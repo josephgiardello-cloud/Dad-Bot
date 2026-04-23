@@ -1,0 +1,110 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# LOCAL DEV PROFILE  (docker compose up)
+#   Runs DadBot Streamlit UI + Ollama side-by-side, no external DB required.
+#   Data is persisted to your local checkout via bind-mounts.
+#
+# PRODUCTION PROFILE  (docker compose --profile production up)
+#   Adds the API server, Redis, and Postgres/pgvector services.
+# ─────────────────────────────────────────────────────────────────────────────
+services:
+
+  # ── Local Ollama (LLM + image models) ──────────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    container_name: dadbot-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:11434"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  # ── DadBot Streamlit UI (local dev) ────────────────────────────────────────
+  dadbot-ui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: dad-bot:latest
+    container_name: dadbot-ui
+    depends_on:
+      ollama:
+        condition: service_healthy
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./dad_profile.json:/var/lib/dadbot/dad_profile.json
+      - ./dad_memory.json:/var/lib/dadbot/dad_memory.json
+      - ./dad_memory_semantic.sqlite3:/var/lib/dadbot/dad_memory_semantic.sqlite3
+      - ./static:/app/static
+      - ./session_logs:/app/session_logs
+    environment:
+      - DADBOT_MODE=streamlit
+      - DADBOT_TENANT_ID=local
+      - OLLAMA_HOST=http://ollama:11434
+    restart: unless-stopped
+
+  # ── Production API server ───────────────────────────────────────────────────
+  dadbot-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: dad-bot-api:latest
+    profiles: [production]
+    env_file:
+      - .env.production
+    ports:
+      - "8010:8010"
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    volumes:
+      - dadbot_data:/var/lib/dadbot
+      - dadbot_logs:/var/log/dadbot
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json, urllib.request; data = json.load(urllib.request.urlopen('http://127.0.0.1:8010/health')); raise SystemExit(0 if data.get('status') == 'ok' else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: dadbot
+      POSTGRES_USER: dadbot
+      POSTGRES_PASSWORD: dadbot
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/init-pgvector.sql:/docker-entrypoint-initdb.d/init-pgvector.sql:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  dadbot_data:
+  dadbot_logs:
+  redis_data:
+  postgres_data:

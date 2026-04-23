@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Dad Bot maskable icon">
+  <rect width="512" height="512" rx="160" fill="#121517"/>
+  <circle cx="256" cy="256" r="176" fill="#20323b"/>
+  <circle cx="256" cy="220" r="112" fill="#f0d6b7"/>
+  <path d="M177 164c26-33 64-54 79-54 18 0 53 19 80 54-21-6-42-8-79-8-38 0-60 2-80 8z" fill="#d7d5d8"/>
+  <circle cx="214" cy="223" r="10" fill="#1f2a31"/>
+  <circle cx="298" cy="223" r="10" fill="#1f2a31"/>
+  <path d="M221 280c18 13 52 13 70 0" stroke="#8e5c2b" stroke-width="11" fill="none" stroke-linecap="round"/>
+  <path d="M170 274c7 83 56 139 86 139s79-56 86-139c-26 22-58 35-86 35s-60-13-86-35z" fill="#d59a55"/>
+  <path d="M154 414h204" stroke="#b5793f" stroke-width="30" stroke-linecap="round" opacity="0.35"/>
+</svg>

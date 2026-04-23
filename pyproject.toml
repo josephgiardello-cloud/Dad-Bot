@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dad-bot"
+version = "0.1.0"
+description = "Dad-Bot conversational assistant"
+requires-python = ">=3.13"
+dependencies = [
+    "ollama",
+    "orjson>=3.10",
+    "pydantic>=2.0",
+    "python-dateutil",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-mock>=3.14",
+]
+llm = [
+    "litellm>=1.50.0",
+]
+service = [
+    "fastapi>=0.116",
+    "uvicorn>=0.35",
+    "redis>=6.0",
+    "psycopg[binary]>=3.2",
+    "pgvector>=0.2.4",
+    "opentelemetry-api>=1.36",
+    "opentelemetry-sdk>=1.36",
+]
+voice = [
+    "faster-whisper>=1.1",
+    "openai-whisper>=20231117",
+    "pyttsx3>=2.98",
+]
+notifications = [
+    "notifypy>=2.3",
+    "plyer>=2.1",
+]
+heritage = [
+    "Pillow>=10.0",
+]
+mcp = [
+    "mcp>=1.6",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-q"
+markers = [
+    "integration: tests that hit external services or full-stack storage paths",
+    "postgres: tests that require a live Postgres DSN",
+]

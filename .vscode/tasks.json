@@ -1,0 +1,22 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Run Dad Bot",
+			"type": "shell",
+			"command": "c:/Users/josep/OneDrive/Desktop/Codes/Dad-Bot/.venv/Scripts/python.exe",
+			"args": [
+				"Dad.py"
+			],
+			"isBackground": true,
+			"group": "build"
+		},
+		{
+			"label": "Run Dad Bot MCP Server",
+			"type": "shell",
+			"command": "c:/Users/josep/OneDrive/Desktop/Dad-Bot/.venv/Scripts/python.exe -m dadbot_system.local_mcp_server *> session_logs/local_mcp_server.task.log",
+			"isBackground": true,
+			"group": "build"
+		}
+	]
+}

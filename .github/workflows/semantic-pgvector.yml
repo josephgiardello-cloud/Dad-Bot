@@ -1,0 +1,42 @@
+name: Semantic PGVector
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  semantic-pgvector:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: dadbot
+          POSTGRES_USER: dadbot
+          POSTGRES_PASSWORD: dadbot
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U dadbot -d dadbot"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .[dev,service]
+
+      - name: Run live PGVector integration test
+        env:
+          DADBOT_TEST_POSTGRES_DSN: postgresql://dadbot:dadbot@127.0.0.1:5432/dadbot
+        run: python -m pytest -q tests/test_semantic_pgvector_integration.py

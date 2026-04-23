@@ -4,6 +4,7 @@ import asyncio
 from contextlib import asynccontextmanager
 
 from .contracts import ChatRequest, DEFAULT_TENANT_ID, HealthResponse, ServiceConfig
+from .kernel import ControlPlane, build_control_plane
 
 try:
     from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -11,23 +12,55 @@ try:
 except ImportError:
     FastAPI = None
     HTTPException = None
-    WebSocket = None
-    WebSocketDisconnect = None
     CORSMiddleware = None
 
+    class WebSocket:  # pragma: no cover - fallback only when FastAPI is missing.
+        pass
 
-def create_api_app(orchestrator, *, worker_manager=None, config: ServiceConfig | None = None):
-    if FastAPI is None or HTTPException is None or WebSocket is None or WebSocketDisconnect is None or CORSMiddleware is None:
+    class WebSocketDisconnect(Exception):
+        pass
+
+
+def create_api_app(orchestrator, *, worker_manager=None, config: ServiceConfig | None = None, control_plane: ControlPlane | None = None):
+    if FastAPI is None or HTTPException is None or CORSMiddleware is None:
         exc = ImportError("FastAPI is not installed")
         raise RuntimeError("FastAPI is not installed. Install the 'service' dependencies to run the API layer.") from exc
 
     service_config = config or ServiceConfig()
+    _control_plane = control_plane if control_plane is not None else build_control_plane()
 
     @asynccontextmanager
     async def lifespan(_app):
-        yield
-        if worker_manager is not None:
-            worker_manager.shutdown()
+        async def _kernel_execute(session_entry: dict, payload: dict) -> dict:
+            _session_id = str(payload.get("_session_id") or "")
+            request = ChatRequest.from_dict(payload, session_id=_session_id)
+            _timeout = float(payload.get("timeout_seconds") or 60.0)
+            task = orchestrator.submit_chat(request)
+            task_status, response = await _wait_for_task_completion(
+                task.task_id, timeout_seconds=_timeout
+            )
+            return {
+                "task": task_status,
+                "response": response,
+                "execution_graph": task.execution_graph.to_dict()
+                if task.execution_graph is not None
+                else None,
+            }
+
+        _scheduler_task = asyncio.create_task(
+            _control_plane.scheduler.run(_kernel_execute)
+        )
+        try:
+            yield
+        finally:
+            _control_plane.scheduler.stop()
+            _scheduler_task.cancel()
+            try:
+                await _scheduler_task
+            except asyncio.CancelledError:
+                pass
+            if worker_manager is not None:
+                worker_manager.shutdown()
 
     app = FastAPI(title=service_config.api.title, lifespan=lifespan)
     app.add_middleware(
@@ -78,24 +111,31 @@ def create_api_app(orchestrator, *, worker_manager=None, config: ServiceConfig |
 
     @app.post("/sessions/{session_id}/turn")
     async def execute_turn(session_id: str, payload: dict):
-        request = ChatRequest.from_dict(payload, session_id=session_id)
-        if not request.user_input and not request.attachments:
+        # Validate input before submitting to the scheduler.
+        _check_request = ChatRequest.from_dict(payload, session_id=session_id)
+        if not _check_request.user_input and not _check_request.attachments:
             raise HTTPException(status_code=400, detail="user_input or attachments are required")
 
         timeout_seconds = float(payload.get("timeout_seconds") or 60.0)
-        task = orchestrator.submit_chat(request)
-        task_status, response = await _wait_for_task_completion(task.task_id, timeout_seconds=timeout_seconds)
+
+        # Route through ControlPlane → Scheduler → kernel_execute_fn.
+        job_payload = {**payload, "_session_id": session_id}
+        result_future = await _control_plane.submit_turn(session_id, job_payload)
+
+        try:
+            result = await asyncio.wait_for(result_future, timeout=timeout_seconds)
+        except asyncio.TimeoutError:
+            raise HTTPException(status_code=504, detail="Timed out waiting for turn completion")
+
+        task_status = result.get("task")
+        response = result.get("response")
 
         if task_status is None:
             raise HTTPException(status_code=404, detail="Task not found")
-        if response is None and str(task_status.get("status") or "").strip().lower() != "failed":
+        if response is None and str((task_status or {}).get("status") or "").strip().lower() != "failed":
             raise HTTPException(status_code=504, detail="Timed out waiting for turn completion")
 
-        return {
-            "task": task_status,
-            "response": response,
-            "execution_graph": task.execution_graph.to_dict() if task.execution_graph is not None else None,
-        }
+        return result
 
     @app.post("/sessions/{session_id}/stream")
     async def submit_stream(session_id: str, payload: dict):

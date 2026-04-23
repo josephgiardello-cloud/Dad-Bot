@@ -1,0 +1,25 @@
+{
+  "name": "Dad Bot",
+  "short_name": "Dad Bot",
+  "description": "Private local dad-style assistant with thread-aware chat, status dashboards, and mobile-friendly controls.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#121517",
+  "theme_color": "#8E5C2B",
+  "icons": [
+    {
+      "src": "/app/static/dadbot-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "/app/static/dadbot-icon-maskable.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+.git
+.pytest_cache
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.sqlite3
+session_logs
+memory_export.json
+dad_memory.json
+dad_memory_semantic.sqlite3
+dad_profile.json
+tests
+static/dad_avatar.png

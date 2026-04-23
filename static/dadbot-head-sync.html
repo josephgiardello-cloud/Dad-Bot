@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Dad Bot Head Sync</title>
+</head>
+<body>
+<script>
+(function () {
+  try {
+    var params = new URLSearchParams(window.location.search || "");
+    var manifest = params.get("manifest") || "";
+    var icon = params.get("icon") || "";
+    var theme = params.get("theme") || "#1f2937";
+    var title = params.get("title") || "Dad Bot";
+
+    var parentDoc = window.parent && window.parent.document ? window.parent.document : document;
+
+    function upsertMeta(name, content) {
+      var node = parentDoc.head.querySelector('meta[name="' + name + '"]');
+      if (!node) {
+        node = parentDoc.createElement("meta");
+        node.name = name;
+        parentDoc.head.appendChild(node);
+      }
+      node.content = content;
+    }
+
+    function upsertLink(rel, href) {
+      if (!href) {
+        return;
+      }
+      var node = parentDoc.head.querySelector('link[rel="' + rel + '"]');
+      if (!node) {
+        node = parentDoc.createElement("link");
+        node.rel = rel;
+        parentDoc.head.appendChild(node);
+      }
+      node.href = href;
+    }
+
+    upsertLink("manifest", manifest);
+    upsertLink("apple-touch-icon", icon);
+    upsertMeta("theme-color", theme);
+    upsertMeta("apple-mobile-web-app-capable", "yes");
+    upsertMeta("apple-mobile-web-app-status-bar-style", "black-translucent");
+    upsertMeta("apple-mobile-web-app-title", title);
+    upsertMeta("mobile-web-app-capable", "yes");
+
+    if (parentDoc.documentElement && parentDoc.documentElement.dataset) {
+      parentDoc.documentElement.dataset.dadbotMobileShell = "ready";
+    }
+  } catch (err) {
+    // Keep this helper silent; the app should render even if head sync fails.
+  }
+})();
+</script>
+</body>
+</html>
