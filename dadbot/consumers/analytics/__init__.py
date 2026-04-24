@@ -1,0 +1,1 @@
+"""Analytics consumer boundary package."""

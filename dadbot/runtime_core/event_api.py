@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from .bus import EventBus
 from .journal import EventJournal
 from .models import Event, new_event
@@ -7,8 +9,18 @@ from .runtime import AgentRuntime
 from .store import ConversationStore
 
 
+logger = logging.getLogger(__name__)
+
+
 class RuntimeEventAPI:
-    """Thin API layer between UI emitters and the deterministic runtime loop."""
+    """Thin API layer between UI emitters and the deterministic runtime loop.
+
+    Observer-style consumers must read projections from this API or the store.
+    They must not influence execution-time control flow.
+    Returned views are detached derived data only: no runtime references, no
+    mutation paths back into execution state, and no execution-time callbacks.
+    Versioned view access is explicit so projection evolution stays additive.
+    """
 
     def __init__(self, *, runtime: AgentRuntime, store: ConversationStore, bus: EventBus, journal: EventJournal | None = None) -> None:
         self.runtime = runtime
@@ -68,13 +80,21 @@ class RuntimeEventAPI:
     def thread_thinking(self, thread_id: str) -> dict:
         return self.store.thread_thinking(str(thread_id or "default"))
 
-    def get_view(self, thread_id: str) -> dict:
-        normalized = str(thread_id or "default")
-        return {
-            "thread_id": normalized,
-            "messages": self.thread_messages(normalized),
-            "thinking": self.thread_thinking(normalized),
-        }
+    def thread_execution_boundaries(self, thread_id: str) -> list[dict]:
+        return self.store.thread_execution_boundaries(str(thread_id or "default"))
+
+    def view_schema_policy(self) -> dict:
+        return self.store.thread_view_schema_policy()
+
+    def get_view(self, thread_id: str, *, version: str = ConversationStore.THREAD_VIEW_DEFAULT_VERSION) -> dict:
+        """Return the canonical thread projection.
+
+        The default view is the live projection contract (`v2`). Replay and audit
+        callers must request `version="v1"` explicitly.
+        """
+        if version not in ConversationStore.THREAD_VIEW_SUPPORTED_VERSIONS:
+            logger.warning("Unsupported projection version requested: %s", version)
+        return self.store.thread_view(str(thread_id or "default"), version=version)
 
     @staticmethod
     def result_for_thread(thread_id: str, processed: list[Event]) -> dict:

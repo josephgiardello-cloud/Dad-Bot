@@ -7,6 +7,8 @@ from typing import Literal
 
 EventType = Literal[
     "user_message",
+    "execution_region_started",
+    "execution_region_completed",
     "assistant_reply",
     "assistant_attachment_added",
     "thinking_update",

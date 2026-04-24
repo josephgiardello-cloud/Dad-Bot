@@ -57,35 +57,17 @@ from dadbot.ui.helpers import (
 )
 from dadbot.ui.preferences import render_preferences_tab
 from dadbot.ui.data import render_memory_garden, render_data_tab
+from dadbot.ui import interaction_controller, state_manager
+from dadbot.consumers.streamlit import load_thread_projection
 from dadbot.runtime_core import UIRuntimeAPI, ThreadView
 from dadbot.core.system_behavior_views import STAGE_METADATA
 
 logger = logging.getLogger(__name__)
 
-RUNTIME_REJECTION_SESSION_KEY = "dad_runtime_last_rejection"
-RUNTIME_TURN_TIMELINE_SESSION_KEY = "dad_runtime_turn_timeline"
-
-EVENT_TO_UI_SIGNAL = {
-    "user_message": "user_intent",
-    "thinking_update": "reasoning_state",
-    "decision_event": "policy_decision",
-    "assistant_reply": "assistant_response",
-    "photo_request": "effect_photo",
-    "tts_request": "effect_tts",
-    "assistant_attachment_added": "effect_attachment",
-    "guardrail_rejection": "guardrail_block",
-}
-
-SIGNAL_PRIORITY = {
-    "guardrail_block": 0,
-    "policy_decision": 1,
-    "reasoning_state": 2,
-    "assistant_response": 3,
-    "effect_photo": 4,
-    "effect_tts": 5,
-    "effect_attachment": 6,
-    "user_intent": 7,
-}
+RUNTIME_REJECTION_SESSION_KEY = state_manager.RUNTIME_REJECTION_SESSION_KEY
+RUNTIME_TURN_TIMELINE_SESSION_KEY = state_manager.RUNTIME_TURN_TIMELINE_SESSION_KEY
+EVENT_TO_UI_SIGNAL = state_manager.EVENT_TO_UI_SIGNAL
+SIGNAL_PRIORITY = state_manager.SIGNAL_PRIORITY
 
 try:
     from faster_whisper import WhisperModel
@@ -146,32 +128,11 @@ def load_ui_stylesheet() -> str:
 
 
 def _runtime_rejection_payload(exc: Exception, *, action: str) -> dict:
-    diagnostics = {}
-    diagnostic_fn = getattr(exc, "diagnostics", None)
-    if callable(diagnostic_fn):
-        try:
-            diagnostics = dict(diagnostic_fn() or {})
-        except Exception:
-            diagnostics = {}
-    return {
-        "action": str(action or "runtime_call"),
-        "reason": str(diagnostics.get("reason") or "Dad Runtime blocked this action to protect system safety and contract integrity."),
-        "rule": str(diagnostics.get("rule") or "unspecified_rule"),
-        "layer": str(diagnostics.get("layer") or "runtime_boundary"),
-        "message": str(diagnostics.get("message") or str(exc) or exc.__class__.__name__),
-    }
+    return state_manager.runtime_rejection_payload(exc, action=action)
 
 
 def record_runtime_rejection(exc: Exception, *, action: str) -> None:
-    is_capability_rejection = (
-        callable(getattr(exc, "diagnostics", None))
-        or hasattr(exc, "rule")
-        or hasattr(exc, "layer")
-        or "CapabilityViolation" in exc.__class__.__name__
-    )
-    if not is_capability_rejection:
-        return
-    st.session_state[RUNTIME_REJECTION_SESSION_KEY] = _runtime_rejection_payload(exc, action=action)
+    state_manager.record_runtime_rejection(exc, action=action)
 
 
 def render_runtime_rejection_banner(*, dismiss_key: str = "dismiss-runtime-rejection") -> None:
@@ -186,101 +147,37 @@ def render_runtime_rejection_banner(*, dismiss_key: str = "dismiss-runtime-rejec
         st.caption(f"Rejected by layer: {details.get('layer', 'runtime_boundary')}")
         st.caption(f"Details: {details.get('message', '')}")
         if st.button("Dismiss", key=dismiss_key, use_container_width=False):
-            st.session_state.pop(RUNTIME_REJECTION_SESSION_KEY, None)
+            state_manager.clear_runtime_rejection()
             st.rerun()
 
 
 def runtime_rule_fix_hint(rule: str) -> str:
-    mapping = {
-        "contract_must_exist": "Use a capability that already exists, or add this API method to CAPABILITY_MANIFEST before calling it.",
-        "api_method_must_be_classified": "Classify the UIRuntimeAPI method in CAPABILITY_MANIFEST and assign the correct group/effects.",
-        "event_type_must_be_known": "Use a store-layer event from ALLOWED_STORE_EVENT_TYPES, not an internal runtime event.",
-        "event_type_must_be_declared_for_capability": "Call the capability that owns this event type, or update the capability contract deliberately.",
-        "side_effects_must_be_declared_for_capability": "Declare the observed side-effect label in the capability contract, or remove that side effect from this path.",
-        "event_type_must_be_known_store_type": "Emit only known store event types and keep runtime/internal event namespaces out of UI ingress.",
-        "external_event_type_must_be_ingress_allowed": "Ingress only user_message, assistant_reply, or assistant_attachment_added via gateway ingest_event.",
-        "all_mutating_events_must_declare_side_effect_labels": "Attach _side_effects labels to emitted mutating events so validation can trace what happened.",
-    }
-    normalized = str(rule or "").strip().lower()
-    return mapping.get(normalized, "Follow the capability contract for this action and keep UI calls on declared boundary methods.")
+    return state_manager.runtime_rule_fix_hint(rule)
 
 
-@dataclass(frozen=True)
-class RuntimeGuardrailView:
-    action: str
-    rule: str
-    layer: str
-    reason: str
-    message: str
-    severity: str
-    fix_hint: str
+RuntimeGuardrailView = state_manager.RuntimeGuardrailView
 
 
 def runtime_guardrail_severity(rule: str) -> str:
-    normalized = str(rule or "").strip().lower()
-    if normalized in {
-        "external_event_type_must_be_ingress_allowed",
-        "event_type_must_be_known",
-        "event_type_must_be_known_store_type",
-    }:
-        return "critical"
-    if normalized in {
-        "event_type_must_be_declared_for_capability",
-        "contract_must_exist",
-        "api_method_must_be_classified",
-    }:
-        return "high"
-    if normalized in {
-        "side_effects_must_be_declared_for_capability",
-        "all_mutating_events_must_declare_side_effect_labels",
-    }:
-        return "medium"
-    return "low"
+    return state_manager.runtime_guardrail_severity(rule)
 
 
 def runtime_guardrail_view_from_session() -> RuntimeGuardrailView | None:
-    details = st.session_state.get(RUNTIME_REJECTION_SESSION_KEY)
-    if not isinstance(details, dict) or not details:
-        return None
-    action = str(details.get("action") or "runtime_call")
-    rule = str(details.get("rule") or "unspecified_rule")
-    layer = str(details.get("layer") or "runtime_boundary")
-    reason = str(details.get("reason") or "Dad Runtime blocked this action.")
-    message = str(details.get("message") or "")
-    return RuntimeGuardrailView(
-        action=action,
-        rule=rule,
-        layer=layer,
-        reason=reason,
-        message=message,
-        severity=runtime_guardrail_severity(rule),
-        fix_hint=runtime_rule_fix_hint(rule),
-    )
+    return state_manager.runtime_guardrail_view_from_session()
 
 
 def runtime_turn_timeline() -> list[dict]:
-    timeline = st.session_state.setdefault(RUNTIME_TURN_TIMELINE_SESSION_KEY, [])
-    if not isinstance(timeline, list):
-        timeline = []
-        st.session_state[RUNTIME_TURN_TIMELINE_SESSION_KEY] = timeline
-    return timeline
+    return state_manager.runtime_turn_timeline()
 
 
 def record_turn_timeline_event(*, thread_id: str, event_type: str, summary: str, payload: dict | None = None, severity: str = "info") -> None:
-    timeline = runtime_turn_timeline()
-    timeline.append(
-        {
-            "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
-            "thread_id": str(thread_id or "default"),
-            "event_type": str(event_type or "unknown"),
-            "signal": EVENT_TO_UI_SIGNAL.get(str(event_type or "").strip().lower(), "runtime_state"),
-            "summary": str(summary or ""),
-            "severity": str(severity or "info"),
-            "payload": dict(payload or {}),
-        }
+    state_manager.record_turn_timeline_event(
+        thread_id=thread_id,
+        event_type=event_type,
+        summary=summary,
+        payload=payload,
+        severity=severity,
     )
-    if len(timeline) > 160:
-        del timeline[:-160]
 
 
 def runtime_semantic_signal_snapshot(*, view: ThreadView | None, guardrail: RuntimeGuardrailView | None) -> list[dict]:
@@ -337,7 +234,8 @@ def runtime_semantic_signal_snapshot(*, view: ThreadView | None, guardrail: Runt
 
 def render_runtime_semantic_strip(*, thread_id: str) -> None:
     api = get_chat_event_api()
-    view = api.get_view(str(thread_id or api.active_thread_id or "default"))
+    resolved_thread_id = str(thread_id or api.active_thread_id or "default")
+    view = load_thread_projection(api=api, thread_id=resolved_thread_id)
     guardrail = runtime_guardrail_view_from_session()
     signals = runtime_semantic_signal_snapshot(view=view, guardrail=guardrail)
     if not signals:
@@ -378,7 +276,7 @@ def render_runtime_guardrails_card(*, dismiss_key: str = "dismiss-runtime-guardr
         if guardrail.message:
             st.caption(f"Details: {guardrail.message}")
         if st.button("Dismiss Guardrail", key=dismiss_key, use_container_width=False):
-            st.session_state.pop(RUNTIME_REJECTION_SESSION_KEY, None)
+            state_manager.clear_runtime_rejection()
             st.rerun()
 
 
@@ -589,64 +487,24 @@ def get_voice_session_controller(bot) -> VoiceSessionController:
 
 @st.cache_resource(show_spinner=False)
 def get_chat_event_api() -> UIRuntimeAPI:
-    return get_runtime().api
+    return interaction_controller.get_chat_event_api()
 
 
 @st.cache_resource(show_spinner=False)
 def get_runtime() -> StreamlitRuntime:
-    return StreamlitRuntime.build()
-
-
-def runtime_thread_view(thread_id: str) -> ThreadView:
-    """Get complete thread view from runtime. UI must consume ONLY this."""
-    api = get_chat_event_api()
-    api.seed_thread(thread_id, bot_messages_for_thread(thread_id))
-    return api.get_view(thread_id)
-
-
-def runtime_thread_messages(thread_id: str) -> list[dict]:
-    """Helper: extract messages from thread view."""
-    view = runtime_thread_view(thread_id)
-    return view.messages
+    return interaction_controller.get_runtime()
 
 
 def process_prompt_via_runtime(*, thread_id: str, prompt: str, attachments: list[dict] | None = None) -> dict:
-    runtime = get_runtime()
-    return runtime.send_user_message(thread_id=thread_id, content=str(prompt or "").strip(), attachments=attachments)
+    return interaction_controller.process_prompt_via_runtime(thread_id=thread_id, prompt=prompt, attachments=attachments)
 
 
 def emit_voice_runtime_ledger_event(event_type: str, payload: dict) -> None:
-    api = get_chat_event_api()
-    event_name = str(event_type or "VOICE_EVENT").strip().upper() or "VOICE_EVENT"
-    if event_name not in {"VOICE_STATE_TRANSITION", "VOICE_EVENT"}:
-        return
-    merged_payload = dict(payload or {})
-    trace_id = str(merged_payload.get("trace_id") or st.session_state.setdefault("voice_trace_id", uuid.uuid4().hex))
-    session_id = str(merged_payload.get("session_id") or api.active_thread_id or "voice-ui")
-    try:
-        api.emit_voice_runtime_ledger_event(
-            event_type=event_name,
-            session_id=session_id,
-            trace_id=trace_id,
-            kernel_step_id="voice.control_plane",
-            payload=merged_payload,
-        )
-    except Exception as exc:
-        record_runtime_rejection(exc, action="emit_voice_runtime_ledger_event")
-        logger.debug("Voice ledger emission skipped for %s: %s", event_name, exc)
+    interaction_controller.emit_voice_runtime_ledger_event(event_type, payload)
 
 
 def purge_session_context(bot, mode="full"):
-    api = get_chat_event_api()
-    normalized_mode = str(mode or "full").strip().lower()
-    if normalized_mode == "soft":
-        result = api.soft_reset_session_context(preserve_recent_summary=True)
-    else:
-        api.reset_session_state()
-        result = {"mode": "full", "preserved_summary": ""}
-    st.session_state.active_thread_id = api.active_thread_id
-    initialize_session(bot)
-    return result
+    return interaction_controller.purge_session_context(bot=bot, initialize_session=initialize_session, mode=mode)
 
 
 def summarize_document_attachment(uploaded_file, max_chars=420):
@@ -1594,7 +1452,7 @@ def render_hero(bot: DadBot, active_thread: dict):
     shell = ui_shell_snapshot(bot)
     ollama_status = shell.get("ollama", {})
     connected = bool(ollama_status.get("connected", False))
-    mood = str(st.session_state.get("ui_mood", get_chat_event_api().last_saved_mood() or "neutral")).title()
+    mood = state_manager.current_ui_mood(default=str(get_chat_event_api().last_saved_mood() or "neutral")).title()
 
     indicator_color = "#4ade80" if connected else "#f87171"
     indicator_text = "Online" if connected else "Offline"
@@ -1750,7 +1608,7 @@ def render_mobile_tab(bot: DadBot):
 
 def update_ui_mood(bot: DadBot):
     _ = bot
-    st.session_state.ui_mood = str(get_chat_event_api().last_saved_mood() or "neutral").strip().lower() or "neutral"
+    state_manager.set_ui_mood(str(get_chat_event_api().last_saved_mood() or "neutral"))
 
 
 def optimize_runtime_for_hardware(bot: DadBot):
@@ -1811,13 +1669,6 @@ def initialize_session(bot: DadBot):
     if not st.session_state.get("ui_profile_seeded", False):
         sync_ui_voice_from_profile(bot)
         st.session_state.ui_profile_seeded = True
-
-
-def active_thread_messages(bot: DadBot):
-    """Get messages for active thread. Fetches fresh from API each time (no session caching)."""
-    initialize_session(bot)
-    active_thread_id = get_chat_event_api().active_thread_id
-    return runtime_thread_messages(active_thread_id)
 
 
 def switch_active_thread(thread_id: str):
@@ -2036,10 +1887,19 @@ def render_companion_toolbar(bot: DadBot):
 
 
 def render_chat_tab(bot: DadBot, active_thread: dict):
+    initialize_session(bot)
     api = get_chat_event_api()
     render_runtime_guardrails_card(dismiss_key="dismiss-runtime-guardrails-chat")
     render_runtime_semantic_strip(thread_id=str(api.active_thread_id or "default"))
-    thread_messages = active_thread_messages(bot)
+    active_thread_id = str(api.active_thread_id or "default")
+    thread_messages = list(
+        load_thread_projection(
+            api=api,
+            thread_id=active_thread_id,
+            seed_messages=bot_messages_for_thread(active_thread_id),
+        ).messages
+        or []
+    )
     render_hero(bot, active_thread)
     render_status_strip(bot)
     st.markdown("<div class='dad-floating-actions'>", unsafe_allow_html=True)
@@ -2229,7 +2089,7 @@ def render_chat_tab(bot: DadBot, active_thread: dict):
                     voice = voice_preferences()
                     if bool(voice.get("enabled")) and bool(voice.get("tts_enabled", True)):
                         render_reply_tts(bot, reply)
-                    latest_view = api.get_view(thread_id)
+                    latest_view = load_thread_projection(api=api, thread_id=thread_id)
                     record_turn_inspector_from_runtime_result(
                         thread_id=thread_id,
                         prompt=prompt,
@@ -2265,8 +2125,9 @@ def render_chat_tab(bot: DadBot, active_thread: dict):
         api.persist_conversation_async()
         st.rerun()
 
-    view = api.get_view(str(api.active_thread_id or "default"))
-    render_turn_inspector(thread_id=str(api.active_thread_id or "default"), view=view)
+    active_thread_id = str(api.active_thread_id or "default")
+    view = load_thread_projection(api=api, thread_id=active_thread_id)
+    render_turn_inspector(thread_id=active_thread_id, view=view)
 
 
 @maybe_fragment
@@ -2587,7 +2448,15 @@ def render_sidebar(bot: DadBot):
                 except Exception as exc:
                     st.error(f"Could not evolve persona: {exc}")
     _sidebar_thread_id = api.active_thread_id
-    _sidebar_msgs = runtime_thread_messages(_sidebar_thread_id)
+    _sidebar_thread_id = str(_sidebar_thread_id or "default")
+    _sidebar_msgs = list(
+        load_thread_projection(
+            api=api,
+            thread_id=_sidebar_thread_id,
+            seed_messages=bot_messages_for_thread(_sidebar_thread_id),
+        ).messages
+        or []
+    )
     _sidebar_chat_export = json.dumps(
         [{"role": m.get("role"), "content": m.get("content")} for m in _sidebar_msgs],
         indent=2,
@@ -2605,19 +2474,19 @@ def render_sidebar(bot: DadBot):
 
 def render_mobile_bottom_navigation():
     st.markdown("<div class='dad-mobile-bottom-nav'>", unsafe_allow_html=True)
-    active_view = str(st.session_state.get("primary_view", "chat"))
+    active_view = state_manager.active_primary_view()
     nav_cols = st.columns(4)
     if nav_cols[0].button("💬 Chat", key="bottom-nav-chat", use_container_width=True, type="primary" if active_view == "chat" else "secondary"):
-        st.session_state.primary_view = "chat"
+        state_manager.set_primary_view("chat")
         st.rerun()
     if nav_cols[1].button("🩺 Status", key="bottom-nav-status", use_container_width=True, type="primary" if active_view == "status" else "secondary"):
-        st.session_state.primary_view = "status"
+        state_manager.set_primary_view("status")
         st.rerun()
     if nav_cols[2].button("🛠️ Workshop", key="bottom-nav-workshop", use_container_width=True, type="primary" if active_view == "workshop" else "secondary"):
-        st.session_state.primary_view = "workshop"
+        state_manager.set_primary_view("workshop")
         st.rerun()
     if nav_cols[3].button("🎙️ Voice", key="bottom-nav-voice", use_container_width=True, type="primary" if active_view == "voice" else "secondary"):
-        st.session_state.primary_view = "voice"
+        state_manager.set_primary_view("voice")
         st.rerun()
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -2659,14 +2528,13 @@ def main():
     first_run_wizard(bot)
     active_thread = get_chat_event_api().active_chat_thread() or create_new_thread()
 
-    if "primary_view" not in st.session_state:
-        st.session_state.primary_view = "chat"
+    state_manager.active_primary_view()
 
     with st.sidebar:
         render_sidebar(bot)
 
     nav_options = ["chat", "status", "workshop", "voice"]
-    current_nav = str(st.session_state.get("primary_view", "chat"))
+    current_nav = state_manager.active_primary_view()
     if current_nav not in nav_options:
         current_nav = "chat"
     nav_choice = st.radio(
@@ -2682,7 +2550,7 @@ def main():
         }[value],
         key="primary-nav",
     )
-    st.session_state.primary_view = nav_choice
+    state_manager.set_primary_view(nav_choice)
 
     if nav_choice == "chat":
         render_chat_tab(bot, active_thread)
