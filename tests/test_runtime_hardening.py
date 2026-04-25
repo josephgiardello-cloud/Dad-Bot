@@ -40,8 +40,20 @@ def test_context_service_passes_query_embedding_to_semantic_index():
             captured.update(kwargs)
             return []
 
+    temporal = SimpleNamespace(
+        wall_time=datetime.now().isoformat(timespec="seconds"),
+        wall_date=date.today().isoformat(),
+    )
+    turn_ctx = SimpleNamespace(
+        user_input="Tell me about last summer",
+        temporal=temporal,
+        temporal_snapshot=lambda: {
+            "wall_time": temporal.wall_time,
+            "wall_date": temporal.wall_date,
+        },
+    )
     service = ContextService(StubContextBuilder(), StubMemoryManager(), semantic_index=StubSemanticIndex())
-    service.build_context(SimpleNamespace(user_input="Tell me about last summer"))
+    service.build_context(turn_ctx)
 
     assert captured["embedded_text"] == "Tell me about last summer"
     assert captured["query_embedding"] == [0.1, 0.9]

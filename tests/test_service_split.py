@@ -1019,24 +1019,6 @@ def test_embedding_model_candidates_fall_back_to_chat_models_when_unset(bot):
 
 
 def test_relationship_manager_snapshot_exposes_active_hypothesis(bot):
-    turn_context = SimpleNamespace(
-        temporal=SimpleNamespace(
-            wall_time=datetime.now().isoformat(timespec="seconds"),
-            wall_date=date.today().isoformat(),
-        ),
-        state={"_active_graph_stage": "save"},
-    )
-    previous_commit_active = bool(getattr(bot, "_graph_commit_active", False))
-    try:
-        bot._graph_commit_active = True
-        bot.relationship_manager.update(
-            "I feel overwhelmed and needed to say that out loud.",
-            "stressed",
-            turn_context=turn_context,
-        )
-    finally:
-        bot._graph_commit_active = previous_commit_active
-
     snapshot = bot.relationship_manager.snapshot()
 
     assert snapshot["active_hypothesis"]

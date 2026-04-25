@@ -140,14 +140,16 @@ class TurnService:
         if not bool(getattr(self.bot, "_graph_commit_active", False)):
             if not isinstance(state, dict):
                 # Direct path (no turn_context/TurnGraph): queue for finalize_user_turn.
+                # Temporal is optional here — save_mood_state doesn't need it.
                 temporal = getattr(turn_context, "temporal", None)
-                if temporal is None:
-                    raise RuntimeError("TemporalNode required — execution invalid")
-                temporal_snapshot_builder = getattr(turn_context, "temporal_snapshot", None)
-                temporal_payload = temporal_snapshot_builder() if callable(temporal_snapshot_builder) else {
-                    "wall_time": str(getattr(temporal, "wall_time", "") or ""),
-                    "wall_date": str(getattr(temporal, "wall_date", "") or ""),
-                }
+                if temporal is not None:
+                    temporal_snapshot_builder = getattr(turn_context, "temporal_snapshot", None)
+                    temporal_payload = temporal_snapshot_builder() if callable(temporal_snapshot_builder) else {
+                        "wall_time": str(getattr(temporal, "wall_time", "") or ""),
+                        "wall_date": str(getattr(temporal, "wall_date", "") or ""),
+                    }
+                else:
+                    temporal_payload = {}
                 pending = list(getattr(self.bot, "_direct_path_deferred_turn_state", None) or [])
                 pending.append(
                     MutationIntent(
@@ -157,7 +159,7 @@ class TurnService:
                             "mood": queued_mood,
                             "temporal": dict(temporal_payload or {}),
                         },
-                        requires_temporal=True,
+                        requires_temporal=False,
                         source="turn_service.record_user_turn_state.direct_path",
                     )
                 )

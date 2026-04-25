@@ -10,8 +10,19 @@ from dadbot.core.nodes import TemporalNode
 def test_mutation_queue_retains_pending_after_failed_drain() -> None:
     queue = MutationQueue()
     queue.bind_owner("trace-a")
-    queue.queue(MutationIntent(type="memory", payload={"op": "save_mood_state", "mood": "neutral"}))
-    queue.queue(MutationIntent(type="relationship", payload={"op": "update", "user_input": "x", "mood": "neutral"}))
+    temporal = {"wall_time": "2026-01-01T00:00:00", "wall_date": "2026-01-01"}
+    queue.queue(
+        MutationIntent(
+            type="memory",
+            payload={"op": "save_mood_state", "mood": "neutral", "temporal": temporal},
+        )
+    )
+    queue.queue(
+        MutationIntent(
+            type="relationship",
+            payload={"op": "update", "user_input": "x", "mood": "neutral", "temporal": temporal},
+        )
+    )
 
     def _fail_first(_intent: MutationIntent) -> None:
         raise RuntimeError("boom")

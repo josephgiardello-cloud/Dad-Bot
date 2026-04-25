@@ -77,8 +77,8 @@ class MaintenanceScheduler:
         patterns = self.bot.detect_life_patterns()
         persona_entry = self.bot.evolve_persona()
         forgetting = self.bot.apply_controlled_forgetting()
-        if getattr(self.bot, "_memory_graph_dirty", False):
-            self.bot.refresh_memory_graph()
+        # Background maintenance is non-semantic in Phase 4 strict mode.
+        # Graph projection/sync is SaveNode-owned only.
 
         updated_at = self.bot.runtime_timestamp()
         self._queue_or_apply_memory_store_patch(
@@ -124,8 +124,8 @@ class MaintenanceScheduler:
                 "narrative_count": len(self.bot.narrative_memories()),
             }
 
-        if getattr(self.bot, "_memory_graph_dirty", False):
-            self.bot.refresh_memory_graph()
+        # Background maintenance is non-semantic in Phase 4 strict mode.
+        # Graph projection/sync is SaveNode-owned only.
 
         narrative_memories = self._distill_narrative_memories(reference_time=now)
         summary = (
@@ -546,7 +546,7 @@ class MaintenanceScheduler:
     def run_scheduled_proactive_jobs(self, force=False, reference_time=None):
         health = self.bot.current_runtime_health_snapshot(
             log_warnings=False,
-            persist=True,
+            persist=False,
             max_age_seconds=120,
         )
         health_level = str(health.get("level") or "green").strip().lower() or "green"
@@ -659,7 +659,7 @@ class MaintenanceScheduler:
 
     def run_post_turn_maintenance(self, user_input, current_mood):
         if self.bot.LIGHT_MODE:
-            self.bot.current_runtime_health_snapshot(force=True, log_warnings=True, persist=True)
+            self.bot.current_runtime_health_snapshot(force=True, log_warnings=False, persist=False)
             return {
                 "summary_refreshed": False,
                 "relationship_reflected": False,
@@ -670,14 +670,14 @@ class MaintenanceScheduler:
 
         health = self.bot.current_runtime_health_snapshot(
             log_warnings=False,
-            persist=True,
+            persist=False,
             max_age_seconds=120,
         )
         health_level = str(health.get("level") or "green").strip().lower() or "green"
         if self.bot.should_delay_noncritical_maintenance(health):
             summary_before = str(self.bot.session_summary or "")
             summary_after = self.bot.refresh_session_summary()
-            self.bot.current_runtime_health_snapshot(force=True, log_warnings=True, persist=True)
+            self.bot.current_runtime_health_snapshot(force=True, log_warnings=False, persist=False)
             return {
                 "summary_refreshed": str(summary_after or "") != summary_before,
                 "scheduled_proactive": False,
@@ -696,23 +696,12 @@ class MaintenanceScheduler:
         summary_after = self.bot.refresh_session_summary()
         scheduled_proactive = self.run_scheduled_proactive_jobs()
         relationship = None
-        try:
-            reflect_read_only = getattr(self.bot.relationship, "reflect_read_only", None)
-            if callable(reflect_read_only):
-                relationship = reflect_read_only()
-            else:
-                relationship = self.bot.relationship.snapshot()
-        except Exception as exc:
-            logger.info(
-                "Post-turn read-only relationship reflection unavailable: %s",
-                exc,
-            )
-        wisdom = self.bot.generate_wisdom_insight(user_input)
+        wisdom = None
         synthesis = self.run_periodic_durable_synthesis(user_input)
         compaction = self.run_memory_compaction()
-        if getattr(self.bot, "_memory_graph_dirty", False):
-            self.bot.refresh_memory_graph()
-        self.bot.current_runtime_health_snapshot(force=True, log_warnings=True, persist=True)
+        # Background maintenance is non-semantic in Phase 4 strict mode.
+        # Graph projection/sync is SaveNode-owned only.
+        self.bot.current_runtime_health_snapshot(force=True, log_warnings=False, persist=False)
         return {
             "summary_refreshed": str(summary_after or "") != summary_before,
             "scheduled_proactive": bool(scheduled_proactive.get("queued_total")),

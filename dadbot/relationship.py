@@ -16,7 +16,25 @@ class RelationshipManager:
         self.bot = self.context.bot
 
     def current_state(self) -> dict:
-        return self._project_state_from_graph()
+        graph = self._memory_graph_snapshot()
+        return self.get_relationship_view(graph)
+
+    def get_relationship_view(self, graph_state: dict) -> dict:
+        if not isinstance(graph_state, dict):
+            raise RuntimeError("Relationship projection requires graph_state dict")
+        return self._project_state_from_graph_state(graph_state)
+
+    def materialize_projection(self, *, turn_context=None) -> dict:
+        temporal = getattr(turn_context, "temporal", None)
+        if temporal is None:
+            raise RuntimeError("TemporalNode required — execution invalid")
+        if not bool(getattr(self.bot, "_graph_commit_active", False)):
+            raise RuntimeError("Relationship projection is SaveNode-only in strict mode")
+        projection = self.get_relationship_view(self._memory_graph_snapshot())
+        state = getattr(turn_context, "state", None)
+        if isinstance(state, dict):
+            state["relationship_projection"] = dict(projection)
+        return projection
 
     def _memory_graph_snapshot(self) -> dict:
         memory = getattr(self.bot, "memory", None)
@@ -28,8 +46,7 @@ class RelationshipManager:
             return {"nodes": [], "edges": []}
         return graph
 
-    def _project_state_from_graph(self) -> dict:
-        graph = self._memory_graph_snapshot()
+    def _project_state_from_graph_state(self, graph: dict) -> dict:
         nodes = [dict(item) for item in list(graph.get("nodes") or []) if isinstance(item, dict)]
         edges = [dict(item) for item in list(graph.get("edges") or []) if isinstance(item, dict)]
 
@@ -427,64 +444,8 @@ Rules:
         return self.build_reflection_prompt(current_state, recent_messages)
 
     def reflect_read_only(self, turn_context=None) -> dict | None:
-        """Read-only relationship reflection for background maintenance.
-
-        This method intentionally performs no persistent mutations and does not
-        require SaveNode boundary context.
-        """
-        turn_count = self.bot.session_turn_count()
-        if turn_count < 3:
-            return None
-        recent_messages = self.bot.prompt_history()
-        if not recent_messages:
-            return None
-        current_state = self.current_state()
-        snapshot = dict(current_state)
-        snapshot["read_only"] = True
-        snapshot["last_reflection"] = str(snapshot.get("last_reflection") or "").strip()
-        return snapshot
-
-    def reflect(self, force: bool = False, turn_context=None) -> dict | None:
-        _ = force
         _ = turn_context
-        return self.reflect_read_only()
-
-    def reflect_relationship_state(self, force: bool = False) -> dict | None:
-        _ = force
-        return self.reflect_read_only()
-
-    def apply_feedback(self, feedback_kind: str, turn_context=None) -> dict:
-        _ = turn_context
-        state = self.current_state()
-        key = str(feedback_kind or "").strip().lower() or "unknown"
-        state["last_reflection"] = f"projection-only feedback observed: {key}"
-        return state
-
-    def apply_relationship_feedback(self, feedback_kind: str, turn_context=None) -> dict:
-        return self.apply_feedback(feedback_kind, turn_context=turn_context)
-
-    def update_relationship_state(self, user_input: str, current_mood: str, turn_context=None) -> dict:
-        return self.update(user_input, current_mood, turn_context=turn_context)
-
-    def apply_pending_mutations(self, turn_context) -> int:
-        """Drain and clear queued relationship mutations without persisting writes."""
-        state = getattr(turn_context, "state", None)
-        if not isinstance(state, dict):
-            return 0
-
-        pending = list(state.get("_pending_relationship_updates") or [])
-        if not pending:
-            return 0
-
-        state["_pending_relationship_updates"] = []
-        return len(pending)
-
-    def update(self, user_input: str, current_mood: str, turn_context=None) -> dict:
-        _ = user_input
-        _ = current_mood
-        _ = turn_context
-        state = self.current_state()
-        return state
+        return self.current_state()
 
 
 __all__ = ["RelationshipManager"]

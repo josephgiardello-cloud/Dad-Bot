@@ -429,7 +429,7 @@ Return only JSON:
 	def refresh_memory_graph(self, force=False):
 		"""Sync the durable graph store, then refresh the lightweight preview used by UI and diagnostics."""
 		current_graph = self.bot.memory.memory_graph_snapshot()
-		temporal_missing_msg = "temporal fallback removed"
+		temporal_missing_msg = "temporalnode required"
 		if not force:
 			if not getattr(self.bot, "_memory_graph_dirty", False):
 				return current_graph

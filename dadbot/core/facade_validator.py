@@ -19,7 +19,7 @@ def validate_dadbot_facade(bot, *, smoke: bool = False) -> None:
         "context_builder": ("build_core_persona_prompt",),
         "tone_context": ("build_mood_context",),
         "mood_manager": ("detect",),
-        "relationship_manager": ("reflect",),
+        "relationship_manager": ("snapshot", "get_relationship_view"),
         "internal_state_manager": ("snapshot", "reflect_after_turn"),
         "prompt_assembly": ("build_chat_request_messages",),
         "multimodal_handler": ("build_user_request_message",),

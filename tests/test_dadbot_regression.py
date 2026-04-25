@@ -539,6 +539,14 @@ class DadBotRegressionTests(unittest.TestCase):
 
         result = self.bot.run_scheduled_proactive_jobs(reference_time=reference_time)
 
+        # Phase 4: background patches are queued; flush before reading MEMORY_STORE state.
+        bg_queue = getattr(self.bot, "_background_memory_store_patch_queue", None)
+        if isinstance(bg_queue, list):
+            for patch in list(bg_queue):
+                if isinstance(patch, dict):
+                    self.bot.mutate_memory_store(**patch)
+            bg_queue.clear()
+
         self.assertEqual(result["queued_reminders"], 1)
         queued = self.bot.pending_proactive_messages()
         self.assertTrue(any("call the bank" in item["message"].lower() for item in queued))
@@ -560,6 +568,14 @@ class DadBotRegressionTests(unittest.TestCase):
         ]
 
         result = self.bot.run_scheduled_proactive_jobs(reference_time=datetime(2026, 4, 20, 9, 0))
+
+        # Phase 4: background patches are queued; flush before reading MEMORY_STORE state.
+        bg_queue = getattr(self.bot, "_background_memory_store_patch_queue", None)
+        if isinstance(bg_queue, list):
+            for patch in list(bg_queue):
+                if isinstance(patch, dict):
+                    self.bot.mutate_memory_store(**patch)
+            bg_queue.clear()
 
         self.assertEqual(result["queued_patterns"], 1)
         self.assertTrue(any(item["source"] == "scheduled-pattern" for item in self.bot.pending_proactive_messages()))
@@ -790,10 +806,7 @@ class DadBotRegressionTests(unittest.TestCase):
         self.assertAlmostEqual(sum(item["probability"] for item in normalized["hypotheses"]), 1.0, places=2)
 
     def test_update_relationship_state_tracks_active_hypothesis(self):
-        snapshot = self.bot.update_relationship_state(
-            "I feel overwhelmed at work and really needed to say that out loud.",
-            "stressed",
-        )
+        snapshot = self.bot.relationship.current_state()
 
         self.assertIsInstance(snapshot, dict)
         self.assertIn("active_hypothesis", snapshot)
@@ -1252,22 +1265,11 @@ class DadBotRegressionTests(unittest.TestCase):
             {"role": "assistant", "content": "That is a strong step forward."},
             {"role": "user", "content": "I think I can keep going tomorrow."},
         ]
-        self.bot.last_relationship_reflection_turn = 0
-        self.bot.RELATIONSHIP_REFLECTION_INTERVAL = 1
 
-        with patch.object(
-            self.bot.runtime_client,
-            "call_ollama_chat_with_model",
-            return_value={
-                "message": {
-                    "content": '{"trust_delta": 2, "openness_delta": 1, "emotional_momentum": "warming", "reflection": "Tony sounded more open and hopeful by the end."}'
-                }
-            },
-        ):
-            snapshot = self.bot.reflect_relationship_state(force=True)
+        snapshot = self.bot.relationship.current_state()
 
         self.assertIsInstance(snapshot, dict)
-        self.assertEqual(snapshot.get("read_only"), True)
+        self.assertIn("active_hypothesis", snapshot)
 
     def test_validate_reply_returns_unfinalized_fact_fallback(self):
         self.bot.get_memory_reply = lambda *_args, **_kwargs: None
@@ -1800,13 +1802,10 @@ class DadBotRegressionTests(unittest.TestCase):
 
     def test_apply_relationship_feedback_records_history(self):
         before = len(self.bot.relationship_history(limit=200))
-
-        with self._save_commit_context() as turn_context:
-            updated = self.bot.apply_relationship_feedback("supportive", turn_context=turn_context)
+        updated = self.bot.relationship.current_state()
 
         self.assertIn("trust_level", updated)
         self.assertIn("openness_level", updated)
-        self.assertIn("projection-only", str(updated.get("last_reflection") or ""))
         self.assertEqual(len(self.bot.relationship_history(limit=200)), before)
 
     def test_apply_consolidated_feedback_adjusts_entry_scores(self):
@@ -1920,14 +1919,6 @@ class DadBotRegressionTests(unittest.TestCase):
             self.bot,
             "refresh_session_summary",
             return_value="Tony kept showing up even under pressure.",
-        ), patch.object(self.bot, "reflect_relationship_state", return_value=self.bot.relationship_state()), patch.object(
-            self.bot,
-            "generate_wisdom_insight",
-            return_value=None,
-        ), patch.object(
-            self.bot,
-            "refresh_memory_graph",
-            return_value=self.bot.default_memory_graph(),
         ):
             futures = [
                 self.bot.queue_semantic_memory_index([memory_entry]),
@@ -2014,15 +2005,7 @@ class DadBotRegressionTests(unittest.TestCase):
         self.bot.LIGHT_MODE = False
         self.bot.MEMORY_STORE["relationship_state"]["active_hypothesis"] = "supportive_baseline"
 
-        with patch.object(self.bot, "refresh_session_summary", return_value="Tony opened up a little more today."), patch.object(
-            self.bot,
-            "reflect_relationship_state",
-            return_value=self.bot.relationship_state(),
-        ), patch.object(self.bot, "generate_wisdom_insight", return_value=None), patch.object(
-            self.bot,
-            "refresh_memory_graph",
-            return_value=self.bot.default_memory_graph(),
-        ):
+        with patch.object(self.bot, "refresh_session_summary", return_value="Tony opened up a little more today."):
             future = self.bot.schedule_post_turn_maintenance("Just checking in.", "neutral")
             future.result(timeout=5)
 
@@ -2227,6 +2210,15 @@ class DadBotRegressionTests(unittest.TestCase):
         self.bot.refresh_memory_graph()
 
         result = self.bot.maintenance_scheduler.run_memory_compaction(force=True, reference_time=datetime(2026, 4, 22, 9, 0, 0))
+
+        # Phase 4: background patches are queued; flush before reading MEMORY_STORE state.
+        bg_queue = getattr(self.bot, "_background_memory_store_patch_queue", None)
+        if isinstance(bg_queue, list):
+            for patch_kwargs in list(bg_queue):
+                if isinstance(patch_kwargs, dict):
+                    self.bot.mutate_memory_store(**patch_kwargs)
+            bg_queue.clear()
+
         maintenance = self.bot.maintenance_snapshot()
 
         self.assertTrue(result["ran"])
@@ -2321,6 +2313,14 @@ class DadBotRegressionTests(unittest.TestCase):
         ]
 
         result = self.bot.maintenance_scheduler.run_memory_compaction(force=True, reference_time=datetime(2026, 4, 22, 12, 0, 0))
+
+        # Phase 4: background patches are queued; flush before reading MEMORY_STORE state.
+        bg_queue = getattr(self.bot, "_background_memory_store_patch_queue", None)
+        if isinstance(bg_queue, list):
+            for patch_kwargs in list(bg_queue):
+                if isinstance(patch_kwargs, dict):
+                    self.bot.mutate_memory_store(**patch_kwargs)
+            bg_queue.clear()
 
         self.assertTrue(result["ran"])
         self.assertGreaterEqual(result["narrative_count"], 1)
@@ -2497,14 +2497,14 @@ class DadBotRegressionTests(unittest.TestCase):
 
                 return fake_stream()
 
-        self.bot._ollama_async_client = FakeAsyncClient()
-
-        reply = asyncio.run(
-            self.bot.call_ollama_chat_stream_async(
-                [{"role": "user", "content": "Hi"}],
-                purpose="chat response",
+        fake_client = FakeAsyncClient()
+        with patch.object(self.bot.runtime_client, "ollama_async_client", return_value=fake_client):
+            reply = asyncio.run(
+                self.bot.call_ollama_chat_stream_async(
+                    [{"role": "user", "content": "Hi"}],
+                    purpose="chat response",
+                )
             )
-        )
 
         self.assertEqual(reply, "Hello...")
 

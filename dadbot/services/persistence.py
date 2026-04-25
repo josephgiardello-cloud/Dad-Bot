@@ -239,17 +239,31 @@ class PersistenceService:
         temporal = getattr(turn_context, "temporal", None)
         if temporal is None:
             raise RuntimeError("TemporalNode required — execution invalid")
-        self._commit_post_finalize_side_effects(turn_context)
+        service = self.turn_service
+        runtime = None if service is None else getattr(service, "bot", None)
+        if runtime is None:
+            raise RuntimeError("SaveNode strict mode requires turn_service.bot")
+        previous_commit_active = bool(getattr(runtime, "_graph_commit_active", False))
+        try:
+            runtime._graph_commit_active = True
+            self._commit_post_finalize_side_effects(turn_context)
+        finally:
+            runtime._graph_commit_active = previous_commit_active
+        state = getattr(turn_context, "state", None)
+        if isinstance(state, dict):
+            state["_save_mutations_applied"] = True
 
     def commit_transaction(self, turn_context: Any) -> None:
         state = getattr(turn_context, "state", None)
         if isinstance(state, dict):
             state["_save_transaction_active"] = False
+            state["_save_mutations_applied"] = False
 
     def rollback_transaction(self, turn_context: Any) -> None:
         state = getattr(turn_context, "state", None)
         if isinstance(state, dict):
             state["_save_transaction_active"] = False
+            state["_save_mutations_applied"] = False
 
     def final_ledger_commit(
         self,
@@ -293,7 +307,10 @@ class PersistenceService:
             runtime._graph_commit_active = True
 
             # Strict sequence before final ledger commit.
-            self._commit_post_finalize_side_effects(turn_context)
+            state = getattr(turn_context, "state", None)
+            mutations_applied = bool(state.get("_save_mutations_applied")) if isinstance(state, dict) else False
+            if not mutations_applied:
+                self._commit_post_finalize_side_effects(turn_context)
             finalized = self.final_ledger_commit(turn_text, mood, reply, norm_attachments)
             return finalized
         except Exception as exc:

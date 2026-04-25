@@ -614,6 +614,10 @@ class TestWorkerIdentity:
 # ===========================================================================
 
 class TestCorrelationContext:
+    def setup_method(self):
+        from dadbot.core.observability import _current_correlation_id
+        _current_correlation_id.set("")
+
     def test_bind_sets_correlation_id(self):
         with CorrelationContext.bind("req-001") as cid:
             assert cid == "req-001"
