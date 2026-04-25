@@ -88,6 +88,17 @@ See `docker-compose.yml` for dev and production profiles.
 - Existing imports like from Dad import DadBot continue to work.
 - New internal code should import from dadbot.core.dadbot where practical.
 
+## Current Refactor Status
+
+Phase 4 graph hardening is complete and the turn pipeline is now frozen around these invariants:
+
+- DadBot graph execution is the default turn path.
+- Sync, async, and stream entrypoints all preserve correlation and trace context.
+- Graph failures are fail-closed: they emit `GRAPH_EXECUTION_FAILED`, return a controlled response, and do not invoke legacy fallback execution.
+- Legacy `turn_service.process_user_message*` entrypoints are confined to the DadBot facade compatibility surface and are guarded by freeze tests.
+
+This means current work is in system hardening and validation mode rather than graph redesign. Node ordering, Save ownership, reflection timing, and core graph wiring should be treated as frozen unless a concrete bug is found.
+
 ## Status/Dashboard Observability
 
 The Status/Dashboard surfaces guardrails and runtime safety signals, including:

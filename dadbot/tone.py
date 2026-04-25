@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dadbot.config import MOOD_TONE_GUIDANCE
 from dadbot.contracts import DadBotContext, SupportsToneRuntime

@@ -1,8 +1,13 @@
 import asyncio
 from concurrent.futures import Future
+from datetime import date, datetime
+from pathlib import Path
+import re
+from types import SimpleNamespace
 import Dad
 
 from Dad import DadBot
+from dadbot.core.observability import CorrelationContext, TracingContext
 from dadbot_system import InMemoryEventBus, InMemoryStateStore
 from dadbot_system.state import AppStateContainer
 
@@ -207,7 +212,9 @@ def test_turn_service_uses_reply_generation_manager(bot, monkeypatch):
     monkeypatch.setattr(bot.turn_service, "prepare_user_turn", lambda user_input, attachments=None: ("neutral", None, False, user_input, attachments or []))
     monkeypatch.setattr(bot.turn_service, "finalize_user_turn", lambda stripped_input, current_mood, dad_reply, attachments=None: (dad_reply, False))
 
-    reply, should_end = bot.process_user_message("Need a hand.")
+    # Pipeline-level assertion: call turn_service directly (graph is always active at the
+    # bot.process_user_message level and uses AgentService, not reply_generation directly).
+    reply, should_end = bot.turn_service.process_user_message("Need a hand.")
 
     assert should_end is False
     assert reply == "generated::Need a hand.::Need a hand.::neutral::False::0"
@@ -283,20 +290,224 @@ def test_process_user_message_uses_graph_path_when_enabled(bot, monkeypatch):
     assert should_end is False
 
 
-def test_process_user_message_graph_failure_falls_back_to_legacy(bot, monkeypatch):
+def test_process_user_message_graph_failure_returns_controlled_response(bot, monkeypatch):
     bot._turn_graph_enabled = True
+    bot._strict_graph_mode = True
+
+    events = []
+
+    class DummyLedgerWriter:
+        def write_event(self, **kwargs):
+            events.append(kwargs)
+            return kwargs
+
+    class DummyControlPlane:
+        ledger_writer = DummyLedgerWriter()
+
+    class DummyOrchestrator:
+        control_plane = DummyControlPlane()
 
     def boom(user_input, attachments=None):
         raise RuntimeError("graph unavailable")
 
     monkeypatch.setattr(bot, "_run_graph_turn_sync", boom)
-    monkeypatch.setattr(bot, "record_runtime_issue", lambda *args, **kwargs: None)
-    monkeypatch.setattr(bot.turn_service, "process_user_message", lambda user_input, attachments=None: (f"legacy::{user_input}", False))
+    monkeypatch.setattr(bot, "_get_turn_orchestrator", lambda: DummyOrchestrator())
+    monkeypatch.setattr(bot, "_turn_orchestrator", DummyOrchestrator())
 
-    reply, should_end = bot.process_user_message("Need a hand.")
+    def fail_legacy(*args, **kwargs):
+        raise AssertionError("legacy path should not run")
 
-    assert reply == "legacy::Need a hand."
+    monkeypatch.setattr(bot.turn_service, "process_user_message", fail_legacy)
+    monkeypatch.setattr(bot, "_append_signoff_compat", lambda text: text)
+
+    try:
+        bot.process_user_message("Need a hand.")
+        assert False, "Expected strict graph failure"
+    except RuntimeError as exc:
+        assert "strict mode" in str(exc)
+    assert len(events) == 1
+    assert events[0]["event_type"] == "GRAPH_EXECUTION_FAILED"
+    assert events[0]["payload"]["error_type"] == "RuntimeError"
+
+
+def test_process_user_message_stream_uses_graph_path_when_enabled(bot, monkeypatch):
+    bot._turn_graph_enabled = True
+
+    chunks = []
+
+    monkeypatch.setattr(bot, "process_user_message", lambda user_input, attachments=None: (f"graph::{user_input}", False))
+
+    reply, should_end = bot.process_user_message_stream("Need a hand.", chunk_callback=chunks.append)
+
+    assert reply == "graph::Need a hand."
     assert should_end is False
+    assert chunks == ["graph::Need a hand."]
+
+
+def test_process_user_message_stream_graph_failure_preserves_trace_and_correlation(bot, monkeypatch):
+    bot._turn_graph_enabled = True
+    bot._strict_graph_mode = True
+
+    events = []
+    order = []
+    chunk_observation = {}
+
+    class DummyLedgerWriter:
+        def write_event(self, **kwargs):
+            order.append("event")
+            events.append(
+                {
+                    **kwargs,
+                    "observed_correlation": CorrelationContext.current(),
+                    "observed_trace": TracingContext.current_trace_id(),
+                }
+            )
+            return kwargs
+
+    class DummyControlPlane:
+        ledger_writer = DummyLedgerWriter()
+
+    class DummyOrchestrator:
+        control_plane = DummyControlPlane()
+
+    def boom(user_input, attachments=None):
+        raise RuntimeError("graph unavailable")
+
+    def fail_legacy(*args, **kwargs):
+        raise AssertionError("legacy sync path should not run")
+
+    monkeypatch.setattr(bot, "_run_graph_turn_sync", boom)
+    monkeypatch.setattr(bot, "_get_turn_orchestrator", lambda: DummyOrchestrator())
+    monkeypatch.setattr(bot, "_turn_orchestrator", DummyOrchestrator())
+    monkeypatch.setattr(bot.turn_service, "process_user_message", fail_legacy)
+    monkeypatch.setattr(bot.turn_service, "process_user_message_stream", fail_legacy)
+    monkeypatch.setattr(bot, "_append_signoff_compat", lambda text: text)
+
+    def capture_chunk(chunk):
+        order.append("chunk")
+        chunk_observation.update(
+            {
+                "chunk": chunk,
+                "correlation_id": CorrelationContext.current(),
+                "trace_id": TracingContext.current_trace_id(),
+            }
+        )
+
+    with CorrelationContext.bind("corr-stream-001"):
+        with TracingContext().span("test.stream.failure", trace_id="trace-stream-001"):
+            try:
+                bot.process_user_message_stream("Need a hand.", chunk_callback=capture_chunk)
+                assert False, "Expected strict graph failure"
+            except RuntimeError as exc:
+                assert "strict mode" in str(exc)
+
+    assert order == ["event"]
+    assert chunk_observation == {}
+    assert len(events) == 1
+
+    failure_event = events[0]
+    assert failure_event["event_type"] == "GRAPH_EXECUTION_FAILED"
+    assert failure_event["kernel_step_id"] == "graph.failure.sync"
+    assert failure_event["trace_id"] == "trace-stream-001"
+    assert failure_event["committed"] is True
+    assert failure_event["observed_correlation"] == "corr-stream-001"
+    assert failure_event["observed_trace"] == "trace-stream-001"
+    assert failure_event["payload"]["correlation_id"] == "corr-stream-001"
+    assert failure_event["payload"]["trace_id"] == "trace-stream-001"
+
+
+def test_process_user_message_async_uses_graph_path_when_enabled(bot, monkeypatch):
+    bot._turn_graph_enabled = True
+
+    async def run_graph(user_input, attachments=None):
+        return (f"graph::{user_input}", False)
+
+    async def fail_legacy(*args, **kwargs):
+        raise AssertionError("legacy async path should not run")
+
+    monkeypatch.setattr(bot, "_run_graph_turn_async", run_graph)
+    monkeypatch.setattr(bot.turn_service, "process_user_message_async", fail_legacy)
+
+    reply, should_end = asyncio.run(bot.process_user_message_async("Need a hand."))
+
+    assert reply == "graph::Need a hand."
+    assert should_end is False
+
+
+def test_process_user_message_async_graph_failure_preserves_trace_and_correlation(bot, monkeypatch):
+    bot._turn_graph_enabled = True
+    bot._strict_graph_mode = True
+
+    events = []
+
+    class DummyLedgerWriter:
+        def write_event(self, **kwargs):
+            events.append(kwargs)
+            return kwargs
+
+    class DummyControlPlane:
+        ledger_writer = DummyLedgerWriter()
+
+    class DummyOrchestrator:
+        control_plane = DummyControlPlane()
+
+    async def boom(user_input, attachments=None):
+        raise RuntimeError("graph unavailable")
+
+    async def fail_legacy(*args, **kwargs):
+        raise AssertionError("legacy async path should not run")
+
+    monkeypatch.setattr(bot, "_run_graph_turn_async", boom)
+    monkeypatch.setattr(bot, "_get_turn_orchestrator", lambda: DummyOrchestrator())
+    monkeypatch.setattr(bot, "_turn_orchestrator", DummyOrchestrator())
+    monkeypatch.setattr(bot.turn_service, "process_user_message_async", fail_legacy)
+    monkeypatch.setattr(bot, "_append_signoff_compat", lambda text: text)
+
+    with CorrelationContext.bind("corr-async-001"):
+        with TracingContext().span("test.async.failure", trace_id="trace-async-001"):
+            try:
+                asyncio.run(bot.process_user_message_async("Need a hand."))
+                assert False, "Expected strict graph failure"
+            except RuntimeError as exc:
+                assert "strict mode" in str(exc)
+
+    assert len(events) == 1
+
+    failure_event = events[0]
+    assert failure_event["event_type"] == "GRAPH_EXECUTION_FAILED"
+    assert failure_event["kernel_step_id"] == "graph.failure.async"
+    assert failure_event["trace_id"] == "trace-async-001"
+    assert failure_event["committed"] is True
+    assert failure_event["payload"]["mode"] == "async"
+    assert failure_event["payload"]["correlation_id"] == "corr-async-001"
+    assert failure_event["payload"]["trace_id"] == "trace-async-001"
+    assert failure_event["payload"]["error_type"] == "RuntimeError"
+
+
+def test_turn_processing_freeze_limits_legacy_entrypoints_to_dadbot_facade():
+    workspace_root = Path(__file__).resolve().parents[1]
+    legacy_pattern = re.compile(r"turn_service\.process_user_message(?:_async|_stream(?:_async)?)?\s*\(")
+
+    legacy_call_files = []
+    for path in sorted((workspace_root / "dadbot").rglob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        if legacy_pattern.search(text):
+            legacy_call_files.append(path.relative_to(workspace_root).as_posix())
+
+    # Legacy fallback is eliminated: no code within dadbot/ calls turn_service.process_user_message*
+    # directly. The graph pipeline (AgentService.run_agent) is the unconditional execution path.
+    assert legacy_call_files == []
+
+    runtime_interface = (workspace_root / "dadbot/managers/runtime_interface.py").read_text(encoding="utf-8")
+    runtime_services = (workspace_root / "dadbot/runtime_core/services.py").read_text(encoding="utf-8")
+    streamlit_runtime = (workspace_root / "dadbot/runtime_core/streamlit_runtime.py").read_text(encoding="utf-8")
+
+    assert "self.bot.process_user_message(" in runtime_interface
+    assert "self.bot.process_user_message(" in runtime_services
+    assert "self._bot.process_user_message(" in streamlit_runtime
+    assert "turn_service.process_user_message" not in runtime_interface
+    assert "turn_service.process_user_message" not in runtime_services
+    assert "turn_service.process_user_message" not in streamlit_runtime
 
 
 def test_conversation_persistence_methods_delegate_to_manager(bot, monkeypatch):
@@ -808,7 +1019,23 @@ def test_embedding_model_candidates_fall_back_to_chat_models_when_unset(bot):
 
 
 def test_relationship_manager_snapshot_exposes_active_hypothesis(bot):
-    bot.relationship_manager.update("I feel overwhelmed and needed to say that out loud.", "stressed")
+    turn_context = SimpleNamespace(
+        temporal=SimpleNamespace(
+            wall_time=datetime.now().isoformat(timespec="seconds"),
+            wall_date=date.today().isoformat(),
+        ),
+        state={"_active_graph_stage": "save"},
+    )
+    previous_commit_active = bool(getattr(bot, "_graph_commit_active", False))
+    try:
+        bot._graph_commit_active = True
+        bot.relationship_manager.update(
+            "I feel overwhelmed and needed to say that out loud.",
+            "stressed",
+            turn_context=turn_context,
+        )
+    finally:
+        bot._graph_commit_active = previous_commit_active
 
     snapshot = bot.relationship_manager.snapshot()
 
@@ -1013,3 +1240,26 @@ def test_runtime_client_tries_fallback_models_async(bot, monkeypatch):
     assert response == {"message": {"content": "ok"}}
     assert attempted == ["primary", "fallback"]
     assert bot.ACTIVE_MODEL == "fallback"
+
+
+def test_plan_agentic_tools_closed_loop_falls_back_cleanly(bot, monkeypatch):
+    bot.ENABLE_AGENTIC_TOOLS = True
+    monkeypatch.setattr(bot, "agentic_tool_settings", lambda: {"enabled": True})
+    monkeypatch.setattr(bot.turn_service, "_planning_prompt", lambda user_input, mood, tools: "planner-prompt")
+    monkeypatch.setattr(bot, "get_available_tools", lambda: [{"type": "function", "function": {"name": "status"}}])
+    monkeypatch.setattr(
+        bot,
+        "call_ollama_chat",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("Event loop is closed")),
+    )
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.close()
+
+    tool_name, tool_args = bot.turn_service.plan_agentic_tools("check status", "steady")
+    planner_debug = bot.planner_debug_snapshot()
+
+    assert (tool_name, tool_args) == (None, None)
+    assert planner_debug.get("planner_status") == "fallback"
+    assert "event loop closed" in (planner_debug.get("planner_reason") or "").lower()

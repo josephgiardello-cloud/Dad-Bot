@@ -1,4 +1,4 @@
-"""Avatar generation and management via Ollama image models."""
+﻿"""Avatar generation and management via Ollama image models."""
 from __future__ import annotations
 
 import base64

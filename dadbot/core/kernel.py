@@ -1,4 +1,4 @@
-"""Execution kernel — the single state-transition authority for turn processing.
+﻿"""Execution kernel â€” the single state-transition authority for turn processing.
 
 Architecture contract
 ---------------------
@@ -13,10 +13,10 @@ State mutations (``turn_context.state[key] = value``) are only legal inside a
 call to ``execute_step()``.  This collapses three previous execution authorities
 (graph, orchestrator, service layer) into one, which directly improves:
 
-  * determinism — one path means one audit trail
-  * replay correctness — kernel_audit in metadata records every state write
-  * debugging clarity — policy decisions are recorded at the point they happen
-  * failure reasoning — rejected steps are surfaced, not silently skipped
+  * determinism â€” one path means one audit trail
+  * replay correctness â€” kernel_audit in metadata records every state write
+  * debugging clarity â€” policy decisions are recorded at the point they happen
+  * failure reasoning â€” rejected steps are surfaced, not silently skipped
 
 Policy gate
 -----------
@@ -100,7 +100,7 @@ class TurnKernel:
         )
         if kernel_result.status == "error":
             raise RuntimeError(kernel_result.error)
-        # "rejected" → step skipped; pipeline continues.
+        # "rejected" â†’ step skipped; pipeline continues.
 
     The kernel records every step in ``turn_context.metadata["kernel_audit"]``
     so the full decision trail is available for replay and debugging.
@@ -135,7 +135,7 @@ class TurnKernel:
             Zero-arg async callable that performs the step.  May mutate
             ``turn_context.state`` as a side effect.
         """
-        # ── Phase 1: Policy gate ─────────────────────────────────────────────
+        # â”€â”€ Phase 1: Policy gate â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         turn_context.metadata["kernel_lineage"] = {
             "kernel_step_id": str(step_name or ""),
             "trace_id": str(getattr(turn_context, "trace_id", "") or ""),
@@ -163,7 +163,7 @@ class TurnKernel:
                     policy=policy,
                 )
 
-        # ── Phase 2: Execute with write-key accounting ───────────────────────
+        # â”€â”€ Phase 2: Execute with write-key accounting â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         keys_before: frozenset[str] = frozenset(turn_context.state)
         try:
             await step_fn()
@@ -178,7 +178,7 @@ class TurnKernel:
 
         keys_written: list[str] = sorted(frozenset(turn_context.state) - keys_before)
 
-        # ── Phase 3: Append audit record ─────────────────────────────────────
+        # â”€â”€ Phase 3: Append audit record â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         audit_entry: dict[str, Any] = {
             "step": step_name,
             "status": "ok",
@@ -215,7 +215,7 @@ def bayesian_policy_gate(bot: Any) -> Callable[["TurnContext", str], PolicyDecis
          re-computing it.
       3. When bias is ``"defer_tools_unless_explicit"`` and the user input
          contains no explicit tool-request keywords, sets
-         ``turn_context.state["_bayesian_tools_blocked"] = True`` — a hard signal
+         ``turn_context.state["_bayesian_tools_blocked"] = True`` â€” a hard signal
          for AgentService to skip tool-planning entirely.
 
     Note: the LLM inference call is always *allowed* so Tony always receives a

@@ -1,0 +1,68 @@
+{
+  "phase": "Phase 4",
+  "input_turn_count": 20,
+  "step1_full_deterministic_replay_gate": {
+    "passed": true,
+    "comparison": {
+      "graph": {
+        "run1_sha256": "a63460a0e49f54c94f0f5f40b78055107c3a5d65354bd30baca32c241d5c68af",
+        "run2_sha256": "a63460a0e49f54c94f0f5f40b78055107c3a5d65354bd30baca32c241d5c68af",
+        "byte_identical": true
+      },
+      "memory": {
+        "run1_sha256": "2de964b1fe271eecff152c7c5649f4f3a840fcc881cf6fc6c1bf1a263af372f1",
+        "run2_sha256": "2de964b1fe271eecff152c7c5649f4f3a840fcc881cf6fc6c1bf1a263af372f1",
+        "byte_identical": true
+      },
+      "ledger": {
+        "run1_sha256": "5794924eb16cc40ec06946223f050593164ef64c15db71b8b75eba6f86060a87",
+        "run2_sha256": "5794924eb16cc40ec06946223f050593164ef64c15db71b8b75eba6f86060a87",
+        "byte_identical": true
+      },
+      "execution_trace": {
+        "run1_sha256": "6e00de80a532baab50ecd51d78465b691997028193886361c2f9f5b5ad87cff5",
+        "run2_sha256": "6e00de80a532baab50ecd51d78465b691997028193886361c2f9f5b5ad87cff5",
+        "identical_stage_ordering": true
+      }
+    }
+  },
+  "step2_ledger_final_determinism_lock": {
+    "passed": true,
+    "checks": {
+      "event_ordering_monotonic": true,
+      "serialization_stable": true,
+      "uuid_variation_detected": false,
+      "hidden_timestamp_marker_detected": false
+    }
+  },
+  "step3_stage_order_enforcement_validation": {
+    "passed": true,
+    "checks": {
+      "required_order": [
+        "temporal",
+        "context_builder",
+        "inference",
+        "safety",
+        "reflection",
+        "save"
+      ],
+      "exact_order_all_turns": true,
+      "no_double_inference": true,
+      "no_skipped_reflection": true,
+      "no_save_reentry": true
+    }
+  },
+  "step4_edge_case_graph_invariant_tests": {
+    "passed": true,
+    "checks": {
+      "no_dual_truth_after_contradiction_resolution": true,
+      "orphan_edge_count": 0,
+      "invalid_visible_edge_count": 0,
+      "temporal_windows_consistent": true
+    }
+  },
+  "step5_freeze_certification": {
+    "eligible": true,
+    "declaration": "Graph is a deterministic, bi-temporal cognitive engine with transactional memory lifecycle."
+  }
+}

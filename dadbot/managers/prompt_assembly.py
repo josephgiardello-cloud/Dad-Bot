@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dadbot.contracts import AttachmentList, DadBotContext, SupportsDadBotAccess
 
@@ -174,7 +174,7 @@ class PromptAssemblyManager:
 		return messages
 
 	def _trim_all_messages(self, messages: list, prompt_budget: int) -> list:
-		"""Per-message trim pass — trim each message to its proportional share."""
+		"""Per-message trim pass â€” trim each message to its proportional share."""
 		if self._total_message_tokens(messages) > prompt_budget:
 			for idx, msg in enumerate(messages):
 				running_total = self._total_message_tokens(messages)
@@ -203,7 +203,7 @@ class PromptAssemblyManager:
 		return messages
 
 	def _trim_to_hard_limit(self, messages: list, prompt_budget: int) -> list:
-		"""Final trim/drop loop — last resort to fit within budget."""
+		"""Final trim/drop loop â€” last resort to fit within budget."""
 		while messages and self._total_message_tokens(messages) > prompt_budget:
 			last_idx = len(messages) - 1
 			other_cost = sum(self.bot.message_token_cost(m) for m in messages[:-1])

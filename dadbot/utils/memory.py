@@ -1,4 +1,4 @@
-"""Memory formatting, sorting, and naturalization utilities.
+﻿"""Memory formatting, sorting, and naturalization utilities.
 
 Pure functions with no DadBot dependency::
 

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import os
@@ -31,7 +31,7 @@ class ExecutionLease:
         self._lock = RLock()
         self._leases: dict[str, dict[str, Any]] = {}
         self._default_ttl = max(1.0, float(default_ttl_seconds or self.DEFAULT_TTL_SECONDS))
-        self._fencing_counters: dict[str, int] = {}  # session_id → monotonic token
+        self._fencing_counters: dict[str, int] = {}  # session_id â†’ monotonic token
 
     def _next_fencing_token(self, session_id: str) -> int:
         """Return a monotonically increasing fencing token for session_id.
@@ -132,9 +132,9 @@ class ExecutionLease:
         with self._lock:
             existing = self._leases.get(normalized)
             if existing is None:
-                return  # no lease held — caller may proceed
+                return  # no lease held â€” caller may proceed
             if existing["expires_at"] <= now:
-                # Expired lease — evict and allow
+                # Expired lease â€” evict and allow
                 del self._leases[normalized]
                 return
             if existing["owner_id"] != str(owner_id or ""):
@@ -193,7 +193,7 @@ class ExecutionLease:
 
 
 # ---------------------------------------------------------------------------
-# Worker identity — persistent process ID across restarts
+# Worker identity â€” persistent process ID across restarts
 # ---------------------------------------------------------------------------
 
 class WorkerIdentity:
@@ -227,15 +227,15 @@ class WorkerIdentity:
         if existing:
             prev_pid = int(existing.get("pid") or 0)
             if prev_pid and prev_pid != os.getpid() and not _pid_is_alive(prev_pid):
-                # Previous worker crashed — preserve its ID for diagnostics.
+                # Previous worker crashed â€” preserve its ID for diagnostics.
                 self._previous_worker_id = str(existing.get("worker_id") or "")
                 self._previous_crashed = True
             elif prev_pid and prev_pid == os.getpid():
-                # Same process (e.g. test re-use) — reuse identity.
+                # Same process (e.g. test re-use) â€” reuse identity.
                 self._worker_id = str(existing.get("worker_id") or "")
                 return
             elif prev_pid and _pid_is_alive(prev_pid):
-                # Another live process owns this identity — generate a new one.
+                # Another live process owns this identity â€” generate a new one.
                 self._worker_id = uuid.uuid4().hex
                 self._write()
                 return

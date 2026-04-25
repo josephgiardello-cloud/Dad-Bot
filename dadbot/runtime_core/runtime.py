@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import copy
 import hashlib
@@ -198,6 +198,8 @@ class AgentRuntime:
         )
         
         pipeline = copy.deepcopy(dict(result.pipeline or {}))
+        turn_health = copy.deepcopy(dict(result.turn_health or {}))
+        ux_feedback = copy.deepcopy(dict(result.ux_feedback or {}))
 
         events: list[Event] = list(execution_boundary_events) + [
             new_event(
@@ -208,6 +210,8 @@ class AgentRuntime:
                     "should_end": bool(result.should_end),
                     "mood": str(result.mood or "neutral"),
                     "pipeline": pipeline,
+                    "turn_health": turn_health,
+                    "ux_feedback": ux_feedback,
                     "attachments": [],
                 },
             )
@@ -221,6 +225,11 @@ class AgentRuntime:
                     "reply_source": str(pipeline.get("reply_source") or "model_generation"),
                     "pipeline_steps": list(pipeline.get("steps") or []),
                     "active_rules": list(result.active_rules or []),
+                    "dad_is_thinking": bool(ux_feedback.get("dad_is_thinking", False)),
+                    "thinking_message": str(ux_feedback.get("message") or ""),
+                    "checking_memory": bool(ux_feedback.get("checking_memory", False)),
+                    "memory_message": str(ux_feedback.get("memory_message") or ""),
+                    "turn_health": turn_health,
                 },
             )
         ]

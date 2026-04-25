@@ -1,9 +1,9 @@
-"""Structured observability layer — trace IDs, metrics, and event stream export.
+﻿"""Structured observability layer â€” trace IDs, metrics, and event stream export.
 
 Three components:
-  TracingContext   — thread-local + contextvars trace/span ID propagation.
-  MetricsSink      — in-process counter + histogram; swappable for OTel.
-  EventStreamExporter — publishes events to stdout JSON or an async queue.
+  TracingContext   â€” thread-local + contextvars trace/span ID propagation.
+  MetricsSink      â€” in-process counter + histogram; swappable for OTel.
+  EventStreamExporter â€” publishes events to stdout JSON or an async queue.
 
 Usage:
     from dadbot.core.observability import get_metrics, get_tracer, EventStreamExporter
@@ -83,7 +83,7 @@ class Span:
 
 
 class TracingContext:
-    """Tracer — creates spans and propagates trace IDs."""
+    """Tracer â€” creates spans and propagates trace IDs."""
 
     def span(self, name: str, *, trace_id: str = "") -> Span:
         return Span(name, trace_id=trace_id)
@@ -176,7 +176,7 @@ class MetricsSink:
 class EventStreamExporter:
     """Publishes structured events to stdout JSON (default) or an async queue.
 
-    Compatible with OpenTelemetry log exporters — each record is a valid
+    Compatible with OpenTelemetry log exporters â€” each record is a valid
     JSON object on a single line.
     """
 
@@ -228,7 +228,7 @@ class EventStreamExporter:
 
 
 # ---------------------------------------------------------------------------
-# Global singletons (opt-in — callers import and use these)
+# Global singletons (opt-in â€” callers import and use these)
 # ---------------------------------------------------------------------------
 
 _global_tracer = TracingContext()
@@ -255,14 +255,14 @@ def configure_exporter(sink: Any = None, *, enabled: bool = True) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Correlation context (Tier 2 item 9 — end-to-end request correlation)
+# Correlation context (Tier 2 item 9 â€” end-to-end request correlation)
 # ---------------------------------------------------------------------------
 
 _current_correlation_id: ContextVar[str] = ContextVar("_current_correlation_id", default="")
 
 
 class CorrelationContext:
-    """Propagates a correlation ID across scheduler → ledger → kernel.
+    """Propagates a correlation ID across scheduler â†’ ledger â†’ kernel.
 
     A correlation ID represents a single end-to-end user request, surviving
     across multiple spans and component boundaries.
@@ -307,7 +307,7 @@ class _CorrelationScope:
 
 
 # ---------------------------------------------------------------------------
-# Structured logger (Tier 2 item 9 — structured logs tied to event IDs)
+# Structured logger (Tier 2 item 9 â€” structured logs tied to event IDs)
 # ---------------------------------------------------------------------------
 
 class LogLevel(str):
@@ -416,7 +416,7 @@ class StructuredLogger:
 
 
 # ---------------------------------------------------------------------------
-# Replay debugger (Tier 2 item 9 — step through execution timeline)
+# Replay debugger (Tier 2 item 9 â€” step through execution timeline)
 # ---------------------------------------------------------------------------
 
 class ReplayDebugger:

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import hashlib
 import json
@@ -213,7 +213,7 @@ class SystemHealthChecker:
             snap = projected.snapshot()
             if int(snap.get("version") or 0) <= 0:
                 errors.append(
-                    "Non-empty ledger produced empty session projection — replay is broken"
+                    "Non-empty ledger produced empty session projection â€” replay is broken"
                 )
 
         return {
@@ -226,19 +226,19 @@ class SystemHealthChecker:
         }
 
     def check_reducer_semantic_correctness(self, ledger: ExecutionLedger) -> dict[str, Any]:
-        """Step 5 — ReducerEngine semantic check.
+        """Step 5 â€” ReducerEngine semantic check.
 
         Validates that applying the ledger events through the canonical reducer
         produces the same state as replaying from scratch.  This is a semantic
         correctness check, not just an ordering check.
 
         The original approach compared sorted-vs-original event lists; this
-        checks that reducer(events) == reducer(sorted(events)) — i.e. the
+        checks that reducer(events) == reducer(sorted(events)) â€” i.e. the
         execution outcome is deterministic regardless of event arrival order.
         """
         events = ledger.read()
         if not events:
-            return {"ok": True, "reason": "empty ledger — nothing to check"}
+            return {"ok": True, "reason": "empty ledger â€” nothing to check"}
 
         forward_state = self._reducer.reduce(events)
         sorted_state = self._reducer.reduce(
@@ -262,7 +262,7 @@ class SystemHealthChecker:
             "reason": (
                 "reducer output is deterministic"
                 if ok
-                else "reducer output diverges — possible non-determinism or event corruption"
+                else "reducer output diverges â€” possible non-determinism or event corruption"
             ),
         }
 
@@ -272,7 +272,7 @@ class SystemHealthChecker:
         ledger: ExecutionLedger,
         snapshot_engine: SnapshotEngine | None = None,
     ) -> dict[str, Any]:
-        """Step 8 — verify snapshot is still consistent with the current ledger."""
+        """Step 8 â€” verify snapshot is still consistent with the current ledger."""
         engine = snapshot_engine or self._snapshot_engine
         latest = engine.latest()
         if latest is None:

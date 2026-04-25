@@ -1,4 +1,4 @@
-"""Mood normalisation and detection-key utilities.
+﻿"""Mood normalisation and detection-key utilities.
 
 Canonical home for pure mood-string logic that previously lived as @staticmethod
 methods on DadBot.  Import directly rather than going through the facade::

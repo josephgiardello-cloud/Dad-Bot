@@ -1,4 +1,4 @@
-"""Runtime health monitoring, adaptive pressure management, and hardware optimization."""
+﻿"""Runtime health monitoring, adaptive pressure management, and hardware optimization."""
 from __future__ import annotations
 
 import logging
@@ -14,7 +14,7 @@ class RuntimeHealthManager:
     def __init__(self, bot):
         self.bot = bot
 
-    # ── Issue tracking ──────────────────────────────────────────────────────
+    # â”€â”€ Issue tracking â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     def record_runtime_issue(self, purpose, fallback, exc=None, *, level=logging.WARNING, metadata=None):
         summary = self.bot.ollama_error_summary(exc) if exc is not None else ""
@@ -47,7 +47,7 @@ class RuntimeHealthManager:
             return []
         return list(reversed(list(recent)[-max_items:]))
 
-    # ── Stats accessors ─────────────────────────────────────────────────────
+    # â”€â”€ Stats accessors â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     def prompt_guard_stats(self):
         stats = getattr(self.bot, "_prompt_guard_stats", None)
@@ -88,7 +88,7 @@ class RuntimeHealthManager:
             "last_updated": datetime.now().isoformat(timespec="seconds"),
         }
 
-    # ── Health history ──────────────────────────────────────────────────────
+    # â”€â”€ Health history â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     def health_history(self, limit=72):
         try:
@@ -127,7 +127,7 @@ class RuntimeHealthManager:
         history.append(point)
         self.bot.mutate_memory_store(health_history=history[-max(8, int(max_points or 240)):], save=False)
 
-    # ── Adaptive budgets ────────────────────────────────────────────────────
+    # â”€â”€ Adaptive budgets â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     def adaptive_prompt_pressure_factor(self):
         prompt_guard = self.prompt_guard_stats()
@@ -175,7 +175,7 @@ class RuntimeHealthManager:
     def adaptive_memory_context_budget(self, baseline_budget):
         return max(96, int(max(1, int(baseline_budget or 1)) * self.adaptive_prompt_pressure_factor()))
 
-    # ── Forecasting ─────────────────────────────────────────────────────────
+    # â”€â”€ Forecasting â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     def forecast_minutes_to_red(self, history=None):
         samples = list(history or self.health_history(limit=24))
@@ -236,7 +236,7 @@ class RuntimeHealthManager:
             return True, "Dad has been trimming context more than usual. A concise clarification will help preserve the important part."
         return True, "Dad's reasoning confidence dipped a bit. A short clarification will help lock onto the right thread."
 
-    # ── Hardware optimization ───────────────────────────────────────────────
+    # â”€â”€ Hardware optimization â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     def hardware_optimization_status(self):
         payload = self.bot.MEMORY_STORE.get("runtime_optimization", {}) if isinstance(self.bot.MEMORY_STORE, dict) else {}
@@ -285,7 +285,7 @@ class RuntimeHealthManager:
             "prompt_budget_factor": suggestion.get("prompt_budget_factor", 1.0),
         }
 
-    # ── Main snapshot ───────────────────────────────────────────────────────
+    # â”€â”€ Main snapshot â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     def current_runtime_health_snapshot(self, *, force=False, log_warnings=False, persist=False, max_age_seconds=None):
         now = time.monotonic()

@@ -1,4 +1,4 @@
-"""Streamlit session-state helpers for UI preferences and voice settings.
+﻿"""Streamlit session-state helpers for UI preferences and voice settings.
 
 These functions are pure in the sense that they never import from dad_streamlit,
 only from streamlit and the DadBot type annotation.

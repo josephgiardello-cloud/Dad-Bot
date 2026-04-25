@@ -1,4 +1,4 @@
-"""Shared UI utility helpers — no dependency on dad_streamlit."""
+﻿"""Shared UI utility helpers â€” no dependency on dad_streamlit."""
 
 from __future__ import annotations
 

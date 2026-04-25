@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from datetime import date
 
@@ -183,13 +183,13 @@ class ProfileContextManager:
         return len(overlap) >= minimum_overlap
 
     def validate_reply(self, user_input, reply):
-        memory_fallback = self.bot.get_memory_reply(user_input)
-        if memory_fallback is not None:
-            return memory_fallback
+        memory_reply = self.bot.get_memory_reply(user_input)
+        if memory_reply is not None:
+            return memory_reply
 
-        fallback = self.bot.get_fact_reply(user_input)
-        if fallback is not None:
-            return fallback
+        fact_reply = self.bot.get_fact_reply(user_input)
+        if fact_reply is not None:
+            return fact_reply
 
         for rule in self.bot.matching_topics(user_input):
             if not self.bot.response_has_expected_anchor(rule, reply):

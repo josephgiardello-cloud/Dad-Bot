@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import hashlib
 import json
@@ -335,7 +335,7 @@ class MediaService:
 
         queue = st.session_state.setdefault("ambient_utterance_queue", [])
         queue.append(transcript_text.strip())
-        st.toast(f"Dad heard: \"{transcript_text[:60]}\"", icon="🎙️")
+        st.toast(f"Dad heard: \"{transcript_text[:60]}\"", icon="ðŸŽ™ï¸")
         persist_voice_profile_if_changed(bot, voice)
 
     def render_realtime_voice_call(self, bot):
@@ -363,7 +363,7 @@ class MediaService:
             st.info("Enable voice in Preferences -> Voice to use the real-time call feature.")
             return
 
-        st.subheader("📞 Talk to Dad - Live")
+        st.subheader("ðŸ“ž Talk to Dad - Live")
         st.caption("Hands-free, real-time voice conversation. Uses your mic -> STT -> Dad -> TTS pipeline.")
 
         known_devices = webrtc.voice_known_devices(voice, controller.runtime_state if isinstance(controller.runtime_state, dict) else {})

@@ -1,11 +1,11 @@
-"""InvariantGate — runtime enforcement hook.
+﻿"""InvariantGate â€” runtime enforcement hook.
 
 Integrates at three points:
-  1. LedgerWriter.write_event()  — before every ledger write
-  2. Scheduler.drain_once()      — before every job execution
-  3. Kernel.execute_step()       — before every kernel step (optional)
+  1. LedgerWriter.write_event()  â€” before every ledger write
+  2. Scheduler.drain_once()      â€” before every job execution
+  3. Kernel.execute_step()       â€” before every kernel step (optional)
 
-Rule: invariant failures HARD FAIL execution — they never log-and-continue.
+Rule: invariant failures HARD FAIL execution â€” they never log-and-continue.
 """
 from __future__ import annotations
 
@@ -53,7 +53,7 @@ def _invariant_non_future_timestamp(event: dict[str, Any]) -> str | None:
     drift_tolerance = 60.0  # seconds
     if ts_float > time.time() + drift_tolerance:
         return (
-            f"Event timestamp {ts_float} is more than {drift_tolerance}s in the future — "
+            f"Event timestamp {ts_float} is more than {drift_tolerance}s in the future â€” "
             f"clock skew or fabricated timestamp"
         )
     return None
@@ -68,7 +68,7 @@ def _invariant_payload_is_dict_or_absent(event: dict[str, Any]) -> str | None:
 
 def _invariant_kernel_lineage_non_empty(event: dict[str, Any]) -> str | None:
     if not str(event.get("kernel_step_id") or "").strip():
-        return "Event 'kernel_step_id' must be non-empty — kernel lineage required"
+        return "Event 'kernel_step_id' must be non-empty â€” kernel lineage required"
     return None
 
 
@@ -81,7 +81,7 @@ def _job_invariant_session_not_terminated(
 ) -> str | None:
     if str(session.get("status") or "active") == "terminated":
         return (
-            f"Cannot execute job {getattr(job, 'job_id', '?')!r} — "
+            f"Cannot execute job {getattr(job, 'job_id', '?')!r} â€” "
             f"session {getattr(job, 'session_id', '?')!r} is terminated"
         )
     return None
@@ -109,7 +109,7 @@ class InvariantGate:
     Call validate_event() before every ledger write.
     Call validate_job() before every job execution.
 
-    Both raise InvariantViolationError on any failure — never log and continue.
+    Both raise InvariantViolationError on any failure â€” never log and continue.
     """
 
     _DEFAULT_EVENT_CHECKS = [

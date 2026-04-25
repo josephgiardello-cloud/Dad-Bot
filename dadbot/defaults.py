@@ -1,4 +1,4 @@
-"""
+﻿"""
 Static configuration and initial state profiles for the DadBot ecosystem.
 Moving these here keeps Dadbot.py focused on orchestration logic.
 """

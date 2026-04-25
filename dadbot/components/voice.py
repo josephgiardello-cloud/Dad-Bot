@@ -1,4 +1,4 @@
-"""Voice interaction components."""
+﻿"""Voice interaction components."""
 
 from dad_streamlit import render_realtime_voice_call, render_reply_tts, render_voice_controls
 

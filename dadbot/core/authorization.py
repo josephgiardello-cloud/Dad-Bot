@@ -1,4 +1,4 @@
-"""Session-level authorization and tenant isolation.
+﻿"""Session-level authorization and tenant isolation.
 
 Design
 ------
@@ -7,11 +7,11 @@ well-behaved code from accidental cross-session or cross-tenant writes.
 
 Components
 ----------
-Capability / CapabilitySet — named operations (READ, WRITE, EXECUTE, ADMIN).
-TenantBoundary             — session IDs must carry a registered tenant prefix.
-SessionAuthorizationPolicy — maps session_id → CapabilitySet.
-CapabilityToken            — HMAC-SHA256 signed bearer token (short-lived).
-authorize_write            — convenience guard for LedgerWriter integration.
+Capability / CapabilitySet â€” named operations (READ, WRITE, EXECUTE, ADMIN).
+TenantBoundary             â€” session IDs must carry a registered tenant prefix.
+SessionAuthorizationPolicy â€” maps session_id â†’ CapabilitySet.
+CapabilityToken            â€” HMAC-SHA256 signed bearer token (short-lived).
+authorize_write            â€” convenience guard for LedgerWriter integration.
 
 Security note
 -------------

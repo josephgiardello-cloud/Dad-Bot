@@ -1,8 +1,6 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
-import json
 import logging
-from datetime import date
 
 from dadbot.contracts import DadBotContext, SupportsRelationshipRuntime
 
@@ -11,14 +9,150 @@ logger = logging.getLogger(__name__)
 
 
 class RelationshipManager:
-    """Owns relationship state, prompt-facing snapshots, and reflection/update logic."""
+    """Owns projection-only relationship snapshots derived from the memory graph."""
 
     def __init__(self, bot: DadBotContext | SupportsRelationshipRuntime):
         self.context = DadBotContext.from_runtime(bot)
         self.bot = self.context.bot
 
     def current_state(self) -> dict:
-        return self.bot.memory_manager.relationship_state()
+        return self._project_state_from_graph()
+
+    def _memory_graph_snapshot(self) -> dict:
+        memory = getattr(self.bot, "memory", None)
+        snapshot_fn = getattr(memory, "memory_graph_snapshot", None)
+        if not callable(snapshot_fn):
+            return {"nodes": [], "edges": []}
+        graph = snapshot_fn() or {}
+        if not isinstance(graph, dict):
+            return {"nodes": [], "edges": []}
+        return graph
+
+    def _project_state_from_graph(self) -> dict:
+        graph = self._memory_graph_snapshot()
+        nodes = [dict(item) for item in list(graph.get("nodes") or []) if isinstance(item, dict)]
+        edges = [dict(item) for item in list(graph.get("edges") or []) if isinstance(item, dict)]
+
+        weighted_nodes = sorted(
+            nodes,
+            key=lambda item: (-float(item.get("weight", 0) or 0), str(item.get("label") or "")),
+        )
+        top_topics = []
+        recurring_topics: dict[str, int] = {}
+        for node in weighted_nodes:
+            label = str(node.get("label") or "").strip().lower()
+            if not label:
+                continue
+            weight = max(1, int(float(node.get("weight", 0) or 0)))
+            recurring_topics[label] = recurring_topics.get(label, 0) + weight
+            if label not in top_topics:
+                top_topics.append(label)
+            if len(top_topics) >= 6:
+                break
+
+        node_pressure = min(25, len(nodes) * 2)
+        edge_pressure = min(20, len(edges) * 2)
+        trust_level = self.bot.clamp_score(45 + node_pressure // 2 + edge_pressure // 2)
+        openness_level = self.bot.clamp_score(45 + node_pressure // 2 + max(0, edge_pressure - 4))
+
+        heavy_terms = {"sad", "stress", "stressed", "frustrated", "tired", "burnout", "overwhelmed"}
+        warm_terms = {"gratitude", "progress", "wins", "family", "support", "calm", "exercise"}
+        heavy_hits = sum(1 for topic in top_topics if any(term in topic for term in heavy_terms))
+        warm_hits = sum(1 for topic in top_topics if any(term in topic for term in warm_terms))
+        if heavy_hits > warm_hits and heavy_hits >= 2:
+            emotional_momentum = "heavy"
+        elif warm_hits > heavy_hits:
+            emotional_momentum = "warming"
+        else:
+            emotional_momentum = "steady"
+
+        profiles = self.bot.relationship_hypothesis_profiles()
+        posteriors: dict[str, float] = {
+            str(item["name"]): float(item.get("probability", 0.0) or 0.0)
+            for item in self.bot.default_relationship_hypotheses()
+            if isinstance(item, dict) and str(item.get("name") or "").strip()
+        }
+        if emotional_momentum == "heavy":
+            posteriors["acute_stress"] = posteriors.get("acute_stress", 0.15) + 0.18
+            posteriors["guarded_distance"] = posteriors.get("guarded_distance", 0.15) + 0.08
+            posteriors["supportive_baseline"] = max(0.01, posteriors.get("supportive_baseline", 0.4) - 0.12)
+        elif emotional_momentum == "warming":
+            posteriors["positive_rebound"] = posteriors.get("positive_rebound", 0.25) + 0.2
+            posteriors["supportive_baseline"] = posteriors.get("supportive_baseline", 0.4) + 0.08
+
+        total = sum(max(0.01, value) for value in posteriors.values()) or 1.0
+        hypotheses = []
+        for name, value in posteriors.items():
+            profile = profiles.get(name, {"label": name.replace("_", " ").title(), "summary": ""})
+            hypotheses.append(
+                {
+                    "name": name,
+                    "label": str(profile.get("label") or name),
+                    "summary": str(profile.get("summary") or ""),
+                    "probability": round(max(0.01, value) / total, 4),
+                }
+            )
+        hypotheses.sort(key=lambda item: (-float(item.get("probability", 0.0) or 0.0), str(item.get("name") or "")))
+
+        return {
+            "trust_level": trust_level,
+            "openness_level": openness_level,
+            "recurring_topics": recurring_topics,
+            "recent_checkins": [],
+            "emotional_momentum": emotional_momentum,
+            "hypotheses": hypotheses,
+            "active_hypothesis": hypotheses[0]["name"] if hypotheses else "supportive_baseline",
+            "last_hypothesis_updated": str(graph.get("updated_at") or self.bot.runtime_timestamp()),
+            "last_reflection": "projection-only",
+            "last_updated": str(graph.get("updated_at") or self.bot.runtime_timestamp()),
+        }
+
+    def _assert_graph_execution_context(self, turn_context=None) -> None:
+        if turn_context is None:
+            raise RuntimeError("Compatibility shim requires explicit turn_context")
+        if getattr(turn_context, "temporal", None) is None:
+            raise RuntimeError("Compatibility shim requires turn_context.temporal")
+        if not bool(getattr(self.bot, "_graph_commit_active", False)):
+            raise RuntimeError("Compatibility shim requires in-graph execution context")
+        active_stage = str(getattr(turn_context, "state", {}).get("_active_graph_stage") or "").strip().lower()
+        if active_stage not in {"save", ""}:
+            raise RuntimeError(
+                "Compatibility shim requires SaveNode graph execution context "
+                f"(active_stage={active_stage!r})"
+            )
+
+    def _run_compat_mutation(self, callback, *, turn_context=None):
+        # Relationship subsystem is projection-only; keep compat call sites alive
+        # without requiring SaveNode mutation context.
+        return callback(turn_context)
+
+    def _require_turn_temporal(self, turn_context=None):
+        temporal = getattr(turn_context, "temporal", None)
+        if temporal is None:
+            raise RuntimeError("TemporalNode missing — deterministic execution violated")
+        wall_time = str(getattr(temporal, "wall_time", "")).strip()
+        wall_date = str(getattr(temporal, "wall_date", "")).strip()
+        if not wall_time or not wall_date:
+            raise RuntimeError("TemporalNode missing — deterministic execution violated")
+        return temporal
+
+    def _assert_save_commit_boundary(self) -> None:
+        if not bool(getattr(self.bot, "_graph_commit_active", False)):
+            raise RuntimeError("Relationship mutation outside SaveNode commit boundary is forbidden in strict mode")
+
+    def _turn_date(self, turn_context=None) -> str:
+        temporal = self._require_turn_temporal(turn_context)
+        wall_date = str(getattr(temporal, "wall_date", "")).strip()
+        if not wall_date:
+            raise RuntimeError("TemporalNode missing — deterministic execution violated")
+        return wall_date
+
+    def _turn_timestamp(self, turn_context=None) -> str:
+        temporal = self._require_turn_temporal(turn_context)
+        wall_time = str(getattr(temporal, "wall_time", "")).strip()
+        if not wall_time:
+            raise RuntimeError("TemporalNode missing — deterministic execution violated")
+        return wall_time
 
     def emotional_momentum(self, recent_checkins: list[dict]) -> str:
         moods = [self.bot.normalize_mood(item.get("mood")) for item in recent_checkins[-6:]]
@@ -223,17 +357,14 @@ class RelationshipManager:
     def relationship_snapshot(self) -> dict:
         return self.snapshot()
 
-    def record_history_point(self, *, trust_level, openness_level, source="turn") -> dict:
-        history = list(self.bot.memory.relationship_history(limit=180))
-        point = {
+    def record_history_point(self, *, trust_level, openness_level, source="turn", turn_context=None) -> dict:
+        return {
             "recorded_at": self.bot.runtime_timestamp(),
             "trust_level": self.bot.clamp_score(trust_level),
             "openness_level": self.bot.clamp_score(openness_level),
             "source": str(source or "turn").strip().lower() or "turn",
+            "projection_only": True,
         }
-        history.append(point)
-        self.bot.memory.mutate_memory_store(relationship_history=history[-180:], save=True)
-        return point
 
     def build_prompt_context(self) -> str:
         snapshot = self.snapshot()
@@ -295,160 +426,64 @@ Rules:
     def build_relationship_reflection_prompt(self, current_state: dict, recent_messages: list[dict]) -> str:
         return self.build_reflection_prompt(current_state, recent_messages)
 
-    def reflect(self, force: bool = False) -> dict | None:
+    def reflect_read_only(self, turn_context=None) -> dict | None:
+        """Read-only relationship reflection for background maintenance.
+
+        This method intentionally performs no persistent mutations and does not
+        require SaveNode boundary context.
+        """
         turn_count = self.bot.session_turn_count()
         if turn_count < 3:
             return None
-        if not force and turn_count - self.bot.last_relationship_reflection_turn < self.bot.RELATIONSHIP_REFLECTION_INTERVAL:
-            return None
-
         recent_messages = self.bot.prompt_history()
         if not recent_messages:
             return None
-
         current_state = self.current_state()
-        prompt = self.build_reflection_prompt(current_state, recent_messages)
+        snapshot = dict(current_state)
+        snapshot["read_only"] = True
+        snapshot["last_reflection"] = str(snapshot.get("last_reflection") or "").strip()
+        return snapshot
 
-        try:
-            response = self.bot.call_ollama_chat(
-                messages=[{"role": "user", "content": prompt}],
-                options={"temperature": 0.1},
-                response_format="json",
-                purpose="relationship reflection",
-            )
-            content = self.bot.extract_ollama_message_content(response)
-        except (RuntimeError, KeyError, TypeError) as exc:
-            self.bot.record_runtime_issue("relationship reflection", "keeping the previous relationship state", exc)
-            return None
-
-        try:
-            reflection = self.bot.parse_model_json_content(content)
-        except (json.JSONDecodeError, TypeError) as exc:
-            logger.warning("Relationship reflection returned invalid JSON: %s", exc)
-            return None
-
-        if not isinstance(reflection, dict):
-            logger.warning("Relationship reflection returned non-dict payload: %r", reflection)
-            return None
-
-        try:
-            trust_delta = max(-2, min(2, int(reflection.get("trust_delta", 0))))
-            openness_delta = max(-2, min(2, int(reflection.get("openness_delta", 0))))
-        except (TypeError, ValueError) as exc:
-            logger.warning("Relationship reflection returned invalid deltas: %r (%s)", reflection, exc)
-            return None
-
-        momentum = str(reflection.get("emotional_momentum") or current_state["emotional_momentum"]).strip().lower()
-        if momentum not in {"steady", "warming", "heavy"}:
-            momentum = current_state["emotional_momentum"]
-
-        current_state["trust_level"] = self.bot.clamp_score(current_state["trust_level"] + trust_delta)
-        current_state["openness_level"] = self.bot.clamp_score(current_state["openness_level"] + openness_delta)
-        current_state["emotional_momentum"] = momentum
-        current_state["last_reflection"] = str(reflection.get("reflection") or "").strip()
-        current_state["last_updated"] = date.today().isoformat()
-        self.bot.last_relationship_reflection_turn = turn_count
-        self.bot.mutate_memory_store(relationship_state=current_state)
-        self.record_history_point(
-            trust_level=current_state["trust_level"],
-            openness_level=current_state["openness_level"],
-            source="reflection",
-        )
-        self.bot.update_trait_impact_from_relationship_feedback(trust_delta, openness_delta)
-        return current_state
+    def reflect(self, force: bool = False, turn_context=None) -> dict | None:
+        _ = force
+        _ = turn_context
+        return self.reflect_read_only()
 
     def reflect_relationship_state(self, force: bool = False) -> dict | None:
-        return self.reflect(force=force)
+        _ = force
+        return self.reflect_read_only()
 
-    def apply_feedback(self, feedback_kind: str) -> dict:
+    def apply_feedback(self, feedback_kind: str, turn_context=None) -> dict:
+        _ = turn_context
         state = self.current_state()
-        key = str(feedback_kind or "").strip().lower()
-        if key in {"supportive", "more_supportive", "warm"}:
-            trust_delta, openness_delta = 2, 2
-        elif key in {"distant", "less_supportive", "cold"}:
-            trust_delta, openness_delta = -2, -2
-        else:
-            trust_delta, openness_delta = 0, 0
-
-        state["trust_level"] = self.bot.clamp_score(state.get("trust_level", 50) + trust_delta)
-        state["openness_level"] = self.bot.clamp_score(state.get("openness_level", 50) + openness_delta)
-        state["last_updated"] = date.today().isoformat()
-        self.bot.mutate_memory_store(relationship_state=state)
-        self.record_history_point(
-            trust_level=state["trust_level"],
-            openness_level=state["openness_level"],
-            source=f"feedback:{key or 'unknown'}",
-        )
-        self.bot.update_trait_impact_from_relationship_feedback(trust_delta, openness_delta)
+        key = str(feedback_kind or "").strip().lower() or "unknown"
+        state["last_reflection"] = f"projection-only feedback observed: {key}"
         return state
 
-    def apply_relationship_feedback(self, feedback_kind: str) -> dict:
-        return self.apply_feedback(feedback_kind)
+    def apply_relationship_feedback(self, feedback_kind: str, turn_context=None) -> dict:
+        return self.apply_feedback(feedback_kind, turn_context=turn_context)
 
-    def update_relationship_state(self, user_input: str, current_mood: str) -> dict:
-        return self.update(user_input, current_mood)
+    def update_relationship_state(self, user_input: str, current_mood: str, turn_context=None) -> dict:
+        return self.update(user_input, current_mood, turn_context=turn_context)
 
-    def update(self, user_input: str, current_mood: str) -> dict:
+    def apply_pending_mutations(self, turn_context) -> int:
+        """Drain and clear queued relationship mutations without persisting writes."""
+        state = getattr(turn_context, "state", None)
+        if not isinstance(state, dict):
+            return 0
+
+        pending = list(state.get("_pending_relationship_updates") or [])
+        if not pending:
+            return 0
+
+        state["_pending_relationship_updates"] = []
+        return len(pending)
+
+    def update(self, user_input: str, current_mood: str, turn_context=None) -> dict:
+        _ = user_input
+        _ = current_mood
+        _ = turn_context
         state = self.current_state()
-        lowered = str(user_input or "").lower()
-        tokens = self.bot.tokenize(user_input)
-
-        vulnerability_markers = {
-            "feel", "feeling", "worried", "anxious", "overwhelmed", "sad", "lonely", "hurt",
-            "struggling", "struggle", "afraid", "scared", "drained", "tired",
-        }
-        connection_markers = ["thank you", "thanks", "appreciate", "love you", "needed that", "that helped"]
-
-        openness_delta = 0
-        trust_delta = 0
-
-        if len(tokens) >= 12:
-            openness_delta += 1
-        if vulnerability_markers & tokens:
-            openness_delta += 2
-            trust_delta += 1
-        if current_mood in {"sad", "stressed", "frustrated", "tired"}:
-            openness_delta += 2
-        if current_mood == "positive":
-            trust_delta += 1
-        if any(marker in lowered for marker in connection_markers):
-            trust_delta += 2
-            openness_delta += 1
-
-        inferred_topic = self.bot.infer_memory_category(user_input)
-        if inferred_topic == "general":
-            topic_matches = self.bot.profile_context.matching_topics(user_input)
-            if topic_matches:
-                inferred_topic = topic_matches[0]["name"].replace("_", " ")
-
-        recurring_topics = dict(state.get("recurring_topics", {}))
-        recurring_topics[inferred_topic] = recurring_topics.get(inferred_topic, 0) + 1
-
-        recent_checkins = list(state.get("recent_checkins", []))
-        recent_checkins.append(
-            {
-                "date": date.today().isoformat(),
-                "mood": self.bot.normalize_mood(current_mood),
-                "topic": inferred_topic,
-            }
-        )
-
-        state["trust_level"] = self.bot.clamp_score(state.get("trust_level", 50) + trust_delta)
-        state["openness_level"] = self.bot.clamp_score(state.get("openness_level", 50) + openness_delta)
-        state["recurring_topics"] = recurring_topics
-        state["recent_checkins"] = recent_checkins[-24:]
-        state["emotional_momentum"] = self.emotional_momentum(state["recent_checkins"])
-        hypotheses = self.build_hypothesis_posteriors(state, user_input, current_mood)
-        state["hypotheses"] = hypotheses
-        state["active_hypothesis"] = hypotheses[0]["name"] if hypotheses else "supportive_baseline"
-        state["last_hypothesis_updated"] = date.today().isoformat()
-        state["last_updated"] = date.today().isoformat()
-        self.bot.mutate_memory_store(relationship_state=state)
-        self.record_history_point(
-            trust_level=state["trust_level"],
-            openness_level=state["openness_level"],
-            source="turn",
-        )
         return state
 
 

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dadbot.contracts import AttachmentList, ChunkCallback, DadBotContext, SupportsTurnProcessingRuntime
 

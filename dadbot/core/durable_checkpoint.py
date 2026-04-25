@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import hashlib
 import json
@@ -77,7 +77,7 @@ class DurableCheckpoint:
             if not self._checkpoints:
                 return {
                     "ok": True,
-                    "reason": "no checkpoints saved yet — clean start",
+                    "reason": "no checkpoints saved yet â€” clean start",
                     "checkpoint_count": 0,
                 }
             last = deepcopy(self._checkpoints[-1])

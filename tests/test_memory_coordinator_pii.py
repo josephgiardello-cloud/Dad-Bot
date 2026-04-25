@@ -1,6 +1,9 @@
 """Integration coverage for memory persistence PII scrubbing."""
 from __future__ import annotations
 
+from datetime import date, datetime
+from types import SimpleNamespace
+
 from dadbot.managers.memory_coordination import MemoryCoordinator
 
 
@@ -44,7 +47,15 @@ class DummyBot:
 
 def test_update_memory_store_scrubs_pii_before_saving(monkeypatch):
     bot = DummyBot()
+    bot._graph_commit_active = True
     coordinator = MemoryCoordinator(bot)
+    turn_context = SimpleNamespace(
+        temporal=SimpleNamespace(
+            wall_time=datetime.now().isoformat(timespec="seconds"),
+            wall_date=date.today().isoformat(),
+        ),
+        state={"_active_graph_stage": "save"},
+    )
 
     def fake_extract_session_memories(history):
         return [
@@ -56,7 +67,7 @@ def test_update_memory_store_scrubs_pii_before_saving(monkeypatch):
         ]
 
     monkeypatch.setattr(coordinator, "extract_session_memories", fake_extract_session_memories)
-    coordinator.update_memory_store([])
+    coordinator.update_memory_store([], turn_context=turn_context)
 
     assert bot.saved_catalog is not None
     assert len(bot.saved_catalog) == 1

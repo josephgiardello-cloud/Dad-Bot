@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import logging
@@ -8,14 +8,14 @@ from dadbot.models import OutputModerationDecision
 
 logger = logging.getLogger(__name__)
 
-# ─── Prompt injection patterns ───────────────────────────────────────────────
+# â”€â”€â”€ Prompt injection patterns â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Attackers attempt to override system instructions via user input.  These
 # heuristics catch the most common "jailbreak" surfaces without running an LLM
 # classifier, so they are fast and deterministic.
 _INJECTION_PATTERNS: list[re.Pattern] = [
     re.compile(r"\bignore\s+(?:all\s+)?(?:previous|prior|above|your)\s+instructions?\b", re.I),
     re.compile(r"\bdisregard\s+(?:all\s+)?(?:previous|prior|above|your)\s+instructions?\b", re.I),
-    re.compile(r"\bforget\s+(?:all\s+)?(?:your|you(?:'|’)re)\s+(?:rules?|instructions?|training|persona|dad|guidelines?)\b", re.I),
+    re.compile(r"\bforget\s+(?:all\s+)?(?:your|you(?:'|â€™)re)\s+(?:rules?|instructions?|training|persona|dad|guidelines?)\b", re.I),
     re.compile(r"\bact\s+(?:like|as\s+if)\s+you\s+(?:have\s+no|don.t\s+have\s+any)\s+(?:rules?|restrictions?|instructions?|guidelines?)\b", re.I),
     re.compile(r"\byou\s+are\s+now\s+(?:a\s+)?(?:DAN|evil|unrestricted|unfiltered|jailbroken|different\s+AI)\b", re.I),
     re.compile(r"\bdo\s+anything\s+now\b", re.I),                # "DAN" family
@@ -200,7 +200,7 @@ class SafetySupportManager:
 	def detect_prompt_injection(user_input: str) -> bool:
 		"""Return True if *user_input* looks like a prompt-injection attempt.
 
-		Uses fast compiled regex patterns only – no LLM call needed.
+		Uses fast compiled regex patterns only â€“ no LLM call needed.
 		"""
 		if not user_input:
 			return False

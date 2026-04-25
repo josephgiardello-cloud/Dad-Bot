@@ -8,6 +8,7 @@ import os
 import tempfile
 import time
 import warnings
+import uuid
 from pathlib import Path
 
 import pytest
@@ -207,8 +208,8 @@ class TestSequenceValidator:
 class TestFileLockMutex:
     def test_acquire_and_release(self):
         with tempfile.TemporaryDirectory() as d:
-            lock = FileLockMutex(Path(d) / "test.lock")
-            token = lock.acquire()
+            lock = FileLockMutex(Path(d) / f"lock_{uuid.uuid4().hex}.lock")
+            token = lock.acquire(timeout_seconds=2)
             assert token
             assert lock.is_held
             released = lock.release(token)
@@ -217,16 +218,16 @@ class TestFileLockMutex:
 
     def test_context_manager(self):
         with tempfile.TemporaryDirectory() as d:
-            lock = FileLockMutex(Path(d) / "test.lock")
-            with lock.locked() as token:
+            lock = FileLockMutex(Path(d) / f"lock_{uuid.uuid4().hex}.lock")
+            with lock.locked(timeout_seconds=2) as token:
                 assert token
                 assert lock.is_held
             assert not lock.is_held
 
     def test_wrong_token_cannot_release(self):
         with tempfile.TemporaryDirectory() as d:
-            lock = FileLockMutex(Path(d) / "test.lock")
-            token = lock.acquire()
+            lock = FileLockMutex(Path(d) / f"lock_{uuid.uuid4().hex}.lock")
+            token = lock.acquire(timeout_seconds=2)
             released = lock.release("wrong-token")
             assert not released
             assert lock.is_held
@@ -234,7 +235,7 @@ class TestFileLockMutex:
 
     def test_stale_lock_evicted(self):
         with tempfile.TemporaryDirectory() as d:
-            path = Path(d) / "stale.lock"
+            path = Path(d) / f"stale_{uuid.uuid4().hex}.lock"
             # Write a lock file with a dead PID and old timestamp.
             record = json.dumps({
                 "pid": 99999999,

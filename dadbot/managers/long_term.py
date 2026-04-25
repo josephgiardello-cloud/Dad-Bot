@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import logging
@@ -429,6 +429,7 @@ Return only JSON:
 	def refresh_memory_graph(self, force=False):
 		"""Sync the durable graph store, then refresh the lightweight preview used by UI and diagnostics."""
 		current_graph = self.bot.memory.memory_graph_snapshot()
+		temporal_missing_msg = "temporal fallback removed"
 		if not force:
 			if not getattr(self.bot, "_memory_graph_dirty", False):
 				return current_graph
@@ -452,6 +453,11 @@ Return only JSON:
 				graph = self.bot.memory_manager.preview_memory_graph(snapshot)
 				self.bot.mutate_memory_store(memory_graph=graph)
 			except Exception as exc:
+				exc_message = str(exc or "").strip().lower()
+				if temporal_missing_msg in exc_message:
+					# Background refreshes can run outside a turn context; skip noisy
+					# degradation logging when strict temporal context is unavailable.
+					return current_graph
 				self.bot.record_runtime_issue("memory graph refresh", "keeping the previous graph snapshot", exc)
 				return current_graph
 
@@ -1007,7 +1013,7 @@ Return only JSON:
 			return reply
 		return f"{reply.strip()} {echo}"
 
-	# ── Continuous learning ─────────────────────────────────────────────────
+	# â”€â”€ Continuous learning â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 	def should_run_continuous_learning(self, force: bool = False) -> bool:
 		"""Return True when a learning cycle is due (every 8 turns) or forced."""

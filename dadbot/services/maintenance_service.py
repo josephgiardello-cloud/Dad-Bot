@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import logging
 from typing import Any
@@ -14,7 +14,7 @@ class MaintenanceService:
 
     ``tick()`` is called at the start of every turn by the HealthNode.  It:
 
-    1. Runs periodic durable synthesis (archive, consolidate, evolve persona …)
+    1. Runs periodic durable synthesis (archive, consolidate, evolve persona â€¦)
        when the cadence threshold is met.
     2. Triggers scheduled proactive jobs (due reminders, life-pattern check-ins)
        so the bot can *initiate* contact rather than only ever react.  Proactive

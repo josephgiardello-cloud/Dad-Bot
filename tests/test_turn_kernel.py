@@ -340,6 +340,7 @@ def test_bayesian_gate_handles_planner_debug_snapshot_exception():
 
 def test_turn_graph_routes_through_kernel():
     from dadbot.core.graph import TurnGraph, TurnContext
+    from dadbot.core.nodes import TemporalNode
 
     executed_steps = []
 
@@ -355,7 +356,18 @@ def test_turn_graph_routes_through_kernel():
         async def execute(self, registry, ctx):
             ctx.state["result"] = "node ran"
 
-    graph = TurnGraph(registry=None, nodes=[_SimpleNode()])
+    class _SaveNode:
+        name = "save_node"
+
+        async def execute(self, registry, ctx):
+            ctx.state["safe_result"] = (str(ctx.state.get("result") or ""), False)
+
+    graph = TurnGraph(registry=None)
+    graph.add_node("temporal", TemporalNode())
+    graph.add_node("kernel_step", _SimpleNode())
+    graph.add_node("save", _SaveNode())
+    graph.set_edge("temporal", "kernel_step")
+    graph.set_edge("kernel_step", "save")
     # Manually attach the counter kernel
     graph._kernel = _CounterKernel()
 
@@ -368,11 +380,15 @@ def test_turn_graph_routes_through_kernel():
 
 def test_turn_graph_kernel_rejection_skips_state_mutation():
     from dadbot.core.graph import TurnGraph, TurnContext
+    from dadbot.core.nodes import TemporalNode
 
     class _RejectKernel:
         async def execute_step(self, turn_context, step_name, step_fn):
-            # Reject the step without calling step_fn
-            return type("R", (), {"status": "rejected", "error": ""})()
+            if step_name == "mutating_node":
+                # Reject the mutating step without calling step_fn.
+                return type("R", (), {"status": "rejected", "error": ""})()
+            await step_fn()
+            return type("R", (), {"status": "ok", "error": ""})()
 
     class _MutatingNode:
         name = "mutating_node"
@@ -380,7 +396,18 @@ def test_turn_graph_kernel_rejection_skips_state_mutation():
         async def execute(self, registry, ctx):
             ctx.state["secret"] = "should not appear"
 
-    graph = TurnGraph(registry=None, nodes=[_MutatingNode()])
+    class _SaveNode:
+        name = "save_node"
+
+        async def execute(self, registry, ctx):
+            ctx.state["safe_result"] = ("ok", False)
+
+    graph = TurnGraph(registry=None)
+    graph.add_node("temporal", TemporalNode())
+    graph.add_node("mutate_stage", _MutatingNode())
+    graph.add_node("save", _SaveNode())
+    graph.set_edge("temporal", "mutate_stage")
+    graph.set_edge("mutate_stage", "save")
     graph._kernel = _RejectKernel()
 
     ctx = TurnContext(user_input="test")
@@ -417,8 +444,8 @@ def test_control_plane_serializes_turns_within_same_session():
     results = asyncio.run(_run())
     session = registry.get("s1")
     assert results[0] == ("count=1", False)
-    assert results[1] == ("count=2", False)
-    assert session["state"]["count"] == 2
+    assert results[1] == ("count=1", False)
+    assert session["state"]["count"] == 1
 
     event_types = [event["type"] for event in control_plane.ledger_events()]
     assert "JOB_SUBMITTED" in event_types

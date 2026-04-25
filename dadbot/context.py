@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dadbot.contracts import DadBotContext, SupportsContextRuntime
 
@@ -87,7 +87,7 @@ Keep family relationships, ages, timelines, and education history consistent wit
         for section in sections:
             section_tokens = self.bot.estimate_token_count(section)
             if running_tokens + section_tokens > budget and kept:
-                # Budget exceeded — drop this and all remaining lower-priority sections.
+                # Budget exceeded â€” drop this and all remaining lower-priority sections.
                 break
             kept.append(section)
             running_tokens += section_tokens

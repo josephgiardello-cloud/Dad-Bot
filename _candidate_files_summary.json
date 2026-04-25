@@ -1,0 +1,127 @@
+[
+    {
+        "File":  "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\tests\\test_agent_service_agent_loop.py",
+        "FirstHitLine":  53,
+        "FirstHitText":  "assert turn_context.state[\"tool_execution_envelope\"][\"deterministic\"] is True"
+    },
+    {
+        "File":  "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\tests\\test_bitemporal_graph_edges.py",
+        "FirstHitLine":  1,
+        "FirstHitText":  "\"\"\"Tests for Step 3 — Bi-Temporal Graph Edges."
+    },
+    {
+        "File":  "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\tests\\test_dadbot_regression.py",
+        "FirstHitLine":  161,
+        "FirstHitText":  "recent = self.bot.normalize_confidence(None, source_count=2, contradiction_count=0, updated_at=date.today().isoformat())"
+    },
+    {
+        "File":  "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\tests\\test_determinism_boundary.py",
+        "FirstHitLine":  1,
+        "FirstHitText":  "\"\"\"Tests for DeterminismBoundary enforcement guarantees.\"\"\""
+    },
+    {
+        "File":  "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\tests\\test_durability_and_leases.py",
+        "FirstHitLine":  9,
+        "FirstHitText":  "from dadbot.core.execution_ledger import ExecutionLedger"
+    },
+    {
+        "File":  "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\tests\\test_eval_harness.py",
+        "FirstHitLine":  5,
+        "FirstHitText":  "fixtures so the tests are fast, deterministic, and CI-safe."
+    },
+    {
+        "File":  "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\tests\\test_graph_store_integration.py",
+        "FirstHitLine":  39,
+        "FirstHitText":  "\"contradictions\": [\"Spent impulsively after payday\"],"
+    },
+    {
+        "File":  "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\tests\\test_ledger_enforcement.py",
+        "FirstHitLine":  3,
+        "FirstHitText":  "from dadbot.core.execution_ledger import ExecutionLedger"
+    },
+    {
+        "File":  "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\tests\\test_memory_decay_policy.py",
+        "FirstHitLine":  1,
+        "FirstHitText":  "\"\"\"Tests for MemoryDecayPolicy (Step 2 — deterministic memory decay)."
+    },
+    {
+        "File":  "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\tests\\test_memory_manager.py",
+        "FirstHitLine":  31,
+        "FirstHitText":  "\"contradictions\": [\"\", \"missed the budget once\"],"
+    },
+    {
+        "File":  "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\tests\\test_models.py",
+        "FirstHitLine":  22,
+        "FirstHitText":  "assert dumped[\"contradictions\"] == []"
+    },
+    {
+        "File":  "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\tests\\test_production_hardening_wave3.py",
+        "FirstHitLine":  15,
+        "FirstHitText":  "from dadbot.core.execution_ledger import ("
+    },
+    {
+        "File":  "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\tests\\test_production_hardening_wave4.py",
+        "FirstHitLine":  39,
+        "FirstHitText":  "from dadbot.core.execution_ledger import ExecutionLedger, WriteBoundaryGuard"
+    },
+    {
+        "File":  "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\tests\\test_production_hardening_wave5.py",
+        "FirstHitLine":  7,
+        "FirstHitText":  "4. Control plane     — every turn goes through ledger (no bypass)"
+    },
+    {
+        "File":  "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\tests\\test_recovery_and_idempotency.py",
+        "FirstHitLine":  8,
+        "FirstHitText":  "InMemoryExecutionLedger,"
+    },
+    {
+        "File":  "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\tests\\test_replay_and_causality.py",
+        "FirstHitLine":  3,
+        "FirstHitText":  "from dadbot.core.execution_ledger import ExecutionLedger"
+    },
+    {
+        "File":  "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\tests\\test_runtime_event_core.py",
+        "FirstHitLine":  169,
+        "FirstHitText":  "def test_runtime_event_api_replays_durable_journal_into_projection(tmp_path: Path):"
+    },
+    {
+        "File":  "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\tests\\test_service_api_integration.py",
+        "FirstHitLine":  134,
+        "FirstHitText":  "def test_api_event_stream_websocket_replays_and_streams_tenant_events():"
+    },
+    {
+        "File":  "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\tests\\test_service_client.py",
+        "FirstHitLine":  43,
+        "FirstHitText":  "if path.startswith(\"/sessions/\") and \"/replay?\" in path:"
+    },
+    {
+        "File":  "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\tests\\test_service_split.py",
+        "FirstHitLine":  297,
+        "FirstHitText":  "class DummyLedgerWriter:"
+    },
+    {
+        "File":  "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\tests\\test_system_health_checker.py",
+        "FirstHitLine":  1,
+        "FirstHitText":  "from dadbot.core.execution_ledger import ExecutionLedger"
+    },
+    {
+        "File":  "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\tests\\test_turn_graph_replay.py",
+        "FirstHitLine":  23,
+        "FirstHitText":  "def test_turn_graph_records_deterministic_phase_transitions():"
+    },
+    {
+        "File":  "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\tests\\test_turn_kernel.py",
+        "FirstHitLine":  22,
+        "FirstHitText":  "InMemoryExecutionLedger,"
+    },
+    {
+        "File":  "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\tests\\test_voice_control_plane.py",
+        "FirstHitLine":  83,
+        "FirstHitText":  "def test_voice_controller_emits_ledger_state_and_event_records() -\u003e None:"
+    },
+    {
+        "File":  "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\tools\\phase4_truth_audit.py",
+        "FirstHitLine":  22,
+        "FirstHitText":  "TemporalNode,"
+    }
+]

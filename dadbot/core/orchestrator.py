@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import hashlib
@@ -7,7 +7,7 @@ import logging
 
 from dadbot.contracts import AttachmentList, FinalizedTurnResult
 from dadbot.core.control_plane import ExecutionControlPlane, SessionRegistry
-from dadbot.core.graph import TurnContext, TurnGraph
+from dadbot.core.graph import TurnContext, TurnGraph, TurnTemporalAxis
 from dadbot.core.kernel import TurnKernel, bayesian_policy_gate
 from dadbot.core.interfaces import (
     HealthService,
@@ -17,7 +17,7 @@ from dadbot.core.interfaces import (
     SafetyPolicyService,
     validate_pipeline_services,
 )
-from dadbot.core.nodes import ContextBuilderNode, HealthNode, InferenceNode, SafetyNode, SaveNode
+from dadbot.core.nodes import ContextBuilderNode, HealthNode, InferenceNode, ReflectionNode, SafetyNode, SaveNode, TemporalNode
 from dadbot.core.observability import CorrelationContext, configure_exporter
 from dadbot.registry import ServiceRegistry, boot_registry
 
@@ -69,12 +69,17 @@ class DadBotOrchestrator:
         )
 
     def _build_turn_graph(self) -> TurnGraph:
-        """Wires pipeline stages: (Health || Memory) -> Inference -> Safety -> Save."""
+        """Wires pipeline: TemporalNode → (Health || Memory) → Inference → Safety → Reflection → Save.
+
+        TemporalNode is enforced as a sequential first stage. All subsequent stages
+        (including the parallel preflight group) depend on temporal context being populated.
+        """
         health = self.registry.get("health")
         memory = self.registry.get("memory")
         llm = self.registry.get("llm")
         safety = self.registry.get("safety")
         storage = self.registry.get("storage")
+        reflection = self.registry.get("reflection")
 
         # Validate service contracts; raises in strict mode, warns otherwise.
         validate_pipeline_services({
@@ -86,6 +91,10 @@ class DadBotOrchestrator:
         }, raise_on_failure=self._strict)
 
         graph = TurnGraph(registry=self.registry)
+        # Stage 1: TemporalNode runs ALONE, sequentially, before anything else.
+        # This is the absolute first stage. No fallback to system time is permitted.
+        graph.add_node("temporal", TemporalNode())
+        # Stage 2: HealthNode and ContextBuilderNode run in parallel AFTER temporal is resolved.
         graph.add_node(
             "preflight",
             (
@@ -95,11 +104,14 @@ class DadBotOrchestrator:
         )
         graph.add_node("inference", InferenceNode(llm))
         graph.add_node("safety", SafetyNode(safety))
+        graph.add_node("reflection", ReflectionNode(reflection))
         graph.add_node("save", SaveNode(storage))
 
+        graph.set_edge("temporal", "preflight")
         graph.set_edge("preflight", "inference")
         graph.set_edge("inference", "safety")
-        graph.set_edge("safety", "save")
+        graph.set_edge("safety", "reflection")
+        graph.set_edge("reflection", "save")
 
         runtime_bot = getattr(llm, 'bot', None)
         if runtime_bot is not None:
@@ -112,6 +124,11 @@ class DadBotOrchestrator:
 
     def _build_turn_context(self, user_input: str, attachments: AttachmentList | None = None) -> TurnContext:
         context = TurnContext(user_input=user_input, attachments=attachments)
+        context.metadata.setdefault("temporal", context.temporal_snapshot())
+        previous_health = dict(getattr(self.bot, "_last_turn_health_state", {}) or {}) if self.bot is not None else {}
+        previous_status = str(previous_health.get("status") or "").strip().lower()
+        if previous_status:
+            context.metadata["turn_health_previous_status"] = previous_status
         llm_service = self.registry.get("llm")
         runtime_bot = getattr(llm_service, "bot", None)
         llm_provider = str(getattr(runtime_bot, "LLM_PROVIDER", "ollama") or "ollama")
@@ -138,6 +155,10 @@ class DadBotOrchestrator:
                 "lock_id": f"det-{lock_hash[:16]}",
             },
         )
+        if self._strict:
+            # Deterministic replay envelope: same lock hash -> same temporal axis.
+            context.temporal = TurnTemporalAxis.from_lock_hash(lock_hash)
+            context.metadata["temporal"] = context.temporal_snapshot()
         return context
 
     async def _execute_job(self, session: dict, job) -> FinalizedTurnResult:
@@ -169,9 +190,17 @@ class DadBotOrchestrator:
             },
         )
         with CorrelationContext.bind(correlation_id):
-            result = await self.graph.execute(context)
+            try:
+                result = await self.graph.execute(context)
+            finally:
+                if self.bot is not None:
+                    self.bot._last_turn_health_state = dict(context.state.get("turn_health_state") or {})
+                    self.bot._last_turn_ux_feedback = dict(context.state.get("ux_feedback") or {})
+                    self.bot._last_turn_health_evidence = dict(context.state.get("turn_health_evidence") or {})
         session.setdefault("state", {})["last_result"] = result
         session.setdefault("state", {})["last_trace_id"] = context.trace_id
+        session.setdefault("state", {})["last_turn_health_state"] = dict(context.state.get("turn_health_state") or {})
+        session.setdefault("state", {})["last_turn_ux_feedback"] = dict(context.state.get("ux_feedback") or {})
         return result
 
     async def handle_turn(
@@ -189,9 +218,6 @@ class DadBotOrchestrator:
             attachments=attachments,
             timeout_seconds=timeout_seconds,
         )
-
-    def graph_turns_enabled(self) -> bool:
-        return bool(getattr(self.bot, "_turn_graph_enabled", False))
 
     @staticmethod
     def _run_coro_in_thread(coro):
@@ -222,77 +248,16 @@ class DadBotOrchestrator:
             return self._run_coro_in_thread(coro)
         return asyncio.run(coro)
 
-    def _record_graph_fallback(self, exc: Exception, *, mode: str) -> None:
-        logger.warning(
-            "Graph orchestration degraded to legacy %s pipeline; preserving response continuity: %s",
-            mode,
-            exc,
-        )
-        record_runtime_issue = getattr(self.bot, "record_runtime_issue", None)
-        if callable(record_runtime_issue):
-            record_runtime_issue(
-                "turn_graph",
-                f"turn_service_{mode}_fallback",
-                exc=exc,
-                level=logging.WARNING,
-                metadata={
-                    "degraded_mode": f"legacy_{mode}",
-                    "graph_enabled": True,
-                    "path": "graph_to_legacy",
-                },
-            )
-
-    def _append_signoff(self, text: str) -> str:
-        finalization = getattr(self.bot, "reply_finalization", None)
-        append_signoff = getattr(finalization, "append_signoff", None)
-        if callable(append_signoff):
-            return append_signoff(text)
-        legacy = getattr(self.bot, "finalize_reply", None)
-        if callable(legacy):
-            return legacy(text)
-        return str(text or "")
-
-    def _ollama_retryable_errors(self):
-        handler = getattr(self.bot, "ollama_retryable_errors", None)
-        if callable(handler):
-            return handler()
-        return (ConnectionError, TimeoutError, OSError)
-
     def run(
         self,
         user_input: str,
         attachments: AttachmentList | None = None,
     ) -> FinalizedTurnResult:
-        turn_service = getattr(self.bot, "turn_service")
-        if self.graph_turns_enabled():
-            try:
-                return self._run_graph_turn_sync(user_input, attachments=attachments)
-            except Exception as exc:
-                self._record_graph_fallback(exc, mode="sync")
-        try:
-            return turn_service.process_user_message(user_input, attachments)
-        except self._ollama_retryable_errors() as exc:
-            logger.error("Ollama connection error during turn; returning friendly fallback: %s", exc)
-            friendly = (
-                "I'm having a little trouble thinking right now - my connection seems to be down. "
-                "Give me a moment and try again, buddy."
-            )
-            return self._append_signoff(friendly), False
-        except Exception as exc:
-            logger.error("Unexpected error during turn processing; returning safe fallback: %s", exc)
-            return self._append_signoff(
-                "Something went sideways on my end. I'm okay - just try again in a second."
-            ), False
+        return self._run_graph_turn_sync(user_input, attachments=attachments)
 
     async def run_async(
         self,
         user_input: str,
         attachments: AttachmentList | None = None,
     ) -> FinalizedTurnResult:
-        turn_service = getattr(self.bot, "turn_service")
-        if self.graph_turns_enabled():
-            try:
-                return await self._run_graph_turn_async(user_input, attachments=attachments)
-            except Exception as exc:
-                self._record_graph_fallback(exc, mode="async")
-        return await turn_service.process_user_message_async(user_input, attachments)
+        return await self._run_graph_turn_async(user_input, attachments=attachments)

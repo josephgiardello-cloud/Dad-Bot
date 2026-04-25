@@ -1,4 +1,4 @@
-"""Snapshot + Restore Engine — fast startup via periodic ledger snapshots.
+﻿"""Snapshot + Restore Engine â€” fast startup via periodic ledger snapshots.
 
 Contract:
   - A snapshot records the full reduced state at a given ledger head sequence.

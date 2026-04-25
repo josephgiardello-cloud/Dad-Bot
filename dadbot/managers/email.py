@@ -1,4 +1,4 @@
-"""Email drafting and optional SMTP delivery."""
+﻿"""Email drafting and optional SMTP delivery."""
 from __future__ import annotations
 
 import os

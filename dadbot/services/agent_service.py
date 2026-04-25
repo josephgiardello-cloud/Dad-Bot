@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import logging
 import math
@@ -14,7 +14,7 @@ class AgentService:
 
     Drives the InferenceNode of the TurnGraph: runs mood detection, direct reply
     checks, agentic tool planning, and LLM generation.  The turn is NOT finalized
-    here — history append, maintenance scheduling, and persistence are the
+    here â€” history append, maintenance scheduling, and persistence are the
     SaveNode / PersistenceService responsibility.
 
     Calling ``bot.process_user_message*`` here would re-enter the graph and cause
@@ -135,13 +135,19 @@ class AgentService:
         attachments = getattr(turn_context, "attachments", None)
         return user_input, attachments, user_input.strip()
 
-    async def _prepare_user_turn(self, bot: Any, stripped: str, attachments: Any) -> tuple[Any, Any, Any, str, Any] | None:
-        turn_service = getattr(bot, "turn_service", None)
-        if turn_service is None:
+    async def _prepare_user_turn(
+        self,
+        bot: Any,
+        stripped: str,
+        attachments: Any,
+        turn_context: Any,
+    ) -> tuple[Any, Any, Any, str, Any] | None:
+        service = bot.turn_service
+        if service is None:
             logger.error("AgentService: bot.turn_service is not wired; cannot run inference")
             return None
         try:
-            return await turn_service.prepare_user_turn_async(stripped, attachments)
+            return await service.prepare_user_turn_async(stripped, attachments, turn_context=turn_context)
         except Exception as exc:
             logger.error("AgentService: prepare_user_turn_async failed: %s", exc)
             return None
@@ -210,10 +216,10 @@ class AgentService:
             reply = boundary.capture("inference.llm_reply", _llm_call)
         except DeterminismViolation as exc:
             logger.error("AgentService: determinism boundary violated: %s", exc)
-            reply = "Something went sideways on my end. Try again in a moment."
+            reply = "I'm having trouble saving my thoughts right now - let me try again in a moment."
         except Exception as exc:
             logger.error("AgentService: LLM inference failed: %s", exc)
-            reply = "Something went sideways on my end. Try again in a moment."
+            reply = "I'm having trouble saving my thoughts right now - let me try again in a moment."
 
         boundary_snapshot = boundary.snapshot()
         turn_context.state["determinism_boundary"] = boundary_snapshot
@@ -228,9 +234,9 @@ class AgentService:
             turn_context.state["already_finalized"] = True
             return ("", False)
 
-        prepared = await self._prepare_user_turn(bot, stripped, attachments)
+        prepared = await self._prepare_user_turn(bot, stripped, attachments, turn_context)
         if prepared is None:
-            return ("Something went sideways on my end. Give me a second.", False)
+            return ("I'm having trouble saving my thoughts right now - let me try again in a moment.", False)
         mood, early_reply, should_end, turn_text, norm_attachments = prepared
 
         self._record_turn_preinference_state(

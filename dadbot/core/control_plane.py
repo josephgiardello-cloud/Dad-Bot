@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import time
@@ -108,7 +108,7 @@ class Scheduler:
         self._session_store = session_store
         self._jobs: dict[str, tuple[ExecutionJob, asyncio.Future]] = {}
         self._pending_job_ids: deque[str] = deque()
-        self._drain_lock = asyncio.Lock()
+        self._drain_lock: asyncio.Lock | None = None
         self._max_inflight_jobs = max(1, int(max_inflight_jobs or 1000))
         self._execution_lease = execution_lease
         self._worker_id: str = str(worker_id or uuid.uuid4().hex)
@@ -140,6 +140,10 @@ class Scheduler:
                 seen.add(job_id)
 
     async def drain_once(self, executor: KernelExecutor) -> bool:
+        # Recreate drain_lock if it was bound to a different event loop.
+        current_loop = asyncio.get_running_loop()
+        if self._drain_lock is None or getattr(self._drain_lock, '_loop', current_loop) is not current_loop:
+            self._drain_lock = asyncio.Lock()
         async with self._drain_lock:
             self._refresh_pending_from_ledger()
             if not self._pending_job_ids:
@@ -184,6 +188,18 @@ class Scheduler:
 
         # InvariantGate: hard-fail if execution pre-conditions are violated.
         self._gate.validate_job(session, job)
+
+        # Recreate lock if it was bound to a different event loop (e.g. after Streamlit reruns
+        # create a new asyncio event loop via asyncio.run() on each request thread).
+        current_loop = asyncio.get_running_loop()
+        existing_lock = session.get("lock")
+        if existing_lock is not None:
+            try:
+                lock_loop = existing_lock._loop  # type: ignore[attr-defined]
+                if lock_loop is not current_loop:
+                    session["lock"] = asyncio.Lock()
+            except AttributeError:
+                session["lock"] = asyncio.Lock()
 
         async with session["lock"]:
             self._writer.append_job_started(job)
@@ -367,16 +383,6 @@ class ExecutionControlPlane:
         metadata_payload["correlation_id"] = correlation_id
         metadata_payload["trace_id"] = trace_id
 
-        self.ledger_writer.append_execution_witness(
-            component="control_plane.submit_turn",
-            session_id=str(session_id or "default"),
-            trace_id=trace_id,
-            correlation_id=correlation_id,
-            payload={
-                "request_id": str(metadata_payload.get("request_id") or ""),
-            },
-        )
-
         request_id = str(
             metadata_payload.get("request_id")
             or metadata_payload.get("idempotency_key")
@@ -414,6 +420,17 @@ class ExecutionControlPlane:
 
         # Mandatory post-admission ledger gate.
         self.ledger_writer.append_job_queued(job)
+
+        # Keep witness chronology causal: submission/queue gates must exist first.
+        self.ledger_writer.append_execution_witness(
+            component="control_plane.submit_turn",
+            session_id=str(session_id or "default"),
+            trace_id=trace_id,
+            correlation_id=correlation_id,
+            payload={
+                "request_id": str(metadata_payload.get("request_id") or ""),
+            },
+        )
 
         deadline = None
         if timeout_seconds is not None:

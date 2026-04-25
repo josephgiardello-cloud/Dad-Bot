@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import email.utils
 import json
@@ -19,10 +19,21 @@ class ToolRegistry:
     def __init__(self, bot):
         self.bot = bot
 
-    def parse_tool_command(self, user_input):
-        stripped = str(user_input or "").strip()
-        lowered = stripped.lower()
+    @staticmethod
+    def _parse_toggle_command(stripped, slash, action):
+        match = re.match(rf"^{re.escape(slash)}(?:\s+(on|off|status))?$", stripped, flags=re.IGNORECASE)
+        if not match:
+            return None
+        mode = str(match.group(1) or "status").strip().lower() or "status"
+        return {"action": action, "args": {"mode": mode}}
 
+    @staticmethod
+    def _parse_list_command(lowered, phrases, action):
+        if any(phrase in lowered for phrase in phrases):
+            return {"action": action, "args": {}}
+        return None
+
+    def _parse_command_structure(self, stripped, lowered):
         slash_commands = {
             "/status": "status_snapshot",
             "/dad": "dad_snapshot",
@@ -31,29 +42,21 @@ class ToolRegistry:
             "/help": "command_help",
         }
         if lowered in slash_commands:
-            return {"action": slash_commands[lowered]}
+            return {"action": slash_commands[lowered], "args": {}}
 
-        quiet_match = re.match(r"^/quiet(?:\s+(on|off|status))?$", stripped, flags=re.IGNORECASE)
-        if quiet_match:
-            mode = str(quiet_match.group(1) or "status").strip().lower() or "status"
-            return {
-                "action": "quiet_mode_toggle",
-                "mode": mode,
-            }
+        quiet = self._parse_toggle_command(stripped, "/quiet", "quiet_mode_toggle")
+        if quiet is not None:
+            return quiet
 
-        voice_match = re.match(r"^/voice(?:\s+(on|off|status))?$", stripped, flags=re.IGNORECASE)
-        if voice_match:
-            mode = str(voice_match.group(1) or "status").strip().lower() or "status"
-            return {
-                "action": "voice_mode_toggle",
-                "mode": mode,
-            }
+        voice = self._parse_toggle_command(stripped, "/voice", "voice_mode_toggle")
+        if voice is not None:
+            return voice
 
         reject_match = re.match(r"^/reject(?:\s+(.*))?$", stripped, flags=re.IGNORECASE)
         if reject_match:
             return {
                 "action": "reject_persona_trait",
-                "query": str(reject_match.group(1) or "").strip(),
+                "args": {"query": str(reject_match.group(1) or "").strip()},
             }
 
         reminder_match = re.match(r"^(?:remind me to|set a reminder to|set reminder to)\s+(.+)$", stripped, flags=re.IGNORECASE)
@@ -61,8 +64,7 @@ class ToolRegistry:
             title, due_text = self.split_reminder_details(reminder_match.group(1).strip())
             return {
                 "action": "set_reminder",
-                "title": title,
-                "due_text": due_text,
+                "args": {"title": title, "due_text": due_text},
             }
 
         calendar_match = re.match(
@@ -74,33 +76,31 @@ class ToolRegistry:
             title, due_text = self.split_reminder_details(calendar_match.group(1).strip())
             return {
                 "action": "create_calendar_event",
-                "title": title,
-                "due_text": due_text,
+                "args": {"title": title, "due_text": due_text},
             }
 
-        if any(
-            phrase in lowered
-            for phrase in [
-                "what reminders do i have",
-                "list my reminders",
-                "show my reminders",
-                "list reminders",
-            ]
-        ):
-            return {"action": "list_reminders"}
+        reminders = self._parse_list_command(
+            lowered,
+            ["what reminders do i have", "list my reminders", "show my reminders", "list reminders"],
+            "list_reminders",
+        )
+        if reminders is not None:
+            return reminders
 
-        if any(
-            phrase in lowered
-            for phrase in [
+        calendars = self._parse_list_command(
+            lowered,
+            [
                 "what's on my calendar",
                 "what is on my calendar",
                 "show my calendar",
                 "check my calendar",
                 "list calendar events",
                 "show calendar events",
-            ]
-        ):
-            return {"action": "list_calendar_events"}
+            ],
+            "list_calendar_events",
+        )
+        if calendars is not None:
+            return calendars
 
         email_match = re.match(
             r"^(?:draft (?:an )?email|write (?:an )?email|email draft)\s+to\s+(.+)$",
@@ -114,8 +114,7 @@ class ToolRegistry:
             subject = str(parts[1] or "") if len(parts) > 1 else ""
             return {
                 "action": "draft_email",
-                "recipient": recipient,
-                "subject": subject,
+                "args": {"recipient": recipient, "subject": subject},
             }
 
         search_match = re.match(
@@ -126,10 +125,46 @@ class ToolRegistry:
         if search_match:
             return {
                 "action": "web_lookup",
-                "query": search_match.group(1).strip(),
+                "args": {"query": search_match.group(1).strip()},
             }
 
         return None
+
+    @staticmethod
+    def _validate_command(structure):
+        if not isinstance(structure, dict):
+            return False
+        action = str(structure.get("action") or "").strip()
+        if not action:
+            return False
+        args = structure.get("args")
+        if args is None:
+            return True
+        return isinstance(args, dict)
+
+    @staticmethod
+    def _resolve_tool(structure):
+        return str(structure.get("action") or "").strip()
+
+    @staticmethod
+    def _extract_arguments(structure):
+        args = structure.get("args")
+        if isinstance(args, dict):
+            return dict(args)
+        return {}
+
+    def parse_tool_command(self, user_input):
+        stripped = str(user_input or "").strip()
+        lowered = stripped.lower()
+        structure = self._parse_command_structure(stripped, lowered)
+        if not self._validate_command(structure):
+            return None
+
+        action = self._resolve_tool(structure)
+        arguments = self._extract_arguments(structure)
+        payload = {"action": action}
+        payload.update(arguments)
+        return payload
 
     def get_available_tools(self):
         return [
@@ -593,11 +628,11 @@ class AgenticHandler:
         )
         return None, None
 
-    def handle_tool_command(self, user_input):
-        command = self.tool_registry.parse_tool_command(user_input)
-        if command is None:
-            return None
+    # ------------------------------------------------------------------
+    # handle_tool_command helpers â€“ one per logical action group
+    # ------------------------------------------------------------------
 
+    def _handle_reminder_action(self, command):
         action = command.get("action")
         if action == "set_reminder":
             reminder = self.bot.add_reminder(command.get("title", ""), command.get("due_text", ""))
@@ -606,10 +641,12 @@ class AgenticHandler:
             if reminder.get("due_text"):
                 return f"I've got it, Tony. I'll remind you to {reminder['title']} {reminder['due_text']}."
             return f"I've got it, Tony. I'll remind you to {reminder['title']}."
-
         if action == "list_reminders":
             return self.format_reminder_list(self.bot.reminder_catalog())
+        return None
 
+    def _handle_calendar_action(self, command):
+        action = command.get("action")
         if action == "create_calendar_event":
             event = self.add_calendar_event(command.get("title", ""), command.get("due_text", ""))
             if event is None:
@@ -617,7 +654,6 @@ class AgenticHandler:
             if event.get("due_text"):
                 return f"Added to your local calendar, Tony: {event['title']} ({event['due_text']})."
             return f"Added to your local calendar, Tony: {event['title']}."
-
         if action == "list_calendar_events":
             events = self.list_calendar_events(limit=6)
             if not events:
@@ -628,29 +664,35 @@ class AgenticHandler:
                 when = str(event.get("due_text") or "")
                 parts.append(f"{title} ({when})" if when else title)
             return "Local calendar events: " + "; ".join(parts) + "."
+        return None
 
-        if action == "draft_email":
-            draft = self.draft_email(
-                command.get("recipient", ""),
-                command.get("subject", ""),
-                command.get("body", ""),
-            )
-            if draft is None:
-                return "I couldn't draft that email yet, buddy."
-            return (
-                f"I drafted that email locally, Tony. Subject: {draft['subject']}. "
-                f"Saved at: {draft['path']}"
-            )
+    def _handle_draft_email(self, command):
+        if command.get("action") != "draft_email":
+            return None
+        draft = self.draft_email(
+            command.get("recipient", ""),
+            command.get("subject", ""),
+            command.get("body", ""),
+        )
+        if draft is None:
+            return "I couldn't draft that email yet, buddy."
+        return (
+            f"I drafted that email locally, Tony. Subject: {draft['subject']}. "
+            f"Saved at: {draft['path']}"
+        )
 
+    def _handle_snapshot_action(self, command):
+        action = command.get("action")
         if action == "status_snapshot":
             return self.bot.format_status_snapshot()
-
         if action == "dad_snapshot":
             return self.bot.format_dad_snapshot()
-
         if action == "proactive_snapshot":
             return self.bot.format_proactive_snapshot()
+        return None
 
+    def _handle_persona_action(self, command):
+        action = command.get("action")
         if action == "force_persona_evolution":
             entry = self.bot.evolve_persona(force=True)
             if entry is None:
@@ -659,16 +701,17 @@ class AgenticHandler:
             if feedback:
                 return f"I locked in a small dad evolution: {entry['trait']}. {feedback}"
             return f"I locked in a small dad evolution: {entry['trait']}."
-
         if action == "reject_persona_trait":
             removed = self.bot.reject_persona_trait(command.get("query", ""))
             if removed is None:
                 return "I couldn't find an evolved trait to roll back right now, buddy."
             return f"Alright, buddy. I rolled back this evolved trait: {removed['trait']}."
-
         if action == "command_help":
             return self.bot.command_help_text()
+        return None
 
+    def _handle_settings_toggle(self, command):
+        action = command.get("action")
         if action == "quiet_mode_toggle":
             mode = str(command.get("mode") or "status").strip().lower() or "status"
             if mode == "on":
@@ -679,7 +722,6 @@ class AgenticHandler:
                 return "Quiet mode is now off, buddy. Dad can resume proactive nudges when appropriate."
             enabled = self.bot.health_quiet_mode_enabled()
             return f"Quiet mode is currently {'on' if enabled else 'off'}, buddy."
-
         if action == "voice_mode_toggle":
             mode = str(command.get("mode") or "status").strip().lower() or "status"
             profile = self.bot.PROFILE if isinstance(self.bot.PROFILE, dict) else {}
@@ -696,13 +738,32 @@ class AgenticHandler:
                 return "Voice mode is now marked off in your profile, buddy."
             enabled = bool(voice_config.get("enabled", False))
             return f"Voice mode is currently {'on' if enabled else 'off'}, buddy."
+        return None
 
-        if action == "web_lookup":
-            result = self.bot.lookup_web(command.get("query", ""))
-            if result is None:
-                return "I tried to look that up for you, buddy, but I couldn't get a clean result right now."
+    def _handle_web_lookup(self, command):
+        if command.get("action") != "web_lookup":
+            return None
+        result = self.bot.lookup_web(command.get("query", ""))
+        if result is None:
+            return "I tried to look that up for you, buddy, but I couldn't get a clean result right now."
+        source = f" Source: {result['source_label']}." if result.get("source_label") else ""
+        return f"I looked that up for you, Tony. {result['heading']}: {result['summary']}{source}"
 
-            source = f" Source: {result['source_label']}." if result.get("source_label") else ""
-            return f"I looked that up for you, Tony. {result['heading']}: {result['summary']}{source}"
+    def handle_tool_command(self, user_input):
+        command = self.tool_registry.parse_tool_command(user_input)
+        if command is None:
+            return None
 
+        for handler in (
+            self._handle_reminder_action,
+            self._handle_calendar_action,
+            self._handle_draft_email,
+            self._handle_snapshot_action,
+            self._handle_persona_action,
+            self._handle_settings_toggle,
+            self._handle_web_lookup,
+        ):
+            result = handler(command)
+            if result is not None:
+                return result
         return None

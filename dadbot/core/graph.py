@@ -1,17 +1,25 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import time
 import uuid
 from datetime import datetime
 from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, Callable, Protocol
+from enum import Enum, StrEnum
+from typing import Any, Callable, Literal, Protocol
 
 from dadbot.contracts import AttachmentList, ChunkCallback, FinalizedTurnResult
 from dadbot.core.determinism import DeterminismBoundary, DeterminismMode
 from dadbot.core.execution_boundary import ControlPlaneExecutionBoundary
 from dadbot.core.kernel import TurnKernel
+
+
+class FatalTurnError(RuntimeError):
+    """Unrecoverable turn invariant violation.
+
+    Raised when core pipeline guarantees are violated (e.g., mutation queue
+    cannot be fully drained or required stages did not execute).
+    """
 
 
 def _json_safe(value: Any) -> Any:
@@ -33,6 +41,285 @@ class StageTrace:
     stage: str
     duration_ms: float
     error: str | None = None
+
+
+@dataclass
+class MutationIntent:
+    """A single deferred persistent mutation to be committed at SaveNode."""
+
+    type: "MutationKind"
+    payload: dict[str, Any]
+    requires_temporal: bool = True
+    source: str = ""  # caller tag for audit/replay
+    priority: int = 100
+    turn_index: int = 0
+    sequence_id: int = 0
+
+    def __post_init__(self) -> None:
+        try:
+            self.type = MutationKind(self.type)
+        except ValueError as exc:
+            raise RuntimeError(f"MutationIntent.type must be one of {[item.value for item in MutationKind]}") from exc
+        if not isinstance(self.payload, dict):
+            raise RuntimeError("MutationIntent.payload must be a dict")
+        if self.requires_temporal:
+            temporal = self.payload.get("temporal")
+            if not isinstance(temporal, dict):
+                raise RuntimeError("TemporalNode required — execution invalid")
+            wall_time = str(temporal.get("wall_time") or "").strip()
+            wall_date = str(temporal.get("wall_date") or "").strip()
+            if not wall_time or not wall_date:
+                raise RuntimeError("TemporalNode required — execution invalid")
+        try:
+            self.priority = int(self.priority)
+            self.turn_index = int(self.turn_index)
+            self.sequence_id = int(self.sequence_id)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("MutationIntent ordering fields must be integers") from exc
+        op = str(self.payload.get("op") or "").strip().lower()
+        if self.type is MutationKind.MEMORY:
+            if op and op not in {item.value for item in MemoryMutationOp}:
+                raise RuntimeError(f"Unsupported memory mutation op: {op!r}")
+        elif self.type is MutationKind.RELATIONSHIP:
+            if op and op not in {item.value for item in RelationshipMutationOp}:
+                raise RuntimeError(f"Unsupported relationship mutation op: {op!r}")
+
+
+class MutationKind(StrEnum):
+    MEMORY = "memory"
+    RELATIONSHIP = "relationship"
+    GRAPH = "graph"
+
+
+class MemoryMutationOp(StrEnum):
+    SAVE_MOOD_STATE = "save_mood_state"
+
+
+class RelationshipMutationOp(StrEnum):
+    UPDATE = "update"
+
+
+class MutationQueue:
+    """Turn-scoped queue for all pending persistent mutations.
+
+    Rules:
+    - Inside SaveNode (commit_active=True): execute immediately or drain
+    - Outside SaveNode: queue for SaveNode to drain
+    - If queue cannot be drained at SaveNode: hard fail (nothing dropped silently)
+    """
+
+    def __init__(self) -> None:
+        self._queue: list[MutationIntent] = []
+        self._drained: list[MutationIntent] = []
+        self._failed: list[tuple[MutationIntent, str]] = []
+        self._owner_trace_id: str = ""
+        self._sequence_counter: int = 0
+
+    def bind_owner(self, trace_id: str) -> None:
+        owner = str(trace_id or "").strip()
+        if not owner:
+            raise RuntimeError("MutationQueue owner binding requires non-empty trace_id")
+        if self._owner_trace_id and self._owner_trace_id != owner:
+            raise RuntimeError(
+                "MutationQueue cross-turn reuse detected: "
+                f"owner={self._owner_trace_id!r}, new_owner={owner!r}"
+            )
+        self._owner_trace_id = owner
+
+    def _assert_owner(self) -> None:
+        if not self._owner_trace_id:
+            raise RuntimeError("MutationQueue is not bound to a turn trace_id")
+
+    def queue(self, intent: MutationIntent) -> None:
+        """Add a mutation intent to the pending queue."""
+        self._assert_owner()
+        if int(getattr(intent, "sequence_id", 0) or 0) <= 0:
+            self._sequence_counter += 1
+            intent.sequence_id = self._sequence_counter
+        self._queue.append(intent)
+
+    def pending(self) -> list[MutationIntent]:
+        self._assert_owner()
+        return list(self._queue)
+
+    def is_empty(self) -> bool:
+        self._assert_owner()
+        return len(self._queue) == 0
+
+    def size(self) -> int:
+        self._assert_owner()
+        return len(self._queue)
+
+    def drain(
+        self,
+        executor: Callable[[MutationIntent], None],
+        *,
+        hard_fail_on_error: bool = True,
+    ) -> list[tuple[MutationIntent, str]]:
+        """Execute all queued intents through ``executor``.  Returns failures.
+
+        If ``hard_fail_on_error=True`` (default for SaveNode), any failure
+        raises ``RuntimeError`` immediately — nothing is silently dropped.
+        """
+        self._assert_owner()
+        to_drain = sorted(
+            list(self._queue),
+            key=lambda m: (
+                int(getattr(m, "priority", 0) or 0),
+                int(getattr(m, "turn_index", 0) or 0),
+                int(getattr(m, "sequence_id", 0) or 0),
+            ),
+        )
+        self._queue.clear()
+        for index, intent in enumerate(to_drain):
+            try:
+                executor(intent)
+                self._drained.append(intent)
+            except Exception as exc:
+                failure = (intent, str(exc))
+                self._failed.append(failure)
+                # Preserve failed + remaining intents for explicit visibility.
+                self._queue = [intent, *to_drain[index + 1 :], *self._queue]
+                if hard_fail_on_error:
+                    raise FatalTurnError(
+                        f"MutationQueue drain failed at SaveNode — "
+                        f"type={intent.type!r} source={intent.source!r}: {exc}"
+                    ) from exc
+        return list(self._failed)
+
+    def snapshot(self) -> dict[str, Any]:
+        self._assert_owner()
+        return {
+            "owner_trace_id": self._owner_trace_id,
+            "pending": len(self._queue),
+            "drained": len(self._drained),
+            "failed": len(self._failed),
+        }
+
+
+@dataclass
+class TurnFidelity:
+    """Pipeline completeness record: tracks which canonical stages ran."""
+
+    temporal: bool = False
+    inference: bool = False
+    reflection: bool = False
+    save: bool = False
+
+    @property
+    def full_pipeline(self) -> bool:
+        """True when all four canonical stages executed successfully."""
+        return self.temporal and self.inference and self.reflection and self.save
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "temporal": bool(self.temporal),
+            "inference": bool(self.inference),
+            "reflection": bool(self.reflection),
+            "save": bool(self.save),
+            "full_pipeline": bool(self.full_pipeline),
+        }
+
+
+class HealthStatus(StrEnum):
+    OK = "OK"
+    DEGRADED_CAPABILITY = "DEGRADED_CAPABILITY"
+    DEGRADED_PERFORMANCE = "DEGRADED_PERFORMANCE"
+    DEGRADED_STRUCTURE = "DEGRADED_STRUCTURE"
+
+
+@dataclass
+class TurnHealthState:
+    """User-facing per-turn health telemetry derived from canonical stage timing."""
+
+    status: str
+    latency_ms: float
+    memory_ops_time: float
+    graph_sync_time: float
+    inference_time: float
+    fallback_used: bool = False
+    fidelity: TurnFidelity = field(default_factory=TurnFidelity)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": str(self.status or HealthStatus.OK),
+            "latency_ms": round(float(self.latency_ms or 0.0), 3),
+            "memory_ops_time": round(float(self.memory_ops_time or 0.0), 3),
+            "graph_sync_time": round(float(self.graph_sync_time or 0.0), 3),
+            "inference_time": round(float(self.inference_time or 0.0), 3),
+            "fallback_used": bool(self.fallback_used),
+            "fidelity": self.fidelity.to_dict(),
+        }
+
+
+@dataclass(frozen=True)
+class TurnTemporalAxis:
+    """Frozen temporal base shared by every stage in a single turn."""
+
+    turn_started_at: str
+    wall_time: str
+    wall_date: str
+    timezone: str
+    utc_offset_minutes: int
+    epoch_seconds: float
+
+    @classmethod
+    def from_now(cls) -> "TurnTemporalAxis":
+        now = datetime.now().astimezone().replace(microsecond=0)
+        offset = now.utcoffset()
+        offset_minutes = int(offset.total_seconds() // 60) if offset is not None else 0
+        wall_time = now.isoformat(timespec="seconds")
+        return cls(
+            turn_started_at=wall_time,
+            wall_time=wall_time,
+            wall_date=now.date().isoformat(),
+            timezone=str(now.tzname() or "local").strip() or "local",
+            utc_offset_minutes=offset_minutes,
+            epoch_seconds=now.timestamp(),
+        )
+
+    @classmethod
+    def from_lock_hash(cls, lock_hash: str) -> "TurnTemporalAxis":
+        """Derive a deterministic temporal axis from a lock hash.
+
+        This is used by strict replay mode so identical lock payloads produce
+        identical turn timestamps and event ordering metadata.
+        """
+        seed = str(lock_hash or "").strip().lower()
+        if not seed:
+            return cls.from_now()
+        try:
+            seed_int = int(seed[:16], 16)
+        except ValueError:
+            return cls.from_now()
+
+        # Base at 2024-01-01T00:00:00+00:00 and keep deterministic offsets.
+        base_epoch = 1704067200
+        # Keep offset bounded to avoid far-future drift while remaining stable.
+        offset_seconds = seed_int % (365 * 24 * 60 * 60)
+        epoch = float(base_epoch + offset_seconds)
+        dt = datetime.fromtimestamp(epoch).astimezone().replace(microsecond=0)
+        offset = dt.utcoffset()
+        offset_minutes = int(offset.total_seconds() // 60) if offset is not None else 0
+        wall_time = dt.isoformat(timespec="seconds")
+        return cls(
+            turn_started_at=wall_time,
+            wall_time=wall_time,
+            wall_date=dt.date().isoformat(),
+            timezone=str(dt.tzname() or "local").strip() or "local",
+            utc_offset_minutes=offset_minutes,
+            epoch_seconds=epoch,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "turn_started_at": self.turn_started_at,
+            "wall_time": self.wall_time,
+            "wall_date": self.wall_date,
+            "timezone": self.timezone,
+            "utc_offset_minutes": self.utc_offset_minutes,
+            "epoch_seconds": self.epoch_seconds,
+        }
 
 
 class TurnPhase(str, Enum):
@@ -73,6 +360,21 @@ class TurnContext:
     short_circuit_result: FinalizedTurnResult | None = None
     # Determinism enforcement boundary: seals/replays all non-deterministic ops.
     determinism_boundary: DeterminismBoundary = field(default_factory=DeterminismBoundary)
+    # Canonical frozen temporal axis for the entire turn.
+    temporal: TurnTemporalAxis = field(default_factory=TurnTemporalAxis.from_now)
+    # User-facing health snapshot emitted once per turn.
+    turn_health: TurnHealthState | None = None
+    # Turn-scoped mutation queue: all persistent mutations queue here until SaveNode drains them.
+    mutation_queue: MutationQueue = field(default_factory=MutationQueue)
+    # Pipeline fidelity: which canonical stages ran this turn.
+    fidelity: TurnFidelity = field(default_factory=TurnFidelity)
+
+    def __post_init__(self) -> None:
+        # Mutation queues are turn-scoped. Bind queue ownership to this trace.
+        self.mutation_queue.bind_owner(self.trace_id)
+
+    def temporal_snapshot(self) -> dict[str, Any]:
+        return self.temporal.to_dict()
 
     def snapshot(self, result: FinalizedTurnResult) -> dict[str, Any]:
         return {
@@ -85,10 +387,16 @@ class TurnContext:
             "phase": self.phase.value,
             "phase_history": list(self.phase_history),
             "event_sequence": self.event_sequence,
+            "temporal": self.temporal_snapshot(),
             "stage_traces": [
                 {"stage": t.stage, "duration_ms": t.duration_ms, "error": t.error}
                 for t in self.stage_traces
             ],
+            "turn_health_state": _json_safe(
+                self.state.get("turn_health_state")
+                or (self.turn_health.to_dict() if self.turn_health is not None else {})
+            ),
+            "ux_feedback": _json_safe(self.state.get("ux_feedback") or {}),
             "determinism_boundary": self.determinism_boundary.snapshot(),
         }
 
@@ -98,18 +406,24 @@ class TurnContext:
             "stage": str(stage or "unknown"),
             "status": str(status or "unknown"),
             "error": str(error or "").strip(),
-            "updated_at": datetime.now().isoformat(timespec="seconds"),
+            "updated_at": self.temporal.wall_time,
             "phase": self.phase.value,
             "user_input": self.user_input,
             "attachments": _json_safe(list(self.attachments or [])),
             "metadata": _json_safe(self.metadata),
             "state": _json_safe(self.state),
+            "temporal": _json_safe(self.temporal_snapshot()),
             "event_sequence": int(self.event_sequence),
             "phase_history": _json_safe(self.phase_history),
             "stage_traces": [
                 {"stage": trace.stage, "duration_ms": trace.duration_ms, "error": trace.error}
                 for trace in self.stage_traces
             ],
+            "turn_health_state": _json_safe(
+                self.state.get("turn_health_state")
+                or (self.turn_health.to_dict() if self.turn_health is not None else {})
+            ),
+            "ux_feedback": _json_safe(self.state.get("ux_feedback") or {}),
             "short_circuit": bool(self.short_circuit),
             "short_circuit_result": _json_safe(self.short_circuit_result),
             "determinism_boundary": _json_safe(self.determinism_boundary.snapshot()),
@@ -194,7 +508,57 @@ class SaveNode:
     async def execute(self, registry: Any, turn_context: TurnContext) -> None:
         service = registry.get("persistence_service")
         result = turn_context.state.get("safe_result")
+        finalize = getattr(service, "finalize_turn", None)
+        if callable(finalize):
+            try:
+                turn_context.state["safe_result"] = finalize(turn_context, result)
+                return
+            except Exception:
+                pass
         service.save_turn(turn_context, result)
+
+
+class TemporalNode:
+    name = "temporal"
+
+    async def execute(self, _registry: Any, turn_context: TurnContext) -> None:
+        if getattr(turn_context, "temporal", None) is None:
+            raise RuntimeError("TemporalNode missing — deterministic execution violated")
+        temporal_payload = turn_context.temporal_snapshot()
+        turn_context.state.setdefault("temporal", temporal_payload)
+        turn_context.metadata.setdefault("temporal", temporal_payload)
+
+
+class ReflectionNode:
+    name = "reflection"
+
+    async def execute(self, registry: Any, turn_context: TurnContext) -> None:
+        try:
+            service = registry.get("reflection")
+        except Exception:
+            return
+        result = turn_context.state.get("safe_result") or turn_context.state.get("candidate")
+        turn_text = turn_context.state.get("turn_text") or turn_context.user_input
+        current_mood = turn_context.state.get("mood") or "neutral"
+        reply_text = result[0] if isinstance(result, tuple) else str(result or "")
+
+        reflect_after_turn = getattr(service, "reflect_after_turn", None)
+        if callable(reflect_after_turn):
+            try:
+                turn_context.state["reflection"] = reflect_after_turn(turn_text, current_mood, reply_text)
+            except TypeError:
+                turn_context.state["reflection"] = reflect_after_turn(turn_context, result)
+            return
+
+        reflect = getattr(service, "reflect", None)
+        if callable(reflect):
+            try:
+                turn_context.state["reflection"] = reflect(turn_context, result)
+            except TypeError:
+                try:
+                    turn_context.state["reflection"] = reflect(force=True)
+                except TypeError:
+                    turn_context.state["reflection"] = reflect(turn_context)
 
 
 class TurnGraph:
@@ -202,13 +566,185 @@ class TurnGraph:
 
     def __init__(self, registry: Any = None, nodes: list[GraphNode] | None = None):
         self.registry = registry
-        self.nodes = nodes or [HealthNode(), ContextBuilderNode(), InferenceNode(), SafetyNode(), SaveNode()]
+        self.nodes = nodes or [
+            TemporalNode(),
+            HealthNode(),
+            ContextBuilderNode(),
+            InferenceNode(),
+            SafetyNode(),
+            ReflectionNode(),
+            SaveNode(),
+        ]
         self._node_map: dict[str, Any] = {}
         self._edges: dict[str, str] = {}
         self._entry_node: str | None = None
         self._kernel = None  # TurnKernel | None
         self._required_execution_token: str = ""
         self._execution_witness_emitter: Callable[[str, TurnContext], None] | None = None
+        self._degraded_latency_threshold_ms = 2500.0
+        self._degraded_inference_threshold_ms = 2200.0
+        self._degraded_memory_threshold_ms = 1200.0
+        self._degraded_graph_sync_threshold_ms = 1200.0
+
+    @staticmethod
+    def _stage_duration_ms(turn_context: TurnContext, stage_name: str) -> float:
+        total = 0.0
+        for trace in list(turn_context.stage_traces or []):
+            if str(getattr(trace, "stage", "") or "").strip().lower() == str(stage_name or "").strip().lower():
+                total += float(getattr(trace, "duration_ms", 0.0) or 0.0)
+        return round(total, 3)
+
+    def _emit_turn_health_state(self, turn_context: TurnContext, *, total_latency_ms: float, failed: bool) -> None:
+        memory_ops_ms = float(turn_context.state.get("_timing_memory_ops_ms") or 0.0)
+        graph_sync_ms = float(turn_context.state.get("_timing_graph_sync_ms") or 0.0)
+        inference_ms = self._stage_duration_ms(turn_context, "inference")
+
+        degraded_performance = any(
+            [
+                total_latency_ms >= self._degraded_latency_threshold_ms,
+                inference_ms >= self._degraded_inference_threshold_ms,
+                memory_ops_ms >= self._degraded_memory_threshold_ms,
+                graph_sync_ms >= self._degraded_graph_sync_threshold_ms,
+            ]
+        )
+        fallback_used = bool(turn_context.state.get("fallback_used", False))
+        degraded_capability = bool(failed or fallback_used or turn_context.state.get("_capability_degraded", False))
+        degraded_structure = bool(turn_context.state.get("_structural_degradation", False))
+        if degraded_structure:
+            status = HealthStatus.DEGRADED_STRUCTURE
+        elif degraded_capability:
+            status = HealthStatus.DEGRADED_CAPABILITY
+        elif degraded_performance:
+            status = HealthStatus.DEGRADED_PERFORMANCE
+        else:
+            status = HealthStatus.OK
+
+        # Update turn fidelity from completed stage traces.
+        stage_order = [str(trace.stage or "") for trace in list(turn_context.stage_traces or [])]
+        fidelity = turn_context.fidelity
+        fidelity.temporal = "temporal" in stage_order or any(
+            "temporal" in str(s) for s in turn_context.state.get("_graph_executed_stages") or set()
+        ) or bool(turn_context.state.get("temporal"))
+        fidelity.inference = "inference" in stage_order
+        fidelity.reflection = "reflection" in stage_order
+        fidelity.save = "save" in stage_order
+
+        health = TurnHealthState(
+            status=status,
+            latency_ms=total_latency_ms,
+            memory_ops_time=memory_ops_ms,
+            graph_sync_time=graph_sync_ms,
+            inference_time=inference_ms,
+            fallback_used=fallback_used,
+            fidelity=fidelity,
+        )
+        health_payload = health.to_dict()
+        evidence = {
+            "stage_order": stage_order,
+            "save_node_executed": stage_order.count("save") == 1,
+            "temporal_enforced": bool(fidelity.temporal),
+            "pipeline_fidelity": fidelity.to_dict(),
+            "mutation_queue": turn_context.mutation_queue.snapshot(),
+            "trace_id": str(turn_context.trace_id or ""),
+            "health_status_tier": str(status),
+        }
+
+        thinking = any(
+            [
+                inference_ms >= self._degraded_inference_threshold_ms,
+                memory_ops_ms >= self._degraded_memory_threshold_ms,
+                graph_sync_ms >= self._degraded_graph_sync_threshold_ms,
+            ]
+        )
+        checking_memory = bool(
+            memory_ops_ms >= self._degraded_memory_threshold_ms
+            or graph_sync_ms >= self._degraded_graph_sync_threshold_ms
+        )
+        mood_hint = str(turn_context.state.get("mood") or "neutral")
+        ux_feedback = {
+            "dad_is_thinking": bool(thinking),
+            "message": "Dad is thinking..." if thinking else "",
+            "checking_memory": checking_memory,
+            "memory_message": "Checking memory..." if checking_memory else "",
+            "mood_hint": mood_hint,
+            "status": status,
+        }
+
+        turn_context.turn_health = health
+        turn_context.state["turn_health_state"] = health_payload
+        turn_context.metadata["turn_health_state"] = dict(health_payload)
+        turn_context.state["turn_health_evidence"] = evidence
+        turn_context.metadata["turn_health_evidence"] = dict(evidence)
+        turn_context.state["ux_feedback"] = ux_feedback
+        turn_context.metadata["ux_feedback"] = dict(ux_feedback)
+
+    @staticmethod
+    def _mark_structural_degradation(turn_context: TurnContext, reason: str) -> None:
+        state = getattr(turn_context, "state", None)
+        if not isinstance(state, dict):
+            return
+        state["_structural_degradation"] = True
+        health = dict(state.get("turn_health_state") or {})
+        if health:
+            health["status"] = str(HealthStatus.DEGRADED_STRUCTURE)
+            state["turn_health_state"] = health
+        evidence = dict(state.get("turn_health_evidence") or {})
+        evidence["fidelity_degraded_reason"] = str(reason or "structural_invariant_violation")
+        evidence["health_status_tier"] = str(HealthStatus.DEGRADED_STRUCTURE)
+        state["turn_health_evidence"] = evidence
+
+    @staticmethod
+    def _mark_stage_enter(turn_context: TurnContext, stage_name: str) -> None:
+        executed = turn_context.state.setdefault("_graph_executed_stages", set())
+        if not isinstance(executed, set):
+            executed = set(executed) if isinstance(executed, (list, tuple)) else set()
+            turn_context.state["_graph_executed_stages"] = executed
+        if stage_name in executed:
+            raise RuntimeError(
+                f"TurnGraph execution violation: stage {stage_name!r} executed more than once in trace {turn_context.trace_id!r}"
+            )
+
+        last_stage = str(turn_context.state.get("_graph_last_stage") or "").strip()
+        expected_next = {
+            "": {"preflight", "health", "temporal", "context_builder"},
+            "preflight": {"inference"},
+            "health": {"context_builder"},
+            # temporal is now always sequential-first; it may be followed by the parallel
+            # preflight group or by health/context_builder individually.
+            "temporal": {"preflight", "health", "context_builder"},
+            "context_builder": {"inference"},
+            "inference": {"safety"},
+            "safety": {"reflection"},
+            "reflection": {"save"},
+            "save": set(),
+        }
+        # Only enforce canonical pipeline ordering when the incoming stage is a
+        # known canonical stage.  Custom / test nodes with arbitrary names are
+        # allowed to execute without triggering the ordering gate.
+        _canonical = set(expected_next.keys()) | {s for vals in expected_next.values() for s in vals}
+        if stage_name in _canonical:
+            allowed = expected_next.get(last_stage)
+            if allowed is not None and allowed and stage_name not in allowed:
+                raise RuntimeError(
+                    "TurnGraph order violation: "
+                    f"stage {stage_name!r} cannot execute after {last_stage!r}; expected one of {sorted(allowed)!r}"
+                )
+
+        executed.add(stage_name)
+        turn_context.state["_graph_last_stage"] = stage_name
+        turn_context.state["_active_graph_stage"] = stage_name
+
+        # Hard invariant: TemporalNode must run before any mutation-capable stage.
+        # Allow temporal itself, preflight group members, and health/context to proceed.
+        # Any stage that can write state (inference, safety, reflection, save) must
+        # only execute after temporal has populated turn_context.state["temporal"].
+        _requires_temporal = {"inference", "safety", "reflection", "save"}
+        if stage_name in _requires_temporal:
+            if not turn_context.state.get("temporal"):
+                raise RuntimeError(
+                    f"TemporalNode not initialized before {stage_name!r} — "
+                    "deterministic execution violated: temporal must be first in pipeline"
+                )
 
     def add_node(self, name: str, node: Any) -> None:
         if name not in self._node_map:
@@ -290,7 +826,7 @@ class TurnGraph:
         turn_context.event_sequence += 1
         checkpoint = turn_context.checkpoint_snapshot(stage=stage, status=status, error=error)
         if callable(save_checkpoint):
-            save_checkpoint(checkpoint)
+            save_checkpoint(checkpoint, _skip_turn_event=True)
 
         save_event = getattr(service, "save_turn_event", None)
         if callable(save_event):
@@ -299,11 +835,12 @@ class TurnGraph:
                     "event_type": "graph_checkpoint",
                     "trace_id": turn_context.trace_id,
                     "sequence": turn_context.event_sequence,
-                    "occurred_at": datetime.now().isoformat(timespec="seconds"),
+                    "occurred_at": turn_context.temporal.wall_time,
                     "stage": str(stage),
                     "status": str(status),
                     "error": str(error or "").strip(),
                     "phase": turn_context.phase.value,
+                    "active_stage": str(turn_context.state.get("_active_graph_stage") or ""),
                     "determinism_lock": _json_safe(determinism_lock),
                     "checkpoint": checkpoint,
                 }
@@ -338,7 +875,7 @@ class TurnGraph:
                         "event_type": "phase_transition",
                         "trace_id": turn_context.trace_id,
                         "sequence": turn_context.event_sequence,
-                        "occurred_at": datetime.now().isoformat(timespec="seconds"),
+                        "occurred_at": turn_context.temporal.wall_time,
                         "stage": str(stage),
                         "phase": turn_context.phase.value,
                         "transition": dict(transition),
@@ -355,93 +892,124 @@ class TurnGraph:
                 )
 
         self._emit_execution_witness("graph.execute", turn_context)
+        execute_started_at = time.perf_counter()
+
+        def _enforce_fidelity_invariants() -> None:
+            fidelity = getattr(turn_context, "fidelity", None)
+            if fidelity is None:
+                self._mark_structural_degradation(turn_context, "fidelity_state_missing")
+                raise RuntimeError("Structural turn invariant violated: turn fidelity state missing")
+            if not bool(getattr(fidelity, "temporal", False)):
+                self._mark_structural_degradation(turn_context, "temporal_stage_missing")
+                raise RuntimeError("Structural turn invariant violated: TemporalNode missing")
+            if not bool(getattr(fidelity, "save", False)):
+                self._mark_structural_degradation(turn_context, "save_stage_missing")
+                raise RuntimeError("Structural turn invariant violated: SaveNode did not execute")
+            # Strict mode: inference must always execute in the canonical pipeline.
+            if not bool(getattr(fidelity, "inference", False)):
+                self._mark_structural_degradation(turn_context, "inference_stage_missing")
+                raise RuntimeError("Structural turn invariant violated: InferenceNode missing")
 
         telemetry = self.registry.get("telemetry") if self.registry is not None else None
-
-        if self._node_map:
-            node_name = self._entry_node
-            while node_name is not None:
-                node = self._node_map[node_name]
-                started_at = time.perf_counter()
-                error_msg: str | None = None
-                self._sync_stage_phase(turn_context, stage=node_name)
-                self._emit_checkpoint(turn_context, stage=node_name, status="before")
-                if telemetry is not None:
-                    telemetry.trace("turn_graph.node_start", node=node_name, trace_id=turn_context.trace_id)
-                try:
-                    turn_context = await self._execute_node(node, turn_context)
-                except Exception as exc:
-                    error_msg = str(exc)
-                    self._emit_checkpoint(turn_context, stage=node_name, status="error", error=error_msg)
-                    raise
-                finally:
-                    duration_ms = round((time.perf_counter() - started_at) * 1000, 3)
-                    turn_context.stage_traces.append(
-                        StageTrace(stage=node_name, duration_ms=duration_ms, error=error_msg)
-                    )
+        try:
+            if self._node_map:
+                node_name = self._entry_node
+                while node_name is not None:
+                    node = self._node_map[node_name]
+                    started_at = time.perf_counter()
+                    error_msg: str | None = None
+                    self._mark_stage_enter(turn_context, node_name)
+                    self._sync_stage_phase(turn_context, stage=node_name)
+                    self._emit_checkpoint(turn_context, stage=node_name, status="before")
                     if telemetry is not None:
-                        telemetry.trace(
-                            "turn_graph.node_done",
-                            node=node_name,
-                            duration_ms=duration_ms,
-                            trace_id=turn_context.trace_id,
+                        telemetry.trace("turn_graph.node_start", node=node_name, trace_id=turn_context.trace_id)
+                    try:
+                        turn_context = await self._execute_node(node, turn_context)
+                    except Exception as exc:
+                        error_msg = str(exc)
+                        self._emit_checkpoint(turn_context, stage=node_name, status="error", error=error_msg)
+                        raise
+                    finally:
+                        turn_context.state["_active_graph_stage"] = ""
+                        duration_ms = round((time.perf_counter() - started_at) * 1000, 3)
+                        turn_context.stage_traces.append(
+                            StageTrace(stage=node_name, duration_ms=duration_ms, error=error_msg)
                         )
-                if error_msg is None:
-                    self._emit_checkpoint(turn_context, stage=node_name, status="after")
-                if turn_context.short_circuit:
-                    if turn_context.short_circuit_result is not None:
-                        return turn_context.short_circuit_result
-                    break
-                prev_node = node_name
-                node_name = self._edges.get(node_name)
-                # Emit a durable edge-transition checkpoint so a crash mid-edge can be
-                # replayed from the exact transition boundary (LangGraph-style immortality).
-                if node_name is not None and error_msg is None:
-                    self._emit_checkpoint(
-                        turn_context,
-                        stage=f"{prev_node}\u2192{node_name}",
-                        status="edge",
-                    )
-        else:
-            for idx, node in enumerate(self.nodes):
-                node_name = getattr(node, "name", type(node).__name__)
-                started_at = time.perf_counter()
-                error_msg = None
-                self._sync_stage_phase(turn_context, stage=node_name)
-                self._emit_checkpoint(turn_context, stage=node_name, status="before")
-                if telemetry is not None:
-                    telemetry.trace("turn_graph.node_start", node=node_name, trace_id=turn_context.trace_id)
-                try:
-                    turn_context = await self._execute_node(node, turn_context)
-                except Exception as exc:
-                    error_msg = str(exc)
-                    self._emit_checkpoint(turn_context, stage=node_name, status="error", error=error_msg)
-                    raise
-                finally:
-                    duration_ms = round((time.perf_counter() - started_at) * 1000, 3)
-                    turn_context.stage_traces.append(
-                        StageTrace(stage=node_name, duration_ms=duration_ms, error=error_msg)
-                    )
+                        if telemetry is not None:
+                            telemetry.trace(
+                                "turn_graph.node_done",
+                                node=node_name,
+                                duration_ms=duration_ms,
+                                trace_id=turn_context.trace_id,
+                            )
+                    if error_msg is None:
+                        self._emit_checkpoint(turn_context, stage=node_name, status="after")
+                    if turn_context.short_circuit:
+                        if turn_context.short_circuit_result is not None:
+                            total_ms = round((time.perf_counter() - execute_started_at) * 1000, 3)
+                            self._emit_turn_health_state(turn_context, total_latency_ms=total_ms, failed=False)
+                            _enforce_fidelity_invariants()
+                            return turn_context.short_circuit_result
+                        break
+                    prev_node = node_name
+                    node_name = self._edges.get(node_name)
+                    if node_name is not None and error_msg is None:
+                        self._emit_checkpoint(
+                            turn_context,
+                            stage=f"{prev_node}\u2192{node_name}",
+                            status="edge",
+                        )
+            else:
+                for idx, node in enumerate(self.nodes):
+                    node_name = getattr(node, "name", type(node).__name__)
+                    started_at = time.perf_counter()
+                    error_msg = None
+                    self._mark_stage_enter(turn_context, node_name)
+                    self._sync_stage_phase(turn_context, stage=node_name)
+                    self._emit_checkpoint(turn_context, stage=node_name, status="before")
                     if telemetry is not None:
-                        telemetry.trace(
-                            "turn_graph.node_done",
-                            node=node_name,
-                            duration_ms=duration_ms,
-                            trace_id=turn_context.trace_id,
+                        telemetry.trace("turn_graph.node_start", node=node_name, trace_id=turn_context.trace_id)
+                    try:
+                        turn_context = await self._execute_node(node, turn_context)
+                    except Exception as exc:
+                        error_msg = str(exc)
+                        self._emit_checkpoint(turn_context, stage=node_name, status="error", error=error_msg)
+                        raise
+                    finally:
+                        turn_context.state["_active_graph_stage"] = ""
+                        duration_ms = round((time.perf_counter() - started_at) * 1000, 3)
+                        turn_context.stage_traces.append(
+                            StageTrace(stage=node_name, duration_ms=duration_ms, error=error_msg)
                         )
-                if error_msg is None:
-                    self._emit_checkpoint(turn_context, stage=node_name, status="after")
-                if turn_context.short_circuit:
-                    if turn_context.short_circuit_result is not None:
-                        return turn_context.short_circuit_result
-                    break
-                # Keep edge checkpoints in the linear fallback path too.
-                next_index = idx + 1
-                if next_index < len(self.nodes):
-                    next_name = getattr(self.nodes[next_index], "name", type(self.nodes[next_index]).__name__)
-                    self._emit_checkpoint(turn_context, stage=f"{node_name}\u2192{next_name}", status="edge")
+                        if telemetry is not None:
+                            telemetry.trace(
+                                "turn_graph.node_done",
+                                node=node_name,
+                                duration_ms=duration_ms,
+                                trace_id=turn_context.trace_id,
+                            )
+                    if error_msg is None:
+                        self._emit_checkpoint(turn_context, stage=node_name, status="after")
+                    if turn_context.short_circuit:
+                        if turn_context.short_circuit_result is not None:
+                            total_ms = round((time.perf_counter() - execute_started_at) * 1000, 3)
+                            self._emit_turn_health_state(turn_context, total_latency_ms=total_ms, failed=False)
+                            _enforce_fidelity_invariants()
+                            return turn_context.short_circuit_result
+                        break
+                    next_index = idx + 1
+                    if next_index < len(self.nodes):
+                        next_name = getattr(self.nodes[next_index], "name", type(self.nodes[next_index]).__name__)
+                        self._emit_checkpoint(turn_context, stage=f"{node_name}\u2192{next_name}", status="edge")
+        except Exception:
+            total_ms = round((time.perf_counter() - execute_started_at) * 1000, 3)
+            self._emit_turn_health_state(turn_context, total_latency_ms=total_ms, failed=True)
+            raise
 
         result = turn_context.state.get("safe_result")
+        total_ms = round((time.perf_counter() - execute_started_at) * 1000, 3)
+        self._emit_turn_health_state(turn_context, total_latency_ms=total_ms, failed=False)
+        _enforce_fidelity_invariants()
         if isinstance(result, tuple) and len(result) >= 2:
             return result
         return (str(result or ""), False)

@@ -1,9 +1,9 @@
-"""Determinism enforcement boundary for the DadBot turn pipeline.
+﻿"""Determinism enforcement boundary for the DadBot turn pipeline.
 
 Problem
 -------
 LLM responses are inherently non-deterministic. Tracking drift is not enough:
-to guarantee identical outcomes on replay we must *seal* the execution — capturing
+to guarantee identical outcomes on replay we must *seal* the execution â€” capturing
 every non-deterministic value at first execution (RECORD mode) and substituting
 those sealed values on any subsequent replay (REPLAY mode).
 
@@ -81,8 +81,8 @@ class DeterminismBoundary:
     Attributes
     ----------
     mode:           Current execution mode.
-    sealed_values:  Slot → captured output mapping.
-    hashes:         Slot → content hash of captured output.
+    sealed_values:  Slot â†’ captured output mapping.
+    hashes:         Slot â†’ content hash of captured output.
     violations:     Accumulated violation records; non-empty means enforcement failed.
     """
 
@@ -193,7 +193,7 @@ class DeterminismBoundary:
         return result
 
     def inject(self, slot: str, value: Any) -> None:
-        """Manually inject a sealed value — used when replaying from persisted events."""
+        """Manually inject a sealed value â€” used when replaying from persisted events."""
         self._seal_slot(slot, value)
 
     def snapshot(self) -> dict[str, Any]:

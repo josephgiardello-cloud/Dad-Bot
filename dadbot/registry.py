@@ -57,8 +57,8 @@ class ServiceRegistry:
     """Dependency-injection registry for DadBot manager instances.
 
     Maintains two parallel structures:
-    - ``_services``     — name → manager instance (for direct lookup by manager name)
-    - ``_provider_map`` — public attr name → manager instance (for O(1) delegation)
+    - ``_services``     â€” name â†’ manager instance (for direct lookup by manager name)
+    - ``_provider_map`` â€” public attr name â†’ manager instance (for O(1) delegation)
 
     Registration order matters: the *first* manager registered that exposes a
     given attribute name wins, matching the priority order of
@@ -86,7 +86,7 @@ class ServiceRegistry:
     def get_provider(self, name: str) -> Any | None:
         """Return the manager instance that owns attribute *name*, or ``None``.
 
-        O(1) — backed by the pre-built ``_provider_map`` index.  The caller is
+        O(1) â€” backed by the pre-built ``_provider_map`` index.  The caller is
         expected to do ``getattr(provider, name)`` to obtain the actual value.
         """
         return self._provider_map.get(name)
@@ -125,7 +125,7 @@ class ServiceRegistry:
         # is first booted (lazy, on the first graph turn). Passing it here enables
         # PersistenceService.finalize_turn to commit history, maintenance, reflection,
         # and health snapshot atomically at the end of every graph turn.
-        turn_service = getattr(bot, "turn_service", None)
+        turn_service = bot.turn_service
 
         # Semantic index for RAG: surfaces relevant long-term memories in ContextService
         # rather than only the most-recent window, avoiding context bloat as memory grows.
@@ -152,6 +152,8 @@ class ServiceRegistry:
         registry.register("llm", registry.get("agent_service"))
         registry.register("safety", registry.get("safety_service"))
         registry.register("storage", registry.get("persistence_service"))
+        reflection_service = getattr(bot, "internal_state_manager", None) or registry.get("persistence_service")
+        registry.register("reflection", reflection_service)
         registry.register("turn_graph", TurnGraph(registry))
 
         telemetry.info("ServiceRegistry boot complete", services=list(registry._services.keys()))
@@ -297,6 +299,7 @@ class DadBotServiceContainer:
             self._turn_orchestrator = DadBotOrchestrator(
                 config_path=self.bot.config.turn_graph_config_path,
                 bot=self.bot,
+                strict=bool(getattr(self.bot.config, "strict_graph_mode", True)),
             )
             self.bot._turn_orchestrator = self._turn_orchestrator
         return self._turn_orchestrator

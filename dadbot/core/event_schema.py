@@ -1,4 +1,4 @@
-"""Event schema versioning and backward-compatible migration.
+﻿"""Event schema versioning and backward-compatible migration.
 
 Every event written to the ledger receives a ``_schema_version`` stamp.
 When loading events from a WAL, ``EventSchemaMigrator`` upgrades older events
@@ -107,7 +107,7 @@ class EventSchemaMigrator:
                 None,
             )
             if step is None:
-                # No path forward — stop here.
+                # No path forward â€” stop here.
                 break
             event = step.apply(event)
             version = str(event.get("_schema_version") or version)

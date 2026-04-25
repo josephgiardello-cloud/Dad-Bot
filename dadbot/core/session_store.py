@@ -1,4 +1,4 @@
-from threading import RLock
+﻿from threading import RLock
 from copy import deepcopy
 from typing import Any
 

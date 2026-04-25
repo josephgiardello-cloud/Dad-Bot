@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
@@ -234,6 +234,7 @@ class DadBotConfig:
     )
     append_signoff: bool = True
     light_mode: bool = False
+    strict_graph_mode: bool = True
     tenant_id: str = ""
     runtime_config: DadRuntimeConfig = field(default_factory=DadRuntimeConfig)
     service_config: ServiceConfig = field(default_factory=ServiceConfig.from_environment)
@@ -242,6 +243,10 @@ class DadBotConfig:
         self.tenant_id = normalize_tenant_id(self.tenant_id or os.environ.get("DADBOT_TENANT_ID") or "")
         self.append_signoff = bool(self.append_signoff and not env_truthy("DADBOT_NO_SIGNOFF", default=False))
         self.light_mode = bool(self.light_mode or env_truthy("DADBOT_LIGHT_MODE", default=False))
+        self.strict_graph_mode = bool(
+            self.strict_graph_mode
+            and env_truthy("DADBOT_STRICT_GRAPH_MODE", default=True)
+        )
         self.active_model = str(self.model_name).strip() or "llama3.2"
         self.active_embedding_model = None
         self.llm_provider = str(os.environ.get("DADBOT_LLM_PROVIDER", "ollama")).strip().lower() or "ollama"

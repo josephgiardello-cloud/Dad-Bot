@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any
@@ -102,10 +102,10 @@ class RecoveryManager:
         On clean success, saves a fresh checkpoint and marks `boot_complete = True`.
         """
         if self._boot_complete:
-            # Already reconciled — return fast.
+            # Already reconciled â€” return fast.
             return {"ok": True, "reason": "already reconciled", "boot_complete": True}
 
-        # Step 1 — checkpoint integrity first (catches truncation / corruption).
+        # Step 1 â€” checkpoint integrity first (catches truncation / corruption).
         checkpoint_report: dict[str, Any] = {}
         if checkpoint is not None:
             try:
@@ -115,7 +115,7 @@ class RecoveryManager:
                     f"Boot-time checkpoint integrity check failed: {exc}"
                 ) from exc
 
-        # Step 2 — ledger → projection rebuild + pending job extraction.
+        # Step 2 â€” ledger â†’ projection rebuild + pending job extraction.
         try:
             recovery_result = self.assert_recoverable(session_store=session_store)
         except RecoveryError as exc:
@@ -123,7 +123,7 @@ class RecoveryManager:
                 f"Boot-time ledger reconciliation failed: {exc}"
             ) from exc
 
-        # Step 3 — save a fresh post-boot checkpoint.
+        # Step 3 â€” save a fresh post-boot checkpoint.
         if checkpoint is not None:
             checkpoint.save(label="boot_reconcile")
 

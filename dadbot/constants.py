@@ -1,4 +1,4 @@
-"""Shared constants for DadBot — mood tables, persona presets, and other static data."""
+﻿"""Shared constants for DadBot â€” mood tables, persona presets, and other static data."""
 from __future__ import annotations
 
 MOOD_CATEGORIES: dict[str, str] = {

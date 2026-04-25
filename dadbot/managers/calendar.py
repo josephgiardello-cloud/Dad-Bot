@@ -1,4 +1,4 @@
-"""iCal feed fetching and calendar sync background worker."""
+﻿"""iCal feed fetching and calendar sync background worker."""
 from __future__ import annotations
 
 import urllib.request

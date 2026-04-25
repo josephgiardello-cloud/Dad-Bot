@@ -1,4 +1,4 @@
-"""PII scrubber for memory entries before persistence.
+﻿"""PII scrubber for memory entries before persistence.
 
 Detects and redacts personally-identifiable information that should never be
 stored verbatim in Dad Bot's memory store.  This is a defence-in-depth layer,
@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import re
 
-# ─── compiled PII patterns ───────────────────────────────────────────────────
+# â”€â”€â”€ compiled PII patterns â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 _PATTERNS: list[tuple[str, re.Pattern]] = [
     # Visa / MC / Amex / Discover card numbers (with optional separators)
     ("credit_card", re.compile(
@@ -32,7 +32,7 @@ _PATTERNS: list[tuple[str, re.Pattern]] = [
     ("email", re.compile(
         r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b"
     )),
-    # Passwords / API keys heuristic: long hex or base64-like tokens (≥32 chars)
+    # Passwords / API keys heuristic: long hex or base64-like tokens (â‰¥32 chars)
     ("token", re.compile(
         r"\b[A-Za-z0-9+/]{32,}={0,2}\b"
     )),

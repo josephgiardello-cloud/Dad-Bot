@@ -1,4 +1,4 @@
-"""Text-to-speech routing: Piper (neural) with pyttsx3 fallback."""
+﻿"""Text-to-speech routing: Piper (neural) with pyttsx3 fallback."""
 from __future__ import annotations
 
 import shutil

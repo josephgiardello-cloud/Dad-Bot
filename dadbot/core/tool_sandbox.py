@@ -1,18 +1,18 @@
-"""Tool execution sandbox for the DadBot agentic pipeline.
+﻿"""Tool execution sandbox for the DadBot agentic pipeline.
 
 Provides three guarantees that were absent from the previous dispatch map:
 
-1. **Idempotency** — each tool invocation is keyed by a stable content-hash of
+1. **Idempotency** â€” each tool invocation is keyed by a stable content-hash of
    (tool_name, parameters).  If the same key is presented again within the same
    sandbox instance the cached result is returned without re-executing the tool.
    This prevents duplicate reminders / double web-lookups caused by retries.
 
-2. **Failure isolation** — every executor call is wrapped in a structured try/except.
+2. **Failure isolation** â€” every executor call is wrapped in a structured try/except.
    Tool failures never propagate as uncaught exceptions into the turn pipeline;
    they are recorded as ``ToolExecutionRecord`` entries with ``status="failed"``
    and the pipeline falls through gracefully.
 
-3. **Rollback semantics** — each successful execution registers a compensating
+3. **Rollback semantics** â€” each successful execution registers a compensating
    action via ``register_compensating_action``.  Calling ``rollback()`` runs every
    registered compensating action in LIFO order.  Compensating actions are
    best-effort: individual failures are logged but do not abort the rollback.

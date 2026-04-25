@@ -1,6 +1,7 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import time
+import uuid
 from typing import Any
 
 from dadbot.core.execution_ledger import ExecutionLedger, WriteBoundaryGuard
@@ -21,7 +22,7 @@ _COMMITTED_EVENT_TYPES: frozenset[str] = frozenset({
 class LedgerWriter:
     """Single write contract for control-plane and session projection events.
 
-    All writes flow through this class — it is the only authorised path into
+    All writes flow through this class â€” it is the only authorised path into
     the ledger.  Integration points added in this wave:
       - InvariantGate: hard-fails on any invariant violation before writing.
       - Committed writes: critical event types set committed=True so the backend
@@ -113,16 +114,17 @@ class LedgerWriter:
         if not str(session_id or "").strip():
             raise _IVE("Event 'session_id' must be non-empty")
         if not str(kernel_step_id or "").strip():
-            raise _IVE("Event 'kernel_step_id' must be non-empty — kernel lineage required")
+            raise _IVE("Event 'kernel_step_id' must be non-empty â€” kernel lineage required")
 
         payload_data = dict(payload or {})
+        trace_candidate = str(trace_id or payload_data.get("trace_id") or "").strip()
         correlation_id = str(
             payload_data.get("correlation_id")
             or CorrelationContext.current()
-            or CorrelationContext.ensure()
-            or ""
+            or trace_candidate
+            or ("corr" + uuid.uuid4().hex)
         ).strip()
-        normalized_trace_id = str(trace_id or payload_data.get("trace_id") or correlation_id).strip()
+        normalized_trace_id = str(trace_candidate or correlation_id).strip()
         if not normalized_trace_id:
             raise _IVE("Event 'trace_id' must be non-empty")
         if not correlation_id:
@@ -141,7 +143,7 @@ class LedgerWriter:
             "payload": payload_data,
         }
 
-        # InvariantGate: hard-fail on violation — never log-and-continue.
+        # InvariantGate: hard-fail on violation â€” never log-and-continue.
         self._gate.validate_event(envelope)
 
         # Determine committed flag: critical types are always committed.
@@ -172,7 +174,17 @@ class LedgerWriter:
             "latency_ms": elapsed_ms,
         })
 
-        if str(event_type or "") != "EXECUTION_WITNESS":
+        if str(event_type or "") not in {
+            "EXECUTION_WITNESS",
+            "JOB_SUBMITTED",
+            "SESSION_BOUND",
+            "JOB_QUEUED",
+            "JOB_STARTED",
+            "JOB_COMPLETED",
+            "JOB_FAILED",
+            "__UNIT_BEGIN__",
+            "__UNIT_COMMIT__",
+        }:
             self._append_write_boundary_witness(
                 session_id=str(session_id or "default"),
                 trace_id=normalized_trace_id,

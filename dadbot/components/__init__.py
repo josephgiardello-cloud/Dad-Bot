@@ -1,4 +1,4 @@
-"""Reusable UI component exports for Dad Bot Streamlit."""
+﻿"""Reusable UI component exports for Dad Bot Streamlit."""
 
 from dadbot.components.voice import render_voice_controls, render_realtime_voice_call, render_reply_tts
 

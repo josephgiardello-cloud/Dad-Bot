@@ -1,4 +1,4 @@
-"""Fault injection, error classification, and deterministic retry policy.
+﻿"""Fault injection, error classification, and deterministic retry policy.
 
 ErrorClassification:
   Labels every exception as RETRYABLE, TERMINAL, or COMPENSATING so
@@ -36,17 +36,17 @@ class ErrorClassification(Enum):
 
 
 class RetryableError(RuntimeError):
-    """Transient error — safe to retry."""
+    """Transient error â€” safe to retry."""
     classification = ErrorClassification.RETRYABLE
 
 
 class TerminalError(RuntimeError):
-    """Permanent error — do not retry."""
+    """Permanent error â€” do not retry."""
     classification = ErrorClassification.TERMINAL
 
 
 class CompensatingActionRequired(RuntimeError):
-    """Partial success — compensating action required before any retry."""
+    """Partial success â€” compensating action required before any retry."""
     classification = ErrorClassification.COMPENSATING
 
 
@@ -163,14 +163,14 @@ class RetryPolicy:
 class FaultInjector:
     """Named failure-point registry for chaos-engineering and tests.
 
-    Usage (tests — deterministic)::
+    Usage (tests â€” deterministic)::
 
         injector = FaultInjector()
         injector.arm("ledger.append", count=1)
         with pytest.raises(RetryableError):
             injector.check("ledger.append")
 
-    Usage (production — probabilistic)::
+    Usage (production â€” probabilistic)::
 
         injector = FaultInjector()
         injector.register("ledger.append", probability=0.01)

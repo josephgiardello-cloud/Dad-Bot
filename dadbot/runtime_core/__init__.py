@@ -1,4 +1,4 @@
-from .models import Event, EventType, new_event
+﻿from .models import Event, EventType, new_event
 from .bus import EventBus
 from .store import ConversationStore
 from .runtime import AgentRuntime
@@ -11,6 +11,7 @@ from .services import (
     DadBotLLMService,
     DadBotMemoryService,
 )
+from .streamlit_runtime import StreamlitRuntime, UIRuntimeAPI, ThreadView
 
 __all__ = [
     "AgentRuntime",
@@ -31,5 +32,8 @@ __all__ = [
     "EventBus",
     "EventType",
     "RuntimeServices",
+    "StreamlitRuntime",
+    "UIRuntimeAPI",
+    "ThreadView",
     "new_event",
 ]

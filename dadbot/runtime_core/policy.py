@@ -1,4 +1,4 @@
-"""Policy engine for runtime decisions (photo generation, TTS, etc.)."""
+﻿"""Policy engine for runtime decisions (photo generation, TTS, etc.)."""
 
 from __future__ import annotations
 

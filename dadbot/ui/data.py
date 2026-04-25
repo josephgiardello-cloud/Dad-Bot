@@ -1,4 +1,4 @@
-"""Data and memory surface renderers."""
+﻿"""Data and memory surface renderers."""
 
 from __future__ import annotations
 
@@ -58,7 +58,7 @@ def render_memory_garden(bot: "DadBot") -> None:
                 age_label, age_color = "fresh", "#3a8a5a"
             pinned = bool(memory_entry.get("pinned", False))
             with st.container(border=True):
-                pin_badge = " ⭐" if pinned else ""
+                pin_badge = " â­" if pinned else ""
                 st.markdown(
                     f"<span style='opacity:{age_fade:.2f}'>"
                     f"<strong>[{memory_category}]</strong> {memory_summary}{pin_badge}</span>",
@@ -68,10 +68,10 @@ def render_memory_garden(bot: "DadBot") -> None:
                 mc1.caption(f"Importance: {memory_importance:.2f}")
                 mc2.caption(f"Added: {memory_date_raw or 'unknown'}")
                 mc3.markdown(
-                    f"<span style='color:{age_color};font-size:0.82rem;'>● {age_label} ({memory_age_days}d)</span>",
+                    f"<span style='color:{age_color};font-size:0.82rem;'>â— {age_label} ({memory_age_days}d)</span>",
                     unsafe_allow_html=True,
                 )
-                star_label = "★ Unstar" if pinned else "☆ Star"
+                star_label = "â˜… Unstar" if pinned else "â˜† Star"
                 if mc4.button(star_label, key=f"pin-{card_key_suffix}-{hash(memory_summary)}", use_container_width=True):
                     catalog = bot.memory_catalog()
                     norm_summary = bot.normalize_memory_text(memory_summary)
@@ -90,7 +90,7 @@ def render_memory_garden(bot: "DadBot") -> None:
                 chapter_memories = chapter_groups[chapter_category]
                 chapter_label = chapter_category.replace("_", " ").title()
                 starred_count = sum(1 for entry in chapter_memories if entry.get("pinned"))
-                chapter_title = f"📖 {chapter_label}  ({len(chapter_memories)} memories{f', {starred_count} ⭐' if starred_count else ''})"
+                chapter_title = f"ðŸ“– {chapter_label}  ({len(chapter_memories)} memories{f', {starred_count} â­' if starred_count else ''})"
                 with st.expander(chapter_title, expanded=False):
                     for chapter_idx, memory_entry in enumerate(chapter_memories):
                         _render_memory_card(memory_entry, f"chap-{chapter_category}-{chapter_idx}")
@@ -102,17 +102,7 @@ def render_memory_garden(bot: "DadBot") -> None:
             st.caption(f"...and {len(filtered_memories) - display_limit} more. Refine your search to see specific entries.")
 
 
-def render_data_tab(bot: "DadBot") -> None:
-    bundle_payload = export_bundle_payload(bot)
-    memory_payload = json.dumps(bundle_payload["memory_store"], indent=2)
-    profile_payload = json.dumps(bot.PROFILE, indent=2)
-    bundle_json = json.dumps(bundle_payload, indent=2)
-    living = bot.profile_runtime.living_dad_snapshot(limit=3)
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Saved memories", len(bot.memory_catalog()))
-    col2.metric("Archived sessions", len(bot.session_archive()))
-    col3.metric("Reminders", len(bot.reminder_catalog()))
-
+def _render_calendar_section(bot: "DadBot") -> None:
     with st.container(border=True):
         st.subheader("Calendar feed")
         st.caption("Connect a public iCal/ICS feed (Google Calendar, Apple Calendar, Outlook) so Dad sees your upcoming events.")
@@ -121,7 +111,7 @@ def render_data_tab(bot: "DadBot") -> None:
             "Public iCal feed URL (.ics)",
             value=_ical_url,
             placeholder="https://calendar.google.com/calendar/ical/.../@public/basic.ics",
-            help="Paste the public ICS link. In Google Calendar: Settings → your calendar → Integrate calendar → Public address in iCal format.",
+            help="Paste the public ICS link. In Google Calendar: Settings â†’ your calendar â†’ Integrate calendar â†’ Public address in iCal format.",
         )
         _ical_save_col, _ical_fetch_col = st.columns(2)
         if _ical_save_col.button("Save feed URL", use_container_width=True):
@@ -144,11 +134,13 @@ def render_data_tab(bot: "DadBot") -> None:
                     _ev_end = _ev.get("end") or ""
                     _ev_loc = f" @ {_ev['location']}" if _ev.get("location") else ""
                     _ev_desc = f"  \n_{_ev['description']}_" if _ev.get("description") else ""
-                    st.markdown(f"**{_ev_date}{'–'+_ev_end if _ev_end and _ev_end!=_ev_date else ''}** — {_ev['summary']}{_ev_loc}{_ev_desc}")
+                    st.markdown(f"**{_ev_date}{'â€“'+_ev_end if _ev_end and _ev_end!=_ev_date else ''}** â€” {_ev['summary']}{_ev_loc}{_ev_desc}")
         if _ical_url:
             st.caption(f"Configured feed: `{_ical_url[:80]}{'...' if len(_ical_url)>80 else ''}`")
             st.caption("Dad will be aware of your upcoming events when this feed is set.")
 
+
+def _render_heritage_section(bot: "DadBot") -> None:
     with st.container(border=True):
         st.subheader("Build My Heritage")
         st.caption("Upload journals, exports, and photo metadata so Dad can bootstrap long-term memory from your history.")
@@ -210,6 +202,8 @@ def render_data_tab(bot: "DadBot") -> None:
             st.success(f"Imported {added} heritage memories.")
             st.rerun()
 
+
+def _render_download_section(bot: "DadBot", memory_payload: str, profile_payload: str, bundle_json: str) -> None:
     with st.container(border=True):
         st.subheader("Download data")
         st.caption("Pull out the current memory store, profile, or a combined support bundle.")
@@ -224,8 +218,8 @@ def render_data_tab(bot: "DadBot") -> None:
             bot.memory.export_memory_store(export_path)
             st.success(f"Memory store exported to {export_path}.")
 
-    render_memory_garden(bot)
 
+def _render_memory_management_section(bot: "DadBot") -> None:
     with st.container(border=True):
         st.subheader("Memory management")
         memories = bot.memory_catalog()
@@ -250,6 +244,8 @@ def render_data_tab(bot: "DadBot") -> None:
                 st.rerun()
             st.info("No memories met forgetting criteria.")
 
+
+def _render_consolidated_feedback_section(bot: "DadBot") -> None:
     with st.container(border=True):
         st.subheader("Consolidated memory feedback")
         st.caption("Upvote or downvote these to reinforce what Dad should treat as durable truth.")
@@ -275,6 +271,8 @@ def render_data_tab(bot: "DadBot") -> None:
                         st.rerun()
                     st.warning("Could not find that memory to adjust.")
 
+
+def _render_conflict_resolution_section(bot: "DadBot") -> None:
     with st.container(border=True):
         st.subheader("Conflict Resolution")
         st.caption("Memories where Dad holds conflicting beliefs. Pick which one is true to resolve the contradiction.")
@@ -290,8 +288,8 @@ def render_data_tab(bot: "DadBot") -> None:
                 with st.container(border=True):
                     st.markdown(f"**Conflict #{_ci + 1}**")
                     _rc1, _rc2 = st.columns(2)
-                    _rc1.info(f"🅐 {_left}")
-                    _rc2.warning(f"🅑 {_right}")
+                    _rc1.info(f"ðŸ… {_left}")
+                    _rc2.warning(f"ðŸ…‘ {_right}")
                     _resolution = st.radio(
                         "Which is correct?",
                         options=["Keep A", "Keep B", "Both could be true", "Dismiss both"],
@@ -311,6 +309,8 @@ def render_data_tab(bot: "DadBot") -> None:
                         st.success("Resolved. Dad will update his understanding.")
                         st.rerun()
 
+
+def _render_living_snapshot_section(living: dict) -> None:
     with st.container(border=True):
         st.subheader("Living Dad snapshot")
         st.caption("Long-term signals shaping Dad's current replies.")
@@ -346,8 +346,10 @@ def render_data_tab(bot: "DadBot") -> None:
             else:
                 st.caption("None queued.")
 
+
+def _render_journal_section(bot: "DadBot") -> None:
     with st.container(border=True):
-        st.subheader("📓 Dad's Journal")
+        st.subheader("ðŸ““ Dad's Journal")
         st.caption("Weekly reflections from Dad's point of view, written as short journal pages.")
         _journal_key = "dad_journal_entries"
         _journal_entries = list(bot.MEMORY_STORE.get(_journal_key) or []) if isinstance(bot.MEMORY_STORE, dict) else []
@@ -384,7 +386,6 @@ def render_data_tab(bot: "DadBot") -> None:
                     _journal_entries.append(_new_entry)
                     _journal_entries = _journal_entries[-12:]
                     bot.mutate_memory_store(**{_journal_key: _journal_entries}, save=True)
-                    _existing_this_week = _new_entry
                     st.rerun()
                 except Exception as _je:
                     st.warning(f"Could not generate journal entry: {_je}")
@@ -397,6 +398,8 @@ def render_data_tab(bot: "DadBot") -> None:
         else:
             st.caption("No journal entries yet. Start chatting and click 'Write this week's entry' to generate one.")
 
+
+def _render_knowledge_web_section(bot: "DadBot") -> None:
     with st.container(border=True):
         st.subheader("Knowledge web")
         st.caption("Visual map of what Dad has learned from long-term memory and relationship patterns.")
@@ -430,6 +433,8 @@ def render_data_tab(bot: "DadBot") -> None:
             except Exception as exc:
                 st.warning(f"Graph rendering unavailable: {exc}")
 
+
+def _render_memory_search_section(bot: "DadBot") -> None:
     with st.container(border=True):
         st.subheader("Memory search")
         st.caption("Inspect what memories Dad can retrieve for a topic before asking for advice.")
@@ -456,3 +461,27 @@ def render_data_tab(bot: "DadBot") -> None:
                         st.caption(json.dumps(payload, indent=2)[:280])
                 else:
                     st.caption(str(payload))
+
+
+def render_data_tab(bot: "DadBot") -> None:
+    bundle_payload = export_bundle_payload(bot)
+    memory_payload = json.dumps(bundle_payload["memory_store"], indent=2)
+    profile_payload = json.dumps(bot.PROFILE, indent=2)
+    bundle_json = json.dumps(bundle_payload, indent=2)
+    living = bot.profile_runtime.living_dad_snapshot(limit=3)
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Saved memories", len(bot.memory_catalog()))
+    col2.metric("Archived sessions", len(bot.session_archive()))
+    col3.metric("Reminders", len(bot.reminder_catalog()))
+
+    _render_calendar_section(bot)
+    _render_heritage_section(bot)
+    _render_download_section(bot, memory_payload, profile_payload, bundle_json)
+    render_memory_garden(bot)
+    _render_memory_management_section(bot)
+    _render_consolidated_feedback_section(bot)
+    _render_conflict_resolution_section(bot)
+    _render_living_snapshot_section(living)
+    _render_journal_section(bot)
+    _render_knowledge_web_section(bot)
+    _render_memory_search_section(bot)

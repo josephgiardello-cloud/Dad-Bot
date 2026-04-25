@@ -1,0 +1,38 @@
+{
+  "scope": "active runtime path targeted files only",
+  "checks": [
+    "datetime.now",
+    "date.today",
+    "_projection_fallback",
+    "any_.now()"
+  ],
+  "status": "clean",
+  "total_hits": 0,
+  "files": [
+    {
+      "file": "dadbot/memory/graph_manager.py",
+      "hit_count": 0,
+      "hits": []
+    },
+    {
+      "file": "dadbot/managers/memory_coordination.py",
+      "hit_count": 0,
+      "hits": []
+    },
+    {
+      "file": "dadbot/relationship.py",
+      "hit_count": 0,
+      "hits": []
+    },
+    {
+      "file": "dadbot/services/context_service.py",
+      "hit_count": 0,
+      "hits": []
+    },
+    {
+      "file": "dadbot/core/nodes.py",
+      "hit_count": 0,
+      "hits": []
+    }
+  ]
+}

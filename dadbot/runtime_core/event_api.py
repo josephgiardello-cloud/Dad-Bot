@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import logging
 
@@ -114,6 +114,8 @@ class RuntimeEventAPI:
             "should_end": bool(payload.get("should_end", False)),
             "mood": str(payload.get("mood") or "neutral"),
             "pipeline": dict(payload.get("pipeline") or {}),
+            "turn_health": dict(payload.get("turn_health") or {}),
+            "ux_feedback": dict(payload.get("ux_feedback") or {}),
             "photo_requested": bool(photo_requested),
             "tts_requested": bool(tts_requested),
         }

@@ -1,4 +1,4 @@
-"""Transitional core import for the current monolithic DadBot implementation."""
+﻿"""Transitional core import for the current monolithic DadBot implementation."""
 
 from Dad import DadBot
 

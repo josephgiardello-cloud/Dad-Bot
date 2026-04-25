@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import hashlib
 import json
@@ -62,7 +62,7 @@ class ExecutionLedger:
             if token != self._write_token or not self._write_token:
                 raise WriteBoundaryViolationError(
                     "Direct ledger.write() is blocked in strict mode. "
-                    "Use LedgerWriter — the authorised write boundary."
+                    "Use LedgerWriter â€” the authorised write boundary."
                 )
 
         normalized = self._normalize_event(event)
@@ -111,7 +111,7 @@ class ExecutionLedger:
     def add_replay_filter(self, fn) -> None:
         """Register a replay filter applied during load_from_backend().
 
-        Example — discard uncommitted AtomicWriteUnit events::
+        Example â€” discard uncommitted AtomicWriteUnit events::
 
             from dadbot.core.durability import AtomicWriteUnit
             ledger.add_replay_filter(AtomicWriteUnit.filter_committed)
@@ -262,7 +262,7 @@ class ExecutionLedger:
 
 
 # ---------------------------------------------------------------------------
-# Step 7 — Strict write boundary
+# Step 7 â€” Strict write boundary
 # ---------------------------------------------------------------------------
 
 class WriteBoundaryViolationError(RuntimeError):

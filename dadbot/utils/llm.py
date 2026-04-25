@@ -1,4 +1,4 @@
-"""LLM response extraction, JSON parsing, and transcript utilities.
+﻿"""LLM response extraction, JSON parsing, and transcript utilities.
 
 Pure functions with no DadBot dependency::
 

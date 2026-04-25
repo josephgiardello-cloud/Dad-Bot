@@ -2,6 +2,7 @@ import asyncio
 from types import SimpleNamespace
 
 from dadbot.core.graph import TurnContext, TurnGraph
+from dadbot.core.nodes import TemporalNode
 
 
 class _PassNode:
@@ -29,17 +30,21 @@ def test_turn_graph_records_deterministic_phase_transitions():
             return super().get(key, default)
 
     persistence = SimpleNamespace(
-        save_graph_checkpoint=lambda payload: checkpoints.append(payload),
+        save_graph_checkpoint=lambda payload, **_kw: checkpoints.append(payload),
         save_turn_event=lambda payload: events.append(payload),
     )
     graph = TurnGraph(registry=Registry({"persistence_service": persistence}))
+    graph.add_node("temporal", TemporalNode())
     graph.add_node("preflight", _PassNode("health", "ok"))
     graph.add_node("inference", _PassNode("candidate", "draft"))
     graph.add_node("safety", _PassNode("safe_result", ("safe", False)))
+    graph.add_node("reflection", _PassNode("reflection", "ok"))
     graph.add_node("save", _SaveNode())
+    graph.set_edge("temporal", "preflight")
     graph.set_edge("preflight", "inference")
     graph.set_edge("inference", "safety")
-    graph.set_edge("safety", "save")
+    graph.set_edge("safety", "reflection")
+    graph.set_edge("reflection", "save")
 
     context = TurnContext(user_input="hello")
     context.metadata["determinism"] = {
@@ -58,6 +63,22 @@ def test_turn_graph_records_deterministic_phase_transitions():
     checkpoint_events = [evt for evt in events if evt.get("event_type") == "graph_checkpoint"]
     assert checkpoint_events
     assert checkpoint_events[0].get("determinism_lock", {}).get("lock_hash") == "abc123"
+    assert checkpoint_events[0].get("occurred_at") == context.temporal.wall_time
+
+
+def test_temporal_node_exposes_canonical_turn_time_to_context_builder():
+    from dadbot.core.nodes import ContextBuilderNode, TemporalNode
+
+    class MemoryService:
+        def build_context(self, context):
+            return {"source": "ok"}
+
+    context = TurnContext(user_input="hello")
+    asyncio.run(TemporalNode().run(context))
+    asyncio.run(ContextBuilderNode(MemoryService()).run(context))
+
+    assert context.state["temporal"]["turn_started_at"] == context.temporal.turn_started_at
+    assert context.state["rich_context"]["temporal"]["turn_started_at"] == context.temporal.turn_started_at
 
 
 def test_graph_checkpoint_events_are_replayable(bot):

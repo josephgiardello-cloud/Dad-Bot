@@ -1,4 +1,4 @@
-from collections import deque
+﻿from collections import deque
 from threading import RLock
 from typing import Any
 

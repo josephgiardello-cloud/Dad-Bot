@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import logging
 from typing import Any
@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 # Relationship trust thresholds (mirrors RelationshipManager.level_label logic)
 _TONY_STRONG = 75
 _TONY_GROWING = 60
-_TONY_STEADY = 45  # below this → "guarded"
+_TONY_STEADY = 45  # below this â†’ "guarded"
 
 
 def _tony_level(score: int) -> str:

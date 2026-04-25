@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import importlib
@@ -93,7 +93,7 @@ def check_dependencies(args, *, base_script_path: Path, runtime_cls):
 	check_system_resources(args)
 
 
-# ─── Model memory requirements (minimum RAM in GB) ───────────────────────────
+# â”€â”€â”€ Model memory requirements (minimum RAM in GB) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 _MODEL_MIN_RAM_GB: dict[str, float] = {
 	"llama3.2:1b": 1.5,
 	"llama3.2": 2.5,
@@ -178,7 +178,7 @@ def minimal_streamlit_stub_source():
 
 		from Dad import DadBot
 
-		st.set_page_config(page_title="Dad Bot", page_icon="🧔", layout="centered")
+		st.set_page_config(page_title="Dad Bot", page_icon="ðŸ§”", layout="centered")
 
 		bot = DadBot()
 

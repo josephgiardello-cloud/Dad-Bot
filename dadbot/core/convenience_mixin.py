@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dadbot.core.facade_utils import DadBotFacadeUtils
 

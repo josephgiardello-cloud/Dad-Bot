@@ -1,4 +1,4 @@
-"""Memory graph node/edge accumulation helpers.
+﻿"""Memory graph node/edge accumulation helpers.
 
 These are thin re-exports of the canonical implementations in
 :class:`dadbot.managers.long_term.LongTermSignalsManager`.  Import directly

@@ -1,8 +1,8 @@
-"""LedgerBackend abstraction — pluggable durability tier for ExecutionLedger.
+﻿"""LedgerBackend abstraction â€” pluggable durability tier for ExecutionLedger.
 
 Two implementations:
-  InMemoryLedgerBackend  — current behavior; no durability guarantee.
-  FileWALLedgerBackend   — JSONL append-only WAL with optional fsync semantics.
+  InMemoryLedgerBackend  â€” current behavior; no durability guarantee.
+  FileWALLedgerBackend   â€” JSONL append-only WAL with optional fsync semantics.
 
 Usage:
     from dadbot.core.ledger_backend import FileWALLedgerBackend
@@ -40,7 +40,7 @@ class LedgerBackend(ABC):
 
 
 # ---------------------------------------------------------------------------
-# In-memory (existing behaviour — default)
+# In-memory (existing behaviour â€” default)
 # ---------------------------------------------------------------------------
 
 class InMemoryLedgerBackend(LedgerBackend):
@@ -63,7 +63,7 @@ class InMemoryLedgerBackend(LedgerBackend):
 
 
 # ---------------------------------------------------------------------------
-# File WAL backend — append-only JSONL with fsync commit semantics
+# File WAL backend â€” append-only JSONL with fsync commit semantics
 # ---------------------------------------------------------------------------
 
 class FileWALLedgerBackend(LedgerBackend):
@@ -73,7 +73,7 @@ class FileWALLedgerBackend(LedgerBackend):
     - Every call to append() writes one line to the WAL file and flushes the OS
       buffer.
     - When committed=True (or when the event type is in COMMITTED_TYPES), the
-      flush is followed by os.fsync() — the write is not returned until the OS
+      flush is followed by os.fsync() â€” the write is not returned until the OS
       confirms the bytes hit the storage device.
     - load() replays all valid JSONL lines; corrupt lines (invalid JSON) are
       skipped with a warning, not raised, so the system can still boot.
@@ -126,7 +126,7 @@ class FileWALLedgerBackend(LedgerBackend):
                     try:
                         events.append(json.loads(raw))
                     except json.JSONDecodeError as exc:
-                        # Tolerate a partial write at the tail — skip and continue.
+                        # Tolerate a partial write at the tail â€” skip and continue.
                         import warnings
                         warnings.warn(
                             f"FileWALLedgerBackend: skipping corrupt line {line_number} in "
@@ -144,7 +144,7 @@ class FileWALLedgerBackend(LedgerBackend):
 
 
 # ---------------------------------------------------------------------------
-# CRC-checksummed WAL backend (Tier 0 — crash-safe corruption detection)
+# CRC-checksummed WAL backend (Tier 0 â€” crash-safe corruption detection)
 # ---------------------------------------------------------------------------
 
 class CRCFileWALLedgerBackend(LedgerBackend):
@@ -153,7 +153,7 @@ class CRCFileWALLedgerBackend(LedgerBackend):
     Line format: ``<crc32_hex_8chars> <json_payload>\\n``
 
     On load, lines with a bad or missing CRC are silently skipped with a
-    ``RuntimeWarning`` — the system can still boot from a partially-corrupt
+    ``RuntimeWarning`` â€” the system can still boot from a partially-corrupt
     file.  A plain-JSON fallback is attempted for legacy lines that pre-date
     the CRC format.
 
@@ -199,7 +199,7 @@ class CRCFileWALLedgerBackend(LedgerBackend):
                         import warnings
                         warnings.warn(
                             f"CRCFileWALLedgerBackend: corrupt/partial line {line_number} "
-                            f"in {self._path} — skipping",
+                            f"in {self._path} â€” skipping",
                             RuntimeWarning,
                             stacklevel=2,
                         )
@@ -216,7 +216,7 @@ class CRCFileWALLedgerBackend(LedgerBackend):
 
 
 # ---------------------------------------------------------------------------
-# Sequence validator (Tier 1 item 4 — backend-enforced ordering)
+# Sequence validator (Tier 1 item 4 â€” backend-enforced ordering)
 # ---------------------------------------------------------------------------
 
 class SequenceValidator:

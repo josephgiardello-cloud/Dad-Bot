@@ -1,10 +1,14 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from collections import defaultdict
 from datetime import datetime, timedelta
+import logging
 from pathlib import Path
 
 from dadbot.notifications import send_local_notification
+
+
+logger = logging.getLogger(__name__)
 
 
 class MaintenanceScheduler:
@@ -12,6 +16,24 @@ class MaintenanceScheduler:
 
     def __init__(self, bot):
         self.bot = bot
+
+    def _background_memory_store_patch_queue(self) -> list[dict]:
+        queue = getattr(self.bot, "_background_memory_store_patch_queue", None)
+        if not isinstance(queue, list):
+            queue = []
+            self.bot._background_memory_store_patch_queue = queue
+        return queue
+
+    def _queue_or_apply_memory_store_patch(self, **patch) -> str:
+        normalized_patch = dict(patch or {})
+        if bool(getattr(self.bot, "_graph_commit_active", False)):
+            self.bot.mutate_memory_store(**normalized_patch)
+            return "applied"
+        queue = self._background_memory_store_patch_queue()
+        queue.append(normalized_patch)
+        if len(queue) > 128:
+            del queue[:-128]
+        return "queued"
 
     def should_run_periodic_durable_synthesis(self, force=False):
         if force:
@@ -59,7 +81,7 @@ class MaintenanceScheduler:
             self.bot.refresh_memory_graph()
 
         updated_at = self.bot.runtime_timestamp()
-        self.bot.mutate_memory_store(
+        self._queue_or_apply_memory_store_patch(
             last_background_synthesis_at=updated_at,
             last_background_synthesis_turn=self.bot.session_turn_count(),
         )
@@ -117,7 +139,7 @@ class MaintenanceScheduler:
             max_items=12,
         )
         updated_at = now.isoformat(timespec="seconds")
-        self.bot.mutate_memory_store(
+        self._queue_or_apply_memory_store_patch(
             last_memory_compaction_at=updated_at,
             last_memory_compaction_summary=str(summary or "").strip(),
             narrative_memories=narrative_memories,
@@ -154,67 +176,119 @@ class MaintenanceScheduler:
         markers = ("workshop", "wood", "shop", "build", "project", "garage", "bench")
         return any(marker in lowered for marker in markers)
 
-    def _scan_environmental_cues(self, now):
-        cues = []
+    def _extract_environmental_signals(self):
+        signals = {
+            "calendar_events": [],
+            "ical_events": [],
+            "draft_modified_times": [],
+        }
 
-        # 1) Agentic calendar events Tony has created in-app.
         try:
             for event in (self.bot.agentic_handler.list_calendar_events(limit=8) or []):
-                title = str(event.get("title") or "").strip()
-                if not title:
-                    continue
-                due_at = self._parse_iso_datetime(event.get("due_at"))
-                if due_at is not None and due_at < now - timedelta(hours=8):
-                    continue
-                cue_key = self._cue_key("calendar", event.get("event_id") or title)
-                if self._workshop_like(title):
-                    message = f"Workshop radar ping, buddy: {title} is on your calendar. Want me to help break it into a first step?"
-                else:
-                    message = f"Calendar heads-up: {title} is on deck. Need a quick plan so it feels lighter?"
-                cues.append({"cue_key": cue_key, "kind": "calendar", "message": message})
+                if isinstance(event, dict):
+                    signals["calendar_events"].append(dict(event))
         except Exception:
             pass
 
-        # 2) External iCal feed events (if configured).
         try:
             for event in (self.bot.calendar_manager.fetch_upcoming_ical_events(limit=6) or []):
-                summary = str(event.get("SUMMARY") or "").strip()
-                if not summary:
-                    continue
-                start_at = event.get("DTSTART")
-                if isinstance(start_at, datetime) and start_at.tzinfo is None:
-                    start_at = start_at.replace(tzinfo=None)
-                cue_key = self._cue_key("ical", summary)
-                if self._workshop_like(summary):
-                    msg = f"I saw '{summary}' coming up. Want a quick workshop game plan before it sneaks up?"
-                else:
-                    msg = f"I noticed '{summary}' coming up on your calendar. Want a quick prep check-in?"
-                cues.append({"cue_key": cue_key, "kind": "ical", "message": msg})
+                if isinstance(event, dict):
+                    signals["ical_events"].append(dict(event))
         except Exception:
             pass
 
-        # 3) Email draft activity can indicate an unresolved conversation loop.
         try:
             drafts_dir = self.bot.env_path("DADBOT_EMAIL_DRAFT_DIR", self.bot.MEMORY_PATH.with_name("email_drafts"))
             if isinstance(drafts_dir, Path) and drafts_dir.exists():
-                recent_drafts = [
-                    item
-                    for item in drafts_dir.glob("*.eml")
-                    if item.is_file() and datetime.fromtimestamp(item.stat().st_mtime) >= now - timedelta(hours=36)
-                ]
-                if recent_drafts:
-                    cue_key = self._cue_key("email-drafts", len(recent_drafts))
-                    cues.append(
-                        {
-                            "cue_key": cue_key,
-                            "kind": "email",
-                            "message": "I noticed you have a recent email draft hanging out. Want help finishing it in one pass?",
-                        }
-                    )
+                for item in drafts_dir.glob("*.eml"):
+                    if not item.is_file():
+                        continue
+                    signals["draft_modified_times"].append(datetime.fromtimestamp(item.stat().st_mtime))
         except Exception:
             pass
 
+        return signals
+
+    def _derive_temporal_features(self, signals, now):
+        horizon = {
+            "calendar_cutoff": now - timedelta(hours=8),
+            "draft_cutoff": now - timedelta(hours=36),
+        }
+        derived = {
+            "calendar_events": [],
+            "ical_events": list(signals.get("ical_events") or []),
+            "has_recent_drafts": False,
+            "recent_draft_count": 0,
+        }
+
+        for event in list(signals.get("calendar_events") or []):
+            title = str(event.get("title") or "").strip()
+            if not title:
+                continue
+            due_at = self._parse_iso_datetime(event.get("due_at"))
+            if due_at is not None and due_at < horizon["calendar_cutoff"]:
+                continue
+            derived["calendar_events"].append(event)
+
+        recent_count = sum(1 for modified_at in list(signals.get("draft_modified_times") or []) if modified_at >= horizon["draft_cutoff"])
+        derived["recent_draft_count"] = recent_count
+        derived["has_recent_drafts"] = recent_count > 0
+
+        return derived
+
+    def _derive_behavioral_features(self, derived):
+        cues = []
+
+        for event in list(derived.get("calendar_events") or []):
+            title = str(event.get("title") or "").strip()
+            cue_key = self._cue_key("calendar", event.get("event_id") or title)
+            if self._workshop_like(title):
+                message = f"Workshop radar ping, buddy: {title} is on your calendar. Want me to help break it into a first step?"
+            else:
+                message = f"Calendar heads-up: {title} is on deck. Need a quick plan so it feels lighter?"
+            cues.append({"cue_key": cue_key, "kind": "calendar", "message": message})
+
+        for event in list(derived.get("ical_events") or []):
+            summary = str(event.get("SUMMARY") or "").strip()
+            if not summary:
+                continue
+            cue_key = self._cue_key("ical", summary)
+            if self._workshop_like(summary):
+                message = f"I saw '{summary}' coming up. Want a quick workshop game plan before it sneaks up?"
+            else:
+                message = f"I noticed '{summary}' coming up on your calendar. Want a quick prep check-in?"
+            cues.append({"cue_key": cue_key, "kind": "ical", "message": message})
+
+        if bool(derived.get("has_recent_drafts")):
+            cue_key = self._cue_key("email-drafts", derived.get("recent_draft_count") or 0)
+            cues.append(
+                {
+                    "cue_key": cue_key,
+                    "kind": "email",
+                    "message": "I noticed you have a recent email draft hanging out. Want help finishing it in one pass?",
+                }
+            )
+
         return cues
+
+    @staticmethod
+    def _assemble_environmental_context(cues):
+        assembled = []
+        for cue in list(cues or []):
+            if not isinstance(cue, dict):
+                continue
+            cue_key = str(cue.get("cue_key") or "").strip()
+            kind = str(cue.get("kind") or "").strip()
+            message = str(cue.get("message") or "").strip()
+            if cue_key and kind and message:
+                assembled.append({"cue_key": cue_key, "kind": kind, "message": message})
+        return assembled
+
+    def _scan_environmental_cues(self, now):
+        signals = self._extract_environmental_signals()
+        temporal = self._derive_temporal_features(signals, now)
+        behavioral = self._derive_behavioral_features(temporal)
+        return self._assemble_environmental_context(behavioral)
 
     def _queue_shadow_repair_prompt(self, now):
         audits = [dict(item) for item in list(self.bot.MEMORY_STORE.get("advice_audits") or []) if isinstance(item, dict)]
@@ -382,6 +456,93 @@ class MaintenanceScheduler:
             backend=str(settings.get("backend") or "auto"),
         )
 
+    def _process_due_reminders(self, reminders, now, lead_window, repeat_window, *, force=False):
+        """Process due/upcoming reminders. Mutates reminder dicts in-place. Returns (queued, notif_count)."""
+        queued = 0
+        notifications_sent = 0
+        for reminder in reminders:
+            if reminder.get("status") == "done":
+                continue
+            due_at = self._parse_iso_datetime(reminder.get("due_at"))
+            if due_at is None:
+                continue
+            if not force and due_at > now + lead_window:
+                continue
+            last_notified_at = self._parse_iso_datetime(reminder.get("last_notified_at"))
+            if not force and last_notified_at is not None and now - last_notified_at < repeat_window:
+                continue
+            message = self._build_due_reminder_message(reminder, due_at, now)
+            self.bot.queue_proactive_message(message, source="scheduled-reminder")
+            sent, _backend = self.maybe_send_proactive_notification(message, source="scheduled-reminder", now=now)
+            if sent:
+                notifications_sent += 1
+            reminder["last_notified_at"] = now.isoformat(timespec="seconds")
+            reminder["notification_count"] = int(reminder.get("notification_count", 0) or 0) + 1
+            queued += 1
+        return queued, notifications_sent
+
+    def _process_pattern_nudges(self, patterns, now, weekday_name, pattern_hour, pattern_confidence, *, force=False):
+        """Process scheduled pattern nudges. Mutates pattern dicts in-place. Returns (queued, notif_count)."""
+        queued = 0
+        notifications_sent = 0
+        for pattern in patterns:
+            day_hint = str(pattern.get("day_hint") or "").strip().lower()
+            if not day_hint or day_hint != weekday_name:
+                continue
+            try:
+                confidence = int(pattern.get("confidence", 0) or 0)
+            except (TypeError, ValueError):
+                confidence = 0
+            if not force and confidence < pattern_confidence:
+                continue
+            if not force and now.hour < pattern_hour:
+                continue
+            last_proactive_at = self._parse_iso_datetime(pattern.get("last_proactive_at"))
+            if not force and last_proactive_at is not None and last_proactive_at.date() == now.date():
+                continue
+            pattern_message = self.bot.build_pattern_message(pattern)
+            self.bot.queue_proactive_message(pattern_message, source="scheduled-pattern")
+            sent, _backend = self.maybe_send_proactive_notification(
+                pattern_message,
+                source="scheduled-pattern",
+                now=now,
+            )
+            if sent:
+                notifications_sent += 1
+            pattern["last_proactive_at"] = now.isoformat(timespec="seconds")
+            queued += 1
+        return queued, notifications_sent
+
+    def _process_environmental_cues(self, cue_history, now, *, force=False):  # noqa: ARG002
+        """Scan and queue environmental cues. Mutates cue_history in-place. Returns (queued, notif_count)."""
+        recent_cue_keys = self._recent_cue_keys(cue_history, now)
+        queued = 0
+        notifications_sent = 0
+        for cue in self._scan_environmental_cues(now):
+            cue_key = str(cue.get("cue_key") or "").strip()
+            message = str(cue.get("message") or "").strip()
+            if not cue_key or not message or cue_key in recent_cue_keys:
+                continue
+            self.bot.queue_proactive_message(message, source="environmental-cue")
+            sent, _backend = self.maybe_send_proactive_notification(
+                message,
+                source="environmental-cue",
+                now=now,
+            )
+            if sent:
+                notifications_sent += 1
+            cue_history.append(
+                {
+                    "cue_key": cue_key,
+                    "kind": str(cue.get("kind") or "environment").strip().lower() or "environment",
+                    "message": message,
+                    "detected_at": now.isoformat(timespec="seconds"),
+                }
+            )
+            recent_cue_keys.add(cue_key)
+            queued += 1
+        return queued, notifications_sent
+
     def run_scheduled_proactive_jobs(self, force=False, reference_time=None):
         health = self.bot.current_runtime_health_snapshot(
             log_warnings=False,
@@ -420,97 +581,24 @@ class MaintenanceScheduler:
 
         reminders = [dict(item) for item in self.bot.reminder_catalog(include_done=True)]
         patterns = [dict(item) for item in self.bot.life_patterns()]
-        queued_reminders = 0
-        queued_patterns = 0
-        queued_environmental = 0
-        queued_shadow_repairs = 0
-        notifications_sent = 0
-
-        for reminder in reminders:
-            if reminder.get("status") == "done":
-                continue
-            due_at = self._parse_iso_datetime(reminder.get("due_at"))
-            if due_at is None:
-                continue
-            if not force and due_at > now + lead_window:
-                continue
-
-            last_notified_at = self._parse_iso_datetime(reminder.get("last_notified_at"))
-            if not force and last_notified_at is not None and now - last_notified_at < repeat_window:
-                continue
-
-            message = self._build_due_reminder_message(reminder, due_at, now)
-            self.bot.queue_proactive_message(message, source="scheduled-reminder")
-            sent, _backend = self.maybe_send_proactive_notification(message, source="scheduled-reminder", now=now)
-            if sent:
-                notifications_sent += 1
-            reminder["last_notified_at"] = now.isoformat(timespec="seconds")
-            reminder["notification_count"] = int(reminder.get("notification_count", 0) or 0) + 1
-            queued_reminders += 1
-
-        weekday_name = now.strftime("%A").lower()
-        for pattern in patterns:
-            day_hint = str(pattern.get("day_hint") or "").strip().lower()
-            if not day_hint or day_hint != weekday_name:
-                continue
-            try:
-                confidence = int(pattern.get("confidence", 0) or 0)
-            except (TypeError, ValueError):
-                confidence = 0
-            if not force and confidence < pattern_confidence:
-                continue
-            if not force and now.hour < pattern_hour:
-                continue
-
-            last_proactive_at = self._parse_iso_datetime(pattern.get("last_proactive_at"))
-            if not force and last_proactive_at is not None and last_proactive_at.date() == now.date():
-                continue
-
-            pattern_message = self.bot.build_pattern_message(pattern)
-            self.bot.queue_proactive_message(pattern_message, source="scheduled-pattern")
-            sent, _backend = self.maybe_send_proactive_notification(
-                pattern_message,
-                source="scheduled-pattern",
-                now=now,
-            )
-            if sent:
-                notifications_sent += 1
-            pattern["last_proactive_at"] = now.isoformat(timespec="seconds")
-            queued_patterns += 1
-
         cue_history = [
             dict(item)
             for item in list(self.bot.MEMORY_STORE.get("environmental_cues_history") or [])
             if isinstance(item, dict)
         ]
-        recent_cue_keys = self._recent_cue_keys(cue_history, now)
-        for cue in self._scan_environmental_cues(now):
-            cue_key = str(cue.get("cue_key") or "").strip()
-            message = str(cue.get("message") or "").strip()
-            if not cue_key or not message or cue_key in recent_cue_keys:
-                continue
-            self.bot.queue_proactive_message(message, source="environmental-cue")
-            sent, _backend = self.maybe_send_proactive_notification(
-                message,
-                source="environmental-cue",
-                now=now,
-            )
-            if sent:
-                notifications_sent += 1
-            cue_history.append(
-                {
-                    "cue_key": cue_key,
-                    "kind": str(cue.get("kind") or "environment").strip().lower() or "environment",
-                    "message": message,
-                    "detected_at": now.isoformat(timespec="seconds"),
-                }
-            )
-            recent_cue_keys.add(cue_key)
-            queued_environmental += 1
 
+        queued_reminders, notif_reminders = self._process_due_reminders(
+            reminders, now, lead_window, repeat_window, force=force
+        )
+        weekday_name = now.strftime("%A").lower()
+        queued_patterns, notif_patterns = self._process_pattern_nudges(
+            patterns, now, weekday_name, pattern_hour, pattern_confidence, force=force
+        )
+        queued_environmental, notif_env = self._process_environmental_cues(cue_history, now, force=force)
         queued_shadow_repairs, audits = self._queue_shadow_repair_prompt(now)
+        notifications_sent = notif_reminders + notif_patterns + notif_env
 
-        self.bot.mutate_memory_store(
+        self._queue_or_apply_memory_store_patch(
             reminders=reminders,
             life_patterns=patterns,
             advice_audits=audits,
@@ -545,7 +633,7 @@ class MaintenanceScheduler:
                 if sent:
                     notifications_sent += 1
                 queued_daily_checkin = 1
-            self.bot.mutate_memory_store(last_daily_checkin_at=now.isoformat(timespec="seconds"))
+            self._queue_or_apply_memory_store_patch(last_daily_checkin_at=now.isoformat(timespec="seconds"))
 
         result["queued_daily_checkin"] = queued_daily_checkin
         result["queued_total"] = int(result.get("queued_total", 0) or 0) + queued_daily_checkin
@@ -607,7 +695,18 @@ class MaintenanceScheduler:
         summary_before = str(self.bot.session_summary or "")
         summary_after = self.bot.refresh_session_summary()
         scheduled_proactive = self.run_scheduled_proactive_jobs()
-        relationship = self.bot.relationship.reflect()
+        relationship = None
+        try:
+            reflect_read_only = getattr(self.bot.relationship, "reflect_read_only", None)
+            if callable(reflect_read_only):
+                relationship = reflect_read_only()
+            else:
+                relationship = self.bot.relationship.snapshot()
+        except Exception as exc:
+            logger.info(
+                "Post-turn read-only relationship reflection unavailable: %s",
+                exc,
+            )
         wisdom = self.bot.generate_wisdom_insight(user_input)
         synthesis = self.run_periodic_durable_synthesis(user_input)
         compaction = self.run_memory_compaction()
@@ -628,7 +727,7 @@ class MaintenanceScheduler:
             "memory_graph_refreshed": not bool(getattr(self.bot, "_memory_graph_dirty", False)),
         }
 
-        # Continuous learning / RLHF — non-critical, runs in background
+        # Continuous learning / RLHF â€” non-critical, runs in background
         self.bot.schedule_continuous_learning()
 
     def schedule_post_turn_maintenance(self, user_input, current_mood):

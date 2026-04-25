@@ -1,8 +1,10 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime
+from typing import Any
 
 from dadbot.contracts import (
     AttachmentList,
@@ -12,6 +14,7 @@ from dadbot.contracts import (
     PreparedTurnResult,
     SupportsTurnProcessingRuntime,
 )
+from dadbot.core.graph import FatalTurnError, MemoryMutationOp, MutationIntent, MutationKind
 from dadbot.core.tool_sandbox import ToolSandbox
 from dadbot.managers.reply_generation import ReplyGenerationManager
 from dadbot.models import AgenticToolPlan, TurnPipelineSnapshot, TurnPipelineStep
@@ -20,6 +23,10 @@ from pydantic import ValidationError
 # Keep the historic logger name so existing tests and log pipelines remain stable
 # while the implementation moves from managers/ to services/.
 logger = logging.getLogger("dadbot.managers.turn_processing")
+
+
+def _is_event_loop_closed_error(exc: BaseException) -> bool:
+    return isinstance(exc, RuntimeError) and "Event loop is closed" in str(exc)
 
 
 class TurnService:
@@ -116,13 +123,48 @@ class TurnService:
     def should_offer_daily_checkin_for_turn(self) -> bool:
         return self.bot.memory.should_do_daily_checkin() and self.bot.session_turn_count() == 0
 
-    def record_user_turn_state(self, stripped_input: str, current_mood: str) -> None:
+    def record_user_turn_state(self, stripped_input: str, current_mood: str, turn_context: Any | None = None) -> None:
         should_offer_daily_checkin = self.should_offer_daily_checkin_for_turn()
         with self.bot._session_lock:
             self.bot.session_moods.append(current_mood)
             self.bot._pending_daily_checkin_context = should_offer_daily_checkin
-        self.bot.memory.save_mood_state(current_mood)
-        self.bot.relationship.update(stripped_input, current_mood)
+
+        # Relationship and memory-store mutations are SaveNode-owned in strict mode.
+        queued_mood = str(current_mood or "neutral")
+        state = getattr(turn_context, "state", None)
+        if isinstance(state, dict):
+            pending_moods = list(state.get("_pending_mood_updates") or [])
+            pending_moods.append({"mood": queued_mood})
+            state["_pending_mood_updates"] = pending_moods
+
+        if not bool(getattr(self.bot, "_graph_commit_active", False)):
+            if not isinstance(state, dict):
+                # Direct path (no turn_context/TurnGraph): queue for finalize_user_turn.
+                temporal = getattr(turn_context, "temporal", None)
+                if temporal is None:
+                    raise RuntimeError("TemporalNode required — execution invalid")
+                temporal_snapshot_builder = getattr(turn_context, "temporal_snapshot", None)
+                temporal_payload = temporal_snapshot_builder() if callable(temporal_snapshot_builder) else {
+                    "wall_time": str(getattr(temporal, "wall_time", "") or ""),
+                    "wall_date": str(getattr(temporal, "wall_date", "") or ""),
+                }
+                pending = list(getattr(self.bot, "_direct_path_deferred_turn_state", None) or [])
+                pending.append(
+                    MutationIntent(
+                        type=MutationKind.MEMORY,
+                        payload={
+                            "op": MemoryMutationOp.SAVE_MOOD_STATE.value,
+                            "mood": queued_mood,
+                            "temporal": dict(temporal_payload or {}),
+                        },
+                        requires_temporal=True,
+                        source="turn_service.record_user_turn_state.direct_path",
+                    )
+                )
+                self.bot._direct_path_deferred_turn_state = pending
+            return
+
+        return
 
     def direct_reply_for_input(self, stripped_input: str, current_mood: str) -> str | None:
         crisis_reply = self.bot.safety_support.direct_reply_for_input(stripped_input)
@@ -704,7 +746,7 @@ Return ONLY valid JSON (no extra text):
             plan_reason=plan_reason,
         )
 
-    # Tool bias → permitted tools mapping.  The Bayesian layer is the SOLE authority
+    # Tool bias â†’ permitted tools mapping.  The Bayesian layer is the SOLE authority
     # over which tools may be executed; the planner is advisory within that gate.
     _TOOL_BIAS_PERMISSIONS: dict[str, frozenset[str]] = {
         "planner_default": frozenset({"set_reminder", "web_search"}),
@@ -817,6 +859,13 @@ Return ONLY valid JSON (no extra text):
                 plan_reason=gate_reason,
             )
         except Exception as exc:
+            if _is_event_loop_closed_error(exc):
+                self.bot.update_planner_debug(
+                    planner_status="fallback",
+                    planner_reason="Planner skipped: event loop closed",
+                )
+                logger.info("Skipping planner call because event loop is closed")
+                return None, None
             self.bot.update_planner_debug(
                 planner_status="fallback",
                 planner_reason=f"Planner error: {exc}",
@@ -826,6 +875,19 @@ Return ONLY valid JSON (no extra text):
         return None, None
 
     async def plan_agentic_tools_async(self, stripped_input: str, current_mood: str) -> tuple[str | None, str | None]:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        if loop.is_closed():
+            self.bot.update_planner_debug(
+                planner_status="fallback",
+                planner_reason="Planner skipped: event loop closed",
+            )
+            logger.info("Skipping async planner call because event loop is closed")
+            return None, None
+
         settings = self.bot.agentic_tool_settings()
         if not settings["enabled"]:
             self.bot.update_planner_debug(
@@ -899,6 +961,13 @@ Return ONLY valid JSON (no extra text):
                 plan_reason=gate_reason,
             )
         except Exception as exc:
+            if _is_event_loop_closed_error(exc):
+                self.bot.update_planner_debug(
+                    planner_status="fallback",
+                    planner_reason="Planner skipped: event loop closed",
+                )
+                logger.info("Skipping async planner call because event loop is closed")
+                return None, None
             self.bot.update_planner_debug(
                 planner_status="fallback",
                 planner_reason=f"Planner error: {exc}",
@@ -907,7 +976,12 @@ Return ONLY valid JSON (no extra text):
 
         return None, None
 
-    def prepare_user_turn(self, stripped_input: str, attachments: AttachmentList | None = None) -> PreparedTurnResult:
+    def prepare_user_turn(
+        self,
+        stripped_input: str,
+        attachments: AttachmentList | None = None,
+        turn_context: Any | None = None,
+    ) -> PreparedTurnResult:
         self._start_turn_pipeline("sync", stripped_input)
         normalized_attachments = self.bot.normalize_chat_attachments(attachments)
         normalized_attachments = self.bot.enrich_multimodal_attachments(normalized_attachments, user_input=stripped_input)
@@ -932,7 +1006,7 @@ Return ONLY valid JSON (no extra text):
             current_mood = self.bot.mood_manager.detect(turn_text, self.bot.prompt_history()[-mood_history_window:])
         self._update_turn_pipeline(current_mood=current_mood)
         self._append_turn_pipeline_step("detect_mood", detail=f"current_mood={current_mood}")
-        self.record_user_turn_state(turn_text, current_mood)
+        self.record_user_turn_state(turn_text, current_mood, turn_context=turn_context)
         self._append_turn_pipeline_step("record_turn_state", detail="saved mood and relationship state")
         self.bot.begin_planner_debug(stripped_input, current_mood)
         self._append_turn_pipeline_step("begin_planner_debug", detail="initialized planner debug state")
@@ -978,7 +1052,12 @@ Return ONLY valid JSON (no extra text):
         self._update_turn_pipeline(final_path="model_reply", reply_source="model_generation")
         return current_mood, None, False, turn_text, normalized_attachments
 
-    async def prepare_user_turn_async(self, stripped_input: str, attachments: AttachmentList | None = None) -> PreparedTurnResult:
+    async def prepare_user_turn_async(
+        self,
+        stripped_input: str,
+        attachments: AttachmentList | None = None,
+        turn_context: Any | None = None,
+    ) -> PreparedTurnResult:
         self._start_turn_pipeline("async", stripped_input)
         normalized_attachments = self.bot.normalize_chat_attachments(attachments)
         normalized_attachments = self.bot.enrich_multimodal_attachments(normalized_attachments, user_input=stripped_input)
@@ -1003,7 +1082,7 @@ Return ONLY valid JSON (no extra text):
             current_mood = await self.bot.mood_manager.detect_async(turn_text, self.bot.prompt_history()[-mood_history_window:])
         self._update_turn_pipeline(current_mood=current_mood)
         self._append_turn_pipeline_step("detect_mood", detail=f"current_mood={current_mood}")
-        self.record_user_turn_state(turn_text, current_mood)
+        self.record_user_turn_state(turn_text, current_mood, turn_context=turn_context)
         self._append_turn_pipeline_step("record_turn_state", detail="saved mood and relationship state")
         self.bot.begin_planner_debug(stripped_input, current_mood)
         self._append_turn_pipeline_step("begin_planner_debug", detail="initialized planner debug state")
@@ -1057,6 +1136,58 @@ Return ONLY valid JSON (no extra text):
         attachments: AttachmentList | None = None,
     ) -> FinalizedTurnResult:
         self._append_turn_pipeline_step("finalize_turn", detail="persisted conversation turn")
+        # Direct path (no TurnGraph/SaveNode): commit deferred turn-state mutations here.
+        previous_commit_active = bool(getattr(self.bot, "_graph_commit_active", False))
+
+        def _flush_background_memory_store_patch_queue() -> int:
+            queue = getattr(self.bot, "_background_memory_store_patch_queue", None)
+            if not isinstance(queue, list) or not queue:
+                return 0
+            pending_patches = list(queue)
+            queue.clear()
+            applied = 0
+            for patch in pending_patches:
+                if not isinstance(patch, dict):
+                    continue
+                self.bot.mutate_memory_store(**patch)
+                applied += 1
+            return applied
+
+        try:
+            self.bot._graph_commit_active = True
+            # Apply deferred mood/relationship updates queued by record_user_turn_state.
+            pending_updates = list(getattr(self.bot, "_direct_path_deferred_turn_state", None) or [])
+            self.bot._direct_path_deferred_turn_state = []
+            failed_updates: list[tuple[str, str]] = []
+            for item in pending_updates:
+                try:
+                    if isinstance(item, MutationIntent):
+                        op = str(item.payload.get("op") or "").strip().lower()
+                        if item.type is MutationKind.MEMORY and op == MemoryMutationOp.SAVE_MOOD_STATE.value:
+                            mood = str(item.payload.get("mood") or "neutral")
+                            self.bot.memory.save_mood_state(mood)
+                        else:
+                            raise RuntimeError(
+                                f"Unsupported direct-path MutationIntent: type={item.type!r}, op={op!r}"
+                            )
+                    elif isinstance(item, dict):
+                        # Backward compatibility for legacy deferred payloads.
+                        mood = str(item.get("mood") or "neutral")
+                        self.bot.memory.save_mood_state(mood)
+                    else:
+                        raise RuntimeError(f"Unsupported direct-path deferred payload type: {type(item).__name__}")
+                    # relationship.update() requires a temporal node (TurnGraph only); skip here.
+                except Exception as exc:
+                    failed_updates.append((repr(item), str(exc)))
+                    logger.error("Direct-path deferred turn-state update failed: %s", exc)
+            if failed_updates:
+                raise FatalTurnError(
+                    "Direct-path deferred turn-state updates were not fully committed: "
+                    f"failed_count={len(failed_updates)}"
+                )
+            _flush_background_memory_store_patch_queue()
+        finally:
+            self.bot._graph_commit_active = previous_commit_active
         with self.bot._session_lock:
             user_turn = {"role": "user", "content": stripped_input, "mood": current_mood}
             if attachments:

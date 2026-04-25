@@ -1,4 +1,4 @@
-"""Service-level Protocol contracts for the DadBot turn pipeline.
+﻿"""Service-level Protocol contracts for the DadBot turn pipeline.
 
 Each protocol corresponds to one graph node's service dependency.  Decorated
 with ``@runtime_checkable`` so ``isinstance(service, HealthService)`` works at
@@ -47,7 +47,7 @@ class MemoryService(Protocol):
 class InferenceService(Protocol):
     """Drives LLM inference and agentic tool execution.
 
-    ``run_agent`` *must* be a coroutine function — validated explicitly at
+    ``run_agent`` *must* be a coroutine function â€” validated explicitly at
     boot because ``@runtime_checkable`` only checks name presence, not
     async/sync distinction.
     """
@@ -108,7 +108,7 @@ def validate_pipeline_services(
     """Validate a mapping of ``{alias: (instance, Protocol)}`` pairs.
 
     Args:
-        services: mapping of service alias → (instance, Protocol class)
+        services: mapping of service alias â†’ (instance, Protocol class)
         raise_on_failure: if True, raises ``RuntimeError`` on any issue;
             otherwise logs warnings and returns the issue list.
 

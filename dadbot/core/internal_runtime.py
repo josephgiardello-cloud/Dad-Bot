@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from collections import deque
 
@@ -45,4 +45,20 @@ class DadBotInternalRuntime:
             "source": "none",
         }
         self.last_turn_pipeline = None
+        self.last_turn_health_state = {
+            "status": "OK",
+            "latency_ms": 0.0,
+            "memory_ops_time": 0.0,
+            "graph_sync_time": 0.0,
+            "inference_time": 0.0,
+            "fallback_used": False,
+        }
+        self.last_turn_ux_feedback = {
+            "dad_is_thinking": False,
+            "message": "",
+            "checking_memory": False,
+            "memory_message": "",
+            "mood_hint": "neutral",
+            "status": "OK",
+        }
         self.background_task_ids = deque(maxlen=32)

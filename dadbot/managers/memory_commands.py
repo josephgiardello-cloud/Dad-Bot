@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import re
@@ -41,7 +41,7 @@ class MemoryCommandManager:
 				"query": forget_match.group(1).strip(),
 			}
 
-		# ── GDPR / CCPA data-rights commands ─────────────────────────────────
+		# â”€â”€ GDPR / CCPA data-rights commands â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 		stripped_lower = stripped.lower()
 
 		if re.match(r"^/export(?:\s+my\s+data)?$", stripped, flags=re.IGNORECASE):
@@ -93,7 +93,7 @@ class MemoryCommandManager:
 
 		return None
 
-	# ── GDPR / CCPA helpers ───────────────────────────────────────────────────
+	# â”€â”€ GDPR / CCPA helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 	def _handle_data_export(self) -> str:
 		"""Export all personal data to a timestamped JSON file in the user's home directory."""
@@ -126,7 +126,7 @@ class MemoryCommandManager:
 				f"Done, buddy. I've saved everything I know about you to:\n\n"
 				f"  {export_path}\n\n"
 				f"That file contains {counts}, plus your relationship state. "
-				"You can open it in any text editor — it's plain JSON."
+				"You can open it in any text editor â€” it's plain JSON."
 			)
 		except Exception as exc:  # pragma: no cover
 			return f"I tried to export your data but ran into a problem: {exc}"
@@ -143,7 +143,7 @@ class MemoryCommandManager:
 			except Exception:
 				pass
 			return (
-				"Done. I've erased everything I had saved about you — memories, relationship history, all of it. "
+				"Done. I've erased everything I had saved about you â€” memories, relationship history, all of it. "
 				"We're starting completely fresh. I'll still be your dad, I just won't remember the specifics from before."
 			)
 		except Exception as exc:  # pragma: no cover
@@ -166,14 +166,14 @@ class MemoryCommandManager:
 				categories[cat] = categories.get(cat, 0) + 1
 
 			category_lines = "\n".join(
-				f"  • {cat}: {count} entr{'y' if count == 1 else 'ies'}"
+				f"  â€¢ {cat}: {count} entr{'y' if count == 1 else 'ies'}"
 				for cat, count in sorted(categories.items())
 			) or "  (none yet)"
 
 			trust = relationship.get("trust_level") if relationship else None
-			trust_line = f"  • Trust level: {trust:.2f}" if isinstance(trust, (int, float)) else ""
+			trust_line = f"  â€¢ Trust level: {trust:.2f}" if isinstance(trust, (int, float)) else ""
 			rel_tenure = relationship.get("relationship_tenure_days") if relationship else None
-			tenure_line = f"  • Relationship tenure: {rel_tenure} day(s)" if rel_tenure is not None else ""
+			tenure_line = f"  â€¢ Relationship tenure: {rel_tenure} day(s)" if rel_tenure is not None else ""
 			rel_lines = "\n".join(filter(None, [trust_line, tenure_line])) or "  (no relationship data)"
 
 			return (

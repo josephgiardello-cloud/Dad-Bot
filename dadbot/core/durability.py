@@ -1,4 +1,4 @@
-"""Crash-safe write semantics and transactional write units.
+﻿"""Crash-safe write semantics and transactional write units.
 
 CRC32LineCodec:
   Encodes/decodes JSONL lines with a CRC-32 integrity checksum so that
@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import binascii
 import json
+import logging
 import os
+import sys
 import time
 import uuid
 from contextlib import contextmanager
@@ -30,6 +32,14 @@ from typing import Any, Callable
 # Sentinel event types used by AtomicWriteUnit.
 UNIT_BEGIN_TYPE: str = "__UNIT_BEGIN__"
 UNIT_COMMIT_TYPE: str = "__UNIT_COMMIT__"
+DEBUG_LOCKS: bool = str(os.getenv("DADBOT_DEBUG_LOCKS", "0")).strip().lower() in {"1", "true", "yes", "on"}
+logger = logging.getLogger(__name__)
+
+
+def _debug_lock_event(event: str, *, path: Path) -> None:
+    # Keep lock diagnostics latent and low-noise unless explicitly enabled.
+    if DEBUG_LOCKS or logger.isEnabledFor(logging.DEBUG):
+        logger.debug(event, extra={"path": str(path)})
 
 
 # ---------------------------------------------------------------------------
@@ -44,7 +54,7 @@ class CRC32LineCodec:
     - On encode: compute CRC-32 of the serialised payload, prepend as 8-char hex.
     - On decode: verify CRC; return None if corrupt/partial (caller should skip).
     - Backward-compat: lines without a CRC prefix (8-char hex + space) are
-      treated as plain JSON — this allows reading old WAL files.
+      treated as plain JSON â€” this allows reading old WAL files.
     """
 
     @staticmethod
@@ -95,7 +105,7 @@ class FileLockMutex:
     ``acquired_at``.  If the lock file exists but the owning PID is no longer
     alive, the lock is considered stale and is evicted automatically.
 
-    Note: This provides *advisory* locking — it protects well-behaved
+    Note: This provides *advisory* locking â€” it protects well-behaved
     processes.  It does NOT replace a distributed coordinator (etcd,
     PostgreSQL advisory locks) for strong multi-node guarantees.
     """
@@ -122,6 +132,7 @@ class FileLockMutex:
 
         Raises RuntimeError if the lock cannot be acquired within timeout.
         """
+        _debug_lock_event("lock_acquire_start", path=self._path)
         deadline = time.monotonic() + max(0.0, float(timeout_seconds))
         self._path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -147,6 +158,7 @@ class FileLockMutex:
                     os.close(fd)
                 with self._lock:
                     self._token = token
+                _debug_lock_event("lock_acquired", path=self._path)
                 return token
             except FileExistsError:
                 time.sleep(0.05)
@@ -166,6 +178,7 @@ class FileLockMutex:
                 if current and current.get("token") == token:
                     self._path.unlink(missing_ok=True)
                 self._token = ""
+                _debug_lock_event("lock_released", path=self._path)
                 return True
             except OSError:
                 return False
@@ -200,7 +213,7 @@ class FileLockMutex:
             pid = int(record.get("pid") or 0)
             if pid > 0 and _pid_is_alive(pid):
                 return False
-        # Stale — remove it.
+        # Stale â€” remove it.
         try:
             self._path.unlink(missing_ok=True)
             return True
@@ -225,18 +238,38 @@ class FileLockMutex:
 
 
 def _pid_is_alive(pid: int) -> bool:
-    """Return True if a process with that PID is still running."""
+    """Return True if a process with that PID is still running.
+
+    POSIX: uses ``os.kill(pid, 0)`` (existence check, signal never delivered).
+    Windows: uses Win32 ``OpenProcess``/``GetExitCodeProcess`` via ctypes.
+    ``os.kill(pid, 0)`` maps to ``CTRL_C_EVENT`` (value 0) on Windows and
+    would send Ctrl+C to the entire process group — never use it on Windows.
+    """
+    if sys.platform == "win32":
+        import ctypes
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+        handle = ctypes.windll.kernel32.OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION, False, pid
+        )
+        if not handle:
+            return False
+        try:
+            exit_code = ctypes.c_ulong(0)
+            if ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                return exit_code.value == STILL_ACTIVE
+            return False
+        finally:
+            ctypes.windll.kernel32.CloseHandle(handle)
     try:
-        os.kill(pid, 0)  # Signal 0 = check existence only.
+        os.kill(pid, 0)  # POSIX: signal 0 checks existence without delivering.
         return True
     except (ProcessLookupError, PermissionError, OSError):
-        # ProcessLookupError → no such process.
-        # PermissionError on POSIX → exists but we can't signal it.
         return False
 
 
 # ---------------------------------------------------------------------------
-# Atomic write unit — transactional multi-step ledger operations
+# Atomic write unit â€” transactional multi-step ledger operations
 # ---------------------------------------------------------------------------
 
 class AtomicWriteUnit:

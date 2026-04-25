@@ -1,4 +1,4 @@
-"""DadBot core package for graph-based orchestration primitives."""
+﻿"""DadBot core package for graph-based orchestration primitives."""
 
 from .authorization import (
     AuthorizationError,
@@ -55,7 +55,7 @@ from .ledger_backend import (
     SequenceValidator,
     StrongConsistencyBackend,
 )
-from .nodes import HealthNode, InferenceNode, MemoryNode, SafetyNode, SaveNode
+from .nodes import HealthNode, InferenceNode, MemoryNode, ReflectionNode, SafetyNode, SaveNode
 from .observability import (
     CorrelationContext,
     EventStreamExporter,
@@ -88,6 +88,7 @@ __all__ = [
     # control plane
     "GraphNode",
     "SessionRegistry",
+    "ReflectionNode",
     "ExecutionJob",
     "Scheduler",
     "ExecutionControlPlane",

@@ -1,4 +1,4 @@
-"""Shared UI utility helpers that depend on streamlit + external libs only.
+﻿"""Shared UI utility helpers that depend on streamlit + external libs only.
 
 These functions are safe to import from any dadbot.ui submodule because they
 never import from dad_streamlit (no circular deps).
@@ -22,7 +22,7 @@ from dadbot.ui.prefs_state import ui_preferences, voice_preferences
 if TYPE_CHECKING:
     from dadbot.core.dadbot import DadBot
 
-# Optional STT backend detection — mirrors dad_streamlit optional imports
+# Optional STT backend detection â€” mirrors dad_streamlit optional imports
 try:
     from faster_whisper import WhisperModel  # type: ignore[import-not-found]
 except Exception:
@@ -141,7 +141,7 @@ def find_available_image_model(candidates: tuple[str, ...]) -> str | None:
 
 def fetch_ical_events(url: str, max_events: int = 10) -> tuple[list[dict], str]:
     """Fetch and parse upcoming events from a public iCal/ICS feed URL.
-    Returns (events_list, error_message). No external deps — pure stdlib."""
+    Returns (events_list, error_message). No external deps â€” pure stdlib."""
     events: list[dict] = []
     try:
         with urlopen(url, timeout=8) as response:

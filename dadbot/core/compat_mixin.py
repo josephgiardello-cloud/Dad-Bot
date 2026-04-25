@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from datetime import datetime
 
@@ -150,8 +150,11 @@ class DadBotCompatMixin:
     def persona_preset_catalog():
         return PERSONA_PRESETS
 
-    @staticmethod
-    def runtime_timestamp():
+    def runtime_timestamp(self):
+        temporal = getattr(self, "_current_turn_time_base", None)
+        turn_started_at = getattr(temporal, "turn_started_at", None)
+        if turn_started_at:
+            return str(turn_started_at)
         return datetime.now().isoformat(timespec="seconds")
 
     @staticmethod

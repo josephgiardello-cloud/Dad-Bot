@@ -1,4 +1,4 @@
-"""Transitional manager imports during the Dad.py package split."""
+﻿"""Transitional manager imports during the Dad.py package split."""
 
 from .conversation_persistence import ConversationPersistenceManager
 from .long_term import LongTermSignalsManager

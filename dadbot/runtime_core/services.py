@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Protocol
@@ -12,6 +12,8 @@ class UserMessageResult:
     should_end: bool
     mood: str
     pipeline: dict
+    turn_health: dict = field(default_factory=dict)
+    ux_feedback: dict = field(default_factory=dict)
     active_rules: list[str] = field(default_factory=list)
 
 
@@ -54,12 +56,16 @@ class DadBotLLMService:
 
         mood = str(self.bot.last_saved_mood() or "neutral")
         pipeline = dict(self.bot.turn_pipeline_snapshot() or {})
+        turn_health = dict(self.bot.turn_health_state() or {})
+        ux_feedback = dict(self.bot.turn_ux_feedback() or {})
         active_rules = list(self.bot.profile_runtime.effective_behavior_rules())
         return UserMessageResult(
             reply=reply,
             should_end=should_end,
             mood=mood,
             pipeline=pipeline,
+            turn_health=turn_health,
+            ux_feedback=ux_feedback,
             active_rules=active_rules,
         )
 

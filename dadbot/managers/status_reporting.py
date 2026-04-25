@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dadbot.contracts import DadBotContext, SupportsDadBotAccess
 from dadbot.models import ActiveThreadSnapshot, BackgroundTaskOverview, CircuitBreakerStatusSnapshot, DashboardStatusSnapshot, GraphFallbackStatusSnapshot, MemoryContextStatusSnapshot, ModerationSnapshot, PersistenceStatusSnapshot, PromptGuardStatusSnapshot, RelationshipStatusSnapshot, RuntimeHealthSnapshot, RuntimeHealthTrendPoint, RuntimeIssueSnapshot, RuntimeStatusSnapshot, SecurityStatusSnapshot, ServiceStatusSnapshot, SessionStatusSnapshot, StatusTraitMetric, ThreadsStatusSnapshot, VisionStatusSnapshot
@@ -50,13 +50,13 @@ class StatusReportingManager:
 		return max(0, min(100, int(round((trust + openness) / 2))))
 
 	def circuit_breaker_snapshot(self, *, health: dict, relationship: dict, graph_fallback: dict | None = None) -> dict:
-		fallback = dict(graph_fallback or {})
+		degraded_graph = dict(graph_fallback or {})
 		last_mood = str(self.bot.last_saved_mood() or "neutral")
 		reasons = []
 		if health.get("clarification_recommended"):
 			reasons.append(str(health.get("clarification_message") or "Dad asked for a short clarification.").strip())
-		if fallback.get("active"):
-			mode = str(fallback.get("degraded_mode") or "legacy").replace("_", " ")
+		if degraded_graph.get("active"):
+			mode = str(degraded_graph.get("degraded_mode") or "legacy").replace("_", " ")
 			reasons.append(f"Turn graph degraded and switched to {mode}.")
 		if str(health.get("level") or "green").strip().lower() == "red":
 			severity = "high"

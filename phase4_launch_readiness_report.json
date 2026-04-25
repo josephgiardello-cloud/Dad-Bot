@@ -1,0 +1,59 @@
+{
+  "phase": "Phase 4",
+  "step": "Launch Readiness Simulation",
+  "input_turn_count": 50,
+  "mix": {
+    "normal": 21,
+    "contradiction": 10,
+    "tool": 8,
+    "drift": 11
+  },
+  "checks": {
+    "stability": {
+      "passed": true,
+      "crashes": 0,
+      "save_node_misses": 0,
+      "status_counts": {
+        "degraded": 49,
+        "recovering": 1
+      }
+    },
+    "memory_integrity": {
+      "passed": true,
+      "duplicate_unresolved_entities": 0,
+      "unresolved_contradictions": 0,
+      "relationship_bounds_ok": true
+    },
+    "graph_stability": {
+      "passed": true,
+      "final_graph": {
+        "node_count": 10,
+        "edge_count": 12,
+        "orphan_edge_count": 0,
+        "invalid_visible_edge_count": 0,
+        "temporal_window_inversion_count": 0
+      },
+      "orphan_edge_max": 0,
+      "invalid_visible_edge_max": 0
+    },
+    "determinism_soft": {
+      "passed": true,
+      "unique_stage_structure_count": 1
+    },
+    "ux_continuity": {
+      "passed": true,
+      "missing_responses": 0,
+      "thinking_signal_misses": 0
+    },
+    "temporal_correctness": {
+      "passed": true,
+      "temporal_window_inversion_max": 0,
+      "fallback_used_any": false
+    }
+  },
+  "launch_readiness": {
+    "eligible": true,
+    "declaration": "Launch-ready for real-world interactive testing",
+    "definition": "A user can talk to it for a full session without the system breaking its cognitive model."
+  }
+}

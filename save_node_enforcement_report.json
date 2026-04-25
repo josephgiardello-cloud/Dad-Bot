@@ -1,0 +1,17 @@
+{
+  "save_node_executed_exactly_once": true,
+  "observed_call_order": [
+    "consolidate_memories",
+    "apply_controlled_forgetting",
+    "sync_graph_store",
+    "relationship.reflect"
+  ],
+  "required_call_order": [
+    "consolidate_memories",
+    "apply_controlled_forgetting",
+    "sync_graph_store",
+    "relationship.reflect"
+  ],
+  "order_valid": true,
+  "deviations": []
+}

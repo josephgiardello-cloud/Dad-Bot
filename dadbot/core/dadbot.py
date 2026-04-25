@@ -1,4 +1,4 @@
-import atexit
+﻿import atexit
 import asyncio
 import importlib
 from importlib import util as import_util  # Fixes the find_spec error
@@ -10,6 +10,7 @@ import sys
 import time
 import uuid
 from collections import deque
+from datetime import datetime
 from pathlib import Path
 from threading import RLock
 from typing import Any
@@ -24,6 +25,7 @@ from dadbot.core.facade_compat import DadBotFacadeCompat
 from dadbot.core.compat_mixin import DadBotCompatMixin
 from dadbot.core.convenience_mixin import DadBotConvenienceMixin
 from dadbot.core.internal_runtime import DadBotInternalRuntime
+from dadbot.core.observability import CorrelationContext, TracingContext
 from dadbot.core.orchestrator import DadBotOrchestrator
 from dadbot.registry import DadBotServiceContainer
 from dadbot.background import BackgroundTaskManager
@@ -270,6 +272,8 @@ class DadBot(DadBotCompatMixin, DadBotConvenienceMixin, DadBotActionMixin):
         "_last_output_moderation": "last_output_moderation",
         "_last_reply_supervisor": "last_reply_supervisor",
         "_last_turn_pipeline": "last_turn_pipeline",
+        "_last_turn_health_state": "last_turn_health_state",
+        "_last_turn_ux_feedback": "last_turn_ux_feedback",
         "_background_task_ids": "background_task_ids",
     }
 
@@ -323,7 +327,7 @@ class DadBot(DadBotCompatMixin, DadBotConvenienceMixin, DadBotActionMixin):
                     compat.warn_if_deprecated(name)
                 return getattr(provider, name)
         except AttributeError:
-            pass  # services not yet assigned — fall through to chain walk
+            pass  # services not yet assigned â€” fall through to chain walk
 
         # Slow path: linear chain walk used only during __init__ construction.
         _sentinel = object()
@@ -352,7 +356,7 @@ class DadBot(DadBotCompatMixin, DadBotConvenienceMixin, DadBotActionMixin):
                 setattr(config, config_attr, value)
                 return
             except AttributeError:
-                pass  # config not yet assigned — fall through for early __init__ writes
+                pass  # config not yet assigned â€” fall through for early __init__ writes
 
         runtime_state_attr = self.__class__._RUNTIME_STATE_ATTR_MAP.get(name)
         if runtime_state_attr is not None:
@@ -495,7 +499,7 @@ class DadBot(DadBotCompatMixin, DadBotConvenienceMixin, DadBotActionMixin):
         profile_llm = self.profile_runtime.profile.get("llm", {}) if isinstance(self.profile_runtime.profile, dict) else {}
         if isinstance(profile_llm, dict):
             # apply_profile_llm_settings normalises provider/model and updates
-            # active_model when provider is ollama — no manual fan-out needed.
+            # active_model when provider is ollama â€” no manual fan-out needed.
             self.config.apply_profile_llm_settings(
                 str(profile_llm.get("provider", "")).strip().lower(),
                 str(profile_llm.get("model", "")).strip(),
@@ -531,6 +535,7 @@ class DadBot(DadBotCompatMixin, DadBotConvenienceMixin, DadBotActionMixin):
 
     def _initialize_turn_orchestration(self) -> None:
         self._turn_graph_enabled = self.config.turn_graph_enabled
+        self._strict_graph_mode = self.config.strict_graph_mode
         self._turn_graph_config_path = self.config.turn_graph_config_path
         self._turn_orchestrator = None
 
@@ -586,10 +591,6 @@ class DadBot(DadBotCompatMixin, DadBotConvenienceMixin, DadBotActionMixin):
         self.reset_session_state()
         self._start_boot_background_tasks()
 
-    def graph_turns_enabled(self) -> bool:
-        """Return whether production turns should use the graph orchestrator path."""
-        return bool(getattr(self, "_turn_graph_enabled", False))
-
     def should_start_background_tasks(self) -> bool:
         """Return True when background tasks should be started on boot.
 
@@ -607,7 +608,11 @@ class DadBot(DadBotCompatMixin, DadBotConvenienceMixin, DadBotActionMixin):
         orchestrator = getattr(self, "_turn_orchestrator", None)
         if orchestrator is not None:
             return orchestrator
-        orchestrator = DadBotOrchestrator(config_path=self._turn_graph_config_path, bot=self)
+        orchestrator = DadBotOrchestrator(
+            config_path=self._turn_graph_config_path,
+            bot=self,
+            strict=bool(getattr(self, "_strict_graph_mode", True)),
+        )
         self._turn_orchestrator = orchestrator
         return orchestrator
 
@@ -1134,64 +1139,145 @@ class DadBot(DadBotCompatMixin, DadBotConvenienceMixin, DadBotActionMixin):
         """Canonical sync turn entrypoint backed by the existing runtime path."""
         return self.process_user_message(user_input, attachments=attachments)
 
-    def _record_graph_fallback(self, exc: Exception, *, mode: str) -> None:
-        """Record a graph-orchestration degradation event and emit the standard warning log."""
-        logger.warning(
-            "Graph orchestration degraded to legacy %s pipeline; preserving response continuity: %s",
-            mode,
-            exc,
+    def _graph_failure_session_id(self) -> str:
+        candidate = getattr(self, "active_thread_id", "") or getattr(self, "tenant_id", "")
+        normalized = str(candidate or "").strip()
+        return normalized or "default"
+
+    @staticmethod
+    def _safe_graph_failure_payload(value: Any, *, limit: int = 240) -> Any:
+        if value is None or isinstance(value, (bool, int, float)):
+            return value
+        if isinstance(value, str):
+            return value[:limit]
+        if isinstance(value, dict):
+            return {
+                str(key)[:80]: DadBot._safe_graph_failure_payload(item, limit=limit)
+                for key, item in list(value.items())[:12]
+            }
+        if isinstance(value, (list, tuple, set)):
+            return [DadBot._safe_graph_failure_payload(item, limit=limit) for item in list(value)[:12]]
+        return str(value)[:limit]
+
+    def _emit_graph_failure_event(
+        self,
+        *,
+        mode: str,
+        correlation_id: str,
+        trace_id: str,
+        user_input: str,
+        attachments: AttachmentList | None,
+        exc: Exception,
+    ) -> None:
+        orchestrator = getattr(self, "_turn_orchestrator", None)
+        if orchestrator is None:
+            try:
+                orchestrator = self._get_turn_orchestrator()
+            except Exception:
+                orchestrator = None
+        control_plane = getattr(orchestrator, "control_plane", None)
+        ledger_writer = getattr(control_plane, "ledger_writer", None)
+        write_event = getattr(ledger_writer, "write_event", None)
+        if not callable(write_event):
+            return
+
+        payload = {
+            "mode": mode,
+            "graph_enabled": True,
+            "strict_graph_mode": bool(getattr(self, "_strict_graph_mode", True)),
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+            "user_input": self._safe_graph_failure_payload(user_input),
+            "attachment_count": len(attachments or []),
+            "attachments": self._safe_graph_failure_payload(list(attachments or []), limit=120),
+            "recorded_at": str(getattr(getattr(self, "_current_turn_time_base", None), "wall_time", "")),
+        }
+        write_event(
+            event_type="GRAPH_EXECUTION_FAILED",
+            session_id=self._graph_failure_session_id(),
+            trace_id=trace_id or correlation_id,
+            kernel_step_id=f"graph.failure.{mode}",
+            payload={
+                **payload,
+                "correlation_id": correlation_id,
+                "trace_id": trace_id or correlation_id,
+            },
+            committed=True,
         )
-        self.record_runtime_issue(
-            "turn_graph",
-            f"turn_service_{mode}_fallback",
-            exc=exc,
-            level=logging.WARNING,
-            metadata={
-                "degraded_mode": f"legacy_{mode}",
+
+    def _graph_failure_reply(self, correlation_id: str) -> str:
+        return self._append_signoff_compat(
+            "I hit an internal graph error and stopped before touching memory or state. "
+            f"Please try again. Reference ID: {correlation_id}"
+        )
+
+    def _raise_graph_execution_failure(
+        self,
+        exc: Exception,
+        *,
+        mode: str,
+        user_input: str,
+        attachments: AttachmentList | None = None,
+    ) -> None:
+        correlation_id = CorrelationContext.current() or CorrelationContext.ensure()
+        trace_id = TracingContext.current_trace_id() or correlation_id
+        logger.exception(
+            "Graph execution failed in %s mode; strict mode forbids alternate execution paths",
+            mode,
+            extra={
+                "correlation_id": correlation_id,
+                "trace_id": trace_id,
                 "graph_enabled": True,
-                "path": "graph_to_legacy",
+                "strict_graph_mode": bool(getattr(self, "_strict_graph_mode", True)),
+                "attachment_count": len(attachments or []),
             },
         )
+        self._emit_graph_failure_event(
+            mode=mode,
+            correlation_id=correlation_id,
+            trace_id=trace_id,
+            user_input=user_input,
+            attachments=attachments,
+            exc=exc,
+        )
+        raise RuntimeError("Graph execution failed in strict mode; legacy path is disabled") from exc
+
+    def _deliver_buffered_stream_chunks(self, reply: str, chunk_callback: ChunkCallback | None) -> None:
+        if callable(chunk_callback) and reply:
+            chunk_callback(reply)
 
     def process_user_message(self, user_input: str, attachments: AttachmentList | None = None) -> FinalizedTurnResult:
-        if self.graph_turns_enabled():
-            try:
-                return self._run_graph_turn_sync(user_input, attachments=attachments)
-            except Exception as exc:
-                self._record_graph_fallback(exc, mode="sync")
         try:
-            return self.turn_service.process_user_message(user_input, attachments)
-        except self.ollama_retryable_errors() as exc:
-            logger.error("Ollama connection error during turn; returning friendly fallback: %s", exc)
-            friendly = (
-                "I'm having a little trouble thinking right now - my connection seems to be down. "
-                "Give me a moment and try again, buddy."
-            )
-            return self._append_signoff_compat(friendly), False
+            return self._run_graph_turn_sync(user_input, attachments=attachments)
         except Exception as exc:
-            logger.error("Unexpected error during turn processing; returning safe fallback: %s", exc)
-            return self._append_signoff_compat(
-                "Something went sideways on my end. I'm okay - just try again in a second."
-            ), False
+            self._raise_graph_execution_failure(
+                exc,
+                mode="sync",
+                user_input=user_input,
+                attachments=attachments,
+            )
 
     def _append_signoff_compat(self, text: str) -> str:
-        """Apply reply signoff using manager-first resolution with legacy fallback."""
+        """Apply reply signoff using manager-first compatibility resolution."""
         finalization = getattr(self, "reply_finalization", None)
         append_signoff = getattr(finalization, "append_signoff", None)
         if callable(append_signoff):
             return append_signoff(text)
-        legacy = getattr(self, "finalize_reply", None)
-        if callable(legacy):
-            return legacy(text)
+        compat_finalize = getattr(self, "finalize_reply", None)
+        if callable(compat_finalize):
+            return compat_finalize(text)
         return str(text or "")
 
     async def process_user_message_async(self, user_input: str, attachments: AttachmentList | None = None) -> FinalizedTurnResult:
-        if self.graph_turns_enabled():
-            try:
-                return await self._run_graph_turn_async(user_input, attachments=attachments)
-            except Exception as exc:
-                self._record_graph_fallback(exc, mode="async")
-        return await self.turn_service.process_user_message_async(user_input, attachments)
+        try:
+            return await self._run_graph_turn_async(user_input, attachments=attachments)
+        except Exception as exc:
+            self._raise_graph_execution_failure(
+                exc,
+                mode="async",
+                user_input=user_input,
+                attachments=attachments,
+            )
 
     def process_user_message_stream(
         self,
@@ -1199,7 +1285,9 @@ class DadBot(DadBotCompatMixin, DadBotConvenienceMixin, DadBotActionMixin):
         attachments: AttachmentList | None = None,
         chunk_callback: ChunkCallback | None = None,
     ) -> FinalizedTurnResult:
-        return self.turn_service.process_user_message_stream(user_input, attachments, chunk_callback)
+        reply, should_end = self.process_user_message(user_input, attachments=attachments)
+        self._deliver_buffered_stream_chunks(reply, chunk_callback)
+        return reply, should_end
 
     async def process_user_message_stream_async(
         self,
@@ -1207,7 +1295,9 @@ class DadBot(DadBotCompatMixin, DadBotConvenienceMixin, DadBotActionMixin):
         attachments: AttachmentList | None = None,
         chunk_callback: ChunkCallback | None = None,
     ) -> FinalizedTurnResult:
-        return await self.turn_service.process_user_message_stream_async(user_input, attachments, chunk_callback)
+        reply, should_end = await self.process_user_message_async(user_input, attachments=attachments)
+        self._deliver_buffered_stream_chunks(reply, chunk_callback)
+        return reply, should_end
 
     def current_runtime_health_snapshot(self, *, force=False, log_warnings=False, persist=False, max_age_seconds=None):
         """Cached health snapshot; explicit on DadBot so tests can patch bot.runtime_health_snapshot."""
@@ -1225,6 +1315,51 @@ class DadBot(DadBotCompatMixin, DadBotConvenienceMixin, DadBotActionMixin):
         self._cached_runtime_health_snapshot = dict(snapshot)
         self._last_runtime_health_snapshot_monotonic = now
         return dict(snapshot)
+
+    def turn_health_state(self) -> dict[str, Any]:
+        payload = dict(getattr(self, "_last_turn_health_state", {}) or {})
+        if payload:
+            return payload
+        return {
+            "status": "OK",
+            "latency_ms": 0.0,
+            "memory_ops_time": 0.0,
+            "graph_sync_time": 0.0,
+            "inference_time": 0.0,
+            "fallback_used": False,
+        }
+
+    def turn_fidelity_state(self) -> dict[str, Any]:
+        payload = dict(getattr(self, "_last_turn_health_state", {}) or {})
+        fidelity = dict(payload.get("fidelity") or {}) if isinstance(payload, dict) else {}
+        if fidelity:
+            return {
+                "temporal": bool(fidelity.get("temporal", False)),
+                "inference": bool(fidelity.get("inference", False)),
+                "reflection": bool(fidelity.get("reflection", False)),
+                "save": bool(fidelity.get("save", False)),
+                "full_pipeline": bool(fidelity.get("full_pipeline", False)),
+            }
+        return {
+            "temporal": False,
+            "inference": False,
+            "reflection": False,
+            "save": False,
+            "full_pipeline": False,
+        }
+
+    def turn_ux_feedback(self) -> dict[str, Any]:
+        payload = dict(getattr(self, "_last_turn_ux_feedback", {}) or {})
+        if payload:
+            return payload
+        return {
+            "dad_is_thinking": False,
+            "message": "",
+            "checking_memory": False,
+            "memory_message": "",
+            "mood_hint": str(self.last_saved_mood() or "neutral"),
+            "status": "OK",
+        }
 
     def local_mcp_status(self) -> dict[str, Any]:
         try:

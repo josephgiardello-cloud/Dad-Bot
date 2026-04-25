@@ -1,4 +1,4 @@
-"""UI render subpackage for Dad Bot Streamlit surfaces.
+﻿"""UI render subpackage for Dad Bot Streamlit surfaces.
 
 Import directly from submodules to avoid circular imports:
   from dadbot.ui.utils import maybe_fragment, filter_memory_entries

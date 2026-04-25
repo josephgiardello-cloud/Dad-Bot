@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import importlib
 import json
 import logging
 import mimetypes
@@ -14,6 +15,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 from urllib.parse import urlencode
 from urllib.request import urlopen
 from urllib.error import URLError
@@ -60,7 +62,14 @@ from dadbot.ui.data import render_memory_garden, render_data_tab
 from dadbot.ui import interaction_controller, state_manager
 from dadbot.consumers.streamlit import load_thread_projection
 from dadbot.runtime_core import UIRuntimeAPI, ThreadView
-from dadbot.core.system_behavior_views import STAGE_METADATA
+
+if TYPE_CHECKING:
+    from dadbot.core.dadbot import DadBot
+
+try:
+    STAGE_METADATA = getattr(importlib.import_module("dadbot.core.system_behavior_views"), "STAGE_METADATA")
+except Exception:  # pragma: no cover - optional compatibility shim
+    STAGE_METADATA = {}
 
 logger = logging.getLogger(__name__)
 
@@ -354,6 +363,13 @@ def render_turn_inspector(*, thread_id: str, view: ThreadView) -> None:
 
     with st.expander("Turn Inspector", expanded=False):
         st.caption("User message -> reasoning -> decision -> effects -> reply")
+
+        rejection = st.session_state.get(RUNTIME_REJECTION_SESSION_KEY)
+        if isinstance(rejection, dict):
+            rejection_message = str(rejection.get("message") or "").strip()
+            if "SaveNode commit boundary" in rejection_message or "outside SaveNode" in rejection_message:
+                st.warning(f"Strict boundary guard tripped: {rejection_message}")
+
         if timeline:
             for item in timeline[-12:]:
                 timestamp = str(item.get("timestamp") or "")
@@ -2119,7 +2135,7 @@ def render_chat_tab(bot: DadBot, active_thread: dict):
                         payload=_runtime_rejection_payload(exc, action="chat_turn"),
                         severity="warning",
                     )
-                    reply = "Something went sideways on my end. Try again?"
+                    reply = "I'm having trouble saving my thoughts right now - let me try again in a moment."
                     st.error(f"Dad Runtime blocked or failed this request: {exc}")
                     st.markdown(reply)
         api.persist_conversation_async()

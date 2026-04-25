@@ -1,8 +1,9 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import base64
 import copy
 import gzip
+import hashlib
 import json
 import pickle
 import uuid
@@ -20,37 +21,46 @@ class ConversationPersistenceManager:
 		self.context = DadBotContext.from_runtime(bot)
 		self.bot = self.context.bot
 
-	def persist_conversation(self) -> None:
-		if not self.bot.LIGHT_MODE:
-			self.bot.refresh_session_summary(force=True)
-			self.bot.relationship.reflect(force=True)
-		chat_history = self.bot.conversation_history()
-		self.bot.update_memory_store(chat_history)
-		if not self.bot.LIGHT_MODE:
-			self.bot.consolidate_memories()
-		self.bot.archive_session_context(chat_history)
-		if not self.bot.LIGHT_MODE:
-			self.bot.refresh_relationship_timeline(force=True)
-			self.bot.detect_life_patterns()
-			self.bot.evolve_persona()
-			self.bot.refresh_memory_graph()
-		self.save_session_log(chat_history)
+	def _save_commit_active(self, turn_context: Any | None = None) -> bool:
+		commit_active = bool(getattr(self.bot, "_graph_commit_active", False))
+		if not commit_active:
+			return False
+		if turn_context is None:
+			return True
+		active_stage = str(getattr(turn_context, "state", {}).get("_active_graph_stage") or "").strip().lower()
+		return active_stage in {"save", ""}
 
-	def persist_conversation_snapshot(self, snapshot: dict) -> None:
-		snapshot_payload = copy.deepcopy(dict(snapshot or {}))
+	def _snapshot_mutation_queue(self) -> list[dict[str, Any]]:
+		queue = getattr(self.bot, "_deferred_save_boundary_snapshots", None)
+		if not isinstance(queue, list):
+			queue = []
+			self.bot._deferred_save_boundary_snapshots = queue
+		return queue
+
+	def _queue_snapshot_for_save_boundary(self, snapshot_payload: dict[str, Any]) -> None:
+		queue = self._snapshot_mutation_queue()
+		queue.append(copy.deepcopy(dict(snapshot_payload or {})))
+		if len(queue) > 32:
+			del queue[:-32]
+
+	def _apply_snapshot_mutations(self, snapshot_payload: dict[str, Any], *, turn_context: Any | None = None) -> None:
 		chat_history = list(snapshot_payload.get("history", []))
 		if chat_history and chat_history[0].get("role") == "system":
 			chat_history = chat_history[1:]
 		if not chat_history:
 			return
 
+		# Deterministic temporal anchors come from TurnContext; defer if absent.
+		if turn_context is None:
+			self._queue_snapshot_for_save_boundary(snapshot_payload)
+			return
+
 		previous_snapshot = self.bot.snapshot_session_state()
 		self.bot.load_session_state_snapshot(snapshot_payload)
-
 		try:
-			self.bot.update_memory_store(chat_history)
+			self.bot.update_memory_store(chat_history, turn_context=turn_context)
 			if not self.bot.LIGHT_MODE:
-				self.bot.consolidate_memories()
+				self.bot.consolidate_memories(turn_context=turn_context)
 			self.bot.archive_session_context(chat_history)
 			if not self.bot.LIGHT_MODE:
 				self.bot.refresh_relationship_timeline(force=True)
@@ -60,6 +70,46 @@ class ConversationPersistenceManager:
 			self.save_session_log(chat_history)
 		finally:
 			self.bot.load_session_state_snapshot(previous_snapshot)
+
+	def flush_deferred_save_boundary_mutations(self, turn_context: Any | None = None) -> int:
+		if not self._save_commit_active(turn_context):
+			return 0
+		queue = self._snapshot_mutation_queue()
+		if not queue:
+			return 0
+		processed = 0
+		pending = list(queue)
+		queue.clear()
+		for payload in pending:
+			try:
+				self._apply_snapshot_mutations(payload, turn_context=turn_context)
+				processed += 1
+			except Exception:
+				# Re-queue failed payload for next SaveNode boundary.
+				queue.append(payload)
+		return processed
+
+	def persist_conversation(self) -> None:
+		chat_history = list(self.bot.conversation_history() or [])
+		if not chat_history:
+			return
+		# Strict mode: persist only (non-mutating). Memory/relationship mutation is SaveNode-owned.
+		self.save_session_log(chat_history)
+
+	def persist_conversation_snapshot(self, snapshot: dict, turn_context: Any | None = None) -> None:
+		snapshot_payload = copy.deepcopy(dict(snapshot or {}))
+		chat_history = list(snapshot_payload.get("history", []))
+		if chat_history and chat_history[0].get("role") == "system":
+			chat_history = chat_history[1:]
+		if not chat_history:
+			return
+
+		if not self._save_commit_active(turn_context):
+			self._queue_snapshot_for_save_boundary(snapshot_payload)
+			self.save_session_log(chat_history)
+			return
+
+		self._apply_snapshot_mutations(snapshot_payload, turn_context=turn_context)
 
 	def save_session_log(self, history: list[dict]) -> None:
 		payload = {
@@ -90,7 +140,7 @@ class ConversationPersistenceManager:
 			session_path = self.bot.SESSION_LOG_DIR / f"session-{timestamp}.json"
 			self.bot.write_json_atomically(session_path, payload, backup=False)
 
-	def persist_graph_checkpoint(self, checkpoint: dict) -> None:
+	def persist_graph_checkpoint(self, checkpoint: dict, _skip_turn_event: bool = False) -> None:
 		payload = copy.deepcopy(dict(checkpoint or {}))
 		if not payload:
 			return
@@ -115,6 +165,16 @@ class ConversationPersistenceManager:
 			self.bot._tenant_document_store.save_session_state(checkpoint_key, wrapped_payload)
 			self.bot._tenant_document_store.save_session_state(f"graph-checkpoint-latest:{trace_id}", wrapped_payload)
 			self.bot._tenant_document_store.save_session_state("graph-checkpoint-latest", wrapped_payload)
+			if not _skip_turn_event:
+				determinism_lock = dict((payload.get("metadata") or {}).get("determinism") or {})
+				self.persist_turn_event({
+					"event_type": "graph_checkpoint",
+					"trace_id": trace_id,
+					"stage": stage,
+					"status": status,
+					"determinism_lock": determinism_lock,
+					"checkpoint": payload,
+				})
 			return
 
 		checkpoint_dir = self.bot.SESSION_LOG_DIR / "graph_checkpoints"
@@ -126,18 +186,20 @@ class ConversationPersistenceManager:
 		latest_path.write_bytes(binary_payload)
 		latest_global_path.write_bytes(binary_payload)
 
-		# Mirror graph checkpoints into an append-only turn-event stream so the
-		# runtime can be replayed deterministically without depending on mutable state.
-		self.persist_turn_event(
-			{
+		# When called directly (not from TurnGraph), write a turn event so that
+		# validate_replay_determinism can fold the lock_hash from checkpoints.
+		# TurnGraph calls persist_graph_checkpoint with _skip_turn_event=True and
+		# emits its own turn event via save_turn_event to avoid duplicate writes.
+		if not _skip_turn_event:
+			determinism_lock = dict((payload.get("metadata") or {}).get("determinism") or {})
+			self.persist_turn_event({
 				"event_type": "graph_checkpoint",
 				"trace_id": trace_id,
 				"stage": stage,
 				"status": status,
-				"checkpoint": copy.deepcopy(payload),
-				"occurred_at": datetime.now().isoformat(timespec="seconds"),
-			}
-		)
+				"determinism_lock": determinism_lock,
+				"checkpoint": payload,
+			})
 
 	def _turn_event_dir(self) -> Path:
 		event_dir = self.bot.SESSION_LOG_DIR / "turn_events"
@@ -164,9 +226,11 @@ class ConversationPersistenceManager:
 			return
 		trace_id = str(payload.get("trace_id") or "unknown").strip() or "unknown"
 		payload["trace_id"] = trace_id
-		payload.setdefault("event_id", uuid.uuid4().hex)
+		sequence = self._compute_next_sequence(trace_id)
+		payload.setdefault("sequence", sequence)
+		event_id_seed = f"{trace_id}:{int(payload.get('sequence') or sequence)}"
+		payload.setdefault("event_id", hashlib.sha256(event_id_seed.encode()).hexdigest()[:16])
 		payload.setdefault("occurred_at", datetime.now().isoformat(timespec="seconds"))
-		payload.setdefault("sequence", self._compute_next_sequence(trace_id))
 
 		if self.bot._tenant_document_store is not None:
 			key = f"turn-events:{trace_id}"
@@ -177,18 +241,18 @@ class ConversationPersistenceManager:
 			self.bot._tenant_document_store.save_session_state(f"turn-events-latest:{trace_id}", payload)
 		else:
 			event_path = self._turn_event_path(trace_id)
-			line = json.dumps(payload, ensure_ascii=True)
+			line = json.dumps(payload, sort_keys=True, ensure_ascii=True)
 			with event_path.open("a", encoding="utf-8") as handle:
 				handle.write(line + "\n")
 
 		# Snapshot compaction every 25 events: replay can start from latest snapshot.
-		sequence = int(payload.get("sequence") or 0)
-		if sequence > 0 and sequence % 25 == 0:
+		compact_sequence = int(payload.get("sequence") or 0)
+		if compact_sequence > 0 and compact_sequence % 25 == 0:
 			replay = self.replay_turn_events(trace_id=trace_id)
 			snapshot_payload = {
 				"trace_id": trace_id,
 				"created_at": datetime.now().isoformat(timespec="seconds"),
-				"last_sequence": sequence,
+				"last_sequence": compact_sequence,
 				"phase": replay.get("phase"),
 				"state": replay.get("replayed_state", {}),
 				"metadata": replay.get("replayed_metadata", {}),
@@ -197,7 +261,7 @@ class ConversationPersistenceManager:
 				self.bot._tenant_document_store.save_session_state(f"turn-snapshot-latest:{trace_id}", snapshot_payload)
 			else:
 				snapshot_path = self._snapshot_path(trace_id)
-				snapshot_path.write_text(json.dumps(snapshot_payload, ensure_ascii=True), encoding="utf-8")
+				snapshot_path.write_text(json.dumps(snapshot_payload, sort_keys=True, ensure_ascii=True), encoding="utf-8")
 
 	def list_turn_events(self, trace_id: str, limit: int = 0) -> list[dict[str, Any]]:
 		normalized = str(trace_id or "").strip()

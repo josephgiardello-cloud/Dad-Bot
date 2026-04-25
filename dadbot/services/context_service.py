@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import logging
 from typing import Any
@@ -14,7 +14,7 @@ class ContextService:
 
     When a ``semantic_index`` (``SQLiteSemanticIndex`` or ``PGVectorSemanticIndex``)
     is wired at construction time, ``build_context`` augments the standard context
-    sections with targeted semantic search results — RAG over long-term memory.
+    sections with targeted semantic search results â€” RAG over long-term memory.
     This lets the model surface relevant history beyond the most-recent window
     without bloating the prompt with the entire memory store.
     """
@@ -30,7 +30,18 @@ class ContextService:
         self.semantic_index = semantic_index  # Optional; wired by ServiceRegistry.boot()
 
     def build_context(self, turn_context: Any) -> dict[str, Any]:
+        temporal = getattr(turn_context, "temporal", None)
+        if temporal is None:
+            raise RuntimeError("TemporalNode required — execution invalid")
         user_input = str(getattr(turn_context, "user_input", "") or "")
+        temporal_snapshot = {}
+        temporal_builder = getattr(turn_context, "temporal_snapshot", None)
+        if callable(temporal_builder):
+            temporal_snapshot = temporal_builder()
+        wall_time = str(temporal_snapshot.get("wall_time") or "").strip()
+        wall_date = str(temporal_snapshot.get("wall_date") or "").strip()
+        if not wall_time or not wall_date:
+            raise RuntimeError("TemporalNode required — execution invalid")
         ctx: dict[str, Any] = {
             "core_persona": self.context_builder.build_core_persona_prompt(),
             "dynamic_profile": self.context_builder.build_dynamic_profile_context(),
@@ -39,6 +50,7 @@ class ContextService:
             "memory": self.context_builder.build_memory_context(user_input),
             "relevant": self.context_builder.build_relevant_context(user_input),
             "cross_session": self.context_builder.build_cross_session_context(user_input),
+            "temporal": temporal_snapshot,
         }
 
         # Semantic RAG: query long-term index for targeted memory hits

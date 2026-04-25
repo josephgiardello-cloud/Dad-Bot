@@ -1,0 +1,23 @@
+{
+  "scope": [
+    "dadbot/core/dadbot.py",
+    "dadbot/core/orchestrator.py",
+    "dadbot/core/graph.py",
+    "dadbot/core/nodes.py",
+    "dadbot/services/agent_service.py",
+    "dadbot/services/persistence.py",
+    "dadbot/registry.py"
+  ],
+  "patterns": [
+    "turn_service.process_user_message",
+    "turn_service.process_user_message_async",
+    "turn_service.process_user_message_stream",
+    "_record_graph_fallback",
+    "graph_turns_enabled",
+    "getattr(...turn_service",
+    "legacy fallback"
+  ],
+  "entropy_detected": false,
+  "match_count": 0,
+  "matches": []
+}

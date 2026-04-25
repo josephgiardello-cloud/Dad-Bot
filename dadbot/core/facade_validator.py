@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 
 def validate_dadbot_facade(bot, *, smoke: bool = False) -> None:

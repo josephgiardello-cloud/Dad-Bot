@@ -8,7 +8,7 @@ class _TurnServiceStub:
     def __init__(self, *, mood="neutral", early_reply=None, should_end=False, turn_text="hello", attachments=None):
         self._payload = (mood, early_reply, should_end, turn_text, attachments)
 
-    async def prepare_user_turn_async(self, _stripped, _attachments):
+    async def prepare_user_turn_async(self, _stripped, _attachments, **_kw):
         return self._payload
 
 

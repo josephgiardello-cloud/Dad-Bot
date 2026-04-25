@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import importlib
@@ -20,6 +20,21 @@ class RuntimeClientManager:
 	def __init__(self, bot: DadBotContext | SupportsDadBotAccess):
 		self.context = DadBotContext.from_runtime(bot)
 		self.bot = self.context.bot
+
+	@staticmethod
+	def _is_event_loop_closed_error(exc: BaseException) -> bool:
+		return isinstance(exc, RuntimeError) and "Event loop is closed" in str(exc)
+
+	def _ensure_event_loop_context(self):
+		try:
+			loop = asyncio.get_running_loop()
+		except RuntimeError:
+			loop = asyncio.new_event_loop()
+			asyncio.set_event_loop(loop)
+		if loop.is_closed():
+			loop = asyncio.new_event_loop()
+			asyncio.set_event_loop(loop)
+		return loop
 
 	def call_llm(
 		self,
@@ -184,10 +199,19 @@ class RuntimeClientManager:
 			)
 
 	def ollama_async_client(self):
+		loop = self._ensure_event_loop_context()
+		loop_id = id(loop)
 		client = getattr(self.bot, "_ollama_async_client", None)
-		if client is None and hasattr(ollama, "AsyncClient"):
-			client = ollama.AsyncClient()
-			self.bot._ollama_async_client = client
+		client_loop_id = getattr(self.bot, "_ollama_async_client_loop_id", None)
+		if client is None or client_loop_id != loop_id:
+			if hasattr(ollama, "AsyncClient"):
+				client = ollama.AsyncClient()
+				self.bot._ollama_async_client = client
+				self.bot._ollama_async_client_loop_id = loop_id
+			else:
+				client = None
+				self.bot._ollama_async_client = None
+				self.bot._ollama_async_client_loop_id = None
 		return client
 
 	def call_ollama_chat(self, messages, options=None, response_format=None, purpose="chat"):
@@ -214,7 +238,7 @@ class RuntimeClientManager:
 
 	async def call_ollama_chat_async(self, messages, options=None, response_format=None, purpose="chat"):
 		last_error = None
-		client = self.ollama_async_client()
+		self._ensure_event_loop_context()
 
 		for candidate in [self.bot.ACTIVE_MODEL, *[model for model in self.bot.model_candidates() if model != self.bot.ACTIVE_MODEL]]:
 			try:
@@ -226,14 +250,32 @@ class RuntimeClientManager:
 					kwargs["options"] = options
 				if response_format is not None:
 					kwargs["format"] = response_format
+				client = self.ollama_async_client()
 				if client is None:
 					response = await asyncio.to_thread(ollama.chat, **kwargs)
 				else:
-					response = await client.chat(**kwargs)
+					try:
+						response = await client.chat(**kwargs)
+					except RuntimeError as exc:
+						if not self._is_event_loop_closed_error(exc):
+							raise
+						logger.info("Recreating async Ollama client after closed event loop")
+						self.bot._ollama_async_client = None
+						self.bot._ollama_async_client_loop_id = None
+						refreshed_client = self.ollama_async_client()
+						if refreshed_client is None:
+							response = await asyncio.to_thread(ollama.chat, **kwargs)
+						else:
+							response = await refreshed_client.chat(**kwargs)
 				self.bot.ACTIVE_MODEL = candidate
 				return response
 			except self.bot.ollama_retryable_errors() as exc:
 				last_error = exc
+			except RuntimeError as exc:
+				if self._is_event_loop_closed_error(exc):
+					last_error = exc
+					continue
+				raise
 
 		error_summary = self.bot.ollama_error_summary(last_error)
 		raise RuntimeError(f"Ollama {purpose} failed for all configured models ({error_summary})") from last_error

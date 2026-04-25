@@ -1,8 +1,8 @@
-"""Event log compaction and archive tier.
+﻿"""Event log compaction and archive tier.
 
-CompactionPolicy — decides when compaction should trigger.
-EventCompactor   — trims pre-snapshot events from the in-memory ledger.
-ArchiveTier      — writes discarded events to a gzip-compressed JSONL file.
+CompactionPolicy â€” decides when compaction should trigger.
+EventCompactor   â€” trims pre-snapshot events from the in-memory ledger.
+ArchiveTier      â€” writes discarded events to a gzip-compressed JSONL file.
 
 Usage::
 
@@ -133,7 +133,7 @@ class EventCompactor:
     """Trims in-memory ledger events before the snapshot head.
 
     Compaction only runs when:
-      - a snapshot exists (no snapshot → cannot compact safely), AND
+      - a snapshot exists (no snapshot â†’ cannot compact safely), AND
       - the CompactionPolicy says the threshold is exceeded (or force=True).
 
     Events trimmed from the ledger are written to the ArchiveTier (if provided)
@@ -216,7 +216,7 @@ class EventCompactor:
             archive_path = str(path)
 
         # Replace the in-memory event list directly.
-        # EventCompactor is an authorised system operation — direct access
+        # EventCompactor is an authorised system operation â€” direct access
         # to _events is intentional here (same as snapshot restore).
         with ledger._lock:
             ledger._events = list(events_to_keep)

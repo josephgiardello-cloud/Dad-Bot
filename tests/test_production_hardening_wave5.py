@@ -97,6 +97,18 @@ class TestTracingPropagation:
         assert ctx.trace_id, "TurnContext.trace_id must be auto-generated"
         assert len(ctx.trace_id) >= 16
 
+    def test_turn_context_temporal_axis_is_frozen_and_exported(self):
+        from dadbot.core.graph import TurnContext
+
+        ctx = TurnContext(user_input="hello")
+        temporal = ctx.temporal_snapshot()
+        checkpoint = ctx.checkpoint_snapshot(stage="preflight", status="before")
+
+        assert temporal["turn_started_at"] == temporal["wall_time"]
+        assert temporal["wall_date"]
+        assert checkpoint["updated_at"] == temporal["wall_time"]
+        assert checkpoint["temporal"]["turn_started_at"] == temporal["turn_started_at"]
+
     def test_turn_context_trace_id_unique_per_instance(self):
         from dadbot.core.graph import TurnContext
         ids = {TurnContext(user_input="x").trace_id for _ in range(20)}

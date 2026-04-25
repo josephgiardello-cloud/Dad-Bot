@@ -1,4 +1,4 @@
-"""Small shared utilities for the dadbot package split."""
+﻿"""Small shared utilities for the dadbot package split."""
 
 from __future__ import annotations
 

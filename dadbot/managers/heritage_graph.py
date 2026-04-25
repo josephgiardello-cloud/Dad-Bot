@@ -1,10 +1,10 @@
-"""Heritage Graph — Semantic Cross-Linking for Narrative Memories.
+﻿"""Heritage Graph â€” Semantic Cross-Linking for Narrative Memories.
 
 Scans the distilled ``narrative_memories`` and ``consolidated_memories``
 archives to find resonant connections across different life topics and
 time periods, then generates "parental wisdom" style bridge phrases.
 
-This is purely in-process keyword/topic overlap scoring — no LLM call.
+This is purely in-process keyword/topic overlap scoring â€” no LLM call.
 The output is injected by ContextBuilder so Dad can say things like:
   "The persistence you showed in math today reminds me of how you
    handled that woodworking project back in March."
@@ -17,7 +17,7 @@ from collections import defaultdict
 from typing import Any
 
 
-# ── Topic synonym groups for broader matching ─────────────────────────────────
+# â”€â”€ Topic synonym groups for broader matching â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 _TOPIC_SYNONYMS: dict[str, list[str]] = {
     "math": ["math", "division", "arithmetic", "calculus", "algebra", "geometry", "numbers"],
     "woodworking": ["woodworking", "workshop", "carpentry", "build", "craft", "wood", "shop"],
@@ -31,11 +31,11 @@ _TOPIC_SYNONYMS: dict[str, list[str]] = {
     "learning": ["learn", "study", "school", "practice", "improve", "progress", "grow"],
 }
 
-# Bridge phrase templates — keyed by the shared emotional/behavioral theme
+# Bridge phrase templates â€” keyed by the shared emotional/behavioral theme
 _BRIDGE_TEMPLATES: list[tuple[list[str], str]] = [
     (
         ["persist", "keep", "try", "give up", "resilience", "never", "don't quit"],
-        "The same persistence you're showing with {current} is exactly how you handled {past} back in {period} — "
+        "The same persistence you're showing with {current} is exactly how you handled {past} back in {period} â€” "
         "you have a real track record of not backing down.",
     ),
     (
@@ -45,7 +45,7 @@ _BRIDGE_TEMPLATES: list[tuple[list[str], str]] = [
     (
         ["stress", "anxiety", "overwhelm", "pressure", "nervous"],
         "Remember how you navigated that tough stretch with {past} in {period}? "
-        "You came through it — and the same steady approach will carry you through {current}.",
+        "You came through it â€” and the same steady approach will carry you through {current}.",
     ),
     (
         ["confidence", "courage", "brave", "risk", "try"],
@@ -57,12 +57,12 @@ _BRIDGE_TEMPLATES: list[tuple[list[str], str]] = [
     ),
     (
         ["happy", "proud", "excited", "achieve", "success", "win"],
-        "You had that same excited energy about {past} in {period} — seeing it light you up again with {current} never gets old.",
+        "You had that same excited energy about {past} in {period} â€” seeing it light you up again with {current} never gets old.",
     ),
 ]
 
 _DEFAULT_BRIDGE = (
-    "Your work on {past} back in {period} keeps coming back to me when we talk about {current} — "
+    "Your work on {past} back in {period} keeps coming back to me when we talk about {current} â€” "
     "there's a real thread connecting these two parts of your story."
 )
 
@@ -116,7 +116,7 @@ class HeritageGraphManager:
     def __init__(self, bot: Any) -> None:
         self.bot = bot
 
-    # ── Public API ────────────────────────────────────────────────────────────
+    # â”€â”€ Public API â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     def cross_link_query(
         self,
@@ -213,12 +213,12 @@ class HeritageGraphManager:
         links = self.cross_link_query(current_text, max_links=2)
         if not links:
             return None
-        lines = ["Dad's Heritage Memory — cross-linked life lessons Dad can draw on:"]
+        lines = ["Dad's Heritage Memory â€” cross-linked life lessons Dad can draw on:"]
         for link in links:
             lines.append(f'- {link["bridge_phrase"]}')
         return "\n".join(lines)
 
-    # ── Helpers ───────────────────────────────────────────────────────────────
+    # â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     @staticmethod
     def _primary_topic_of(text: str) -> str:
