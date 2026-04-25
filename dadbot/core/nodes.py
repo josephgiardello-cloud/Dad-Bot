@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import logging
 from typing import Any
@@ -24,8 +24,10 @@ class HealthNode:
         return context
 
 
-class MemoryNode:
-    """Builds rich contextual memory/profile payload including semantic RAG hits."""
+class ContextBuilderNode:
+    """Builds rich contextual payload (profile/relationship/memory/cross-session)."""
+
+    name = "context_builder"
 
     def __init__(self, memory_manager: Any):
         self.mgr = memory_manager
@@ -45,6 +47,12 @@ class MemoryNode:
             except Exception as exc:
                 logger.warning("MemoryNode.build_context failed (non-fatal): %s", exc)
         return context
+
+
+class MemoryNode(ContextBuilderNode):
+    """Backward-compatible alias for legacy pipeline wiring."""
+
+    name = "memory"
 
 
 class InferenceNode:

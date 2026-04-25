@@ -128,38 +128,25 @@ class PromptAssemblyManager:
 		request_messages.append(self.bot.build_user_request_message(user_input, attachments))
 		return request_messages
 
-	def guard_chat_request_messages(self, messages, purpose="chat"):
-		"""Apply a final prompt-size guard before calling Ollama.
+	# ------------------------------------------------------------------
+	# guard_chat_request_messages pipeline helpers
+	# ------------------------------------------------------------------
 
-		Strategy:
-		- Keep the newest user turn whenever possible.
-		- Drop older non-system context first.
-		- Trim remaining messages to fit the prompt budget.
-		- If an oversized system prompt still dominates, replace it with a
-		  minimal safety/persona fallback and continue.
-		"""
-		import logging
-		from datetime import datetime
-		_logger = logging.getLogger(__name__)
-
-		normalized_messages = [dict(m) for m in list(messages or []) if isinstance(m, dict)]
-		if not normalized_messages:
-			return []
-
+	def _compute_prompt_budget(self) -> int:
+		"""Compute the effective token budget for the prompt, applying pressure factor."""
 		context_budget = max(256, int(self.bot.effective_context_token_budget(self.bot.ACTIVE_MODEL) or self.bot.CONTEXT_TOKEN_BUDGET or 0))
 		reserved_tokens = max(64, int(self.bot.RESERVED_RESPONSE_TOKENS or 0))
 		prompt_budget = max(128, context_budget - reserved_tokens)
 		pressure_factor = self.bot.adaptive_prompt_pressure_factor()
 		if pressure_factor < 1.0:
 			prompt_budget = max(96, int(prompt_budget * pressure_factor))
+		return prompt_budget
 
-		def total_tokens(items):
-			return sum(self.bot.message_token_cost(m) for m in items)
+	def _total_message_tokens(self, messages: list) -> int:
+		return sum(self.bot.message_token_cost(m) for m in messages)
 
-		original_tokens = total_tokens(normalized_messages)
-		if original_tokens <= prompt_budget:
-			return normalized_messages
-
+	def _drop_oldest_messages(self, messages: list, prompt_budget: int) -> list:
+		"""Drop oldest non-system, non-last messages until within budget."""
 		def removable_indices(items):
 			indexes = []
 			for idx, msg in enumerate(items):
@@ -171,51 +158,71 @@ class PromptAssemblyManager:
 				indexes.append(idx)
 			return indexes
 
-		while len(normalized_messages) > 1 and total_tokens(normalized_messages) > prompt_budget:
-			candidates = removable_indices(normalized_messages)
+		while len(messages) > 1 and self._total_message_tokens(messages) > prompt_budget:
+			candidates = removable_indices(messages)
 			if not candidates:
 				break
-			normalized_messages.pop(candidates[0])
+			messages.pop(candidates[0])
+		return messages
 
-		if total_tokens(normalized_messages) > prompt_budget and normalized_messages:
-			leading_cost = sum(self.bot.message_token_cost(m) for m in normalized_messages[:-1])
+	def _trim_last_message(self, messages: list, prompt_budget: int) -> list:
+		"""Trim the last message to fit within the remaining budget after leading messages."""
+		if self._total_message_tokens(messages) > prompt_budget and messages:
+			leading_cost = sum(self.bot.message_token_cost(m) for m in messages[:-1])
 			remaining_budget = max(32, prompt_budget - leading_cost)
-			normalized_messages[-1] = self.bot.trim_message_to_token_budget(normalized_messages[-1], remaining_budget)
+			messages[-1] = self.bot.trim_message_to_token_budget(messages[-1], remaining_budget)
+		return messages
 
-		if total_tokens(normalized_messages) > prompt_budget:
-			for idx, msg in enumerate(normalized_messages):
-				running_total = total_tokens(normalized_messages)
+	def _trim_all_messages(self, messages: list, prompt_budget: int) -> list:
+		"""Per-message trim pass — trim each message to its proportional share."""
+		if self._total_message_tokens(messages) > prompt_budget:
+			for idx, msg in enumerate(messages):
+				running_total = self._total_message_tokens(messages)
 				if running_total <= prompt_budget:
 					break
 				other_cost = running_total - self.bot.message_token_cost(msg)
 				allowed_budget = max(16, prompt_budget - other_cost)
-				normalized_messages[idx] = self.bot.trim_message_to_token_budget(msg, allowed_budget)
+				messages[idx] = self.bot.trim_message_to_token_budget(msg, allowed_budget)
+		return messages
 
-		if normalized_messages:
-			first_role = str(normalized_messages[0].get("role") or "").strip().lower()
-			if first_role == "system" and total_tokens(normalized_messages) > prompt_budget:
-				minimal_system_prompt = "You are a warm, grounded dad speaking to Tony. Be supportive, concise, honest, and safe."
-				normalized_messages[0] = {**normalized_messages[0], "content": minimal_system_prompt}
-				if total_tokens(normalized_messages) > prompt_budget:
-					other_cost = total_tokens(normalized_messages) - self.bot.message_token_cost(normalized_messages[0])
-					allowed_budget = max(16, prompt_budget - other_cost)
-					normalized_messages[0] = self.bot.trim_message_to_token_budget(normalized_messages[0], allowed_budget)
-				_logger.warning("Prompt guard replaced oversized system prompt with minimal fallback for %s", purpose)
+	def _apply_system_prompt_fallback(self, messages: list, prompt_budget: int, purpose: str) -> list:
+		"""Replace an oversized system prompt with a minimal safety fallback."""
+		import logging
+		_logger = logging.getLogger(__name__)
+		if not messages:
+			return messages
+		first_role = str(messages[0].get("role") or "").strip().lower()
+		if first_role == "system" and self._total_message_tokens(messages) > prompt_budget:
+			minimal_system_prompt = "You are a warm, grounded dad speaking to Tony. Be supportive, concise, honest, and safe."
+			messages[0] = {**messages[0], "content": minimal_system_prompt}
+			if self._total_message_tokens(messages) > prompt_budget:
+				other_cost = self._total_message_tokens(messages) - self.bot.message_token_cost(messages[0])
+				allowed_budget = max(16, prompt_budget - other_cost)
+				messages[0] = self.bot.trim_message_to_token_budget(messages[0], allowed_budget)
+			_logger.warning("Prompt guard replaced oversized system prompt with minimal fallback for %s", purpose)
+		return messages
 
-		while normalized_messages and total_tokens(normalized_messages) > prompt_budget:
-			last_idx = len(normalized_messages) - 1
-			other_cost = sum(self.bot.message_token_cost(m) for m in normalized_messages[:-1])
+	def _trim_to_hard_limit(self, messages: list, prompt_budget: int) -> list:
+		"""Final trim/drop loop — last resort to fit within budget."""
+		while messages and self._total_message_tokens(messages) > prompt_budget:
+			last_idx = len(messages) - 1
+			other_cost = sum(self.bot.message_token_cost(m) for m in messages[:-1])
 			allowed_budget = max(8, prompt_budget - other_cost)
-			trimmed = self.bot.trim_message_to_token_budget(normalized_messages[last_idx], allowed_budget)
-			if trimmed.get("content", "") == normalized_messages[last_idx].get("content", ""):
-				if len(normalized_messages) > 1:
-					normalized_messages.pop(last_idx)
+			trimmed = self.bot.trim_message_to_token_budget(messages[last_idx], allowed_budget)
+			if trimmed.get("content", "") == messages[last_idx].get("content", ""):
+				if len(messages) > 1:
+					messages.pop(last_idx)
 					continue
-				normalized_messages[last_idx] = {**trimmed, "content": "..."}
+				messages[last_idx] = {**trimmed, "content": "..."}
 				break
-			normalized_messages[last_idx] = trimmed
+			messages[last_idx] = trimmed
+		return messages
 
-		final_tokens = total_tokens(normalized_messages)
+	def _record_guard_stats(self, original_tokens: int, final_tokens: int, purpose: str) -> None:
+		"""Update prompt_guard_stats and emit a log line if trimming occurred."""
+		import logging
+		from datetime import datetime
+		_logger = logging.getLogger(__name__)
 		prompt_guard_stats = self.bot.prompt_guard_stats()
 		trimmed_flag = final_tokens < original_tokens
 		prompt_guard_stats.update({
@@ -229,10 +236,39 @@ class PromptAssemblyManager:
 			prompt_guard_stats["trim_count"] = int(prompt_guard_stats.get("trim_count", 0) or 0) + 1
 			prompt_guard_stats["trimmed_tokens_total"] = int(prompt_guard_stats.get("trimmed_tokens_total", 0) or 0) + max(0, int(original_tokens) - int(final_tokens))
 		self.bot._prompt_guard_stats = prompt_guard_stats
-
-		if final_tokens < original_tokens:
+		if trimmed_flag:
 			_logger.info("Prompt guard trimmed %s request from %s to %s tokens for %s", self.bot.ACTIVE_MODEL, original_tokens, final_tokens, purpose)
 
+	# ------------------------------------------------------------------
+	# Orchestrator
+	# ------------------------------------------------------------------
+
+	def guard_chat_request_messages(self, messages, purpose="chat"):
+		"""Apply a final prompt-size guard before calling Ollama.
+
+		Strategy:
+		- Keep the newest user turn whenever possible.
+		- Drop older non-system context first.
+		- Trim remaining messages to fit the prompt budget.
+		- If an oversized system prompt still dominates, replace it with a
+		  minimal safety/persona fallback and continue.
+		"""
+		normalized_messages = [dict(m) for m in list(messages or []) if isinstance(m, dict)]
+		if not normalized_messages:
+			return []
+
+		prompt_budget = self._compute_prompt_budget()
+		original_tokens = self._total_message_tokens(normalized_messages)
+		if original_tokens <= prompt_budget:
+			return normalized_messages
+
+		normalized_messages = self._drop_oldest_messages(normalized_messages, prompt_budget)
+		normalized_messages = self._trim_last_message(normalized_messages, prompt_budget)
+		normalized_messages = self._trim_all_messages(normalized_messages, prompt_budget)
+		normalized_messages = self._apply_system_prompt_fallback(normalized_messages, prompt_budget, purpose)
+		normalized_messages = self._trim_to_hard_limit(normalized_messages, prompt_budget)
+
+		self._record_guard_stats(original_tokens, self._total_message_tokens(normalized_messages), purpose)
 		return normalized_messages
 
 

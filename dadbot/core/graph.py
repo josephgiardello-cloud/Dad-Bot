@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import time
@@ -156,12 +156,18 @@ class HealthNode:
         turn_context.state["health"] = service.tick(turn_context)
 
 
-class MemoryNode:
-    name = "memory"
+class ContextBuilderNode:
+    name = "context_builder"
 
     async def execute(self, registry: Any, turn_context: TurnContext) -> None:
         service = registry.get("context_service")
         turn_context.state["rich_context"] = service.build_context(turn_context)
+
+
+class MemoryNode(ContextBuilderNode):
+    """Backward-compatible alias for legacy graph stage naming."""
+
+    name = "memory"
 
 
 class InferenceNode:
@@ -196,7 +202,7 @@ class TurnGraph:
 
     def __init__(self, registry: Any = None, nodes: list[GraphNode] | None = None):
         self.registry = registry
-        self.nodes = nodes or [HealthNode(), MemoryNode(), InferenceNode(), SafetyNode(), SaveNode()]
+        self.nodes = nodes or [HealthNode(), ContextBuilderNode(), InferenceNode(), SafetyNode(), SaveNode()]
         self._node_map: dict[str, Any] = {}
         self._edges: dict[str, str] = {}
         self._entry_node: str | None = None

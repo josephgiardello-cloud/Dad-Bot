@@ -75,90 +75,124 @@ class RelationshipManager:
     def relationship_hypotheses(self, state: dict | None = None, limit: int | None = None) -> list[dict]:
         return self.hypotheses(state=state, limit=limit)
 
-    def build_hypothesis_posteriors(self, state: dict, user_input: str, current_mood: str) -> list[dict]:
+    # ------------------------------------------------------------------
+    # build_hypothesis_posteriors pipeline stages
+    # ------------------------------------------------------------------
+
+    def _load_hypothesis_priors(self, state: dict) -> tuple[dict, dict]:
+        """Load hypothesis profiles and prior probabilities from current state."""
         profiles = self.bot.relationship_hypothesis_profiles()
         priors = {entry["name"]: float(entry.get("probability", 0.0) or 0.0) for entry in self.hypotheses(state)}
         if not priors:
             priors = {entry["name"]: float(entry["probability"]) for entry in self.bot.default_relationship_hypotheses()}
+        return profiles, priors
 
-        lowered = str(user_input or "").strip().lower()
-        tokens = self.bot.tokenize(user_input)
-        vulnerability_markers = {
+    def _extract_turn_signals(self, state: dict, user_input: str, current_mood: str) -> dict:
+        """Extract all observable signals from the current turn for evidence weighting."""
+        _VULNERABILITY_MARKERS = {
             "feel", "feeling", "worried", "anxious", "overwhelmed", "sad", "lonely", "hurt",
             "struggling", "struggle", "afraid", "scared", "drained", "tired",
         }
-        connection_markers = ["thank you", "thanks", "appreciate", "love you", "needed that", "that helped"]
-        guarded_markers = ["leave me alone", "stop", "whatever", "fine", "forget it", "dont want to talk", "don't want to talk"]
-        heavy_moods = {"sad", "stressed", "frustrated", "tired"}
-        recent_moods = [self.bot.normalize_mood(item.get("mood")) for item in list(state.get("recent_checkins", []))[-6:]]
-        heavy_recent = sum(1 for mood in recent_moods if mood in heavy_moods)
-        positive_recent = sum(1 for mood in recent_moods if mood == "positive")
-        average_level = (int(state.get("trust_level", 50)) + int(state.get("openness_level", 50))) / 2.0
+        _CONNECTION_MARKERS = ["thank you", "thanks", "appreciate", "love you", "needed that", "that helped"]
+        _GUARDED_MARKERS = ["leave me alone", "stop", "whatever", "fine", "forget it", "dont want to talk", "don't want to talk"]
+        _HEAVY_MOODS = {"sad", "stressed", "frustrated", "tired"}
 
+        lowered = str(user_input or "").strip().lower()
+        tokens = self.bot.tokenize(user_input)
+        recent_moods = [self.bot.normalize_mood(item.get("mood")) for item in list(state.get("recent_checkins", []))[-6:]]
+        return {
+            "lowered": lowered,
+            "tokens": tokens,
+            "has_vulnerability": bool(_VULNERABILITY_MARKERS & tokens),
+            "has_connection": any(marker in lowered for marker in _CONNECTION_MARKERS),
+            "has_guarded": any(marker in lowered for marker in _GUARDED_MARKERS),
+            "is_heavy_mood": current_mood in _HEAVY_MOODS,
+            "is_positive_mood": current_mood == "positive",
+            "is_neutral_or_stressed": current_mood in {"neutral", "stressed"},
+            "heavy_recent": sum(1 for mood in recent_moods if mood in _HEAVY_MOODS),
+            "positive_recent": sum(1 for mood in recent_moods if mood == "positive"),
+            "average_level": (int(state.get("trust_level", 50)) + int(state.get("openness_level", 50))) / 2.0,
+            "is_heavy_momentum": str(state.get("emotional_momentum") or "steady") == "heavy",
+        }
+
+    def _build_evidence_weights(self, profiles: dict, signals: dict, state: dict) -> dict:
+        """Compute per-hypothesis likelihood multipliers from extracted turn signals."""
         evidence = {name: 1.0 for name in profiles}
         evidence["supportive_baseline"] *= 1.05
-        if average_level >= 65:
+
+        if signals["average_level"] >= 65:
             evidence["supportive_baseline"] *= 1.35
-        elif average_level <= 42:
+        elif signals["average_level"] <= 42:
             evidence["guarded_distance"] *= 1.40
 
-        if vulnerability_markers & tokens:
+        if signals["has_vulnerability"]:
             evidence["acute_stress"] *= 2.40
             evidence["supportive_baseline"] *= 1.15
-
-        if current_mood in heavy_moods:
+        if signals["is_heavy_mood"]:
             evidence["acute_stress"] *= 2.00
-        if current_mood == "positive":
+        if signals["is_positive_mood"]:
             evidence["positive_rebound"] *= 1.90
             evidence["supportive_baseline"] *= 1.20
-
-        if any(marker in lowered for marker in connection_markers):
+        if signals["has_connection"]:
             evidence["supportive_baseline"] *= 1.80
-        if any(marker in lowered for marker in guarded_markers):
+        if signals["has_guarded"]:
             evidence["guarded_distance"] *= 2.30
             evidence["supportive_baseline"] *= 0.75
-
-        if str(state.get("emotional_momentum") or "steady") == "heavy":
+        if signals["is_heavy_momentum"]:
             evidence["acute_stress"] *= 1.30
             evidence["guarded_distance"] *= 1.10
-
-        if current_mood == "positive" and heavy_recent >= 2:
+        if signals["is_positive_mood"] and signals["heavy_recent"] >= 2:
             evidence["positive_rebound"] *= 2.10
-        if heavy_recent >= 3 and current_mood in {"neutral", "stressed"}:
+        if signals["heavy_recent"] >= 3 and signals["is_neutral_or_stressed"]:
             evidence["acute_stress"] *= 1.25
-        if positive_recent >= 2 and current_mood == "positive":
+        if signals["positive_recent"] >= 2 and signals["is_positive_mood"]:
             evidence["positive_rebound"] *= 1.20
 
+        # Continuity bias: nudge the currently-leading hypothesis
         current_hypotheses = self.hypotheses(state)
         if current_hypotheses:
             leading_name = str(current_hypotheses[0].get("name") or "").strip().lower()
             if leading_name in evidence:
                 evidence[leading_name] *= 1.08
 
-        posterior_entries = []
+        return evidence
+
+    def _compute_raw_posteriors(self, profiles: dict, priors: dict, evidence: dict) -> list[dict]:
+        """Apply Bayes update with 25/75 smoothing toward the prior."""
         raw_total = sum(max(0.01, priors.get(name, 0.01)) * evidence[name] for name in profiles)
         if raw_total <= 0:
             raw_total = float(len(profiles))
-
+        entries = []
         for name, profile in profiles.items():
             prior = max(0.01, priors.get(name, 0.01))
             posterior = (prior * evidence[name]) / raw_total
             smoothed = prior * 0.25 + posterior * 0.75
-            posterior_entries.append(
-                {
-                    "name": name,
-                    "label": profile["label"],
-                    "summary": profile["summary"],
-                    "probability": smoothed,
-                }
-            )
+            entries.append({
+                "name": name,
+                "label": profile["label"],
+                "summary": profile["summary"],
+                "probability": smoothed,
+            })
+        return entries
 
-        total_probability = sum(entry["probability"] for entry in posterior_entries) or 1.0
-        for entry in posterior_entries:
-            entry["probability"] = round(entry["probability"] / total_probability, 4)
+    def _normalize_and_rank_posteriors(self, entries: list[dict]) -> list[dict]:
+        """Normalize probabilities to sum to 1.0 and sort descending."""
+        total = sum(entry["probability"] for entry in entries) or 1.0
+        for entry in entries:
+            entry["probability"] = round(entry["probability"] / total, 4)
+        entries.sort(key=lambda entry: (-entry["probability"], entry["name"]))
+        return entries
 
-        posterior_entries.sort(key=lambda entry: (-entry["probability"], entry["name"]))
-        return posterior_entries
+    # ------------------------------------------------------------------
+    # Orchestrator
+    # ------------------------------------------------------------------
+
+    def build_hypothesis_posteriors(self, state: dict, user_input: str, current_mood: str) -> list[dict]:
+        profiles, priors = self._load_hypothesis_priors(state)
+        signals = self._extract_turn_signals(state, user_input, current_mood)
+        evidence = self._build_evidence_weights(profiles, signals, state)
+        entries = self._compute_raw_posteriors(profiles, priors, evidence)
+        return self._normalize_and_rank_posteriors(entries)
 
     def snapshot(self) -> dict:
         state = self.current_state()
@@ -188,6 +222,18 @@ class RelationshipManager:
 
     def relationship_snapshot(self) -> dict:
         return self.snapshot()
+
+    def record_history_point(self, *, trust_level, openness_level, source="turn") -> dict:
+        history = list(self.bot.memory.relationship_history(limit=180))
+        point = {
+            "recorded_at": self.bot.runtime_timestamp(),
+            "trust_level": self.bot.clamp_score(trust_level),
+            "openness_level": self.bot.clamp_score(openness_level),
+            "source": str(source or "turn").strip().lower() or "turn",
+        }
+        history.append(point)
+        self.bot.memory.mutate_memory_store(relationship_history=history[-180:], save=True)
+        return point
 
     def build_prompt_context(self) -> str:
         snapshot = self.snapshot()
@@ -303,7 +349,7 @@ Rules:
         current_state["last_updated"] = date.today().isoformat()
         self.bot.last_relationship_reflection_turn = turn_count
         self.bot.mutate_memory_store(relationship_state=current_state)
-        self.bot.record_relationship_history_point(
+        self.record_history_point(
             trust_level=current_state["trust_level"],
             openness_level=current_state["openness_level"],
             source="reflection",
@@ -328,7 +374,7 @@ Rules:
         state["openness_level"] = self.bot.clamp_score(state.get("openness_level", 50) + openness_delta)
         state["last_updated"] = date.today().isoformat()
         self.bot.mutate_memory_store(relationship_state=state)
-        self.bot.record_relationship_history_point(
+        self.record_history_point(
             trust_level=state["trust_level"],
             openness_level=state["openness_level"],
             source=f"feedback:{key or 'unknown'}",
@@ -398,7 +444,7 @@ Rules:
         state["last_hypothesis_updated"] = date.today().isoformat()
         state["last_updated"] = date.today().isoformat()
         self.bot.mutate_memory_store(relationship_state=state)
-        self.bot.record_relationship_history_point(
+        self.record_history_point(
             trust_level=state["trust_level"],
             openness_level=state["openness_level"],
             source="turn",

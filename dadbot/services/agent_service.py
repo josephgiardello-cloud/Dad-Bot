@@ -129,58 +129,48 @@ class AgentService:
             "deterministic": True,
         }
 
-    async def run_agent(self, turn_context: Any, rich_context: dict[str, Any] | None = None):
-        bot = self.bot
+    @staticmethod
+    def _normalize_turn_input(turn_context: Any) -> tuple[str, Any, str]:
         user_input = str(getattr(turn_context, "user_input", "") or "")
         attachments = getattr(turn_context, "attachments", None)
-        stripped = user_input.strip()
+        return user_input, attachments, user_input.strip()
 
-        if not stripped and not attachments:
-            turn_context.state["already_finalized"] = True
-            return ("", False)
-
-        # Delegate pre-LLM work to TurnService (mood, direct reply,
-        # agentic tool planning) without going through DadBot.process_user_message*
-        # which would re-enter the graph and create infinite recursion.
+    async def _prepare_user_turn(self, bot: Any, stripped: str, attachments: Any) -> tuple[Any, Any, Any, str, Any] | None:
         turn_service = getattr(bot, "turn_service", None)
         if turn_service is None:
             logger.error("AgentService: bot.turn_service is not wired; cannot run inference")
-            return ("I'm having trouble thinking right now. Try again in a moment.", False)
-
+            return None
         try:
-            mood, early_reply, should_end, turn_text, norm_attachments = (
-                await turn_service.prepare_user_turn_async(stripped, attachments)
-            )
+            return await turn_service.prepare_user_turn_async(stripped, attachments)
         except Exception as exc:
             logger.error("AgentService: prepare_user_turn_async failed: %s", exc)
-            return ("Something went sideways on my end. Give me a second.", False)
+            return None
 
-        # Stash turn context metadata for downstream nodes (SafetyNode, SaveNode)
+    @staticmethod
+    def _record_turn_preinference_state(turn_context: Any, *, mood: Any, turn_text: str, stripped: str, norm_attachments: Any) -> None:
         turn_context.state["mood"] = mood or "neutral"
         turn_context.state["turn_text"] = turn_text or stripped
         turn_context.state["norm_attachments"] = norm_attachments
 
-        # Required Bayesian step in the execution path: belief update + policy.
+    def _record_bayesian_state(self, bot: Any, turn_context: Any, *, turn_text: str, stripped: str, mood: Any) -> dict[str, Any]:
         bayesian_state = self._bayesian_execution_state(
             turn_text=turn_text or stripped,
             current_mood=mood or "neutral",
         )
         turn_context.state["bayesian_state"] = bayesian_state
         turn_context.metadata["bayesian_state"] = bayesian_state
-
-        # Push the governing tool_bias from the Bayesian state into the planner debug
-        # store so that plan_agentic_tools (which is called by prepare_user_turn_async
-        # earlier in this same turn) can gate tool selection correctly.
-        # NOTE: prepare_user_turn_async is called above; the governing bias is persisted
-        # here for subsequent turns and for the tool envelope metadata.
         tool_bias = str(bayesian_state.get("tool_bias") or "planner_default")
         try:
-            bot.update_planner_debug(bayesian_tool_bias=tool_bias, bayesian_policy=str(bayesian_state.get("policy") or ""))
+            bot.update_planner_debug(
+                bayesian_tool_bias=tool_bias,
+                bayesian_policy=str(bayesian_state.get("policy") or ""),
+            )
         except Exception:
             pass
+        return bayesian_state
 
-        # Record TONY relationship score AFTER prepare_user_turn_async has updated
-        # relationship state so the score reflects the current turn.
+    @staticmethod
+    def _record_relationship_snapshot(bot: Any, turn_context: Any) -> None:
         try:
             rel_state = bot.relationship_manager.current_state()
             turn_context.state["tony_score"] = rel_state.get("score", 50)
@@ -190,33 +180,20 @@ class AgentService:
             turn_context.state.setdefault("tony_score", 50)
             turn_context.state.setdefault("tony_level", "steady")
 
-        # Session exit: prepare_user_turn_async already persisted; skip SaveNode work.
-        if should_end:
-            turn_context.state["already_finalized"] = True
-            turn_context.state["tool_execution_envelope"] = self._tool_execution_envelope(
-                bot,
-                turn_context,
-                reply_source="session_exit",
-            )
-            return (early_reply or "", True)
-
-        # Direct reply (safety intercept, memory command, tool command, fact reply)
-        if early_reply is not None:
-            turn_context.state["tool_execution_envelope"] = self._tool_execution_envelope(
-                bot,
-                turn_context,
-                reply_source="direct_or_tool_reply",
-            )
-            return (early_reply, False)
-
-        # LLM inference — routed through the determinism boundary so that:
-        #   RECORD mode: call LLM, seal the response for this turn.
-        #   REPLAY mode: return sealed response without calling LLM.
-        #   OPEN mode:   call LLM directly (no enforcement).
+    @staticmethod
+    def _llm_reply_with_boundary(
+        *,
+        bot: Any,
+        turn_context: Any,
+        stripped: str,
+        turn_text: str,
+        mood: Any,
+        norm_attachments: Any,
+    ) -> str:
         reply_gen = getattr(bot, "reply_generation", None)
         if reply_gen is None:
             logger.error("AgentService: bot.reply_generation is not wired")
-            return ("I can't generate a reply right now. Try again.", False)
+            return "I can't generate a reply right now. Try again."
 
         boundary: DeterminismBoundary = getattr(turn_context, "determinism_boundary", None) or DeterminismBoundary()
 
@@ -238,9 +215,61 @@ class AgentService:
             logger.error("AgentService: LLM inference failed: %s", exc)
             reply = "Something went sideways on my end. Try again in a moment."
 
-        # Persist boundary snapshot into turn state after execution.
-        turn_context.state["determinism_boundary"] = boundary.snapshot()
-        turn_context.metadata["determinism_boundary"] = boundary.snapshot()
+        boundary_snapshot = boundary.snapshot()
+        turn_context.state["determinism_boundary"] = boundary_snapshot
+        turn_context.metadata["determinism_boundary"] = boundary_snapshot
+        return reply
+
+    async def run_agent(self, turn_context: Any, rich_context: dict[str, Any] | None = None):
+        bot = self.bot
+        _user_input, attachments, stripped = self._normalize_turn_input(turn_context)
+
+        if not stripped and not attachments:
+            turn_context.state["already_finalized"] = True
+            return ("", False)
+
+        prepared = await self._prepare_user_turn(bot, stripped, attachments)
+        if prepared is None:
+            return ("Something went sideways on my end. Give me a second.", False)
+        mood, early_reply, should_end, turn_text, norm_attachments = prepared
+
+        self._record_turn_preinference_state(
+            turn_context,
+            mood=mood,
+            turn_text=turn_text,
+            stripped=stripped,
+            norm_attachments=norm_attachments,
+        )
+        self._record_bayesian_state(bot, turn_context, turn_text=turn_text, stripped=stripped, mood=mood)
+        self._record_relationship_snapshot(bot, turn_context)
+
+        # Session exit: prepare_user_turn_async already persisted; skip SaveNode work.
+        if should_end:
+            turn_context.state["already_finalized"] = True
+            turn_context.state["tool_execution_envelope"] = self._tool_execution_envelope(
+                bot,
+                turn_context,
+                reply_source="session_exit",
+            )
+            return (early_reply or "", True)
+
+        # Direct reply (safety intercept, memory command, tool command, fact reply)
+        if early_reply is not None:
+            turn_context.state["tool_execution_envelope"] = self._tool_execution_envelope(
+                bot,
+                turn_context,
+                reply_source="direct_or_tool_reply",
+            )
+            return (early_reply, False)
+
+        reply = self._llm_reply_with_boundary(
+            bot=bot,
+            turn_context=turn_context,
+            stripped=stripped,
+            turn_text=turn_text,
+            mood=mood,
+            norm_attachments=norm_attachments,
+        )
 
         turn_context.state["tool_execution_envelope"] = self._tool_execution_envelope(
             bot,

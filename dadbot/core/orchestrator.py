@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -16,7 +17,7 @@ from dadbot.core.interfaces import (
     SafetyPolicyService,
     validate_pipeline_services,
 )
-from dadbot.core.nodes import HealthNode, InferenceNode, MemoryNode, SafetyNode, SaveNode
+from dadbot.core.nodes import ContextBuilderNode, HealthNode, InferenceNode, SafetyNode, SaveNode
 from dadbot.core.observability import CorrelationContext, configure_exporter
 from dadbot.registry import ServiceRegistry, boot_registry
 
@@ -35,6 +36,7 @@ class DadBotOrchestrator:
         strict: bool = False,
         enable_observability: bool = True,
     ):
+        self.bot = bot
         self._strict = strict
         self.registry = registry or boot_registry(config_path=config_path, bot=bot)
         if enable_observability:
@@ -88,7 +90,7 @@ class DadBotOrchestrator:
             "preflight",
             (
                 HealthNode(health),
-                MemoryNode(memory),
+                ContextBuilderNode(memory),
             ),
         )
         graph.add_node("inference", InferenceNode(llm))
@@ -187,3 +189,110 @@ class DadBotOrchestrator:
             attachments=attachments,
             timeout_seconds=timeout_seconds,
         )
+
+    def graph_turns_enabled(self) -> bool:
+        return bool(getattr(self.bot, "_turn_graph_enabled", False))
+
+    @staticmethod
+    def _run_coro_in_thread(coro):
+        import concurrent.futures
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, coro).result()
+
+    async def _run_graph_turn_async(
+        self,
+        user_input: str,
+        attachments: AttachmentList | None = None,
+    ) -> FinalizedTurnResult:
+        return await self.handle_turn(user_input, attachments=attachments)
+
+    def _run_graph_turn_sync(
+        self,
+        user_input: str,
+        attachments: AttachmentList | None = None,
+    ) -> FinalizedTurnResult:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        coro = self._run_graph_turn_async(user_input, attachments=attachments)
+        if loop is not None and loop.is_running():
+            return self._run_coro_in_thread(coro)
+        return asyncio.run(coro)
+
+    def _record_graph_fallback(self, exc: Exception, *, mode: str) -> None:
+        logger.warning(
+            "Graph orchestration degraded to legacy %s pipeline; preserving response continuity: %s",
+            mode,
+            exc,
+        )
+        record_runtime_issue = getattr(self.bot, "record_runtime_issue", None)
+        if callable(record_runtime_issue):
+            record_runtime_issue(
+                "turn_graph",
+                f"turn_service_{mode}_fallback",
+                exc=exc,
+                level=logging.WARNING,
+                metadata={
+                    "degraded_mode": f"legacy_{mode}",
+                    "graph_enabled": True,
+                    "path": "graph_to_legacy",
+                },
+            )
+
+    def _append_signoff(self, text: str) -> str:
+        finalization = getattr(self.bot, "reply_finalization", None)
+        append_signoff = getattr(finalization, "append_signoff", None)
+        if callable(append_signoff):
+            return append_signoff(text)
+        legacy = getattr(self.bot, "finalize_reply", None)
+        if callable(legacy):
+            return legacy(text)
+        return str(text or "")
+
+    def _ollama_retryable_errors(self):
+        handler = getattr(self.bot, "ollama_retryable_errors", None)
+        if callable(handler):
+            return handler()
+        return (ConnectionError, TimeoutError, OSError)
+
+    def run(
+        self,
+        user_input: str,
+        attachments: AttachmentList | None = None,
+    ) -> FinalizedTurnResult:
+        turn_service = getattr(self.bot, "turn_service")
+        if self.graph_turns_enabled():
+            try:
+                return self._run_graph_turn_sync(user_input, attachments=attachments)
+            except Exception as exc:
+                self._record_graph_fallback(exc, mode="sync")
+        try:
+            return turn_service.process_user_message(user_input, attachments)
+        except self._ollama_retryable_errors() as exc:
+            logger.error("Ollama connection error during turn; returning friendly fallback: %s", exc)
+            friendly = (
+                "I'm having a little trouble thinking right now - my connection seems to be down. "
+                "Give me a moment and try again, buddy."
+            )
+            return self._append_signoff(friendly), False
+        except Exception as exc:
+            logger.error("Unexpected error during turn processing; returning safe fallback: %s", exc)
+            return self._append_signoff(
+                "Something went sideways on my end. I'm okay - just try again in a second."
+            ), False
+
+    async def run_async(
+        self,
+        user_input: str,
+        attachments: AttachmentList | None = None,
+    ) -> FinalizedTurnResult:
+        turn_service = getattr(self.bot, "turn_service")
+        if self.graph_turns_enabled():
+            try:
+                return await self._run_graph_turn_async(user_input, attachments=attachments)
+            except Exception as exc:
+                self._record_graph_fallback(exc, mode="async")
+        return await turn_service.process_user_message_async(user_input, attachments)
