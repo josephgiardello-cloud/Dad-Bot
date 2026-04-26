@@ -4,6 +4,7 @@ import logging
 from typing import Any
 
 from dadbot.core.graph import TurnContext
+from dadbot.core.invariant_registry import check_invariants
 
 logger = logging.getLogger(__name__)
 
@@ -162,6 +163,11 @@ class SaveNode:
             raise
 
     async def run(self, context: TurnContext) -> TurnContext:
+        check_invariants(
+            context,
+            stage="save_node_pre",
+            call_site="core.nodes.SaveNode.run",
+        )
         if getattr(context, "temporal", None) is None:
             raise RuntimeError("TemporalNode required — execution invalid")
         context.state.setdefault("temporal", context.temporal_snapshot())
@@ -183,6 +189,11 @@ class SaveNode:
             if callable(rollback_transaction):
                 rollback_transaction(context)
             raise
+        check_invariants(
+            context,
+            stage="save_node_post",
+            call_site="core.nodes.SaveNode.run",
+        )
         return context
 
 

@@ -11,6 +11,8 @@ from typing import Any, Callable, Literal, Protocol
 from dadbot.contracts import AttachmentList, ChunkCallback, FinalizedTurnResult
 from dadbot.core.determinism import DeterminismBoundary, DeterminismMode
 from dadbot.core.execution_boundary import ControlPlaneExecutionBoundary
+from dadbot.core.execution_firewall import ExecutionFirewall, FirewallContext
+from dadbot.core.invariant_registry import check_invariants
 from dadbot.core.kernel import TurnKernel
 
 
@@ -155,6 +157,8 @@ class MutationQueue:
         executor: Callable[[MutationIntent], None],
         *,
         hard_fail_on_error: bool = True,
+        turn_context: Any | None = None,
+        firewall: ExecutionFirewall | None = None,
     ) -> list[tuple[MutationIntent, str]]:
         """Execute all queued intents through ``executor``.  Returns failures.
 
@@ -173,6 +177,15 @@ class MutationQueue:
         self._queue.clear()
         for index, intent in enumerate(to_drain):
             try:
+                if turn_context is not None:
+                    commit_active = bool(getattr(turn_context, "state", {}).get("_save_transaction_active", False))
+                    check_invariants(
+                        turn_context,
+                        stage="mutation_drain",
+                        call_site=f"mutation_queue:{getattr(intent, 'source', '')}",
+                        firewall=firewall,
+                        mutation_outside_save_node=not commit_active,
+                    )
                 executor(intent)
                 self._drained.append(intent)
             except Exception as exc:
@@ -585,6 +598,7 @@ class TurnGraph:
         self._degraded_inference_threshold_ms = 2200.0
         self._degraded_memory_threshold_ms = 1200.0
         self._degraded_graph_sync_threshold_ms = 1200.0
+        self._execution_firewall = ExecutionFirewall()
 
     @staticmethod
     def _stage_duration_ms(turn_context: TurnContext, stage_name: str) -> float:
@@ -747,6 +761,15 @@ class TurnGraph:
                 )
 
     def add_node(self, name: str, node: Any) -> None:
+        self._execution_firewall.enforce_execution_firewall(
+            f"turn_graph.add_node:{name}",
+            context=FirewallContext(
+                trace_id="",
+                stage="graph_build",
+                mutation_outside_save_node=False,
+                temporal_missing=False,
+            ),
+        )
         if name not in self._node_map:
             if self._entry_node is None:
                 self._entry_node = name
@@ -798,6 +821,14 @@ class TurnGraph:
         if isinstance(node, (list, tuple)):
             return await self._execute_parallel_nodes(node, turn_context)
 
+        node_name = str(getattr(node, "name", type(node).__name__) or type(node).__name__)
+        check_invariants(
+            turn_context,
+            stage="pre_node_execute",
+            call_site=f"turn_graph.node:{node_name}",
+            firewall=self._execution_firewall,
+        )
+
         async def _call_node() -> TurnContext:
             if callable(getattr(node, "run", None)):
                 result = await node.run(turn_context)
@@ -809,7 +840,6 @@ class TurnGraph:
             raise TypeError(f"Unsupported node type: {type(node).__name__}")
 
         if self._kernel is not None:
-            node_name = getattr(node, "name", type(node).__name__)
             step_result = await self._kernel.execute_step(turn_context, node_name, _call_node)
             if step_result.status == "error":
                 raise RuntimeError(step_result.error)
@@ -892,6 +922,12 @@ class TurnGraph:
                 )
 
         self._emit_execution_witness("graph.execute", turn_context)
+        check_invariants(
+            turn_context,
+            stage="pre_execute",
+            call_site="turn_graph.execute",
+            firewall=self._execution_firewall,
+        )
         execute_started_at = time.perf_counter()
 
         def _enforce_fidelity_invariants() -> None:
@@ -950,6 +986,12 @@ class TurnGraph:
                         if turn_context.short_circuit_result is not None:
                             total_ms = round((time.perf_counter() - execute_started_at) * 1000, 3)
                             self._emit_turn_health_state(turn_context, total_latency_ms=total_ms, failed=False)
+                            check_invariants(
+                                turn_context,
+                                stage="post_execute",
+                                call_site="turn_graph.execute.short_circuit",
+                                firewall=self._execution_firewall,
+                            )
                             _enforce_fidelity_invariants()
                             return turn_context.short_circuit_result
                         break
@@ -996,6 +1038,12 @@ class TurnGraph:
                         if turn_context.short_circuit_result is not None:
                             total_ms = round((time.perf_counter() - execute_started_at) * 1000, 3)
                             self._emit_turn_health_state(turn_context, total_latency_ms=total_ms, failed=False)
+                            check_invariants(
+                                turn_context,
+                                stage="post_execute",
+                                call_site="turn_graph.execute.short_circuit",
+                                firewall=self._execution_firewall,
+                            )
                             _enforce_fidelity_invariants()
                             return turn_context.short_circuit_result
                         break
@@ -1011,6 +1059,12 @@ class TurnGraph:
         result = turn_context.state.get("safe_result")
         total_ms = round((time.perf_counter() - execute_started_at) * 1000, 3)
         self._emit_turn_health_state(turn_context, total_latency_ms=total_ms, failed=False)
+        check_invariants(
+            turn_context,
+            stage="post_execute",
+            call_site="turn_graph.execute.complete",
+            firewall=self._execution_firewall,
+        )
         _enforce_fidelity_invariants()
         if isinstance(result, tuple) and len(result) >= 2:
             return result

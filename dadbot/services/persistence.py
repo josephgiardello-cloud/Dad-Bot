@@ -180,7 +180,11 @@ class PersistenceService:
                 else:
                     raise RuntimeError(f"MutationIntent: unknown type={intent_type!r} source={source!r}")
 
-            mutation_queue.drain(_dispatch_mutation_intent, hard_fail_on_error=True)
+            mutation_queue.drain(
+                _dispatch_mutation_intent,
+                hard_fail_on_error=True,
+                turn_context=turn_context,
+            )
             if not mutation_queue.is_empty():
                 pending = mutation_queue.size()
                 raise FatalTurnError(
