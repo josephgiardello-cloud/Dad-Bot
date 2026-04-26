@@ -628,36 +628,18 @@ class TurnGraph:
     def set_execution_kernel(self, kernel: ExecutionKernel) -> None:
         self._execution_kernel = kernel
 
-    def _kernel_validate(
-        self,
-        *,
-        stage: str,
-        operation: str,
-        turn_context: TurnContext,
-        mutation_outside_save_node: bool = False,
-    ) -> None:
-        kernel = self._execution_kernel
-        if kernel is None:
-            return
-        if bool(getattr(kernel, "strict", False)):
-            kernel.validate(
-                stage=stage,
-                operation=operation,
-                context=turn_context,
-                mutation_outside_save_node=mutation_outside_save_node,
-            )
-            return
-        try:
-            result = kernel.validate(
-                stage=stage,
-                operation=operation,
-                context=turn_context,
-                mutation_outside_save_node=mutation_outside_save_node,
-            )
-            if not bool(getattr(result, "ok", True)):
-                logger.warning("[KERNEL SHADOW VIOLATION] %s", getattr(result, "reason", "validation failed"))
-        except Exception as exc:
-            logger.warning("[KERNEL SHADOW VIOLATION] %s", exc)
+    def _pipeline_items(self) -> list[tuple[str, Any]]:
+        if self._node_map:
+            items: list[tuple[str, Any]] = []
+            node_name = self._entry_node
+            while node_name is not None:
+                items.append((node_name, self._node_map[node_name]))
+                node_name = self._edges.get(node_name)
+            return items
+        return [
+            (str(getattr(node, "name", type(node).__name__) or type(node).__name__), node)
+            for node in self.nodes
+        ]
 
     @staticmethod
     def _stage_duration_ms(turn_context: TurnContext, stage_name: str) -> float:
@@ -822,11 +804,13 @@ class TurnGraph:
     def add_node(self, name: str, node: Any) -> None:
         # Kernel in shadow mode during graph construction.
         shadow_context = TurnContext(user_input="graph_build")
-        self._kernel_validate(
+        result = self._execution_kernel.validate(
             stage="graph_build",
             operation=f"turn_graph.add_node:{name}",
-            turn_context=shadow_context,
+            context=shadow_context,
         )
+        if not bool(getattr(result, "ok", True)):
+            logger.warning("[KERNEL SHADOW VIOLATION] %s", getattr(result, "reason", "graph build validation failed"))
         if name not in self._node_map:
             if self._entry_node is None:
                 self._entry_node = name
@@ -879,11 +863,6 @@ class TurnGraph:
             return await self._execute_parallel_nodes(node, turn_context)
 
         node_name = str(getattr(node, "name", type(node).__name__) or type(node).__name__)
-        self._kernel_validate(
-            stage="pre_node_execute",
-            operation=f"turn_graph.node:{node_name}",
-            turn_context=turn_context,
-        )
 
         async def _call_node() -> TurnContext:
             if callable(getattr(node, "run", None)):
@@ -979,11 +958,6 @@ class TurnGraph:
 
         self._emit_execution_witness("graph.execute", turn_context)
         turn_context.state["_execution_kernel"] = self._execution_kernel
-        self._kernel_validate(
-            stage="pre_execute",
-            operation="turn_graph.execute",
-            turn_context=turn_context,
-        )
         execute_started_at = time.perf_counter()
 
         def _enforce_fidelity_invariants() -> None:
@@ -1005,119 +979,60 @@ class TurnGraph:
                 raise RuntimeError("Structural turn invariant violated: InferenceNode missing")
 
         telemetry = self.registry.get("telemetry") if self.registry is not None else None
+        executed_stage_names: list[str] = []
+
+        async def _execute_stage(stage_name: str, node: Any, stage_context: TurnContext) -> TurnContext:
+            started_at = time.perf_counter()
+            error_msg: str | None = None
+            self._mark_stage_enter(stage_context, stage_name)
+            self._sync_stage_phase(stage_context, stage=stage_name)
+            self._emit_checkpoint(stage_context, stage=stage_name, status="before")
+            if telemetry is not None:
+                telemetry.trace("turn_graph.node_start", node=stage_name, trace_id=stage_context.trace_id)
+            try:
+                stage_context = await self._execute_node(node, stage_context)
+            except Exception as exc:
+                error_msg = str(exc)
+                self._emit_checkpoint(stage_context, stage=stage_name, status="error", error=error_msg)
+                raise
+            finally:
+                stage_context.state["_active_graph_stage"] = ""
+                duration_ms = round((time.perf_counter() - started_at) * 1000, 3)
+                stage_context.stage_traces.append(
+                    StageTrace(stage=stage_name, duration_ms=duration_ms, error=error_msg)
+                )
+                if telemetry is not None:
+                    telemetry.trace(
+                        "turn_graph.node_done",
+                        node=stage_name,
+                        duration_ms=duration_ms,
+                        trace_id=stage_context.trace_id,
+                    )
+            if error_msg is None:
+                self._emit_checkpoint(stage_context, stage=stage_name, status="after")
+                executed_stage_names.append(stage_name)
+            return stage_context
+
         try:
-            if self._node_map:
-                node_name = self._entry_node
-                while node_name is not None:
-                    node = self._node_map[node_name]
-                    started_at = time.perf_counter()
-                    error_msg: str | None = None
-                    self._mark_stage_enter(turn_context, node_name)
-                    self._sync_stage_phase(turn_context, stage=node_name)
-                    self._emit_checkpoint(turn_context, stage=node_name, status="before")
-                    if telemetry is not None:
-                        telemetry.trace("turn_graph.node_start", node=node_name, trace_id=turn_context.trace_id)
-                    try:
-                        turn_context = await self._execute_node(node, turn_context)
-                    except Exception as exc:
-                        error_msg = str(exc)
-                        self._emit_checkpoint(turn_context, stage=node_name, status="error", error=error_msg)
-                        raise
-                    finally:
-                        turn_context.state["_active_graph_stage"] = ""
-                        duration_ms = round((time.perf_counter() - started_at) * 1000, 3)
-                        turn_context.stage_traces.append(
-                            StageTrace(stage=node_name, duration_ms=duration_ms, error=error_msg)
-                        )
-                        if telemetry is not None:
-                            telemetry.trace(
-                                "turn_graph.node_done",
-                                node=node_name,
-                                duration_ms=duration_ms,
-                                trace_id=turn_context.trace_id,
-                            )
-                    if error_msg is None:
-                        self._emit_checkpoint(turn_context, stage=node_name, status="after")
-                    if turn_context.short_circuit:
-                        if turn_context.short_circuit_result is not None:
-                            total_ms = round((time.perf_counter() - execute_started_at) * 1000, 3)
-                            self._emit_turn_health_state(turn_context, total_latency_ms=total_ms, failed=False)
-                            self._kernel_validate(
-                                stage="post_execute",
-                                operation="turn_graph.execute.short_circuit",
-                                turn_context=turn_context,
-                            )
-                            _enforce_fidelity_invariants()
-                            return turn_context.short_circuit_result
-                        break
-                    prev_node = node_name
-                    node_name = self._edges.get(node_name)
-                    if node_name is not None and error_msg is None:
-                        self._emit_checkpoint(
-                            turn_context,
-                            stage=f"{prev_node}\u2192{node_name}",
-                            status="edge",
-                        )
-            else:
-                for idx, node in enumerate(self.nodes):
-                    node_name = getattr(node, "name", type(node).__name__)
-                    started_at = time.perf_counter()
-                    error_msg = None
-                    self._mark_stage_enter(turn_context, node_name)
-                    self._sync_stage_phase(turn_context, stage=node_name)
-                    self._emit_checkpoint(turn_context, stage=node_name, status="before")
-                    if telemetry is not None:
-                        telemetry.trace("turn_graph.node_start", node=node_name, trace_id=turn_context.trace_id)
-                    try:
-                        turn_context = await self._execute_node(node, turn_context)
-                    except Exception as exc:
-                        error_msg = str(exc)
-                        self._emit_checkpoint(turn_context, stage=node_name, status="error", error=error_msg)
-                        raise
-                    finally:
-                        turn_context.state["_active_graph_stage"] = ""
-                        duration_ms = round((time.perf_counter() - started_at) * 1000, 3)
-                        turn_context.stage_traces.append(
-                            StageTrace(stage=node_name, duration_ms=duration_ms, error=error_msg)
-                        )
-                        if telemetry is not None:
-                            telemetry.trace(
-                                "turn_graph.node_done",
-                                node=node_name,
-                                duration_ms=duration_ms,
-                                trace_id=turn_context.trace_id,
-                            )
-                    if error_msg is None:
-                        self._emit_checkpoint(turn_context, stage=node_name, status="after")
-                    if turn_context.short_circuit:
-                        if turn_context.short_circuit_result is not None:
-                            total_ms = round((time.perf_counter() - execute_started_at) * 1000, 3)
-                            self._emit_turn_health_state(turn_context, total_latency_ms=total_ms, failed=False)
-                            self._kernel_validate(
-                                stage="post_execute",
-                                operation="turn_graph.execute.short_circuit",
-                                turn_context=turn_context,
-                            )
-                            _enforce_fidelity_invariants()
-                            return turn_context.short_circuit_result
-                        break
-                    next_index = idx + 1
-                    if next_index < len(self.nodes):
-                        next_name = getattr(self.nodes[next_index], "name", type(self.nodes[next_index]).__name__)
-                        self._emit_checkpoint(turn_context, stage=f"{node_name}\u2192{next_name}", status="edge")
+            pipeline = self._pipeline_items()
+            turn_context = await self._execution_kernel.run(turn_context, pipeline, _execute_stage)
+            for idx, stage_name in enumerate(executed_stage_names[:-1]):
+                next_name = executed_stage_names[idx + 1]
+                self._emit_checkpoint(turn_context, stage=f"{stage_name}\u2192{next_name}", status="edge")
         except Exception:
             total_ms = round((time.perf_counter() - execute_started_at) * 1000, 3)
             self._emit_turn_health_state(turn_context, total_latency_ms=total_ms, failed=True)
             raise
 
+        if turn_context.short_circuit and turn_context.short_circuit_result is not None:
+            total_ms = round((time.perf_counter() - execute_started_at) * 1000, 3)
+            self._emit_turn_health_state(turn_context, total_latency_ms=total_ms, failed=False)
+            _enforce_fidelity_invariants()
+            return turn_context.short_circuit_result
+
         result = turn_context.state.get("safe_result")
         total_ms = round((time.perf_counter() - execute_started_at) * 1000, 3)
         self._emit_turn_health_state(turn_context, total_latency_ms=total_ms, failed=False)
-        self._kernel_validate(
-            stage="post_execute",
-            operation="turn_graph.execute.complete",
-            turn_context=turn_context,
-        )
         _enforce_fidelity_invariants()
         if isinstance(result, tuple) and len(result) >= 2:
             return result

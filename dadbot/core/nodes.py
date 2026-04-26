@@ -149,21 +149,6 @@ class SaveNode:
     def _result_from_context(self, context: TurnContext) -> Any:
         return context.state.get("safe_result") or context.state.get("candidate")
 
-    @staticmethod
-    def _kernel_shadow_validate(context: TurnContext, *, stage: str, operation: str) -> None:
-        kernel = context.state.get("_execution_kernel") if isinstance(context.state, dict) else None
-        if kernel is None:
-            return
-        if bool(getattr(kernel, "strict", False)):
-            kernel.validate(stage=stage, operation=operation, context=context)
-            return
-        try:
-            result = kernel.validate(stage=stage, operation=operation, context=context)
-            if not bool(getattr(result, "ok", True)):
-                logger.warning("[KERNEL SHADOW VIOLATION] %s", getattr(result, "reason", "validation failed"))
-        except Exception as exc:
-            logger.warning("[KERNEL SHADOW VIOLATION] %s", exc)
-
     def _finalize_turn(self, context: TurnContext, result: Any) -> bool:
         finalize = getattr(self.mgr, "finalize_turn", None)
         if not callable(finalize):
@@ -177,11 +162,6 @@ class SaveNode:
             raise
 
     async def run(self, context: TurnContext) -> TurnContext:
-        self._kernel_shadow_validate(
-            context,
-            stage="save_node_pre",
-            operation="core.nodes.SaveNode.run",
-        )
         if getattr(context, "temporal", None) is None:
             raise RuntimeError("TemporalNode required — execution invalid")
         context.state.setdefault("temporal", context.temporal_snapshot())
@@ -203,11 +183,6 @@ class SaveNode:
             if callable(rollback_transaction):
                 rollback_transaction(context)
             raise
-        self._kernel_shadow_validate(
-            context,
-            stage="save_node_post",
-            operation="core.nodes.SaveNode.run",
-        )
         return context
 
 
