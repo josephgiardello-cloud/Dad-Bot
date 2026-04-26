@@ -4,6 +4,21 @@
 class DadBotActionMixin:
     """Convenience actions layered on top of the manager-owned runtime surface."""
 
+    def _queue_or_apply_memory_patch(self, **patch):
+        normalized_patch = dict(patch or {})
+        if bool(getattr(self, "_graph_commit_active", False)):
+            self.memory.mutate_memory_store(**normalized_patch, save=True)
+            return "applied"
+
+        queue = getattr(self, "_background_memory_store_patch_queue", None)
+        if not isinstance(queue, list):
+            queue = []
+            self._background_memory_store_patch_queue = queue
+        queue.append(normalized_patch)
+        if len(queue) > 128:
+            del queue[:-128]
+        return "queued"
+
     def record_relationship_history_point(self, *, trust_level, openness_level, source="turn"):
         history = list(self.memory.relationship_history(limit=180))
         point = {
@@ -13,7 +28,7 @@ class DadBotActionMixin:
             "source": str(source or "turn").strip().lower() or "turn",
         }
         history.append(point)
-        self.memory.mutate_memory_store(relationship_history=history[-180:], save=True)
+        self._queue_or_apply_memory_patch(relationship_history=history[-180:])
         return point
 
     def soft_reset_session_context(self, preserve_recent_summary=True):

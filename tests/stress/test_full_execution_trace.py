@@ -272,6 +272,20 @@ def test_audit_mode_emits_capability_report(isolated_bot):
     assert checks["save_node_single_execution"]["details"]["save_count"] == 1
     assert checks["capability_audit_emission"]["status"] == "pass"
 
+    turn_events = bot.list_turn_events("audit-trace-001")
+    capability_events = [
+        event for event in turn_events
+        if str(event.get("event_type") or "") == "CAPABILITY_AUDIT_EVENT"
+    ]
+    assert capability_events, "Expected CAPABILITY_AUDIT_EVENT in persisted turn events"
+    assert capability_events[-1].get("payload", {}).get("timestamp", "__missing__") is None
+
+    ledger_events = bot.turn_orchestrator.control_plane.ledger.read()
+    assert any(
+        str(event.get("type") or "") == "CAPABILITY_AUDIT_EVENT"
+        for event in ledger_events
+    ), "Expected CAPABILITY_AUDIT_EVENT in execution ledger"
+
 
 def test_golden_replay_capability_contracts_hold_for_identical_runs():
     with TemporaryDirectory() as left_tmp, TemporaryDirectory() as right_tmp:

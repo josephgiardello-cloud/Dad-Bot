@@ -48,6 +48,12 @@ FORBIDDEN_TRACE_FIELDS: frozenset[str] = frozenset({
     "last_checked_at",
 })
 
+# Event types that are persisted for observability/reporting only and must not
+# participate in replay equivalence hashing.
+NON_REPLAY_EVENT_TYPES: frozenset[str] = frozenset({
+    "CAPABILITY_AUDIT_EVENT",
+})
+
 
 def _strip_non_canonical(value: Any) -> Any:
     if isinstance(value, dict):

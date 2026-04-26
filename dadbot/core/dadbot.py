@@ -517,6 +517,8 @@ class DadBot(DadBotCompatMixin, DadBotConvenienceMixin, DadBotActionMixin):
         self._io_lock = RLock()
         self._session_lock = RLock()
         self._graph_refresh_lock = RLock()
+        # Explicit actor isolation for sync graph turns: one in-flight turn at a time.
+        self._turn_execution_lock = RLock()
         self.background_tasks = BackgroundTaskManager(max_workers=12, thread_name_prefix="dadbot-bg")
         self._semantic_index_lock = RLock()
         self._semantic_index_future = None
@@ -637,16 +639,21 @@ class DadBot(DadBotCompatMixin, DadBotConvenienceMixin, DadBotActionMixin):
         coroutine is dispatched to a dedicated thread with its own event loop
         rather than falling back to the legacy TurnProcessingManager.  This
         ensures the graph pipeline is *always* the active engine in production.
-        """
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
 
-        coro = self._run_graph_turn_async(user_input, attachments=attachments)
-        if loop is not None and loop.is_running():
-            return self._run_coro_in_thread(coro)
-        return asyncio.run(coro)
+        Strict actor-isolation contract: sync callers share one execution actor,
+        so turn-critical mutable state is never concurrently mutated.
+        """
+        with self._turn_execution_lock:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+
+            coro = self._run_graph_turn_async(user_input, attachments=attachments)
+            if loop is not None and loop.is_running():
+                return self._run_coro_in_thread(coro)
+            else:
+                return asyncio.run(coro)
 
     def _validate_managers(self, *, smoke=False):
         """Compatibility wrapper for extracted facade validation."""

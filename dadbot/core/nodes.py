@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -10,6 +11,17 @@ from typing import Any
 from dadbot.core.graph import TurnContext
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Stable hash helper (delegation determinism envelope)
+# ---------------------------------------------------------------------------
+
+
+def _stable_sha256(payload: Any) -> str:
+    """Compute a deterministic SHA-256 digest from any JSON-serialisable payload."""
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
 
 # ---------------------------------------------------------------------------
 # Structured output helpers (delegation / reasoning / tool calling)
@@ -128,6 +140,24 @@ class TemporalNode:
     async def run(self, context: TurnContext) -> TurnContext:
         if getattr(context, "temporal", None) is None:
             raise RuntimeError("TemporalNode missing — deterministic execution violated")
+        vc = getattr(context, "virtual_clock", None)
+        if vc is not None:
+            # Derive temporal axis from the virtual clock instead of the real wall clock,
+            # giving tests and replay runs fully deterministic temporal fields.
+            vc.tick()
+            vdt = vc.to_datetime()
+            offset = vdt.utcoffset()
+            offset_minutes = int(offset.total_seconds() // 60) if offset is not None else 0
+            wall_time = vdt.isoformat(timespec="seconds")
+            from dadbot.core.graph import TurnTemporalAxis
+            context.temporal = TurnTemporalAxis(
+                turn_started_at=wall_time,
+                wall_time=wall_time,
+                wall_date=vdt.date().isoformat(),
+                timezone=str(vdt.tzname() or "local").strip() or "local",
+                utc_offset_minutes=offset_minutes,
+                epoch_seconds=vc.now(),
+            )
         temporal_payload = context.temporal_snapshot()
         context.state["temporal"] = temporal_payload
         context.metadata.setdefault("temporal", temporal_payload)
@@ -334,6 +364,17 @@ class InferenceNode:
             if sub_input:
                 task_pairs.append((sub_input, agent_name))
 
+        # Assign deterministic subtask IDs and sort by ID to guarantee consistent
+        # execution order regardless of LLM output ordering or async scheduling.
+        _parent_trace = str(context.trace_id or "")
+        _indexed: list[tuple[str, str, str]] = [
+            (f"{_parent_trace}.del{depth}.{i}", inp, name)
+            for i, (inp, name) in enumerate(task_pairs)
+        ]
+        _indexed.sort(key=lambda t: t[0])
+        subtask_ids = [sid for sid, _, _ in _indexed]
+        task_pairs = [(inp, name) for _, inp, name in _indexed]
+
         seed_board = dict(context.metadata.get("agent_blackboard_seed") or {})
         blackboard: dict[str, str]
         if depth <= 0:
@@ -378,6 +419,16 @@ class InferenceNode:
             f" ({successful} succeeded, {failures} failed)."
         )
 
+        # Canonical arbitration record hash — locks in "same subtasks → same winner"
+        # guarantee and detects any reordering or output substitution.
+        _arb_record = {
+            "subtask_ids": subtask_ids,
+            "mode": mode,
+            "depth": depth,
+            "outputs": results,
+        }
+        arbitration_hash = _stable_sha256(_arb_record)
+
         context.metadata["delegation_depth"] = depth
         context.metadata["subtasks_executed"] = len(task_pairs)
         context.state["delegation_results"] = results
@@ -390,6 +441,8 @@ class InferenceNode:
             "success_count": successful,
             "failure_count": failures,
             "depth_exceeded": bool(context.metadata.get("delegation_depth_exceeded")),
+            "subtask_ids": subtask_ids,
+            "arbitration_hash": arbitration_hash,
         }
         _append_arbitration_log(
             context,

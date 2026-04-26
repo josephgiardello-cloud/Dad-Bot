@@ -1,5 +1,7 @@
 ﻿from __future__ import annotations
 
+import json
+
 from dadbot.contracts import DadBotContext, SupportsContextRuntime
 
 
@@ -151,44 +153,142 @@ Keep family relationships, ages, timelines, and education history consistent wit
         post_trim_tokens = sum(self.bot.estimate_token_count(section) for section in trimmed_sections)
         return trimmed_sections, total_sections, pre_trim_tokens, post_trim_tokens
 
-    def build_memory_context(self, user_input: str) -> str | None:
-        memory_limit = self.bot.memory_context_limit_for_input(user_input)
-        retrieval = self.bot.retrieve_context(user_input, strategy="hybrid", limit=memory_limit)
-        graph_result = retrieval.get("graph_result")
-        archive_entries = retrieval.get("archive_entries") or []
-        memories = retrieval.get("semantic_memories") or []
-        deep_pattern_context = self.bot.long_term_signals.build_deep_pattern_context(user_input)
-        consolidated_context = self.bot.build_active_consolidated_context(user_input)
+    def _recent_turn_messages(self, *, max_turns: int = 12) -> list[dict]:
+        history = list(self.bot.conversation_history())
+        if not history:
+            return []
+        # Keep the most recent user+assistant turns at full fidelity.
+        max_messages = max(2, int(max_turns or 12) * 2)
+        return [dict(message) for message in history[-max_messages:] if isinstance(message, dict)]
 
-        if not deep_pattern_context and not consolidated_context and not graph_result and not archive_entries and not memories:
+    @staticmethod
+    def _clip_message_text(text: str, *, limit: int = 220) -> str:
+        normalized = str(text or "").strip()
+        if len(normalized) <= limit:
+            return normalized
+        return normalized[: max(1, limit - 3)].rstrip() + "..."
+
+    def _build_recent_buffer_context(self, *, max_turns: int = 12) -> str | None:
+        recent_messages = self._recent_turn_messages(max_turns=max_turns)
+        if not recent_messages:
+            return None
+
+        lines: list[str] = []
+        for message in recent_messages:
+            role = str(message.get("role") or "").strip().lower()
+            if role not in {"user", "assistant"}:
+                continue
+            content = self._clip_message_text(str(message.get("content") or ""))
+            if not content:
+                continue
+            speaker = "Tony" if role == "user" else "Dad"
+            lines.append(f"- {speaker}: {content}")
+
+        if not lines:
+            return None
+        return "Recent conversation buffer (highest priority):\n" + "\n".join(lines)
+
+    @staticmethod
+    def _structured_claim_type(category: str, summary: str) -> str:
+        text = f"{category} {summary}".lower()
+        if any(token in text for token in ["prefer", "likes", "favorite", "wants", "enjoys"]):
+            return "preferences"
+        if any(token in text for token in ["decided", "decision", "will", "chose", "plan"]):
+            return "decisions"
+        if any(token in text for token in ["goal", "working on", "trying to", "aim", "target"]):
+            return "goals"
+        if any(token in text for token in ["cannot", "can't", "constraint", "limited", "budget", "deadline", "schedule"]):
+            return "constraints"
+        return "entities"
+
+    def _build_structured_claims_context(self, user_input: str, *, max_items: int = 8) -> tuple[str | None, list[dict[str, object]]]:
+        claims: list[dict[str, object]] = []
+        for entry in self.bot.select_active_consolidated_memories(user_input, max_items=max_items):
+            summary = str(entry.get("summary") or "").strip()
+            if not summary:
+                continue
+            category = str(entry.get("category") or "general").strip().lower() or "general"
+            claim = {
+                "type": self._structured_claim_type(category, summary),
+                "summary": summary,
+                "category": category,
+                "mood": str(entry.get("mood") or "neutral"),
+                "confidence": round(float(entry.get("confidence", 0.0) or 0.0), 3),
+                "importance": round(float(entry.get("importance_score", 0.0) or 0.0), 3),
+                "updated_at": str(entry.get("updated_at") or ""),
+            }
+            claims.append(claim)
+
+        if not claims:
+            return None, []
+
+        payload = json.dumps(claims[: max(1, int(max_items or 8))], ensure_ascii=True)
+        return "Structured memory claims (JSON):\n" + payload, claims
+
+    def build_hierarchical_memory_context(self, user_input: str) -> tuple[str | None, dict[str, object]]:
+        recent_section = self._build_recent_buffer_context(max_turns=12)
+        summary_section = self.build_session_summary_context()
+        structured_section, structured_claims = self._build_structured_claims_context(user_input, max_items=8)
+
+        prioritized_sections = [
+            ("recent", recent_section),
+            ("summary", summary_section),
+            ("structured", structured_section),
+        ]
+        section_lookup = {name: section for name, section in prioritized_sections if section}
+        sections = [section for _name, section in prioritized_sections if section]
+        if not sections:
+            return None, {
+                "recent_tokens": 0,
+                "summary_tokens": 0,
+                "structured_tokens": 0,
+                "structured_claims": [],
+                "selected_layers": [],
+            }
+
+        memory_token_budget = min(1400, max(220, int(self.bot.CONTEXT_TOKEN_BUDGET or 6000) // 3))
+        trimmed_sections = self._fit_sections_to_token_budget(sections, memory_token_budget)
+
+        selected_layers: list[str] = []
+        for layer_name in ("recent", "summary", "structured"):
+            layer_text = section_lookup.get(layer_name)
+            if layer_text and layer_text in trimmed_sections:
+                selected_layers.append(layer_name)
+
+        layer_stats = {
+            "recent_tokens": self.bot.estimate_token_count(section_lookup.get("recent") or "") if "recent" in selected_layers else 0,
+            "summary_tokens": self.bot.estimate_token_count(section_lookup.get("summary") or "") if "summary" in selected_layers else 0,
+            "structured_tokens": self.bot.estimate_token_count(section_lookup.get("structured") or "") if "structured" in selected_layers else 0,
+            "structured_claims": list(structured_claims),
+            "selected_layers": selected_layers,
+        }
+
+        if not trimmed_sections:
+            return None, layer_stats
+
+        context_text = "\n\n".join(trimmed_sections + ["Use these only as prior context Tony has already shared."])
+        return context_text, layer_stats
+
+    def build_memory_context(self, user_input: str) -> str | None:
+        context_text, layer_stats = self.build_hierarchical_memory_context(user_input)
+        if context_text is None:
+            self.bot._last_hierarchical_memory_stats = dict(layer_stats)
             self._record_memory_context_stats(user_input=user_input, tokens=0, selected_sections=0, total_sections=0, pruned=False)
             return None
 
-        sections = self._build_memory_sections(
-            deep_pattern_context=deep_pattern_context,
-            consolidated_context=consolidated_context,
-            graph_result=graph_result,
-            archive_entries=archive_entries,
-            memories=memories,
-        )
-
-        # Trim sections to a token budget so that a large memory store never
-        # displaces conversation history.  Budget = 25 % of the context window,
-        # capped at 800 tokens.  Sections are already in priority order so the
-        # lowest-priority ones (semantic fallback) are dropped first.
-        sections, total_sections, pre_trim_tokens, post_trim_tokens = self._trim_memory_sections_to_budget(sections)
+        total_sections = 3
+        selected_sections = len(list(layer_stats.get("selected_layers") or []))
+        post_trim_tokens = self.bot.estimate_token_count(context_text)
+        pre_trim_tokens = int(layer_stats.get("recent_tokens", 0) or 0) + int(layer_stats.get("summary_tokens", 0) or 0) + int(layer_stats.get("structured_tokens", 0) or 0)
         self._record_memory_context_stats(
             user_input=user_input,
             tokens=post_trim_tokens,
-            selected_sections=len(sections),
+            selected_sections=selected_sections,
             total_sections=total_sections,
-            pruned=(len(sections) < total_sections) or (post_trim_tokens < pre_trim_tokens),
+            pruned=(selected_sections < total_sections) or (post_trim_tokens < pre_trim_tokens),
         )
-
-        if not sections:
-            return None
-
-        return "\n\n".join(sections + ["Use these only as prior context Tony has already shared."])
+        self.bot._last_hierarchical_memory_stats = dict(layer_stats)
+        return context_text
 
     def _cross_session_traits_section(self) -> str | None:
         evolution_history = self.bot.persona_evolution_history()

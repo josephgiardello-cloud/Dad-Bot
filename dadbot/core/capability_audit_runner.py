@@ -8,6 +8,8 @@ from dadbot.core.capability_contracts import CAPABILITY_CONTRACTS
 
 
 CapabilityStatus = Literal["pass", "fail", "not_evaluated"]
+CAPABILITY_AUDIT_EVENT_TYPE = "CAPABILITY_AUDIT_EVENT"
+CAPABILITY_AUDIT_VERSION = "v1"
 
 
 @dataclass
@@ -154,3 +156,27 @@ def build_capability_coverage_matrix(scenario_reports: list[dict[str, Any]]) -> 
             "last_pass": str(date.today()) if violations == 0 else "",
         }
     return matrix
+
+
+def build_capability_audit_event_payload(
+    report: CapabilityAuditReport,
+    *,
+    scenario: str,
+) -> dict[str, Any]:
+    checks = {check.name: check for check in list(report.checks or [])}
+    temporal_ordering_ok = checks.get("temporal_ordering").status == "pass" if checks.get("temporal_ordering") else False
+    mutation_safety_ok = checks.get("mutation_safety").status == "pass" if checks.get("mutation_safety") else False
+    save_ok = checks.get("save_node_single_execution").status == "pass" if checks.get("save_node_single_execution") else False
+
+    return {
+        "audit_version": CAPABILITY_AUDIT_VERSION,
+        "scenario": str(scenario or "runtime_turn"),
+        "result": "ok" if report.ok else "fail",
+        "metrics": {
+            "temporal_violation": not temporal_ordering_ok,
+            "mutation_leak": not mutation_safety_ok,
+            "save_node_compliance": bool(save_ok),
+        },
+        # Explicitly non-canonical operational field.
+        "timestamp": None,
+    }

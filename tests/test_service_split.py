@@ -189,7 +189,11 @@ def test_prepare_final_reply_async_delegates_to_reply_finalization(bot, monkeypa
 
 def test_turn_service_helper_methods_delegate_to_manager(bot, monkeypatch):
     monkeypatch.setattr(bot.turn_service, "should_offer_daily_checkin_for_turn", lambda: True)
-    monkeypatch.setattr(bot.turn_service, "record_user_turn_state", lambda user_input, current_mood: (user_input, current_mood))
+    monkeypatch.setattr(
+        bot.turn_service,
+        "record_user_turn_state",
+        lambda user_input, current_mood, turn_context=None: (user_input, current_mood, turn_context),
+    )
     monkeypatch.setattr(bot.turn_service, "direct_reply_for_input", lambda user_input, current_mood: f"reply::{user_input}::{current_mood}")
 
     should_offer = bot.should_offer_daily_checkin_for_turn()
@@ -197,7 +201,7 @@ def test_turn_service_helper_methods_delegate_to_manager(bot, monkeypatch):
     reply = bot.direct_reply_for_input("Where was I born?", "neutral")
 
     assert should_offer is True
-    assert recorded == ("Just checking in.", "neutral")
+    assert recorded[:2] == ("Just checking in.", "neutral")
     assert reply == "reply::Where was I born?::neutral"
 
 
@@ -209,8 +213,16 @@ def test_turn_service_uses_reply_generation_manager(bot, monkeypatch):
             f"generated::{stripped_input}::{turn_text}::{current_mood}::{stream}::{len(normalized_attachments)}"
         ),
     )
-    monkeypatch.setattr(bot.turn_service, "prepare_user_turn", lambda user_input, attachments=None: ("neutral", None, False, user_input, attachments or []))
-    monkeypatch.setattr(bot.turn_service, "finalize_user_turn", lambda stripped_input, current_mood, dad_reply, attachments=None: (dad_reply, False))
+    monkeypatch.setattr(
+        bot.turn_service,
+        "prepare_user_turn",
+        lambda user_input, attachments=None, turn_context=None: ("neutral", None, False, user_input, attachments or []),
+    )
+    monkeypatch.setattr(
+        bot.turn_service,
+        "finalize_user_turn",
+        lambda stripped_input, current_mood, dad_reply, attachments=None, turn_context=None: (dad_reply, False),
+    )
 
     # Pipeline-level assertion: call turn_service directly (graph is always active at the
     # bot.process_user_message level and uses AgentService, not reply_generation directly).

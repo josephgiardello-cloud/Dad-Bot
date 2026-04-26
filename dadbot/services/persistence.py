@@ -3,8 +3,14 @@
 from copy import deepcopy
 import logging
 import time
+import uuid
 from typing import Any
 
+from dadbot.core.capability_audit_runner import (
+    CAPABILITY_AUDIT_EVENT_TYPE,
+    build_capability_audit_event_payload,
+    build_runtime_capability_audit_report,
+)
 from dadbot.core.graph import FatalTurnError, LedgerMutationOp, MemoryMutationOp, MutationIntent, MutationKind
 from dadbot.managers.conversation_persistence import ConversationPersistenceManager
 
@@ -165,6 +171,13 @@ class PersistenceService:
                     with runtime._session_lock:
                         runtime.history.append(entry)
                     return
+                if op == LedgerMutationOp.RECORD_TURN_STATE.value:
+                    mood = str(payload.get("mood") or "neutral")
+                    should_offer_daily_checkin = bool(payload.get("should_offer_daily_checkin", False))
+                    with runtime._session_lock:
+                        runtime.session_moods.append(mood)
+                        runtime._pending_daily_checkin_context = should_offer_daily_checkin
+                    return
                 if op == LedgerMutationOp.SYNC_THREAD_SNAPSHOT.value:
                     runtime.sync_active_thread_snapshot()
                     return
@@ -191,6 +204,77 @@ class PersistenceService:
                     append_step = getattr(service, "_append_turn_pipeline_step", None)
                     if callable(append_step):
                         append_step("health_snapshot", detail="refreshed runtime health snapshot")
+                    return
+                if op == LedgerMutationOp.CAPABILITY_AUDIT_EVENT.value:
+                    # Non-authoritative observability write: never block turn correctness.
+                    try:
+                        stage_order = [
+                            str(getattr(trace, "stage", "") or "")
+                            for trace in list(getattr(turn_context, "stage_traces", []) or [])
+                        ]
+                        if "save" not in [s.strip().lower() for s in stage_order]:
+                            stage_order = [*stage_order, "save"]
+
+                        report = build_runtime_capability_audit_report(
+                            turn_context,
+                            stage_order=stage_order,
+                            failed=False,
+                        )
+                        report_payload = report.to_dict()
+                        if isinstance(getattr(turn_context, "state", None), dict):
+                            turn_context.state["capability_audit_report"] = report_payload
+                        if isinstance(getattr(turn_context, "metadata", None), dict):
+                            turn_context.metadata["capability_audit_report"] = dict(report_payload)
+
+                        event_payload = build_capability_audit_event_payload(
+                            report,
+                            scenario=str(payload.get("scenario") or "runtime_turn"),
+                        )
+
+                        if hasattr(turn_context, "event_sequence"):
+                            turn_context.event_sequence += 1
+                            sequence = int(turn_context.event_sequence)
+                        else:
+                            sequence = 0
+
+                        trace_id = str(getattr(turn_context, "trace_id", "") or "unknown")
+                        phase_value = str(getattr(getattr(turn_context, "phase", None), "value", "") or "")
+                        occurred_at = ""
+                        temporal = getattr(turn_context, "temporal", None)
+                        if temporal is not None:
+                            occurred_at = str(getattr(temporal, "wall_time", "") or "")
+
+                        self.save_turn_event(
+                            {
+                                "event_type": CAPABILITY_AUDIT_EVENT_TYPE,
+                                "trace_id": trace_id,
+                                "sequence": sequence,
+                                "occurred_at": occurred_at,
+                                "stage": "save",
+                                "status": "after",
+                                "phase": phase_value,
+                                "payload": event_payload,
+                            }
+                        )
+
+                        control_plane = getattr(getattr(runtime, "turn_orchestrator", None), "control_plane", None)
+                        ledger_writer = getattr(control_plane, "ledger_writer", None)
+                        write_event = getattr(ledger_writer, "write_event", None)
+                        if callable(write_event):
+                            session_id = str(
+                                (getattr(turn_context, "metadata", {}) or {}).get("control_plane", {}).get("session_id")
+                                or "default"
+                            )
+                            write_event(
+                                event_type=CAPABILITY_AUDIT_EVENT_TYPE,
+                                session_id=session_id,
+                                trace_id=trace_id,
+                                kernel_step_id="save_node.capability_audit",
+                                payload=event_payload,
+                                committed=False,
+                            )
+                    except Exception as exc:
+                        logger.warning("PersistenceService capability audit persistence failed (non-fatal): %s", exc)
                     return
                 raise RuntimeError(
                     f"MutationIntent(type=ledger, source={source!r}): unsupported op={op!r}"
@@ -223,6 +307,60 @@ class PersistenceService:
             runtime.mutate_memory_store(**patch)
             applied += 1
         return applied
+
+    @staticmethod
+    def _build_hierarchical_memory_payload(turn_context: Any) -> dict[str, Any]:
+        state = getattr(turn_context, "state", None)
+        metadata = getattr(turn_context, "metadata", None)
+        state_dict = state if isinstance(state, dict) else {}
+        metadata_dict = metadata if isinstance(metadata, dict) else {}
+
+        return {
+            "recent_buffer": list(state_dict.get("memory_recent_buffer") or []),
+            "rolling_summary": str(state_dict.get("memory_rolling_summary") or ""),
+            "structured_memory": dict(state_dict.get("memory_structured") or {}),
+            "full_history_id": state_dict.get("memory_full_history_id"),
+            "token_counts": {
+                "recent": int(metadata_dict.get("recent_tokens", 0) or 0),
+                "summary": int(metadata_dict.get("summary_tokens", 0) or 0),
+                "structured": int(metadata_dict.get("structured_tokens", 0) or 0),
+                "total": int(metadata_dict.get("context_total_tokens", 0) or 0),
+            },
+        }
+
+    def _persist_hierarchical_memory_commit(self, turn_context: Any, *, commit_id: str) -> None:
+        state = getattr(turn_context, "state", None)
+        metadata = getattr(turn_context, "metadata", None)
+        if not isinstance(state, dict):
+            return
+
+        memory_payload = self._build_hierarchical_memory_payload(turn_context)
+        state["hierarchical_memory_payload"] = dict(memory_payload)
+        if isinstance(metadata, dict):
+            metadata["hierarchical_memory_payload"] = dict(memory_payload)
+
+        trace_id = str(getattr(turn_context, "trace_id", "") or "")
+        phase_value = str(getattr(getattr(turn_context, "phase", None), "value", "") or "")
+        occurred_at = ""
+        temporal = getattr(turn_context, "temporal", None)
+        if temporal is not None:
+            occurred_at = str(getattr(temporal, "wall_time", "") or "")
+
+        self.save_turn_event(
+            {
+                "event_type": "hierarchical_memory_commit",
+                "trace_id": trace_id,
+                "occurred_at": occurred_at,
+                "stage": "save",
+                "status": "after",
+                "phase": phase_value,
+                "payload": {
+                    "commit_id": str(commit_id or ""),
+                    "trace_id": trace_id,
+                    "memory": memory_payload,
+                },
+            }
+        )
 
     def _commit_post_finalize_side_effects(self, turn_context: Any) -> None:
         """Run strict SaveNode mutation sequence before final ledger commit."""
@@ -342,6 +480,13 @@ class PersistenceService:
         if isinstance(state, dict):
             if runtime is not None:
                 state["_save_transaction_snapshot"] = self._capture_transaction_snapshot(runtime, turn_context)
+            trace_id = str(getattr(turn_context, "trace_id", "") or "")
+            state["_save_transaction"] = {
+                "commit_id": uuid.uuid4().hex,
+                "trace_id": trace_id,
+                "started_at": str(getattr(temporal, "wall_time", "") or ""),
+                "status": "active",
+            }
             state["_save_transaction_active"] = True
 
     def apply_mutations(self, turn_context: Any) -> None:
@@ -361,6 +506,20 @@ class PersistenceService:
     def commit_transaction(self, turn_context: Any) -> None:
         state = getattr(turn_context, "state", None)
         if isinstance(state, dict):
+            transaction = dict(state.get("_save_transaction", {}) or {})
+            if transaction:
+                temporal = getattr(turn_context, "temporal", None)
+                transaction["status"] = "committed"
+                transaction["committed_at"] = str(getattr(temporal, "wall_time", "") or "")
+                state["_save_transaction"] = transaction
+                commit_id = str(transaction.get("commit_id") or "")
+                state["last_commit_id"] = commit_id
+                state["last_transaction_status"] = "committed"
+                metadata = getattr(turn_context, "metadata", None)
+                if isinstance(metadata, dict):
+                    metadata["last_commit_id"] = commit_id
+                    metadata["last_transaction_status"] = "committed"
+                self._persist_hierarchical_memory_commit(turn_context, commit_id=commit_id)
             state["_save_transaction_active"] = False
             state["_save_mutations_applied"] = False
 
@@ -372,6 +531,12 @@ class PersistenceService:
             runtime = None if service is None else getattr(service, "bot", None)
             if snapshot and runtime is not None:
                 self._restore_transaction_snapshot(runtime, turn_context, snapshot)
+            transaction = dict(state.get("_save_transaction", {}) or {})
+            if transaction:
+                temporal = getattr(turn_context, "temporal", None)
+                transaction["status"] = "rolled_back"
+                transaction["rolled_back_at"] = str(getattr(temporal, "wall_time", "") or "")
+                state["_save_transaction"] = transaction
             state["_save_transaction_active"] = False
             state["_save_mutations_applied"] = False
             state.pop("_save_transaction_snapshot", None)
@@ -422,6 +587,11 @@ class PersistenceService:
         previous_commit_active = bool(getattr(runtime, "_graph_commit_active", False))
         finalize_started = time.perf_counter()
         try:
+            if previous_commit_active:
+                logger.warning(
+                    "PersistenceService.finalize_turn detected stale _graph_commit_active=True; "
+                    "forcing fresh SaveNode boundary"
+                )
             runtime._current_turn_time_base = getattr(turn_context, "temporal", None)
             runtime._graph_commit_active = True
 
@@ -438,7 +608,7 @@ class PersistenceService:
         finally:
             if isinstance(getattr(turn_context, "state", None), dict):
                 turn_context.state["_timing_finalize_ms"] = round((time.perf_counter() - finalize_started) * 1000, 3)
-            runtime._graph_commit_active = previous_commit_active
+            runtime._graph_commit_active = False
             runtime._current_turn_time_base = previous_temporal
 
     def save_turn(self, turn_context: Any, result: Any) -> None:

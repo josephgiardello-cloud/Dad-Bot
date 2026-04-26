@@ -4,6 +4,7 @@ import hashlib
 import json
 from typing import Any
 
+from dadbot.core.canonical_event import NON_REPLAY_EVENT_TYPES
 from dadbot.core.event_reducer import CanonicalEventReducer
 from dadbot.core.execution_ledger import _canonical_trace_payload
 
@@ -20,7 +21,12 @@ class ReplayVerifier:
 
     def trace_hash(self, events: list[dict[str, Any]]) -> str:
         ordered = sorted(
-            [dict(event) for event in list(events or []) if isinstance(event, dict)],
+            [
+                dict(event)
+                for event in list(events or [])
+                if isinstance(event, dict)
+                and str(event.get("type") or "") not in NON_REPLAY_EVENT_TYPES
+            ],
             key=lambda event: int(event.get("sequence") or 0),
         )
         canonical_trace = [

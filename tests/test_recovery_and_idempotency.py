@@ -253,3 +253,47 @@ def test_validate_trace_catches_all_forbidden_fields():
         dirty = dict(base_event, payload={**base_event["payload"], field: 99999.0})
         with pytest.raises(AssertionError, match=field):
             validate_trace([dirty])
+
+
+def test_capability_audit_event_is_excluded_from_replay_hash():
+    left = InMemoryExecutionLedger()
+    right = InMemoryExecutionLedger()
+    verifier = ReplayVerifier()
+
+    baseline = {
+        "type": "JOB_COMPLETED",
+        "session_id": "s-audit-replay",
+        "trace_id": "tr-audit-replay",
+        "timestamp": 1.0,
+        "kernel_step_id": "scheduler.execute.complete",
+        "payload": {
+            "result": "ok",
+            "metadata": {"quality": "stable"},
+        },
+    }
+    left.write(dict(baseline))
+    right.write(dict(baseline))
+
+    right.write(
+        {
+            "type": "CAPABILITY_AUDIT_EVENT",
+            "session_id": "s-audit-replay",
+            "trace_id": "tr-audit-replay",
+            "timestamp": 2.0,
+            "kernel_step_id": "save_node.capability_audit",
+            "payload": {
+                "audit_version": "v1",
+                "scenario": "runtime_turn",
+                "result": "ok",
+                "metrics": {
+                    "temporal_violation": False,
+                    "mutation_leak": False,
+                    "save_node_compliance": True,
+                },
+                "timestamp": None,
+            },
+        }
+    )
+
+    assert left.replay_hash() == right.replay_hash()
+    assert verifier.trace_hash(left.read()) == verifier.trace_hash(right.read())

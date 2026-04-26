@@ -1,6 +1,10 @@
 ﻿from __future__ import annotations
 
+import hashlib
+import json
 import logging
+import os
+import time
 from typing import Any
 
 from dadbot.context import ContextBuilder
@@ -29,7 +33,135 @@ class ContextService:
         self.memory_manager = memory_manager
         self.semantic_index = semantic_index  # Optional; wired by ServiceRegistry.boot()
 
+    def _runtime(self) -> Any:
+        return getattr(self.context_builder, "bot", None)
+
+    def _estimate_tokens(self, text: str | None) -> int:
+        runtime = self._runtime()
+        if runtime is None:
+            return 0
+        return int(runtime.estimate_token_count(text or "") or 0)
+
+    def get_snapshot(self, session_id: str) -> dict[str, Any]:
+        """Return an immutable per-session memory snapshot for the current turn."""
+        runtime = self._runtime()
+        if runtime is None:
+            return {
+                "recent_buffer": [],
+                "rolling_summary": "",
+                "structured_memory": {},
+                "full_history_id": "",
+            }
+
+        history = list(runtime.conversation_history() or [])
+        recent_messages = []
+        recent_builder = getattr(self.context_builder, "_recent_turn_messages", None)
+        if callable(recent_builder):
+            recent_messages = list(recent_builder(max_turns=12) or [])
+        else:
+            recent_messages = [dict(m) for m in history[-24:] if isinstance(m, dict)]
+
+        summary_text = str(runtime.session_summary or "")
+        claims = list(getattr(runtime, "_last_hierarchical_memory_stats", {}).get("structured_claims") or [])
+        full_history_id = hashlib.sha256(
+            json.dumps(
+                {
+                    "session_id": str(session_id or "default"),
+                    "history_len": len(history),
+                    "recent_tail": [
+                        {
+                            "role": str(m.get("role") or ""),
+                            "content": str(m.get("content") or "")[:120],
+                        }
+                        for m in recent_messages[-6:]
+                    ],
+                },
+                sort_keys=True,
+                ensure_ascii=True,
+            ).encode("utf-8")
+        ).hexdigest()[:16]
+
+        return {
+            "recent_buffer": [dict(m) for m in recent_messages],
+            "rolling_summary": summary_text,
+            "structured_memory": {"claims": [dict(c) for c in claims]},
+            "full_history_id": f"hist-{full_history_id}",
+        }
+
+    @staticmethod
+    def _deterministic_memory_fingerprint(snapshot: dict[str, Any]) -> str:
+        claims = list((snapshot.get("structured_memory") or {}).get("claims") or [])
+        compact_claims = [
+            {
+                "type": str(item.get("type") or ""),
+                "summary": str(item.get("summary") or ""),
+                "category": str(item.get("category") or ""),
+            }
+            for item in claims
+            if isinstance(item, dict)
+        ]
+        normalized = {
+            "recent_count": len(list(snapshot.get("recent_buffer") or [])),
+            "rolling_summary": str(snapshot.get("rolling_summary") or ""),
+            "claims": compact_claims,
+            "full_history_id": str(snapshot.get("full_history_id") or ""),
+        }
+        return hashlib.sha256(
+            json.dumps(normalized, sort_keys=True, ensure_ascii=True, default=str).encode("utf-8")
+        ).hexdigest()[:16]
+
+    def _maybe_schedule_background_compression(self, turn_context: Any, *, context_total_tokens: int, recent_tokens: int) -> bool:
+        runtime = self._runtime()
+        if runtime is None:
+            return False
+
+        metadata = getattr(turn_context, "metadata", None)
+        determinism = dict(metadata.get("determinism") or {}) if isinstance(metadata, dict) else {}
+        if bool(determinism.get("enforced", False)):
+            # Strict mode must remain deterministic; skip background summarization side effects.
+            if isinstance(metadata, dict):
+                metadata["compression_scheduled"] = False
+                metadata["compression_blocking"] = False
+                metadata["compression_disabled_in_strict"] = True
+            return False
+
+        should_start_background_tasks = getattr(runtime, "should_start_background_tasks", None)
+        if callable(should_start_background_tasks) and not bool(should_start_background_tasks()):
+            return False
+
+        if isinstance(metadata, dict) and metadata.get("compression_scheduled"):
+            return False
+
+        budget = max(1, int(getattr(runtime, "CONTEXT_TOKEN_BUDGET", 6000) or 6000))
+        threshold = max(128, int(budget * 0.75))
+        recent_pressure = recent_tokens >= max(80, int(threshold * 0.25))
+        over_threshold = context_total_tokens >= threshold
+        if not (over_threshold or recent_pressure):
+            if isinstance(metadata, dict):
+                metadata["compression_scheduled"] = False
+                metadata["compression_blocking"] = False
+            return False
+
+        summary_manager = getattr(runtime, "session_summary_manager", None)
+        refresh = getattr(summary_manager, "refresh_session_summary", None)
+        background_tasks = getattr(runtime, "background_tasks", None)
+        submit = getattr(background_tasks, "submit", None)
+        if not callable(refresh) or not callable(submit):
+            return False
+
+        try:
+            # Fire-and-forget scheduling only; never await in the foreground turn.
+            submit(refresh, force=True, task_kind="context-compression")
+            if isinstance(metadata, dict):
+                metadata["compression_scheduled"] = True
+                metadata["compression_blocking"] = False
+                metadata["compression_trigger_tokens"] = context_total_tokens
+            return True
+        except Exception:
+            return False
+
     def build_context(self, turn_context: Any) -> dict[str, Any]:
+        started = time.perf_counter()
         temporal = getattr(turn_context, "temporal", None)
         if temporal is None:
             raise RuntimeError("TemporalNode required — execution invalid")
@@ -52,6 +184,31 @@ class ContextService:
             "cross_session": self.context_builder.build_cross_session_context(user_input),
             "temporal": temporal_snapshot,
         }
+
+        session_id = str((getattr(turn_context, "metadata", {}) or {}).get("control_plane", {}).get("session_id") or "default")
+        memory_snapshot = self.get_snapshot(session_id)
+
+        layer_stats = dict(getattr(self.context_builder.bot, "_last_hierarchical_memory_stats", {}) or {})
+        recent_tokens = int(layer_stats.get("recent_tokens", 0) or 0)
+        summary_tokens = int(layer_stats.get("summary_tokens", 0) or 0)
+        structured_tokens = int(layer_stats.get("structured_tokens", 0) or 0)
+        structured_claims = list(layer_stats.get("structured_claims") or [])
+        selected_layers = list(layer_stats.get("selected_layers") or [])
+
+        ctx["memory_layers"] = {
+            "selected_layers": selected_layers,
+            "structured_claims": structured_claims,
+            "recent_tokens": recent_tokens,
+            "summary_tokens": summary_tokens,
+            "structured_tokens": structured_tokens,
+        }
+
+        state = getattr(turn_context, "state", None)
+        if isinstance(state, dict):
+            state["memory_recent_buffer"] = list(memory_snapshot.get("recent_buffer") or [])
+            state["memory_rolling_summary"] = str(memory_snapshot.get("rolling_summary") or "")
+            state["memory_structured"] = dict(memory_snapshot.get("structured_memory") or {})
+            state["memory_full_history_id"] = str(memory_snapshot.get("full_history_id") or "")
 
         # Semantic RAG: query long-term index for targeted memory hits
         if self.semantic_index is not None and user_input.strip():
@@ -80,5 +237,51 @@ class ContextService:
                         ctx["semantic"] = unique_hits
             except Exception as exc:
                 logger.debug("ContextService: semantic index query failed (non-fatal): %s", exc)
+
+        context_total_tokens = 0
+        for key in ("core_persona", "dynamic_profile", "relationship", "session_summary", "memory", "relevant", "cross_session"):
+            context_total_tokens += self._estimate_tokens(str(ctx.get(key) or ""))
+        context_total_tokens += recent_tokens + summary_tokens + structured_tokens
+
+        context_build_ms = round((time.perf_counter() - started) * 1000, 3)
+        metadata = getattr(turn_context, "metadata", None)
+        if isinstance(metadata, dict):
+            determinism = dict(metadata.get("determinism") or {})
+            if bool(determinism.get("enforced", False)):
+                memory_fingerprint = self._deterministic_memory_fingerprint(memory_snapshot)
+                base_lock_hash = str(determinism.get("lock_hash") or "")
+                composite_lock_hash = hashlib.sha256(
+                    json.dumps(
+                        {
+                            "base_lock_hash": base_lock_hash,
+                            "memory_fingerprint": memory_fingerprint,
+                        },
+                        sort_keys=True,
+                        ensure_ascii=True,
+                    ).encode("utf-8")
+                ).hexdigest()
+                determinism["memory_fingerprint"] = memory_fingerprint
+                determinism["lock_hash"] = composite_lock_hash
+                determinism["lock_id"] = f"det-{composite_lock_hash[:16]}"
+                determinism["lock_version"] = max(2, int(determinism.get("lock_version") or 2))
+                metadata["determinism"] = determinism
+                setattr(self.context_builder.bot, "_last_memory_fingerprint", memory_fingerprint)
+            metadata["context_build_ms"] = context_build_ms
+            metadata["prefill_ms"] = float(metadata.get("prefill_ms") or 0.0)
+            metadata["recent_tokens"] = recent_tokens
+            metadata["summary_tokens"] = summary_tokens
+            metadata["structured_tokens"] = structured_tokens
+            metadata["context_total_tokens"] = context_total_tokens
+
+        if isinstance(state, dict):
+            state["_timing_context_build_ms"] = context_build_ms
+
+        compression_scheduled = self._maybe_schedule_background_compression(
+            turn_context,
+            context_total_tokens=context_total_tokens,
+            recent_tokens=recent_tokens,
+        )
+        if isinstance(metadata, dict):
+            metadata["compression_scheduled"] = bool(metadata.get("compression_scheduled") or compression_scheduled)
 
         return ctx

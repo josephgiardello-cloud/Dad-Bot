@@ -1,6 +1,8 @@
 ﻿from __future__ import annotations
 
 import asyncio
+import contextlib
+import hashlib
 import json
 import logging
 import time
@@ -21,6 +23,36 @@ from dadbot.core.kernel import TurnKernel
 
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Mutation intent payload schema (pre-commit validation gate)
+# ---------------------------------------------------------------------------
+
+# Required top-level keys per mutation kind (runtime-enforced)
+_INTENT_REQUIRED_PAYLOAD_KEYS: dict[str, list[str]] = {
+    "memory": ["temporal"],
+    "relationship": ["temporal"],
+    "graph": [],
+    "ledger": ["temporal"],
+}
+
+
+def _validate_mutation_intent_payload(intent: "MutationIntent") -> None:
+    """Enforce per-kind required-field schema on a MutationIntent payload.
+
+    Raises ``ValueError`` when a required field is absent, converting silent
+    data corruption into an explicit pre-commit schema failure.
+    """
+    kind = str(intent.type).lower()
+    required = _INTENT_REQUIRED_PAYLOAD_KEYS.get(kind, [])
+    # Only validate temporal when requires_temporal=True — matches existing guard.
+    if not bool(intent.requires_temporal) and "temporal" in required:
+        required = [k for k in required if k != "temporal"]
+    for key in required:
+        if key not in intent.payload:
+            raise ValueError(
+                f"MutationIntent({kind!r}) is missing required payload key: {key!r}"
+            )
 
 
 class FatalTurnError(RuntimeError):
@@ -63,6 +95,8 @@ class MutationIntent:
     priority: int = 100
     turn_index: int = 0
     sequence_id: int = 0
+    # Content hash computed in __post_init__; not part of __init__ signature.
+    payload_hash: str = field(default="", init=False, repr=False)
 
     def __post_init__(self) -> None:
         try:
@@ -95,6 +129,12 @@ class MutationIntent:
         elif self.type is MutationKind.LEDGER:
             if op and op not in {item.value for item in LedgerMutationOp}:
                 raise RuntimeError(f"Unsupported ledger mutation op: {op!r}")
+        # Schema validation: enforce required fields per mutation kind.
+        _validate_mutation_intent_payload(self)
+        # Payload content hash for audit/replay integrity.
+        self.payload_hash = hashlib.sha256(
+            json.dumps(self.payload, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()[:24]
 
 
 class MutationKind(StrEnum):
@@ -114,10 +154,12 @@ class RelationshipMutationOp(StrEnum):
 
 class LedgerMutationOp(StrEnum):
     APPEND_HISTORY = "append_history"
+    RECORD_TURN_STATE = "record_turn_state"
     SYNC_THREAD_SNAPSHOT = "sync_thread_snapshot"
     CLEAR_TURN_CONTEXT = "clear_turn_context"
     SCHEDULE_MAINTENANCE = "schedule_maintenance"
     HEALTH_SNAPSHOT = "health_snapshot"
+    CAPABILITY_AUDIT_EVENT = "capability_audit_event"
 
 
 class MutationQueue:
@@ -135,6 +177,7 @@ class MutationQueue:
         self._failed: list[tuple[MutationIntent, str]] = []
         self._owner_trace_id: str = ""
         self._sequence_counter: int = 0
+        self._mutations_locked: bool = False
 
     def bind_owner(self, trace_id: str) -> None:
         owner = str(trace_id or "").strip()
@@ -154,6 +197,11 @@ class MutationQueue:
     def queue(self, intent: MutationIntent) -> None:
         """Add a mutation intent to the pending queue."""
         self._assert_owner()
+        if self._mutations_locked:
+            raise RuntimeError(
+                "MutationGuard violation: mutation attempted outside SaveNode "
+                f"(type={getattr(intent, 'type', '?')!r})"
+            )
         if int(getattr(intent, "sequence_id", 0) or 0) <= 0:
             self._sequence_counter += 1
             intent.sequence_id = self._sequence_counter
@@ -227,6 +275,26 @@ class MutationQueue:
         }
 
 
+class MutationGuard:
+    """Context manager that blocks mutation queueing outside SaveNode.
+
+    Wrap every non-SaveNode stage execution with this guard to enforce the
+    invariant that only SaveNode may commit mutations at runtime.  Any attempt
+    to call ``MutationQueue.queue()`` while the guard is active raises
+    ``RuntimeError``, converting a convention into an enforced runtime contract.
+    """
+
+    def __init__(self, mutation_queue: "MutationQueue") -> None:
+        self._queue = mutation_queue
+
+    def __enter__(self) -> "MutationGuard":
+        self._queue._mutations_locked = True
+        return self
+
+    def __exit__(self, *_: Any) -> None:
+        self._queue._mutations_locked = False
+
+
 @dataclass
 class TurnFidelity:
     """Pipeline completeness record: tracks which canonical stages ran."""
@@ -280,6 +348,40 @@ class TurnHealthState:
             "fallback_used": bool(self.fallback_used),
             "fidelity": self.fidelity.to_dict(),
         }
+
+
+@dataclass
+class VirtualClock:
+    """Deterministic seeded clock for eliminating wall-time nondeterminism in replay/tests.
+
+    Assign to ``TurnContext.virtual_clock`` before turn execution.  ``TemporalNode``
+    will call ``tick()`` and derive the turn's ``TurnTemporalAxis`` from the virtual
+    timestamp instead of the real wall clock, making temporal fields 100% reproducible
+    across replay runs.
+
+    Usage::
+
+        vc = VirtualClock(base_epoch=1_700_000_000.0, step_size_seconds=30.0)
+        ctx.virtual_clock = vc
+        # First tick => epoch=1_700_000_030.0 (base + 1 step)
+    """
+
+    base_epoch: float = field(default_factory=time.time)
+    step_size_seconds: float = 1.0
+    _step: int = field(default=0, init=False, repr=False)
+
+    def now(self) -> float:
+        """Current virtual epoch (does NOT advance the clock)."""
+        return self.base_epoch + self._step * self.step_size_seconds
+
+    def tick(self) -> float:
+        """Advance clock by one step and return the new epoch."""
+        self._step += 1
+        return self.now()
+
+    def to_datetime(self) -> "datetime":
+        """Convert current virtual epoch to a timezone-aware datetime."""
+        return datetime.fromtimestamp(self.now()).astimezone().replace(microsecond=0)
 
 
 @dataclass(frozen=True)
@@ -398,6 +500,10 @@ class TurnContext:
     mutation_queue: MutationQueue = field(default_factory=MutationQueue)
     # Pipeline fidelity: which canonical stages ran this turn.
     fidelity: TurnFidelity = field(default_factory=TurnFidelity)
+    # Optional deterministic virtual clock; TemporalNode uses it when set instead of wall time.
+    virtual_clock: "VirtualClock | None" = field(default=None)
+    # Running hash of the most-recently emitted checkpoint for integrity chaining.
+    _last_checkpoint_hash: str = field(default="", init=False, repr=False)
 
     def __post_init__(self) -> None:
         # Mutation queues are turn-scoped. Bind queue ownership to this trace.
@@ -431,7 +537,7 @@ class TurnContext:
         }
 
     def checkpoint_snapshot(self, *, stage: str, status: str, error: str | None = None) -> dict[str, Any]:
-        return {
+        snapshot = {
             "trace_id": self.trace_id,
             "stage": str(stage or "unknown"),
             "status": str(status or "unknown"),
@@ -457,7 +563,25 @@ class TurnContext:
             "short_circuit": bool(self.short_circuit),
             "short_circuit_result": _json_safe(self.short_circuit_result),
             "determinism_boundary": _json_safe(self.determinism_boundary.snapshot()),
+            # Hash chain: each checkpoint includes the previous checkpoint's hash so
+            # the full sequence forms a tamper-evident integrity chain.
+            "prev_checkpoint_hash": self._last_checkpoint_hash,
         }
+        # Compute hash over the lightweight header fields (not the full state blob).
+        _chain_payload = {
+            "trace_id": self.trace_id,
+            "stage": snapshot["stage"],
+            "status": snapshot["status"],
+            "event_sequence": snapshot["event_sequence"],
+            "prev_checkpoint_hash": self._last_checkpoint_hash,
+        }
+        checkpoint_hash = hashlib.sha256(
+            json.dumps(_chain_payload, sort_keys=True).encode("utf-8")
+        ).hexdigest()[:32]
+        snapshot["checkpoint_hash"] = checkpoint_hash
+        # Advance the chain for the next checkpoint in this turn.
+        self._last_checkpoint_hash = checkpoint_hash
+        return snapshot
 
     def transition_phase(self, target: TurnPhase, *, reason: str) -> list[dict[str, str]]:
         transitions: list[dict[str, str]] = []
@@ -725,6 +849,7 @@ class TurnGraph:
         turn_context.turn_health = health
         turn_context.state["turn_health_state"] = health_payload
         turn_context.metadata["turn_health_state"] = dict(health_payload)
+        turn_context.metadata["total_turn_ms"] = round(float(total_latency_ms or 0.0), 3)
         turn_context.state["turn_health_evidence"] = evidence
         turn_context.metadata["turn_health_evidence"] = dict(evidence)
         turn_context.state["ux_feedback"] = ux_feedback
@@ -1008,7 +1133,13 @@ class TurnGraph:
             if telemetry is not None:
                 telemetry.trace("turn_graph.node_start", node=stage_name, trace_id=stage_context.trace_id)
             try:
-                stage_context = await self._execute_node(node, stage_context)
+                _guard = (
+                    MutationGuard(stage_context.mutation_queue)
+                    if stage_name != "save"
+                    else contextlib.nullcontext()
+                )
+                with _guard:
+                    stage_context = await self._execute_node(node, stage_context)
             except Exception as exc:
                 error_msg = str(exc)
                 self._emit_checkpoint(stage_context, stage=stage_name, status="error", error=error_msg)

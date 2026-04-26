@@ -3,8 +3,12 @@
 import asyncio
 import contextlib
 import hashlib
+import importlib.metadata
 import json
 import logging
+import os
+import sys
+import time
 
 from dadbot.contracts import AttachmentList, FinalizedTurnResult
 from dadbot.core.control_plane import ExecutionControlPlane, SessionRegistry
@@ -23,6 +27,35 @@ from dadbot.core.observability import CorrelationContext, configure_exporter
 from dadbot.registry import ServiceRegistry, boot_registry
 
 logger = logging.getLogger(__name__)
+
+
+class DeterminismViolation(RuntimeError):
+    """Raised when environment drift is detected between strict-mode replay turns."""
+
+
+def _build_determinism_manifest() -> dict:
+    """Compute a portable environment fingerprint for cross-machine drift detection.
+
+    Hashes only environment variable *keys* (not values) to detect structural
+    drift without exposing secrets in logs or trace metadata.
+    """
+    env_keys = sorted(os.environ.keys())
+    env_hash = hashlib.sha256(
+        json.dumps({"env_keys": env_keys}, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    dep_sample = ["pydantic", "ollama", "orjson", "python-dateutil"]
+    dep_versions: dict[str, str] = {}
+    for pkg in dep_sample:
+        try:
+            dep_versions[pkg] = importlib.metadata.version(pkg)
+        except Exception:
+            dep_versions[pkg] = "unknown"
+    return {
+        "python_version": sys.version,
+        "env_hash": env_hash,
+        "dependency_versions": dep_versions,
+        "timezone": list(time.tzname),
+    }
 
 
 def _stable_sha256(payload: dict) -> str:
@@ -147,6 +180,12 @@ class DadBotOrchestrator:
         context.metadata.setdefault("agent_blackboard_seed", dict(blackboard_seed))
         context.state.setdefault("agent_blackboard", dict(blackboard_seed))
 
+        # Environment manifest: fingerprints Python version, env vars, and dependency
+        # versions so cross-machine replay drift is detected at the envelope level.
+        manifest = _build_determinism_manifest()
+        manifest_hash = _stable_sha256(manifest)
+        context.metadata["determinism_manifest"] = manifest
+
         lock_payload = {
             "user_input": str(user_input or ""),
             "attachments": list(attachments or []),
@@ -155,6 +194,7 @@ class DadBotOrchestrator:
             "state_machine": "PLAN_ACT_OBSERVE_RESPOND",
             "agent_blackboard_seed": blackboard_seed,
             "agent_blackboard_seed_fingerprint": blackboard_seed_fingerprint,
+            "determinism_manifest_hash": manifest_hash,
         }
         lock_hash = _stable_sha256(lock_payload)
         if self._strict:
@@ -171,6 +211,8 @@ class DadBotOrchestrator:
                 "memory_layers_included": True,
                 "memory_fingerprint": str(getattr(self.bot, "_last_memory_fingerprint", "") or ""),
                 "agent_blackboard_seed_fingerprint": blackboard_seed_fingerprint,
+                "manifest": manifest,
+                "manifest_hash": manifest_hash,
             }
         else:
             determinism = {
@@ -185,6 +227,8 @@ class DadBotOrchestrator:
                 "lock_id": f"det-{lock_hash[:16]}",
                 "memory_layers_included": True,
                 "agent_blackboard_seed_fingerprint": blackboard_seed_fingerprint,
+                "manifest": manifest,
+                "manifest_hash": manifest_hash,
             }
         context.metadata.setdefault("determinism", determinism)
         if self._strict:
@@ -221,6 +265,27 @@ class DadBotOrchestrator:
             or ""
         ).strip()
         context = self._build_turn_context(job.user_input, attachments=job.attachments)
+        # Strict-mode environment drift check: compare current manifest against the
+        # manifest stored from the previous turn in this session.  Any change in
+        # env-var keys, Python version, or timezone raises DeterminismViolation.
+        if self._strict:
+            stored_manifest = dict(
+                (session.get("state") or {}).get("last_determinism_manifest") or {}
+            )
+            current_manifest = dict(context.metadata.get("determinism_manifest") or {})
+            if stored_manifest:
+                if stored_manifest.get("env_hash") != current_manifest.get("env_hash"):
+                    raise DeterminismViolation(
+                        "Environment drift detected: env_hash changed from "
+                        f"{stored_manifest.get('env_hash')!r} to "
+                        f"{current_manifest.get('env_hash')!r}"
+                    )
+                if stored_manifest.get("python_version") != current_manifest.get("python_version"):
+                    raise DeterminismViolation(
+                        "Python version drift: "
+                        f"{stored_manifest.get('python_version')!r} -> "
+                        f"{current_manifest.get('python_version')!r}"
+                    )
         # Executor boundary: trace must exist and correlation must be propagated.
         job_trace_id = str(
             getattr(job, "metadata", {}).get("trace_id")
@@ -268,6 +333,7 @@ class DadBotOrchestrator:
         session_state["last_agent_blackboard"] = final_blackboard
         session_state["last_arbitration_log"] = list(context.state.get("delegation_arbitration_log") or [])
         session_state["last_determinism"] = dict(context.metadata.get("determinism") or {})
+        session_state["last_determinism_manifest"] = dict(context.metadata.get("determinism_manifest") or {})
         return result
 
     async def handle_turn(

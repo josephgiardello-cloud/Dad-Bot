@@ -653,3 +653,110 @@ class TestDadBotPhase4Properties:
         determinism = dict(context.metadata.get("determinism") or {})
         assert str(determinism.get("agent_blackboard_seed_fingerprint") or "").strip()
         assert str(determinism.get("agent_blackboard_final_fingerprint") or "").strip()
+
+    # ------------------------------------------------------------------
+    # Tests 20-22: Phase 5 hardening — determinism manifest, delegation
+    #              lock, and mutation schema validation
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_replay_differential_lock_hash_stable(
+        self, orchestrator: DadBotOrchestrator
+    ):
+        """Claim: Same input in strict mode always yields stable env_hash and manifest_hash.
+
+        The composite lock_hash intentionally incorporates a memory fingerprint that
+        evolves with each turn, so it is NOT expected to be identical across sequential
+        turns on the same session.  What MUST be stable is the underlying environment
+        fingerprint (env_hash) and the dependency manifest hash (manifest_hash) — these
+        encode the execution environment and should never drift within a single process.
+        """
+        orchestrator._strict = True
+        input_text = "replay-differential-anchor-input"
+
+        hashes: list[tuple[str, str, str]] = []
+        for _ in range(3):
+            _, ctx = await _run_and_capture_context(
+                orchestrator, input_text, session_id="pv-replay-diff"
+            )
+            det = dict(ctx.metadata.get("determinism") or {})
+            manifest = dict(det.get("manifest") or {})
+            hashes.append((
+                str(det.get("lock_hash") or ""),
+                str(manifest.get("env_hash") or ""),
+                str(det.get("manifest_hash") or ""),
+            ))
+
+        # env_hash must be non-empty and stable — reflects the execution environment.
+        assert all(h[1] for h in hashes), "env_hash must be non-empty on every run"
+        assert all(h[1] == hashes[0][1] for h in hashes[1:]), (
+            "env_hash drifted between replays (environment instability): "
+            f"{[h[1] for h in hashes]}"
+        )
+        # manifest_hash must be stable — encodes Python version + dependency versions.
+        assert all(h[2] for h in hashes), "manifest_hash must be non-empty on every run"
+        assert all(h[2] == hashes[0][2] for h in hashes[1:]), (
+            "manifest_hash drifted between replays (dependency version instability): "
+            f"{[h[2] for h in hashes]}"
+        )
+        # lock_hash is a composite that intentionally includes a per-turn memory
+        # fingerprint; it is expected to evolve across sequential turns.  We only
+        # verify it is non-empty (was computed) on every run, not that it is identical.
+        assert all(h[0] for h in hashes), "lock_hash must be non-empty on every run"
+
+    @pytest.mark.asyncio
+    async def test_delegation_arbitration_hash_in_metadata(
+        self, orchestrator: DadBotOrchestrator, monkeypatch
+    ):
+        """Claim: Delegation produces a stable arbitration_hash in arbitration_metadata."""
+        service = orchestrator.registry.get("agent_service")
+
+        async def _agent(context: TurnContext, _rich: dict[str, Any]) -> tuple[str, bool]:
+            if not context.metadata.get("parent_trace_id"):
+                return (
+                    json.dumps({
+                        "type": "delegate",
+                        "mode": "sequential",
+                        "subtasks": [
+                            {"agent": "alpha", "input": "step one"},
+                            {"agent": "beta", "input": "step two"},
+                        ],
+                    }),
+                    False,
+                )
+            return (f"done::{context.metadata.get('agent_name', '')}", False)
+
+        monkeypatch.setattr(service, "run_agent", _agent)
+
+        _, context = await _run_and_capture_context(
+            orchestrator, "Delegation lock test", session_id="pv-arb-hash"
+        )
+
+        arb = dict(context.state.get("arbitration_metadata") or {})
+        assert str(arb.get("arbitration_hash") or "").strip(), (
+            "arbitration_hash missing from arbitration_metadata"
+        )
+        assert isinstance(arb.get("subtask_ids"), list), (
+            "subtask_ids missing from arbitration_metadata"
+        )
+        assert len(arb["subtask_ids"]) == 2
+
+    @pytest.mark.asyncio
+    async def test_determinism_manifest_stamped_in_envelope(
+        self, orchestrator: DadBotOrchestrator
+    ):
+        """Claim: Every turn stamps python_version, env_hash, and manifest_hash."""
+        _, context = await _run_and_capture_context(
+            orchestrator, "Manifest check", session_id="pv-manifest"
+        )
+        det = dict(context.metadata.get("determinism") or {})
+        manifest = dict(det.get("manifest") or {})
+        assert str(manifest.get("python_version") or "").strip(), (
+            "python_version missing from determinism manifest"
+        )
+        assert str(manifest.get("env_hash") or "").strip(), (
+            "env_hash missing from determinism manifest"
+        )
+        assert str(det.get("manifest_hash") or "").strip(), (
+            "manifest_hash missing from determinism envelope"
+        )

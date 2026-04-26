@@ -8,7 +8,7 @@ from copy import deepcopy
 from threading import RLock
 from typing import Any
 
-from dadbot.core.canonical_event import canonicalize_event_payload
+from dadbot.core.canonical_event import NON_REPLAY_EVENT_TYPES, canonicalize_event_payload
 from dadbot.core.ledger.enforcement import LedgerEnforcer, LedgerEnforcementError
 from dadbot.core.ledger_backend import LedgerBackend, InMemoryLedgerBackend
 from dadbot.core.event_schema import stamp_schema_version
@@ -214,6 +214,10 @@ class ExecutionLedger:
 
     def replay_hash(self, *, session_id: str = "") -> str:
         events = self.filter(session_id=session_id) if session_id else self.read()
+        events = [
+            event for event in events
+            if str(event.get("type") or "") not in NON_REPLAY_EVENT_TYPES
+        ]
         canonical = [
             {
                 "type": str(event.get("type") or ""),

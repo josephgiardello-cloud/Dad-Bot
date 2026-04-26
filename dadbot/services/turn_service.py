@@ -127,10 +127,24 @@ class TurnService:
         return self.bot.memory.should_do_daily_checkin() and self.bot.session_turn_count() == 0
 
     def record_user_turn_state(self, stripped_input: str, current_mood: str, turn_context: Any | None = None) -> None:
+        if turn_context is None:
+            raise RuntimeError("Strict mode requires turn_context for turn state mutation")
         should_offer_daily_checkin = self.should_offer_daily_checkin_for_turn()
-        with self.bot._session_lock:
-            self.bot.session_moods.append(current_mood)
-            self.bot._pending_daily_checkin_context = should_offer_daily_checkin
+        mutation_queue = getattr(turn_context, "mutation_queue", None)
+        if mutation_queue is None:
+            raise RuntimeError("Strict mode requires turn_context.mutation_queue for turn state mutation")
+        mutation_queue.queue(
+            MutationIntent(
+                type=MutationKind.LEDGER,
+                payload={
+                    "op": LedgerMutationOp.RECORD_TURN_STATE.value,
+                    "mood": str(current_mood or "neutral"),
+                    "should_offer_daily_checkin": bool(should_offer_daily_checkin),
+                },
+                requires_temporal=False,
+                source="turn_service.record_user_turn_state",
+            )
+        )
 
         # Queue mood mutation for SaveNode drain at the turn commit boundary.
         # All persistent mood writes flow through state["_pending_mood_updates"] →
@@ -1113,12 +1127,7 @@ Return ONLY valid JSON (no extra text):
         turn_context: Any | None = None,
     ) -> FinalizedTurnResult:
         if turn_context is None:
-            return self._finalize_direct_compat_turn(
-                stripped_input,
-                current_mood,
-                dad_reply,
-                attachments,
-            )
+            raise RuntimeError("Strict mode requires turn_context for finalize_user_turn")
         mutation_queue = getattr(turn_context, "mutation_queue", None)
         if mutation_queue is None:
             raise RuntimeError("SaveNode context missing mutation_queue in strict mode")
@@ -1184,6 +1193,18 @@ Return ONLY valid JSON (no extra text):
                 source="turn_service.finalize_user_turn.health_snapshot",
             )
         )
+        if bool(getattr(turn_context, "metadata", {}).get("audit_mode", False)):
+            mutation_queue.queue(
+                MutationIntent(
+                    type=MutationKind.LEDGER,
+                    payload={
+                        "op": LedgerMutationOp.CAPABILITY_AUDIT_EVENT.value,
+                        "scenario": "runtime_turn",
+                    },
+                    requires_temporal=False,
+                    source="turn_service.finalize_user_turn.capability_audit_event",
+                )
+            )
         return dad_reply, False
 
     # ---------------------------------------------------------------------------

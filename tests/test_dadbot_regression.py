@@ -13,6 +13,7 @@ from unittest.mock import patch
 import ollama
 
 from Dad import DadBot
+from dadbot.core.graph import LedgerMutationOp, TurnContext
 from dadbot_system.state import InMemoryStateStore
 
 
@@ -61,13 +62,12 @@ class DadBotRegressionTests(unittest.TestCase):
     @contextlib.contextmanager
     def _save_commit_context(self):
         previous_commit_active = bool(getattr(self.bot, "_graph_commit_active", False))
-        turn_context = SimpleNamespace(
-            temporal=SimpleNamespace(
-                wall_time=datetime.now().isoformat(timespec="seconds"),
-                wall_date=date.today().isoformat(),
-            ),
-            state={"_active_graph_stage": "save"},
+        turn_context = TurnContext(user_input="test")
+        turn_context.temporal = SimpleNamespace(
+            wall_time=datetime.now().isoformat(timespec="seconds"),
+            wall_date=date.today().isoformat(),
         )
+        turn_context.state["_active_graph_stage"] = "save"
         try:
             self.bot._graph_commit_active = True
             yield turn_context
@@ -2577,18 +2577,30 @@ class DadBotRegressionTests(unittest.TestCase):
         self.bot.mood_manager.detect = lambda *_args, **_kwargs: "neutral"
         self.bot.MEMORY_STORE["last_mood_updated_at"] = (date.today() - timedelta(days=1)).isoformat()
 
-        current_mood, dad_reply, should_end, _turn_text, _attachments = self.bot.prepare_user_turn("Just checking in.")
+        turn_context = TurnContext(user_input="Just checking in.")
+        current_mood, dad_reply, should_end, _turn_text, _attachments = self.bot.prepare_user_turn(
+            "Just checking in.",
+            turn_context=turn_context,
+        )
 
         self.assertEqual(current_mood, "neutral")
         self.assertIsNone(dad_reply)
         self.assertFalse(should_end)
-        self.assertTrue(self.bot._pending_daily_checkin_context)
-        self.assertIsNotNone(self.bot.build_daily_checkin_context(current_mood))
+        self.assertEqual(turn_context.mutation_queue.size(), 1)
+        op = str(turn_context.mutation_queue.pending()[0].payload.get("op") or "")
+        self.assertEqual(op, LedgerMutationOp.RECORD_TURN_STATE.value)
 
-        self.bot.finalize_user_turn("Just checking in.", current_mood, "Glad to hear from you, buddy.")
+        self.bot.turn_service._resolve_persistence_service().finalize_turn(
+            turn_context,
+            ("Glad to hear from you, buddy.", False),
+        )
         self.assertFalse(self.bot._pending_daily_checkin_context)
 
-        next_mood, next_reply, next_should_end, _turn_text, _attachments = self.bot.prepare_user_turn("Still here.")
+        next_turn_context = TurnContext(user_input="Still here.")
+        next_mood, next_reply, next_should_end, _turn_text, _attachments = self.bot.prepare_user_turn(
+            "Still here.",
+            turn_context=next_turn_context,
+        )
         self.assertEqual(next_mood, "neutral")
         self.assertIsNone(next_reply)
         self.assertFalse(next_should_end)
@@ -2597,12 +2609,22 @@ class DadBotRegressionTests(unittest.TestCase):
     def test_finalize_user_turn_queues_post_turn_maintenance(self):
         self.bot.LIGHT_MODE = False
 
-        with patch.object(self.bot, "schedule_post_turn_maintenance") as schedule_post_turn_maintenance:
-            dad_reply, should_end = self.bot.finalize_user_turn("Just checking in.", "neutral", "Glad to hear from you, buddy.")
+        turn_context = TurnContext(user_input="Just checking in.")
+        dad_reply, should_end = self.bot.finalize_user_turn(
+            "Just checking in.",
+            "neutral",
+            "Glad to hear from you, buddy.",
+            turn_context=turn_context,
+        )
 
         self.assertFalse(should_end)
         self.assertEqual(dad_reply, "Glad to hear from you, buddy.")
-        schedule_post_turn_maintenance.assert_called_once_with("Just checking in.", "neutral")
+        queued_ops = [
+            str(intent.payload.get("op") or "")
+            for intent in turn_context.mutation_queue.pending()
+            if isinstance(getattr(intent, "payload", None), dict)
+        ]
+        self.assertIn(LedgerMutationOp.SCHEDULE_MAINTENANCE.value, queued_ops)
 
     def test_prepare_user_turn_blends_daily_checkin_into_direct_reply(self):
         self.bot.mood_manager.detect = lambda *_args, **_kwargs: "neutral"

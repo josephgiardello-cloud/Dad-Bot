@@ -410,19 +410,30 @@ def _run_adversarial(bot: Any) -> ModuleResult:
 # Module 3: Concurrency Simulator
 # ---------------------------------------------------------------------------
 
-def _run_concurrency(bot: Any, num_threads: int = 20) -> ModuleResult:
+def _run_concurrency(bot: Any, num_threads: int = 50) -> ModuleResult:
     name = "concurrency"
     max_score = _SCORE_WEIGHTS[name]
     t0 = time.monotonic()
     failures: list[str] = []
     risk_flags: list[str] = []
 
-    # Each thread runs a small sequence of turns.
+    # Each thread runs one turn to verify isolation without compounding
+    # conversation-history growth (which makes each turn slower after
+    # long_horizon has already added 200+ messages to the shared bot).
     results_lock = threading.Lock()
     turn_results: list[dict[str, Any]] = []
+    worker_turns = 1
+    start_barrier = threading.Barrier(num_threads)
 
-    def _worker(worker_id: int, turns: int = 3) -> None:
+    def _worker(worker_id: int, turns: int = worker_turns) -> None:
+        # Force aligned start to maximize contention pressure across shared runtime surfaces.
+        try:
+            start_barrier.wait(timeout=15)
+        except threading.BrokenBarrierError:
+            pass
         for t in range(turns):
+            # Deterministic jitter increases turn interleaving and race exposure.
+            time.sleep(((worker_id * 11 + t * 7) % 5) * 0.003)
             msg = f"Concurrency worker {worker_id} turn {t}: {_generate_mixed_input(worker_id + t)}"
             try:
                 reply, should_end = bot.process_user_message(msg)
@@ -437,6 +448,7 @@ def _run_concurrency(bot: Any, num_threads: int = 20) -> ModuleResult:
                         "error": f"{type(exc).__name__}: {exc!s:.80}",
                     })
                 return
+            time.sleep(((worker_id * 13 + t * 5) % 3) * 0.002)
             with results_lock:
                 turn_results.append({
                     "worker": worker_id,
@@ -446,11 +458,14 @@ def _run_concurrency(bot: Any, num_threads: int = 20) -> ModuleResult:
                 })
 
     with concurrent.futures.ThreadPoolExecutor(
-        max_workers=min(num_threads, 10),
+        max_workers=max(1, num_threads),
         thread_name_prefix="cert-concurrency",
     ) as pool:
         futs = [pool.submit(_worker, i) for i in range(num_threads)]
-        for f in concurrent.futures.as_completed(futs, timeout=120):
+        # Scale wait timeout with concurrency pressure so 50-thread stress records
+        # real race outcomes instead of spuriously failing on harness timeouts.
+        worker_timeout = max(180, num_threads * worker_turns * 4)
+        for f in concurrent.futures.as_completed(futs, timeout=worker_timeout):
             try:
                 f.result()
             except Exception as exc:
@@ -946,7 +961,7 @@ class Phase4CertificationGate:
     def run_adversarial(self) -> ModuleResult:
         return _run_adversarial(self.bot)
 
-    def run_concurrency(self, num_threads: int = 20) -> ModuleResult:
+    def run_concurrency(self, num_threads: int = 50) -> ModuleResult:
         return _run_concurrency(self.bot, num_threads=num_threads)
 
     def run_crash_recovery(self) -> ModuleResult:
@@ -971,7 +986,7 @@ class Phase4CertificationGate:
         long_horizon_turns: int = 200,
         memory_growth_turns: int = 200,
         replay_turns: int = 100,
-        concurrency_threads: int = 20,
+        concurrency_threads: int = 50,
     ) -> dict[str, Any]:
         """Run all 7 certification modules in order and return the final report."""
         _log = logging.getLogger("dadbot.stress.phase4_certification_gate")
