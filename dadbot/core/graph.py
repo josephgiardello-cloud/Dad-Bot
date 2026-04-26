@@ -514,8 +514,9 @@ class TurnContext:
     fidelity: TurnFidelity = field(default_factory=TurnFidelity)
     # Optional deterministic virtual clock; TemporalNode uses it when set instead of wall time.
     virtual_clock: "VirtualClock | None" = field(default=None)
-    # Running hash of the most-recently emitted checkpoint for integrity chaining.
-    _last_checkpoint_hash: str = field(default="", init=False, repr=False)
+    # Hash-chain pointers for checkpoint integrity across load/save boundaries.
+    last_checkpoint_hash: str = field(default="", init=False)
+    prev_checkpoint_hash: str = field(default="", init=False)
 
     def __post_init__(self) -> None:
         # Mutation queues are turn-scoped. Bind queue ownership to this trace.
@@ -546,9 +547,19 @@ class TurnContext:
             ),
             "ux_feedback": _json_safe(self.state.get("ux_feedback") or {}),
             "determinism_boundary": self.determinism_boundary.snapshot(),
+            "last_checkpoint_hash": self.last_checkpoint_hash,
+            "prev_checkpoint_hash": self.prev_checkpoint_hash,
         }
 
-    def checkpoint_snapshot(self, *, stage: str, status: str, error: str | None = None) -> dict[str, Any]:
+    def checkpoint_snapshot(
+        self,
+        *,
+        stage: str,
+        status: str,
+        error: str | None = None,
+        advance_chain: bool = True,
+    ) -> dict[str, Any]:
+        chain_prev = str(self.last_checkpoint_hash or self.prev_checkpoint_hash or "")
         snapshot = {
             "trace_id": self.trace_id,
             "stage": str(stage or "unknown"),
@@ -577,7 +588,7 @@ class TurnContext:
             "determinism_boundary": _json_safe(self.determinism_boundary.snapshot()),
             # Hash chain: each checkpoint includes the previous checkpoint's hash so
             # the full sequence forms a tamper-evident integrity chain.
-            "prev_checkpoint_hash": self._last_checkpoint_hash,
+            "prev_checkpoint_hash": chain_prev,
         }
         # Compute hash over the lightweight header fields (not the full state blob).
         _chain_payload = {
@@ -585,14 +596,16 @@ class TurnContext:
             "stage": snapshot["stage"],
             "status": snapshot["status"],
             "event_sequence": snapshot["event_sequence"],
-            "prev_checkpoint_hash": self._last_checkpoint_hash,
+            "prev_checkpoint_hash": chain_prev,
         }
         checkpoint_hash = hashlib.sha256(
             json.dumps(_chain_payload, sort_keys=True).encode("utf-8")
         ).hexdigest()[:32]
         snapshot["checkpoint_hash"] = checkpoint_hash
-        # Advance the chain for the next checkpoint in this turn.
-        self._last_checkpoint_hash = checkpoint_hash
+        if advance_chain:
+            # Advance the chain for the next durable checkpoint edge.
+            self.prev_checkpoint_hash = chain_prev
+            self.last_checkpoint_hash = checkpoint_hash
         return snapshot
 
     def transition_phase(self, target: TurnPhase, *, reason: str) -> list[dict[str, str]]:
@@ -678,6 +691,16 @@ class SaveNode:
         if callable(finalize):
             try:
                 turn_context.state["safe_result"] = finalize(turn_context, result)
+                # Ensure hash-chain checkpoints are also emitted from SaveNode so
+                # commit-time state is captured inside the finalize boundary.
+                save_checkpoint = getattr(service, "save_graph_checkpoint", None)
+                if callable(save_checkpoint):
+                    checkpoint = turn_context.checkpoint_snapshot(
+                        stage="save",
+                        status="atomic_commit",
+                        error=None,
+                    )
+                    save_checkpoint(checkpoint, _skip_turn_event=True)
                 return
             except Exception:
                 pass
@@ -1023,7 +1046,12 @@ class TurnGraph:
         save_checkpoint = getattr(service, "save_graph_checkpoint", None)
         determinism_lock = dict(turn_context.metadata.get("determinism") or {})
         turn_context.event_sequence += 1
-        checkpoint = turn_context.checkpoint_snapshot(stage=stage, status=status, error=error)
+        checkpoint = turn_context.checkpoint_snapshot(
+            stage=stage,
+            status=status,
+            error=error,
+            advance_chain=bool(turn_context.metadata.get("checkpoint_every_node", False)),
+        )
         if callable(save_checkpoint):
             save_checkpoint(checkpoint, _skip_turn_event=True)
 

@@ -10,6 +10,7 @@ import asyncio
 import json
 import os
 import random
+import tempfile
 import time
 from types import SimpleNamespace
 from typing import Any
@@ -18,6 +19,11 @@ import pytest
 
 from dadbot.core.graph import TurnContext
 from dadbot.core.orchestrator import DadBotOrchestrator, DeterminismViolation
+from dadbot.core.persistence import SQLiteCheckpointer
+
+
+MAX_TURNS = int(os.getenv("DADBOT_MAX_TEST_TURNS", "80") or "80")
+MAX_CONCURRENCY = int(os.getenv("DADBOT_MAX_CONCURRENCY", "12") or "12")
 
 
 @pytest.fixture
@@ -107,7 +113,7 @@ class TestDadBotPhase4Properties:
     @pytest.mark.asyncio
     async def test_latency_does_not_degrade_with_history_length(self, orchestrator: DadBotOrchestrator):
         """Claim: Hierarchical memory keeps latency bounded as history grows."""
-        turns = int(os.environ.get("DADBOT_PROPERTY_MAX_TURNS", "80") or "80")
+        turns = int(os.environ.get("DADBOT_PROPERTY_MAX_TURNS", str(MAX_TURNS)) or str(MAX_TURNS))
         latency_threshold = float(os.environ.get("DADBOT_PROPERTY_LATENCY_THRESHOLD", "1.4") or "1.4")
         latencies_ms: list[float] = []
 
@@ -126,7 +132,7 @@ class TestDadBotPhase4Properties:
     @pytest.mark.asyncio
     async def test_memory_layers_invariants(self, orchestrator: DadBotOrchestrator):
         """Claim: Recent/summary/structured memory layer invariants hold."""
-        turns = int(os.environ.get("DADBOT_PROPERTY_MEMORY_LAYER_TURNS", "80") or "80")
+        turns = int(os.environ.get("DADBOT_PROPERTY_MEMORY_LAYER_TURNS", str(MAX_TURNS)) or str(MAX_TURNS))
         for i in range(max(10, turns)):
             _, context = await _run_and_capture_context(
                 orchestrator,
@@ -145,7 +151,7 @@ class TestDadBotPhase4Properties:
     @pytest.mark.asyncio
     async def test_concurrent_sessions_have_isolated_memory(self, orchestrator: DadBotOrchestrator):
         """Claim: Session-scoped turns keep memory snapshots isolated."""
-        concurrency = int(os.environ.get("DADBOT_PROPERTY_CONCURRENCY", "12") or "12")
+        concurrency = int(os.environ.get("DADBOT_PROPERTY_CONCURRENCY", str(MAX_CONCURRENCY)) or str(MAX_CONCURRENCY))
         session_ids = [f"pv-session-{i}" for i in range(max(1, concurrency))]
 
         # Run sequentially so each session sees a distinct conversation-history
@@ -583,6 +589,60 @@ class TestDadBotPhase4Properties:
         )
 
     @pytest.mark.asyncio
+    async def test_parallel_delegation_reduces_wall_time(
+        self, orchestrator: DadBotOrchestrator, monkeypatch
+    ):
+        """Prove parallel delegation is measurably faster than sequential mode."""
+        service = orchestrator.registry.get("agent_service")
+        per_task_sleep_s = float(os.environ.get("DADBOT_PROPERTY_DELEGATION_SLEEP_S", "0.03") or "0.03")
+
+        async def _timed_agent(context: TurnContext, _rich: dict[str, Any]) -> tuple[str, bool]:
+            if not context.metadata.get("parent_trace_id"):
+                mode = "parallel" if "parallel" in str(context.user_input).lower() else "sequential"
+                return (
+                    json.dumps(
+                        {
+                            "type": "delegate",
+                            "mode": mode,
+                            "subtasks": [
+                                {"agent": "a", "input": "topic-a"},
+                                {"agent": "b", "input": "topic-b"},
+                                {"agent": "c", "input": "topic-c"},
+                                {"agent": "d", "input": "topic-d"},
+                                {"agent": "e", "input": "topic-e"},
+                                {"agent": "f", "input": "topic-f"},
+                            ],
+                        }
+                    ),
+                    False,
+                )
+            await asyncio.sleep(per_task_sleep_s)
+            return (f"done::{context.metadata.get('agent_name', '')}", False)
+
+        monkeypatch.setattr(service, "run_agent", _timed_agent)
+
+        start = time.perf_counter()
+        seq_result, _ = await _run_and_capture_context(
+            orchestrator,
+            "Process 6 independent research tasks. Use sequential mode.",
+            session_id="pv-wall-seq",
+        )
+        seq_ms = (time.perf_counter() - start) * 1000
+
+        start = time.perf_counter()
+        par_result, _ = await _run_and_capture_context(
+            orchestrator,
+            "Process 6 independent research tasks. Use parallel mode.",
+            session_id="pv-wall-par",
+        )
+        par_ms = (time.perf_counter() - start) * 1000
+
+        assert isinstance(seq_result, tuple) and isinstance(par_result, tuple)
+        assert par_ms < seq_ms * 0.80, (
+            f"Parallel was not faster enough: parallel={par_ms:.1f}ms vs sequential={seq_ms:.1f}ms"
+        )
+
+    @pytest.mark.asyncio
     async def test_delegation_summary_appears_in_final_reply(
         self, orchestrator: DadBotOrchestrator, monkeypatch
     ):
@@ -922,3 +982,40 @@ class TestDadBotPhase4Properties:
         assert all(out == outputs[0] for out in outputs[1:]), (
             f"Delegation outputs drifted under timing jitter: {outputs}"
         )
+
+    @pytest.mark.asyncio
+    async def test_persistence_round_trip_load_verify_and_replay(
+        self, orchestrator: DadBotOrchestrator
+    ):
+        """Claim: Save -> load -> replay validates manifest/hash chain and keeps deterministic continuity."""
+        orchestrator._strict = True
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            db_path = f.name
+        try:
+            cp = SQLiteCheckpointer(db_path, auto_migrate=True, prune_every=0)
+            orchestrator.checkpointer = cp
+
+            storage = orchestrator.registry.get("storage")
+            set_checkpointer = getattr(storage, "set_checkpointer", None)
+            if callable(set_checkpointer):
+                set_checkpointer(cp)
+            else:
+                setattr(storage, "checkpointer", cp)
+            setattr(storage, "strict_mode", True)
+
+            sid = "pv-persistence-roundtrip"
+            _, ctx1 = await _run_and_capture_context(orchestrator, "first durable turn", session_id=sid)
+            h1 = str(ctx1.last_checkpoint_hash or "")
+            assert h1, "first turn did not produce checkpoint hash"
+
+            # New orchestrator instance semantics: keep same runtime object, but force
+            # load path to execute and verify strict manifest/hash-chain.
+            _, ctx2 = await _run_and_capture_context(orchestrator, "second durable turn", session_id=sid)
+            assert str(ctx2.prev_checkpoint_hash or "") == h1
+            assert str(ctx2.last_checkpoint_hash or "")
+            assert str(ctx2.last_checkpoint_hash or "") != h1
+        finally:
+            try:
+                os.unlink(db_path)
+            except OSError:
+                pass

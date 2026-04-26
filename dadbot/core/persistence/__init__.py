@@ -5,17 +5,20 @@ management with hash-chain integrity, manifest drift detection, and pruning.
 """
 
 from dadbot.core.persistence.base import (
+    AbstractAsyncCheckpointer,
     AbstractCheckpointer,
     CheckpointError,
     CheckpointIntegrityError,
     CheckpointNotFoundError,
 )
-from dadbot.core.persistence.sqlite_checkpointer import SQLiteCheckpointer
+from dadbot.core.persistence.checkpointer import AsyncSQLiteCheckpointer, SQLiteCheckpointer
 
 __all__ = [
     "AbstractCheckpointer",
+    "AbstractAsyncCheckpointer",
     "CheckpointError",
     "CheckpointIntegrityError",
     "CheckpointNotFoundError",
     "SQLiteCheckpointer",
+    "AsyncSQLiteCheckpointer",
 ]

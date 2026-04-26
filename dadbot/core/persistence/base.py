@@ -1,4 +1,4 @@
-"""Abstract base class for checkpoint persistence adapters."""
+"""Abstract base classes for checkpoint persistence adapters."""
 
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional
@@ -67,6 +67,9 @@ class AbstractCheckpointer(ABC):
         self,
         session_id: str,
         trace_id: Optional[str] = None,
+        *,
+        current_manifest: Optional[Dict[str, Any]] = None,
+        strict: bool = False,
     ) -> Dict[str, Any]:
         """Load and verify a checkpoint.
         
@@ -88,6 +91,7 @@ class AbstractCheckpointer(ABC):
         self,
         session_id: str,
         keep_count: int = 10,
+        older_than_days: int | None = None,
     ) -> int:
         """Delete old checkpoints, keeping only the most recent N.
         
@@ -110,4 +114,47 @@ class AbstractCheckpointer(ABC):
         Returns:
             Number of checkpoints deleted
         """
+        pass
+
+    @abstractmethod
+    def migrate(self) -> None:
+        """Apply schema migration(s) for the checkpoint backend."""
+        pass
+
+
+class AbstractAsyncCheckpointer(ABC):
+    """Async counterpart for checkpoint persistence backends."""
+
+    @abstractmethod
+    async def save_checkpoint(
+        self,
+        session_id: str,
+        trace_id: str,
+        checkpoint: Dict[str, Any],
+        manifest: Dict[str, Any],
+    ) -> bool:
+        pass
+
+    @abstractmethod
+    async def load_checkpoint(
+        self,
+        session_id: str,
+        trace_id: Optional[str] = None,
+        *,
+        current_manifest: Optional[Dict[str, Any]] = None,
+        strict: bool = False,
+    ) -> Dict[str, Any]:
+        pass
+
+    @abstractmethod
+    async def prune_old_checkpoints(
+        self,
+        session_id: str,
+        keep_count: int = 10,
+        older_than_days: int | None = None,
+    ) -> int:
+        pass
+
+    @abstractmethod
+    async def migrate(self) -> None:
         pass

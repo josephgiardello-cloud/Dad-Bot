@@ -1,0 +1,16 @@
+........................................................................ [ 80%]
+.................                                                        [100%]
+============================== warnings summary ===============================
+tests\adversarial_test.py:67
+  C:\Users\josep\OneDrive\Desktop\Dad-Bot\tests\adversarial_test.py:67: PytestUnknownMarkWarning: Unknown pytest.mark.adversarial - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.adversarial
+
+tests\adversarial_test.py:173
+  C:\Users\josep\OneDrive\Desktop\Dad-Bot\tests\adversarial_test.py:173: PytestUnknownMarkWarning: Unknown pytest.mark.adversarial - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.adversarial
+
+tests\adversarial_test.py:252
+  C:\Users\josep\OneDrive\Desktop\Dad-Bot\tests\adversarial_test.py:252: PytestUnknownMarkWarning: Unknown pytest.mark.adversarial - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.adversarial
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html

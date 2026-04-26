@@ -27,6 +27,7 @@ from dadbot.core.planner import PlannerNode
 from dadbot.core.critic import CritiqueEngine
 from dadbot.memory.goal_scorer import GoalAwareRanker
 from dadbot.core.observability import CorrelationContext, configure_exporter
+from dadbot.core.persistence import CheckpointIntegrityError, CheckpointNotFoundError
 from dadbot.registry import ServiceRegistry, boot_registry
 
 logger = logging.getLogger(__name__)
@@ -79,10 +80,12 @@ class DadBotOrchestrator:
         strict: bool = False,
         enable_observability: bool = True,
         checkpointer=None,
+        checkpoint_every_node: bool = False,
     ):
         self.bot = bot
         self._strict = strict
         self.checkpointer = checkpointer
+        self.checkpoint_every_node = bool(checkpoint_every_node)
         self.registry = registry or boot_registry(config_path=config_path, bot=bot)
         if enable_observability:
             configure_exporter(enabled=True)
@@ -125,6 +128,15 @@ class DadBotOrchestrator:
         safety = self.registry.get("safety")
         storage = self.registry.get("storage")
         reflection = self.registry.get("reflection")
+
+        # Wire optional durable checkpointer into persistence service.
+        if self.checkpointer is not None:
+            set_checkpointer = getattr(storage, "set_checkpointer", None)
+            if callable(set_checkpointer):
+                set_checkpointer(self.checkpointer)
+            else:
+                setattr(storage, "checkpointer", self.checkpointer)
+            setattr(storage, "strict_mode", bool(self._strict))
 
         # Validate service contracts; raises in strict mode, warns otherwise.
         validate_pipeline_services({
@@ -181,12 +193,15 @@ class DadBotOrchestrator:
         runtime_bot = getattr(llm_service, "bot", None)
         llm_provider = str(getattr(runtime_bot, "LLM_PROVIDER", "ollama") or "ollama")
         llm_model = str(getattr(runtime_bot, "LLM_MODEL", "") or "")
+        memory_fingerprint = str(getattr(self.bot, "_last_memory_fingerprint", "") or "")
 
         # Determinism-safe, per-turn blackboard seed and fingerprint.
         blackboard_seed: dict[str, str] = {}
         blackboard_seed_fingerprint = _stable_sha256(blackboard_seed)
         context.metadata.setdefault("agent_blackboard_seed", dict(blackboard_seed))
         context.state.setdefault("agent_blackboard", dict(blackboard_seed))
+        blackboard = dict(context.state.get("agent_blackboard") or context.state.get("blackboard") or {})
+        blackboard_fingerprint = _stable_sha256(blackboard)[:16]
 
         # Environment manifest: fingerprints Python version, env vars, and dependency
         # versions so cross-machine replay drift is detected at the envelope level.
@@ -202,6 +217,9 @@ class DadBotOrchestrator:
             "state_machine": "PLAN_ACT_OBSERVE_RESPOND",
             "agent_blackboard_seed": blackboard_seed,
             "agent_blackboard_seed_fingerprint": blackboard_seed_fingerprint,
+            "agent_blackboard": blackboard,
+            "agent_blackboard_fingerprint": blackboard_fingerprint,
+            "memory_fingerprint": memory_fingerprint,
             "determinism_manifest_hash": manifest_hash,
         }
         lock_hash = _stable_sha256(lock_payload)
@@ -217,7 +235,8 @@ class DadBotOrchestrator:
                 "lock_hash": lock_hash,
                 "lock_id": f"det-{lock_hash[:16]}",
                 "memory_layers_included": True,
-                "memory_fingerprint": str(getattr(self.bot, "_last_memory_fingerprint", "") or ""),
+                "memory_fingerprint": memory_fingerprint,
+                "blackboard_fingerprint": blackboard_fingerprint,
                 "agent_blackboard_seed_fingerprint": blackboard_seed_fingerprint,
                 "manifest": manifest,
                 "manifest_hash": manifest_hash,
@@ -234,11 +253,14 @@ class DadBotOrchestrator:
                 "lock_hash": lock_hash,
                 "lock_id": f"det-{lock_hash[:16]}",
                 "memory_layers_included": True,
+                "memory_fingerprint": memory_fingerprint,
+                "blackboard_fingerprint": blackboard_fingerprint,
                 "agent_blackboard_seed_fingerprint": blackboard_seed_fingerprint,
                 "manifest": manifest,
                 "manifest_hash": manifest_hash,
             }
         context.metadata.setdefault("determinism", determinism)
+        context.metadata["checkpoint_every_node"] = bool(self.checkpoint_every_node)
         if self._strict:
             # Deterministic replay envelope: same lock hash -> same temporal axis.
             context.temporal = TurnTemporalAxis.from_lock_hash(lock_hash)
@@ -278,27 +300,45 @@ class DadBotOrchestrator:
         session_id = str(session.get("session_id") or job.session_id)
         if self.checkpointer:
             try:
-                from dadbot.core.persistence import CheckpointNotFoundError
-                prev_checkpoint = self.checkpointer.load_checkpoint(session_id)
-                # Checkpoint loaded successfully; verify manifest consistency
-                prev_manifest = prev_checkpoint.get("manifest", {})
+                current_manifest = dict(context.metadata.get("determinism_manifest") or {})
+                prev_checkpoint = self.checkpointer.load_checkpoint(
+                    session_id,
+                    current_manifest=current_manifest,
+                    strict=bool(self._strict),
+                )
+                prev_manifest = dict(prev_checkpoint.get("manifest") or {})
+                loaded_checkpoint_hash = str(prev_checkpoint.get("checkpoint_hash") or "")
+                loaded_prev_hash = str(prev_checkpoint.get("prev_checkpoint_hash") or "")
+                if loaded_checkpoint_hash:
+                    context.last_checkpoint_hash = loaded_checkpoint_hash
+                    context.prev_checkpoint_hash = loaded_prev_hash
                 current_manifest = dict(context.metadata.get("determinism_manifest") or {})
                 if prev_manifest.get("env_hash") != current_manifest.get("env_hash"):
-                    logger.warning(
-                        "Env drift after checkpoint load: %r -> %r",
-                        prev_manifest.get("env_hash"),
-                        current_manifest.get("env_hash"),
+                    message = (
+                        "Env drift after checkpoint load: "
+                        f"{prev_manifest.get('env_hash')!r} -> {current_manifest.get('env_hash')!r}"
                     )
+                    if self._strict:
+                        raise DeterminismViolation(message)
+                    logger.warning(message)
                 if prev_manifest.get("python_version") != current_manifest.get("python_version"):
-                    logger.warning(
-                        "Python version drift after checkpoint load: %r -> %r",
-                        prev_manifest.get("python_version"),
-                        current_manifest.get("python_version"),
+                    message = (
+                        "Python version drift after checkpoint load: "
+                        f"{prev_manifest.get('python_version')!r} -> {current_manifest.get('python_version')!r}"
                     )
+                    if self._strict:
+                        raise DeterminismViolation(message)
+                    logger.warning(message)
                 logger.debug(f"Loaded checkpoint for session={session_id}")
             except CheckpointNotFoundError:
                 logger.debug(f"No previous checkpoint for session={session_id} (first turn or new session)")
+            except CheckpointIntegrityError as exc:
+                if self._strict:
+                    raise DeterminismViolation(str(exc)) from exc
+                logger.error("Checkpoint load integrity failure (non-fatal): %s", exc)
             except Exception as e:
+                if self._strict:
+                    raise
                 logger.error(f"Checkpoint load failed (non-fatal): {e}")
         
         # Load persisted goals into context so PlannerNode and ContextBuilderNode
@@ -385,31 +425,6 @@ class DadBotOrchestrator:
         session_state["last_arbitration_log"] = list(context.state.get("delegation_arbitration_log") or [])
         session_state["last_determinism"] = dict(context.metadata.get("determinism") or {})
         session_state["last_determinism_manifest"] = dict(context.metadata.get("determinism_manifest") or {})
-        
-        # Save checkpoint if persister is available
-        if self.checkpointer:
-            try:
-                checkpoint = {
-                    "checkpoint_hash": context.state.get("last_checkpoint_hash", ""),
-                    "prev_checkpoint_hash": context.state.get("prev_checkpoint_hash", ""),
-                    "status": "completed",
-                    "error": None,
-                    "state": session_state,
-                    "metadata": dict(context.metadata or {}),
-                }
-                manifest = dict(context.metadata.get("determinism_manifest") or {})
-                self.checkpointer.save_checkpoint(
-                    session_id=session_id,
-                    trace_id=context.trace_id,
-                    checkpoint=checkpoint,
-                    manifest=manifest,
-                )
-                # Prune old checkpoints periodically (keep last 10)
-                if int(context.state.get("turn_index", 1)) % 10 == 0:
-                    self.checkpointer.prune_old_checkpoints(session_id, keep_count=10)
-                logger.debug(f"Checkpoint saved: session={session_id}, trace={context.trace_id}")
-            except Exception as e:
-                logger.error(f"Checkpoint save failed (non-fatal): {e}")
         
         return result
 

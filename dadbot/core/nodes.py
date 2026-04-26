@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import asyncio
+from dataclasses import dataclass
 from typing import Any
 
 
@@ -41,6 +42,15 @@ _DELEGATION_MODES = frozenset({"sequential", "parallel"})
 
 #: Hard cap on delegated sub-task count per delegation block.
 _MAX_DELEGATION_SUBTASKS: int = 8
+
+
+@dataclass
+class DelegateResult:
+    task_input: str
+    agent_name: str
+    success: bool
+    payload: str | None = None
+    error: str = ""
 
 
 def _safe_snippet(value: str, *, limit: int = 120) -> str:
@@ -350,9 +360,19 @@ class InferenceNode:
                     "max_depth": _MAX_DELEGATION_DEPTH,
                 },
             )
-            return (
+            message = (
                 f"I skipped delegation because depth limit {_MAX_DELEGATION_DEPTH} was reached."
             )
+            if context.state.get("assistant_response"):
+                context.state["assistant_response"] = (
+                    f"{context.state['assistant_response']}\n\nDelegation depth limit reached. "
+                    "Stopping further subtasks."
+                )
+            else:
+                context.state["assistant_response"] = (
+                    "Delegation depth limit reached. Stopping further subtasks."
+                )
+            return message
 
         raw_mode = str(block.get("mode") or "sequential").strip().lower()
         mode = raw_mode if raw_mode in _DELEGATION_MODES else "sequential"
@@ -407,17 +427,24 @@ class InferenceNode:
                 for inp, name in task_pairs
             ]
             gathered = await asyncio.gather(*coros, return_exceptions=True)
-            results: list[str] = []
+            delegate_results: list[DelegateResult] = []
             for (_inp, name), outcome in zip(task_pairs, gathered):
                 if isinstance(outcome, Exception):
-                    text = f"[Sub-task failed: {name} encountered an internal error.]"
+                    text = f"[Sub-task failed: {name} -> {str(outcome)[:100]}]"
                     logger.warning("Parallel sub-task %r failed: %s", name, outcome)
+                    delegate_results.append(
+                        DelegateResult(
+                            task_input=_inp,
+                            agent_name=name,
+                            success=False,
+                            payload=None,
+                            error=text,
+                        )
+                    )
                 else:
-                    text = str(outcome or "")
-                blackboard[name] = text
-                results.append(text)
+                    delegate_results.append(outcome)
         else:
-            results = []
+            delegate_results = []
             for inp, name in task_pairs:
                 sub_result = await self._run_subtask(
                     context,
@@ -426,12 +453,27 @@ class InferenceNode:
                     agent_name=name,
                     blackboard=blackboard,
                 )
-                blackboard[name] = sub_result
-                results.append(sub_result)
+                delegate_results.append(sub_result)
+                # Sequential mode supports inter-agent messaging: downstream subtasks
+                # must see upstream outputs immediately via the shared blackboard.
+                if sub_result.success:
+                    blackboard[name] = str(sub_result.payload or "")
+                else:
+                    blackboard[name] = str(sub_result.error or "")
 
-        successful = sum(1 for item in results if item and not _is_subtask_failure_text(item))
-        failures = sum(1 for item in results if _is_subtask_failure_text(item))
-        merged_details = "\n\n".join(r for r in results if r) or "[No sub-task results]"
+        result_texts: list[str] = []
+        for item in delegate_results:
+            if item.success:
+                text = str(item.payload or "")
+                blackboard[item.agent_name] = text
+                result_texts.append(text)
+            else:
+                blackboard[item.agent_name] = str(item.error or "")
+                result_texts.append(str(item.error or ""))
+
+        successful = sum(1 for item in delegate_results if item.success)
+        failures = sum(1 for item in delegate_results if not item.success)
+        merged_details = "\n\n".join(r for r in result_texts if r) or "[No sub-task results]"
         summary = (
             f"I delegated {len(task_pairs)} task(s) in {mode} mode"
             f" ({successful} succeeded, {failures} failed)."
@@ -443,13 +485,13 @@ class InferenceNode:
             "subtask_ids": subtask_ids,
             "mode": mode,
             "depth": depth,
-            "outputs": results,
+            "outputs": result_texts,
         }
         arbitration_hash = _stable_sha256(_arb_record)
 
         context.metadata["delegation_depth"] = depth
         context.metadata["subtasks_executed"] = len(task_pairs)
-        context.state["delegation_results"] = results
+        context.state["delegation_results"] = result_texts
         context.state["arbitration_metadata"] = {
             "mode": mode,
             "agents_dispatched": len(task_pairs),
@@ -474,7 +516,19 @@ class InferenceNode:
                 "failure_count": failures,
             },
         )
-        return f"{summary}\n\n{merged_details}"
+        visible_summary = (
+            f"\n\nI delegated {len(task_pairs)} subtasks (research, safety checks, etc.) "
+            "and merged the results."
+        )
+        if failures > 0:
+            visible_summary += (
+                f"\n\nNote: {failures} subtask(s) encountered issues but the main goal was completed."
+            )
+        if context.state.get("assistant_response"):
+            context.state["assistant_response"] = f"{context.state['assistant_response']}{visible_summary}"
+        else:
+            context.state["assistant_response"] = f"Task completed with delegation.{visible_summary}"
+        return f"{summary}\n\n{merged_details}{visible_summary}"
 
     async def _run_subtask(
         self,
@@ -484,11 +538,17 @@ class InferenceNode:
         depth: int,
         agent_name: str = "",
         blackboard: "dict[str, str] | None" = None,
-    ) -> str:
+    ) -> DelegateResult:
         """Run a single delegated sub-task through inference only."""
         run_agent = getattr(self.mgr, "run_agent", None)
         if not callable(run_agent):
-            return "[Sub-task failed: no inference provider available.]"
+            return DelegateResult(
+                task_input=subtask_input,
+                agent_name=str(agent_name or "agent"),
+                success=False,
+                payload=None,
+                error="[Sub-task failed: no inference provider available.]",
+            )
         sub_ctx = TurnContext(
             user_input=subtask_input,
             metadata={
@@ -514,15 +574,48 @@ class InferenceNode:
                 reply = await self._handle_block(sub_ctx, sub_block, depth=depth)
                 if bool(sub_ctx.metadata.get("delegation_depth_exceeded")):
                     parent_context.metadata["delegation_depth_exceeded"] = True
+                    parent_context.state["delegation_depth_exceeded"] = True
+                    _append_arbitration_log(
+                        parent_context,
+                        {
+                            "event": "depth_guard_block",
+                            "depth": depth,
+                            "max_depth": _MAX_DELEGATION_DEPTH,
+                            "source": "subtask",
+                            "agent": str(agent_name or ""),
+                        },
+                    )
             text = str(reply or "").strip()
             if not text:
-                return f"[Sub-task failed: {agent_name or 'agent'} returned no output.]"
-            return text
+                return DelegateResult(
+                    task_input=subtask_input,
+                    agent_name=str(agent_name or "agent"),
+                    success=False,
+                    payload=None,
+                    error=(
+                        f"[Sub-task failed: '{_safe_snippet(subtask_input)}' -> "
+                        f"{agent_name or 'agent'} returned no output."
+                        "]"
+                    ),
+                )
+            return DelegateResult(
+                task_input=subtask_input,
+                agent_name=str(agent_name or "agent"),
+                success=True,
+                payload=text,
+                error="",
+            )
         except Exception as exc:
             logger.warning("Sub-task inference failed (depth=%d, agent=%s): %s", depth, agent_name, exc)
-            return (
-                f"[Sub-task failed: {agent_name or 'agent'} could not complete "
-                f"'{_safe_snippet(subtask_input)}'.]"
+            error_msg = (
+                f"[Sub-task failed: '{_safe_snippet(subtask_input)}' -> {str(exc)[:100]}]"
+            )
+            return DelegateResult(
+                task_input=subtask_input,
+                agent_name=str(agent_name or "agent"),
+                success=False,
+                payload=None,
+                error=error_msg,
             )
 
     # ------------------------------------------------------------------
@@ -732,6 +825,13 @@ class SaveNode:
         try:
             apply_mutations(context)
             self._finalize_turn(context, result)
+            if not bool(context.state.get("_atomic_checkpoint_saved", False)):
+                checkpoint_snapshot = getattr(context, "checkpoint_snapshot", None)
+                save_graph_checkpoint = getattr(self.mgr, "save_graph_checkpoint", None)
+                if callable(checkpoint_snapshot) and callable(save_graph_checkpoint):
+                    checkpoint = checkpoint_snapshot(stage="save", status="atomic_finalize", error=None)
+                    save_graph_checkpoint(checkpoint, _skip_turn_event=True)
+                    context.state["_atomic_checkpoint_saved"] = True
             commit_transaction(context)
         except Exception:
             rollback_transaction = getattr(self.mgr, "rollback_transaction", None)

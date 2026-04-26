@@ -12,6 +12,7 @@ from dadbot.core.capability_audit_runner import (
     build_runtime_capability_audit_report,
 )
 from dadbot.core.graph import FatalTurnError, LedgerMutationOp, MemoryMutationOp, MutationIntent, MutationKind
+from dadbot.core.persistence import AbstractCheckpointer
 from dadbot.managers.conversation_persistence import ConversationPersistenceManager
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,11 @@ class PersistenceService:
         self.persistence_manager = persistence_manager
         # Wired by ServiceRegistry.boot() after wire_runtime_managers has run.
         self.turn_service = turn_service
+        self.checkpointer: AbstractCheckpointer | None = None
+        self.strict_mode: bool = False
+
+    def set_checkpointer(self, checkpointer: AbstractCheckpointer | None) -> None:
+        self.checkpointer = checkpointer
 
     @staticmethod
     def _call_nonfatal(callable_obj: Any, *args: Any, **kwargs: Any) -> Any:
@@ -598,6 +604,36 @@ class PersistenceService:
             # Strict sequence: finalize queues ledger intents; then one canonical SaveNode commit.
             finalized = self.final_ledger_commit(turn_text, mood, reply, norm_attachments, turn_context)
             self._commit_post_finalize_side_effects(turn_context)
+
+            # Atomic checkpoint capture: emit from inside finalize_turn boundary so
+            # hash-chain state is committed with the same save transaction.
+            checkpoint = None
+            checkpoint_snapshot = getattr(turn_context, "checkpoint_snapshot", None)
+            if callable(checkpoint_snapshot):
+                checkpoint = checkpoint_snapshot(stage="save", status="atomic_finalize", error=None)
+                turn_context.state["_atomic_checkpoint_saved"] = True
+                save_graph_checkpoint = getattr(self, "save_graph_checkpoint", None)
+                if callable(save_graph_checkpoint):
+                    save_graph_checkpoint(checkpoint, _skip_turn_event=True)
+
+            if self.checkpointer is not None and checkpoint is not None:
+                control_plane = dict(getattr(turn_context, "metadata", {}).get("control_plane") or {})
+                session_id = str(control_plane.get("session_id") or "default")
+                trace_id = str(getattr(turn_context, "trace_id", "") or "")
+                manifest = dict(getattr(turn_context, "metadata", {}).get("determinism_manifest") or {})
+                try:
+                    self.checkpointer.save_checkpoint(
+                        session_id=session_id,
+                        trace_id=trace_id,
+                        checkpoint=checkpoint,
+                        manifest=manifest,
+                    )
+                except Exception as exc:
+                    # Non-fatal by default; strict mode escalates.
+                    logger.error("PersistenceService.checkpointer save failed: %s", exc)
+                    if bool(self.strict_mode):
+                        raise
+
             complete_pipeline = getattr(service, "_complete_turn_pipeline", None)
             if callable(complete_pipeline):
                 complete_pipeline(should_end=False)
