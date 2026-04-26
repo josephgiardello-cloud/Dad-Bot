@@ -4,7 +4,6 @@ import logging
 from typing import Any
 
 from dadbot.core.graph import TurnContext
-from dadbot.core.invariant_registry import check_invariants
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +149,21 @@ class SaveNode:
     def _result_from_context(self, context: TurnContext) -> Any:
         return context.state.get("safe_result") or context.state.get("candidate")
 
+    @staticmethod
+    def _kernel_shadow_validate(context: TurnContext, *, stage: str, operation: str) -> None:
+        kernel = context.state.get("_execution_kernel") if isinstance(context.state, dict) else None
+        if kernel is None:
+            return
+        if bool(getattr(kernel, "strict", False)):
+            kernel.validate(stage=stage, operation=operation, context=context)
+            return
+        try:
+            result = kernel.validate(stage=stage, operation=operation, context=context)
+            if not bool(getattr(result, "ok", True)):
+                logger.warning("[KERNEL SHADOW VIOLATION] %s", getattr(result, "reason", "validation failed"))
+        except Exception as exc:
+            logger.warning("[KERNEL SHADOW VIOLATION] %s", exc)
+
     def _finalize_turn(self, context: TurnContext, result: Any) -> bool:
         finalize = getattr(self.mgr, "finalize_turn", None)
         if not callable(finalize):
@@ -163,10 +177,10 @@ class SaveNode:
             raise
 
     async def run(self, context: TurnContext) -> TurnContext:
-        check_invariants(
+        self._kernel_shadow_validate(
             context,
             stage="save_node_pre",
-            call_site="core.nodes.SaveNode.run",
+            operation="core.nodes.SaveNode.run",
         )
         if getattr(context, "temporal", None) is None:
             raise RuntimeError("TemporalNode required — execution invalid")
@@ -189,10 +203,10 @@ class SaveNode:
             if callable(rollback_transaction):
                 rollback_transaction(context)
             raise
-        check_invariants(
+        self._kernel_shadow_validate(
             context,
             stage="save_node_post",
-            call_site="core.nodes.SaveNode.run",
+            operation="core.nodes.SaveNode.run",
         )
         return context
 

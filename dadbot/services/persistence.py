@@ -184,6 +184,7 @@ class PersistenceService:
                 _dispatch_mutation_intent,
                 hard_fail_on_error=True,
                 turn_context=turn_context,
+                kernel=(getattr(turn_context, "state", {}) or {}).get("_execution_kernel"),
             )
             if not mutation_queue.is_empty():
                 pending = mutation_queue.size()

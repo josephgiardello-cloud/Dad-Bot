@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import asyncio
+import logging
 import time
 import uuid
 from datetime import datetime
@@ -11,9 +12,13 @@ from typing import Any, Callable, Literal, Protocol
 from dadbot.contracts import AttachmentList, ChunkCallback, FinalizedTurnResult
 from dadbot.core.determinism import DeterminismBoundary, DeterminismMode
 from dadbot.core.execution_boundary import ControlPlaneExecutionBoundary
-from dadbot.core.execution_firewall import ExecutionFirewall, FirewallContext
-from dadbot.core.invariant_registry import check_invariants
+from dadbot.core.execution_firewall import ExecutionFirewall
+from dadbot.core.execution_kernel import ExecutionKernel
+from dadbot.core.invariant_registry import InvariantRegistry
 from dadbot.core.kernel import TurnKernel
+
+
+logger = logging.getLogger(__name__)
 
 
 class FatalTurnError(RuntimeError):
@@ -158,7 +163,7 @@ class MutationQueue:
         *,
         hard_fail_on_error: bool = True,
         turn_context: Any | None = None,
-        firewall: ExecutionFirewall | None = None,
+        kernel: ExecutionKernel | None = None,
     ) -> list[tuple[MutationIntent, str]]:
         """Execute all queued intents through ``executor``.  Returns failures.
 
@@ -177,15 +182,30 @@ class MutationQueue:
         self._queue.clear()
         for index, intent in enumerate(to_drain):
             try:
-                if turn_context is not None:
+                if turn_context is not None and kernel is not None:
                     commit_active = bool(getattr(turn_context, "state", {}).get("_save_transaction_active", False))
-                    check_invariants(
-                        turn_context,
-                        stage="mutation_drain",
-                        call_site=f"mutation_queue:{getattr(intent, 'source', '')}",
-                        firewall=firewall,
-                        mutation_outside_save_node=not commit_active,
-                    )
+                    if bool(getattr(kernel, "strict", False)):
+                        kernel.validate(
+                            stage="mutation_drain",
+                            operation=f"mutation_queue:{getattr(intent, 'source', '')}",
+                            context=turn_context,
+                            mutation_outside_save_node=not commit_active,
+                        )
+                    else:
+                        try:
+                            result = kernel.validate(
+                                stage="mutation_drain",
+                                operation=f"mutation_queue:{getattr(intent, 'source', '')}",
+                                context=turn_context,
+                                mutation_outside_save_node=not commit_active,
+                            )
+                            if not bool(getattr(result, "ok", True)):
+                                logger.warning(
+                                    "[KERNEL SHADOW VIOLATION] %s",
+                                    getattr(result, "reason", "mutation drain validation failed"),
+                                )
+                        except Exception as exc:
+                            logger.warning("[KERNEL SHADOW VIOLATION] %s", exc)
                 executor(intent)
                 self._drained.append(intent)
             except Exception as exc:
@@ -598,7 +618,46 @@ class TurnGraph:
         self._degraded_inference_threshold_ms = 2200.0
         self._degraded_memory_threshold_ms = 1200.0
         self._degraded_graph_sync_threshold_ms = 1200.0
-        self._execution_firewall = ExecutionFirewall()
+        self._execution_kernel = ExecutionKernel(
+            firewall=ExecutionFirewall(),
+            invariant_registry=InvariantRegistry(),
+            quarantine=None,
+            strict=False,
+        )
+
+    def set_execution_kernel(self, kernel: ExecutionKernel) -> None:
+        self._execution_kernel = kernel
+
+    def _kernel_validate(
+        self,
+        *,
+        stage: str,
+        operation: str,
+        turn_context: TurnContext,
+        mutation_outside_save_node: bool = False,
+    ) -> None:
+        kernel = self._execution_kernel
+        if kernel is None:
+            return
+        if bool(getattr(kernel, "strict", False)):
+            kernel.validate(
+                stage=stage,
+                operation=operation,
+                context=turn_context,
+                mutation_outside_save_node=mutation_outside_save_node,
+            )
+            return
+        try:
+            result = kernel.validate(
+                stage=stage,
+                operation=operation,
+                context=turn_context,
+                mutation_outside_save_node=mutation_outside_save_node,
+            )
+            if not bool(getattr(result, "ok", True)):
+                logger.warning("[KERNEL SHADOW VIOLATION] %s", getattr(result, "reason", "validation failed"))
+        except Exception as exc:
+            logger.warning("[KERNEL SHADOW VIOLATION] %s", exc)
 
     @staticmethod
     def _stage_duration_ms(turn_context: TurnContext, stage_name: str) -> float:
@@ -761,14 +820,12 @@ class TurnGraph:
                 )
 
     def add_node(self, name: str, node: Any) -> None:
-        self._execution_firewall.enforce_execution_firewall(
-            f"turn_graph.add_node:{name}",
-            context=FirewallContext(
-                trace_id="",
-                stage="graph_build",
-                mutation_outside_save_node=False,
-                temporal_missing=False,
-            ),
+        # Kernel in shadow mode during graph construction.
+        shadow_context = TurnContext(user_input="graph_build")
+        self._kernel_validate(
+            stage="graph_build",
+            operation=f"turn_graph.add_node:{name}",
+            turn_context=shadow_context,
         )
         if name not in self._node_map:
             if self._entry_node is None:
@@ -822,11 +879,10 @@ class TurnGraph:
             return await self._execute_parallel_nodes(node, turn_context)
 
         node_name = str(getattr(node, "name", type(node).__name__) or type(node).__name__)
-        check_invariants(
-            turn_context,
+        self._kernel_validate(
             stage="pre_node_execute",
-            call_site=f"turn_graph.node:{node_name}",
-            firewall=self._execution_firewall,
+            operation=f"turn_graph.node:{node_name}",
+            turn_context=turn_context,
         )
 
         async def _call_node() -> TurnContext:
@@ -922,11 +978,11 @@ class TurnGraph:
                 )
 
         self._emit_execution_witness("graph.execute", turn_context)
-        check_invariants(
-            turn_context,
+        turn_context.state["_execution_kernel"] = self._execution_kernel
+        self._kernel_validate(
             stage="pre_execute",
-            call_site="turn_graph.execute",
-            firewall=self._execution_firewall,
+            operation="turn_graph.execute",
+            turn_context=turn_context,
         )
         execute_started_at = time.perf_counter()
 
@@ -986,11 +1042,10 @@ class TurnGraph:
                         if turn_context.short_circuit_result is not None:
                             total_ms = round((time.perf_counter() - execute_started_at) * 1000, 3)
                             self._emit_turn_health_state(turn_context, total_latency_ms=total_ms, failed=False)
-                            check_invariants(
-                                turn_context,
+                            self._kernel_validate(
                                 stage="post_execute",
-                                call_site="turn_graph.execute.short_circuit",
-                                firewall=self._execution_firewall,
+                                operation="turn_graph.execute.short_circuit",
+                                turn_context=turn_context,
                             )
                             _enforce_fidelity_invariants()
                             return turn_context.short_circuit_result
@@ -1038,11 +1093,10 @@ class TurnGraph:
                         if turn_context.short_circuit_result is not None:
                             total_ms = round((time.perf_counter() - execute_started_at) * 1000, 3)
                             self._emit_turn_health_state(turn_context, total_latency_ms=total_ms, failed=False)
-                            check_invariants(
-                                turn_context,
+                            self._kernel_validate(
                                 stage="post_execute",
-                                call_site="turn_graph.execute.short_circuit",
-                                firewall=self._execution_firewall,
+                                operation="turn_graph.execute.short_circuit",
+                                turn_context=turn_context,
                             )
                             _enforce_fidelity_invariants()
                             return turn_context.short_circuit_result
@@ -1059,11 +1113,10 @@ class TurnGraph:
         result = turn_context.state.get("safe_result")
         total_ms = round((time.perf_counter() - execute_started_at) * 1000, 3)
         self._emit_turn_health_state(turn_context, total_latency_ms=total_ms, failed=False)
-        check_invariants(
-            turn_context,
+        self._kernel_validate(
             stage="post_execute",
-            call_site="turn_graph.execute.complete",
-            firewall=self._execution_firewall,
+            operation="turn_graph.execute.complete",
+            turn_context=turn_context,
         )
         _enforce_fidelity_invariants()
         if isinstance(result, tuple) and len(result) >= 2:
