@@ -191,12 +191,14 @@ class DadBotOrchestrator:
         )
         with CorrelationContext.bind(correlation_id):
             try:
-                result = await self.graph.execute(context)
+                context.metadata["audit_mode"] = bool(getattr(job, "metadata", {}).get("audit_mode", False))
+                result = await self.graph.execute(context, audit_mode=bool(context.metadata.get("audit_mode")))
             finally:
                 if self.bot is not None:
                     self.bot._last_turn_health_state = dict(context.state.get("turn_health_state") or {})
                     self.bot._last_turn_ux_feedback = dict(context.state.get("ux_feedback") or {})
                     self.bot._last_turn_health_evidence = dict(context.state.get("turn_health_evidence") or {})
+                    self.bot._last_capability_audit_report = dict(context.state.get("capability_audit_report") or {})
         session.setdefault("state", {})["last_result"] = result
         session.setdefault("state", {})["last_trace_id"] = context.trace_id
         session.setdefault("state", {})["last_turn_health_state"] = dict(context.state.get("turn_health_state") or {})

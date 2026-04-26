@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import logging
+from typing import Any
 
 from dadbot.contracts import DadBotContext, SupportsRelationshipRuntime
 
@@ -15,14 +16,14 @@ class RelationshipManager:
         self.context = DadBotContext.from_runtime(bot)
         self.bot = self.context.bot
 
-    def current_state(self) -> dict:
+    def current_state(self, turn_context: Any | None = None) -> dict:
         graph = self._memory_graph_snapshot()
-        return self.get_relationship_view(graph)
+        return self.get_relationship_view(graph, turn_context=turn_context)
 
-    def get_relationship_view(self, graph_state: dict) -> dict:
+    def get_relationship_view(self, graph_state: dict, *, turn_context: Any | None = None) -> dict:
         if not isinstance(graph_state, dict):
             raise RuntimeError("Relationship projection requires graph_state dict")
-        return self._project_state_from_graph_state(graph_state)
+        return self._project_state_from_graph_state(graph_state, turn_context=turn_context)
 
     def materialize_projection(self, *, turn_context=None) -> dict:
         temporal = getattr(turn_context, "temporal", None)
@@ -30,7 +31,7 @@ class RelationshipManager:
             raise RuntimeError("TemporalNode required — execution invalid")
         if not bool(getattr(self.bot, "_graph_commit_active", False)):
             raise RuntimeError("Relationship projection is SaveNode-only in strict mode")
-        projection = self.get_relationship_view(self._memory_graph_snapshot())
+        projection = self.get_relationship_view(self._memory_graph_snapshot(), turn_context=turn_context)
         state = getattr(turn_context, "state", None)
         if isinstance(state, dict):
             state["relationship_projection"] = dict(projection)
@@ -46,7 +47,7 @@ class RelationshipManager:
             return {"nodes": [], "edges": []}
         return graph
 
-    def _project_state_from_graph_state(self, graph: dict) -> dict:
+    def _project_state_from_graph_state(self, graph: dict, *, turn_context: Any | None = None) -> dict:
         nodes = [dict(item) for item in list(graph.get("nodes") or []) if isinstance(item, dict)]
         edges = [dict(item) for item in list(graph.get("edges") or []) if isinstance(item, dict)]
 
@@ -111,6 +112,10 @@ class RelationshipManager:
             )
         hypotheses.sort(key=lambda item: (-float(item.get("probability", 0.0) or 0.0), str(item.get("name") or "")))
 
+        projection_updated_at = str(
+            graph.get("updated_at") or (self._turn_timestamp(turn_context) if turn_context is not None else "")
+        ).strip()
+
         return {
             "trust_level": trust_level,
             "openness_level": openness_level,
@@ -119,29 +124,10 @@ class RelationshipManager:
             "emotional_momentum": emotional_momentum,
             "hypotheses": hypotheses,
             "active_hypothesis": hypotheses[0]["name"] if hypotheses else "supportive_baseline",
-            "last_hypothesis_updated": str(graph.get("updated_at") or self.bot.runtime_timestamp()),
+            "last_hypothesis_updated": projection_updated_at,
             "last_reflection": "projection-only",
-            "last_updated": str(graph.get("updated_at") or self.bot.runtime_timestamp()),
+            "last_updated": projection_updated_at,
         }
-
-    def _assert_graph_execution_context(self, turn_context=None) -> None:
-        if turn_context is None:
-            raise RuntimeError("Compatibility shim requires explicit turn_context")
-        if getattr(turn_context, "temporal", None) is None:
-            raise RuntimeError("Compatibility shim requires turn_context.temporal")
-        if not bool(getattr(self.bot, "_graph_commit_active", False)):
-            raise RuntimeError("Compatibility shim requires in-graph execution context")
-        active_stage = str(getattr(turn_context, "state", {}).get("_active_graph_stage") or "").strip().lower()
-        if active_stage not in {"save", ""}:
-            raise RuntimeError(
-                "Compatibility shim requires SaveNode graph execution context "
-                f"(active_stage={active_stage!r})"
-            )
-
-    def _run_compat_mutation(self, callback, *, turn_context=None):
-        # Relationship subsystem is projection-only; keep compat call sites alive
-        # without requiring SaveNode mutation context.
-        return callback(turn_context)
 
     def _require_turn_temporal(self, turn_context=None):
         temporal = getattr(turn_context, "temporal", None)
@@ -375,8 +361,13 @@ class RelationshipManager:
         return self.snapshot()
 
     def record_history_point(self, *, trust_level, openness_level, source="turn", turn_context=None) -> dict:
+        recorded_at = (
+            self._turn_timestamp(turn_context)
+            if turn_context is not None
+            else str(self._memory_graph_snapshot().get("updated_at") or "").strip()
+        )
         return {
-            "recorded_at": self.bot.runtime_timestamp(),
+            "recorded_at": recorded_at,
             "trust_level": self.bot.clamp_score(trust_level),
             "openness_level": self.bot.clamp_score(openness_level),
             "source": str(source or "turn").strip().lower() or "turn",

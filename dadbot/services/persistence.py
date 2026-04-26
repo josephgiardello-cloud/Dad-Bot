@@ -5,7 +5,7 @@ import logging
 import time
 from typing import Any
 
-from dadbot.core.graph import FatalTurnError, MemoryMutationOp, MutationIntent, MutationKind
+from dadbot.core.graph import FatalTurnError, LedgerMutationOp, MemoryMutationOp, MutationIntent, MutationKind
 from dadbot.managers.conversation_persistence import ConversationPersistenceManager
 
 logger = logging.getLogger(__name__)
@@ -113,6 +113,102 @@ class PersistenceService:
         state["_pending_relationship_updates"] = []
         state["_deferred_turn_state_updates"] = []
 
+    def _drain_mutation_queue(self, runtime: Any, turn_context: Any) -> None:
+        mutation_queue = getattr(turn_context, "mutation_queue", None)
+        if mutation_queue is None:
+            return
+
+        service = self.turn_service
+
+        def _dispatch_mutation_intent(intent: Any) -> None:
+            if not isinstance(intent, MutationIntent):
+                raise RuntimeError(f"MutationQueue received non-MutationIntent payload: {type(intent).__name__}")
+            intent_type = intent.type
+            payload = dict(intent.payload or {})
+            source = str(intent.source or "")
+
+            if intent_type is MutationKind.MEMORY:
+                op = str(payload.get("op") or "").strip().lower()
+                if op != MemoryMutationOp.SAVE_MOOD_STATE.value:
+                    raise RuntimeError(
+                        f"MutationIntent(type=memory, source={source!r}): unsupported op={op!r}"
+                    )
+                mood = str(payload.get("mood") or "neutral")
+                memory = getattr(runtime, "memory", None)
+                if memory is None:
+                    raise RuntimeError(
+                        f"MutationIntent(type=memory, source={source!r}): runtime.memory unavailable"
+                    )
+                memory.save_mood_state(mood)
+                return
+
+            if intent_type is MutationKind.RELATIONSHIP:
+                raise RuntimeError(
+                    "MutationIntent(type=relationship) rejected: relationship subsystem is projection-only"
+                )
+
+            if intent_type is MutationKind.GRAPH:
+                memory_manager = getattr(runtime, "memory_manager", None)
+                graph_manager = getattr(memory_manager, "graph_manager", None) if memory_manager else None
+                if graph_manager is None:
+                    raise RuntimeError(f"MutationIntent(type=graph, source={source!r}): graph_manager unavailable")
+                _fn = getattr(graph_manager, "apply_mutation", None)
+                if callable(_fn):
+                    _fn(payload, turn_context=turn_context)
+                    return
+                raise RuntimeError(f"MutationIntent(type=graph, source={source!r}): graph_manager.apply_mutation not callable")
+
+            if intent_type is MutationKind.LEDGER:
+                op = str(payload.get("op") or "").strip().lower()
+                if op == LedgerMutationOp.APPEND_HISTORY.value:
+                    entry = dict(payload.get("entry") or {})
+                    with runtime._session_lock:
+                        runtime.history.append(entry)
+                    return
+                if op == LedgerMutationOp.SYNC_THREAD_SNAPSHOT.value:
+                    runtime.sync_active_thread_snapshot()
+                    return
+                if op == LedgerMutationOp.CLEAR_TURN_CONTEXT.value:
+                    with runtime._session_lock:
+                        runtime._pending_daily_checkin_context = False
+                        runtime._active_tool_observation_context = None
+                    return
+                if op == LedgerMutationOp.SCHEDULE_MAINTENANCE.value:
+                    turn_text = str(payload.get("turn_text") or "")
+                    mood = payload.get("mood")
+                    if not bool(getattr(runtime, "LIGHT_MODE", False)):
+                        runtime.schedule_post_turn_maintenance(turn_text, mood)
+                        append_step = getattr(service, "_append_turn_pipeline_step", None)
+                        if callable(append_step):
+                            append_step("schedule_maintenance", detail="queued post-turn maintenance")
+                    else:
+                        append_step = getattr(service, "_append_turn_pipeline_step", None)
+                        if callable(append_step):
+                            append_step("schedule_maintenance", status="skipped", detail="light mode skips maintenance")
+                    return
+                if op == LedgerMutationOp.HEALTH_SNAPSHOT.value:
+                    runtime.current_runtime_health_snapshot(force=True, log_warnings=True, persist=True)
+                    append_step = getattr(service, "_append_turn_pipeline_step", None)
+                    if callable(append_step):
+                        append_step("health_snapshot", detail="refreshed runtime health snapshot")
+                    return
+                raise RuntimeError(
+                    f"MutationIntent(type=ledger, source={source!r}): unsupported op={op!r}"
+                )
+
+            raise RuntimeError(f"MutationIntent: unknown type={intent_type!r} source={source!r}")
+
+        mutation_queue.drain(
+            _dispatch_mutation_intent,
+            hard_fail_on_error=True,
+        )
+        if not mutation_queue.is_empty():
+            pending = mutation_queue.size()
+            raise FatalTurnError(
+                "Mutation queue not fully drained"
+                f" (pending={pending}, trace_id={getattr(turn_context, 'trace_id', '')!r})"
+            )
+
     @staticmethod
     def _flush_background_memory_store_patch_queue(runtime: Any) -> int:
         queue = getattr(runtime, "_background_memory_store_patch_queue", None)
@@ -143,54 +239,7 @@ class PersistenceService:
         # Every mutation queued outside this boundary (deferred from earlier stages or
         # direct-path callers) must execute here. Any failure is a hard fail — nothing
         # is silently dropped.
-        mutation_queue = getattr(turn_context, "mutation_queue", None)
-        if mutation_queue is not None:
-            def _dispatch_mutation_intent(intent: Any) -> None:
-                if not isinstance(intent, MutationIntent):
-                    raise RuntimeError(f"MutationQueue received non-MutationIntent payload: {type(intent).__name__}")
-                intent_type = intent.type
-                payload = dict(intent.payload or {})
-                source = str(intent.source or "")
-                if intent_type is MutationKind.MEMORY:
-                    op = str(payload.get("op") or "").strip().lower()
-                    if op != MemoryMutationOp.SAVE_MOOD_STATE.value:
-                        raise RuntimeError(
-                            f"MutationIntent(type=memory, source={source!r}): unsupported op={op!r}"
-                        )
-                    mood = str(payload.get("mood") or "neutral")
-                    memory = getattr(runtime, "memory", None)
-                    if memory is None:
-                        raise RuntimeError(
-                            f"MutationIntent(type=memory, source={source!r}): runtime.memory unavailable"
-                        )
-                    memory.save_mood_state(mood)
-                elif intent_type is MutationKind.RELATIONSHIP:
-                    raise RuntimeError(
-                        "MutationIntent(type=relationship) rejected: relationship subsystem is projection-only"
-                    )
-                elif intent_type is MutationKind.GRAPH:
-                    memory_manager = getattr(runtime, "memory_manager", None)
-                    graph_manager = getattr(memory_manager, "graph_manager", None) if memory_manager else None
-                    if graph_manager is None:
-                        raise RuntimeError(f"MutationIntent(type=graph, source={source!r}): graph_manager unavailable")
-                    _fn = getattr(graph_manager, "apply_mutation", None)
-                    if callable(_fn):
-                        _fn(payload, turn_context=turn_context)
-                    else:
-                        raise RuntimeError(f"MutationIntent(type=graph, source={source!r}): graph_manager.apply_mutation not callable")
-                else:
-                    raise RuntimeError(f"MutationIntent: unknown type={intent_type!r} source={source!r}")
-
-            mutation_queue.drain(
-                _dispatch_mutation_intent,
-                hard_fail_on_error=True,
-            )
-            if not mutation_queue.is_empty():
-                pending = mutation_queue.size()
-                raise FatalTurnError(
-                    "Mutation queue not fully drained"
-                    f" (pending={pending}, trace_id={getattr(turn_context, 'trace_id', '')!r})"
-                )
+        self._drain_mutation_queue(runtime, turn_context)
         # --------------------------------------------------------------------------
 
         # Apply any pending non-SaveNode mutation intents at the canonical commit boundary.
@@ -303,15 +352,11 @@ class PersistenceService:
         runtime = None if service is None else getattr(service, "bot", None)
         if runtime is None:
             raise RuntimeError("SaveNode strict mode requires turn_service.bot")
-        previous_commit_active = bool(getattr(runtime, "_graph_commit_active", False))
-        try:
-            runtime._graph_commit_active = True
-            self._commit_post_finalize_side_effects(turn_context)
-        finally:
-            runtime._graph_commit_active = previous_commit_active
+        # SaveNode finalize_turn performs the canonical commit sequence in strict mode.
+        # This hook exists to preserve transaction staging semantics in core.nodes.SaveNode.
         state = getattr(turn_context, "state", None)
         if isinstance(state, dict):
-            state["_save_mutations_applied"] = True
+            state["_save_mutations_applied"] = False
 
     def commit_transaction(self, turn_context: Any) -> None:
         state = getattr(turn_context, "state", None)
@@ -330,6 +375,13 @@ class PersistenceService:
             state["_save_transaction_active"] = False
             state["_save_mutations_applied"] = False
             state.pop("_save_transaction_snapshot", None)
+        mutation_queue = getattr(turn_context, "mutation_queue", None)
+        if mutation_queue is not None:
+            # Roll back queue runtime bookkeeping so failed-turn contracts are deterministic.
+            mutation_queue._queue = []
+            mutation_queue._drained = []
+            mutation_queue._failed = []
+            mutation_queue._sequence_counter = 0
 
     def final_ledger_commit(
         self,
@@ -337,10 +389,11 @@ class PersistenceService:
         mood: str,
         reply: str,
         norm_attachments: Any,
+        turn_context: Any,
     ) -> tuple:
         if self.turn_service is None:
             raise RuntimeError("SaveNode strict mode requires graph turn_service wiring in Phase 4")
-        return self.turn_service.finalize_user_turn(turn_text, mood, reply, norm_attachments)
+        return self.turn_service.finalize_user_turn(turn_text, mood, reply, norm_attachments, turn_context=turn_context)
 
     def finalize_turn(self, turn_context: Any, result: Any) -> tuple:
         """Atomically commit history, maintenance, reflection, health snapshot, and persistence."""
@@ -372,12 +425,12 @@ class PersistenceService:
             runtime._current_turn_time_base = getattr(turn_context, "temporal", None)
             runtime._graph_commit_active = True
 
-            # Strict sequence before final ledger commit.
-            state = getattr(turn_context, "state", None)
-            mutations_applied = bool(state.get("_save_mutations_applied")) if isinstance(state, dict) else False
-            if not mutations_applied:
-                self._commit_post_finalize_side_effects(turn_context)
-            finalized = self.final_ledger_commit(turn_text, mood, reply, norm_attachments)
+            # Strict sequence: finalize queues ledger intents; then one canonical SaveNode commit.
+            finalized = self.final_ledger_commit(turn_text, mood, reply, norm_attachments, turn_context)
+            self._commit_post_finalize_side_effects(turn_context)
+            complete_pipeline = getattr(service, "_complete_turn_pipeline", None)
+            if callable(complete_pipeline):
+                complete_pipeline(should_end=False)
             return finalized
         except Exception as exc:
             logger.error("PersistenceService.finalize_turn strict-mode failure: %s", exc)

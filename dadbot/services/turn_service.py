@@ -14,7 +14,7 @@ from dadbot.contracts import (
     PreparedTurnResult,
     SupportsTurnProcessingRuntime,
 )
-from dadbot.core.graph import FatalTurnError, MemoryMutationOp, MutationIntent, MutationKind
+from dadbot.core.graph import LedgerMutationOp, MutationIntent, MutationKind, TurnContext
 from dadbot.core.tool_sandbox import ToolSandbox
 from dadbot.managers.reply_generation import ReplyGenerationManager
 from dadbot.models import AgenticToolPlan, TurnPipelineSnapshot, TurnPipelineStep
@@ -43,8 +43,11 @@ class TurnService:
         self.bot = self.context.bot
         self.reply_generation = ReplyGenerationManager(self.context)
 
-    @staticmethod
-    def _pipeline_timestamp() -> str:
+    def _pipeline_timestamp(self) -> str:
+        temporal = getattr(self.bot, "_current_turn_time_base", None)
+        wall_time = str(getattr(temporal, "wall_time", "") or "").strip()
+        if wall_time:
+            return wall_time
         return datetime.now().isoformat(timespec="seconds")
 
     def _store_turn_pipeline(self, payload: dict[str, object]) -> dict[str, object]:
@@ -129,44 +132,15 @@ class TurnService:
             self.bot.session_moods.append(current_mood)
             self.bot._pending_daily_checkin_context = should_offer_daily_checkin
 
-        # Relationship and memory-store mutations are SaveNode-owned in strict mode.
+        # Queue mood mutation for SaveNode drain at the turn commit boundary.
+        # All persistent mood writes flow through state["_pending_mood_updates"] →
+        # PersistenceService._apply_pending_save_boundary_mutations → SaveNode.
         queued_mood = str(current_mood or "neutral")
         state = getattr(turn_context, "state", None)
         if isinstance(state, dict):
             pending_moods = list(state.get("_pending_mood_updates") or [])
             pending_moods.append({"mood": queued_mood})
             state["_pending_mood_updates"] = pending_moods
-
-        if not bool(getattr(self.bot, "_graph_commit_active", False)):
-            if not isinstance(state, dict):
-                # Direct path (no turn_context/TurnGraph): queue for finalize_user_turn.
-                # Temporal is optional here — save_mood_state doesn't need it.
-                temporal = getattr(turn_context, "temporal", None)
-                if temporal is not None:
-                    temporal_snapshot_builder = getattr(turn_context, "temporal_snapshot", None)
-                    temporal_payload = temporal_snapshot_builder() if callable(temporal_snapshot_builder) else {
-                        "wall_time": str(getattr(temporal, "wall_time", "") or ""),
-                        "wall_date": str(getattr(temporal, "wall_date", "") or ""),
-                    }
-                else:
-                    temporal_payload = {}
-                pending = list(getattr(self.bot, "_direct_path_deferred_turn_state", None) or [])
-                pending.append(
-                    MutationIntent(
-                        type=MutationKind.MEMORY,
-                        payload={
-                            "op": MemoryMutationOp.SAVE_MOOD_STATE.value,
-                            "mood": queued_mood,
-                            "temporal": dict(temporal_payload or {}),
-                        },
-                        requires_temporal=False,
-                        source="turn_service.record_user_turn_state.direct_path",
-                    )
-                )
-                self.bot._direct_path_deferred_turn_state = pending
-            return
-
-        return
 
     def direct_reply_for_input(self, stripped_input: str, current_mood: str) -> str | None:
         crisis_reply = self.bot.safety_support.direct_reply_for_input(stripped_input)
@@ -1136,97 +1110,160 @@ Return ONLY valid JSON (no extra text):
         current_mood: str | None,
         dad_reply: str | None,
         attachments: AttachmentList | None = None,
+        turn_context: Any | None = None,
     ) -> FinalizedTurnResult:
+        if turn_context is None:
+            return self._finalize_direct_compat_turn(
+                stripped_input,
+                current_mood,
+                dad_reply,
+                attachments,
+            )
+        mutation_queue = getattr(turn_context, "mutation_queue", None)
+        if mutation_queue is None:
+            raise RuntimeError("SaveNode context missing mutation_queue in strict mode")
+
         self._append_turn_pipeline_step("finalize_turn", detail="persisted conversation turn")
-        # Direct path (no TurnGraph/SaveNode): commit deferred turn-state mutations here.
-        previous_commit_active = bool(getattr(self.bot, "_graph_commit_active", False))
 
-        def _flush_background_memory_store_patch_queue() -> int:
-            queue = getattr(self.bot, "_background_memory_store_patch_queue", None)
-            if not isinstance(queue, list) or not queue:
-                return 0
-            pending_patches = list(queue)
-            queue.clear()
-            applied = 0
-            for patch in pending_patches:
-                if not isinstance(patch, dict):
-                    continue
-                self.bot.mutate_memory_store(**patch)
-                applied += 1
-            return applied
+        user_turn = {"role": "user", "content": stripped_input, "mood": current_mood}
+        if attachments:
+            user_turn["attachments"] = [self.bot.history_attachment_metadata(attachment) for attachment in attachments]
 
-        try:
-            self.bot._graph_commit_active = True
-            # Apply deferred mood/relationship updates queued by record_user_turn_state.
-            pending_updates = list(getattr(self.bot, "_direct_path_deferred_turn_state", None) or [])
-            self.bot._direct_path_deferred_turn_state = []
-            failed_updates: list[tuple[str, str]] = []
-            for item in pending_updates:
-                try:
-                    if isinstance(item, MutationIntent):
-                        op = str(item.payload.get("op") or "").strip().lower()
-                        if item.type is MutationKind.MEMORY and op == MemoryMutationOp.SAVE_MOOD_STATE.value:
-                            mood = str(item.payload.get("mood") or "neutral")
-                            self.bot.memory.save_mood_state(mood)
-                        else:
-                            raise RuntimeError(
-                                f"Unsupported direct-path MutationIntent: type={item.type!r}, op={op!r}"
-                            )
-                    elif isinstance(item, dict):
-                        # Backward compatibility for legacy deferred payloads.
-                        mood = str(item.get("mood") or "neutral")
-                        self.bot.memory.save_mood_state(mood)
-                    else:
-                        raise RuntimeError(f"Unsupported direct-path deferred payload type: {type(item).__name__}")
-                    # relationship.update() requires a temporal node (TurnGraph only); skip here.
-                except Exception as exc:
-                    failed_updates.append((repr(item), str(exc)))
-                    logger.error("Direct-path deferred turn-state update failed: %s", exc)
-            if failed_updates:
-                raise FatalTurnError(
-                    "Direct-path deferred turn-state updates were not fully committed: "
-                    f"failed_count={len(failed_updates)}"
-                )
-            _flush_background_memory_store_patch_queue()
-        finally:
-            self.bot._graph_commit_active = previous_commit_active
-        with self.bot._session_lock:
-            user_turn = {"role": "user", "content": stripped_input, "mood": current_mood}
-            if attachments:
-                user_turn["attachments"] = [self.bot.history_attachment_metadata(attachment) for attachment in attachments]
-            self.bot.history.append(user_turn)
-            self.bot.history.append({"role": "assistant", "content": dad_reply})
-            self.bot._pending_daily_checkin_context = False
-            self.bot._active_tool_observation_context = None
-        self.bot.sync_active_thread_snapshot()
-        if not self.bot.LIGHT_MODE:
-            self.bot.schedule_post_turn_maintenance(stripped_input, current_mood)
-            self._append_turn_pipeline_step("schedule_maintenance", detail="queued post-turn maintenance")
-        else:
-            self._append_turn_pipeline_step("schedule_maintenance", status="skipped", detail="light mode skips maintenance")
-        try:
-            self.bot.internal_state_manager.reflect_after_turn(stripped_input, current_mood or "neutral", dad_reply or "")
-            self._append_turn_pipeline_step("internal_reflection", detail="updated persistent internal state")
-        except Exception as exc:
-            logger.warning("Internal state reflection failed: %s", exc)
-            self._append_turn_pipeline_step("internal_reflection", status="error", detail=str(exc))
-        self.bot.current_runtime_health_snapshot(force=True, log_warnings=True, persist=True)
-        self._append_turn_pipeline_step("health_snapshot", detail="refreshed runtime health snapshot")
-        self._complete_turn_pipeline(should_end=False)
+        mutation_queue.queue(
+            MutationIntent(
+                type=MutationKind.LEDGER,
+                payload={"op": LedgerMutationOp.APPEND_HISTORY.value, "entry": user_turn},
+                requires_temporal=False,
+                source="turn_service.finalize_user_turn.user_entry",
+            )
+        )
+        mutation_queue.queue(
+            MutationIntent(
+                type=MutationKind.LEDGER,
+                payload={
+                    "op": LedgerMutationOp.APPEND_HISTORY.value,
+                    "entry": {"role": "assistant", "content": dad_reply},
+                },
+                requires_temporal=False,
+                source="turn_service.finalize_user_turn.assistant_entry",
+            )
+        )
+        mutation_queue.queue(
+            MutationIntent(
+                type=MutationKind.LEDGER,
+                payload={"op": LedgerMutationOp.CLEAR_TURN_CONTEXT.value},
+                requires_temporal=False,
+                source="turn_service.finalize_user_turn.clear_turn_context",
+            )
+        )
+        mutation_queue.queue(
+            MutationIntent(
+                type=MutationKind.LEDGER,
+                payload={"op": LedgerMutationOp.SYNC_THREAD_SNAPSHOT.value},
+                requires_temporal=False,
+                source="turn_service.finalize_user_turn.sync_thread_snapshot",
+            )
+        )
+        mutation_queue.queue(
+            MutationIntent(
+                type=MutationKind.LEDGER,
+                payload={
+                    "op": LedgerMutationOp.SCHEDULE_MAINTENANCE.value,
+                    "turn_text": stripped_input,
+                    "mood": current_mood,
+                },
+                requires_temporal=False,
+                source="turn_service.finalize_user_turn.schedule_maintenance",
+            )
+        )
+        mutation_queue.queue(
+            MutationIntent(
+                type=MutationKind.LEDGER,
+                payload={"op": LedgerMutationOp.HEALTH_SNAPSHOT.value},
+                requires_temporal=False,
+                source="turn_service.finalize_user_turn.health_snapshot",
+            )
+        )
         return dad_reply, False
+
+    # ---------------------------------------------------------------------------
+    # Public API: thin shells — accept input, invoke kernel, return output.
+    # TurnService is an input adapter only.  No state mutations happen here.
+    # ---------------------------------------------------------------------------
+
+    def _resolve_persistence_service(self) -> Any:
+        services = getattr(self.bot, "services", None)
+        persistence_service = getattr(services, "persistence_service", None)
+        if persistence_service is not None:
+            return persistence_service
+        registry = getattr(self.bot, "service_registry", None)
+        get = getattr(registry, "get", None)
+        if callable(get):
+            try:
+                persistence_service = get("persistence_service")
+            except Exception:
+                persistence_service = None
+        if persistence_service is None:
+            cached = getattr(self.bot, "_compat_persistence_service", None)
+            if cached is not None:
+                return cached
+            from dadbot.managers.conversation_persistence import ConversationPersistenceManager
+            from dadbot.services.persistence import PersistenceService
+
+            persistence_service = PersistenceService(
+                ConversationPersistenceManager(self.bot),
+                turn_service=self,
+            )
+            setattr(self.bot, "_compat_persistence_service", persistence_service)
+        return persistence_service
+
+    @staticmethod
+    def _compat_turn_context(user_input: str, attachments: AttachmentList | None = None) -> TurnContext:
+        return TurnContext(user_input=user_input, attachments=attachments)
+
+    def _finalize_direct_compat_turn(
+        self,
+        stripped_input: str,
+        current_mood: str | None,
+        dad_reply: str | None,
+        attachments: AttachmentList | None = None,
+        *,
+        turn_context: TurnContext | None = None,
+    ) -> FinalizedTurnResult:
+        context = turn_context or self._compat_turn_context(stripped_input, attachments)
+        context.state["turn_text"] = stripped_input
+        context.state["mood"] = current_mood or "neutral"
+        context.state["norm_attachments"] = attachments or []
+        persistence_service = self._resolve_persistence_service()
+        return persistence_service.finalize_turn(context, (dad_reply, False))
+
+    def _run_orchestrator_sync(
+        self, user_input: str, attachments: AttachmentList | None
+    ) -> FinalizedTurnResult:
+        """Run the turn orchestrator synchronously, safe from within a running loop."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        coro = self.bot.turn_orchestrator.handle_turn(user_input, attachments=attachments)
+        if loop is not None and loop.is_running():
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                return pool.submit(asyncio.run, coro).result()
+        return asyncio.run(coro)
 
     def process_user_message(self, user_input: str, attachments: AttachmentList | None = None) -> FinalizedTurnResult:
         stripped_input = user_input.strip()
         if not stripped_input and not attachments:
             return None, False
-
+        turn_context = self._compat_turn_context(stripped_input, attachments)
         current_mood, dad_reply, should_end, turn_text, normalized_attachments = self.prepare_user_turn(
             stripped_input,
             attachments=attachments,
+            turn_context=turn_context,
         )
         if should_end:
             return dad_reply, True
-
         if dad_reply is None:
             self._append_turn_pipeline_step("generate_reply", status="running", detail="generating sync reply")
             dad_reply = self.reply_generation.generate_validated_reply(
@@ -1237,21 +1274,26 @@ Return ONLY valid JSON (no extra text):
                 stream=False,
             )
             self._append_turn_pipeline_step("generate_reply", detail="generated sync reply")
-
-        return self.finalize_user_turn(turn_text, current_mood, dad_reply, normalized_attachments)
+        return self._finalize_direct_compat_turn(
+            turn_text,
+            current_mood,
+            dad_reply,
+            normalized_attachments,
+            turn_context=turn_context,
+        )
 
     async def process_user_message_async(self, user_input: str, attachments: AttachmentList | None = None) -> FinalizedTurnResult:
         stripped_input = user_input.strip()
         if not stripped_input and not attachments:
             return None, False
-
+        turn_context = self._compat_turn_context(stripped_input, attachments)
         current_mood, dad_reply, should_end, turn_text, normalized_attachments = await self.prepare_user_turn_async(
             stripped_input,
             attachments=attachments,
+            turn_context=turn_context,
         )
         if should_end:
             return dad_reply, True
-
         if dad_reply is None:
             self._append_turn_pipeline_step("generate_reply", status="running", detail="generating async reply")
             dad_reply = await self.reply_generation.generate_validated_reply_async(
@@ -1259,10 +1301,16 @@ Return ONLY valid JSON (no extra text):
                 turn_text,
                 current_mood,
                 normalized_attachments,
+                stream=False,
             )
             self._append_turn_pipeline_step("generate_reply", detail="generated async reply")
-
-        return self.finalize_user_turn(turn_text, current_mood, dad_reply, normalized_attachments)
+        return self._finalize_direct_compat_turn(
+            turn_text,
+            current_mood,
+            dad_reply,
+            normalized_attachments,
+            turn_context=turn_context,
+        )
 
     def process_user_message_stream(
         self,
@@ -1273,14 +1321,14 @@ Return ONLY valid JSON (no extra text):
         stripped_input = user_input.strip()
         if not stripped_input and not attachments:
             return None, False
-
+        turn_context = self._compat_turn_context(stripped_input, attachments)
         current_mood, dad_reply, should_end, turn_text, normalized_attachments = self.prepare_user_turn(
             stripped_input,
             attachments=attachments,
+            turn_context=turn_context,
         )
         if should_end:
             return dad_reply, True
-
         if dad_reply is None:
             self._update_turn_pipeline(mode="stream_sync")
             self._append_turn_pipeline_step("generate_reply", status="running", detail="generating streamed sync reply")
@@ -1293,8 +1341,15 @@ Return ONLY valid JSON (no extra text):
                 chunk_callback=chunk_callback,
             )
             self._append_turn_pipeline_step("generate_reply", detail="generated streamed sync reply")
-
-        return self.finalize_user_turn(turn_text, current_mood, dad_reply, normalized_attachments)
+        elif callable(chunk_callback) and dad_reply:
+            chunk_callback(dad_reply)
+        return self._finalize_direct_compat_turn(
+            turn_text,
+            current_mood,
+            dad_reply,
+            normalized_attachments,
+            turn_context=turn_context,
+        )
 
     async def process_user_message_stream_async(
         self,
@@ -1305,14 +1360,14 @@ Return ONLY valid JSON (no extra text):
         stripped_input = user_input.strip()
         if not stripped_input and not attachments:
             return None, False
-
+        turn_context = self._compat_turn_context(stripped_input, attachments)
         current_mood, dad_reply, should_end, turn_text, normalized_attachments = await self.prepare_user_turn_async(
             stripped_input,
             attachments=attachments,
+            turn_context=turn_context,
         )
         if should_end:
             return dad_reply, True
-
         if dad_reply is None:
             self._update_turn_pipeline(mode="stream_async")
             self._append_turn_pipeline_step("generate_reply", status="running", detail="generating streamed async reply")
@@ -1325,8 +1380,17 @@ Return ONLY valid JSON (no extra text):
                 chunk_callback=chunk_callback,
             )
             self._append_turn_pipeline_step("generate_reply", detail="generated streamed async reply")
-
-        return self.finalize_user_turn(turn_text, current_mood, dad_reply, normalized_attachments)
+        elif callable(chunk_callback) and dad_reply:
+            maybe_coro = chunk_callback(dad_reply)
+            if asyncio.iscoroutine(maybe_coro):
+                await maybe_coro
+        return self._finalize_direct_compat_turn(
+            turn_text,
+            current_mood,
+            dad_reply,
+            normalized_attachments,
+            turn_context=turn_context,
+        )
 
 
 __all__ = ["TurnService"]

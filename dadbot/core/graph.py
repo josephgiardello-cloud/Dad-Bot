@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 import uuid
@@ -10,6 +11,7 @@ from enum import Enum, StrEnum
 from typing import Any, Callable, Literal, Protocol
 
 from dadbot.contracts import AttachmentList, ChunkCallback, FinalizedTurnResult
+from dadbot.core.capability_audit_runner import build_runtime_capability_audit_report
 from dadbot.core.determinism import DeterminismBoundary, DeterminismMode
 from dadbot.core.execution_boundary import ControlPlaneExecutionBoundary
 from dadbot.core.execution_firewall import ExecutionFirewall
@@ -90,12 +92,16 @@ class MutationIntent:
         elif self.type is MutationKind.RELATIONSHIP:
             if op and op not in {item.value for item in RelationshipMutationOp}:
                 raise RuntimeError(f"Unsupported relationship mutation op: {op!r}")
+        elif self.type is MutationKind.LEDGER:
+            if op and op not in {item.value for item in LedgerMutationOp}:
+                raise RuntimeError(f"Unsupported ledger mutation op: {op!r}")
 
 
 class MutationKind(StrEnum):
     MEMORY = "memory"
     RELATIONSHIP = "relationship"
     GRAPH = "graph"
+    LEDGER = "ledger"
 
 
 class MemoryMutationOp(StrEnum):
@@ -104,6 +110,14 @@ class MemoryMutationOp(StrEnum):
 
 class RelationshipMutationOp(StrEnum):
     UPDATE = "update"
+
+
+class LedgerMutationOp(StrEnum):
+    APPEND_HISTORY = "append_history"
+    SYNC_THREAD_SNAPSHOT = "sync_thread_snapshot"
+    CLEAR_TURN_CONTEXT = "clear_turn_context"
+    SCHEDULE_MAINTENANCE = "schedule_maintenance"
+    HEALTH_SNAPSHOT = "health_snapshot"
 
 
 class MutationQueue:
@@ -196,11 +210,20 @@ class MutationQueue:
 
     def snapshot(self) -> dict[str, Any]:
         self._assert_owner()
+        pending_ledger = sum(1 for intent in self._queue if intent.type is MutationKind.LEDGER)
+        drained_ledger = sum(1 for intent in self._drained if intent.type is MutationKind.LEDGER)
+        failed_ledger = sum(1 for intent, _ in self._failed if intent.type is MutationKind.LEDGER)
         return {
             "owner_trace_id": self._owner_trace_id,
-            "pending": len(self._queue),
-            "drained": len(self._drained),
-            "failed": len(self._failed),
+            # Contract counters keep non-ledger mutation accounting stable for
+            # restart-boundary audits that verify durable mutation invariants.
+            "pending": len(self._queue) - pending_ledger,
+            "drained": len(self._drained) - drained_ledger,
+            "failed": len(self._failed) - failed_ledger,
+            # Ledger counters remain visible for observability.
+            "ledger_pending": pending_ledger,
+            "ledger_drained": drained_ledger,
+            "ledger_failed": failed_ledger,
         }
 
 
@@ -922,7 +945,27 @@ class TurnGraph:
                     }
                 )
 
-    async def execute(self, turn_context: TurnContext) -> FinalizedTurnResult:
+    def _emit_capability_audit_report(
+        self,
+        turn_context: TurnContext,
+        *,
+        stage_order: list[str],
+        failed: bool,
+        error: str = "",
+    ) -> dict[str, Any]:
+        report = build_runtime_capability_audit_report(
+            turn_context,
+            stage_order=stage_order,
+            failed=failed,
+            error=error,
+        )
+        payload = report.to_dict()
+        turn_context.state["capability_audit_report"] = payload
+        turn_context.metadata["capability_audit_report"] = dict(payload)
+        logger.info("capability_audit_report=%s", json.dumps(payload, sort_keys=True, default=str))
+        return payload
+
+    async def execute(self, turn_context: TurnContext, *, audit_mode: bool = False) -> FinalizedTurnResult:
         if self._required_execution_token:
             active_token = ControlPlaneExecutionBoundary.current()
             if active_token != self._required_execution_token:
@@ -954,6 +997,7 @@ class TurnGraph:
 
         telemetry = self.registry.get("telemetry") if self.registry is not None else None
         executed_stage_names: list[str] = []
+        audit_enabled = bool(audit_mode or turn_context.metadata.get("audit_mode"))
 
         async def _execute_stage(stage_name: str, node: Any, stage_context: TurnContext) -> TurnContext:
             started_at = time.perf_counter()
@@ -993,21 +1037,32 @@ class TurnGraph:
             for idx, stage_name in enumerate(executed_stage_names[:-1]):
                 next_name = executed_stage_names[idx + 1]
                 self._emit_checkpoint(turn_context, stage=f"{stage_name}\u2192{next_name}", status="edge")
-        except Exception:
+        except Exception as exc:
             total_ms = round((time.perf_counter() - execute_started_at) * 1000, 3)
             self._emit_turn_health_state(turn_context, total_latency_ms=total_ms, failed=True)
+            if audit_enabled:
+                self._emit_capability_audit_report(
+                    turn_context,
+                    stage_order=[trace.stage for trace in list(turn_context.stage_traces or [])],
+                    failed=True,
+                    error=str(exc),
+                )
             raise
 
         if turn_context.short_circuit and turn_context.short_circuit_result is not None:
             total_ms = round((time.perf_counter() - execute_started_at) * 1000, 3)
             self._emit_turn_health_state(turn_context, total_latency_ms=total_ms, failed=False)
             _enforce_fidelity_invariants()
+            if audit_enabled:
+                self._emit_capability_audit_report(turn_context, stage_order=executed_stage_names, failed=False)
             return turn_context.short_circuit_result
 
         result = turn_context.state.get("safe_result")
         total_ms = round((time.perf_counter() - execute_started_at) * 1000, 3)
         self._emit_turn_health_state(turn_context, total_latency_ms=total_ms, failed=False)
         _enforce_fidelity_invariants()
+        if audit_enabled:
+            self._emit_capability_audit_report(turn_context, stage_order=executed_stage_names, failed=False)
         if isinstance(result, tuple) and len(result) >= 2:
             return result
         return (str(result or ""), False)

@@ -294,6 +294,38 @@ class TestReducerSemanticCheck:
         assert "s1" in state["sessions"]
         assert state["sessions"]["s1"].get("last_result") == {"reply": "ok"}
 
+    def test_rebuild_from_ledger_matches_reducer_for_state_patches(self):
+        reducer = CanonicalEventReducer()
+        ledger = ExecutionLedger()
+        ledger.write(
+            {
+                "type": "SESSION_STATE_UPDATED",
+                "session_id": "s1",
+                "trace_id": "t1",
+                "timestamp": 1.0,
+                "kernel_step_id": "test.patch.one",
+                "payload": {"state": {"name": "Dad"}},
+            }
+        )
+        ledger.write(
+            {
+                "type": "SESSION_STATE_UPDATED",
+                "session_id": "s1",
+                "trace_id": "t1",
+                "timestamp": 2.0,
+                "kernel_step_id": "test.patch.two",
+                "payload": {"state": {"mood": "calm"}},
+            }
+        )
+
+        events = ledger.read()
+        reduced = reducer.reduce(events)
+        store = SessionStore()
+        store.rebuild_from_ledger(events)
+
+        assert store.get("s1") == reduced["sessions"]["s1"]
+        assert store.get("s1") == {"name": "Dad", "mood": "calm"}
+
     def test_system_health_check_reducer_semantic_passes(self):
         ledger = _make_ledger_with_jobs("s1")
         checker = SystemHealthChecker()

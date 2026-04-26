@@ -9,6 +9,8 @@ from unittest.mock import patch
 
 import pytest
 
+from dadbot.core.canonical_event import validate_trace
+
 from dadbot.core.graph import MutationQueue, TurnContext
 from tests.stress.phase4_certification_gate import build_bot
 from tools.phase4_legacy_integrity_scan import run_scan
@@ -33,6 +35,23 @@ def isolated_bot():
 def _turn_stage_order(bot: Any) -> list[str]:
     evidence = dict(getattr(bot, "_last_turn_health_evidence", {}) or {})
     return [str(s).strip().lower() for s in list(evidence.get("stage_order") or [])]
+
+
+def _run_audited_turn(bot: Any, user_input: str, *, trace_id: str, correlation_id: str, request_id: str, session_id: str = "audit-session") -> tuple[Any, dict[str, Any]]:
+    result = asyncio.run(
+        bot.turn_orchestrator.control_plane.submit_turn(
+            session_id=session_id,
+            user_input=user_input,
+            metadata={
+                "audit_mode": True,
+                "trace_id": trace_id,
+                "correlation_id": correlation_id,
+                "request_id": request_id,
+            },
+        )
+    )
+    report = dict(getattr(bot, "_last_capability_audit_report", {}) or {})
+    return result, report
 
 
 def _persistent_state_snapshot(bot: Any) -> dict[str, Any]:
@@ -125,6 +144,10 @@ def _assert_turn_event_integrity(bot: Any, trace_id: str, *, expect_save_after: 
     assert trace_id, "Expected non-empty trace_id for turn event integrity audit"
     events = bot.list_turn_events(trace_id)
     assert events, f"No turn events persisted for trace_id={trace_id!r}"
+
+    # Global canonicalization assertion: no forbidden wall-clock fields must
+    # survive into any event payload in the production trace.
+    validate_trace(events)
 
     sequences = [int(event.get("sequence") or 0) for event in events]
     assert all(sequence > 0 for sequence in sequences)
@@ -224,6 +247,62 @@ def test_full_execution_trace_matches_canonical_pipeline(isolated_bot):
         json.dumps({"turns": trace_records}, indent=2),
         encoding="utf-8",
     )
+
+
+def test_audit_mode_emits_capability_report(isolated_bot):
+    bot = isolated_bot
+
+    (reply, should_end), report = _run_audited_turn(
+        bot,
+        "Please help me think through a hard conversation.",
+        trace_id="audit-trace-001",
+        correlation_id="audit-corr-001",
+        request_id="audit-req-001",
+    )
+
+    assert should_end is False
+    assert isinstance(reply, str) and reply.strip()
+    assert report.get("ok") is True
+    assert report.get("failed") is False
+    assert report.get("stage_order") == CANONICAL_PIPELINE
+    assert report.get("mutation_queue", {}).get("pending") == 0
+    checks = {check["name"]: check for check in list(report.get("checks") or [])}
+    assert checks["temporal_ordering"]["status"] == "pass"
+    assert checks["mutation_safety"]["status"] == "pass"
+    assert checks["save_node_single_execution"]["details"]["save_count"] == 1
+    assert checks["capability_audit_emission"]["status"] == "pass"
+
+
+def test_golden_replay_capability_contracts_hold_for_identical_runs():
+    with TemporaryDirectory() as left_tmp, TemporaryDirectory() as right_tmp:
+        left_bot = build_bot(Path(left_tmp), reply="Golden replay OK.")
+        right_bot = build_bot(Path(right_tmp), reply="Golden replay OK.")
+        try:
+            _, left_report = _run_audited_turn(
+                left_bot,
+                "Give me the same structured advice twice.",
+                trace_id="golden-trace-001",
+                correlation_id="golden-corr-001",
+                request_id="golden-req-001",
+                session_id="golden-session",
+            )
+            _, right_report = _run_audited_turn(
+                right_bot,
+                "Give me the same structured advice twice.",
+                trace_id="golden-trace-001",
+                correlation_id="golden-corr-001",
+                request_id="golden-req-001",
+                session_id="golden-session",
+            )
+
+            assert left_report.get("stage_order") == CANONICAL_PIPELINE
+            assert right_report.get("stage_order") == CANONICAL_PIPELINE
+            assert left_report.get("mutation_queue", {}).get("pending") == 0
+            assert right_report.get("mutation_queue", {}).get("pending") == 0
+            assert left_bot.turn_orchestrator.control_plane.ledger.replay_hash() == right_bot.turn_orchestrator.control_plane.ledger.replay_hash()
+        finally:
+            left_bot.shutdown()
+            right_bot.shutdown()
 
 
 def test_legacy_behavior_trigger_rejected_strictly(isolated_bot):

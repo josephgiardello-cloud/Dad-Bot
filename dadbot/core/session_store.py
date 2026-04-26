@@ -121,7 +121,9 @@ class SessionStore:
             if event_type == "SESSION_STATE_UPDATED":
                 state = payload.get("state")
                 if isinstance(state, dict):
-                    self._sessions[session_id] = deepcopy(state)
+                    existing = dict(self._sessions.get(session_id) or {})
+                    existing.update(deepcopy(state))
+                    self._sessions[session_id] = existing
             elif event_type == "SESSION_STATE_DELETED":
                 self._sessions.pop(session_id, None)
             elif event_type == "JOB_COMPLETED":

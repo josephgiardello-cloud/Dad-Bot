@@ -12,6 +12,7 @@ from dadbot.core.control_plane import (
     SessionRegistry,
 )
 from dadbot.core.recovery_manager import RecoveryManager
+from dadbot.core.replay_verifier import ReplayVerifier
 from dadbot.core.session_store import SessionStore
 
 
@@ -117,3 +118,138 @@ def test_recovery_manager_rebuilds_projection_and_returns_pending_jobs():
 
     state = session_store.get("s-recover")
     assert state == {"x": 1}
+
+
+def test_replay_hash_ignores_job_submission_wall_clock_metadata():
+    left = InMemoryExecutionLedger()
+    right = InMemoryExecutionLedger()
+    verifier = ReplayVerifier()
+
+    left.write(
+        {
+            "type": "JOB_QUEUED",
+            "session_id": "s-deterministic",
+            "trace_id": "tr-deterministic",
+            "timestamp": 2.0,
+            "kernel_step_id": "control_plane.enqueue",
+            "payload": {
+                "job_id": "job-deterministic-1",
+                "request_id": "req-deterministic-1",
+                "user_input": "hello",
+                "attachments": [],
+                "metadata": {"trace_id": "tr-deterministic"},
+                "priority": 0,
+                "submitted_at": 2.0,
+            },
+        }
+    )
+    right.write(
+        {
+            "type": "JOB_QUEUED",
+            "session_id": "s-deterministic",
+            "trace_id": "tr-deterministic",
+            "timestamp": 2.0,
+            "kernel_step_id": "control_plane.enqueue",
+            "payload": {
+                "job_id": "job-deterministic-1",
+                "request_id": "req-deterministic-1",
+                "user_input": "hello",
+                "attachments": [],
+                "metadata": {"trace_id": "tr-deterministic"},
+                "priority": 0,
+                "submitted_at": 999.0,
+            },
+        }
+    )
+
+    assert left.replay_hash() == right.replay_hash()
+    assert verifier.trace_hash(left.read()) == verifier.trace_hash(right.read())
+
+
+# ---------------------------------------------------------------------------
+# Canonicalization boundary — system-wide policy tests (Step 1–5)
+# ---------------------------------------------------------------------------
+
+def test_lease_time_not_in_replay_hash():
+    """Lease temporal fields (acquired_at, expires_at) must not affect the
+    canonical replay hash even if they accidentally appear in an event payload.
+
+    ExecutionLease never writes to the ledger, but if any downstream code
+    ever copies lease data into an event payload, the hash must remain stable.
+    """
+    from dadbot.core.canonical_event import canonicalize_event_payload, validate_trace
+
+    # Simulate two otherwise-identical events whose payloads carry different
+    # lease timestamps (the kind of leakage we are guarding against).
+    event_base = {
+        "type": "JOB_STARTED",
+        "session_id": "s-lease",
+        "trace_id": "tr-lease",
+        "timestamp": 1.0,
+        "kernel_step_id": "scheduler.execute.start",
+        "sequence": 1,
+        "session_index": 1,
+        "event_id": "evt-1",
+        "parent_event_id": "",
+        "payload": {"job_id": "job-lease-1"},
+    }
+    event_with_lease_t1 = dict(event_base, payload={**event_base["payload"], "acquired_at": 1000.0, "expires_at": 1030.0})
+    event_with_lease_t2 = dict(event_base, payload={**event_base["payload"], "acquired_at": 2000.0, "expires_at": 2030.0})
+
+    canon1 = canonicalize_event_payload(event_with_lease_t1["payload"])
+    canon2 = canonicalize_event_payload(event_with_lease_t2["payload"])
+    assert canon1 == canon2, "acquired_at/expires_at must be stripped before hashing"
+
+    # validate_trace must NOT raise for a clean event (no forbidden fields).
+    clean_trace = [dict(event_base)]
+    validate_trace(clean_trace)  # no AssertionError expected
+
+    # validate_trace MUST raise for an event whose payload leaks a forbidden field.
+    dirty_trace = [event_with_lease_t1]
+    with pytest.raises(AssertionError, match="acquired_at|expires_at"):
+        validate_trace(dirty_trace)
+
+
+def test_health_checker_witness_payload_has_no_forbidden_fields():
+    """SystemHealthChecker._append_health_witness() must produce a payload that
+    passes validate_trace — i.e. it must not embed any wall-clock timestamps
+    in the event payload dict.
+    """
+    from dadbot.core.canonical_event import validate_trace
+    from dadbot.core.execution_ledger import ExecutionLedger
+    from dadbot.core.system_health_checker import SystemHealthChecker
+
+    ledger = ExecutionLedger()
+    checker = SystemHealthChecker()
+    checker._append_health_witness(ledger, component="test.component")
+
+    events = ledger.read()
+    assert events, "health witness write should have produced at least one event"
+    # validate_trace inspects the payload dicts — raises AssertionError on any
+    # forbidden field found.
+    validate_trace(events)
+
+
+def test_validate_trace_catches_all_forbidden_fields():
+    """validate_trace must catch every field in NON_CANONICAL_PAYLOAD_FIELDS,
+    not just submitted_at or acquired_at.
+    """
+    import pytest
+    from dadbot.core.canonical_event import FORBIDDEN_TRACE_FIELDS, validate_trace
+
+    base_event = {
+        "type": "JOB_QUEUED",
+        "session_id": "s-validate",
+        "trace_id": "tr-validate",
+        "timestamp": 1.0,
+        "kernel_step_id": "test",
+        "sequence": 1,
+        "session_index": 1,
+        "event_id": "evt-v1",
+        "parent_event_id": "",
+        "payload": {"job_id": "job-v1"},
+    }
+    for field in FORBIDDEN_TRACE_FIELDS:
+        dirty = dict(base_event, payload={**base_event["payload"], field: 99999.0})
+        with pytest.raises(AssertionError, match=field):
+            validate_trace([dirty])

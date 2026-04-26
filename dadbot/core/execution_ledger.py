@@ -8,6 +8,7 @@ from copy import deepcopy
 from threading import RLock
 from typing import Any
 
+from dadbot.core.canonical_event import canonicalize_event_payload
 from dadbot.core.ledger.enforcement import LedgerEnforcer, LedgerEnforcementError
 from dadbot.core.ledger_backend import LedgerBackend, InMemoryLedgerBackend
 from dadbot.core.event_schema import stamp_schema_version
@@ -15,6 +16,18 @@ from dadbot.core.event_schema import stamp_schema_version
 
 # ContextVar used by WriteBoundaryGuard (Step 7) to authorise writes.
 _ledger_write_token: ContextVar[str] = ContextVar("_ledger_write_token", default="")
+
+
+def _canonical_trace_payload(event_type: str, payload: Any) -> dict[str, Any]:  # noqa: ARG001
+    """Strip all non-canonical fields from *payload*.
+
+    Delegates to the system-wide ``canonicalize_event_payload`` function so
+    that the canonical boundary is defined in exactly one place.
+    The *event_type* parameter is retained for call-site compatibility but is
+    no longer needed — canonicalization is unconditional and field-based, not
+    event-type-based.
+    """
+    return canonicalize_event_payload(payload)
 
 
 class ExecutionLedger:
@@ -209,7 +222,10 @@ class ExecutionLedger:
                 "event_id": str(event.get("event_id") or ""),
                 "parent_event_id": str(event.get("parent_event_id") or ""),
                 "kernel_step_id": str(event.get("kernel_step_id") or ""),
-                "payload": event.get("payload") if isinstance(event.get("payload"), dict) else {},
+                "payload": _canonical_trace_payload(
+                    str(event.get("type") or ""),
+                    event.get("payload"),
+                ),
             }
             for event in events
         ]

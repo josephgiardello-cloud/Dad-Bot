@@ -5,6 +5,7 @@ import json
 from typing import Any
 
 from dadbot.core.event_reducer import CanonicalEventReducer
+from dadbot.core.execution_ledger import _canonical_trace_payload
 
 
 class ReplayVerifier:
@@ -30,7 +31,10 @@ class ReplayVerifier:
                 "event_id": str(event.get("event_id") or ""),
                 "parent_event_id": str(event.get("parent_event_id") or ""),
                 "kernel_step_id": str(event.get("kernel_step_id") or ""),
-                "payload": event.get("payload") if isinstance(event.get("payload"), dict) else {},
+                "payload": _canonical_trace_payload(
+                    str(event.get("type") or ""),
+                    event.get("payload"),
+                ),
             }
             for event in ordered
         ]

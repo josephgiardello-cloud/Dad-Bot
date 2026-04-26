@@ -43,6 +43,20 @@ class ConversationPersistenceManager:
 		if len(queue) > 32:
 			del queue[:-32]
 
+	def _active_turn_wall_time(self) -> str:
+		temporal = getattr(self.bot, "_current_turn_time_base", None)
+		wall_time = str(getattr(temporal, "wall_time", "") or "").strip()
+		if wall_time:
+			return wall_time
+		return datetime.now().isoformat(timespec="seconds")
+
+	def _active_turn_file_token(self) -> str:
+		wall_time = self._active_turn_wall_time()
+		compact = wall_time.replace(":", "").replace("T", "-")
+		compact = compact.replace("+", "-").replace("Z", "")
+		compact = compact.split(".")[0]
+		return compact or datetime.now().strftime("%Y%m%d-%H%M%S")
+
 	def _apply_snapshot_mutations(self, snapshot_payload: dict[str, Any], *, turn_context: Any | None = None) -> None:
 		chat_history = list(snapshot_payload.get("history", []))
 		if chat_history and chat_history[0].get("role") == "system":
@@ -61,12 +75,9 @@ class ConversationPersistenceManager:
 			self.bot.update_memory_store(chat_history, turn_context=turn_context)
 			if not self.bot.LIGHT_MODE:
 				self.bot.consolidate_memories(turn_context=turn_context)
-			self.bot.archive_session_context(chat_history)
+			self.bot.archive_session_context(chat_history, turn_context=turn_context)
 			if not self.bot.LIGHT_MODE:
-				self.bot.refresh_relationship_timeline(force=True)
-				self.bot.detect_life_patterns()
-				self.bot.evolve_persona()
-				self.bot.refresh_memory_graph()
+				self.bot.refresh_relationship_timeline(force=True, turn_context=turn_context)
 			self.save_session_log(chat_history)
 		finally:
 			self.bot.load_session_state_snapshot(previous_snapshot)
@@ -112,8 +123,9 @@ class ConversationPersistenceManager:
 		self._apply_snapshot_mutations(snapshot_payload, turn_context=turn_context)
 
 	def save_session_log(self, history: list[dict]) -> None:
+		created_at = self._active_turn_wall_time()
 		payload = {
-			"created_at": datetime.now().isoformat(timespec="seconds"),
+			"created_at": created_at,
 			"tenant_id": self.bot.config.tenant_id,
 			"model": self.bot.config.active_model,
 			"embedding_model": self.bot.config.active_embedding_model,
@@ -121,7 +133,7 @@ class ConversationPersistenceManager:
 			"relationship_state": self.bot.relationship_state(),
 			"history": history,
 		}
-		timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+		timestamp = self._active_turn_file_token()
 		io_lock = getattr(self.bot, "_io_lock", None)
 		if io_lock is None:
 			if self.bot._tenant_document_store is not None:
@@ -149,14 +161,14 @@ class ConversationPersistenceManager:
 		trace_id = str(payload.get("trace_id") or "unknown").strip() or "unknown"
 		stage = str(payload.get("stage") or "stage").strip().replace(" ", "-") or "stage"
 		status = str(payload.get("status") or "unknown").strip().replace(" ", "-") or "unknown"
-		timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+		timestamp = self._active_turn_file_token()
 		binary_payload = gzip.compress(pickle.dumps(payload, protocol=pickle.HIGHEST_PROTOCOL))
 		wrapped_payload = {
 			"format": "gzip+pickle",
 			"trace_id": trace_id,
 			"stage": stage,
 			"status": status,
-			"created_at": datetime.now().isoformat(timespec="seconds"),
+			"created_at": self._active_turn_wall_time(),
 			"payload_b64": base64.b64encode(binary_payload).decode("ascii"),
 		}
 
@@ -230,7 +242,7 @@ class ConversationPersistenceManager:
 		payload.setdefault("sequence", sequence)
 		event_id_seed = f"{trace_id}:{int(payload.get('sequence') or sequence)}"
 		payload.setdefault("event_id", hashlib.sha256(event_id_seed.encode()).hexdigest()[:16])
-		payload.setdefault("occurred_at", datetime.now().isoformat(timespec="seconds"))
+		payload.setdefault("occurred_at", self._active_turn_wall_time())
 
 		if self.bot._tenant_document_store is not None:
 			key = f"turn-events:{trace_id}"
@@ -251,7 +263,7 @@ class ConversationPersistenceManager:
 			replay = self.replay_turn_events(trace_id=trace_id)
 			snapshot_payload = {
 				"trace_id": trace_id,
-				"created_at": datetime.now().isoformat(timespec="seconds"),
+				"created_at": self._active_turn_wall_time(),
 				"last_sequence": compact_sequence,
 				"phase": replay.get("phase"),
 				"state": replay.get("replayed_state", {}),
