@@ -377,7 +377,6 @@ class ExecutionControlPlane:
         ).strip()
         trace_id = str(
             metadata_payload.get("trace_id")
-            or correlation_id
             or uuid.uuid4().hex
         ).strip()
         metadata_payload["correlation_id"] = correlation_id

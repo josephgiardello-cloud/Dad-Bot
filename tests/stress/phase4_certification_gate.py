@@ -111,7 +111,12 @@ def _install_fake_llm(bot, reply: str = "I hear you, buddy. Stay steady.") -> No
     bot.call_ollama_chat_async = _async_stub
 
 
-def build_bot(temp_path: Path, *, reply: str = "I hear you, buddy. Stay steady.") -> Any:
+def build_bot(
+    temp_path: Path,
+    *,
+    reply: str = "I hear you, buddy. Stay steady.",
+    restore_from_disk: bool = False,
+) -> Any:
     """Build a fully isolated DadBot with all external I/O stubbed."""
     # Import here to avoid module-level import errors when running standalone.
     from Dad import DadBot  # noqa: PLC0415
@@ -124,10 +129,24 @@ def build_bot(temp_path: Path, *, reply: str = "I hear you, buddy. Stay steady."
     bot.SEMANTIC_MEMORY_DB_PATH = temp_path / "dad_memory_semantic.sqlite3"
     bot.GRAPH_STORE_DB_PATH = temp_path / "dad_memory_graph.sqlite3"
     bot.SESSION_LOG_DIR = temp_path / "session_logs"
-    bot.MEMORY_STORE = bot.default_memory_store()
-    bot.save_memory_store()
     bot.embed_texts = _fake_embed
     _install_fake_llm(bot, reply)
+
+    if restore_from_disk:
+        restored = None
+        resume = getattr(bot, "resume_turn_from_checkpoint", None)
+        if callable(resume):
+            restored = resume()
+        if restored is None:
+            if bot.MEMORY_PATH.exists():
+                payload = json.loads(bot.MEMORY_PATH.read_text(encoding="utf-8"))
+                bot.MEMORY_STORE = bot.memory_manager.normalize_memory_store(payload)
+            else:
+                bot.MEMORY_STORE = bot.default_memory_store()
+        return bot
+
+    bot.MEMORY_STORE = bot.default_memory_store()
+    bot.save_memory_store()
     return bot
 
 

@@ -162,8 +162,6 @@ class MutationQueue:
         executor: Callable[[MutationIntent], None],
         *,
         hard_fail_on_error: bool = True,
-        turn_context: Any | None = None,
-        kernel: ExecutionKernel | None = None,
     ) -> list[tuple[MutationIntent, str]]:
         """Execute all queued intents through ``executor``.  Returns failures.
 
@@ -182,30 +180,6 @@ class MutationQueue:
         self._queue.clear()
         for index, intent in enumerate(to_drain):
             try:
-                if turn_context is not None and kernel is not None:
-                    commit_active = bool(getattr(turn_context, "state", {}).get("_save_transaction_active", False))
-                    if bool(getattr(kernel, "strict", False)):
-                        kernel.validate(
-                            stage="mutation_drain",
-                            operation=f"mutation_queue:{getattr(intent, 'source', '')}",
-                            context=turn_context,
-                            mutation_outside_save_node=not commit_active,
-                        )
-                    else:
-                        try:
-                            result = kernel.validate(
-                                stage="mutation_drain",
-                                operation=f"mutation_queue:{getattr(intent, 'source', '')}",
-                                context=turn_context,
-                                mutation_outside_save_node=not commit_active,
-                            )
-                            if not bool(getattr(result, "ok", True)):
-                                logger.warning(
-                                    "[KERNEL SHADOW VIOLATION] %s",
-                                    getattr(result, "reason", "mutation drain validation failed"),
-                                )
-                        except Exception as exc:
-                            logger.warning("[KERNEL SHADOW VIOLATION] %s", exc)
                 executor(intent)
                 self._drained.append(intent)
             except Exception as exc:

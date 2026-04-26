@@ -1,0 +1,180 @@
+﻿============================= test session starts =============================
+platform win32 -- Python 3.13.7, pytest-9.0.3, pluggy-1.6.0 -- C:\Users\josep\OneDrive\Desktop\Dad-Bot\.venv\Scripts\python.exe
+cachedir: .pytest_cache
+Using --randomly-seed=895888564
+rootdir: C:\Users\josep\OneDrive\Desktop\Dad-Bot
+configfile: pyproject.toml
+plugins: anyio-4.13.0, mock-3.15.1, randomly-4.1.0
+collecting ... collected 16 items / 15 deselected / 1 selected
+
+tests/stress/test_full_execution_trace.py::test_restart_boundary_recovery_audit_matches_clean_execution[relationship_projection-materialize_projection] FAILED [100%]
+
+================================== FAILURES ===================================
+_ test_restart_boundary_recovery_audit_matches_clean_execution[relationship_projection-materialize_projection] _
+tests\stress\test_full_execution_trace.py:806: in test_restart_boundary_recovery_audit_matches_clean_execution
+    assert _restart_boundary_snapshot(failed_bot) == before_turn_snapshot
+E   assert {'relationshi...-04-25', ...}} == {'relationshi...-04-25', ...}}
+E     
+E     Omitting 1 identical items, use -vv to show
+E     Differing items:
+E     {'save_boundary': {'graph': {'edges': [], 'nodes': [], 'updated_at': None}, 'history': [{'content': "You are 'Dad'.\nY... path OK. Love you, buddy.', 'role': 'assistant'}], 'last_mood': 'neutral', 'last_mood_updated_at': '2026-04-25', ...}} != {'save_boundary': {'graph': {'edges': [], 'nodes': [], 'updated_at': None}, 'history': [{'content': "You are 'Dad'.\nY... path OK. Love you, buddy.', 'role': 'assistant'}], 'last_mood': 'neutral', 'last_mood_updated_at': '2026-04-25', ...}}
+E     
+E     Full diff:
+E       {...
+E     
+E     ...Full output truncated (101 lines hidden), use '-vv' to show
+---------------------------- Captured stdout call -----------------------------
+{"exported_at": 1777166310.0291114, "trace_id": "corrfc0b0d99d1cb48caafdaf99921c3", "span_id": "", "event": "ledger.write", "event_type": "JOB_SUBMITTED", "session_id": "default", "correlation_id": "corrfc0b0d99d1cb48caafdaf99921c3", "committed": false, "latency_ms": 0.2543000737205148}
+{"exported_at": 1777166310.0293217, "trace_id": "corrfc0b0d99d1cb48caafdaf99921c3", "span_id": "", "event": "ledger.write", "event_type": "SESSION_BOUND", "session_id": "default", "correlation_id": "corrfc0b0d99d1cb48caafdaf99921c3", "committed": false, "latency_ms": 0.04949991125613451}
+{"exported_at": 1777166310.0294352, "trace_id": "corrfc0b0d99d1cb48caafdaf99921c3", "span_id": "", "event": "ledger.write", "event_type": "JOB_QUEUED", "session_id": "default", "correlation_id": "corrfc0b0d99d1cb48caafdaf99921c3", "committed": true, "latency_ms": 0.04740001168102026}
+{"exported_at": 1777166310.0296533, "trace_id": "corrfc0b0d99d1cb48caafdaf99921c3", "span_id": "", "event": "ledger.write", "event_type": "EXECUTION_WITNESS", "session_id": "default", "correlation_id": "corrfc0b0d99d1cb48caafdaf99921c3", "committed": false, "latency_ms": 0.04809990059584379}
+{"exported_at": 1777166310.029867, "trace_id": "corrfc0b0d99d1cb48caafdaf99921c3", "span_id": "", "event": "ledger.write", "event_type": "EXECUTION_WITNESS", "session_id": "default", "correlation_id": "corrfc0b0d99d1cb48caafdaf99921c3", "committed": false, "latency_ms": 0.03779993858188391}
+{"exported_at": 1777166310.0299594, "trace_id": "corrfc0b0d99d1cb48caafdaf99921c3", "span_id": "", "event": "ledger.write", "event_type": "JOB_STARTED", "session_id": "default", "correlation_id": "corrfc0b0d99d1cb48caafdaf99921c3", "committed": true, "latency_ms": 0.03439991269260645}
+{"exported_at": 1777166310.0301666, "trace_id": "corrfc0b0d99d1cb48caafdaf99921c3", "span_id": "", "event": "ledger.write", "event_type": "EXECUTION_WITNESS", "session_id": "default", "correlation_id": "corrfc0b0d99d1cb48caafdaf99921c3", "committed": false, "latency_ms": 0.039100064896047115}
+{"exported_at": 1777166310.4024043, "trace_id": "corrfc0b0d99d1cb48caafdaf99921c3", "span_id": "", "event": "ledger.write", "event_type": "JOB_COMPLETED", "session_id": "default", "correlation_id": "corrfc0b0d99d1cb48caafdaf99921c3", "committed": true, "latency_ms": 0.06860005669295788}
+{"exported_at": 1777166310.402585, "trace_id": "", "span_id": "", "event": "job.completed", "job_id": "81efe51acfe2413ab14e77fd36e2e0b7", "session_id": "default", "latency_ms": 372.3216999787837}
+{"exported_at": 1777166310.4354985, "trace_id": "corr2540620ce74a4f18b4fbd151af49", "span_id": "", "event": "ledger.write", "event_type": "JOB_SUBMITTED", "session_id": "default", "correlation_id": "corr2540620ce74a4f18b4fbd151af49", "committed": false, "latency_ms": 0.05679996684193611}
+{"exported_at": 1777166310.435593, "trace_id": "corr2540620ce74a4f18b4fbd151af49", "span_id": "", "event": "ledger.write", "event_type": "SESSION_BOUND", "session_id": "default", "correlation_id": "corr2540620ce74a4f18b4fbd151af49", "committed": false, "latency_ms": 0.036800047382712364}
+{"exported_at": 1777166310.435682, "trace_id": "corr2540620ce74a4f18b4fbd151af49", "span_id": "", "event": "ledger.write", "event_type": "JOB_QUEUED", "session_id": "default", "correlation_id": "corr2540620ce74a4f18b4fbd151af49", "committed": true, "latency_ms": 0.04569999873638153}
+{"exported_at": 1777166310.435765, "trace_id": "corr2540620ce74a4f18b4fbd151af49", "span_id": "", "event": "ledger.write", "event_type": "EXECUTION_WITNESS", "session_id": "default", "correlation_id": "corr2540620ce74a4f18b4fbd151af49", "committed": false, "latency_ms": 0.048699905164539814}
+{"exported_at": 1777166310.4360864, "trace_id": "corr2540620ce74a4f18b4fbd151af49", "span_id": "", "event": "ledger.write", "event_type": "EXECUTION_WITNESS", "session_id": "default", "correlation_id": "corr2540620ce74a4f18b4fbd151af49", "committed": false, "latency_ms": 0.03779993858188391}
+{"exported_at": 1777166310.436175, "trace_id": "corr2540620ce74a4f18b4fbd151af49", "span_id": "", "event": "ledger.write", "event_type": "JOB_STARTED", "session_id": "default", "correlation_id": "corr2540620ce74a4f18b4fbd151af49", "committed": true, "latency_ms": 0.03460003063082695}
+{"exported_at": 1777166310.4364421, "trace_id": "corr2540620ce74a4f18b4fbd151af49", "span_id": "", "event": "ledger.write", "event_type": "EXECUTION_WITNESS", "session_id": "default", "correlation_id": "corr2540620ce74a4f18b4fbd151af49", "committed": false, "latency_ms": 0.03829994238913059}
+{"exported_at": 1777166310.811838, "trace_id": "corr2540620ce74a4f18b4fbd151af49", "span_id": "", "event": "ledger.write", "event_type": "JOB_COMPLETED", "session_id": "default", "correlation_id": "corr2540620ce74a4f18b4fbd151af49", "committed": true, "latency_ms": 0.06449990905821323}
+{"exported_at": 1777166310.8118954, "trace_id": "", "span_id": "", "event": "job.completed", "job_id": "aab4fcc43b0349dca48c18fb0c8a2336", "session_id": "default", "latency_ms": 375.49340003170073}
+{"exported_at": 1777166310.8433728, "trace_id": "corrf44a0c46cb524683ab7651213ae7", "span_id": "", "event": "ledger.write", "event_type": "JOB_SUBMITTED", "session_id": "default", "correlation_id": "corrf44a0c46cb524683ab7651213ae7", "committed": false, "latency_ms": 0.058399979025125504}
+{"exported_at": 1777166310.8434632, "trace_id": "corrf44a0c46cb524683ab7651213ae7", "span_id": "", "event": "ledger.write", "event_type": "SESSION_BOUND", "session_id": "default", "correlation_id": "corrf44a0c46cb524683ab7651213ae7", "committed": false, "latency_ms": 0.03760005347430706}
+{"exported_at": 1777166310.8435516, "trace_id": "corrf44a0c46cb524683ab7651213ae7", "span_id": "", "event": "ledger.write", "event_type": "JOB_QUEUED", "session_id": "default", "correlation_id": "corrf44a0c46cb524683ab7651213ae7", "committed": true, "latency_ms": 0.0475000124424696}
+{"exported_at": 1777166310.8436494, "trace_id": "corrf44a0c46cb524683ab7651213ae7", "span_id": "", "event": "ledger.write", "event_type": "EXECUTION_WITNESS", "session_id": "default", "correlation_id": "corrf44a0c46cb524683ab7651213ae7", "committed": false, "latency_ms": 0.04700000863522291}
+{"exported_at": 1777166310.8443234, "trace_id": "corrf44a0c46cb524683ab7651213ae7", "span_id": "", "event": "ledger.write", "event_type": "EXECUTION_WITNESS", "session_id": "default", "correlation_id": "corrf44a0c46cb524683ab7651213ae7", "committed": false, "latency_ms": 0.1607000594958663}
+{"exported_at": 1777166310.844643, "trace_id": "corrf44a0c46cb524683ab7651213ae7", "span_id": "", "event": "ledger.write", "event_type": "JOB_STARTED", "session_id": "default", "correlation_id": "corrf44a0c46cb524683ab7651213ae7", "committed": true, "latency_ms": 0.06600003689527512}
+{"exported_at": 1777166310.8453321, "trace_id": "corrf44a0c46cb524683ab7651213ae7", "span_id": "", "event": "ledger.write", "event_type": "EXECUTION_WITNESS", "session_id": "default", "correlation_id": "corrf44a0c46cb524683ab7651213ae7", "committed": false, "latency_ms": 0.0521000474691391}
+{"exported_at": 1777166311.242037, "trace_id": "corrf44a0c46cb524683ab7651213ae7", "span_id": "", "event": "ledger.write", "event_type": "JOB_COMPLETED", "session_id": "default", "correlation_id": "corrf44a0c46cb524683ab7651213ae7", "committed": true, "latency_ms": 0.06610003765672445}
+{"exported_at": 1777166311.24209, "trace_id": "", "span_id": "", "event": "job.completed", "job_id": "718ee62de3714a43be349acf916db841", "session_id": "default", "latency_ms": 397.26830006111413}
+{"exported_at": 1777166311.2848828, "trace_id": "corrbea3c89cd70549288c935b9055a2", "span_id": "", "event": "ledger.write", "event_type": "JOB_SUBMITTED", "session_id": "default", "correlation_id": "corrbea3c89cd70549288c935b9055a2", "committed": false, "latency_ms": 0.054699950851500034}
+{"exported_at": 1777166311.284984, "trace_id": "corrbea3c89cd70549288c935b9055a2", "span_id": "", "event": "ledger.write", "event_type": "SESSION_BOUND", "session_id": "default", "correlation_id": "corrbea3c89cd70549288c935b9055a2", "committed": false, "latency_ms": 0.0377000542357564}
+{"exported_at": 1777166311.2850688, "trace_id": "corrbea3c89cd70549288c935b9055a2", "span_id": "", "event": "ledger.write", "event_type": "JOB_QUEUED", "session_id": "default", "correlation_id": "corrbea3c89cd70549288c935b9055a2", "committed": true, "latency_ms": 0.04529999569058418}
+{"exported_at": 1777166311.285421, "trace_id": "corrbea3c89cd70549288c935b9055a2", "span_id": "", "event": "ledger.write", "event_type": "EXECUTION_WITNESS", "session_id": "default", "correlation_id": "corrbea3c89cd70549288c935b9055a2", "committed": false, "latency_ms": 0.06230000872164965}
+{"exported_at": 1777166311.2859745, "trace_id": "corrbea3c89cd70549288c935b9055a2", "span_id": "", "event": "ledger.write", "event_type": "EXECUTION_WITNESS", "session_id": "default", "correlation_id": "corrbea3c89cd70549288c935b9055a2", "committed": false, "latency_ms": 0.04930002614855766}
+{"exported_at": 1777166311.286454, "trace_id": "corrbea3c89cd70549288c935b9055a2", "span_id": "", "event": "ledger.write", "event_type": "JOB_STARTED", "session_id": "default", "correlation_id": "corrbea3c89cd70549288c935b9055a2", "committed": true, "latency_ms": 0.15009997878223658}
+{"exported_at": 1777166311.2868469, "trace_id": "corrbea3c89cd70549288c935b9055a2", "span_id": "", "event": "ledger.write", "event_type": "EXECUTION_WITNESS", "session_id": "default", "correlation_id": "corrbea3c89cd70549288c935b9055a2", "committed": false, "latency_ms": 0.04600000102072954}
+{"exported_at": 1777166311.6549287, "trace_id": "corrbea3c89cd70549288c935b9055a2", "span_id": "", "event": "ledger.write", "event_type": "JOB_COMPLETED", "session_id": "default", "correlation_id": "corrbea3c89cd70549288c935b9055a2", "committed": true, "latency_ms": 0.07440010085701942}
+{"exported_at": 1777166311.654979, "trace_id": "", "span_id": "", "event": "job.completed", "job_id": "0f158aaeb24247d5a103c31c2a50e5d0", "session_id": "default", "latency_ms": 368.17730008624494}
+{"exported_at": 1777166311.6948323, "trace_id": "corr43d5a4a61f684858b15605704d7c", "span_id": "", "event": "ledger.write", "event_type": "JOB_SUBMITTED", "session_id": "default", "correlation_id": "corr43d5a4a61f684858b15605704d7c", "committed": false, "latency_ms": 0.05880009848624468}
+{"exported_at": 1777166311.6949246, "trace_id": "corr43d5a4a61f684858b15605704d7c", "span_id": "", "event": "ledger.write", "event_type": "SESSION_BOUND", "session_id": "default", "correlation_id": "corr43d5a4a61f684858b15605704d7c", "committed": false, "latency_ms": 0.03709993325173855}
+{"exported_at": 1777166311.695008, "trace_id": "corr43d5a4a61f684858b15605704d7c", "span_id": "", "event": "ledger.write", "event_type": "JOB_QUEUED", "session_id": "default", "correlation_id": "corr43d5a4a61f684858b15605704d7c", "committed": true, "latency_ms": 0.04379998426884413}
+{"exported_at": 1777166311.6950746, "trace_id": "corr43d5a4a61f684858b15605704d7c", "span_id": "", "event": "ledger.write", "event_type": "EXECUTION_WITNESS", "session_id": "default", "correlation_id": "corr43d5a4a61f684858b15605704d7c", "committed": false, "latency_ms": 0.03429991193115711}
+{"exported_at": 1777166311.6956284, "trace_id": "corr43d5a4a61f684858b15605704d7c", "span_id": "", "event": "ledger.write", "event_type": "EXECUTION_WITNESS", "session_id": "default", "correlation_id": "corr43d5a4a61f684858b15605704d7c", "committed": false, "latency_ms": 0.03459991421550512}
+{"exported_at": 1777166311.6957068, "trace_id": "corr43d5a4a61f684858b15605704d7c", "span_id": "", "event": "ledger.write", "event_type": "JOB_STARTED", "session_id": "default", "correlation_id": "corr43d5a4a61f684858b15605704d7c", "committed": true, "latency_ms": 0.03190001007169485}
+{"exported_at": 1777166311.6958945, "trace_id": "corr43d5a4a61f684858b15605704d7c", "span_id": "", "event": "ledger.write", "event_type": "EXECUTION_WITNESS", "session_id": "default", "correlation_id": "corr43d5a4a61f684858b15605704d7c", "committed": false, "latency_ms": 0.036400044336915016}
+{"exported_at": 1777166312.058761, "trace_id": "corr43d5a4a61f684858b15605704d7c", "span_id": "", "event": "ledger.write", "event_type": "JOB_COMPLETED", "session_id": "default", "correlation_id": "corr43d5a4a61f684858b15605704d7c", "committed": true, "latency_ms": 0.07150007877498865}
+{"exported_at": 1777166312.058827, "trace_id": "", "span_id": "", "event": "job.completed", "job_id": "35d0b17ab1444db8afd06a05dd716fb2", "session_id": "default", "latency_ms": 362.931500072591}
+{"exported_at": 1777166312.0937774, "trace_id": "corrf65ead4b56bc444da7ed2aaa6845", "span_id": "", "event": "ledger.write", "event_type": "JOB_SUBMITTED", "session_id": "default", "correlation_id": "corrf65ead4b56bc444da7ed2aaa6845", "committed": false, "latency_ms": 0.057699973694980145}
+{"exported_at": 1777166312.0938733, "trace_id": "corrf65ead4b56bc444da7ed2aaa6845", "span_id": "", "event": "ledger.write", "event_type": "SESSION_BOUND", "session_id": "default", "correlation_id": "corrf65ead4b56bc444da7ed2aaa6845", "committed": false, "latency_ms": 0.037800054997205734}
+{"exported_at": 1777166312.0939612, "trace_id": "corrf65ead4b56bc444da7ed2aaa6845", "span_id": "", "event": "ledger.write", "event_type": "JOB_QUEUED", "session_id": "default", "correlation_id": "corrf65ead4b56bc444da7ed2aaa6845", "committed": true, "latency_ms": 0.04680000711232424}
+{"exported_at": 1777166312.0940287, "trace_id": "corrf65ead4b56bc444da7ed2aaa6845", "span_id": "", "event": "ledger.write", "event_type": "EXECUTION_WITNESS", "session_id": "default", "correlation_id": "corrf65ead4b56bc444da7ed2aaa6845", "committed": false, "latency_ms": 0.03490003291517496}
+{"exported_at": 1777166312.095051, "trace_id": "corrf65ead4b56bc444da7ed2aaa6845", "span_id": "", "event": "ledger.write", "event_type": "EXECUTION_WITNESS", "session_id": "default", "correlation_id": "corrf65ead4b56bc444da7ed2aaa6845", "committed": false, "latency_ms": 0.05010003224015236}
+{"exported_at": 1777166312.0951507, "trace_id": "corrf65ead4b56bc444da7ed2aaa6845", "span_id": "", "event": "ledger.write", "event_type": "JOB_STARTED", "session_id": "default", "correlation_id": "corrf65ead4b56bc444da7ed2aaa6845", "committed": true, "latency_ms": 0.03320001997053623}
+{"exported_at": 1777166312.095351, "trace_id": "corrf65ead4b56bc444da7ed2aaa6845", "span_id": "", "event": "ledger.write", "event_type": "EXECUTION_WITNESS", "session_id": "default", "correlation_id": "corrf65ead4b56bc444da7ed2aaa6845", "committed": false, "latency_ms": 0.03699993249028921}
+{"exported_at": 1777166312.4714346, "trace_id": "corrf65ead4b56bc444da7ed2aaa6845", "span_id": "", "event": "ledger.write", "event_type": "JOB_COMPLETED", "session_id": "default", "correlation_id": "corrf65ead4b56bc444da7ed2aaa6845", "committed": true, "latency_ms": 0.06790005136281252}
+{"exported_at": 1777166312.471485, "trace_id": "", "span_id": "", "event": "job.completed", "job_id": "466c0ba634f24dd484570eb68d970465", "session_id": "default", "latency_ms": 376.1655999114737}
+{"exported_at": 1777166312.507041, "trace_id": "corr14815ef541144ad09a79f791a5c6", "span_id": "", "event": "ledger.write", "event_type": "JOB_SUBMITTED", "session_id": "default", "correlation_id": "corr14815ef541144ad09a79f791a5c6", "committed": false, "latency_ms": 0.05380006041377783}
+{"exported_at": 1777166312.5071313, "trace_id": "corr14815ef541144ad09a79f791a5c6", "span_id": "", "event": "ledger.write", "event_type": "SESSION_BOUND", "session_id": "default", "correlation_id": "corr14815ef541144ad09a79f791a5c6", "committed": false, "latency_ms": 0.03599992487579584}
+{"exported_at": 1777166312.5072124, "trace_id": "corr14815ef541144ad09a79f791a5c6", "span_id": "", "event": "ledger.write", "event_type": "JOB_QUEUED", "session_id": "default", "correlation_id": "corr14815ef541144ad09a79f791a5c6", "committed": true, "latency_ms": 0.04369998350739479}
+{"exported_at": 1777166312.5072787, "trace_id": "corr14815ef541144ad09a79f791a5c6", "span_id": "", "event": "ledger.write", "event_type": "EXECUTION_WITNESS", "session_id": "default", "correlation_id": "corr14815ef541144ad09a79f791a5c6", "committed": false, "latency_ms": 0.03490003291517496}
+{"exported_at": 1777166312.508009, "trace_id": "corr14815ef541144ad09a79f791a5c6", "span_id": "", "event": "ledger.write", "event_type": "EXECUTION_WITNESS", "session_id": "default", "correlation_id": "corr14815ef541144ad09a79f791a5c6", "committed": false, "latency_ms": 0.03560003824532032}
+{"exported_at": 1777166312.508142, "trace_id": "corr14815ef541144ad09a79f791a5c6", "span_id": "", "event": "ledger.write", "event_type": "JOB_STARTED", "session_id": "default", "correlation_id": "corr14815ef541144ad09a79f791a5c6", "committed": true, "latency_ms": 0.03269989974796772}
+{"exported_at": 1777166312.5083356, "trace_id": "corr14815ef541144ad09a79f791a5c6", "span_id": "", "event": "ledger.write", "event_type": "EXECUTION_WITNESS", "session_id": "default", "correlation_id": "corr14815ef541144ad09a79f791a5c6", "committed": false, "latency_ms": 0.036100042052567005}
+{"exported_at": 1777166312.881706, "trace_id": "corr14815ef541144ad09a79f791a5c6", "span_id": "", "event": "ledger.write", "event_type": "JOB_COMPLETED", "session_id": "default", "correlation_id": "corr14815ef541144ad09a79f791a5c6", "committed": true, "latency_ms": 0.06870005745440722}
+{"exported_at": 1777166312.8817575, "trace_id": "", "span_id": "", "event": "job.completed", "job_id": "ba31d820c70345139013f14a617d4a71", "session_id": "default", "latency_ms": 373.44359990675}
+{"exported_at": 1777166313.0159712, "trace_id": "corr18cf3327e17d4d62b84a2c5d4c33", "span_id": "", "event": "ledger.write", "event_type": "JOB_SUBMITTED", "session_id": "default", "correlation_id": "corr18cf3327e17d4d62b84a2c5d4c33", "committed": false, "latency_ms": 0.05559995770454407}
+{"exported_at": 1777166313.0160668, "trace_id": "corr18cf3327e17d4d62b84a2c5d4c33", "span_id": "", "event": "ledger.write", "event_type": "SESSION_BOUND", "session_id": "default", "correlation_id": "corr18cf3327e17d4d62b84a2c5d4c33", "committed": false, "latency_ms": 0.0393999507650733}
+{"exported_at": 1777166313.0161502, "trace_id": "corr18cf3327e17d4d62b84a2c5d4c33", "span_id": "", "event": "ledger.write", "event_type": "JOB_QUEUED", "session_id": "default", "correlation_id": "corr18cf3327e17d4d62b84a2c5d4c33", "committed": true, "latency_ms": 0.043500098399817944}
+{"exported_at": 1777166313.016216, "trace_id": "corr18cf3327e17d4d62b84a2c5d4c33", "span_id": "", "event": "ledger.write", "event_type": "EXECUTION_WITNESS", "session_id": "default", "correlation_id": "corr18cf3327e17d4d62b84a2c5d4c33", "committed": false, "latency_ms": 0.03400002606213093}
+{"exported_at": 1777166313.017302, "trace_id": "corr18cf3327e17d4d62b84a2c5d4c33", "span_id": "", "event": "ledger.write", "event_type": "EXECUTION_WITNESS", "session_id": "default", "correlation_id": "corr18cf3327e17d4d62b84a2c5d4c33", "committed": false, "latency_ms": 0.05059991963207722}
+{"exported_at": 1777166313.0174017, "trace_id": "corr18cf3327e17d4d62b84a2c5d4c33", "span_id": "", "event": "ledger.write", "event_type": "JOB_STARTED", "session_id": "default", "correlation_id": "corr18cf3327e17d4d62b84a2c5d4c33", "committed": true, "latency_ms": 0.0342000275850296}
+{"exported_at": 1777166313.0175948, "trace_id": "corr18cf3327e17d4d62b84a2c5d4c33", "span_id": "", "event": "ledger.write", "event_type": "EXECUTION_WITNESS", "session_id": "default", "correlation_id": "corr18cf3327e17d4d62b84a2c5d4c33", "committed": false, "latency_ms": 0.03769993782043457}
+{"exported_at": 1777166313.3918958, "trace_id": "corr18cf3327e17d4d62b84a2c5d4c33", "span_id": "", "event": "ledger.write", "event_type": "JOB_COMPLETED", "session_id": "default", "correlation_id": "corr18cf3327e17d4d62b84a2c5d4c33", "committed": true, "latency_ms": 0.06720004603266716}
+{"exported_at": 1777166313.3919477, "trace_id": "", "span_id": "", "event": "job.completed", "job_id": "1d3a39c12a254bfcbfcc1eea772c3c8f", "session_id": "default", "latency_ms": 374.37460001092404}
+{"exported_at": 1777166313.4406013, "trace_id": "corr2fda5863e9174ff488848905d5ae", "span_id": "", "event": "ledger.write", "event_type": "JOB_SUBMITTED", "session_id": "default", "correlation_id": "corr2fda5863e9174ff488848905d5ae", "committed": false, "latency_ms": 0.0754999928176403}
+{"exported_at": 1777166313.4406936, "trace_id": "corr2fda5863e9174ff488848905d5ae", "span_id": "", "event": "ledger.write", "event_type": "SESSION_BOUND", "session_id": "default", "correlation_id": "corr2fda5863e9174ff488848905d5ae", "committed": false, "latency_ms": 0.0377000542357564}
+{"exported_at": 1777166313.4407828, "trace_id": "corr2fda5863e9174ff488848905d5ae", "span_id": "", "event": "ledger.write", "event_type": "JOB_QUEUED", "session_id": "default", "correlation_id": "corr2fda5863e9174ff488848905d5ae", "committed": true, "latency_ms": 0.04449998959898949}
+{"exported_at": 1777166313.440851, "trace_id": "corr2fda5863e9174ff488848905d5ae", "span_id": "", "event": "ledger.write", "event_type": "EXECUTION_WITNESS", "session_id": "default", "correlation_id": "corr2fda5863e9174ff488848905d5ae", "committed": false, "latency_ms": 0.03430002834647894}
+{"exported_at": 1777166313.4410286, "trace_id": "corr2fda5863e9174ff488848905d5ae", "span_id": "", "event": "ledger.write", "event_type": "EXECUTION_WITNESS", "session_id": "default", "correlation_id": "corr2fda5863e9174ff488848905d5ae", "committed": false, "latency_ms": 0.034100026823580265}
+{"exported_at": 1777166313.4411035, "trace_id": "corr2fda5863e9174ff488848905d5ae", "span_id": "", "event": "ledger.write", "event_type": "JOB_STARTED", "session_id": "default", "correlation_id": "corr2fda5863e9174ff488848905d5ae", "committed": true, "latency_ms": 0.032100011594593525}
+{"exported_at": 1777166313.4412706, "trace_id": "corr2fda5863e9174ff488848905d5ae", "span_id": "", "event": "ledger.write", "event_type": "EXECUTION_WITNESS", "session_id": "default", "correlation_id": "corr2fda5863e9174ff488848905d5ae", "committed": false, "latency_ms": 0.036499928683042526}
+{"exported_at": 1777166313.7940528, "trace_id": "corr2fda5863e9174ff488848905d5ae", "span_id": "", "event": "ledger.write", "event_type": "JOB_COMPLETED", "session_id": "default", "correlation_id": "corr2fda5863e9174ff488848905d5ae", "committed": true, "latency_ms": 0.07319997530430555}
+{"exported_at": 1777166313.7941115, "trace_id": "", "span_id": "", "event": "job.completed", "job_id": "879f5f7c227f4fc5ab315ded1447a3fc", "session_id": "default", "latency_ms": 352.8227999340743}
+{"exported_at": 1777166313.8280253, "trace_id": "corr0d7d82b62dfc4161ac86523d3ba3", "span_id": "", "event": "ledger.write", "event_type": "JOB_SUBMITTED", "session_id": "default", "correlation_id": "corr0d7d82b62dfc4161ac86523d3ba3", "committed": false, "latency_ms": 0.05840009544044733}
+{"exported_at": 1777166313.8281167, "trace_id": "corr0d7d82b62dfc4161ac86523d3ba3", "span_id": "", "event": "ledger.write", "event_type": "SESSION_BOUND", "session_id": "default", "correlation_id": "corr0d7d82b62dfc4161ac86523d3ba3", "committed": false, "latency_ms": 0.036199926398694515}
+{"exported_at": 1777166313.828201, "trace_id": "corr0d7d82b62dfc4161ac86523d3ba3", "span_id": "", "event": "ledger.write", "event_type": "JOB_QUEUED", "session_id": "default", "correlation_id": "corr0d7d82b62dfc4161ac86523d3ba3", "committed": true, "latency_ms": 0.044899992644786835}
+{"exported_at": 1777166313.828271, "trace_id": "corr0d7d82b62dfc4161ac86523d3ba3", "span_id": "", "event": "ledger.write", "event_type": "EXECUTION_WITNESS", "session_id": "default", "correlation_id": "corr0d7d82b62dfc4161ac86523d3ba3", "committed": false, "latency_ms": 0.0366999302059412}
+{"exported_at": 1777166313.828585, "trace_id": "corr0d7d82b62dfc4161ac86523d3ba3", "span_id": "", "event": "ledger.write", "event_type": "EXECUTION_WITNESS", "session_id": "default", "correlation_id": "corr0d7d82b62dfc4161ac86523d3ba3", "committed": false, "latency_ms": 0.036800047382712364}
+{"exported_at": 1777166313.828673, "trace_id": "corr0d7d82b62dfc4161ac86523d3ba3", "span_id": "", "event": "ledger.write", "event_type": "JOB_STARTED", "session_id": "default", "correlation_id": "corr0d7d82b62dfc4161ac86523d3ba3", "committed": true, "latency_ms": 0.03520003519952297}
+{"exported_at": 1777166313.8288913, "trace_id": "corr0d7d82b62dfc4161ac86523d3ba3", "span_id": "", "event": "ledger.write", "event_type": "EXECUTION_WITNESS", "session_id": "default", "correlation_id": "corr0d7d82b62dfc4161ac86523d3ba3", "committed": false, "latency_ms": 0.03820005804300308}
+{"exported_at": 1777166314.1827164, "trace_id": "corr0d7d82b62dfc4161ac86523d3ba3", "span_id": "", "event": "ledger.write", "event_type": "JOB_COMPLETED", "session_id": "default", "correlation_id": "corr0d7d82b62dfc4161ac86523d3ba3", "committed": true, "latency_ms": 0.06839993875473738}
+{"exported_at": 1777166314.1827712, "trace_id": "", "span_id": "", "event": "job.completed", "job_id": "25dbeddd66d84482a9fad9f77bbed6e7", "session_id": "default", "latency_ms": 353.9248000597581}
+{"exported_at": 1777166314.2153308, "trace_id": "corr6aaaf5913fb9480b946e6c633516", "span_id": "", "event": "ledger.write", "event_type": "JOB_SUBMITTED", "session_id": "default", "correlation_id": "corr6aaaf5913fb9480b946e6c633516", "committed": false, "latency_ms": 0.05829997826367617}
+{"exported_at": 1777166314.2154279, "trace_id": "corr6aaaf5913fb9480b946e6c633516", "span_id": "", "event": "ledger.write", "event_type": "SESSION_BOUND", "session_id": "default", "correlation_id": "corr6aaaf5913fb9480b946e6c633516", "committed": false, "latency_ms": 0.03909994848072529}
+{"exported_at": 1777166314.2155125, "trace_id": "corr6aaaf5913fb9480b946e6c633516", "span_id": "", "event": "ledger.write", "event_type": "JOB_QUEUED", "session_id": "default", "correlation_id": "corr6aaaf5913fb9480b946e6c633516", "committed": true, "latency_ms": 0.04569999873638153}
+{"exported_at": 1777166314.2155807, "trace_id": "corr6aaaf5913fb9480b946e6c633516", "span_id": "", "event": "ledger.write", "event_type": "EXECUTION_WITNESS", "session_id": "default", "correlation_id": "corr6aaaf5913fb9480b946e6c633516", "committed": false, "latency_ms": 0.03520003519952297}
+{"exported_at": 1777166314.2159922, "trace_id": "corr6aaaf5913fb9480b946e6c633516", "span_id": "", "event": "ledger.write", "event_type": "EXECUTION_WITNESS", "session_id": "default", "correlation_id": "corr6aaaf5913fb9480b946e6c633516", "committed": false, "latency_ms": 0.03609992563724518}
+{"exported_at": 1777166314.2160735, "trace_id": "corr6aaaf5913fb9480b946e6c633516", "span_id": "", "event": "ledger.write", "event_type": "JOB_STARTED", "session_id": "default", "correlation_id": "corr6aaaf5913fb9480b946e6c633516", "committed": true, "latency_ms": 0.032800016924738884}
+{"exported_at": 1777166314.216266, "trace_id": "corr6aaaf5913fb9480b946e6c633516", "span_id": "", "event": "ledger.write", "event_type": "EXECUTION_WITNESS", "session_id": "default", "correlation_id": "corr6aaaf5913fb9480b946e6c633516", "committed": false, "latency_ms": 0.037199934013187885}
+{"exported_at": 1777166314.5487478, "trace_id": "corr6aaaf5913fb9480b946e6c633516", "span_id": "", "event": "ledger.write", "event_type": "JOB_FAILED", "session_id": "default", "correlation_id": "corr6aaaf5913fb9480b946e6c633516", "committed": true, "latency_ms": 0.06800005212426186}
+{"exported_at": 1777166314.553312, "trace_id": "corr87431f13c17b44b397fbaf7f241b", "span_id": "", "event": "ledger.write", "event_type": "GRAPH_EXECUTION_FAILED", "session_id": "712ff74a7daf4310815b59d32f107037", "correlation_id": "corr87431f13c17b44b397fbaf7f241b", "committed": true, "latency_ms": 0.06430002395063639}
+------------------------------ Captured log call ------------------------------
+ERROR    dadbot.core.kernel:kernel.py:171 TurnKernel: step 'SaveNode' raised: relationship_projection restart crash injection turn=3
+ERROR    dadbot.core.dadbot:dadbot.py:1224 Graph execution failed in sync mode; strict mode forbids alternate execution paths
+Traceback (most recent call last):
+  File "C:\Users\josep\OneDrive\Desktop\Dad-Bot\dadbot\core\dadbot.py", line 1251, in process_user_message
+    return self._run_graph_turn_sync(user_input, attachments=attachments)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\josep\OneDrive\Desktop\Dad-Bot\dadbot\core\dadbot.py", line 649, in _run_graph_turn_sync
+    return asyncio.run(coro)
+           ~~~~~~~~~~~^^^^^^
+  File "C:\Users\josep\AppData\Local\Programs\Python\Python313\Lib\asyncio\runners.py", line 195, in run
+    return runner.run(main)
+           ~~~~~~~~~~^^^^^^
+  File "C:\Users\josep\AppData\Local\Programs\Python\Python313\Lib\asyncio\runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "C:\Users\josep\AppData\Local\Programs\Python\Python313\Lib\asyncio\base_events.py", line 725, in run_until_complete
+    return future.result()
+           ~~~~~~~~~~~~~^^
+  File "C:\Users\josep\OneDrive\Desktop\Dad-Bot\dadbot\core\dadbot.py", line 620, in _run_graph_turn_async
+    return await self.turn_orchestrator.handle_turn(user_input, attachments=attachments)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\josep\OneDrive\Desktop\Dad-Bot\dadbot\core\orchestrator.py", line 215, in handle_turn
+    return await self.control_plane.submit_turn(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<4 lines>...
+    )
+    ^
+  File "C:\Users\josep\OneDrive\Desktop\Dad-Bot\dadbot\core\control_plane.py", line 447, in submit_turn
+    result = await future
+             ^^^^^^^^^^^^
+  File "C:\Users\josep\OneDrive\Desktop\Dad-Bot\dadbot\core\control_plane.py", line 217, in drain_once
+    result = await executor(session, job)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\josep\OneDrive\Desktop\Dad-Bot\dadbot\core\control_plane.py", line 336, in _kernel_executor_with_boundary
+    return await self._kernel_executor(session, job)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\josep\OneDrive\Desktop\Dad-Bot\dadbot\core\orchestrator.py", line 194, in _execute_job
+    result = await self.graph.execute(context)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\josep\OneDrive\Desktop\Dad-Bot\dadbot\core\graph.py", line 992, in execute
+    turn_context = await self._execution_kernel.run(turn_context, pipeline, _execute_stage)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\josep\OneDrive\Desktop\Dad-Bot\dadbot\core\execution_kernel.py", line 108, in run
+    turn_context = await execute_stage(stage_name, stage_obj, turn_context)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\josep\OneDrive\Desktop\Dad-Bot\dadbot\core\graph.py", line 967, in _execute_stage
+    stage_context = await self._execute_node(node, stage_context)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\josep\OneDrive\Desktop\Dad-Bot\dadbot\core\graph.py", line 854, in _execute_node
+    raise RuntimeError(step_result.error)
+RuntimeError: relationship_projection restart crash injection turn=3
+=========================== short test summary info ===========================
+FAILED tests/stress/test_full_execution_trace.py::test_restart_boundary_recovery_audit_matches_clean_execution[relationship_projection-materialize_projection]
+====================== 1 failed, 15 deselected in 5.51s =======================

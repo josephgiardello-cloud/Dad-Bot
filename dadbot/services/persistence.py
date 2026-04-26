@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+from copy import deepcopy
 import logging
 import time
 from typing import Any
@@ -183,8 +184,6 @@ class PersistenceService:
             mutation_queue.drain(
                 _dispatch_mutation_intent,
                 hard_fail_on_error=True,
-                turn_context=turn_context,
-                kernel=(getattr(turn_context, "state", {}) or {}).get("_execution_kernel"),
             )
             if not mutation_queue.is_empty():
                 pending = mutation_queue.size()
@@ -232,12 +231,68 @@ class PersistenceService:
         if isinstance(getattr(turn_context, "state", None), dict):
             turn_context.state["_timing_graph_sync_ms"] = graph_sync_ms
 
+    @staticmethod
+    def _capture_transaction_snapshot(runtime: Any, turn_context: Any) -> dict[str, Any]:
+        graph_manager = getattr(getattr(runtime, "memory_manager", None), "graph_manager", None)
+        graph_snapshot = {"nodes": [], "edges": [], "updated_at": None}
+        background_patch_queue = getattr(runtime, "_background_memory_store_patch_queue", None)
+        if graph_manager is not None:
+            snapshot_builder = getattr(graph_manager, "graph_snapshot", None)
+            if callable(snapshot_builder):
+                graph_snapshot = snapshot_builder() or graph_snapshot
+
+        return {
+            "memory_store": deepcopy(dict(getattr(runtime, "MEMORY_STORE", {}) or {})),
+            "graph_snapshot": deepcopy(graph_snapshot),
+            "session_state": deepcopy(runtime.snapshot_session_state()),
+            "last_turn_pipeline": deepcopy(dict(getattr(runtime, "_last_turn_pipeline", {}) or {})),
+            "background_patch_queue": deepcopy(list(background_patch_queue)) if isinstance(background_patch_queue, list) else None,
+            "turn_state": deepcopy(dict(getattr(turn_context, "state", {}) or {})),
+            "metadata": deepcopy(dict(getattr(turn_context, "metadata", {}) or {})),
+        }
+
+    @staticmethod
+    def _restore_transaction_snapshot(runtime: Any, turn_context: Any, snapshot: dict[str, Any]) -> None:
+        session_state = dict(snapshot.get("session_state", {}) or {})
+        if session_state:
+            runtime.load_session_state_snapshot(deepcopy(session_state))
+        else:
+            runtime.MEMORY_STORE = deepcopy(dict(snapshot.get("memory_store", {}) or {}))
+        runtime._last_turn_pipeline = deepcopy(dict(snapshot.get("last_turn_pipeline", {}) or {}))
+        background_patch_queue = snapshot.get("background_patch_queue", None)
+        if isinstance(background_patch_queue, list):
+            runtime._background_memory_store_patch_queue = deepcopy(background_patch_queue)
+
+        state = getattr(turn_context, "state", None)
+        if isinstance(state, dict):
+            state.clear()
+            state.update(deepcopy(dict(snapshot.get("turn_state", {}) or {})))
+
+        metadata = getattr(turn_context, "metadata", None)
+        if isinstance(metadata, dict):
+            metadata.clear()
+            metadata.update(deepcopy(dict(snapshot.get("metadata", {}) or {})))
+
+        graph_snapshot = dict(snapshot.get("graph_snapshot", {}) or {})
+        graph_manager = getattr(getattr(runtime, "memory_manager", None), "graph_manager", None)
+        backend = getattr(graph_manager, "_graph_store_backend", None) if graph_manager is not None else None
+        replace_graph = getattr(backend, "replace_graph", None)
+        if callable(replace_graph):
+            replace_graph(
+                deepcopy(list(graph_snapshot.get("nodes", []) or [])),
+                deepcopy(list(graph_snapshot.get("edges", []) or [])),
+            )
+
     def begin_transaction(self, turn_context: Any) -> None:
         temporal = getattr(turn_context, "temporal", None)
         if temporal is None:
             raise RuntimeError("TemporalNode required — execution invalid")
         state = getattr(turn_context, "state", None)
+        service = self.turn_service
+        runtime = None if service is None else getattr(service, "bot", None)
         if isinstance(state, dict):
+            if runtime is not None:
+                state["_save_transaction_snapshot"] = self._capture_transaction_snapshot(runtime, turn_context)
             state["_save_transaction_active"] = True
 
     def apply_mutations(self, turn_context: Any) -> None:
@@ -267,8 +322,14 @@ class PersistenceService:
     def rollback_transaction(self, turn_context: Any) -> None:
         state = getattr(turn_context, "state", None)
         if isinstance(state, dict):
+            snapshot = dict(state.get("_save_transaction_snapshot", {}) or {})
+            service = self.turn_service
+            runtime = None if service is None else getattr(service, "bot", None)
+            if snapshot and runtime is not None:
+                self._restore_transaction_snapshot(runtime, turn_context, snapshot)
             state["_save_transaction_active"] = False
             state["_save_mutations_applied"] = False
+            state.pop("_save_transaction_snapshot", None)
 
     def final_ledger_commit(
         self,
