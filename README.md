@@ -43,6 +43,17 @@ streamlit run dad_streamlit.py
 
 Open [http://localhost:8501](http://localhost:8501) in your browser.
 
+### Windows Workspace Virtual Environment Note
+
+If you have similarly named folders (for example `Desktop/Dad-Bot` and `Desktop/Codes/Dad-Bot`), always use the workspace-local environment:
+
+```powershell
+& c:/Users/josep/OneDrive/Desktop/Dad-Bot/.venv/Scripts/Activate.ps1
+python -m pytest
+```
+
+Using a different folder's virtual environment can miss required pytest plugins (such as asyncio support) and cause false test failures.
+
 ### 3. Production-Oriented Install and Run
 
 Install the package into your current environment:

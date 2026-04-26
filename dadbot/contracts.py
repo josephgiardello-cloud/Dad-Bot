@@ -232,6 +232,50 @@ class SupportsTurnProcessingRuntime(Protocol):
     def begin_planner_debug(self, user_input: str, current_mood: str) -> dict[str, Any]: ...
 
 
+# ---------------------------------------------------------------------------
+# L3/L4/L5 substrate protocols
+# ---------------------------------------------------------------------------
+
+
+class SupportsEventAuthority(Protocol):
+    """Protocol for EventAuthority: canonical source-of-truth event layer."""
+    def append(self, event: dict[str, Any]) -> int: ...
+    def derive_state(self) -> dict[str, Any]: ...
+    def is_defined(self) -> bool: ...
+    def assert_defined(self) -> None: ...
+    def rebuild_state_from_events(self, events: list[dict[str, Any]]) -> dict[str, Any]: ...
+    def authority_hash(self) -> str: ...
+
+
+class SupportsStatelessExecution(Protocol):
+    """Protocol for StatelessExecutor: pure-function execution mode."""
+    def execute(
+        self,
+        user_input: str,
+        event_log: list[dict[str, Any]],
+        config: dict[str, Any] | None = None,
+    ) -> Any: ...
+    def is_bootstrapped(self, event_log: list[dict[str, Any]]) -> bool: ...
+
+
+class SupportsMemoryStateSpace(Protocol):
+    """Protocol for MemoryStateVector: ordered state vector space."""
+    entries: tuple[dict[str, Any], ...]
+    space_hash: str
+
+    @classmethod
+    def from_memories(cls, memories: list[dict[str, Any]]) -> Any: ...
+    def project(self, indices: list[int]) -> Any: ...
+    def to_list(self) -> list[dict[str, Any]]: ...
+
+
+class SupportsEvolutionHooks(Protocol):
+    """Protocol for GraphIntrospectionAPI: read-only introspection + hooks."""
+    def introspect(self, dag: Any) -> dict[str, Any]: ...
+    def hook_pre_mutation(self, callback: Any) -> None: ...
+    def hook_post_mutation(self, callback: Any) -> None: ...
+
+
 @dataclass(frozen=True)
 class DadBotContext:
     """Live compatibility wrapper for extracted managers during the DadBot split."""

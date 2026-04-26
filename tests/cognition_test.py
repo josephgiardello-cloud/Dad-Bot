@@ -30,6 +30,7 @@ from dadbot.core.planner import (
 from dadbot.core.critic import CritiqueEngine, CritiqueResult, PASS_THRESHOLD
 from dadbot.memory.goal_scorer import GoalAwareRanker
 from dadbot.core.graph import TurnContext
+from dadbot.core.nodes import ToolExecutorNode, ToolRouterNode
 from dadbot.core.orchestrator import DadBotOrchestrator
 
 
@@ -277,6 +278,24 @@ class TestPlannerNode:
         plan = result.state["turn_plan"]
         assert plan["complexity"] == ComplexityLevel.COMPLEX
 
+    @pytest.mark.asyncio
+    async def test_planner_emits_memory_only_requests_when_v2_enabled(self):
+        """Planner emits only goal/session MemoryTool requests when v2 is enabled."""
+        planner = PlannerNode()
+        ctx = _make_context(
+            "I want to improve my routines",
+            session_goals=[{"id": "g1", "description": "improve routines", "status": "active"}],
+            tool_ir={"requests": []},
+        )
+        ctx.metadata["tool_system_v2_enabled"] = True
+
+        result = await planner.run(ctx)
+
+        requests = list(result.state.get("tool_ir", {}).get("requests") or [])
+        assert len(requests) == 2
+        assert [r.get("intent") for r in requests] == ["goal_lookup", "session_memory_fetch"]
+        assert all(str(r.get("tool_name") or "") == "memory_lookup" for r in requests)
+
     def test_turn_plan_trivial_factory(self):
         """TurnPlan.trivial() returns a valid, minimal plan dict."""
         plan = TurnPlan.trivial()
@@ -287,7 +306,109 @@ class TestPlannerNode:
 
 
 # ---------------------------------------------------------------------------
-# 3. CritiqueEngine
+# 3. Strict Tool Router/Executor
+# ---------------------------------------------------------------------------
+
+
+class TestToolRoutingPipeline:
+    """Verify strict compilation and deterministic execution boundaries."""
+
+    @pytest.mark.asyncio
+    async def test_router_strict_validation_dedup_and_order(self):
+        router = ToolRouterNode()
+        ctx = _make_context(
+            "plan tools",
+            tool_ir={
+                "requests": [
+                    {
+                        "tool_name": "memory_lookup",
+                        "args": {"query": "q", "scope": "session"},
+                        "intent": "session_memory_fetch",
+                        "expected_output": "session_memory_context",
+                        "priority": 20,
+                    },
+                    {
+                        "tool_name": "memory_lookup",
+                        "args": {"query": "q", "scope": "goals", "goal_ids": ["g1"]},
+                        "intent": "goal_lookup",
+                        "expected_output": "goal_context",
+                        "priority": 10,
+                    },
+                    {
+                        "tool_name": "memory_lookup",
+                        "args": {"query": "q", "scope": "session"},
+                        "intent": "session_memory_fetch",
+                        "expected_output": "session_memory_context",
+                        "priority": 20,
+                    },
+                    {
+                        "tool_name": "echo",
+                        "args": {"message": "bad"},
+                        "intent": "session_memory_fetch",
+                        "expected_output": "ignored",
+                        "priority": 1,
+                    },
+                ]
+            },
+        )
+
+        result = await router.run(ctx)
+
+        compiler = dict(result.state.get("tool_ir", {}).get("compiler") or {})
+        plan = list(result.state.get("tool_ir", {}).get("execution_plan") or [])
+        assert compiler.get("strict") is True
+        assert compiler.get("compiled_count") == 2
+        assert compiler.get("rejected_count") == 2
+        assert [p.get("intent") for p in plan] == ["goal_lookup", "session_memory_fetch"]
+        assert [p.get("sequence") for p in plan] == [0, 1]
+
+    @pytest.mark.asyncio
+    async def test_executor_logs_all_planned_outputs(self):
+        executor = ToolExecutorNode()
+        ctx = _make_context(
+            "execute tools",
+            session_goals=[{"id": "g1", "description": "goal", "status": "active"}],
+            memories=[{"content": "memory one"}],
+            tool_ir={
+                "execution_plan": [
+                    {
+                        "sequence": 0,
+                        "tool_name": "memory_lookup",
+                        "args": {"query": "q", "scope": "goals", "goal_ids": ["g1"]},
+                        "intent": "goal_lookup",
+                        "expected_output": "goal_context",
+                        "priority": 10,
+                        "deterministic_id": "",  # filled below
+                    },
+                    {
+                        "sequence": 1,
+                        "tool_name": "memory_lookup",
+                        "args": {"query": "q", "scope": "session"},
+                        "intent": "session_memory_fetch",
+                        "expected_output": "session_memory_context",
+                        "priority": 20,
+                        "deterministic_id": "",  # filled below
+                    },
+                ]
+            },
+        )
+        for item in ctx.state["tool_ir"]["execution_plan"]:
+            from dadbot.core.tool_ir import deterministic_tool_id
+
+            item["deterministic_id"] = deterministic_tool_id(item["tool_name"], item["args"])
+
+        result = await executor.run(ctx)
+
+        executions = list(result.state.get("tool_ir", {}).get("executions") or [])
+        tool_results = list(result.state.get("tool_results") or [])
+        assert len(executions) == 2
+        assert len(tool_results) == 2
+        assert all(str(item.get("status") or "") == "ok" for item in tool_results)
+        assert bool(result.metadata.get("tool_execution_graph_hash")) is True
+
+
+# ---------------------------------------------------------------------------
+# 4. CritiqueEngine
 # ---------------------------------------------------------------------------
 
 class TestCritiqueEngine:
@@ -384,6 +505,38 @@ class TestCritiqueEngine:
         r1 = engine.critique("", "test", plan, iteration=1)
         assert engine.needs_revision(r1) is False
 
+    def test_tool_omission_detected_for_question_without_tool_plan(self):
+        engine = CritiqueEngine()
+        plan = {"strategy": "direct_answer", "intent_type": "question", "complexity": "simple"}
+
+        result = engine.critique(
+            "You can improve by practicing every day and reviewing mistakes.",
+            "How do I improve?",
+            plan,
+            iteration=0,
+            tool_ir={"execution_plan": []},
+            tool_results=[],
+        )
+
+        assert "tool_omission_detected" in result.issues
+        assert result.tool_necessity_score < 1.0
+
+    def test_tool_correctness_detected_on_error_results(self):
+        engine = CritiqueEngine()
+        plan = {"strategy": "goal_track", "intent_type": "goal_oriented", "complexity": "moderate"}
+
+        result = engine.critique(
+            "Let's make a plan with your goal context.",
+            "I want to save money.",
+            plan,
+            iteration=0,
+            tool_ir={"execution_plan": [{"tool_name": "memory_lookup"}], "executions": [{"tool_name": "memory_lookup"}]},
+            tool_results=[{"tool_name": "memory_lookup", "status": "error", "output": "boom"}],
+        )
+
+        assert "tool_correctness_low" in result.issues
+        assert result.tool_correctness_score < 1.0
+
     def test_custom_pass_threshold(self):
         """Custom pass_threshold is respected."""
         strict = CritiqueEngine(pass_threshold=0.99)
@@ -398,7 +551,7 @@ class TestCritiqueEngine:
 
 
 # ---------------------------------------------------------------------------
-# 4. GoalAwareRanker
+# 5. GoalAwareRanker
 # ---------------------------------------------------------------------------
 
 class TestGoalAwareRanker:

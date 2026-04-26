@@ -178,6 +178,18 @@ class ToolSandbox:
             ],
         }
 
+    def isolated_state_snapshot(self, generation: int = 0) -> "ToolSandboxSnapshot":
+        """Capture an immutable ToolSandboxSnapshot for isolation testing.
+
+        Two sandboxes executing the same tool sequence must produce equal
+        ``snapshot_hash`` values, proving no cross-tool state leakage.
+        """
+        return ToolSandboxSnapshot.capture(self, generation)
+
+    def is_clean(self) -> bool:
+        """True iff no tools have been executed yet (fresh sandbox)."""
+        return len(self._records) == 0
+
     @contextmanager
     def transaction(
         self,
@@ -283,3 +295,52 @@ class ToolTransaction:
                 outcome["error"] = str(exc) or type(exc).__name__
             outcomes.append(outcome)
         return outcomes
+
+
+# ---------------------------------------------------------------------------
+# Phase 7: ToolSandboxSnapshot — isolated state snapshot for cross-tool isolation
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ToolSandboxSnapshot:
+    """Immutable, content-addressed snapshot of a ToolSandbox's execution records.
+
+    Enables:
+    - Cross-tool isolation checks: snapshots taken before/after each tool should
+      only differ by that tool's records.
+    - Rollback comparison: verify that rollback restored the exact prior state.
+    - Determinism validation: same sequence of operations → same snapshot_hash.
+    """
+
+    records_count: int
+    cache_keys: tuple[str, ...]
+    snapshot_hash: str
+    generation: int
+
+    @classmethod
+    def capture(cls, sandbox: "ToolSandbox", generation: int) -> "ToolSandboxSnapshot":
+        cache_keys = tuple(sorted(sandbox._cache.keys()))
+        payload = json.dumps(
+            {
+                "records_count": len(sandbox._records),
+                "cache_keys": list(cache_keys),
+                "generation": generation,
+            },
+            sort_keys=True,
+        )
+        snap_hash = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        return cls(
+            records_count=len(sandbox._records),
+            cache_keys=cache_keys,
+            snapshot_hash=snap_hash,
+            generation=generation,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "records_count": self.records_count,
+            "cache_keys": list(self.cache_keys),
+            "snapshot_hash": self.snapshot_hash,
+            "generation": self.generation,
+        }

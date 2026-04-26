@@ -1,0 +1,282 @@
+{
+  "snapshot_version": "V1",
+  "git_hash": "6374e4b8063b1013d88b4be9f851edbfb806b7d2",
+  "file_tree_hash": "9fc2cb6abc4433d017de9bb916cc44c922c8de235454cf09ece3708a9857ec2a",
+  "schema_registry": {
+    "tool_ir_schema_version": "1.0",
+    "dag_schema_version": "1.0",
+    "event_log_schema_version": "1.0",
+    "snapshot_version": "V1"
+  },
+  "dependency_lock": {
+    "lock_hash": "59750392aaf82299b651ed91a7332c4566e5e9a6bb51583dd72fe4ee01948ee7",
+    "package_count": "131"
+  },
+  "golden_set": {
+    "version": "V1",
+    "set_hash": "49c005602466ab0c3a22b77f5ad4d3657245256ee74e55297b14feea1176aab6",
+    "record_count": 25,
+    "records": [
+      {
+        "prompt": "Hey, how's it going?",
+        "intent_type": "casual",
+        "strategy": "casual_reply",
+        "tool_plan": [],
+        "tool_trace_hash": "a351101e9e29057b81fce12fd635ec33169ee8a53e9323a9debd6183648fc41d",
+        "plan_class_hash": "72c5b7c6461338edc0c18695faa93f1ece6e7a9d86274f964ce00e9948fc978b",
+        "envelope_hash": "f0a0995f124428784caafa6a1e550aabc21ff6c86e34b02e9e27fde658201711"
+      },
+      {
+        "prompt": "Good morning!",
+        "intent_type": "casual",
+        "strategy": "casual_reply",
+        "tool_plan": [],
+        "tool_trace_hash": "a351101e9e29057b81fce12fd635ec33169ee8a53e9323a9debd6183648fc41d",
+        "plan_class_hash": "72c5b7c6461338edc0c18695faa93f1ece6e7a9d86274f964ce00e9948fc978b",
+        "envelope_hash": "f0a0995f124428784caafa6a1e550aabc21ff6c86e34b02e9e27fde658201711"
+      },
+      {
+        "prompt": "Thanks for the chat yesterday.",
+        "intent_type": "casual",
+        "strategy": "casual_reply",
+        "tool_plan": [],
+        "tool_trace_hash": "a351101e9e29057b81fce12fd635ec33169ee8a53e9323a9debd6183648fc41d",
+        "plan_class_hash": "72c5b7c6461338edc0c18695faa93f1ece6e7a9d86274f964ce00e9948fc978b",
+        "envelope_hash": "f0a0995f124428784caafa6a1e550aabc21ff6c86e34b02e9e27fde658201711"
+      },
+      {
+        "prompt": "I love you, dad.",
+        "intent_type": "emotional",
+        "strategy": "empathy_first",
+        "tool_plan": [],
+        "tool_trace_hash": "a351101e9e29057b81fce12fd635ec33169ee8a53e9323a9debd6183648fc41d",
+        "plan_class_hash": "54280daa50e6423bc4b26a101535fb1a239a4d4b4dbcc6936f1b2e479bc1f23b",
+        "envelope_hash": "ec398a3a934b7c7a6146ed346aeacef5533a6221f587657362e3c78824ee61db"
+      },
+      {
+        "prompt": "Goodnight.",
+        "intent_type": "casual",
+        "strategy": "casual_reply",
+        "tool_plan": [],
+        "tool_trace_hash": "a351101e9e29057b81fce12fd635ec33169ee8a53e9323a9debd6183648fc41d",
+        "plan_class_hash": "72c5b7c6461338edc0c18695faa93f1ece6e7a9d86274f964ce00e9948fc978b",
+        "envelope_hash": "f0a0995f124428784caafa6a1e550aabc21ff6c86e34b02e9e27fde658201711"
+      },
+      {
+        "prompt": "I'm really stressed about work lately.",
+        "intent_type": "emotional",
+        "strategy": "empathy_first",
+        "tool_plan": [
+          "memory_lookup"
+        ],
+        "tool_trace_hash": "02cd85dd0f28390ee95b135785276750e1626064a521a64b1a271589a3199722",
+        "plan_class_hash": "e91c6924b6b14c2d1ae3c713615fc38de8cb1d65f5929d52cd98626749b35866",
+        "envelope_hash": "e8bacf48f1ab20d55ccaed9dbbbca3ba19f64d1b31e2578b683f9613fbd961f8"
+      },
+      {
+        "prompt": "I had a really hard day today.",
+        "intent_type": "emotional",
+        "strategy": "empathy_first",
+        "tool_plan": [
+          "memory_lookup"
+        ],
+        "tool_trace_hash": "02cd85dd0f28390ee95b135785276750e1626064a521a64b1a271589a3199722",
+        "plan_class_hash": "e91c6924b6b14c2d1ae3c713615fc38de8cb1d65f5929d52cd98626749b35866",
+        "envelope_hash": "e8bacf48f1ab20d55ccaed9dbbbca3ba19f64d1b31e2578b683f9613fbd961f8"
+      },
+      {
+        "prompt": "I feel like I'm failing at everything.",
+        "intent_type": "emotional",
+        "strategy": "empathy_first",
+        "tool_plan": [
+          "memory_lookup"
+        ],
+        "tool_trace_hash": "02cd85dd0f28390ee95b135785276750e1626064a521a64b1a271589a3199722",
+        "plan_class_hash": "e91c6924b6b14c2d1ae3c713615fc38de8cb1d65f5929d52cd98626749b35866",
+        "envelope_hash": "e8bacf48f1ab20d55ccaed9dbbbca3ba19f64d1b31e2578b683f9613fbd961f8"
+      },
+      {
+        "prompt": "I'm proud of myself for finishing the project.",
+        "intent_type": "emotional",
+        "strategy": "empathy_first",
+        "tool_plan": [
+          "memory_lookup"
+        ],
+        "tool_trace_hash": "02cd85dd0f28390ee95b135785276750e1626064a521a64b1a271589a3199722",
+        "plan_class_hash": "e91c6924b6b14c2d1ae3c713615fc38de8cb1d65f5929d52cd98626749b35866",
+        "envelope_hash": "e8bacf48f1ab20d55ccaed9dbbbca3ba19f64d1b31e2578b683f9613fbd961f8"
+      },
+      {
+        "prompt": "I've been feeling lonely recently.",
+        "intent_type": "emotional",
+        "strategy": "empathy_first",
+        "tool_plan": [
+          "memory_lookup"
+        ],
+        "tool_trace_hash": "02cd85dd0f28390ee95b135785276750e1626064a521a64b1a271589a3199722",
+        "plan_class_hash": "e91c6924b6b14c2d1ae3c713615fc38de8cb1d65f5929d52cd98626749b35866",
+        "envelope_hash": "e8bacf48f1ab20d55ccaed9dbbbca3ba19f64d1b31e2578b683f9613fbd961f8"
+      },
+      {
+        "prompt": "What have I been working on lately?",
+        "intent_type": "question",
+        "strategy": "fact_seeking",
+        "tool_plan": [
+          "memory_lookup"
+        ],
+        "tool_trace_hash": "02cd85dd0f28390ee95b135785276750e1626064a521a64b1a271589a3199722",
+        "plan_class_hash": "d8f919c82664fa0b4fb115af03f96a72a577c6975c5e6bf39e0d4c65b729c6b2",
+        "envelope_hash": "294b11829a9a3c6a009ac9087b84e315cbf2630d3dabbc617902f04597da95a5"
+      },
+      {
+        "prompt": "Do you remember what I said about my job last week?",
+        "intent_type": "question",
+        "strategy": "fact_seeking",
+        "tool_plan": [
+          "memory_lookup"
+        ],
+        "tool_trace_hash": "02cd85dd0f28390ee95b135785276750e1626064a521a64b1a271589a3199722",
+        "plan_class_hash": "d8f919c82664fa0b4fb115af03f96a72a577c6975c5e6bf39e0d4c65b729c6b2",
+        "envelope_hash": "294b11829a9a3c6a009ac9087b84e315cbf2630d3dabbc617902f04597da95a5"
+      },
+      {
+        "prompt": "What are my current goals?",
+        "intent_type": "goal_oriented",
+        "strategy": "goal_track",
+        "tool_plan": [
+          "memory_lookup"
+        ],
+        "tool_trace_hash": "02cd85dd0f28390ee95b135785276750e1626064a521a64b1a271589a3199722",
+        "plan_class_hash": "7de10150c6e9bfc46a86d774b406d43b851732036c54e6ebe4e985d49f8cbc82",
+        "envelope_hash": "f297c3243ec497124f231febedd97983005931162bcecdef5877fe01c262a537"
+      },
+      {
+        "prompt": "Am I making progress on my fitness goals?",
+        "intent_type": "goal_oriented",
+        "strategy": "goal_track",
+        "tool_plan": [
+          "memory_lookup"
+        ],
+        "tool_trace_hash": "02cd85dd0f28390ee95b135785276750e1626064a521a64b1a271589a3199722",
+        "plan_class_hash": "7de10150c6e9bfc46a86d774b406d43b851732036c54e6ebe4e985d49f8cbc82",
+        "envelope_hash": "f297c3243ec497124f231febedd97983005931162bcecdef5877fe01c262a537"
+      },
+      {
+        "prompt": "What topics have we talked about the most?",
+        "intent_type": "question",
+        "strategy": "fact_seeking",
+        "tool_plan": [
+          "memory_lookup"
+        ],
+        "tool_trace_hash": "02cd85dd0f28390ee95b135785276750e1626064a521a64b1a271589a3199722",
+        "plan_class_hash": "d8f919c82664fa0b4fb115af03f96a72a577c6975c5e6bf39e0d4c65b729c6b2",
+        "envelope_hash": "294b11829a9a3c6a009ac9087b84e315cbf2630d3dabbc617902f04597da95a5"
+      },
+      {
+        "prompt": "Help me make a plan for next week.",
+        "intent_type": "multi_step",
+        "strategy": "task_plan",
+        "tool_plan": [
+          "memory_lookup"
+        ],
+        "tool_trace_hash": "02cd85dd0f28390ee95b135785276750e1626064a521a64b1a271589a3199722",
+        "plan_class_hash": "97c168982694cb7c75f57632289cf7f408f7e1755d7dc1158ad39761744680d7",
+        "envelope_hash": "e6882c7530d94d139d9793fa4249ff6e56f57659d610d634b8120b41d4d579d1"
+      },
+      {
+        "prompt": "I want to track how often I go to the gym.",
+        "intent_type": "multi_step",
+        "strategy": "task_plan",
+        "tool_plan": [
+          "memory_lookup"
+        ],
+        "tool_trace_hash": "02cd85dd0f28390ee95b135785276750e1626064a521a64b1a271589a3199722",
+        "plan_class_hash": "97c168982694cb7c75f57632289cf7f408f7e1755d7dc1158ad39761744680d7",
+        "envelope_hash": "e6882c7530d94d139d9793fa4249ff6e56f57659d610d634b8120b41d4d579d1"
+      },
+      {
+        "prompt": "Help me remember to call mom every Sunday.",
+        "intent_type": "multi_step",
+        "strategy": "task_plan",
+        "tool_plan": [
+          "memory_lookup"
+        ],
+        "tool_trace_hash": "02cd85dd0f28390ee95b135785276750e1626064a521a64b1a271589a3199722",
+        "plan_class_hash": "97c168982694cb7c75f57632289cf7f408f7e1755d7dc1158ad39761744680d7",
+        "envelope_hash": "e6882c7530d94d139d9793fa4249ff6e56f57659d610d634b8120b41d4d579d1"
+      },
+      {
+        "prompt": "I'm trying to build a habit of reading 30 minutes a day.",
+        "intent_type": "goal_oriented",
+        "strategy": "goal_track",
+        "tool_plan": [
+          "memory_lookup"
+        ],
+        "tool_trace_hash": "02cd85dd0f28390ee95b135785276750e1626064a521a64b1a271589a3199722",
+        "plan_class_hash": "7de10150c6e9bfc46a86d774b406d43b851732036c54e6ebe4e985d49f8cbc82",
+        "envelope_hash": "f297c3243ec497124f231febedd97983005931162bcecdef5877fe01c262a537"
+      },
+      {
+        "prompt": "Can you help me break down my big project into smaller steps?",
+        "intent_type": "multi_step",
+        "strategy": "task_plan",
+        "tool_plan": [
+          "memory_lookup"
+        ],
+        "tool_trace_hash": "02cd85dd0f28390ee95b135785276750e1626064a521a64b1a271589a3199722",
+        "plan_class_hash": "97c168982694cb7c75f57632289cf7f408f7e1755d7dc1158ad39761744680d7",
+        "envelope_hash": "e6882c7530d94d139d9793fa4249ff6e56f57659d610d634b8120b41d4d579d1"
+      },
+      {
+        "prompt": "What's the weather going to be like today?",
+        "intent_type": "question",
+        "strategy": "fact_seeking",
+        "tool_plan": [],
+        "tool_trace_hash": "a351101e9e29057b81fce12fd635ec33169ee8a53e9323a9debd6183648fc41d",
+        "plan_class_hash": "74512c3004092e626f524f3bee90736929697b64d21d1c0ef943c3c62b6c61de",
+        "envelope_hash": "5741bcb3782dd242bde45bebfd81bc76c216435df6ce60bb79a23ad8111c0203"
+      },
+      {
+        "prompt": "Can you recommend a good book?",
+        "intent_type": "question",
+        "strategy": "fact_seeking",
+        "tool_plan": [],
+        "tool_trace_hash": "a351101e9e29057b81fce12fd635ec33169ee8a53e9323a9debd6183648fc41d",
+        "plan_class_hash": "74512c3004092e626f524f3bee90736929697b64d21d1c0ef943c3c62b6c61de",
+        "envelope_hash": "5741bcb3782dd242bde45bebfd81bc76c216435df6ce60bb79a23ad8111c0203"
+      },
+      {
+        "prompt": "How do I stay motivated when things get hard?",
+        "intent_type": "question",
+        "strategy": "fact_seeking",
+        "tool_plan": [
+          "memory_lookup"
+        ],
+        "tool_trace_hash": "02cd85dd0f28390ee95b135785276750e1626064a521a64b1a271589a3199722",
+        "plan_class_hash": "d8f919c82664fa0b4fb115af03f96a72a577c6975c5e6bf39e0d4c65b729c6b2",
+        "envelope_hash": "294b11829a9a3c6a009ac9087b84e315cbf2630d3dabbc617902f04597da95a5"
+      },
+      {
+        "prompt": "What's the best way to deal with stress?",
+        "intent_type": "question",
+        "strategy": "fact_seeking",
+        "tool_plan": [
+          "memory_lookup"
+        ],
+        "tool_trace_hash": "02cd85dd0f28390ee95b135785276750e1626064a521a64b1a271589a3199722",
+        "plan_class_hash": "d8f919c82664fa0b4fb115af03f96a72a577c6975c5e6bf39e0d4c65b729c6b2",
+        "envelope_hash": "294b11829a9a3c6a009ac9087b84e315cbf2630d3dabbc617902f04597da95a5"
+      },
+      {
+        "prompt": "bye",
+        "intent_type": "casual",
+        "strategy": "casual_reply",
+        "tool_plan": [],
+        "tool_trace_hash": "a351101e9e29057b81fce12fd635ec33169ee8a53e9323a9debd6183648fc41d",
+        "plan_class_hash": "72c5b7c6461338edc0c18695faa93f1ece6e7a9d86274f964ce00e9948fc978b",
+        "envelope_hash": "f0a0995f124428784caafa6a1e550aabc21ff6c86e34b02e9e27fde658201711"
+      }
+    ]
+  },
+  "snapshot_hash": "f4d9ab1c9124a8f3f632b58ea1ab77eee4e388bf888388b12a98ee579c217e2b"
+}

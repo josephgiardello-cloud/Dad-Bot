@@ -62,6 +62,8 @@ class CritiqueResult:
     issues: list[str]     # symbolic issue tags (empty on pass)
     revision_hint: str    # human-readable guidance for the revision pass
     iteration: int        # which loop iteration this critique covers
+    tool_necessity_score: float = 1.0
+    tool_correctness_score: float = 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -94,6 +96,9 @@ class CritiqueEngine:
         user_input: str,
         turn_plan: dict[str, Any],
         iteration: int,
+        *,
+        tool_ir: dict[str, Any] | None = None,
+        tool_results: list[dict[str, Any]] | None = None,
     ) -> CritiqueResult:
         """Evaluate ``candidate`` and return a CritiqueResult."""
         reply = str(candidate or "").strip()
@@ -139,6 +144,45 @@ class CritiqueEngine:
             issues.append("reply_too_brief")
             score -= 0.15
 
+        # --- Tool-awareness checks (Phase 4) ---
+
+        planned_tools = list((tool_ir or {}).get("execution_plan") or [])
+        executed_tools = list((tool_ir or {}).get("executions") or [])
+        observed_results = list(tool_results or [])
+
+        tool_necessity_score = 1.0
+        tool_correctness_score = 1.0
+
+        tool_needed = intent_type in {"question", "goal_oriented", "multi_step"} or strategy in {
+            "goal_track",
+            "task_plan",
+        }
+        if tool_needed and not planned_tools:
+            issues.append("tool_omission_detected")
+            tool_necessity_score -= 0.4
+            score -= 0.2
+        if (not tool_needed) and planned_tools:
+            issues.append("tool_unnecessary_usage")
+            tool_necessity_score -= 0.2
+            score -= 0.1
+
+        if planned_tools:
+            if len(executed_tools) != len(planned_tools):
+                issues.append("tool_execution_mismatch")
+                tool_correctness_score -= 0.4
+                score -= 0.2
+            if len(observed_results) != len(planned_tools):
+                issues.append("tool_result_mismatch")
+                tool_correctness_score -= 0.3
+                score -= 0.15
+            if any(str(item.get("status") or "").lower() != "ok" for item in observed_results):
+                issues.append("tool_correctness_low")
+                tool_correctness_score -= 0.3
+                score -= 0.15
+
+        tool_necessity_score = max(0.0, round(tool_necessity_score, 3))
+        tool_correctness_score = max(0.0, round(tool_correctness_score, 3))
+
         # --- Final score ---
 
         score = max(0.0, round(score, 3))
@@ -157,6 +201,14 @@ class CritiqueEngine:
             hints.append(f"Directly address the question: '{user_input[:80]}'")
         if "reply_too_brief" in issues:
             hints.append("Give a more thorough answer")
+        if "tool_omission_detected" in issues:
+            hints.append("Use required memory tool evidence before finalizing")
+        if "tool_unnecessary_usage" in issues:
+            hints.append("Avoid unnecessary tool calls for simple turns")
+        if "tool_execution_mismatch" in issues or "tool_result_mismatch" in issues:
+            hints.append("Ensure tool plan, execution, and outputs are aligned")
+        if "tool_correctness_low" in issues:
+            hints.append("Resolve tool failures before composing the final reply")
         revision_hint = "; ".join(hints)
 
         return CritiqueResult(
@@ -165,6 +217,8 @@ class CritiqueEngine:
             issues=issues,
             revision_hint=revision_hint,
             iteration=iteration,
+            tool_necessity_score=tool_necessity_score,
+            tool_correctness_score=tool_correctness_score,
         )
 
     def needs_revision(self, result: CritiqueResult) -> bool:

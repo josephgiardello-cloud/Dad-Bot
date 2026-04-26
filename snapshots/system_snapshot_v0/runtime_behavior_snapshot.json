@@ -1,0 +1,1806 @@
+{
+  "canonical_prompt_count": 20,
+  "gold_traces": [
+    {
+      "determinism": {
+        "agent_blackboard_final_fingerprint": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "agent_blackboard_seed_fingerprint": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "blackboard_fingerprint": "44136fa355b3678a",
+        "enforced": true,
+        "llm_model": "llama3.2",
+        "llm_provider": "ollama",
+        "lock_hash": "62807b8c69232cda291ba4d3615ce9d50ba16334848043f56443ee3d785a7d74",
+        "lock_id": "det-62807b8c69232cda",
+        "lock_version": 3,
+        "manifest": {
+          "dependency_versions": {
+            "ollama": "0.6.1",
+            "orjson": "3.11.8",
+            "pydantic": "2.12.5",
+            "python-dateutil": "2.9.0.post0"
+          },
+          "env_hash": "0d75218d2ca32563ea02cb06de2dd201ea20040a4185c0ccb896c41c7558b079",
+          "python_version": "3.13.7 (tags/v3.13.7:bcee1c3, Aug 14 2025, 14:15:11) [MSC v.1944 64 bit (AMD64)]",
+          "timezone": [
+            "Eastern Standard Time",
+            "Eastern Daylight Time"
+          ]
+        },
+        "manifest_hash": "b8c490c8e9e5971c70d2a9e6aa6369186866926ae674db14fee13b6230b3a5d6",
+        "memory_fingerprint": "7da0777b5b6d075c",
+        "memory_layers_included": true,
+        "seed_policy": "fixed_seed",
+        "state_machine": "PLAN_ACT_OBSERVE_RESPOND",
+        "temperature_policy": "0.0"
+      },
+      "execution_stages": [
+        "inference",
+        "planner",
+        "preflight",
+        "reflection",
+        "safety",
+        "save",
+        "temporal"
+      ],
+      "expected_output": "SNAPSHOT_V0::Hey Dad, good morning.",
+      "index": 1,
+      "prompt": "Hey Dad, good morning.",
+      "should_end": false,
+      "stage_traces": [
+        {
+          "duration_ms": 6.685,
+          "error": null,
+          "stage": "temporal"
+        },
+        {
+          "duration_ms": 39.477,
+          "error": null,
+          "stage": "preflight"
+        },
+        {
+          "duration_ms": 11.51,
+          "error": null,
+          "stage": "planner"
+        },
+        {
+          "duration_ms": 18.396,
+          "error": null,
+          "stage": "inference"
+        },
+        {
+          "duration_ms": 18.297,
+          "error": null,
+          "stage": "safety"
+        },
+        {
+          "duration_ms": 17.002,
+          "error": null,
+          "stage": "reflection"
+        },
+        {
+          "duration_ms": 53.307,
+          "error": null,
+          "stage": "save"
+        }
+      ],
+      "tool_free": true,
+      "tool_ir": {
+        "execution_plan": [],
+        "executions": [],
+        "requests": []
+      },
+      "tool_results": []
+    },
+    {
+      "determinism": {
+        "agent_blackboard_final_fingerprint": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "agent_blackboard_seed_fingerprint": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "blackboard_fingerprint": "44136fa355b3678a",
+        "enforced": true,
+        "llm_model": "llama3.2",
+        "llm_provider": "ollama",
+        "lock_hash": "6a4f06598a9fb2936b65de54d2b7a17444c24501ea1dcb6683a1185634046e33",
+        "lock_id": "det-6a4f06598a9fb293",
+        "lock_version": 3,
+        "manifest": {
+          "dependency_versions": {
+            "ollama": "0.6.1",
+            "orjson": "3.11.8",
+            "pydantic": "2.12.5",
+            "python-dateutil": "2.9.0.post0"
+          },
+          "env_hash": "0d75218d2ca32563ea02cb06de2dd201ea20040a4185c0ccb896c41c7558b079",
+          "python_version": "3.13.7 (tags/v3.13.7:bcee1c3, Aug 14 2025, 14:15:11) [MSC v.1944 64 bit (AMD64)]",
+          "timezone": [
+            "Eastern Standard Time",
+            "Eastern Daylight Time"
+          ]
+        },
+        "manifest_hash": "b8c490c8e9e5971c70d2a9e6aa6369186866926ae674db14fee13b6230b3a5d6",
+        "memory_fingerprint": "799d2c88ffeca6f4",
+        "memory_layers_included": true,
+        "seed_policy": "fixed_seed",
+        "state_machine": "PLAN_ACT_OBSERVE_RESPOND",
+        "temperature_policy": "0.0"
+      },
+      "execution_stages": [
+        "inference",
+        "planner",
+        "preflight",
+        "reflection",
+        "safety",
+        "save",
+        "temporal"
+      ],
+      "expected_output": "SNAPSHOT_V0::I slept okay but still feel tired.",
+      "index": 2,
+      "prompt": "I slept okay but still feel tired.",
+      "should_end": false,
+      "stage_traces": [
+        {
+          "duration_ms": 5.095,
+          "error": null,
+          "stage": "temporal"
+        },
+        {
+          "duration_ms": 32.674,
+          "error": null,
+          "stage": "preflight"
+        },
+        {
+          "duration_ms": 10.01,
+          "error": null,
+          "stage": "planner"
+        },
+        {
+          "duration_ms": 19.082,
+          "error": null,
+          "stage": "inference"
+        },
+        {
+          "duration_ms": 19.174,
+          "error": null,
+          "stage": "safety"
+        },
+        {
+          "duration_ms": 15.279,
+          "error": null,
+          "stage": "reflection"
+        },
+        {
+          "duration_ms": 51.463,
+          "error": null,
+          "stage": "save"
+        }
+      ],
+      "tool_free": true,
+      "tool_ir": {
+        "execution_plan": [],
+        "executions": [],
+        "requests": []
+      },
+      "tool_results": []
+    },
+    {
+      "determinism": {
+        "agent_blackboard_final_fingerprint": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "agent_blackboard_seed_fingerprint": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "blackboard_fingerprint": "44136fa355b3678a",
+        "enforced": true,
+        "llm_model": "llama3.2",
+        "llm_provider": "ollama",
+        "lock_hash": "e4b68573268e41ac884d49f727dfbf77b125eff28a2289650f53072bdcd50f09",
+        "lock_id": "det-e4b68573268e41ac",
+        "lock_version": 3,
+        "manifest": {
+          "dependency_versions": {
+            "ollama": "0.6.1",
+            "orjson": "3.11.8",
+            "pydantic": "2.12.5",
+            "python-dateutil": "2.9.0.post0"
+          },
+          "env_hash": "0d75218d2ca32563ea02cb06de2dd201ea20040a4185c0ccb896c41c7558b079",
+          "python_version": "3.13.7 (tags/v3.13.7:bcee1c3, Aug 14 2025, 14:15:11) [MSC v.1944 64 bit (AMD64)]",
+          "timezone": [
+            "Eastern Standard Time",
+            "Eastern Daylight Time"
+          ]
+        },
+        "manifest_hash": "b8c490c8e9e5971c70d2a9e6aa6369186866926ae674db14fee13b6230b3a5d6",
+        "memory_fingerprint": "f1f8789d51c118e0",
+        "memory_layers_included": true,
+        "seed_policy": "fixed_seed",
+        "state_machine": "PLAN_ACT_OBSERVE_RESPOND",
+        "temperature_policy": "0.0"
+      },
+      "execution_stages": [
+        "inference",
+        "planner",
+        "preflight",
+        "reflection",
+        "safety",
+        "save",
+        "temporal"
+      ],
+      "expected_output": "SNAPSHOT_V0::Can you help me plan my work day?",
+      "index": 3,
+      "prompt": "Can you help me plan my work day?",
+      "should_end": false,
+      "stage_traces": [
+        {
+          "duration_ms": 4.939,
+          "error": null,
+          "stage": "temporal"
+        },
+        {
+          "duration_ms": 32.407,
+          "error": null,
+          "stage": "preflight"
+        },
+        {
+          "duration_ms": 10.345,
+          "error": null,
+          "stage": "planner"
+        },
+        {
+          "duration_ms": 19.539,
+          "error": null,
+          "stage": "inference"
+        },
+        {
+          "duration_ms": 19.089,
+          "error": null,
+          "stage": "safety"
+        },
+        {
+          "duration_ms": 15.602,
+          "error": null,
+          "stage": "reflection"
+        },
+        {
+          "duration_ms": 50.721,
+          "error": null,
+          "stage": "save"
+        }
+      ],
+      "tool_free": true,
+      "tool_ir": {
+        "execution_plan": [],
+        "executions": [],
+        "requests": []
+      },
+      "tool_results": []
+    },
+    {
+      "determinism": {
+        "agent_blackboard_final_fingerprint": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "agent_blackboard_seed_fingerprint": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "blackboard_fingerprint": "44136fa355b3678a",
+        "enforced": true,
+        "llm_model": "llama3.2",
+        "llm_provider": "ollama",
+        "lock_hash": "5e4b202bfec9cd79bd51f7a80d0d87b9a44915fd951fff94f2c7d21858556829",
+        "lock_id": "det-5e4b202bfec9cd79",
+        "lock_version": 3,
+        "manifest": {
+          "dependency_versions": {
+            "ollama": "0.6.1",
+            "orjson": "3.11.8",
+            "pydantic": "2.12.5",
+            "python-dateutil": "2.9.0.post0"
+          },
+          "env_hash": "0d75218d2ca32563ea02cb06de2dd201ea20040a4185c0ccb896c41c7558b079",
+          "python_version": "3.13.7 (tags/v3.13.7:bcee1c3, Aug 14 2025, 14:15:11) [MSC v.1944 64 bit (AMD64)]",
+          "timezone": [
+            "Eastern Standard Time",
+            "Eastern Daylight Time"
+          ]
+        },
+        "manifest_hash": "b8c490c8e9e5971c70d2a9e6aa6369186866926ae674db14fee13b6230b3a5d6",
+        "memory_fingerprint": "225728c620424510",
+        "memory_layers_included": true,
+        "seed_policy": "fixed_seed",
+        "state_machine": "PLAN_ACT_OBSERVE_RESPOND",
+        "temperature_policy": "0.0"
+      },
+      "execution_stages": [
+        "inference",
+        "planner",
+        "preflight",
+        "reflection",
+        "safety",
+        "save",
+        "temporal"
+      ],
+      "expected_output": "SNAPSHOT_V0::I feel anxious before meetings.",
+      "index": 4,
+      "prompt": "I feel anxious before meetings.",
+      "should_end": false,
+      "stage_traces": [
+        {
+          "duration_ms": 5.345,
+          "error": null,
+          "stage": "temporal"
+        },
+        {
+          "duration_ms": 34.393,
+          "error": null,
+          "stage": "preflight"
+        },
+        {
+          "duration_ms": 10.656,
+          "error": null,
+          "stage": "planner"
+        },
+        {
+          "duration_ms": 17.947,
+          "error": null,
+          "stage": "inference"
+        },
+        {
+          "duration_ms": 19.82,
+          "error": null,
+          "stage": "safety"
+        },
+        {
+          "duration_ms": 16.123,
+          "error": null,
+          "stage": "reflection"
+        },
+        {
+          "duration_ms": 51.642,
+          "error": null,
+          "stage": "save"
+        }
+      ],
+      "tool_free": true,
+      "tool_ir": {
+        "execution_plan": [],
+        "executions": [],
+        "requests": []
+      },
+      "tool_results": []
+    },
+    {
+      "determinism": {
+        "agent_blackboard_final_fingerprint": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "agent_blackboard_seed_fingerprint": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "blackboard_fingerprint": "44136fa355b3678a",
+        "enforced": true,
+        "llm_model": "llama3.2",
+        "llm_provider": "ollama",
+        "lock_hash": "bfd00f7813f41f2574b9c9e0ec760f988dd12921685e8de7820f1b19cb1afe88",
+        "lock_id": "det-bfd00f7813f41f25",
+        "lock_version": 3,
+        "manifest": {
+          "dependency_versions": {
+            "ollama": "0.6.1",
+            "orjson": "3.11.8",
+            "pydantic": "2.12.5",
+            "python-dateutil": "2.9.0.post0"
+          },
+          "env_hash": "0d75218d2ca32563ea02cb06de2dd201ea20040a4185c0ccb896c41c7558b079",
+          "python_version": "3.13.7 (tags/v3.13.7:bcee1c3, Aug 14 2025, 14:15:11) [MSC v.1944 64 bit (AMD64)]",
+          "timezone": [
+            "Eastern Standard Time",
+            "Eastern Daylight Time"
+          ]
+        },
+        "manifest_hash": "b8c490c8e9e5971c70d2a9e6aa6369186866926ae674db14fee13b6230b3a5d6",
+        "memory_fingerprint": "adf54e8edcd5d67c",
+        "memory_layers_included": true,
+        "seed_policy": "fixed_seed",
+        "state_machine": "PLAN_ACT_OBSERVE_RESPOND",
+        "temperature_policy": "0.0"
+      },
+      "execution_stages": [
+        "inference",
+        "planner",
+        "preflight",
+        "reflection",
+        "safety",
+        "save",
+        "temporal"
+      ],
+      "expected_output": "SNAPSHOT_V0::Give me one short focus tip.",
+      "index": 5,
+      "prompt": "Give me one short focus tip.",
+      "should_end": false,
+      "stage_traces": [
+        {
+          "duration_ms": 4.956,
+          "error": null,
+          "stage": "temporal"
+        },
+        {
+          "duration_ms": 32.63,
+          "error": null,
+          "stage": "preflight"
+        },
+        {
+          "duration_ms": 11.797,
+          "error": null,
+          "stage": "planner"
+        },
+        {
+          "duration_ms": 19.464,
+          "error": null,
+          "stage": "inference"
+        },
+        {
+          "duration_ms": 17.362,
+          "error": null,
+          "stage": "safety"
+        },
+        {
+          "duration_ms": 15.797,
+          "error": null,
+          "stage": "reflection"
+        },
+        {
+          "duration_ms": 53.884,
+          "error": null,
+          "stage": "save"
+        }
+      ],
+      "tool_free": true,
+      "tool_ir": {
+        "execution_plan": [],
+        "executions": [],
+        "requests": []
+      },
+      "tool_results": []
+    },
+    {
+      "determinism": {
+        "agent_blackboard_final_fingerprint": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "agent_blackboard_seed_fingerprint": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "blackboard_fingerprint": "44136fa355b3678a",
+        "enforced": true,
+        "llm_model": "llama3.2",
+        "llm_provider": "ollama",
+        "lock_hash": "cb20f66ac86c0a93415cfef1cc686f94e032323486afd281daa8c84173914228",
+        "lock_id": "det-cb20f66ac86c0a93",
+        "lock_version": 3,
+        "manifest": {
+          "dependency_versions": {
+            "ollama": "0.6.1",
+            "orjson": "3.11.8",
+            "pydantic": "2.12.5",
+            "python-dateutil": "2.9.0.post0"
+          },
+          "env_hash": "0d75218d2ca32563ea02cb06de2dd201ea20040a4185c0ccb896c41c7558b079",
+          "python_version": "3.13.7 (tags/v3.13.7:bcee1c3, Aug 14 2025, 14:15:11) [MSC v.1944 64 bit (AMD64)]",
+          "timezone": [
+            "Eastern Standard Time",
+            "Eastern Daylight Time"
+          ]
+        },
+        "manifest_hash": "b8c490c8e9e5971c70d2a9e6aa6369186866926ae674db14fee13b6230b3a5d6",
+        "memory_fingerprint": "e0f27d7fd770143f",
+        "memory_layers_included": true,
+        "seed_policy": "fixed_seed",
+        "state_machine": "PLAN_ACT_OBSERVE_RESPOND",
+        "temperature_policy": "0.0"
+      },
+      "execution_stages": [
+        "inference",
+        "planner",
+        "preflight",
+        "reflection",
+        "safety",
+        "save",
+        "temporal"
+      ],
+      "expected_output": "SNAPSHOT_V0::What did I say about my mood yesterday?",
+      "index": 6,
+      "prompt": "What did I say about my mood yesterday?",
+      "should_end": false,
+      "stage_traces": [
+        {
+          "duration_ms": 5.664,
+          "error": null,
+          "stage": "temporal"
+        },
+        {
+          "duration_ms": 37.012,
+          "error": null,
+          "stage": "preflight"
+        },
+        {
+          "duration_ms": 11.935,
+          "error": null,
+          "stage": "planner"
+        },
+        {
+          "duration_ms": 17.446,
+          "error": null,
+          "stage": "inference"
+        },
+        {
+          "duration_ms": 19.907,
+          "error": null,
+          "stage": "safety"
+        },
+        {
+          "duration_ms": 17.785,
+          "error": null,
+          "stage": "reflection"
+        },
+        {
+          "duration_ms": 49.464,
+          "error": null,
+          "stage": "save"
+        }
+      ],
+      "tool_free": true,
+      "tool_ir": {
+        "execution_plan": [],
+        "executions": [],
+        "requests": []
+      },
+      "tool_results": []
+    },
+    {
+      "determinism": {
+        "agent_blackboard_final_fingerprint": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "agent_blackboard_seed_fingerprint": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "blackboard_fingerprint": "44136fa355b3678a",
+        "enforced": true,
+        "llm_model": "llama3.2",
+        "llm_provider": "ollama",
+        "lock_hash": "9b1a86e6a52df317d9a98d4fd04b4983bc96e643d321713b87c1cbe112904912",
+        "lock_id": "det-9b1a86e6a52df317",
+        "lock_version": 3,
+        "manifest": {
+          "dependency_versions": {
+            "ollama": "0.6.1",
+            "orjson": "3.11.8",
+            "pydantic": "2.12.5",
+            "python-dateutil": "2.9.0.post0"
+          },
+          "env_hash": "0d75218d2ca32563ea02cb06de2dd201ea20040a4185c0ccb896c41c7558b079",
+          "python_version": "3.13.7 (tags/v3.13.7:bcee1c3, Aug 14 2025, 14:15:11) [MSC v.1944 64 bit (AMD64)]",
+          "timezone": [
+            "Eastern Standard Time",
+            "Eastern Daylight Time"
+          ]
+        },
+        "manifest_hash": "b8c490c8e9e5971c70d2a9e6aa6369186866926ae674db14fee13b6230b3a5d6",
+        "memory_fingerprint": "9eebc5ffbd416db5",
+        "memory_layers_included": true,
+        "seed_policy": "fixed_seed",
+        "state_machine": "PLAN_ACT_OBSERVE_RESPOND",
+        "temperature_policy": "0.0"
+      },
+      "execution_stages": [
+        "inference",
+        "planner",
+        "preflight",
+        "reflection",
+        "safety",
+        "save",
+        "temporal"
+      ],
+      "expected_output": "SNAPSHOT_V0::I want to save money this month.",
+      "index": 7,
+      "prompt": "I want to save money this month.",
+      "should_end": false,
+      "stage_traces": [
+        {
+          "duration_ms": 6.046,
+          "error": null,
+          "stage": "temporal"
+        },
+        {
+          "duration_ms": 35.1,
+          "error": null,
+          "stage": "preflight"
+        },
+        {
+          "duration_ms": 12.548,
+          "error": null,
+          "stage": "planner"
+        },
+        {
+          "duration_ms": 19.707,
+          "error": null,
+          "stage": "inference"
+        },
+        {
+          "duration_ms": 19.859,
+          "error": null,
+          "stage": "safety"
+        },
+        {
+          "duration_ms": 17.452,
+          "error": null,
+          "stage": "reflection"
+        },
+        {
+          "duration_ms": 52.22,
+          "error": null,
+          "stage": "save"
+        }
+      ],
+      "tool_free": true,
+      "tool_ir": {
+        "execution_plan": [],
+        "executions": [],
+        "requests": []
+      },
+      "tool_results": []
+    },
+    {
+      "determinism": {
+        "agent_blackboard_final_fingerprint": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "agent_blackboard_seed_fingerprint": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "blackboard_fingerprint": "44136fa355b3678a",
+        "enforced": true,
+        "llm_model": "llama3.2",
+        "llm_provider": "ollama",
+        "lock_hash": "97ec74cfbcdc1af4071cd81c89148247c5e88c204da16095af6a0870a1b30ec7",
+        "lock_id": "det-97ec74cfbcdc1af4",
+        "lock_version": 3,
+        "manifest": {
+          "dependency_versions": {
+            "ollama": "0.6.1",
+            "orjson": "3.11.8",
+            "pydantic": "2.12.5",
+            "python-dateutil": "2.9.0.post0"
+          },
+          "env_hash": "0d75218d2ca32563ea02cb06de2dd201ea20040a4185c0ccb896c41c7558b079",
+          "python_version": "3.13.7 (tags/v3.13.7:bcee1c3, Aug 14 2025, 14:15:11) [MSC v.1944 64 bit (AMD64)]",
+          "timezone": [
+            "Eastern Standard Time",
+            "Eastern Daylight Time"
+          ]
+        },
+        "manifest_hash": "b8c490c8e9e5971c70d2a9e6aa6369186866926ae674db14fee13b6230b3a5d6",
+        "memory_fingerprint": "2173271f9657c92c",
+        "memory_layers_included": true,
+        "seed_policy": "fixed_seed",
+        "state_machine": "PLAN_ACT_OBSERVE_RESPOND",
+        "temperature_policy": "0.0"
+      },
+      "execution_stages": [
+        "inference",
+        "planner",
+        "preflight",
+        "reflection",
+        "safety",
+        "save",
+        "temporal"
+      ],
+      "expected_output": "SNAPSHOT_V0::Can you remind me to call mom tonight?",
+      "index": 8,
+      "prompt": "Can you remind me to call mom tonight?",
+      "should_end": false,
+      "stage_traces": [
+        {
+          "duration_ms": 5.714,
+          "error": null,
+          "stage": "temporal"
+        },
+        {
+          "duration_ms": 40.559,
+          "error": null,
+          "stage": "preflight"
+        },
+        {
+          "duration_ms": 11.403,
+          "error": null,
+          "stage": "planner"
+        },
+        {
+          "duration_ms": 16.471,
+          "error": null,
+          "stage": "inference"
+        },
+        {
+          "duration_ms": 19.92,
+          "error": null,
+          "stage": "safety"
+        },
+        {
+          "duration_ms": 17.378,
+          "error": null,
+          "stage": "reflection"
+        },
+        {
+          "duration_ms": 54.919,
+          "error": null,
+          "stage": "save"
+        }
+      ],
+      "tool_free": true,
+      "tool_ir": {
+        "execution_plan": [],
+        "executions": [],
+        "requests": []
+      },
+      "tool_results": []
+    },
+    {
+      "determinism": {
+        "agent_blackboard_final_fingerprint": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "agent_blackboard_seed_fingerprint": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "blackboard_fingerprint": "44136fa355b3678a",
+        "enforced": true,
+        "llm_model": "llama3.2",
+        "llm_provider": "ollama",
+        "lock_hash": "4640e55f6986cc59a9fb0e95f1502bb46835cad725a198f35e5d22160a95418d",
+        "lock_id": "det-4640e55f6986cc59",
+        "lock_version": 3,
+        "manifest": {
+          "dependency_versions": {
+            "ollama": "0.6.1",
+            "orjson": "3.11.8",
+            "pydantic": "2.12.5",
+            "python-dateutil": "2.9.0.post0"
+          },
+          "env_hash": "0d75218d2ca32563ea02cb06de2dd201ea20040a4185c0ccb896c41c7558b079",
+          "python_version": "3.13.7 (tags/v3.13.7:bcee1c3, Aug 14 2025, 14:15:11) [MSC v.1944 64 bit (AMD64)]",
+          "timezone": [
+            "Eastern Standard Time",
+            "Eastern Daylight Time"
+          ]
+        },
+        "manifest_hash": "b8c490c8e9e5971c70d2a9e6aa6369186866926ae674db14fee13b6230b3a5d6",
+        "memory_fingerprint": "314e3339c25d1627",
+        "memory_layers_included": true,
+        "seed_policy": "fixed_seed",
+        "state_machine": "PLAN_ACT_OBSERVE_RESPOND",
+        "temperature_policy": "0.0"
+      },
+      "execution_stages": [
+        "inference",
+        "planner",
+        "preflight",
+        "reflection",
+        "safety",
+        "save",
+        "temporal"
+      ],
+      "expected_output": "SNAPSHOT_V0::I had a rough day at work.",
+      "index": 9,
+      "prompt": "I had a rough day at work.",
+      "should_end": false,
+      "stage_traces": [
+        {
+          "duration_ms": 5.645,
+          "error": null,
+          "stage": "temporal"
+        },
+        {
+          "duration_ms": 40.921,
+          "error": null,
+          "stage": "preflight"
+        },
+        {
+          "duration_ms": 11.84,
+          "error": null,
+          "stage": "planner"
+        },
+        {
+          "duration_ms": 20.993,
+          "error": null,
+          "stage": "inference"
+        },
+        {
+          "duration_ms": 22.424,
+          "error": null,
+          "stage": "safety"
+        },
+        {
+          "duration_ms": 16.618,
+          "error": null,
+          "stage": "reflection"
+        },
+        {
+          "duration_ms": 58.516,
+          "error": null,
+          "stage": "save"
+        }
+      ],
+      "tool_free": true,
+      "tool_ir": {
+        "execution_plan": [],
+        "executions": [],
+        "requests": []
+      },
+      "tool_results": []
+    },
+    {
+      "determinism": {
+        "agent_blackboard_final_fingerprint": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "agent_blackboard_seed_fingerprint": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "blackboard_fingerprint": "44136fa355b3678a",
+        "enforced": true,
+        "llm_model": "llama3.2",
+        "llm_provider": "ollama",
+        "lock_hash": "f80b6189c59d345767391f9f2a405387f0fee1dae0e499d52cb9718800061c7f",
+        "lock_id": "det-f80b6189c59d3457",
+        "lock_version": 3,
+        "manifest": {
+          "dependency_versions": {
+            "ollama": "0.6.1",
+            "orjson": "3.11.8",
+            "pydantic": "2.12.5",
+            "python-dateutil": "2.9.0.post0"
+          },
+          "env_hash": "0d75218d2ca32563ea02cb06de2dd201ea20040a4185c0ccb896c41c7558b079",
+          "python_version": "3.13.7 (tags/v3.13.7:bcee1c3, Aug 14 2025, 14:15:11) [MSC v.1944 64 bit (AMD64)]",
+          "timezone": [
+            "Eastern Standard Time",
+            "Eastern Daylight Time"
+          ]
+        },
+        "manifest_hash": "b8c490c8e9e5971c70d2a9e6aa6369186866926ae674db14fee13b6230b3a5d6",
+        "memory_fingerprint": "e6bbf675f3eeb9b7",
+        "memory_layers_included": true,
+        "seed_policy": "fixed_seed",
+        "state_machine": "PLAN_ACT_OBSERVE_RESPOND",
+        "temperature_policy": "0.0"
+      },
+      "execution_stages": [
+        "inference",
+        "planner",
+        "preflight",
+        "reflection",
+        "safety",
+        "save",
+        "temporal"
+      ],
+      "expected_output": "SNAPSHOT_V0::Please help me prioritize these tasks.",
+      "index": 10,
+      "prompt": "Please help me prioritize these tasks.",
+      "should_end": false,
+      "stage_traces": [
+        {
+          "duration_ms": 5.394,
+          "error": null,
+          "stage": "temporal"
+        },
+        {
+          "duration_ms": 39.422,
+          "error": null,
+          "stage": "preflight"
+        },
+        {
+          "duration_ms": 12.006,
+          "error": null,
+          "stage": "planner"
+        },
+        {
+          "duration_ms": 21.238,
+          "error": null,
+          "stage": "inference"
+        },
+        {
+          "duration_ms": 21.094,
+          "error": null,
+          "stage": "safety"
+        },
+        {
+          "duration_ms": 16.846,
+          "error": null,
+          "stage": "reflection"
+        },
+        {
+          "duration_ms": 54.4,
+          "error": null,
+          "stage": "save"
+        }
+      ],
+      "tool_free": true,
+      "tool_ir": {
+        "execution_plan": [],
+        "executions": [],
+        "requests": []
+      },
+      "tool_results": []
+    },
+    {
+      "determinism": {
+        "agent_blackboard_final_fingerprint": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "agent_blackboard_seed_fingerprint": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "blackboard_fingerprint": "44136fa355b3678a",
+        "enforced": true,
+        "llm_model": "llama3.2",
+        "llm_provider": "ollama",
+        "lock_hash": "011ca4a9af659909c278575def16d60b1ac4b8e4900d2a44c0b5127e9c17cada",
+        "lock_id": "det-011ca4a9af659909",
+        "lock_version": 3,
+        "manifest": {
+          "dependency_versions": {
+            "ollama": "0.6.1",
+            "orjson": "3.11.8",
+            "pydantic": "2.12.5",
+            "python-dateutil": "2.9.0.post0"
+          },
+          "env_hash": "0d75218d2ca32563ea02cb06de2dd201ea20040a4185c0ccb896c41c7558b079",
+          "python_version": "3.13.7 (tags/v3.13.7:bcee1c3, Aug 14 2025, 14:15:11) [MSC v.1944 64 bit (AMD64)]",
+          "timezone": [
+            "Eastern Standard Time",
+            "Eastern Daylight Time"
+          ]
+        },
+        "manifest_hash": "b8c490c8e9e5971c70d2a9e6aa6369186866926ae674db14fee13b6230b3a5d6",
+        "memory_fingerprint": "d453c5dad13f3fb5",
+        "memory_layers_included": true,
+        "seed_policy": "fixed_seed",
+        "state_machine": "PLAN_ACT_OBSERVE_RESPOND",
+        "temperature_policy": "0.0"
+      },
+      "execution_stages": [
+        "inference",
+        "planner",
+        "preflight",
+        "reflection",
+        "safety",
+        "save",
+        "temporal"
+      ],
+      "expected_output": "SNAPSHOT_V0::I am trying to walk every evening.",
+      "index": 11,
+      "prompt": "I am trying to walk every evening.",
+      "should_end": false,
+      "stage_traces": [
+        {
+          "duration_ms": 5.701,
+          "error": null,
+          "stage": "temporal"
+        },
+        {
+          "duration_ms": 36.127,
+          "error": null,
+          "stage": "preflight"
+        },
+        {
+          "duration_ms": 11.126,
+          "error": null,
+          "stage": "planner"
+        },
+        {
+          "duration_ms": 20.049,
+          "error": null,
+          "stage": "inference"
+        },
+        {
+          "duration_ms": 21.259,
+          "error": null,
+          "stage": "safety"
+        },
+        {
+          "duration_ms": 18.096,
+          "error": null,
+          "stage": "reflection"
+        },
+        {
+          "duration_ms": 57.632,
+          "error": null,
+          "stage": "save"
+        }
+      ],
+      "tool_free": true,
+      "tool_ir": {
+        "execution_plan": [],
+        "executions": [],
+        "requests": []
+      },
+      "tool_results": []
+    },
+    {
+      "determinism": {
+        "agent_blackboard_final_fingerprint": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "agent_blackboard_seed_fingerprint": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "blackboard_fingerprint": "44136fa355b3678a",
+        "enforced": true,
+        "llm_model": "llama3.2",
+        "llm_provider": "ollama",
+        "lock_hash": "77c3ff247a6738499ed742bd59c39861b3efea8e4d890a5791b2fee214f7697b",
+        "lock_id": "det-77c3ff247a673849",
+        "lock_version": 3,
+        "manifest": {
+          "dependency_versions": {
+            "ollama": "0.6.1",
+            "orjson": "3.11.8",
+            "pydantic": "2.12.5",
+            "python-dateutil": "2.9.0.post0"
+          },
+          "env_hash": "0d75218d2ca32563ea02cb06de2dd201ea20040a4185c0ccb896c41c7558b079",
+          "python_version": "3.13.7 (tags/v3.13.7:bcee1c3, Aug 14 2025, 14:15:11) [MSC v.1944 64 bit (AMD64)]",
+          "timezone": [
+            "Eastern Standard Time",
+            "Eastern Daylight Time"
+          ]
+        },
+        "manifest_hash": "b8c490c8e9e5971c70d2a9e6aa6369186866926ae674db14fee13b6230b3a5d6",
+        "memory_fingerprint": "df3a7437fec488e2",
+        "memory_layers_included": true,
+        "seed_policy": "fixed_seed",
+        "state_machine": "PLAN_ACT_OBSERVE_RESPOND",
+        "temperature_policy": "0.0"
+      },
+      "execution_stages": [
+        "inference",
+        "planner",
+        "preflight",
+        "reflection",
+        "safety",
+        "save",
+        "temporal"
+      ],
+      "expected_output": "SNAPSHOT_V0::What should I do first after lunch?",
+      "index": 12,
+      "prompt": "What should I do first after lunch?",
+      "should_end": false,
+      "stage_traces": [
+        {
+          "duration_ms": 5.681,
+          "error": null,
+          "stage": "temporal"
+        },
+        {
+          "duration_ms": 37.772,
+          "error": null,
+          "stage": "preflight"
+        },
+        {
+          "duration_ms": 12.754,
+          "error": null,
+          "stage": "planner"
+        },
+        {
+          "duration_ms": 16.373,
+          "error": null,
+          "stage": "inference"
+        },
+        {
+          "duration_ms": 20.424,
+          "error": null,
+          "stage": "safety"
+        },
+        {
+          "duration_ms": 15.849,
+          "error": null,
+          "stage": "reflection"
+        },
+        {
+          "duration_ms": 55.497,
+          "error": null,
+          "stage": "save"
+        }
+      ],
+      "tool_free": true,
+      "tool_ir": {
+        "execution_plan": [],
+        "executions": [],
+        "requests": []
+      },
+      "tool_results": []
+    },
+    {
+      "determinism": {
+        "agent_blackboard_final_fingerprint": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "agent_blackboard_seed_fingerprint": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "blackboard_fingerprint": "44136fa355b3678a",
+        "enforced": true,
+        "llm_model": "llama3.2",
+        "llm_provider": "ollama",
+        "lock_hash": "cc30250cfb4fd51f0e657717cb0d8a3abd36a1aaf3d08105dff6223918f2ff81",
+        "lock_id": "det-cc30250cfb4fd51f",
+        "lock_version": 3,
+        "manifest": {
+          "dependency_versions": {
+            "ollama": "0.6.1",
+            "orjson": "3.11.8",
+            "pydantic": "2.12.5",
+            "python-dateutil": "2.9.0.post0"
+          },
+          "env_hash": "0d75218d2ca32563ea02cb06de2dd201ea20040a4185c0ccb896c41c7558b079",
+          "python_version": "3.13.7 (tags/v3.13.7:bcee1c3, Aug 14 2025, 14:15:11) [MSC v.1944 64 bit (AMD64)]",
+          "timezone": [
+            "Eastern Standard Time",
+            "Eastern Daylight Time"
+          ]
+        },
+        "manifest_hash": "b8c490c8e9e5971c70d2a9e6aa6369186866926ae674db14fee13b6230b3a5d6",
+        "memory_fingerprint": "74eb70efecfdb706",
+        "memory_layers_included": true,
+        "seed_policy": "fixed_seed",
+        "state_machine": "PLAN_ACT_OBSERVE_RESPOND",
+        "temperature_policy": "0.0"
+      },
+      "execution_stages": [
+        "inference",
+        "planner",
+        "preflight",
+        "reflection",
+        "safety",
+        "save",
+        "temporal"
+      ],
+      "expected_output": "SNAPSHOT_V0::I feel better than last week.",
+      "index": 13,
+      "prompt": "I feel better than last week.",
+      "should_end": false,
+      "stage_traces": [
+        {
+          "duration_ms": 5.373,
+          "error": null,
+          "stage": "temporal"
+        },
+        {
+          "duration_ms": 36.267,
+          "error": null,
+          "stage": "preflight"
+        },
+        {
+          "duration_ms": 10.794,
+          "error": null,
+          "stage": "planner"
+        },
+        {
+          "duration_ms": 18.326,
+          "error": null,
+          "stage": "inference"
+        },
+        {
+          "duration_ms": 20.083,
+          "error": null,
+          "stage": "safety"
+        },
+        {
+          "duration_ms": 17.081,
+          "error": null,
+          "stage": "reflection"
+        },
+        {
+          "duration_ms": 52.696,
+          "error": null,
+          "stage": "save"
+        }
+      ],
+      "tool_free": true,
+      "tool_ir": {
+        "execution_plan": [],
+        "executions": [],
+        "requests": []
+      },
+      "tool_results": []
+    },
+    {
+      "determinism": {
+        "agent_blackboard_final_fingerprint": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "agent_blackboard_seed_fingerprint": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "blackboard_fingerprint": "44136fa355b3678a",
+        "enforced": true,
+        "llm_model": "llama3.2",
+        "llm_provider": "ollama",
+        "lock_hash": "0f55ab14ef532afbc91aefc09bfa23b41404c2ccf4db041154ae2e0fa0e870a6",
+        "lock_id": "det-0f55ab14ef532afb",
+        "lock_version": 3,
+        "manifest": {
+          "dependency_versions": {
+            "ollama": "0.6.1",
+            "orjson": "3.11.8",
+            "pydantic": "2.12.5",
+            "python-dateutil": "2.9.0.post0"
+          },
+          "env_hash": "0d75218d2ca32563ea02cb06de2dd201ea20040a4185c0ccb896c41c7558b079",
+          "python_version": "3.13.7 (tags/v3.13.7:bcee1c3, Aug 14 2025, 14:15:11) [MSC v.1944 64 bit (AMD64)]",
+          "timezone": [
+            "Eastern Standard Time",
+            "Eastern Daylight Time"
+          ]
+        },
+        "manifest_hash": "b8c490c8e9e5971c70d2a9e6aa6369186866926ae674db14fee13b6230b3a5d6",
+        "memory_fingerprint": "9a7b6b828ac39c3d",
+        "memory_layers_included": true,
+        "seed_policy": "fixed_seed",
+        "state_machine": "PLAN_ACT_OBSERVE_RESPOND",
+        "temperature_policy": "0.0"
+      },
+      "execution_stages": [
+        "inference",
+        "planner",
+        "preflight",
+        "reflection",
+        "safety",
+        "save",
+        "temporal"
+      ],
+      "expected_output": "SNAPSHOT_V0::Can we keep this week simple?",
+      "index": 14,
+      "prompt": "Can we keep this week simple?",
+      "should_end": false,
+      "stage_traces": [
+        {
+          "duration_ms": 5.247,
+          "error": null,
+          "stage": "temporal"
+        },
+        {
+          "duration_ms": 36.355,
+          "error": null,
+          "stage": "preflight"
+        },
+        {
+          "duration_ms": 10.92,
+          "error": null,
+          "stage": "planner"
+        },
+        {
+          "duration_ms": 19.945,
+          "error": null,
+          "stage": "inference"
+        },
+        {
+          "duration_ms": 20.845,
+          "error": null,
+          "stage": "safety"
+        },
+        {
+          "duration_ms": 16.214,
+          "error": null,
+          "stage": "reflection"
+        },
+        {
+          "duration_ms": 56.395,
+          "error": null,
+          "stage": "save"
+        }
+      ],
+      "tool_free": true,
+      "tool_ir": {
+        "execution_plan": [],
+        "executions": [],
+        "requests": []
+      },
+      "tool_results": []
+    },
+    {
+      "determinism": {
+        "agent_blackboard_final_fingerprint": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "agent_blackboard_seed_fingerprint": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "blackboard_fingerprint": "44136fa355b3678a",
+        "enforced": true,
+        "llm_model": "llama3.2",
+        "llm_provider": "ollama",
+        "lock_hash": "514a0bc25ddf6310ee6d010d409cbf4c58c0a517d184c6e7805b4bb7837d4dc4",
+        "lock_id": "det-514a0bc25ddf6310",
+        "lock_version": 3,
+        "manifest": {
+          "dependency_versions": {
+            "ollama": "0.6.1",
+            "orjson": "3.11.8",
+            "pydantic": "2.12.5",
+            "python-dateutil": "2.9.0.post0"
+          },
+          "env_hash": "0d75218d2ca32563ea02cb06de2dd201ea20040a4185c0ccb896c41c7558b079",
+          "python_version": "3.13.7 (tags/v3.13.7:bcee1c3, Aug 14 2025, 14:15:11) [MSC v.1944 64 bit (AMD64)]",
+          "timezone": [
+            "Eastern Standard Time",
+            "Eastern Daylight Time"
+          ]
+        },
+        "manifest_hash": "b8c490c8e9e5971c70d2a9e6aa6369186866926ae674db14fee13b6230b3a5d6",
+        "memory_fingerprint": "9c67329ce5cf74b6",
+        "memory_layers_included": true,
+        "seed_policy": "fixed_seed",
+        "state_machine": "PLAN_ACT_OBSERVE_RESPOND",
+        "temperature_policy": "0.0"
+      },
+      "execution_stages": [
+        "inference",
+        "planner",
+        "preflight",
+        "reflection",
+        "safety",
+        "save",
+        "temporal"
+      ],
+      "expected_output": "SNAPSHOT_V0::I am worried about deadlines.",
+      "index": 15,
+      "prompt": "I am worried about deadlines.",
+      "should_end": false,
+      "stage_traces": [
+        {
+          "duration_ms": 5.761,
+          "error": null,
+          "stage": "temporal"
+        },
+        {
+          "duration_ms": 37.861,
+          "error": null,
+          "stage": "preflight"
+        },
+        {
+          "duration_ms": 11.0,
+          "error": null,
+          "stage": "planner"
+        },
+        {
+          "duration_ms": 20.644,
+          "error": null,
+          "stage": "inference"
+        },
+        {
+          "duration_ms": 18.363,
+          "error": null,
+          "stage": "safety"
+        },
+        {
+          "duration_ms": 17.219,
+          "error": null,
+          "stage": "reflection"
+        },
+        {
+          "duration_ms": 58.012,
+          "error": null,
+          "stage": "save"
+        }
+      ],
+      "tool_free": true,
+      "tool_ir": {
+        "execution_plan": [],
+        "executions": [],
+        "requests": []
+      },
+      "tool_results": []
+    },
+    {
+      "determinism": {
+        "agent_blackboard_final_fingerprint": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "agent_blackboard_seed_fingerprint": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "blackboard_fingerprint": "44136fa355b3678a",
+        "enforced": true,
+        "llm_model": "llama3.2",
+        "llm_provider": "ollama",
+        "lock_hash": "2756e98ce7dedde42b77968ca6766982883cbd12a4541bd8629728bedf3cb7c1",
+        "lock_id": "det-2756e98ce7dedde4",
+        "lock_version": 3,
+        "manifest": {
+          "dependency_versions": {
+            "ollama": "0.6.1",
+            "orjson": "3.11.8",
+            "pydantic": "2.12.5",
+            "python-dateutil": "2.9.0.post0"
+          },
+          "env_hash": "0d75218d2ca32563ea02cb06de2dd201ea20040a4185c0ccb896c41c7558b079",
+          "python_version": "3.13.7 (tags/v3.13.7:bcee1c3, Aug 14 2025, 14:15:11) [MSC v.1944 64 bit (AMD64)]",
+          "timezone": [
+            "Eastern Standard Time",
+            "Eastern Daylight Time"
+          ]
+        },
+        "manifest_hash": "b8c490c8e9e5971c70d2a9e6aa6369186866926ae674db14fee13b6230b3a5d6",
+        "memory_fingerprint": "74b525ba45f4a93a",
+        "memory_layers_included": true,
+        "seed_policy": "fixed_seed",
+        "state_machine": "PLAN_ACT_OBSERVE_RESPOND",
+        "temperature_policy": "0.0"
+      },
+      "execution_stages": [
+        "inference",
+        "planner",
+        "preflight",
+        "reflection",
+        "safety",
+        "save",
+        "temporal"
+      ],
+      "expected_output": "SNAPSHOT_V0::How can I stay calm during stress?",
+      "index": 16,
+      "prompt": "How can I stay calm during stress?",
+      "should_end": false,
+      "stage_traces": [
+        {
+          "duration_ms": 5.456,
+          "error": null,
+          "stage": "temporal"
+        },
+        {
+          "duration_ms": 36.731,
+          "error": null,
+          "stage": "preflight"
+        },
+        {
+          "duration_ms": 11.138,
+          "error": null,
+          "stage": "planner"
+        },
+        {
+          "duration_ms": 18.012,
+          "error": null,
+          "stage": "inference"
+        },
+        {
+          "duration_ms": 19.782,
+          "error": null,
+          "stage": "safety"
+        },
+        {
+          "duration_ms": 16.703,
+          "error": null,
+          "stage": "reflection"
+        },
+        {
+          "duration_ms": 55.37,
+          "error": null,
+          "stage": "save"
+        }
+      ],
+      "tool_free": true,
+      "tool_ir": {
+        "execution_plan": [],
+        "executions": [],
+        "requests": []
+      },
+      "tool_results": []
+    },
+    {
+      "determinism": {
+        "agent_blackboard_final_fingerprint": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "agent_blackboard_seed_fingerprint": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "blackboard_fingerprint": "44136fa355b3678a",
+        "enforced": true,
+        "llm_model": "llama3.2",
+        "llm_provider": "ollama",
+        "lock_hash": "a80f1d36524bc9d041992a050eba28e749a333fa92af6d72ca2d4e75371cd8fc",
+        "lock_id": "det-a80f1d36524bc9d0",
+        "lock_version": 3,
+        "manifest": {
+          "dependency_versions": {
+            "ollama": "0.6.1",
+            "orjson": "3.11.8",
+            "pydantic": "2.12.5",
+            "python-dateutil": "2.9.0.post0"
+          },
+          "env_hash": "0d75218d2ca32563ea02cb06de2dd201ea20040a4185c0ccb896c41c7558b079",
+          "python_version": "3.13.7 (tags/v3.13.7:bcee1c3, Aug 14 2025, 14:15:11) [MSC v.1944 64 bit (AMD64)]",
+          "timezone": [
+            "Eastern Standard Time",
+            "Eastern Daylight Time"
+          ]
+        },
+        "manifest_hash": "b8c490c8e9e5971c70d2a9e6aa6369186866926ae674db14fee13b6230b3a5d6",
+        "memory_fingerprint": "dde981674d521dfe",
+        "memory_layers_included": true,
+        "seed_policy": "fixed_seed",
+        "state_machine": "PLAN_ACT_OBSERVE_RESPOND",
+        "temperature_policy": "0.0"
+      },
+      "execution_stages": [
+        "inference",
+        "planner",
+        "preflight",
+        "reflection",
+        "safety",
+        "save",
+        "temporal"
+      ],
+      "expected_output": "SNAPSHOT_V0::Give me a practical next step.",
+      "index": 17,
+      "prompt": "Give me a practical next step.",
+      "should_end": false,
+      "stage_traces": [
+        {
+          "duration_ms": 5.533,
+          "error": null,
+          "stage": "temporal"
+        },
+        {
+          "duration_ms": 40.528,
+          "error": null,
+          "stage": "preflight"
+        },
+        {
+          "duration_ms": 11.128,
+          "error": null,
+          "stage": "planner"
+        },
+        {
+          "duration_ms": 20.782,
+          "error": null,
+          "stage": "inference"
+        },
+        {
+          "duration_ms": 22.16,
+          "error": null,
+          "stage": "safety"
+        },
+        {
+          "duration_ms": 19.192,
+          "error": null,
+          "stage": "reflection"
+        },
+        {
+          "duration_ms": 59.393,
+          "error": null,
+          "stage": "save"
+        }
+      ],
+      "tool_free": true,
+      "tool_ir": {
+        "execution_plan": [],
+        "executions": [],
+        "requests": []
+      },
+      "tool_results": []
+    },
+    {
+      "determinism": {
+        "agent_blackboard_final_fingerprint": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "agent_blackboard_seed_fingerprint": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "blackboard_fingerprint": "44136fa355b3678a",
+        "enforced": true,
+        "llm_model": "llama3.2",
+        "llm_provider": "ollama",
+        "lock_hash": "1923fc6706986d973641b25bc50f09b0683af72c6af075c58ea3e2f57303e1c8",
+        "lock_id": "det-1923fc6706986d97",
+        "lock_version": 3,
+        "manifest": {
+          "dependency_versions": {
+            "ollama": "0.6.1",
+            "orjson": "3.11.8",
+            "pydantic": "2.12.5",
+            "python-dateutil": "2.9.0.post0"
+          },
+          "env_hash": "0d75218d2ca32563ea02cb06de2dd201ea20040a4185c0ccb896c41c7558b079",
+          "python_version": "3.13.7 (tags/v3.13.7:bcee1c3, Aug 14 2025, 14:15:11) [MSC v.1944 64 bit (AMD64)]",
+          "timezone": [
+            "Eastern Standard Time",
+            "Eastern Daylight Time"
+          ]
+        },
+        "manifest_hash": "b8c490c8e9e5971c70d2a9e6aa6369186866926ae674db14fee13b6230b3a5d6",
+        "memory_fingerprint": "30133065f28b4344",
+        "memory_layers_included": true,
+        "seed_policy": "fixed_seed",
+        "state_machine": "PLAN_ACT_OBSERVE_RESPOND",
+        "temperature_policy": "0.0"
+      },
+      "execution_stages": [
+        "inference",
+        "planner",
+        "preflight",
+        "reflection",
+        "safety",
+        "save",
+        "temporal"
+      ],
+      "expected_output": "SNAPSHOT_V0::I appreciate your support.",
+      "index": 18,
+      "prompt": "I appreciate your support.",
+      "should_end": false,
+      "stage_traces": [
+        {
+          "duration_ms": 5.639,
+          "error": null,
+          "stage": "temporal"
+        },
+        {
+          "duration_ms": 39.441,
+          "error": null,
+          "stage": "preflight"
+        },
+        {
+          "duration_ms": 11.347,
+          "error": null,
+          "stage": "planner"
+        },
+        {
+          "duration_ms": 19.537,
+          "error": null,
+          "stage": "inference"
+        },
+        {
+          "duration_ms": 20.778,
+          "error": null,
+          "stage": "safety"
+        },
+        {
+          "duration_ms": 17.619,
+          "error": null,
+          "stage": "reflection"
+        },
+        {
+          "duration_ms": 57.555,
+          "error": null,
+          "stage": "save"
+        }
+      ],
+      "tool_free": true,
+      "tool_ir": {
+        "execution_plan": [],
+        "executions": [],
+        "requests": []
+      },
+      "tool_results": []
+    },
+    {
+      "determinism": {
+        "agent_blackboard_final_fingerprint": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "agent_blackboard_seed_fingerprint": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "blackboard_fingerprint": "44136fa355b3678a",
+        "enforced": true,
+        "llm_model": "llama3.2",
+        "llm_provider": "ollama",
+        "lock_hash": "76679102f5e98fe4bc526ac5cbb6113d52cd7c31cee31fcf1c097cf5152b7682",
+        "lock_id": "det-76679102f5e98fe4",
+        "lock_version": 3,
+        "manifest": {
+          "dependency_versions": {
+            "ollama": "0.6.1",
+            "orjson": "3.11.8",
+            "pydantic": "2.12.5",
+            "python-dateutil": "2.9.0.post0"
+          },
+          "env_hash": "0d75218d2ca32563ea02cb06de2dd201ea20040a4185c0ccb896c41c7558b079",
+          "python_version": "3.13.7 (tags/v3.13.7:bcee1c3, Aug 14 2025, 14:15:11) [MSC v.1944 64 bit (AMD64)]",
+          "timezone": [
+            "Eastern Standard Time",
+            "Eastern Daylight Time"
+          ]
+        },
+        "manifest_hash": "b8c490c8e9e5971c70d2a9e6aa6369186866926ae674db14fee13b6230b3a5d6",
+        "memory_fingerprint": "83f966b5efd156df",
+        "memory_layers_included": true,
+        "seed_policy": "fixed_seed",
+        "state_machine": "PLAN_ACT_OBSERVE_RESPOND",
+        "temperature_policy": "0.0"
+      },
+      "execution_stages": [
+        "inference",
+        "planner",
+        "preflight",
+        "reflection",
+        "safety",
+        "save",
+        "temporal"
+      ],
+      "expected_output": "SNAPSHOT_V0::Can you summarize my current goals?",
+      "index": 19,
+      "prompt": "Can you summarize my current goals?",
+      "should_end": false,
+      "stage_traces": [
+        {
+          "duration_ms": 5.409,
+          "error": null,
+          "stage": "temporal"
+        },
+        {
+          "duration_ms": 39.564,
+          "error": null,
+          "stage": "preflight"
+        },
+        {
+          "duration_ms": 14.238,
+          "error": null,
+          "stage": "planner"
+        },
+        {
+          "duration_ms": 23.458,
+          "error": null,
+          "stage": "inference"
+        },
+        {
+          "duration_ms": 26.033,
+          "error": null,
+          "stage": "safety"
+        },
+        {
+          "duration_ms": 17.448,
+          "error": null,
+          "stage": "reflection"
+        },
+        {
+          "duration_ms": 59.283,
+          "error": null,
+          "stage": "save"
+        }
+      ],
+      "tool_free": true,
+      "tool_ir": {
+        "execution_plan": [],
+        "executions": [],
+        "requests": []
+      },
+      "tool_results": []
+    },
+    {
+      "determinism": {
+        "agent_blackboard_final_fingerprint": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "agent_blackboard_seed_fingerprint": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "blackboard_fingerprint": "44136fa355b3678a",
+        "enforced": true,
+        "llm_model": "llama3.2",
+        "llm_provider": "ollama",
+        "lock_hash": "f612be41dd595bf24c6ba06aaa1574bc77b4340519e961c6f7164b2793f4245d",
+        "lock_id": "det-f612be41dd595bf2",
+        "lock_version": 3,
+        "manifest": {
+          "dependency_versions": {
+            "ollama": "0.6.1",
+            "orjson": "3.11.8",
+            "pydantic": "2.12.5",
+            "python-dateutil": "2.9.0.post0"
+          },
+          "env_hash": "0d75218d2ca32563ea02cb06de2dd201ea20040a4185c0ccb896c41c7558b079",
+          "python_version": "3.13.7 (tags/v3.13.7:bcee1c3, Aug 14 2025, 14:15:11) [MSC v.1944 64 bit (AMD64)]",
+          "timezone": [
+            "Eastern Standard Time",
+            "Eastern Daylight Time"
+          ]
+        },
+        "manifest_hash": "b8c490c8e9e5971c70d2a9e6aa6369186866926ae674db14fee13b6230b3a5d6",
+        "memory_fingerprint": "8a0dc34f86172b76",
+        "memory_layers_included": true,
+        "seed_policy": "fixed_seed",
+        "state_machine": "PLAN_ACT_OBSERVE_RESPOND",
+        "temperature_policy": "0.0"
+      },
+      "execution_stages": [
+        "inference",
+        "planner",
+        "preflight",
+        "reflection",
+        "safety",
+        "save",
+        "temporal"
+      ],
+      "expected_output": "SNAPSHOT_V0::Thanks Dad.",
+      "index": 20,
+      "prompt": "Thanks Dad.",
+      "should_end": false,
+      "stage_traces": [
+        {
+          "duration_ms": 5.82,
+          "error": null,
+          "stage": "temporal"
+        },
+        {
+          "duration_ms": 42.652,
+          "error": null,
+          "stage": "preflight"
+        },
+        {
+          "duration_ms": 13.983,
+          "error": null,
+          "stage": "planner"
+        },
+        {
+          "duration_ms": 20.933,
+          "error": null,
+          "stage": "inference"
+        },
+        {
+          "duration_ms": 21.111,
+          "error": null,
+          "stage": "safety"
+        },
+        {
+          "duration_ms": 17.141,
+          "error": null,
+          "stage": "reflection"
+        },
+        {
+          "duration_ms": 52.799,
+          "error": null,
+          "stage": "save"
+        }
+      ],
+      "tool_free": true,
+      "tool_ir": {
+        "execution_plan": [],
+        "executions": [],
+        "requests": []
+      },
+      "tool_results": []
+    }
+  ],
+  "session_id": "system-snapshot-v0"
+}

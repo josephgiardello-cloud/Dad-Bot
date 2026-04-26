@@ -4,7 +4,7 @@
 		{
 			"label": "Run Dad Bot",
 			"type": "shell",
-			"command": "c:/Users/josep/OneDrive/Desktop/Codes/Dad-Bot/.venv/Scripts/python.exe",
+			"command": "c:/Users/josep/OneDrive/Desktop/Dad-Bot/.venv/Scripts/python.exe",
 			"args": [
 				"Dad.py"
 			],

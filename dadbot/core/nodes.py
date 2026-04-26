@@ -5,11 +5,24 @@ import json
 import logging
 import re
 import asyncio
+import time
 from dataclasses import dataclass
 from typing import Any
 
 
 from dadbot.core.graph import TurnContext
+from dadbot.core.tool_ir import (
+    ToolEvent,
+    ToolEventLog,
+    ToolEventType,
+    ToolExecutionPlan,
+    ToolRequest,
+    build_execution_event,
+    deterministic_tool_id,
+    normalize_tool_results,
+    reduce_events_to_results,
+)
+from dadbot.core.tool_dag import build_dag_from_execution_plan
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +55,9 @@ _DELEGATION_MODES = frozenset({"sequential", "parallel"})
 
 #: Hard cap on delegated sub-task count per delegation block.
 _MAX_DELEGATION_SUBTASKS: int = 8
+
+_ALLOWED_ROUTED_TOOLS = frozenset({"memory_lookup"})
+_ALLOWED_MEMORY_INTENTS = frozenset({"goal_lookup", "session_memory_fetch"})
 
 
 @dataclass
@@ -132,6 +148,23 @@ def _dispatch_builtin_tool(name: str, args: dict, context: TurnContext) -> str:
         return str(getattr(temporal, "wall_time", "") if temporal else "")
     if name == "memory_lookup":
         query = str(args.get("query") or args.get("q") or "").strip()
+        scope = str(args.get("scope") or "").strip().lower()
+        if scope == "goals":
+            goals = list(context.state.get("session_goals") or [])
+            goal_ids = {str(v) for v in list(args.get("goal_ids") or [])}
+            if goal_ids:
+                goals = [g for g in goals if str((g or {}).get("id") or "") in goal_ids]
+            if goals:
+                return str(goals[:3])
+            return f"[No goal matches for: {query!r}]"
+        if scope == "session":
+            memories = list(context.state.get("memories") or [])
+            if memories:
+                return str(memories[:3])
+            rich_ctx = dict(context.state.get("rich_context") or {})
+            if rich_ctx:
+                return str(list(rich_ctx.items())[:3])
+            return f"[No session memory results for: {query!r}]"
         memories = list(context.state.get("memories") or [])
         rich_ctx = dict(context.state.get("rich_context") or {})
         if memories:
@@ -235,6 +268,247 @@ class MemoryNode(ContextBuilderNode):
     """Backward-compatible alias for legacy pipeline wiring."""
 
     name = "memory"
+
+
+class ToolRouterNode:
+    """Strict compiler for planner-emitted Tool IR requests.
+
+    Enforces validation, deduplication, and deterministic execution ordering.
+    """
+
+    name = "tool_router"
+
+    def _compile_request(self, raw: Any) -> tuple[ToolRequest | None, str | None]:
+        item = dict(raw or {})
+        tool_name = str(item.get("tool_name") or "").strip().lower()
+        if tool_name not in _ALLOWED_ROUTED_TOOLS:
+            return None, f"unsupported_tool:{tool_name or '<empty>'}"
+        args = item.get("args")
+        if not isinstance(args, dict):
+            return None, "invalid_args"
+        intent = str(item.get("intent") or "").strip().lower()
+        if intent not in _ALLOWED_MEMORY_INTENTS:
+            return None, f"invalid_intent:{intent or '<empty>'}"
+        expected_output = str(item.get("expected_output") or "").strip()
+        if not expected_output:
+            return None, "missing_expected_output"
+        try:
+            priority = int(item.get("priority") or 100)
+        except Exception:
+            return None, "invalid_priority"
+        if priority < 0:
+            return None, "invalid_priority"
+        return ToolRequest(
+            tool_name=tool_name,
+            args=dict(args),
+            intent=intent,
+            expected_output=expected_output,
+            priority=priority,
+        ), None
+
+    async def run(self, context: TurnContext) -> TurnContext:
+        tool_ir = dict(context.state.get("tool_ir") or {})
+        raw_requests = list(tool_ir.get("requests") or [])
+
+        compiled: list[ToolRequest] = []
+        rejected: list[dict[str, Any]] = []
+        seen: set[str] = set()
+
+        for index, raw in enumerate(raw_requests):
+            request, rejection = self._compile_request(raw)
+            if request is None:
+                rejected.append({"index": index, "reason": rejection or "invalid_request"})
+                continue
+            req_id = deterministic_tool_id(request.tool_name, request.args)
+            if req_id in seen:
+                rejected.append({"index": index, "reason": "duplicate_request", "deterministic_id": req_id})
+                continue
+            seen.add(req_id)
+            compiled.append(request)
+
+        compiled.sort(
+            key=lambda item: (
+                int(item.priority),
+                str(item.intent),
+                deterministic_tool_id(item.tool_name, item.args),
+            )
+        )
+        plan = ToolExecutionPlan(requests=compiled)
+
+        tool_ir["requests"] = [
+            {
+                "tool_name": request.tool_name,
+                "args": request.args,
+                "intent": request.intent,
+                "expected_output": request.expected_output,
+                "priority": request.priority,
+            }
+            for request in compiled
+        ]
+        tool_ir["execution_plan"] = [
+            {
+                "sequence": index,
+                "tool_name": request.tool_name,
+                "args": request.args,
+                "intent": request.intent,
+                "expected_output": request.expected_output,
+                "priority": request.priority,
+                "deterministic_id": deterministic_tool_id(request.tool_name, request.args),
+            }
+            for index, request in enumerate(plan.requests)
+        ]
+        tool_ir["compiler"] = {
+            "strict": True,
+            "compiled_count": len(compiled),
+            "rejected_count": len(rejected),
+            "rejected": rejected,
+            "ordering": "priority:intent:deterministic_id",
+        }
+        # Phase 1+2: emit canonical ToolDAG for downstream consumers.
+        execution_plan_for_dag = list(tool_ir.get("execution_plan") or [])
+        if execution_plan_for_dag:
+            dag = build_dag_from_execution_plan(execution_plan_for_dag)
+            tool_ir["tool_dag"] = dag.to_dict()
+        else:
+            tool_ir["tool_dag"] = None
+        context.metadata["tool_router_strict"] = True
+        context.metadata["tool_router_rejected_count"] = len(rejected)
+        context.state["tool_ir"] = tool_ir
+        return context
+
+
+class ToolExecutorNode:
+    """Deterministic source-of-truth tool execution boundary.
+
+    Guarantees:
+    - Executes only items present in ToolRouter output.
+    - No hidden or fallback tool execution paths.
+    - Every planned step emits a logged execution and tool result.
+    """
+
+    name = "tool_executor"
+
+    @staticmethod
+    def _canonical_execution_trace(
+        *, execution_plan: list[dict[str, Any]], executions: list[dict[str, Any]], results: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        return {
+            "execution_plan": [
+                {
+                    "sequence": int(item.get("sequence") or 0),
+                    "tool_name": str(item.get("tool_name") or ""),
+                    "intent": str(item.get("intent") or ""),
+                    "priority": int(item.get("priority") or 0),
+                    "deterministic_id": str(item.get("deterministic_id") or ""),
+                }
+                for item in execution_plan
+            ],
+            "executions": [
+                {
+                    "sequence": int(item.get("sequence") or 0),
+                    "tool_name": str(item.get("tool_name") or ""),
+                    "input_hash": str(item.get("input_hash") or ""),
+                    "status": str(item.get("status") or ""),
+                    "output": item.get("output"),
+                    "deterministic_id": str(item.get("deterministic_id") or ""),
+                }
+                for item in executions
+            ],
+            "results": normalize_tool_results(results),
+        }
+
+    async def run(self, context: TurnContext) -> TurnContext:
+        tool_ir = dict(context.state.get("tool_ir") or {})
+        execution_plan = list(tool_ir.get("execution_plan") or [])
+        executions: list[dict[str, Any]] = []
+        results: list[dict[str, Any]] = []
+
+        for item in execution_plan:
+            sequence = int(item.get("sequence") or 0)
+            tool_name = str(item.get("tool_name") or "").strip().lower()
+            args = item.get("args")
+            expected_id = str(item.get("deterministic_id") or "")
+
+            if tool_name not in _ALLOWED_ROUTED_TOOLS:
+                raise RuntimeError(f"ToolExecutorNode refuses unsupported tool: {tool_name!r}")
+            if not isinstance(args, dict):
+                raise RuntimeError(f"ToolExecutorNode received invalid args for tool: {tool_name!r}")
+
+            started = time.perf_counter()
+            try:
+                output = _dispatch_builtin_tool(tool_name, dict(args), context)
+                event = build_execution_event(tool_name, dict(args), output, "ok", started)
+            except Exception as exc:
+                event = build_execution_event(tool_name, dict(args), str(exc), "error", started)
+
+            if expected_id and expected_id != event.deterministic_id:
+                raise RuntimeError(
+                    "ToolExecutorNode deterministic_id mismatch for "
+                    f"{tool_name!r}: expected {expected_id!r}, got {event.deterministic_id!r}"
+                )
+
+            executions.append(
+                {
+                    "sequence": sequence,
+                    "tool_name": event.tool_name,
+                    "input_hash": event.input_hash,
+                    "output": event.output,
+                    "latency": event.latency,
+                    "status": event.status,
+                    "deterministic_id": event.deterministic_id,
+                }
+            )
+            results.append(
+                {
+                    "sequence": sequence,
+                    "tool_name": tool_name,
+                    "status": event.status,
+                    "output": event.output,
+                    "deterministic_id": event.deterministic_id,
+                }
+            )
+
+        if len(executions) != len(execution_plan):
+            raise RuntimeError(
+                "ToolExecutorNode execution log mismatch: "
+                f"planned={len(execution_plan)} executed={len(executions)}"
+            )
+
+        # Phase 3: build event log from execution records.
+        event_log = ToolEventLog()
+        for seq, (item, exec_rec) in enumerate(zip(execution_plan, executions)):
+            t_name = str(item.get("tool_name") or "")
+            t_args = dict(item.get("args") or {})
+            t_id = str(item.get("deterministic_id") or "")
+            # REQUESTED event
+            event_log.append(ToolEvent.requested(t_id, seq * 2, t_name, t_args))
+            # EXECUTED or FAILED event
+            if str(exec_rec.get("status") or "ok") == "error":
+                event_log.append(ToolEvent.failed(t_id, seq * 2 + 1, t_name, t_args, str(exec_rec.get("output") or "")))
+            else:
+                event_log.append(ToolEvent.executed(t_id, seq * 2 + 1, t_name, t_args, exec_rec.get("output"), "ok"))
+        tool_ir["event_stream"] = event_log.to_list()
+        tool_ir["event_stream_replay_hash"] = event_log.replay_hash()
+
+        tool_ir["executions"] = executions
+        tool_ir["executor"] = {
+            "strict": True,
+            "planned_count": len(execution_plan),
+            "executed_count": len(executions),
+            "all_outputs_logged": len(executions) == len(results),
+            "hidden_execution_paths": False,
+        }
+        context.state["tool_ir"] = tool_ir
+        context.state["tool_results"] = normalize_tool_results(results)
+
+        canonical_trace = self._canonical_execution_trace(
+            execution_plan=execution_plan,
+            executions=executions,
+            results=results,
+        )
+        context.metadata["tool_execution_graph_hash"] = _stable_sha256(canonical_trace)
+        context.metadata["tool_executor_strict"] = True
+        return context
 
 
 
@@ -732,7 +1006,12 @@ class InferenceNode:
                 reply_text = candidate[0] if isinstance(candidate, tuple) else str(candidate or "")
                 try:
                     critique = self._critique_engine.critique(
-                        reply_text, context.user_input, turn_plan, iteration
+                        reply_text,
+                        context.user_input,
+                        turn_plan,
+                        iteration,
+                        tool_ir=dict(context.state.get("tool_ir") or {}),
+                        tool_results=list(context.state.get("tool_results") or []),
                     )
                     context.state["critique_record"] = {
                         "iteration": iteration,
@@ -740,6 +1019,8 @@ class InferenceNode:
                         "passed": critique.passed,
                         "issues": critique.issues,
                         "revision_hint": critique.revision_hint,
+                        "tool_necessity_score": critique.tool_necessity_score,
+                        "tool_correctness_score": critique.tool_correctness_score,
                     }
                     if critique.passed:
                         break

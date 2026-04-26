@@ -1,0 +1,9 @@
+{
+  "checkpoint_every_node": false,
+  "cwd": "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot",
+  "env": {},
+  "python_executable": "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\.venv\\Scripts\\python.exe",
+  "python_version": "3.13.7 (tags/v3.13.7:bcee1c3, Aug 14 2025, 14:15:11) [MSC v.1944 64 bit (AMD64)]",
+  "strict_mode": false,
+  "tool_system_v2_enabled": false
+}

@@ -1,0 +1,15 @@
+{
+  "code_snapshot": {
+    "dependency_lockfile": "dependency_lock.txt",
+    "git_commit_hash": "6374e4b8063b1013d88b4be9f851edbfb806b7d2",
+    "runtime_config_dump": "runtime_config_dump.json"
+  },
+  "component_hashes": {
+    "critic_hash": "13ffb267dccf116692f52fbe52420e3e183f9b0be559d52bbb2ce828284e8634",
+    "graph_hash": "9154567345b823685486cd731966a2f5555066e437d36ba56367928a66b0fd9b",
+    "memory_schema_hash": "dca01b0be92d93f8d7ef51cbc058ffa38909bbe2ab8b079d1acf64089d07075c",
+    "planner_hash": "2e31fd54be5268f3918a60cea0c1f8852bc84ae5fa1fa47b01d3edfb4da886e9"
+  },
+  "snapshot_hash": "5c6a27f32e4ce915f03420d48dc565576f86e086771888c69db6ff609eb6f730",
+  "snapshot_name": "SYSTEM_SNAPSHOT_V0"
+}

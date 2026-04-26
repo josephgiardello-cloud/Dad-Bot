@@ -14,6 +14,11 @@ from dadbot.contracts import AttachmentList, FinalizedTurnResult
 from dadbot.core.control_plane import ExecutionControlPlane, SessionRegistry
 from dadbot.core.graph import TurnContext, TurnGraph, TurnTemporalAxis
 from dadbot.core.kernel import TurnKernel, bayesian_policy_gate
+from dadbot.core.system_identity import (
+    SYSTEM_SNAPSHOT_V0_HASH,
+    compute_component_hashes,
+    turn_graph_structure,
+)
 from dadbot.core.interfaces import (
     HealthService,
     InferenceService,
@@ -22,7 +27,17 @@ from dadbot.core.interfaces import (
     SafetyPolicyService,
     validate_pipeline_services,
 )
-from dadbot.core.nodes import ContextBuilderNode, HealthNode, InferenceNode, ReflectionNode, SafetyNode, SaveNode, TemporalNode
+from dadbot.core.nodes import (
+    ContextBuilderNode,
+    HealthNode,
+    InferenceNode,
+    ReflectionNode,
+    SafetyNode,
+    SaveNode,
+    TemporalNode,
+    ToolExecutorNode,
+    ToolRouterNode,
+)
 from dadbot.core.planner import PlannerNode
 from dadbot.core.critic import CritiqueEngine
 from dadbot.memory.goal_scorer import GoalAwareRanker
@@ -31,6 +46,10 @@ from dadbot.core.persistence import CheckpointIntegrityError, CheckpointNotFound
 from dadbot.registry import ServiceRegistry, boot_registry
 
 logger = logging.getLogger(__name__)
+
+
+# Rollback switch: keep baseline graph as default until tool-native path is promoted.
+TOOL_SYSTEM_V2_ENABLED: bool = False
 
 
 class DeterminismViolation(RuntimeError):
@@ -68,6 +87,47 @@ def _stable_sha256(payload: dict) -> str:
     ).hexdigest()
 
 
+def _tool_trace_hash(context: TurnContext) -> str:
+    tool_ir = dict(context.state.get("tool_ir") or {})
+    execution_plan = list(tool_ir.get("execution_plan") or [])
+    executions = list(tool_ir.get("executions") or [])
+    results = list(context.state.get("tool_results") or [])
+    payload = {
+        "execution_plan": [
+            {
+                "sequence": int(item.get("sequence") or 0),
+                "tool_name": str(item.get("tool_name") or ""),
+                "intent": str(item.get("intent") or ""),
+                "priority": int(item.get("priority") or 0),
+                "deterministic_id": str(item.get("deterministic_id") or ""),
+            }
+            for item in execution_plan
+        ],
+        "executions": [
+            {
+                "sequence": int(item.get("sequence") or 0),
+                "tool_name": str(item.get("tool_name") or ""),
+                "input_hash": str(item.get("input_hash") or ""),
+                "status": str(item.get("status") or ""),
+                "output": item.get("output"),
+                "deterministic_id": str(item.get("deterministic_id") or ""),
+            }
+            for item in executions
+        ],
+        "results": [
+            {
+                "sequence": int(item.get("sequence") or 0),
+                "tool_name": str(item.get("tool_name") or ""),
+                "status": str(item.get("status") or ""),
+                "output": item.get("output"),
+                "deterministic_id": str(item.get("deterministic_id") or ""),
+            }
+            for item in results
+        ],
+    }
+    return _stable_sha256(payload)
+
+
 class DadBotOrchestrator:
     """Refactored orchestrator that replaces monolithic turn orchestration."""
 
@@ -81,11 +141,13 @@ class DadBotOrchestrator:
         enable_observability: bool = True,
         checkpointer=None,
         checkpoint_every_node: bool = False,
+        tool_system_v2_enabled: bool = TOOL_SYSTEM_V2_ENABLED,
     ):
         self.bot = bot
         self._strict = strict
         self.checkpointer = checkpointer
         self.checkpoint_every_node = bool(checkpoint_every_node)
+        self.tool_system_v2_enabled = bool(tool_system_v2_enabled)
         self.registry = registry or boot_registry(config_path=config_path, bot=bot)
         if enable_observability:
             configure_exporter(enabled=True)
@@ -161,6 +223,9 @@ class DadBotOrchestrator:
         )
         # Stage 3: PlannerNode decomposes intent and detects new goals.
         graph.add_node("planner", PlannerNode())
+        if self.tool_system_v2_enabled:
+            graph.add_node("tool_router", ToolRouterNode())
+            graph.add_node("tool_executor", ToolExecutorNode())
         graph.add_node("inference", InferenceNode(llm, critique_engine=CritiqueEngine()))
         graph.add_node("safety", SafetyNode(safety))
         graph.add_node("reflection", ReflectionNode(reflection))
@@ -168,7 +233,12 @@ class DadBotOrchestrator:
 
         graph.set_edge("temporal", "preflight")
         graph.set_edge("preflight", "planner")
-        graph.set_edge("planner", "inference")
+        if self.tool_system_v2_enabled:
+            graph.set_edge("planner", "tool_router")
+            graph.set_edge("tool_router", "tool_executor")
+            graph.set_edge("tool_executor", "inference")
+        else:
+            graph.set_edge("planner", "inference")
         graph.set_edge("inference", "safety")
         graph.set_edge("safety", "reflection")
         graph.set_edge("reflection", "save")
@@ -200,8 +270,27 @@ class DadBotOrchestrator:
         blackboard_seed_fingerprint = _stable_sha256(blackboard_seed)
         context.metadata.setdefault("agent_blackboard_seed", dict(blackboard_seed))
         context.state.setdefault("agent_blackboard", dict(blackboard_seed))
+        context.state.setdefault(
+            "tool_ir",
+            {
+                "requests": [],
+                "execution_plan": [],
+                "executions": [],
+            },
+        )
+        context.state.setdefault("tool_results", [])
         blackboard = dict(context.state.get("agent_blackboard") or context.state.get("blackboard") or {})
         blackboard_fingerprint = _stable_sha256(blackboard)[:16]
+
+        component_hashes = compute_component_hashes(
+            tool_system_v2_enabled=bool(self.tool_system_v2_enabled)
+        )
+        context.metadata["system_identity"] = {
+            **component_hashes,
+            "system_snapshot_v0_hash": SYSTEM_SNAPSHOT_V0_HASH,
+            "tool_system_v2_enabled": bool(self.tool_system_v2_enabled),
+            "turn_graph": turn_graph_structure(tool_system_v2_enabled=bool(self.tool_system_v2_enabled)),
+        }
 
         # Environment manifest: fingerprints Python version, env vars, and dependency
         # versions so cross-machine replay drift is detected at the envelope level.
@@ -209,6 +298,7 @@ class DadBotOrchestrator:
         manifest_hash = _stable_sha256(manifest)
         context.metadata["determinism_manifest"] = manifest
 
+        base_tool_trace_hash = _tool_trace_hash(context)
         lock_payload = {
             "user_input": str(user_input or ""),
             "attachments": list(attachments or []),
@@ -221,6 +311,7 @@ class DadBotOrchestrator:
             "agent_blackboard_fingerprint": blackboard_fingerprint,
             "memory_fingerprint": memory_fingerprint,
             "determinism_manifest_hash": manifest_hash,
+            "tool_trace_hash": base_tool_trace_hash,
         }
         lock_hash = _stable_sha256(lock_payload)
         if self._strict:
@@ -238,6 +329,7 @@ class DadBotOrchestrator:
                 "memory_fingerprint": memory_fingerprint,
                 "blackboard_fingerprint": blackboard_fingerprint,
                 "agent_blackboard_seed_fingerprint": blackboard_seed_fingerprint,
+                "tool_trace_hash": base_tool_trace_hash,
                 "manifest": manifest,
                 "manifest_hash": manifest_hash,
             }
@@ -256,10 +348,13 @@ class DadBotOrchestrator:
                 "memory_fingerprint": memory_fingerprint,
                 "blackboard_fingerprint": blackboard_fingerprint,
                 "agent_blackboard_seed_fingerprint": blackboard_seed_fingerprint,
+                "tool_trace_hash": base_tool_trace_hash,
                 "manifest": manifest,
                 "manifest_hash": manifest_hash,
             }
         context.metadata.setdefault("determinism", determinism)
+        context.metadata["tool_system_v2_enabled"] = bool(self.tool_system_v2_enabled)
+        context.metadata["system_snapshot_v0_hash"] = SYSTEM_SNAPSHOT_V0_HASH
         context.metadata["checkpoint_every_node"] = bool(self.checkpoint_every_node)
         if self._strict:
             # Deterministic replay envelope: same lock hash -> same temporal axis.
@@ -402,7 +497,22 @@ class DadBotOrchestrator:
         final_blackboard_fingerprint = _stable_sha256(final_blackboard)
         determinism_meta = dict(context.metadata.get("determinism") or {})
         determinism_meta["agent_blackboard_final_fingerprint"] = final_blackboard_fingerprint
+
+        final_tool_trace_hash = str(context.metadata.get("tool_execution_graph_hash") or _tool_trace_hash(context))
+        determinism_meta["tool_trace_hash"] = final_tool_trace_hash
+        lock_hash = str(determinism_meta.get("lock_hash") or "")
+        lock_with_tools = _stable_sha256(
+            {
+                "lock_hash": lock_hash,
+                "tool_trace_hash": final_tool_trace_hash,
+                "tool_system_v2_enabled": bool(self.tool_system_v2_enabled),
+            }
+        )
+        determinism_meta["lock_hash_with_tools"] = lock_with_tools
+        determinism_meta["lock_id_with_tools"] = f"detx-{lock_with_tools[:16]}"
+
         context.metadata["determinism"] = determinism_meta
+        context.metadata["determinism_hash_with_tools"] = lock_with_tools
 
         session_state = session.setdefault("state", {})
         session_state["last_result"] = result

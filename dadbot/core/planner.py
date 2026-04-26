@@ -188,9 +188,43 @@ class PlannerNode:
             new_goal_detected=new_goal_detected,
         )
         context.state["turn_plan"] = plan.to_dict()
+
+        # Phase 3: Planner emits only MemoryTool requests behind the v2 switch.
+        if bool(context.metadata.get("tool_system_v2_enabled", False)):
+            tool_ir = dict(context.state.get("tool_ir") or {})
+            tool_ir["requests"] = self._memory_tool_requests(
+                user_input=user_input,
+                active_goal_ids=active_goal_ids,
+            )
+            context.state["tool_ir"] = tool_ir
+
         context.metadata["planner_ran"] = True
         context.metadata["intent_type"] = str(intent_type)
         return context
+
+    def _memory_tool_requests(self, *, user_input: str, active_goal_ids: list[str]) -> list[dict[str, Any]]:
+        goal_lookup = {
+            "tool_name": "memory_lookup",
+            "args": {
+                "query": user_input,
+                "scope": "goals",
+                "goal_ids": list(active_goal_ids),
+            },
+            "intent": "goal_lookup",
+            "expected_output": "goal_context",
+            "priority": 10,
+        }
+        session_fetch = {
+            "tool_name": "memory_lookup",
+            "args": {
+                "query": user_input,
+                "scope": "session",
+            },
+            "intent": "session_memory_fetch",
+            "expected_output": "session_memory_context",
+            "priority": 20,
+        }
+        return [goal_lookup, session_fetch]
 
     # ------------------------------------------------------------------
     # Classification helpers

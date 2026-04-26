@@ -1,0 +1,159 @@
+{
+  "critic": {
+    "hard_failure_rules": [
+      "reply_empty",
+      "fallback_detected"
+    ],
+    "max_loop_iterations": 2,
+    "pass_threshold": 0.65,
+    "strategy_checks": {
+      "empathy_first": [
+        "missing_empathy"
+      ],
+      "moderate_or_complex": [
+        "reply_too_brief"
+      ],
+      "question": [
+        "reply_misses_question"
+      ]
+    },
+    "tool_awareness_checks": {
+      "correctness": [
+        "tool_execution_mismatch",
+        "tool_result_mismatch",
+        "tool_correctness_low"
+      ],
+      "necessity": [
+        "tool_omission_detected",
+        "tool_unnecessary_usage"
+      ]
+    }
+  },
+  "determinism_manifest_logic": {
+    "lock_payload_keys": [
+      "user_input",
+      "attachments",
+      "llm_provider",
+      "llm_model",
+      "state_machine",
+      "agent_blackboard_seed",
+      "agent_blackboard_seed_fingerprint",
+      "agent_blackboard",
+      "agent_blackboard_fingerprint",
+      "memory_fingerprint",
+      "determinism_manifest_hash",
+      "tool_trace_hash"
+    ],
+    "manifest_keys": [
+      "python_version",
+      "env_hash",
+      "dependency_versions",
+      "timezone"
+    ],
+    "post_execution_hash_keys": [
+      "lock_hash",
+      "tool_trace_hash",
+      "tool_system_v2_enabled"
+    ],
+    "strict_temporal_mode": "TurnTemporalAxis.from_lock_hash"
+  },
+  "memory": {
+    "goal_ops": [
+      "upsert_goal",
+      "complete_goal",
+      "abandon_goal"
+    ],
+    "ledger_ops": [
+      "append_history",
+      "record_turn_state",
+      "sync_thread_snapshot",
+      "clear_turn_context",
+      "schedule_maintenance",
+      "health_snapshot",
+      "capability_audit_event"
+    ],
+    "memory_ops": [
+      "save_mood_state"
+    ],
+    "mutation_kinds": [
+      "memory",
+      "relationship",
+      "graph",
+      "ledger",
+      "goal"
+    ],
+    "relationship_ops": [
+      "update"
+    ],
+    "turn_state_keys": [
+      "memories",
+      "rich_context",
+      "session_goals",
+      "new_goals",
+      "tool_ir",
+      "tool_results"
+    ]
+  },
+  "planner": {
+    "complexity": [
+      "simple",
+      "moderate",
+      "complex"
+    ],
+    "intent_type": [
+      "statement",
+      "question",
+      "request",
+      "emotional",
+      "goal_oriented",
+      "multi_step",
+      "casual"
+    ],
+    "strategy": [
+      "direct_answer",
+      "empathy_first",
+      "task_plan",
+      "goal_track",
+      "clarify"
+    ]
+  },
+  "turn_graph": {
+    "edges": [
+      [
+        "temporal",
+        "preflight"
+      ],
+      [
+        "preflight",
+        "planner"
+      ],
+      [
+        "planner",
+        "inference"
+      ],
+      [
+        "inference",
+        "safety"
+      ],
+      [
+        "safety",
+        "reflection"
+      ],
+      [
+        "reflection",
+        "save"
+      ]
+    ],
+    "nodes": [
+      "temporal",
+      "preflight",
+      "planner",
+      "inference",
+      "safety",
+      "reflection",
+      "save"
+    ],
+    "tool_system_v2_enabled": false,
+    "version": "v0"
+  }
+}
