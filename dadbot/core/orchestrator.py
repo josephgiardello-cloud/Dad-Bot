@@ -23,6 +23,9 @@ from dadbot.core.interfaces import (
     validate_pipeline_services,
 )
 from dadbot.core.nodes import ContextBuilderNode, HealthNode, InferenceNode, ReflectionNode, SafetyNode, SaveNode, TemporalNode
+from dadbot.core.planner import PlannerNode
+from dadbot.core.critic import CritiqueEngine
+from dadbot.memory.goal_scorer import GoalAwareRanker
 from dadbot.core.observability import CorrelationContext, configure_exporter
 from dadbot.registry import ServiceRegistry, boot_registry
 
@@ -75,9 +78,11 @@ class DadBotOrchestrator:
         bot=None,
         strict: bool = False,
         enable_observability: bool = True,
+        checkpointer=None,
     ):
         self.bot = bot
         self._strict = strict
+        self.checkpointer = checkpointer
         self.registry = registry or boot_registry(config_path=config_path, bot=bot)
         if enable_observability:
             configure_exporter(enabled=True)
@@ -139,16 +144,19 @@ class DadBotOrchestrator:
             "preflight",
             (
                 HealthNode(health),
-                ContextBuilderNode(memory),
+                ContextBuilderNode(memory, goal_ranker=GoalAwareRanker()),
             ),
         )
-        graph.add_node("inference", InferenceNode(llm))
+        # Stage 3: PlannerNode decomposes intent and detects new goals.
+        graph.add_node("planner", PlannerNode())
+        graph.add_node("inference", InferenceNode(llm, critique_engine=CritiqueEngine()))
         graph.add_node("safety", SafetyNode(safety))
         graph.add_node("reflection", ReflectionNode(reflection))
         graph.add_node("save", SaveNode(storage))
 
         graph.set_edge("temporal", "preflight")
-        graph.set_edge("preflight", "inference")
+        graph.set_edge("preflight", "planner")
+        graph.set_edge("planner", "inference")
         graph.set_edge("inference", "safety")
         graph.set_edge("safety", "reflection")
         graph.set_edge("reflection", "save")
@@ -265,6 +273,39 @@ class DadBotOrchestrator:
             or ""
         ).strip()
         context = self._build_turn_context(job.user_input, attachments=job.attachments)
+        
+        # Load checkpoint if persister is available (verify hash-chain and manifest)
+        session_id = str(session.get("session_id") or job.session_id)
+        if self.checkpointer:
+            try:
+                from dadbot.core.persistence import CheckpointNotFoundError
+                prev_checkpoint = self.checkpointer.load_checkpoint(session_id)
+                # Checkpoint loaded successfully; verify manifest consistency
+                prev_manifest = prev_checkpoint.get("manifest", {})
+                current_manifest = dict(context.metadata.get("determinism_manifest") or {})
+                if prev_manifest.get("env_hash") != current_manifest.get("env_hash"):
+                    logger.warning(
+                        "Env drift after checkpoint load: %r -> %r",
+                        prev_manifest.get("env_hash"),
+                        current_manifest.get("env_hash"),
+                    )
+                if prev_manifest.get("python_version") != current_manifest.get("python_version"):
+                    logger.warning(
+                        "Python version drift after checkpoint load: %r -> %r",
+                        prev_manifest.get("python_version"),
+                        current_manifest.get("python_version"),
+                    )
+                logger.debug(f"Loaded checkpoint for session={session_id}")
+            except CheckpointNotFoundError:
+                logger.debug(f"No previous checkpoint for session={session_id} (first turn or new session)")
+            except Exception as e:
+                logger.error(f"Checkpoint load failed (non-fatal): {e}")
+        
+        # Load persisted goals into context so PlannerNode and ContextBuilderNode
+        # can use goal-aware ranking and intent matching.
+        context.state["session_goals"] = list(
+            (session.get("state") or {}).get("goals") or []
+        )
         # Strict-mode environment drift check: compare current manifest against the
         # manifest stored from the previous turn in this session.  Any change in
         # env-var keys, Python version, or timezone raises DeterminismViolation.
@@ -325,6 +366,16 @@ class DadBotOrchestrator:
 
         session_state = session.setdefault("state", {})
         session_state["last_result"] = result
+        # Persist new goals detected this turn into session state.
+        new_goals = list(context.state.get("new_goals") or [])
+        if new_goals:
+            current_goals: list = list(session_state.get("goals") or [])
+            existing_ids = {g["id"] for g in current_goals if isinstance(g, dict) and "id" in g}
+            for goal_dict in new_goals:
+                if isinstance(goal_dict, dict) and goal_dict.get("id") not in existing_ids:
+                    current_goals.append(goal_dict)
+                    existing_ids.add(goal_dict.get("id"))
+            session_state["goals"] = current_goals
         session_state["last_trace_id"] = context.trace_id
         session_state["last_turn_health_state"] = dict(context.state.get("turn_health_state") or {})
         session_state["last_turn_ux_feedback"] = dict(context.state.get("ux_feedback") or {})
@@ -334,6 +385,32 @@ class DadBotOrchestrator:
         session_state["last_arbitration_log"] = list(context.state.get("delegation_arbitration_log") or [])
         session_state["last_determinism"] = dict(context.metadata.get("determinism") or {})
         session_state["last_determinism_manifest"] = dict(context.metadata.get("determinism_manifest") or {})
+        
+        # Save checkpoint if persister is available
+        if self.checkpointer:
+            try:
+                checkpoint = {
+                    "checkpoint_hash": context.state.get("last_checkpoint_hash", ""),
+                    "prev_checkpoint_hash": context.state.get("prev_checkpoint_hash", ""),
+                    "status": "completed",
+                    "error": None,
+                    "state": session_state,
+                    "metadata": dict(context.metadata or {}),
+                }
+                manifest = dict(context.metadata.get("determinism_manifest") or {})
+                self.checkpointer.save_checkpoint(
+                    session_id=session_id,
+                    trace_id=context.trace_id,
+                    checkpoint=checkpoint,
+                    manifest=manifest,
+                )
+                # Prune old checkpoints periodically (keep last 10)
+                if int(context.state.get("turn_index", 1)) % 10 == 0:
+                    self.checkpointer.prune_old_checkpoints(session_id, keep_count=10)
+                logger.debug(f"Checkpoint saved: session={session_id}, trace={context.trace_id}")
+            except Exception as e:
+                logger.error(f"Checkpoint save failed (non-fatal): {e}")
+        
         return result
 
     async def handle_turn(

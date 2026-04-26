@@ -185,8 +185,9 @@ class ContextBuilderNode:
 
     name = "context_builder"
 
-    def __init__(self, memory_manager: Any):
+    def __init__(self, memory_manager: Any, *, goal_ranker: Any = None):
         self.mgr = memory_manager
+        self._goal_ranker = goal_ranker
 
     async def run(self, context: TurnContext) -> TurnContext:
         if getattr(context, "temporal", None) is None:
@@ -195,6 +196,15 @@ class ContextBuilderNode:
             try:
                 context.state.setdefault("temporal", context.temporal_snapshot())
                 context.state["memories"] = await self.mgr.query(context.user_input)
+                # Goal-aware memory re-ranking: boost entries relevant to active goals.
+                active_goals = list(context.state.get("session_goals") or [])
+                if active_goals and self._goal_ranker is not None:
+                    try:
+                        context.state["memories"] = self._goal_ranker.rerank(
+                            context.state["memories"], active_goals
+                        )
+                    except Exception as exc:
+                        logger.warning("GoalAwareRanker.rerank failed (non-fatal): %s", exc)
             except Exception as exc:
                 logger.warning("MemoryNode.query failed (non-fatal): %s", exc)
             return context
@@ -243,8 +253,16 @@ class InferenceNode:
     silently routing through a legacy path.
     """
 
-    def __init__(self, llm_manager: Any):
+    def __init__(
+        self,
+        llm_manager: Any,
+        *,
+        critique_engine: Any = None,
+        max_loop_iterations: int = 2,
+    ) -> None:
         self.mgr = llm_manager
+        self._critique_engine = critique_engine
+        self._max_loop_iterations = max(1, int(max_loop_iterations))
 
     @staticmethod
     def _fallback_candidate(message: str) -> tuple[str, bool]:
@@ -604,17 +622,44 @@ class InferenceNode:
                 if callable(set_deterministic):
                     set_deterministic(True)
         rich_context = context.state.get("rich_context", {})
-        try:
-            raw_result = await run_agent(context, rich_context)
-            # Resolve structured blocks (delegation / reasoning / tool call).
-            context.state["candidate"] = await self._resolve_candidate(
-                context, raw_result, depth=0
-            )
-        except Exception as exc:
-            logger.error("InferenceNode.run_agent failed: %s", exc)
-            context.state["candidate"] = self._fallback_candidate(
-                "Something went sideways. Try again in a moment."
-            )
+        candidate: Any = None
+        for iteration in range(self._max_loop_iterations):
+            try:
+                raw_result = await run_agent(context, rich_context)
+                # Resolve structured blocks (delegation / reasoning / tool call).
+                candidate = await self._resolve_candidate(context, raw_result, depth=0)
+            except Exception as exc:
+                logger.error("InferenceNode.run_agent failed (iteration %d): %s", iteration, exc)
+                candidate = self._fallback_candidate("Something went sideways. Try again in a moment.")
+                break
+
+            # Critique loop: evaluate the candidate against the turn plan.
+            if self._critique_engine is not None and iteration < self._max_loop_iterations - 1:
+                turn_plan = dict(context.state.get("turn_plan") or {})
+                reply_text = candidate[0] if isinstance(candidate, tuple) else str(candidate or "")
+                try:
+                    critique = self._critique_engine.critique(
+                        reply_text, context.user_input, turn_plan, iteration
+                    )
+                    context.state["critique_record"] = {
+                        "iteration": iteration,
+                        "score": critique.score,
+                        "passed": critique.passed,
+                        "issues": critique.issues,
+                        "revision_hint": critique.revision_hint,
+                    }
+                    if critique.passed:
+                        break
+                    # Inject revision hint so the agent can read it on re-run.
+                    context.state["_critique_revision_context"] = critique.revision_hint
+                except Exception as exc:
+                    logger.warning("CritiqueEngine.critique failed (non-fatal): %s", exc)
+                    break
+            else:
+                break
+
+        context.state.pop("_critique_revision_context", None)
+        context.state["candidate"] = candidate
         return context
 class SafetyNode:
     """Applies TONY score tone constraints and reply policy enforcement."""

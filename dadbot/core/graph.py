@@ -34,6 +34,7 @@ _INTENT_REQUIRED_PAYLOAD_KEYS: dict[str, list[str]] = {
     "relationship": ["temporal"],
     "graph": [],
     "ledger": ["temporal"],
+    "goal": [],
 }
 
 
@@ -129,6 +130,9 @@ class MutationIntent:
         elif self.type is MutationKind.LEDGER:
             if op and op not in {item.value for item in LedgerMutationOp}:
                 raise RuntimeError(f"Unsupported ledger mutation op: {op!r}")
+        elif self.type is MutationKind.GOAL:
+            if op and op not in {item.value for item in GoalMutationOp}:
+                raise RuntimeError(f"Unsupported goal mutation op: {op!r}")
         # Schema validation: enforce required fields per mutation kind.
         _validate_mutation_intent_payload(self)
         # Payload content hash for audit/replay integrity.
@@ -142,6 +146,7 @@ class MutationKind(StrEnum):
     RELATIONSHIP = "relationship"
     GRAPH = "graph"
     LEDGER = "ledger"
+    GOAL = "goal"
 
 
 class MemoryMutationOp(StrEnum):
@@ -160,6 +165,13 @@ class LedgerMutationOp(StrEnum):
     SCHEDULE_MAINTENANCE = "schedule_maintenance"
     HEALTH_SNAPSHOT = "health_snapshot"
     CAPABILITY_AUDIT_EVENT = "capability_audit_event"
+
+
+class GoalMutationOp(StrEnum):
+    UPSERT_GOAL = "upsert_goal"
+    COMPLETE_GOAL = "complete_goal"
+    ABANDON_GOAL = "abandon_goal"
+
 
 
 class MutationQueue:
