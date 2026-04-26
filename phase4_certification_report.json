@@ -1,0 +1,163 @@
+{
+  "phase4_certification": "PASS",
+  "score": 100,
+  "pass_threshold": 90,
+  "failures": [],
+  "risk_flags": [],
+  "total_duration_s": 90.64,
+  "results": {
+    "long_horizon": {
+      "name": "long_horizon",
+      "passed": true,
+      "score": 25,
+      "max_score": 25,
+      "metrics": {
+        "turns_attempted": 50,
+        "turns_completed": 50,
+        "pipeline_completion_rate": 1.0,
+        "avg_turn_latency_ms": 270.9,
+        "max_turn_latency_ms": 345.5,
+        "memory_sizes_kb": [
+          5.0
+        ],
+        "queue_depths": [
+          0
+        ],
+        "health_checks": [
+          "green"
+        ]
+      },
+      "failures": [],
+      "risk_flags": [],
+      "duration_s": 13.548
+    },
+    "adversarial": {
+      "name": "adversarial",
+      "passed": true,
+      "score": 20,
+      "max_score": 20,
+      "metrics": {
+        "cases": 19,
+        "completed": 19,
+        "fatal_errors": 0
+      },
+      "failures": [],
+      "risk_flags": [],
+      "duration_s": 31.524
+    },
+    "concurrency": {
+      "name": "concurrency",
+      "passed": true,
+      "score": 20,
+      "max_score": 20,
+      "metrics": {
+        "threads": 10,
+        "total_turns": 10,
+        "ok_turns": 10,
+        "completion_rate": 1.0
+      },
+      "failures": [],
+      "risk_flags": [],
+      "duration_s": 3.522
+    },
+    "crash_recovery": {
+      "name": "crash_recovery",
+      "passed": true,
+      "score": 15,
+      "max_score": 15,
+      "metrics": {
+        "scenarios": 4
+      },
+      "failures": [],
+      "risk_flags": [],
+      "duration_s": 3.002
+    },
+    "memory_growth": {
+      "name": "memory_growth",
+      "passed": true,
+      "score": 10,
+      "max_score": 10,
+      "metrics": {
+        "turns": 50,
+        "memory_samples_bytes": [
+          86136,
+          90601,
+          95071,
+          99544,
+          104012,
+          108482,
+          112953,
+          117423,
+          121892,
+          126363
+        ],
+        "history_lengths": [
+          172,
+          182,
+          192,
+          202,
+          212,
+          222,
+          232,
+          242,
+          252,
+          262
+        ],
+        "growth_ratio": 1.47
+      },
+      "failures": [],
+      "risk_flags": [],
+      "duration_s": 21.174
+    },
+    "tool_failure": {
+      "name": "tool_failure",
+      "passed": true,
+      "score": 5,
+      "max_score": 5,
+      "metrics": {
+        "scenarios": 4
+      },
+      "failures": [],
+      "risk_flags": [],
+      "duration_s": 2.455
+    },
+    "large_replay": {
+      "name": "large_replay",
+      "passed": true,
+      "score": 10,
+      "max_score": 10,
+      "metrics": {
+        "turns": 30,
+        "run1_completion_rate": 1.0,
+        "run2_completion_rate": 1.0,
+        "step_fingerprints_match": true
+      },
+      "failures": [],
+      "risk_flags": [],
+      "duration_s": 15.417
+    }
+  },
+  "wall_time_s": 93.48,
+  "phase4_closure_summary": {
+    "status": "complete",
+    "date": "2026-04-26",
+    "remaining_items_completed": [
+      "Delegation Safety & Depth Guard Hardening",
+      "Blackboard Consistency & Determinism",
+      "Parallel vs Sequential Performance Test",
+      "Delegation Visibility in Final Response",
+      "Error Propagation in Sub-Tasks",
+      "Property Suite Polish"
+    ],
+    "validation": {
+      "fast_gate_profile": "50/50/30/10",
+      "fast_gate_passed": true,
+      "property_suite": {
+        "passed": 19,
+        "failed": 0
+      },
+      "transient_failures_observed": 0
+    },
+    "declaration": "Phase 4 is complete and ready for closure."
+  }
+}

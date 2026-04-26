@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -22,6 +23,12 @@ from dadbot.core.observability import CorrelationContext, configure_exporter
 from dadbot.registry import ServiceRegistry, boot_registry
 
 logger = logging.getLogger(__name__)
+
+
+def _stable_sha256(payload: dict) -> str:
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
 
 
 class DadBotOrchestrator:
@@ -133,33 +140,78 @@ class DadBotOrchestrator:
         runtime_bot = getattr(llm_service, "bot", None)
         llm_provider = str(getattr(runtime_bot, "LLM_PROVIDER", "ollama") or "ollama")
         llm_model = str(getattr(runtime_bot, "LLM_MODEL", "") or "")
+
+        # Determinism-safe, per-turn blackboard seed and fingerprint.
+        blackboard_seed: dict[str, str] = {}
+        blackboard_seed_fingerprint = _stable_sha256(blackboard_seed)
+        context.metadata.setdefault("agent_blackboard_seed", dict(blackboard_seed))
+        context.state.setdefault("agent_blackboard", dict(blackboard_seed))
+
         lock_payload = {
             "user_input": str(user_input or ""),
             "attachments": list(attachments or []),
             "llm_provider": llm_provider,
             "llm_model": llm_model,
             "state_machine": "PLAN_ACT_OBSERVE_RESPOND",
+            "agent_blackboard_seed": blackboard_seed,
+            "agent_blackboard_seed_fingerprint": blackboard_seed_fingerprint,
         }
-        lock_hash = hashlib.sha256(json.dumps(lock_payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()
-        context.metadata.setdefault(
-            "determinism",
-            {
+        lock_hash = _stable_sha256(lock_payload)
+        if self._strict:
+            determinism = {
                 "state_machine": "PLAN_ACT_OBSERVE_RESPOND",
                 "enforced": True,
                 "llm_provider": llm_provider,
                 "llm_model": llm_model,
-                "seed_policy": "unseeded",
-                "temperature_policy": "runtime_default",
-                "lock_version": 1,
+                "seed_policy": "fixed_seed",
+                "temperature_policy": "0.0",
+                "lock_version": 3,
                 "lock_hash": lock_hash,
                 "lock_id": f"det-{lock_hash[:16]}",
-            },
-        )
+                "memory_layers_included": True,
+                "memory_fingerprint": str(getattr(self.bot, "_last_memory_fingerprint", "") or ""),
+                "agent_blackboard_seed_fingerprint": blackboard_seed_fingerprint,
+            }
+        else:
+            determinism = {
+                "state_machine": "PLAN_ACT_OBSERVE_RESPOND",
+                "enforced": False,
+                "llm_provider": llm_provider,
+                "llm_model": llm_model,
+                "seed_policy": "unseeded",
+                "temperature_policy": "runtime_default",
+                "lock_version": 3,
+                "lock_hash": lock_hash,
+                "lock_id": f"det-{lock_hash[:16]}",
+                "memory_layers_included": True,
+                "agent_blackboard_seed_fingerprint": blackboard_seed_fingerprint,
+            }
+        context.metadata.setdefault("determinism", determinism)
         if self._strict:
             # Deterministic replay envelope: same lock hash -> same temporal axis.
             context.temporal = TurnTemporalAxis.from_lock_hash(lock_hash)
             context.metadata["temporal"] = context.temporal_snapshot()
+            if runtime_bot is not None:
+                setattr(runtime_bot, "LLM_TEMPERATURE", 0.0)
+                setattr(runtime_bot, "LLM_SEED", 42)
+                set_deterministic = getattr(runtime_bot, "set_deterministic", None)
+                if callable(set_deterministic):
+                    set_deterministic(True)
         return context
+
+    def _update_bot_last_state_safely(self, context: TurnContext) -> None:
+        """Thread-safe update of legacy bot state mirrored from TurnContext."""
+        if self.bot is None:
+            return
+        lock = getattr(self.bot, "_state_lock", None) or getattr(self.bot, "_session_lock", None)
+        if lock is None:
+            lock = contextlib.nullcontext()
+        with lock:
+            self.bot._last_turn_health_state = dict(context.state.get("turn_health_state") or {})
+            self.bot._last_turn_ux_feedback = dict(context.state.get("ux_feedback") or {})
+            self.bot._last_turn_health_evidence = dict(context.state.get("turn_health_evidence") or {})
+            self.bot._last_capability_audit_report = dict(context.state.get("capability_audit_report") or {})
+            self.bot._last_commit_id = context.state.get("last_commit_id")
 
     async def _execute_job(self, session: dict, job) -> FinalizedTurnResult:
         correlation_id = str(
@@ -193,16 +245,29 @@ class DadBotOrchestrator:
             try:
                 context.metadata["audit_mode"] = bool(getattr(job, "metadata", {}).get("audit_mode", False))
                 result = await self.graph.execute(context, audit_mode=bool(context.metadata.get("audit_mode")))
+            except Exception as exc:
+                logger.exception("Turn execution failed")
+                context.state["error"] = str(exc)
+                result = ("", False)
             finally:
-                if self.bot is not None:
-                    self.bot._last_turn_health_state = dict(context.state.get("turn_health_state") or {})
-                    self.bot._last_turn_ux_feedback = dict(context.state.get("ux_feedback") or {})
-                    self.bot._last_turn_health_evidence = dict(context.state.get("turn_health_evidence") or {})
-                    self.bot._last_capability_audit_report = dict(context.state.get("capability_audit_report") or {})
-        session.setdefault("state", {})["last_result"] = result
-        session.setdefault("state", {})["last_trace_id"] = context.trace_id
-        session.setdefault("state", {})["last_turn_health_state"] = dict(context.state.get("turn_health_state") or {})
-        session.setdefault("state", {})["last_turn_ux_feedback"] = dict(context.state.get("ux_feedback") or {})
+                self._update_bot_last_state_safely(context)
+                self._last_turn_context = context
+        final_blackboard = dict(context.state.get("agent_blackboard") or {})
+        final_blackboard_fingerprint = _stable_sha256(final_blackboard)
+        determinism_meta = dict(context.metadata.get("determinism") or {})
+        determinism_meta["agent_blackboard_final_fingerprint"] = final_blackboard_fingerprint
+        context.metadata["determinism"] = determinism_meta
+
+        session_state = session.setdefault("state", {})
+        session_state["last_result"] = result
+        session_state["last_trace_id"] = context.trace_id
+        session_state["last_turn_health_state"] = dict(context.state.get("turn_health_state") or {})
+        session_state["last_turn_ux_feedback"] = dict(context.state.get("ux_feedback") or {})
+        session_state["last_memory_full_history_id"] = str(context.state.get("memory_full_history_id") or "")
+        session_state["last_memory_structured"] = dict(context.state.get("memory_structured") or {})
+        session_state["last_agent_blackboard"] = final_blackboard
+        session_state["last_arbitration_log"] = list(context.state.get("delegation_arbitration_log") or [])
+        session_state["last_determinism"] = dict(context.metadata.get("determinism") or {})
         return result
 
     async def handle_turn(
@@ -248,7 +313,8 @@ class DadBotOrchestrator:
         coro = self._run_graph_turn_async(user_input, attachments=attachments)
         if loop is not None and loop.is_running():
             return self._run_coro_in_thread(coro)
-        return asyncio.run(coro)
+        else:
+            return asyncio.run(coro)
 
     def run(
         self,

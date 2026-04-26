@@ -349,6 +349,47 @@ def record_turn_inspector_from_runtime_result(*, thread_id: str, prompt: str, ru
         )
 
 
+def render_agentic_trace(runtime_result: dict) -> None:
+    """Render delegation/reasoning trace surfaced by runtime_result."""
+    trace = dict(runtime_result.get("multi_agent_trace") or {})
+    if not trace:
+        return
+
+    arbitration = dict(trace.get("arbitration") or {})
+    blackboard = dict(trace.get("blackboard") or {})
+    delegation_results = list(trace.get("delegation_results") or [])
+    reasoning_steps = list(trace.get("reasoning_steps") or [])
+
+    with st.expander("Delegation + Reasoning", expanded=False):
+        subtasks = int(trace.get("subtasks_executed") or 0)
+        depth = int(trace.get("delegation_depth") or 0)
+        mode = str(arbitration.get("mode") or "sequential")
+        st.caption(f"Mode: {mode} | Subtasks: {subtasks} | Depth: {depth}")
+
+        if arbitration:
+            st.caption("Supervisor arbitration")
+            st.json(arbitration)
+
+        if delegation_results:
+            st.caption("Sub-agent outputs")
+            for index, item in enumerate(delegation_results[:8], start=1):
+                st.caption(f"{index}. {str(item or '').strip()[:220]}")
+
+        if blackboard:
+            st.caption("Shared blackboard")
+            st.json(blackboard)
+
+        if reasoning_steps:
+            st.caption("Reasoning steps")
+            for index, step in enumerate(reasoning_steps[:8], start=1):
+                if isinstance(step, dict):
+                    text = str(step.get("output") or step.get("result") or step.get("step") or "").strip()
+                else:
+                    text = str(step or "").strip()
+                if text:
+                    st.caption(f"{index}. {text[:220]}")
+
+
 def render_turn_inspector(*, thread_id: str, view: ThreadView) -> None:
     normalized_thread = str(thread_id or "default")
     timeline = [
@@ -2102,6 +2143,7 @@ def render_chat_tab(bot: DadBot, active_thread: dict):
                             api.process_until_idle(max_events=8)
                             assistant_attachments.append(attachment)
                     st.markdown(reply)
+                    render_agentic_trace(runtime_result)
                     voice = voice_preferences()
                     if bool(voice.get("enabled")) and bool(voice.get("tts_enabled", True)):
                         render_reply_tts(bot, reply)

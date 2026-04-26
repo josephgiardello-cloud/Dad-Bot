@@ -93,6 +93,33 @@ class UIRuntimeAPI:
             schema_policy={},
         )
 
+    def _multi_agent_trace_snapshot(self) -> dict[str, Any]:
+        """Extract delegation/reasoning details from the latest turn context for UI visibility."""
+        orchestrator = getattr(self._bot, "turn_orchestrator", None)
+        context = getattr(orchestrator, "_last_turn_context", None)
+        if context is None:
+            return {}
+
+        metadata = dict(getattr(context, "metadata", {}) or {})
+        state = dict(getattr(context, "state", {}) or {})
+
+        arbitration = dict(state.get("arbitration_metadata") or {})
+        blackboard = dict(state.get("agent_blackboard") or {})
+        delegation_results = list(state.get("delegation_results") or [])
+        reasoning_steps = list(state.get("reasoning_steps") or [])
+
+        if not arbitration and not blackboard and not delegation_results and not reasoning_steps:
+            return {}
+
+        return {
+            "delegation_depth": int(metadata.get("delegation_depth") or 0),
+            "subtasks_executed": int(metadata.get("subtasks_executed") or 0),
+            "arbitration": arbitration,
+            "blackboard": blackboard,
+            "delegation_results": delegation_results,
+            "reasoning_steps": reasoning_steps,
+        }
+
     def send_user_message(self, *, thread_id: str, content: str, attachments: list[dict] | None = None) -> dict:
         normalized_thread_id = str(thread_id or self._bot.active_thread_id or "default")
         if normalized_thread_id != str(self._bot.active_thread_id or ""):
@@ -103,6 +130,7 @@ class UIRuntimeAPI:
         reply, should_end = self._bot.process_user_message(str(content or ""), attachments=list(attachments or []))
         turn_health = dict(self._bot.turn_health_state() or {})
         ux_feedback = dict(self._bot.turn_ux_feedback() or {})
+        multi_agent_trace = self._multi_agent_trace_snapshot()
         return {
             "reply": str(reply or ""),
             "should_end": bool(should_end),
@@ -110,6 +138,7 @@ class UIRuntimeAPI:
             "pipeline": dict(self._bot.turn_pipeline_snapshot() or {}),
             "turn_health": turn_health,
             "ux_feedback": ux_feedback,
+            "multi_agent_trace": multi_agent_trace,
             "photo_requested": False,
             "tts_requested": False,
         }

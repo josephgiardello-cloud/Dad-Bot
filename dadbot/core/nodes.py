@@ -1,11 +1,123 @@
 ﻿from __future__ import annotations
 
+import json
 import logging
+import re
+import asyncio
 from typing import Any
+
 
 from dadbot.core.graph import TurnContext
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Structured output helpers (delegation / reasoning / tool calling)
+# ---------------------------------------------------------------------------
+
+#: Maximum recursion depth for internal sub-task delegation.
+_MAX_DELEGATION_DEPTH: int = 2
+
+#: Matches a JSON object inside a markdown fenced code block.
+_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
+
+#: Recognised structured block types emitted by the LLM.
+_KNOWN_STRUCTURED_TYPES = frozenset({"delegate", "tool", "reasoning", "plan"})
+
+#: Recognised delegation execution modes.
+_DELEGATION_MODES = frozenset({"sequential", "parallel"})
+
+#: Hard cap on delegated sub-task count per delegation block.
+_MAX_DELEGATION_SUBTASKS: int = 8
+
+
+def _safe_snippet(value: str, *, limit: int = 120) -> str:
+    """Return a compact single-line snippet suitable for user-facing traces."""
+    compact = " ".join(str(value or "").split())
+    return compact[:limit]
+
+
+def _is_subtask_failure_text(value: str) -> bool:
+    text = str(value or "").strip().lower()
+    return text.startswith("[sub-task failed") or text.startswith("[sub-task error")
+
+
+def _append_arbitration_log(context: TurnContext, payload: dict[str, Any]) -> None:
+    """Append a delegation arbitration event to turn state for safe auditing."""
+    events = list(context.state.get("delegation_arbitration_log") or [])
+    events.append(dict(payload or {}))
+    context.state["delegation_arbitration_log"] = events
+
+
+def _parse_structured_block(text: str) -> "dict | None":
+    """Extract a typed JSON structured block from LLM output text, or None.
+
+    Checks fenced code blocks first, then bare JSON at the start of text.
+    Returns the parsed dict only when ``type`` is in ``_KNOWN_STRUCTURED_TYPES``.
+    """
+    if not text or not isinstance(text, str):
+        return None
+    candidates: list[str] = []
+    for m in _FENCE_RE.finditer(text):
+        candidates.append(m.group(1))
+    stripped = text.strip()
+    if stripped.startswith("{"):
+        candidates.append(stripped)
+    for raw in candidates:
+        try:
+            data = json.loads(raw)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        block_type = str(data.get("type") or "").strip().lower()
+        if block_type in _KNOWN_STRUCTURED_TYPES:
+            return {**data, "type": block_type}
+    return None
+
+
+def _extract_reasoning_reply(block: dict) -> str:
+    """Pull the final human-readable reply out of a reasoning/plan block."""
+    for key in ("conclusion", "answer", "reply", "response", "result"):
+        v = block.get(key)
+        if v and isinstance(v, str) and v.strip():
+            return v.strip()
+    steps = block.get("steps")
+    if isinstance(steps, list) and steps:
+        last = steps[-1]
+        if isinstance(last, str):
+            return last.strip()
+        if isinstance(last, dict):
+            for k in ("output", "result", "description", "step"):
+                v = last.get(k)
+                if v and isinstance(v, str):
+                    return v.strip()
+    return ""
+
+
+def _dispatch_builtin_tool(name: str, args: dict, context: TurnContext) -> str:
+    """Execute a built-in tool and return its string result.
+
+    Built-in tools:
+    - ``echo``: echo the ``message`` arg (passthrough / smoke test)
+    - ``current_time``: return the frozen turn wall-time from the temporal axis
+    - ``memory_lookup``: return a snippet from the turn's memory/context snapshot
+    """
+    if name == "echo":
+        return str(args.get("message") or args)
+    if name == "current_time":
+        temporal = getattr(context, "temporal", None)
+        return str(getattr(temporal, "wall_time", "") if temporal else "")
+    if name == "memory_lookup":
+        query = str(args.get("query") or args.get("q") or "").strip()
+        memories = list(context.state.get("memories") or [])
+        rich_ctx = dict(context.state.get("rich_context") or {})
+        if memories:
+            return str(memories[:3])
+        if rich_ctx:
+            return str(list(rich_ctx.items())[:3])
+        return f"[No memory results for: {query!r}]"
+    return f"[Unknown tool: {name!r}]"
 
 
 class TemporalNode:
@@ -75,8 +187,26 @@ class MemoryNode(ContextBuilderNode):
     name = "memory"
 
 
+
 class InferenceNode:
-    """Pure cognition loop executor â€” runs AgentService.run_agent as the sole inference path.
+    """Pure cognition loop executor - runs AgentService.run_agent as the sole inference path.
+
+    Phase 4 extensions (all contained inside this node; no pipeline shape change):
+
+    - **Sub-task delegation** (Priority 1): LLM emits
+      ``{"type": "delegate", "subtasks": [...]}``.  Each sub-task is executed
+      synchronously via ``run_agent`` at most ``_MAX_DELEGATION_DEPTH`` levels deep.
+      Results are merged and committed through the existing SaveNode.
+    - **Structured reasoning** (Priority 2): LLM emits
+      ``{"type": "reasoning", "steps": [...], "conclusion": "..."}`` or
+      ``{"type": "plan", ...}``.  The conclusion is extracted as the reply;
+      step list is saved to ``context.state["reasoning_steps"]``.
+    - **Tool calling** (Priority 3): LLM emits
+      ``{"type": "tool", "name": "...", "args": {...}}``.  Dispatched to the
+      built-in tool registry; result fed back for a follow-up inference call.
+    - **Depth guard** (Priority 4): delegation depth is tracked and capped at
+      ``_MAX_DELEGATION_DEPTH``; ``delegation_depth_exceeded`` is stamped in
+      metadata when the guard fires.
 
     No fallback generation path exists.  If the bound manager does not expose
     ``run_agent``, the node raises ``RuntimeError`` at run-time rather than
@@ -90,22 +220,349 @@ class InferenceNode:
     def _fallback_candidate(message: str) -> tuple[str, bool]:
         return (str(message or "Unable to generate a reply right now."), False)
 
+    # ------------------------------------------------------------------
+    # Structured-output dispatch
+    # ------------------------------------------------------------------
+
+    async def _resolve_candidate(
+        self,
+        context: TurnContext,
+        raw_result: Any,
+        *,
+        depth: int = 0,
+    ) -> Any:
+        """Resolve raw ``run_agent`` output, expanding any structured block inline.
+
+        Returns the same ``(reply, should_exit)`` tuple shape; only the reply
+        text is transformed when a recognised structured block is detected.
+        """
+        reply = raw_result[0] if isinstance(raw_result, tuple) else str(raw_result or "")
+        should_exit = (
+            raw_result[1]
+            if isinstance(raw_result, tuple) and len(raw_result) > 1
+            else False
+        )
+        block = _parse_structured_block(reply)
+        if block is None:
+            return raw_result
+        resolved = await self._handle_block(context, block, depth=depth)
+        return (resolved, should_exit)
+
+    async def _handle_block(
+        self, context: TurnContext, block: dict, *, depth: int
+    ) -> str:
+        """Dispatch a structured block to its typed handler."""
+        block_type = str(block.get("type") or "").lower()
+        if block_type == "delegate":
+            return await self._handle_delegation(context, block, depth=depth)
+        if block_type == "tool":
+            return await self._handle_tool_call(context, block)
+        if block_type in ("reasoning", "plan"):
+            return self._handle_reasoning(context, block)
+        return str(block)
+
+    # ------------------------------------------------------------------
+    # Priority 1: Sub-task delegation
+    # ------------------------------------------------------------------
+
+    async def _handle_delegation(
+        self, context: TurnContext, block: dict, *, depth: int
+    ) -> str:
+        """Execute delegated sub-tasks and merge their results.
+
+        Execution modes (``mode`` key in the delegate block):
+
+        - ``"sequential"`` (default): tasks run one after another. Each
+          agent's result is posted to ``context.state["agent_blackboard"]``
+          so later agents can read earlier results (inter-agent messaging).
+        - ``"parallel"``: tasks run concurrently via ``asyncio.gather``.
+
+        A short delegation summary is included in the final reply so users can
+        understand what happened without opening debug views.
+        """
+        if depth >= _MAX_DELEGATION_DEPTH:
+            logger.warning(
+                "Delegation depth guard triggered at depth=%d (max=%d).",
+                depth,
+                _MAX_DELEGATION_DEPTH,
+            )
+            context.metadata["delegation_depth_exceeded"] = True
+            context.state["delegation_depth_exceeded"] = True
+            context.state["arbitration_metadata"] = {
+                "mode": "blocked",
+                "agents_dispatched": 0,
+                "depth": depth,
+                "reason": "depth_limit",
+            }
+            _append_arbitration_log(
+                context,
+                {
+                    "event": "depth_guard_block",
+                    "depth": depth,
+                    "max_depth": _MAX_DELEGATION_DEPTH,
+                },
+            )
+            return (
+                f"I skipped delegation because depth limit {_MAX_DELEGATION_DEPTH} was reached."
+            )
+
+        raw_mode = str(block.get("mode") or "sequential").strip().lower()
+        mode = raw_mode if raw_mode in _DELEGATION_MODES else "sequential"
+
+        subtasks = list(block.get("subtasks") or [])
+        requested_subtasks = len(subtasks)
+        if requested_subtasks > _MAX_DELEGATION_SUBTASKS:
+            subtasks = subtasks[:_MAX_DELEGATION_SUBTASKS]
+            _append_arbitration_log(
+                context,
+                {
+                    "event": "subtask_trimmed",
+                    "requested": requested_subtasks,
+                    "executed": len(subtasks),
+                    "max_subtasks": _MAX_DELEGATION_SUBTASKS,
+                },
+            )
+
+        # Resolve (input, agent_name) pairs.
+        task_pairs: list[tuple[str, str]] = []
+        for i, subtask in enumerate(subtasks):
+            if isinstance(subtask, str):
+                sub_input, agent_name = subtask.strip(), f"agent_{i}"
+            else:
+                sub_input = str(subtask.get("input") or "").strip()
+                agent_name = str(subtask.get("agent") or f"agent_{i}").strip()
+            if sub_input:
+                task_pairs.append((sub_input, agent_name))
+
+        seed_board = dict(context.metadata.get("agent_blackboard_seed") or {})
+        blackboard: dict[str, str]
+        if depth <= 0:
+            blackboard = dict(seed_board)
+        else:
+            blackboard = dict(context.state.get("agent_blackboard") or seed_board)
+        context.state["agent_blackboard"] = blackboard
+
+        if mode == "parallel":
+            coros = [
+                self._run_subtask(context, inp, depth=depth + 1, agent_name=name)
+                for inp, name in task_pairs
+            ]
+            gathered = await asyncio.gather(*coros, return_exceptions=True)
+            results: list[str] = []
+            for (_inp, name), outcome in zip(task_pairs, gathered):
+                if isinstance(outcome, Exception):
+                    text = f"[Sub-task failed: {name} encountered an internal error.]"
+                    logger.warning("Parallel sub-task %r failed: %s", name, outcome)
+                else:
+                    text = str(outcome or "")
+                blackboard[name] = text
+                results.append(text)
+        else:
+            results = []
+            for inp, name in task_pairs:
+                sub_result = await self._run_subtask(
+                    context,
+                    inp,
+                    depth=depth + 1,
+                    agent_name=name,
+                    blackboard=blackboard,
+                )
+                blackboard[name] = sub_result
+                results.append(sub_result)
+
+        successful = sum(1 for item in results if item and not _is_subtask_failure_text(item))
+        failures = sum(1 for item in results if _is_subtask_failure_text(item))
+        merged_details = "\n\n".join(r for r in results if r) or "[No sub-task results]"
+        summary = (
+            f"I delegated {len(task_pairs)} task(s) in {mode} mode"
+            f" ({successful} succeeded, {failures} failed)."
+        )
+
+        context.metadata["delegation_depth"] = depth
+        context.metadata["subtasks_executed"] = len(task_pairs)
+        context.state["delegation_results"] = results
+        context.state["arbitration_metadata"] = {
+            "mode": mode,
+            "agents_dispatched": len(task_pairs),
+            "depth": depth,
+            "requested_subtasks": requested_subtasks,
+            "executed_subtasks": len(task_pairs),
+            "success_count": successful,
+            "failure_count": failures,
+            "depth_exceeded": bool(context.metadata.get("delegation_depth_exceeded")),
+        }
+        _append_arbitration_log(
+            context,
+            {
+                "event": "delegation_complete",
+                "mode": mode,
+                "depth": depth,
+                "requested_subtasks": requested_subtasks,
+                "executed_subtasks": len(task_pairs),
+                "success_count": successful,
+                "failure_count": failures,
+            },
+        )
+        return f"{summary}\n\n{merged_details}"
+
+    async def _run_subtask(
+        self,
+        parent_context: TurnContext,
+        subtask_input: str,
+        *,
+        depth: int,
+        agent_name: str = "",
+        blackboard: "dict[str, str] | None" = None,
+    ) -> str:
+        """Run a single delegated sub-task through inference only."""
+        run_agent = getattr(self.mgr, "run_agent", None)
+        if not callable(run_agent):
+            return "[Sub-task failed: no inference provider available.]"
+        sub_ctx = TurnContext(
+            user_input=subtask_input,
+            metadata={
+                "determinism": dict(parent_context.metadata.get("determinism") or {}),
+                "temporal": dict(parent_context.metadata.get("temporal") or {}),
+                "delegation_depth": depth,
+                "parent_trace_id": parent_context.trace_id,
+                "agent_name": str(agent_name or ""),
+            },
+            state={
+                "rich_context": dict(parent_context.state.get("rich_context") or {}),
+                "memories": list(parent_context.state.get("memories") or []),
+                "agent_blackboard": dict(blackboard or {}),
+            },
+        )
+        sub_ctx.temporal = parent_context.temporal
+        rich_context = sub_ctx.state.get("rich_context", {})
+        try:
+            sub_raw = await run_agent(sub_ctx, rich_context)
+            reply = sub_raw[0] if isinstance(sub_raw, tuple) else str(sub_raw or "")
+            sub_block = _parse_structured_block(reply)
+            if sub_block is not None:
+                reply = await self._handle_block(sub_ctx, sub_block, depth=depth)
+                if bool(sub_ctx.metadata.get("delegation_depth_exceeded")):
+                    parent_context.metadata["delegation_depth_exceeded"] = True
+            text = str(reply or "").strip()
+            if not text:
+                return f"[Sub-task failed: {agent_name or 'agent'} returned no output.]"
+            return text
+        except Exception as exc:
+            logger.warning("Sub-task inference failed (depth=%d, agent=%s): %s", depth, agent_name, exc)
+            return (
+                f"[Sub-task failed: {agent_name or 'agent'} could not complete "
+                f"'{_safe_snippet(subtask_input)}'.]"
+            )
+
+    # ------------------------------------------------------------------
+    # Priority 3: Tool calling
+    # ------------------------------------------------------------------
+
+    async def _handle_tool_call(self, context: TurnContext, block: dict) -> str:
+        """Execute a built-in tool and optionally follow up with inference.
+
+        Tool name and result are stamped into ``context.state`` and
+        ``context.metadata``.  If the tool succeeds a follow-up ``run_agent``
+        call is made so the LLM can produce a natural-language reply.
+        """
+        tool_name = str(block.get("name") or "").strip().lower()
+        tool_args = dict(block.get("args") or {})
+        tool_result = _dispatch_builtin_tool(tool_name, tool_args, context)
+        context.state["tool_result"] = tool_result
+        context.state["tool_called"] = tool_name
+        context.metadata["tool_called"] = tool_name
+        context.metadata["tool_call_executed"] = True
+
+        run_agent = getattr(self.mgr, "run_agent", None)
+        if callable(run_agent) and tool_result:
+            follow_input = (
+                f"[Tool result for '{tool_name}']: {tool_result}\n\n"
+                f"Original question: {context.user_input}"
+            )
+            follow_ctx = TurnContext(
+                user_input=follow_input,
+                metadata={
+                    "determinism": dict(context.metadata.get("determinism") or {}),
+                    "temporal": dict(context.metadata.get("temporal") or {}),
+                    "parent_trace_id": context.trace_id,
+                    "tool_follow_up": True,
+                },
+                state={
+                    "rich_context": dict(context.state.get("rich_context") or {}),
+                    "tool_result": tool_result,
+                },
+            )
+            follow_ctx.temporal = context.temporal
+            try:
+                follow_raw = await run_agent(
+                    follow_ctx, follow_ctx.state.get("rich_context", {})
+                )
+                follow_reply = (
+                    follow_raw[0]
+                    if isinstance(follow_raw, tuple)
+                    else str(follow_raw or "")
+                )
+                # Do not recurse on structured output from follow-up calls.
+                if _parse_structured_block(follow_reply) is None:
+                    return follow_reply
+            except Exception as exc:
+                logger.warning("Tool follow-up inference failed: %s", exc)
+        return str(tool_result)
+
+    # ------------------------------------------------------------------
+    # Priority 2: Structured reasoning output
+    # ------------------------------------------------------------------
+
+    def _handle_reasoning(self, context: TurnContext, block: dict) -> str:
+        """Extract the final reply from a structured reasoning/plan block.
+
+        Full step list is saved to ``context.state["reasoning_steps"]`` for
+        downstream inspection, auditing, or re-use.
+        """
+        steps = list(block.get("steps") or [])
+        conclusion = _extract_reasoning_reply(block)
+        context.state["reasoning_steps"] = steps
+        context.metadata["reasoning_structured"] = True
+        context.metadata["reasoning_steps_count"] = len(steps)
+        return conclusion or (str(steps[-1]) if steps else "")
+
+    # ------------------------------------------------------------------
+    # Main run method
+    # ------------------------------------------------------------------
+
     async def run(self, context: TurnContext) -> TurnContext:
+        # Turn-scoped blackboard seed prevents cross-turn leakage.
+        seed_board = dict(context.metadata.get("agent_blackboard_seed") or {})
+        context.state["agent_blackboard"] = dict(seed_board)
         run_agent = getattr(self.mgr, "run_agent", None)
         if not callable(run_agent):
             raise RuntimeError(
                 f"InferenceNode: bound manager {type(self.mgr).__name__!r} does not expose "
                 "'run_agent'; only AgentService is a valid inference provider."
             )
+        # Priority 4: determinism enforcement (strict-mode LLM knobs).
+        determinism = dict(getattr(context, "metadata", {}).get("determinism") or {})
+        if bool(determinism.get("enforced", False)):
+            runtime_bot = getattr(self.mgr, "bot", None)
+            if runtime_bot is not None:
+                setattr(runtime_bot, "LLM_TEMPERATURE", 0.0)
+                setattr(runtime_bot, "LLM_SEED", 42)
+                set_deterministic = getattr(runtime_bot, "set_deterministic", None)
+                if callable(set_deterministic):
+                    set_deterministic(True)
         rich_context = context.state.get("rich_context", {})
         try:
-            context.state["candidate"] = await run_agent(context, rich_context)
+            raw_result = await run_agent(context, rich_context)
+            # Resolve structured blocks (delegation / reasoning / tool call).
+            context.state["candidate"] = await self._resolve_candidate(
+                context, raw_result, depth=0
+            )
         except Exception as exc:
             logger.error("InferenceNode.run_agent failed: %s", exc)
-            context.state["candidate"] = self._fallback_candidate("Something went sideways. Try again in a moment.")
+            context.state["candidate"] = self._fallback_candidate(
+                "Something went sideways. Try again in a moment."
+            )
         return context
-
-
 class SafetyNode:
     """Applies TONY score tone constraints and reply policy enforcement."""
 
