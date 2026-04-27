@@ -17,6 +17,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import hashlib
 import queue
 import sys
 import threading
@@ -24,6 +25,7 @@ import time
 from collections import defaultdict
 from contextvars import ContextVar
 from copy import deepcopy
+from enum import IntEnum
 from typing import Any, Iterator
 
 
@@ -33,6 +35,48 @@ from typing import Any, Iterator
 
 _current_trace_id: ContextVar[str] = ContextVar("_current_trace_id", default="")
 _current_span_id: ContextVar[str] = ContextVar("_current_span_id", default="")
+
+
+class TraceLevel(IntEnum):
+    """Observability verbosity and audit criticality levels."""
+
+    OFF = 0
+    MINIMAL = 1
+    DEBUG = 2
+    FULL = 3
+    AUDIT = 4
+
+    @classmethod
+    def parse(cls, value: "TraceLevel | str | int | None") -> "TraceLevel":
+        if isinstance(value, cls):
+            return value
+        if value is None:
+            return cls.MINIMAL
+        if isinstance(value, int):
+            try:
+                return cls(value)
+            except ValueError:
+                return cls.MINIMAL
+        normalized = str(value).strip().upper()
+        return {
+            "OFF": cls.OFF,
+            "MINIMAL": cls.MINIMAL,
+            "DEBUG": cls.DEBUG,
+            "FULL": cls.FULL,
+            "AUDIT": cls.AUDIT,
+        }.get(normalized, cls.MINIMAL)
+
+
+def _should_sample(*, key: str, sample_rate: float) -> bool:
+    rate = float(sample_rate)
+    if rate >= 1.0:
+        return True
+    if rate <= 0.0:
+        return False
+    digest = hashlib.sha256(str(key).encode("utf-8")).digest()
+    threshold = int(rate * (2**64 - 1))
+    value = int.from_bytes(digest[:8], byteorder="big", signed=False)
+    return value <= threshold
 
 
 def _new_id(prefix: str = "") -> str:
@@ -82,10 +126,52 @@ class Span:
         }
 
 
+class _NoOpSpan(Span):
+    """Span-compatible object that does not mutate trace context."""
+
+    def __init__(self, name: str, *, trace_id: str = "", parent_span_id: str = "") -> None:
+        self.name = str(name or "unnamed")
+        self.trace_id = str(trace_id or "")
+        self.span_id = ""
+        self.parent_span_id = str(parent_span_id or "")
+        self.started_at = time.time()
+        self.ended_at = self.started_at
+        self._trace_token = None
+        self._span_token = None
+
+    def __enter__(self) -> "_NoOpSpan":
+        return self
+
+    def __exit__(self, *_) -> None:
+        self.ended_at = time.time()
+
+
 class TracingContext:
     """Tracer â€” creates spans and propagates trace IDs."""
 
-    def span(self, name: str, *, trace_id: str = "") -> Span:
+    def __init__(self, *, min_level: TraceLevel | str | int = TraceLevel.MINIMAL) -> None:
+        self._min_level = TraceLevel.parse(min_level)
+
+    def set_level(self, level: TraceLevel | str | int) -> None:
+        self._min_level = TraceLevel.parse(level)
+
+    def level(self) -> TraceLevel:
+        return self._min_level
+
+    def span(
+        self,
+        name: str,
+        *,
+        trace_id: str = "",
+        level: TraceLevel | str | int = TraceLevel.MINIMAL,
+    ) -> Span:
+        event_level = TraceLevel.parse(level)
+        if event_level == TraceLevel.AUDIT:
+            return Span(name, trace_id=trace_id)
+        if self._min_level == TraceLevel.OFF:
+            return _NoOpSpan(name=name, trace_id=trace_id)
+        if event_level < self._min_level:
+            return _NoOpSpan(name=name, trace_id=trace_id)
         return Span(name, trace_id=trace_id)
 
     @staticmethod
@@ -185,6 +271,8 @@ class EventStreamExporter:
         *,
         sink: Any = None,
         enabled: bool = True,
+        min_level: TraceLevel | str | int = TraceLevel.MINIMAL,
+        sample_rate: float = 1.0,
     ) -> None:
         """
         Args:
@@ -192,6 +280,8 @@ class EventStreamExporter:
                   sys.stdout JSON line writer.
             enabled: set False to silence all exports (e.g. in tests).
         """
+        self._min_level = TraceLevel.parse(min_level)
+        self._sample_rate = max(0.0, min(1.0, float(sample_rate)))
         self._enabled = bool(enabled)
         if sink is None:
             self._sink = self._stdout_sink
@@ -200,13 +290,45 @@ class EventStreamExporter:
         else:
             self._sink = sink
 
-    def export(self, record: dict[str, Any]) -> None:
+    def set_level(self, level: TraceLevel | str | int) -> None:
+        self._min_level = TraceLevel.parse(level)
+
+    def set_sample_rate(self, sample_rate: float) -> None:
+        self._sample_rate = max(0.0, min(1.0, float(sample_rate)))
+
+    def export(
+        self,
+        record: dict[str, Any],
+        *,
+        level: TraceLevel | str | int | None = None,
+    ) -> None:
         if not self._enabled:
             return
+
+        event_level = TraceLevel.parse(level or record.get("trace_level"))
+        if event_level != TraceLevel.AUDIT:
+            if self._min_level == TraceLevel.OFF:
+                return
+            if event_level < self._min_level:
+                return
+            if event_level in {TraceLevel.DEBUG, TraceLevel.FULL}:
+                sample_key = "|".join(
+                    [
+                        str(record.get("event") or ""),
+                        str(record.get("session_id") or ""),
+                        str(_current_trace_id.get() or ""),
+                        str(_current_span_id.get() or ""),
+                        str(time.time_ns()),
+                    ]
+                )
+                if not _should_sample(key=sample_key, sample_rate=self._sample_rate):
+                    return
+
         enriched = {
             "exported_at": time.time(),
             "trace_id": _current_trace_id.get() or "",
             "span_id": _current_span_id.get() or "",
+            "trace_level": event_level.name,
             **record,
         }
         try:
@@ -248,10 +370,27 @@ def get_exporter() -> EventStreamExporter:
     return _global_exporter
 
 
-def configure_exporter(sink: Any = None, *, enabled: bool = True) -> None:
+def set_trace_level(level: TraceLevel | str | int) -> None:
+    """Update process-wide tracer/exporter level in one call."""
+    _global_tracer.set_level(level)
+    _global_exporter.set_level(level)
+
+
+def configure_exporter(
+    sink: Any = None,
+    *,
+    enabled: bool = True,
+    min_level: TraceLevel | str | int = TraceLevel.MINIMAL,
+    sample_rate: float = 1.0,
+) -> None:
     """Replace the global event stream exporter."""
     global _global_exporter
-    _global_exporter = EventStreamExporter(sink=sink, enabled=enabled)
+    _global_exporter = EventStreamExporter(
+        sink=sink,
+        enabled=enabled,
+        min_level=min_level,
+        sample_rate=sample_rate,
+    )
 
 
 # ---------------------------------------------------------------------------

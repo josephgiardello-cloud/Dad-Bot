@@ -7,7 +7,7 @@
       "1.0",
       "legacy-0"
     ],
-    "generated_at_utc": "2026-04-27T04:00:07+00:00"
+    "generated_at_utc": "2026-04-27T10:24:24+00:00"
   },
   "GLOBAL_PASS": true,
   "subsystem_scores": {
@@ -50,7 +50,7 @@
       "checkpoint_hash": true,
       "KernelRejectionSemantics": true
     },
-    "files_scanned": 413
+    "files_scanned": 424
   },
   "structural": {
     "ok": true,
@@ -81,11 +81,11 @@
     "replay_anchor": "0c95012e5c54edba446e783c51c19d2439ec0fb3d902dfaee8ff8dcfbf89ac30",
     "reason": ""
   },
-  "final_certification_hash": "c60de5d7b19c05d1d252d80c6c884055411981e64779b804de20d7a00edcfebf",
+  "final_certification_hash": "de5c473665ecb6afbcf8de66e5fb639cf544bd624e12339fd0e6f108b2840fc5",
   "signature": {
     "algorithm": "HMAC-SHA256",
     "key_id": "local-dev",
-    "value": "e4743db398b54081c1dd3f89ac650ed22a3a5343a2152578c1d4451d24b4f268",
+    "value": "816f95f2f87fc056524d92ec62b4a28a7ed664a52b596e2d52b52b6281d32657",
     "using_default_key": "true"
   }
 }

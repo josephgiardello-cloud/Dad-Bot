@@ -501,6 +501,12 @@ def launch_api_service(args, *, dadbot_cls=None):
 		config.persistence.postgres_dsn = str(args.postgres_dsn or "").strip()
 	if args.otel:
 		config.telemetry.otel_enabled = True
+		try:
+			from dadbot.core.otel_bridge import install_otel_bridge
+
+			install_otel_bridge()
+		except Exception:
+			logger.warning("OpenTelemetry bridge could not be installed", exc_info=True)
 
 	configure_logging(config.telemetry, force=True)
 	configure_tracing(config.telemetry)

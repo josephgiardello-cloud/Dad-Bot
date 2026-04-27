@@ -1,58 +1,48 @@
-﻿import atexit
-import asyncio
+﻿"""dadbot/core/dadbot.py — DadBot public facade.
+
+DadBot is intentionally thin.  Logic lives in dedicated managers held by
+``self.services`` and in the five behaviour mixins:
+
+    DadBotBootMixin     boot/init/shutdown lifecycle
+    DadBotTurnMixin     turn execution and graph failure handling
+    DadBotLlmMixin      LLM/model call forwarding
+    DadBotMcpMixin      local MCP server management
+    DadBotHealthMixin   health/UX state and checkpoint/replay
+
+The remaining body of this class is pure delegation plumbing:
+    * Class-level routing maps (_CONFIG_ATTR_MAP, _MANAGER_DELEGATE_CHAIN, etc.)
+    * __getattr__ / __setattr__ for zero-overhead manager attribute routing
+    * Explicit @property getters/setters for every registered manager
+    * Config and runtime-state property aliases (PROFILE, MEMORY_STORE, ...)
+    * model_port / ux_gateway properties (access private attrs set by boot mixin)
+    * reset_session_state and two small turn-state helpers
+"""
+from __future__ import annotations
+
 import importlib
-from importlib import util as import_util  # Fixes the find_spec error
-import json
+from importlib import util as import_util
 import logging
 import os
 import subprocess
-import sys
-import time
-import uuid
-from collections import deque
-from datetime import datetime
-from pathlib import Path
-from threading import RLock
 from typing import Any
 
 try:
     import ollama
 except ImportError:  # pragma: no cover
     ollama = None  # type: ignore[assignment]
-from dadbot.app_runtime import build_customer_document_store, ensure_streamlit_app_file, main as run_app_main
+
+from dadbot.app_runtime import main as run_app_main
 from dadbot.core.action_mixin import DadBotActionMixin
-from dadbot.core.facade_compat import DadBotFacadeCompat
+from dadbot.core.boot_mixin import DadBotBootMixin
 from dadbot.core.compat_mixin import DadBotCompatMixin
 from dadbot.core.convenience_mixin import DadBotConvenienceMixin
-from dadbot.core.internal_runtime import DadBotInternalRuntime
-from dadbot.core.observability import CorrelationContext, TracingContext
-from dadbot.core.orchestrator import DadBotOrchestrator
-from dadbot.registry import DadBotServiceContainer
-from dadbot.background import BackgroundTaskManager
-from dadbot.config import DadBotConfig, DadRuntimeConfig as PackagedDadRuntimeConfig
-from dadbot.contracts import AttachmentList, ChunkCallback, DadBotContext, FinalizedTurnResult
-from dadbot.runtime.model import ModelPort, ModelConfig, OllamaModelAdapter
-from dadbot.runtime.mcp import LocalMcpServerController
-from dadbot.core.offline_replay_validator import OfflineReplayValidator
+from dadbot.core.facade_compat import DadBotFacadeCompat
+from dadbot.core.health_mixin import DadBotHealthMixin
+from dadbot.core.llm_mixin import DadBotLlmMixin
+from dadbot.core.mcp_mixin import DadBotMcpMixin
+from dadbot.core.turn_mixin import DadBotTurnMixin
 from dadbot.core.ux_projection_gateway import TurnUxProjectionGateway
-from dadbot.constants import MOOD_CATEGORIES, MOOD_ALIASES
-from dadbot.defaults import (
-    default_planner_debug_state as _default_planner_debug_state,
-)
-from dadbot.utils import (
-    env_truthy,
-    json_dump,
-    json_load,
-)
-from dadbot_system import (
-    DadServiceClient,
-    InMemoryEventBus,
-    InMemoryStateStore,
-    NamespacedStateStore,
-    ServiceConfig,
-    normalize_tenant_id,
-)
-from dadbot_system.state import AppStateContainer
+from dadbot.runtime.model import ModelPort
 
 tiktoken = importlib.import_module("tiktoken") if import_util.find_spec("tiktoken") else None
 litellm = importlib.import_module("litellm") if import_util.find_spec("litellm") else None
@@ -73,95 +63,54 @@ if litellm is None:
         "Install with: pip install litellm"
     )
 
-
 logger = logging.getLogger(__name__)
 
 
-class DadBot(DadBotCompatMixin, DadBotConvenienceMixin, DadBotActionMixin):
+class DadBot(
+    DadBotBootMixin,
+    DadBotTurnMixin,
+    DadBotLlmMixin,
+    DadBotMcpMixin,
+    DadBotHealthMixin,
+    DadBotCompatMixin,
+    DadBotConvenienceMixin,
+    DadBotActionMixin,
+):
     """Thin public facade for the Dad Bot persona.
 
-    This facade is intentionally thin. Prefer direct manager access where possible.
+    This facade is intentionally thin -- prefer direct manager access in new code.
 
     Architecture overview
     ---------------------
-    DadBot is the public facade for all bot functionality. Heavy logic lives in
-    dedicated managers held by ``self.services`` and runtime configuration lives
-    in ``self.config``. The facade keeps the high-level public API stable while
-    delegating most implementation detail to the container.
+    DadBot is the public facade for all bot functionality.  Heavy logic lives in
+    dedicated managers held by ``self.services`` and in the five behaviour mixins
+    listed at the top of this module.  The facade keeps the high-level public API
+    stable while delegating most implementation detail to the container.
 
-    1. **Explicit delegation** - thin shim methods that call a specific manager.
-        Used when the method signature differs from the manager, when IDE
-        discoverability matters, or when extra logic must run around the call.
-
-    2. **Auto-delegation via ``__getattr__``** - unknown attribute lookups are
-        forwarded in priority order through ``_MANAGER_DELEGATE_CHAIN``.  The five
-        fully-extracted managers (RuntimeHealthManager, TTSManager, AvatarManager,
-        CalendarManager, EmailManager) are handled this way; explicit pass-through
-        shims for those managers have been removed.
-
-    Ongoing extraction
-    ------------------
-    MemoryCoordinator, RelationshipManager, and LongTermSignalsManager are partially extracted.
-    Turn orchestration is now handled by TurnService in dadbot.services. Their heavy logic lives in
-    their manager files but DadBot retains explicit delegation shims for backward
-    compatibility while the migration is in progress.
-
-    ``DadBotOrchestrator`` at the bottom of this module wires a graph-based turn
-    pipeline (``TurnGraph``) that now drives production turn handling; streaming
-    flows still reuse TurnService for chunked reply generation.
+    Delegation strategies
+    ---------------------
+    1. **Behaviour mixins** -- grouped logical concerns (boot, turn, LLM, MCP, health).
+    2. **Explicit @property delegation** -- thin shims for every registered manager so
+       that IDE discoverability and static analysis work.
+    3. **Auto-delegation via __getattr__** -- unknown attribute lookups are forwarded in
+       priority order through ``_MANAGER_DELEGATE_CHAIN``; first match wins.
     """
-    @staticmethod
-    def runtime_root_path():
-        return Path(__file__).resolve().parents[2]
 
-    @classmethod
-    def runtime_script_path(cls):
-        return cls.runtime_root_path() / "Dad.py"
+    # ------------------------------------------------------------------
+    # Auto-delegation registry
+    # ------------------------------------------------------------------
 
-    @staticmethod
-    def profile_template_path():
-        return DadBot.runtime_root_path() / "dad_profile.template.json"
-
-    @staticmethod
-    def env_path(name, fallback_path):
-        configured = str(os.environ.get(name) or "").strip()
-        if configured:
-            return Path(configured)
-        return Path(fallback_path)
-
-    @staticmethod
-    def default_profile():
-        template_path = DadBot.profile_template_path()
-        with template_path.open("r", encoding="utf-8") as profile_template_file:
-            return json_load(profile_template_file)
-
-    @classmethod
-    def initialize_profile_file(cls, profile_path=None, force=False):
-        destination = Path(profile_path) if profile_path is not None else cls.runtime_root_path() / "dad_profile.json"
-        if destination.exists() and not force:
-            return False
-
-        destination.parent.mkdir(parents=True, exist_ok=True)
-
-        with destination.open("w", encoding="utf-8") as profile_file:
-            json_dump(cls.default_profile(), profile_file, indent=2)
-        return True
-
-    # -- Auto-delegation registry ------------------------------------------------
-    # Python calls __getattr__ only when normal attribute lookup fails, so any
-    # explicit method on DadBot always takes precedence over this chain.
-    # Managers are searched in priority order; first match wins.
     _LEGACY_MANAGER_DELEGATE_CHAIN: tuple[str, ...] = (
-        "health_manager",    # RuntimeHealthManager  -- health metrics, HW optimisation
-        "tts_manager",       # TTSManager            -- Piper / pyttsx3 audio synthesis
-        "avatar_manager",    # AvatarManager         -- avatar image generation
-        "calendar_manager",  # CalendarManager       -- iCal feed sync
-        "email_manager",     # EmailManager          -- draft + SMTP delivery
+        "health_manager",
+        "tts_manager",
+        "avatar_manager",
+        "calendar_manager",
+        "email_manager",
         "runtime_storage",
-        "profile_runtime",   # opening_message, persona management
-        "memory_manager",    # embed_texts, embed_text, semantic index + embeddings cache
+        "profile_runtime",
+        "memory_manager",
         "memory_query",
-        "memory_coordinator",  # build_consolidated_memory_context, build_active_consolidated_context
+        "memory_coordinator",
         "long_term_signals",
         "relationship_manager",
         "runtime_state_manager",
@@ -169,37 +118,32 @@ class DadBot(DadBotCompatMixin, DadBotConvenienceMixin, DadBotActionMixin):
     )
 
     _SERVICE_MANAGER_DELEGATE_CHAIN: tuple[str, ...] = (
-        "maintenance_scheduler",   # run_post_turn_maintenance, run_scheduled_proactive_jobs, etc.
-        "conversation_persistence",# persist_conversation, save_session_log, etc.
-        "session_summary_manager", # build_session_summary_prompt, refresh_session_summary
-        "turn_service",            # should_offer_daily_checkin_for_turn, prepare_user_turn, etc.
-        "memory_commands",         # handle_memory_command, build_memory_transcript
-        "safety_support",          # detect_crisis_signal, moderate_output_reply, etc.
-        "profile_context",         # age_on_date, template_context, validate_reply, etc.
-        "reply_supervisor",        # run_reply_supervisor, judge_reply_alignment, etc.
-        "reply_finalization",      # should_calibrate_pushback, apply_calibrated_pushback
-        "multimodal_handler",      # normalize_chat_attachments, build_user_request_message, etc.
-        "model_runtime",           # model_context_length, embedding_model_candidates, etc.
-        "agentic_handler",         # add_reminder, lookup_web, add_calendar_event, delete_calendar_event
-        "tool_registry",           # parse_tool_command, get_available_tools, etc.
-        "context_builder",         # build_core_persona_prompt, build_memory_context, etc.
-        "tone_context",            # build_mood_context, build_escalation_context, etc.
-        "prompt_assembly",         # guard_chat_request_messages, build_chat_request_messages, etc.
-        "runtime_client",          # ollama_async_client, available_model_names, ensure_ollama_ready
-        "runtime_orchestration",   # background_task_snapshot, submit_background_task
-        "runtime_interface",       # chat_loop, chat_loop_via_service
-        "mood_manager",            # get_cached_mood_detection, remember_mood_detection
+        "maintenance_scheduler",
+        "conversation_persistence",
+        "session_summary_manager",
+        "turn_service",
+        "memory_commands",
+        "safety_support",
+        "profile_context",
+        "reply_supervisor",
+        "reply_finalization",
+        "multimodal_handler",
+        "model_runtime",
+        "agentic_handler",
+        "tool_registry",
+        "context_builder",
+        "tone_context",
+        "prompt_assembly",
+        "runtime_client",
+        "runtime_orchestration",
+        "runtime_interface",
+        "mood_manager",
     )
 
     _MANAGER_DELEGATE_CHAIN: tuple[str, ...] = (
         _LEGACY_MANAGER_DELEGATE_CHAIN + _SERVICE_MANAGER_DELEGATE_CHAIN
     )
 
-    # Maps backward-compatible facade attribute names to their canonical DadBotConfig
-    # field names.  __getattr__ reads and __setattr__ writes are routed through this
-    # map so callers can continue using bot.MODEL_NAME, bot.LLM_PROVIDER, etc. while
-    # the single source of truth remains bot.config.<field>.
-    # Canonical new code should use bot.config.<field> directly.
     _CONFIG_ATTR_MAP: dict[str, str] = {
         "MODEL_NAME": "model_name",
         "FALLBACK_MODELS": "fallback_models",
@@ -281,29 +225,29 @@ class DadBot(DadBotCompatMixin, DadBotConvenienceMixin, DadBotActionMixin):
         "_background_task_ids": "background_task_ids",
     }
 
+    # ------------------------------------------------------------------
+    # Attribute routing
+    # ------------------------------------------------------------------
+
     def __getattr__(self, name: str):
         """Route unknown attribute lookups to registered manager objects.
 
-        After ``__init__`` completes, lookups hit the O(1) provider map exposed
-        by ``self.services``. During the early-init window (before the services
-        container exists) the chain is walked
+        After __init__ completes, lookups hit the O(1) provider map exposed by
+        self.services.  During the early-init window the chain is walked
         directly so that manager construction can reference each other safely.
 
-        Dunder names (``__foo__``) are never delegated to avoid interfering with
-        pickling, copying, and other Python internals.
+        Dunder names (__foo__) are never delegated.
         """
         if name.startswith("__"):
             raise AttributeError(name)
 
-        # Config proxy: names in _CONFIG_ATTR_MAP forward to self.config.
-        # Canonical callers should prefer bot.config.<field> directly.
         config_attr = self.__class__._CONFIG_ATTR_MAP.get(name)
         if config_attr is not None:
             try:
                 config = object.__getattribute__(self, "config")
                 return getattr(config, config_attr)
             except AttributeError:
-                pass  # config not yet assigned during early __init__
+                pass
 
         runtime_state_attr = self.__class__._RUNTIME_STATE_ATTR_MAP.get(name)
         if runtime_state_attr is not None:
@@ -321,7 +265,6 @@ class DadBot(DadBotCompatMixin, DadBotConvenienceMixin, DadBotActionMixin):
             except AttributeError:
                 pass
 
-        # Fast path: O(1) provider lookup once boot is complete.
         try:
             services = object.__getattribute__(self, "services")
             provider = services.get_provider(name)
@@ -331,9 +274,8 @@ class DadBot(DadBotCompatMixin, DadBotConvenienceMixin, DadBotActionMixin):
                     compat.warn_if_deprecated(name)
                 return getattr(provider, name)
         except AttributeError:
-            pass  # services not yet assigned â€” fall through to chain walk
+            pass
 
-        # Slow path: linear chain walk used only during __init__ construction.
         _sentinel = object()
         for _mgr_attr in self.__class__._MANAGER_DELEGATE_CHAIN:
             try:
@@ -346,13 +288,7 @@ class DadBot(DadBotCompatMixin, DadBotConvenienceMixin, DadBotActionMixin):
         raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name!r}'")
 
     def __setattr__(self, name: str, value) -> None:
-        """Route mutations of config-mirrored names to self.config.
-
-        Preserves backward compatibility for callers that set
-        ``bot.MODEL_NAME``, ``bot.LLM_PROVIDER``, etc. while keeping the
-        canonical state inside ``DadBotConfig``.  All other attribute writes
-        fall through to normal ``object.__setattr__``.
-        """
+        """Route mutations of config-mirrored names to self.config."""
         config_attr = self.__class__._CONFIG_ATTR_MAP.get(name)
         if config_attr is not None:
             try:
@@ -360,7 +296,7 @@ class DadBot(DadBotCompatMixin, DadBotConvenienceMixin, DadBotActionMixin):
                 setattr(config, config_attr, value)
                 return
             except AttributeError:
-                pass  # config not yet assigned â€” fall through for early __init__ writes
+                pass
 
         runtime_state_attr = self.__class__._RUNTIME_STATE_ATTR_MAP.get(name)
         if runtime_state_attr is not None:
@@ -379,6 +315,7 @@ class DadBot(DadBotCompatMixin, DadBotConvenienceMixin, DadBotActionMixin):
                 return
             except AttributeError:
                 pass
+
         object.__setattr__(self, name, value)
 
     def _get_explicit_manager(self, name: str):
@@ -397,15 +334,7 @@ class DadBot(DadBotCompatMixin, DadBotConvenienceMixin, DadBotActionMixin):
         object.__setattr__(self, f"_{name}", value)
 
     def _resolve_dependency(self, name: str, factory):
-        """Resolve a runtime dependency from the optional injection registry.
-
-        `dependency_registry` can be either:
-        - a mapping-like object with `.get(name)`
-        - a plain dict
-
-        Registry values may be concrete instances or zero-arg callables that
-        lazily build the instance.
-        """
+        """Resolve a runtime dependency from the optional injection registry."""
         registry = getattr(self, "_dependency_registry", None)
         candidate = None
         if registry is not None and hasattr(registry, "get"):
@@ -416,338 +345,9 @@ class DadBot(DadBotCompatMixin, DadBotConvenienceMixin, DadBotActionMixin):
             return candidate
         return factory()
 
-    def _build_runtime_state_bundle(self):
-        store = InMemoryStateStore()
-        event_bus = InMemoryEventBus()
-        container = AppStateContainer(
-            f"local-{uuid.uuid4().hex}",
-            self.default_planner_debug_state,
-            tenant_id=self.config.tenant_id,
-            store=store,
-            event_bus=event_bus,
-        )
-        return {
-            "store": store,
-            "event_bus": event_bus,
-            "container": container,
-        }
-
-    def _resolve_runtime_state_bundle(self):
-        bundle = self._resolve_dependency("runtime_state_bundle", self._build_runtime_state_bundle)
-        if isinstance(bundle, AppStateContainer):
-            return {
-                "store": None,
-                "event_bus": None,
-                "container": bundle,
-            }
-        if not isinstance(bundle, dict):
-            raise RuntimeError("runtime_state_bundle dependency must be a dict or AppStateContainer")
-        container = bundle.get("container")
-        if not isinstance(container, AppStateContainer):
-            raise RuntimeError("runtime_state_bundle must provide an AppStateContainer via 'container'")
-        return {
-            "store": bundle.get("store"),
-            "event_bus": bundle.get("event_bus"),
-            "container": container,
-        }
-
-    def _initialize_config(
-        self,
-        *,
-        model_name: str,
-        fallback_models: tuple[str, ...],
-        append_signoff: bool,
-        light_mode: bool,
-        tenant_id: str,
-    ) -> None:
-        self.config = DadBotConfig(
-            model_name=model_name,
-            fallback_models=fallback_models,
-            append_signoff=append_signoff,
-            light_mode=light_mode,
-            tenant_id=tenant_id,
-        )
-        self._service_config = self.config.service_config
-        self.runtime_config = self.config.runtime_config
-
-    def _ensure_runtime_paths(self) -> None:
-        self.config.profile_path.parent.mkdir(parents=True, exist_ok=True)
-        self.config.memory_path.parent.mkdir(parents=True, exist_ok=True)
-        self.config.semantic_memory_db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.config.graph_store_db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.config.session_log_dir.mkdir(parents=True, exist_ok=True)
-
-    def _initialize_document_store(self, document_store: Any) -> None:
-        self._customer_state_store = (
-            document_store
-            if document_store is not None
-            else build_customer_document_store(self._service_config)
-        )
-        self._tenant_document_store = None
-        if self._customer_state_store is not None:
-            self._tenant_document_store = NamespacedStateStore(
-                self._customer_state_store,
-                f"tenant-doc:{self.config.tenant_id}",
-            )
-
-    def _initialize_services(self) -> None:
-        self.bot_context = DadBotContext.from_runtime(self)
-        self.context = self.bot_context
-        self.services = DadBotServiceContainer(self)
-
-        # Bootstrap managers required before profile/memory hydration.
-        self.services.wire_bootstrap()
-        
-        # Initialize model port after runtime_client is available.
-        self._model_port: ModelPort | None = None
-        
-        # Initialize MCP server controller.
-        self._mcp_controller = LocalMcpServerController(self.runtime_root_path())
-        
-        # Initialize UX projection gateway (wired but not part of execute() semantics).
-        self._ux_gateway = TurnUxProjectionGateway()
-        
-        # Initialize model port after runtime_client is available.
-        # This port deterministically gates all LLM and embedding calls.
-        self._model_port: ModelPort | None = None
-
-    def _hydrate_profile_and_memory(self) -> None:
-        self.profile_runtime.load_profile()
-        profile_llm = self.profile_runtime.profile.get("llm", {}) if isinstance(self.profile_runtime.profile, dict) else {}
-        if isinstance(profile_llm, dict):
-            # apply_profile_llm_settings normalises provider/model and updates
-            # active_model when provider is ollama â€” no manual fan-out needed.
-            self.config.apply_profile_llm_settings(
-                str(profile_llm.get("provider", "")).strip().lower(),
-                str(profile_llm.get("model", "")).strip(),
-            )
-        self.memory.load_memory_store()
-        self.profile_runtime.refresh_profile_runtime()
-        self.services.wire_runtime()
-        self.service_registry = self.services.registry
-        
-        # Initialize model port now that runtime is fully wired.
-        config = ModelConfig(
-            active_model=str(self.config.active_model or "llama3.2"),
-            temperature=None,
-            request_timeout_seconds=30.0,
-        )
-        self._model_port = OllamaModelAdapter(
-            runtime_client=self.runtime_client,
-            model_runtime=self.model_runtime,
-            config=config,
-        )
-
-    def _initialize_runtime_caches(self) -> None:
-        self._model_metadata_cache = {}
-        self._tokenizer_cache = {}
-        self._tokenizer = self.initialize_tokenizer(self.config.active_model)
-        self._ollama_async_client = None
-        self._io_lock = RLock()
-        self._session_lock = RLock()
-        self._graph_refresh_lock = RLock()
-        # Explicit actor isolation for sync graph turns: one in-flight turn at a time.
-        self._turn_execution_lock = RLock()
-        self.background_tasks = BackgroundTaskManager(max_workers=12, thread_name_prefix="dadbot-bg")
-        self._semantic_index_lock = RLock()
-        self._semantic_index_future = None
-        self._pending_semantic_index_memories = None
-        self._memory_graph_dirty = True
-        self._last_memory_graph_refresh_monotonic = 0.0
-        self._recent_mood_detections = {}
-        self._recent_runtime_issues = deque(maxlen=12)
-        self._last_runtime_health_log_monotonic = 0.0
-        self._base_background_worker_limit = 12
-        self._health_snapshot_interval_seconds = self.config.health_snapshot_interval_seconds
-        self._proactive_heartbeat_interval_seconds = self.config.proactive_heartbeat_interval_seconds
-        self._cached_runtime_health_snapshot = None
-        self._last_runtime_health_snapshot_monotonic = 0.0
-        self._internal_runtime = DadBotInternalRuntime(context_token_budget=self.CONTEXT_TOKEN_BUDGET)
-
-    def _initialize_turn_orchestration(self) -> None:
-        self._turn_graph_enabled = self.config.turn_graph_enabled
-        self._strict_graph_mode = self.config.strict_graph_mode
-        self._turn_graph_config_path = self.config.turn_graph_config_path
-        self._turn_orchestrator = None
-
-    def _start_boot_background_tasks(self) -> None:
-        # Defer initial graph sync in normal runtime, but avoid starting this
-        # task under pytest where it can race deterministic tests and keep
-        # temporary SQLite files open during Windows cleanup.
-        disable_graph_init_task = env_truthy("DADBOT_DISABLE_GRAPH_INIT_TASK", default=False)
-        if self.should_start_background_tasks():
-            if not disable_graph_init_task:
-                self.background_tasks.submit(
-                    self.refresh_memory_graph,
-                    force=True,
-                    task_kind="graph-init",
-                )
-            # Auto-sync iCal calendar feed on startup (background, non-blocking)
-            if self.ical_feed_url():
-                self.schedule_calendar_sync()
-            if not env_truthy("DADBOT_DISABLE_PROACTIVE_HEARTBEAT", default=False):
-                self.background_tasks.submit(
-                    self._run_proactive_heartbeat_loop,
-                    task_kind="proactive-heartbeat",
-                )
-
-    def __init__(
-        self,
-        model_name: str = "llama3.2",
-        fallback_models: tuple[str, ...] = ("phi4:mini", "qwen3.5:4b", "gemma3:4b", "gemma2:2b", "llama3.2:1b"),
-        *,
-        append_signoff: bool = True,
-        light_mode: bool = False,
-        tenant_id: str = "",
-        document_store: Any = None,
-        dependency_registry: Any = None,
-    ) -> None:
-        self._dependency_registry = dependency_registry
-        self._facade_compat = DadBotFacadeCompat(self.__class__._DEPRECATED_FACADE_ALIASES)
-        self._initialize_config(
-            model_name=model_name,
-            fallback_models=fallback_models,
-            append_signoff=append_signoff,
-            light_mode=light_mode,
-            tenant_id=tenant_id,
-        )
-        self._ensure_runtime_paths()
-        self._initialize_document_store(document_store)
-        self._initialize_services()
-        self._hydrate_profile_and_memory()
-        self._initialize_runtime_caches()
-        self._initialize_turn_orchestration()
-        self._validate_managers(smoke=env_truthy("DADBOT_VALIDATE_MANAGERS_SMOKE", default=False))
-        atexit.register(self.shutdown)
-        self.reset_session_state()
-        self._start_boot_background_tasks()
-
-    def should_start_background_tasks(self) -> bool:
-        """Return True when background tasks should be started on boot.
-
-        Returns False under pytest (where background threads can race
-        deterministic tests and keep temporary files open on Windows).
-        Override via the ``DADBOT_DISABLE_GRAPH_INIT_TASK`` /
-        ``DADBOT_DISABLE_PROACTIVE_HEARTBEAT`` env flags for finer control.
-        """
-        return "PYTEST_CURRENT_TEST" not in os.environ
-
-    def _get_turn_orchestrator(self):
-        services = getattr(self, "services", None)
-        if services is not None:
-            return services.turn_orchestrator
-        orchestrator = getattr(self, "_turn_orchestrator", None)
-        if orchestrator is not None:
-            return orchestrator
-        orchestrator = DadBotOrchestrator(
-            config_path=self._turn_graph_config_path,
-            bot=self,
-            strict=bool(getattr(self, "_strict_graph_mode", True)),
-        )
-        self._turn_orchestrator = orchestrator
-        return orchestrator
-
-    async def _run_graph_turn_async(self, user_input: str, attachments: AttachmentList | None = None) -> FinalizedTurnResult:
-        return await self.turn_orchestrator.handle_turn(user_input, attachments=attachments)
-
-    @staticmethod
-    def _run_coro_in_thread(coro):
-        """Run a coroutine in a worker thread with its own event loop.
-
-        Used when the coroutine must be awaited from within an already-running
-        loop (e.g. Streamlit, Jupyter) where :func:`asyncio.run` is forbidden.
-        """
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            return pool.submit(asyncio.run, coro).result()
-
-    def _run_graph_turn_sync(self, user_input: str, attachments: AttachmentList | None = None) -> FinalizedTurnResult:
-        """Run the graph turn synchronously regardless of the calling context.
-
-        When called from within a running event loop (e.g., Streamlit), the
-        coroutine is dispatched to a dedicated thread with its own event loop
-        rather than falling back to the legacy TurnProcessingManager.  This
-        ensures the graph pipeline is *always* the active engine in production.
-
-        Strict actor-isolation contract: sync callers share one execution actor,
-        so turn-critical mutable state is never concurrently mutated.
-        """
-        with self._turn_execution_lock:
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = None
-
-            coro = self._run_graph_turn_async(user_input, attachments=attachments)
-            if loop is not None and loop.is_running():
-                return self._run_coro_in_thread(coro)
-            else:
-                return asyncio.run(coro)
-
-    def _validate_managers(self, *, smoke=False):
-        """Compatibility wrapper for extracted facade validation."""
-        self.services.validate_facade(smoke=smoke)
-
-    def shutdown(self):
-        background_tasks = getattr(self, "background_tasks", None)
-        try:
-            if background_tasks is not None:
-                background_tasks.shutdown(wait=True)
-        finally:
-            save_memory_store = getattr(self, "save_memory_store", None)
-            if callable(save_memory_store):
-                try:
-                    save_memory_store()
-                except Exception as exc:
-                    logger.info("Final memory store flush during shutdown failed: %s", exc)
-
-    def _run_proactive_heartbeat_loop(self):
-        interval_seconds = max(300, int(getattr(self, "_proactive_heartbeat_interval_seconds", 3600) or 3600))
-        try:
-            self.maintenance_scheduler.run_proactive_heartbeat()
-        except Exception as exc:
-            logger.info("Proactive heartbeat startup tick failed: %s", exc)
-
-        while not self.background_tasks.wait_for_shutdown(interval_seconds):
-            try:
-                self.maintenance_scheduler.run_proactive_heartbeat()
-            except Exception as exc:
-                logger.info("Proactive heartbeat tick failed: %s", exc)
-
-    @staticmethod
-    def ollama_retryable_errors():
-        base = (ConnectionError, TimeoutError, OSError)
-        if ollama is None:
-            return base
-        return (*base, ollama.RequestError, ollama.ResponseError)
-
-    @staticmethod
-    def ollama_error_summary(exc):
-        if exc is None:
-            return "Unknown Ollama error"
-
-        details = []
-        # Check for Ollama-specific response errors
-        if hasattr(exc, "status_code"):
-            details.append(f"status={exc.status_code}")
-        elif hasattr(exc, "status"):
-            details.append(f"status={exc.status}")
-
-        # Safely grab the message content
-        if hasattr(exc, "error"):
-            error_text = exc.error
-        elif hasattr(exc, "message"):
-            error_text = exc.message
-        else:
-            error_text = str(exc)
-        if error_text:
-            details.append(str(error_text)[:120])
-        summary = "; ".join(details)
-        return summary if summary else type(exc).__name__
-
-    @staticmethod
-    def default_planner_debug_state():
-        return _default_planner_debug_state()
+    # ------------------------------------------------------------------
+    # Core manager properties
+    # ------------------------------------------------------------------
 
     @property
     def memory(self):
@@ -759,17 +359,19 @@ class DadBot(DadBotCompatMixin, DadBotConvenienceMixin, DadBotActionMixin):
 
     @property
     def mood(self) -> Any:
-        """Typed alias for explicit mood-manager access."""
         return self.services.mood_manager
 
     @property
     def profile(self) -> Any:
-        """Typed alias for explicit profile-runtime access."""
         return self.services.profile_runtime
 
     @property
     def turn_orchestrator(self):
         return self.services.turn_orchestrator
+
+    # ------------------------------------------------------------------
+    # Explicit manager properties (getter + setter)
+    # ------------------------------------------------------------------
 
     @property
     def runtime_storage(self):
@@ -995,6 +597,10 @@ class DadBot(DadBotCompatMixin, DadBotConvenienceMixin, DadBotActionMixin):
     def conversation_persistence(self, value):
         self._set_explicit_manager("conversation_persistence", value)
 
+    # ------------------------------------------------------------------
+    # Config properties
+    # ------------------------------------------------------------------
+
     @property
     def PROFILE(self):
         return self.profile_runtime.profile
@@ -1019,6 +625,35 @@ class DadBot(DadBotCompatMixin, DadBotConvenienceMixin, DadBotActionMixin):
     def STYLE(self, value):
         self.profile_runtime.style = value
 
+    # ------------------------------------------------------------------
+    # Deterministic model port and UX gateway
+    # (private attrs set by DadBotBootMixin)
+    # ------------------------------------------------------------------
+
+    @property
+    def model_port(self) -> ModelPort:
+        """Deterministic model interaction port.
+
+        All LLM and embedding calls MUST route through this port to ensure
+        replay correctness, deterministic execution, and certification validity.
+        """
+        if self._model_port is None:
+            raise RuntimeError("Model port not initialized -- services not ready")
+        return self._model_port
+
+    @property
+    def ux_gateway(self) -> TurnUxProjectionGateway:
+        """UX projection gateway (post-execution assembly).
+
+        Constraint: DadBot does NOT access state/fidelity directly.
+        All reads route through cached values from previous gateway projections.
+        """
+        return self._ux_gateway
+
+    # ------------------------------------------------------------------
+    # Session state helpers
+    # ------------------------------------------------------------------
+
     def reset_session_state(self) -> Any:
         """Explicit facade delegate for runtime session reset."""
         return self.runtime_state_manager.reset_session_state()
@@ -1029,559 +664,6 @@ class DadBot(DadBotCompatMixin, DadBotConvenienceMixin, DadBotActionMixin):
     def _apply_thread_snapshot_unlocked(self, snapshot):
         return self.runtime_state_manager.apply_thread_snapshot_unlocked(snapshot)
 
-    def runtime_health_snapshot(self, *, log_warnings=True, persist=True):
-        health_manager = getattr(self, "health_manager", None)
-        runtime_health_snapshot = getattr(health_manager, "runtime_health_snapshot", None)
-        if callable(runtime_health_snapshot):
-            return runtime_health_snapshot(log_warnings=log_warnings, persist=persist)
-        return {"status": "unknown"}
-
-    def estimate_token_count(self, text):
-        """Estimate token count via deterministic model port.
-        
-        Routes through: self.model_port.estimate_token_count()
-        """
-        return self.model_port.estimate_token_count(text, model=self.ACTIVE_MODEL)
-
-    def estimate_tokens(self, text):
-        return self.estimate_token_count(text)
-
-    def initialize_tokenizer(self, model_name=None):
-        """Initialize tokenizer via model runtime manager."""
-        return self.model_runtime.initialize_tokenizer(model_name)
-
-    def current_tokenizer(self, model_name=None):
-        """Get tokenizer via model runtime manager."""
-        return self.model_runtime.current_tokenizer(model_name)
-
-    def model_chars_per_token_estimate(self, model_name=None):
-        return self.model_runtime.model_chars_per_token_estimate(model_name)
-
-    # -- Intentionally kept thin shims for API stability / discoverability ------
-    # Prefer direct manager access in new code:
-    # - bot.mood_manager.detect(...)
-    # - bot.reply_finalization.append_signoff(...)
-    # - bot.relationship.reflect(...), bot.relationship.snapshot(...)
-    # - bot.memory.export_memory_store(...), bot.memory.memory_graph_snapshot()
-    # - bot.internal_state_manager.snapshot(...)
-    #
-    # These remain on DadBot for current callers, tests, and interactive usage
-    # while the facade is being thinned down incrementally.
-
-    @property
-    def model_port(self) -> ModelPort:
-        """Deterministic model interaction port.
-        
-        All LLM and embedding calls MUST route through this port to ensure
-        replay correctness, deterministic execution, and certification validity.
-        """
-        if self._model_port is None:
-            raise RuntimeError("Model port not initialized — services not ready")
-        return self._model_port
-
-    @property
-    def ux_gateway(self) -> TurnUxProjectionGateway:
-        """UX projection gateway (post-execution assembly).
-        
-        Wired but not part of execution semantics. Used by runtime adapter
-        to assemble health and feedback after TurnGraph.execute() completes.
-        
-        Constraint: DadBot does NOT access state/fidelity directly.
-        All reads route through cached values from previous gateway projections.
-        """
-        return self._ux_gateway
-
-    def call_llm(
-        self,
-        messages,
-        *,
-        model=None,
-        temperature=None,
-        stream=False,
-        purpose="chat",
-        options=None,
-        response_format=None,
-        chunk_callback=None,
-        **kwargs,
-    ):
-        """Main unified LLM entrypoint via deterministic model port.
-        
-        Deprecated: prefer model_port.generate() directly.
-        Routes through: self.model_port.generate()
-        """
-        return self.model_port.generate(
-            messages,
-            model=model,
-            temperature=temperature,
-            stream=stream,
-            purpose=purpose,
-            response_format=response_format,
-            chunk_callback=chunk_callback,
-            **kwargs,
-        )
-
-    async def call_llm_async(
-        self,
-        messages,
-        *,
-        model=None,
-        temperature=None,
-        stream=False,
-        purpose="chat",
-        options=None,
-        response_format=None,
-        chunk_callback=None,
-        **kwargs,
-    ):
-        """Async unified LLM entrypoint via deterministic model port.
-        
-        Deprecated: prefer model_port.generate_async() directly.
-        Routes through: self.model_port.generate_async()
-        """
-        return await self.model_port.generate_async(
-            messages,
-            model=model,
-            temperature=temperature,
-            stream=stream,
-            purpose=purpose,
-            response_format=response_format,
-            chunk_callback=chunk_callback,
-            **kwargs,
-        )
-
-    def call_ollama_chat(self, messages, options=None, response_format=None, purpose="chat"):
-        return self.call_llm(messages, purpose=purpose, options=options, response_format=response_format)
-
-    async def call_ollama_chat_async(self, messages, options=None, response_format=None, purpose="chat"):
-        return await self.call_llm_async(messages, purpose=purpose, options=options, response_format=response_format)
-
-    def call_ollama_chat_with_model(self, model_name, messages, options=None, response_format=None, purpose="chat"):
-        return self.call_llm(messages, model=model_name, purpose=purpose, options=options, response_format=response_format)
-
-    def call_ollama_chat_stream(self, messages, options=None, purpose="chat", chunk_callback=None):
-        return self.call_llm(messages, stream=True, purpose=purpose, options=options, chunk_callback=chunk_callback)
-
-    async def call_ollama_chat_stream_async(self, messages, options=None, purpose="chat", chunk_callback=None):
-        return await self.call_llm_async(messages, stream=True, purpose=purpose, options=options, chunk_callback=chunk_callback)
-
-    def _record_background_task(self, task_id, *, task_kind, status, metadata=None, error=""):
-        return self.runtime_orchestration.record_background_task(
-            task_id,
-            task_kind=task_kind,
-            status=status,
-            metadata=metadata,
-            error=error,
-        )
-
-    def embed_texts(self, texts, purpose="semantic retrieval"):
-        """Embed texts via deterministic model port.
-        
-        Routes through: self.model_port.embed()
-        """
-        return self.model_port.embed(texts, purpose=purpose)
-
-    def chat_loop(self):
-        return self.runtime_interface.chat_loop()
-
-    def chat_loop_via_service(self, service_client, session_id=None):
-        return self.runtime_interface.chat_loop_via_service(service_client, session_id=session_id)
-
-    async def handle_turn_async(
-        self,
-        user_input: str,
-        attachments: AttachmentList | None = None,
-    ) -> FinalizedTurnResult:
-        """Canonical async turn entrypoint backed by the existing runtime path."""
-        return await self.process_user_message_async(user_input, attachments=attachments)
-
-    def handle_turn_sync(
-        self,
-        user_input: str,
-        attachments: AttachmentList | None = None,
-    ) -> FinalizedTurnResult:
-        """Canonical sync turn entrypoint backed by the existing runtime path."""
-        return self.process_user_message(user_input, attachments=attachments)
-
-    def _graph_failure_session_id(self) -> str:
-        candidate = getattr(self, "active_thread_id", "") or getattr(self, "tenant_id", "")
-        normalized = str(candidate or "").strip()
-        return normalized or "default"
-
-    @staticmethod
-    def _safe_graph_failure_payload(value: Any, *, limit: int = 240) -> Any:
-        if value is None or isinstance(value, (bool, int, float)):
-            return value
-        if isinstance(value, str):
-            return value[:limit]
-        if isinstance(value, dict):
-            return {
-                str(key)[:80]: DadBot._safe_graph_failure_payload(item, limit=limit)
-                for key, item in list(value.items())[:12]
-            }
-        if isinstance(value, (list, tuple, set)):
-            return [DadBot._safe_graph_failure_payload(item, limit=limit) for item in list(value)[:12]]
-        return str(value)[:limit]
-
-    def _emit_graph_failure_event(
-        self,
-        *,
-        mode: str,
-        correlation_id: str,
-        trace_id: str,
-        user_input: str,
-        attachments: AttachmentList | None,
-        exc: Exception,
-    ) -> None:
-        orchestrator = getattr(self, "_turn_orchestrator", None)
-        if orchestrator is None:
-            try:
-                orchestrator = self._get_turn_orchestrator()
-            except Exception:
-                orchestrator = None
-        control_plane = getattr(orchestrator, "control_plane", None)
-        ledger_writer = getattr(control_plane, "ledger_writer", None)
-        write_event = getattr(ledger_writer, "write_event", None)
-        if not callable(write_event):
-            return
-
-        payload = {
-            "mode": mode,
-            "graph_enabled": True,
-            "strict_graph_mode": bool(getattr(self, "_strict_graph_mode", True)),
-            "error_type": type(exc).__name__,
-            "error": str(exc),
-            "user_input": self._safe_graph_failure_payload(user_input),
-            "attachment_count": len(attachments or []),
-            "attachments": self._safe_graph_failure_payload(list(attachments or []), limit=120),
-            "recorded_at": str(getattr(getattr(self, "_current_turn_time_base", None), "wall_time", "")),
-        }
-        write_event(
-            event_type="GRAPH_EXECUTION_FAILED",
-            session_id=self._graph_failure_session_id(),
-            trace_id=trace_id or correlation_id,
-            kernel_step_id=f"graph.failure.{mode}",
-            payload={
-                **payload,
-                "correlation_id": correlation_id,
-                "trace_id": trace_id or correlation_id,
-            },
-            committed=True,
-        )
-
-    def _graph_failure_reply(self, correlation_id: str) -> str:
-        return self._append_signoff_compat(
-            "I hit an internal graph error and stopped before touching memory or state. "
-            f"Please try again. Reference ID: {correlation_id}"
-        )
-
-    def _raise_graph_execution_failure(
-        self,
-        exc: Exception,
-        *,
-        mode: str,
-        user_input: str,
-        attachments: AttachmentList | None = None,
-    ) -> None:
-        correlation_id = CorrelationContext.current() or CorrelationContext.ensure()
-        trace_id = TracingContext.current_trace_id() or correlation_id
-        logger.exception(
-            "Graph execution failed in %s mode; strict mode forbids alternate execution paths",
-            mode,
-            extra={
-                "correlation_id": correlation_id,
-                "trace_id": trace_id,
-                "graph_enabled": True,
-                "strict_graph_mode": bool(getattr(self, "_strict_graph_mode", True)),
-                "attachment_count": len(attachments or []),
-            },
-        )
-        self._emit_graph_failure_event(
-            mode=mode,
-            correlation_id=correlation_id,
-            trace_id=trace_id,
-            user_input=user_input,
-            attachments=attachments,
-            exc=exc,
-        )
-        raise RuntimeError("Graph execution failed in strict mode; legacy path is disabled") from exc
-
-    def _deliver_buffered_stream_chunks(self, reply: str, chunk_callback: ChunkCallback | None) -> None:
-        if callable(chunk_callback) and reply:
-            chunk_callback(reply)
-
-    def process_user_message(self, user_input: str, attachments: AttachmentList | None = None) -> FinalizedTurnResult:
-        try:
-            return self._run_graph_turn_sync(user_input, attachments=attachments)
-        except Exception as exc:
-            self._raise_graph_execution_failure(
-                exc,
-                mode="sync",
-                user_input=user_input,
-                attachments=attachments,
-            )
-
-    def _append_signoff_compat(self, text: str) -> str:
-        """Apply reply signoff using manager-first compatibility resolution."""
-        finalization = getattr(self, "reply_finalization", None)
-        append_signoff = getattr(finalization, "append_signoff", None)
-        if callable(append_signoff):
-            return append_signoff(text)
-        compat_finalize = getattr(self, "finalize_reply", None)
-        if callable(compat_finalize):
-            return compat_finalize(text)
-        return str(text or "")
-
-    async def process_user_message_async(self, user_input: str, attachments: AttachmentList | None = None) -> FinalizedTurnResult:
-        try:
-            return await self._run_graph_turn_async(user_input, attachments=attachments)
-        except Exception as exc:
-            self._raise_graph_execution_failure(
-                exc,
-                mode="async",
-                user_input=user_input,
-                attachments=attachments,
-            )
-
-    def process_user_message_stream(
-        self,
-        user_input: str,
-        attachments: AttachmentList | None = None,
-        chunk_callback: ChunkCallback | None = None,
-    ) -> FinalizedTurnResult:
-        reply, should_end = self.process_user_message(user_input, attachments=attachments)
-        self._deliver_buffered_stream_chunks(reply, chunk_callback)
-        return reply, should_end
-
-    async def process_user_message_stream_async(
-        self,
-        user_input: str,
-        attachments: AttachmentList | None = None,
-        chunk_callback: ChunkCallback | None = None,
-    ) -> FinalizedTurnResult:
-        reply, should_end = await self.process_user_message_async(user_input, attachments=attachments)
-        self._deliver_buffered_stream_chunks(reply, chunk_callback)
-        return reply, should_end
-
-    def current_runtime_health_snapshot(self, *, force=False, log_warnings=False, persist=False, max_age_seconds=None):
-        """Cached health snapshot; explicit on DadBot so tests can patch bot.runtime_health_snapshot."""
-        now = time.monotonic()
-        max_age_seconds = max(0, int(max_age_seconds or 0)) if max_age_seconds is not None else max(30, int(self._health_snapshot_interval_seconds or 300))
-        cached = self._cached_runtime_health_snapshot
-        last = self._last_runtime_health_snapshot_monotonic
-        if not force and isinstance(cached, dict) and (now - last) <= max_age_seconds:
-            return dict(cached)
-        snapshot = getattr(
-            self,
-            "runtime_health_snapshot",
-            lambda **_kw: {"status": "unknown"},
-        )(log_warnings=log_warnings, persist=persist)
-        self._cached_runtime_health_snapshot = dict(snapshot)
-        self._last_runtime_health_snapshot_monotonic = now
-        return dict(snapshot)
-
-    def turn_health_state(self) -> dict[str, Any]:
-        """Get cached turn health state from last execution.
-        
-        Wired through UX gateway for assembly. This method returns the cached
-        values stamped by TurnUxProjectionGateway after prior graph execution.
-        
-        Constraint: Does NOT compute health directly. Single source of truth
-        is in the gateway. DadBot does NOT access ctx.state or fidelity.
-        """
-        payload = dict(getattr(self, "_last_turn_health_state", {}) or {})
-        if payload:
-            return payload
-        return {
-            "status": "OK",
-            "latency_ms": 0.0,
-            "memory_ops_time": 0.0,
-            "graph_sync_time": 0.0,
-            "inference_time": 0.0,
-            "fallback_used": False,
-        }
-
-    def turn_fidelity_state(self) -> dict[str, Any]:
-        """Get cached turn fidelity state from last execution.
-        
-        Wired through UX gateway. This method returns cached values from
-        the last executed turn. DadBot does NOT access fidelity fields directly.
-        """
-        payload = dict(getattr(self, "_last_turn_health_state", {}) or {})
-        fidelity = dict(payload.get("fidelity") or {}) if isinstance(payload, dict) else {}
-        if fidelity:
-            return {
-                "temporal": bool(fidelity.get("temporal", False)),
-                "inference": bool(fidelity.get("inference", False)),
-                "reflection": bool(fidelity.get("reflection", False)),
-                "save": bool(fidelity.get("save", False)),
-                "full_pipeline": bool(fidelity.get("full_pipeline", False)),
-            }
-        return {
-            "temporal": False,
-            "inference": False,
-            "reflection": False,
-            "save": False,
-            "full_pipeline": False,
-        }
-
-    def turn_ux_feedback(self) -> dict[str, Any]:
-        """Get cached UX feedback from last execution.
-        
-        Wired through UX gateway. This method returns cached feedback
-        stamped by TurnUxProjectionGateway after prior graph execution.
-        
-        Constraint: Does NOT compute feedback. Single source of truth
-        is in the gateway. DadBot does NOT access state directly.
-        """
-        payload = dict(getattr(self, "_last_turn_ux_feedback", {}) or {})
-        if payload:
-            return payload
-        return {
-            "dad_is_thinking": False,
-            "message": "",
-            "checking_memory": False,
-            "memory_message": "",
-            "mood_hint": str(self.last_saved_mood() or "neutral"),
-            "status": "OK",
-        }
-
-    def local_mcp_status(self) -> dict[str, Any]:
-        """Get MCP server status.
-        
-        Routes through: LocalMcpServerController.get_status()
-        """
-        try:
-            from dadbot_system.local_mcp_server import local_mcp_status as describe_local_mcp
-        except Exception as exc:
-            return {
-                "available": False,
-                "configured": False,
-                "server_name": "dadbot-local-services",
-                "tool_count": 0,
-                "local_state_entries": len(dict(self.MEMORY_STORE.get("mcp_local_store") or {})),
-                "error": str(exc).strip() or exc.__class__.__name__,
-                "running": False,
-            }
-        
-        payload = dict(describe_local_mcp(self) or {})
-        controller_status = self._mcp_controller.get_status()
-        payload.setdefault("local_state_entries", len(dict(self.MEMORY_STORE.get("mcp_local_store") or {})))
-        payload.update(controller_status)
-        payload.setdefault("task_label", "Run Dad Bot MCP Server")
-        return payload
-
-    def local_mcp_runtime_paths(self) -> dict[str, Path]:
-        """Get MCP runtime file paths (pid, logs).
-        
-        Routes through: LocalMcpServerController.get_runtime_paths()
-        """
-        return self._mcp_controller.get_runtime_paths()
-
-    @staticmethod
-    def _local_mcp_process_running(pid: int | None) -> bool:
-        """Check if MCP process is running.
-        
-        Routes through: LocalMcpServerController.is_process_running()
-        """
-        return LocalMcpServerController.is_process_running(pid)
-
-    def _read_local_mcp_pid(self) -> int | None:
-        """Read stored MCP process ID.
-        
-        Routes through: LocalMcpServerController.read_pid()
-        """
-        return self._mcp_controller.read_pid()
-
-    def local_mcp_log_tail(self, *, lines: int = 20) -> dict[str, str]:
-        """Get last N lines from MCP server logs.
-        
-        Routes through: LocalMcpServerController.get_log_tail()
-        """
-        return self._mcp_controller.get_log_tail(lines=lines)
-
-    def start_local_mcp_server_process(self, *, restart: bool = False) -> dict[str, Any]:
-        """Start MCP server process.
-        
-        Routes through: LocalMcpServerController.start_process()
-        """
-        self._mcp_controller.start_process(restart=restart)
-        return self.local_mcp_status()
-
-    def stop_local_mcp_server_process(self) -> dict[str, Any]:
-        """Stop MCP server process.
-        
-        Routes through: LocalMcpServerController.stop_process()
-        """
-        self._mcp_controller.stop_process()
-        return self.local_mcp_status()
-
-    def load_latest_graph_checkpoint(self, trace_id: str = "") -> dict[str, Any] | None:
-        return self.conversation_persistence.load_latest_graph_checkpoint(trace_id=trace_id)
-
-    def resume_turn_from_checkpoint(self, trace_id: str = "") -> dict[str, Any] | None:
-        return self.conversation_persistence.resume_graph_checkpoint(trace_id=trace_id)
-
-    def list_turn_events(self, trace_id: str, limit: int = 0) -> list[dict[str, Any]]:
-        return self.conversation_persistence.list_turn_events(trace_id=trace_id, limit=limit)
-
-    def replay_turn_events(self, trace_id: str) -> dict[str, Any]:
-        return self.conversation_persistence.replay_turn_events(trace_id=trace_id)
-
-    def validate_replay_determinism(self, trace_id: str, expected_lock_hash: str = "") -> dict[str, Any]:
-        """Validate replay determinism using OfflineReplayValidator.
-        
-        Routes through: OfflineReplayValidator.validate_full()
-        Constraint: No logic duplication. Single source of truth in validator module.
-        """
-        replay = self.conversation_persistence.replay_turn_events(trace_id=trace_id)
-        determinism = dict(replay.get("determinism") or {})
-        
-        # Extract data for offline validator
-        events = list(replay.get("events") or [])
-        contract = dict(determinism.get("contract") or {})
-        identity = dict(determinism.get("execution_identity") or {})
-        
-        # Run validation through OfflineReplayValidator (single source of truth)
-        validator = OfflineReplayValidator()
-        report = validator.validate_full(
-            contract=contract,
-            events=events,
-            identity=identity,
-            trace_id=str(trace_id or "").strip(),
-        )
-        
-        # Format result compatible with existing callers
-        observed_hash = str(determinism.get("lock_hash") or "").strip()
-        expected_hash = str(expected_lock_hash or "").strip()
-        matches_expected = True
-        if expected_hash:
-            matches_expected = observed_hash == expected_hash
-        
-        return {
-            "trace_id": str(trace_id or "").strip(),
-            "replay_valid": report.passed,
-            "replay_verdict": report.verdict,
-            "replay_violations": report.violations,
-            "consistent": bool(determinism.get("consistent", True)),
-            "observed_lock_hash": observed_hash,
-            "expected_lock_hash": expected_hash,
-            "matches_expected": matches_expected,
-            "lock_hashes": list(determinism.get("lock_hashes") or []),
-            "execution_identity": identity,
-            "execution_fingerprint": str(determinism.get("execution_fingerprint") or ""),
-        }
-
-    def build_local_mcp_server(self):
-        from dadbot_system.local_mcp_server import build_server
-
-        return build_server(bot=self)
-
-    def run_local_mcp_server(self) -> None:
-        from dadbot_system.local_mcp_server import main as run_local_mcp_main
-
-        run_local_mcp_main(bot=self)
-
 
 if __name__ == "__main__":
     raise SystemExit(run_app_main(dadbot_cls=DadBot, script_path=__file__))
-
