@@ -51,6 +51,7 @@ mcp = [
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 addopts = "-q"
+pythonpath = [".", "tests"]
 markers = [
     "integration: tests that hit external services or full-stack storage paths",
     "postgres: tests that require a live Postgres DSN",

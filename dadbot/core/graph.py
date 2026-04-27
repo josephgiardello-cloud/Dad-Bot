@@ -64,6 +64,52 @@ class FatalTurnError(RuntimeError):
     """
 
 
+class TurnFailureSeverity(StrEnum):
+    """Severity for standardized failure taxonomy."""
+
+    RECOVERABLE = "recoverable"
+    PARTIAL = "partial"
+    FATAL = "fatal"
+    COMPENSATABLE = "compensatable"
+
+
+@dataclass(frozen=True)
+class KernelRejectionSemantics:
+    """Formal runtime contract for a kernel step rejection.
+
+    This captures the semantic guarantees for a rejected step:
+    - whether retries are allowed
+    - whether step-local state mutation is permitted
+    - whether downstream stages may continue
+    - whether and how rejection is persisted
+    - whether the turn should abort immediately
+
+    Defaults are backward-compatible with existing behavior:
+    rejected steps are skipped, produce no step-state mutation, and the
+    pipeline continues.
+    """
+
+    retryable: bool = False
+    state_mutation_allowed: bool = False
+    invalidate_downstream: bool = False
+    persistence_behavior: Literal["persist_rejection_event", "no_persist"] = "persist_rejection_event"
+    action: Literal["skip_stage", "abort_turn"] = "skip_stage"
+
+
+@dataclass(frozen=True)
+class PersistenceServiceContract:
+    """Versioned persistence surface expected by TurnGraph.
+
+    Backends may expose additional methods; these are the minimum contract
+    required by checkpoint/event execution semantics.
+    """
+
+    version: str = "1.0"
+    save_turn: str = "save_turn"
+    save_graph_checkpoint: str = "save_graph_checkpoint"
+    save_turn_event: str = "save_turn_event"
+
+
 def _json_safe(value: Any) -> Any:
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
@@ -780,6 +826,99 @@ class TurnGraph:
             quarantine=None,
             strict=False,
         )
+        self._persistence_contract = PersistenceServiceContract()
+        # Backward-compatible default: rejected step is skipped, no retry,
+        # and downstream stages continue unless explicitly overridden.
+        self._kernel_rejection_semantics: dict[str, KernelRejectionSemantics] = {
+            "*": KernelRejectionSemantics(),
+        }
+
+    def set_kernel_rejection_semantics(self, stage: str, semantics: KernelRejectionSemantics) -> None:
+        """Override rejection semantics for a stage name.
+
+        Use stage='*' for global defaults.
+        """
+        key = str(stage or "*").strip().lower() or "*"
+        self._kernel_rejection_semantics[key] = semantics
+
+    def _rejection_semantics_for_stage(self, stage: str) -> KernelRejectionSemantics:
+        key = str(stage or "").strip().lower()
+        if key in self._kernel_rejection_semantics:
+            return self._kernel_rejection_semantics[key]
+        return self._kernel_rejection_semantics.get("*", KernelRejectionSemantics())
+
+    @staticmethod
+    def _classify_failure(error: Exception) -> TurnFailureSeverity:
+        if isinstance(error, FatalTurnError):
+            return TurnFailureSeverity.FATAL
+        message = str(error or "").lower()
+        if "timeout" in message:
+            return TurnFailureSeverity.RECOVERABLE
+        if "compensat" in message or "rollback" in message:
+            return TurnFailureSeverity.COMPENSATABLE
+        if "degraded" in message or "partial" in message:
+            return TurnFailureSeverity.PARTIAL
+        return TurnFailureSeverity.FATAL
+
+    def _validate_persistence_service_contract(self, turn_context: TurnContext, service: Any) -> None:
+        """Validate minimum persistence interface for graph execution semantics.
+
+        Strict mode is opt-in via metadata['persistence_contract_strict'].
+        """
+        if service is None:
+            raise RuntimeError("Persistence service unavailable")
+
+        missing: list[str] = []
+        for attr in (
+            self._persistence_contract.save_turn,
+            self._persistence_contract.save_graph_checkpoint,
+            self._persistence_contract.save_turn_event,
+        ):
+            if not callable(getattr(service, attr, None)):
+                missing.append(attr)
+
+        if not missing:
+            turn_context.state["persistence_contract"] = {
+                "version": self._persistence_contract.version,
+                "ok": True,
+                "missing": [],
+            }
+            return
+
+        payload = {
+            "version": self._persistence_contract.version,
+            "ok": False,
+            "missing": list(missing),
+        }
+        turn_context.state["persistence_contract"] = payload
+        turn_context.metadata["persistence_contract"] = dict(payload)
+
+        if bool(turn_context.metadata.get("persistence_contract_strict", False)):
+            raise RuntimeError(
+                "Persistence service contract violation: "
+                f"missing callables={missing!r}, contract_version={self._persistence_contract.version}"
+            )
+
+    def _persist_kernel_rejection(self, turn_context: TurnContext, *, stage: str, reason: str) -> None:
+        if self.registry is None:
+            return
+        service = self.registry.get("persistence_service")
+        save_event = getattr(service, "save_turn_event", None)
+        if not callable(save_event):
+            return
+        turn_context.event_sequence += 1
+        save_event(
+            {
+                "event_type": "kernel_rejection",
+                "trace_id": turn_context.trace_id,
+                "sequence": turn_context.event_sequence,
+                "occurred_at": turn_context.temporal.wall_time,
+                "stage": str(stage or ""),
+                "reason": str(reason or ""),
+                "phase": turn_context.phase.value,
+                "semantics": _json_safe(self._rejection_semantics_for_stage(stage).__dict__),
+            }
+        )
 
     def set_execution_kernel(self, kernel: ExecutionKernel) -> None:
         self._execution_kernel = kernel
@@ -1035,7 +1174,30 @@ class TurnGraph:
             step_result = await self._kernel.execute_step(turn_context, node_name, _call_node)
             if step_result.status == "error":
                 raise RuntimeError(step_result.error)
-            # "rejected" -> step was skipped by policy; pipeline continues normally.
+            if step_result.status == "rejected":
+                semantics = self._rejection_semantics_for_stage(node_name)
+                rejection_reason = str(getattr(getattr(step_result, "policy", None), "reason", "") or "")
+                turn_context.state.setdefault("kernel_rejection_contract", []).append(
+                    {
+                        "stage": node_name,
+                        "reason": rejection_reason,
+                        "retryable": bool(semantics.retryable),
+                        "state_mutation_allowed": bool(semantics.state_mutation_allowed),
+                        "invalidate_downstream": bool(semantics.invalidate_downstream),
+                        "action": str(semantics.action),
+                        "persistence_behavior": str(semantics.persistence_behavior),
+                    }
+                )
+                if semantics.persistence_behavior == "persist_rejection_event":
+                    self._persist_kernel_rejection(turn_context, stage=node_name, reason=rejection_reason)
+
+                if semantics.action == "abort_turn" or semantics.invalidate_downstream:
+                    raise RuntimeError(
+                        "Kernel step rejected under abort semantics: "
+                        f"stage={node_name!r}, reason={rejection_reason!r}"
+                    )
+                # Backward-compatible default: stage is skipped and pipeline continues.
+                return turn_context
             return turn_context
 
         return await _call_node()
@@ -1043,6 +1205,7 @@ class TurnGraph:
         if self.registry is None:
             return
         service = self.registry.get("persistence_service")
+        self._validate_persistence_service_contract(turn_context, service)
         save_checkpoint = getattr(service, "save_graph_checkpoint", None)
         determinism_lock = dict(turn_context.metadata.get("determinism") or {})
         turn_context.event_sequence += 1
@@ -1200,15 +1363,28 @@ class TurnGraph:
             if error_msg is None:
                 self._emit_checkpoint(stage_context, stage=stage_name, status="after")
                 executed_stage_names.append(stage_name)
+                # Emit edge checkpoint immediately after this stage completes,
+                # if there's a next stage in the pipeline.
+                pipeline_names = list(stage_context.state.get("_pipeline_stage_names") or [])
+                if pipeline_names and stage_name in pipeline_names:
+                    current_idx = pipeline_names.index(stage_name)
+                    if current_idx + 1 < len(pipeline_names):
+                        next_stage_name = pipeline_names[current_idx + 1]
+                        self._emit_checkpoint(stage_context, stage=f"{stage_name}\u2192{next_stage_name}", status="edge")
             return stage_context
 
         try:
             pipeline = self._pipeline_items()
+            # Store all pipeline stage names in turn_context so _execute_stage can find the next stage
+            pipeline_stage_names = [name for name, _ in pipeline]
+            turn_context.state["_pipeline_stage_names"] = pipeline_stage_names
             turn_context = await self._execution_kernel.run(turn_context, pipeline, _execute_stage)
-            for idx, stage_name in enumerate(executed_stage_names[:-1]):
-                next_name = executed_stage_names[idx + 1]
-                self._emit_checkpoint(turn_context, stage=f"{stage_name}\u2192{next_name}", status="edge")
         except Exception as exc:
+            failure_class = self._classify_failure(exc)
+            turn_context.state["failure_taxonomy"] = {
+                "severity": str(failure_class),
+                "error": str(exc),
+            }
             total_ms = round((time.perf_counter() - execute_started_at) * 1000, 3)
             self._emit_turn_health_state(turn_context, total_latency_ms=total_ms, failed=True)
             if audit_enabled:

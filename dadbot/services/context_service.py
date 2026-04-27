@@ -188,7 +188,9 @@ class ContextService:
         session_id = str((getattr(turn_context, "metadata", {}) or {}).get("control_plane", {}).get("session_id") or "default")
         memory_snapshot = self.get_snapshot(session_id)
 
-        layer_stats = dict(getattr(self.context_builder.bot, "_last_hierarchical_memory_stats", {}) or {})
+        # Guard against missing context_builder.bot (e.g., in test stubs)
+        bot = getattr(self.context_builder, "bot", None)
+        layer_stats = dict(getattr(bot, "_last_hierarchical_memory_stats", {}) or {}) if bot else {}
         recent_tokens = int(layer_stats.get("recent_tokens", 0) or 0)
         summary_tokens = int(layer_stats.get("summary_tokens", 0) or 0)
         structured_tokens = int(layer_stats.get("structured_tokens", 0) or 0)

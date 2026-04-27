@@ -16,7 +16,7 @@ from tests.stress.phase4_certification_gate import build_bot
 from tools.phase4_legacy_integrity_scan import run_scan
 
 
-CANONICAL_PIPELINE = ["temporal", "preflight", "inference", "safety", "reflection", "save"]
+CANONICAL_PIPELINE = ["temporal", "preflight", "planner", "inference", "safety", "reflection", "save"]
 
 
 @pytest.fixture

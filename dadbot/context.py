@@ -270,25 +270,109 @@ Keep family relationships, ages, timelines, and education history consistent wit
         return context_text, layer_stats
 
     def build_memory_context(self, user_input: str) -> str | None:
-        context_text, layer_stats = self.build_hierarchical_memory_context(user_input)
-        if context_text is None:
-            self.bot._last_hierarchical_memory_stats = dict(layer_stats)
-            self._record_memory_context_stats(user_input=user_input, tokens=0, selected_sections=0, total_sections=0, pruned=False)
+        """Build query-aware memory context with graph, archive, consolidated, and semantic sections."""
+        user_input_str = str(user_input or "").strip()
+        
+        sections = []
+        
+        # 1. Try to get graph and archive results
+        graph_result = None
+        archive_entries = []
+        semantic_memories = []
+        
+        try:
+            graph_result = self.bot.graph_retrieval_for_input(user_input_str, limit=3) if user_input_str else None
+        except Exception:
+            pass
+        
+        try:
+            if not graph_result and user_input_str:
+                archive_entries = list(self.bot.relevant_archive_entries_for_input(user_input_str, limit=2) or [])
+        except Exception:
+            pass
+        
+        try:
+            if user_input_str:
+                semantic_memories = list(self.bot.relevant_memories_for_input(user_input_str, limit=3, graph_result=graph_result) or [])
+        except Exception:
+            pass
+        
+        # 2. Get consolidated and deep pattern context
+        deep_pattern_context = None
+        consolidated_context = None
+        
+        if user_input_str:
+            try:
+                deep_pattern_context = self.bot.long_term_signals.build_deep_pattern_context(user_input_str)
+            except Exception:
+                pass
+            try:
+                consolidated_context = self.bot.build_active_consolidated_context(user_input_str)
+            except Exception:
+                pass
+        
+        # 3. Build all sections using _build_memory_sections
+        if deep_pattern_context or consolidated_context or graph_result or archive_entries or semantic_memories:
+            sections = self._build_memory_sections(
+                deep_pattern_context=deep_pattern_context,
+                consolidated_context=consolidated_context,
+                graph_result=graph_result,
+                archive_entries=archive_entries,
+                memories=semantic_memories,
+            )
+        
+        # 4. If no sections from query-aware retrieval, fall back to hierarchical memory
+        if not sections and user_input_str:
+            context_text, layer_stats = self.build_hierarchical_memory_context(user_input_str)
+            if context_text:
+                self.bot._last_hierarchical_memory_stats = dict(layer_stats)
+                self._record_memory_context_stats(
+                    user_input=user_input_str,
+                    tokens=self.bot.estimate_token_count(context_text),
+                    selected_sections=1,
+                    total_sections=1,
+                    pruned=False,
+                )
+                return context_text
             return None
-
-        total_sections = 3
-        selected_sections = len(list(layer_stats.get("selected_layers") or []))
-        post_trim_tokens = self.bot.estimate_token_count(context_text)
-        pre_trim_tokens = int(layer_stats.get("recent_tokens", 0) or 0) + int(layer_stats.get("summary_tokens", 0) or 0) + int(layer_stats.get("structured_tokens", 0) or 0)
+        
+        if not sections:
+            return None
+        
+        # 5. Trim sections to budget
+        try:
+            trimmed_sections, total_sections, pre_trim_tokens, post_trim_tokens = self._trim_memory_sections_to_token_budget(sections)
+        except Exception:
+            # If trimming fails, just use all sections
+            trimmed_sections = sections
+            total_sections = len(sections)
+            pre_trim_tokens = sum(self.bot.estimate_token_count(s) for s in sections)
+            post_trim_tokens = pre_trim_tokens
+        
+        if not trimmed_sections:
+            return None
+        
+        combined_context = "\n\n".join(trimmed_sections)
+        
         self._record_memory_context_stats(
-            user_input=user_input,
+            user_input=user_input_str,
             tokens=post_trim_tokens,
-            selected_sections=selected_sections,
+            selected_sections=len(trimmed_sections),
             total_sections=total_sections,
-            pruned=(selected_sections < total_sections) or (post_trim_tokens < pre_trim_tokens),
+            pruned=(len(trimmed_sections) < total_sections) or (post_trim_tokens < pre_trim_tokens),
         )
+        
+        # Store stats for context service
+        layer_stats = {
+            "recent_tokens": 0,
+            "summary_tokens": 0,
+            "structured_tokens": 0,
+            "structured_claims": [],
+            "selected_layers": [],
+        }
         self.bot._last_hierarchical_memory_stats = dict(layer_stats)
-        return context_text
+        
+        return combined_context
 
     def _cross_session_traits_section(self) -> str | None:
         evolution_history = self.bot.persona_evolution_history()

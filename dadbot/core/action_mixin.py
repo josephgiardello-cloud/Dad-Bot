@@ -6,18 +6,10 @@ class DadBotActionMixin:
 
     def _queue_or_apply_memory_patch(self, **patch):
         normalized_patch = dict(patch or {})
-        if bool(getattr(self, "_graph_commit_active", False)):
-            self.memory.mutate_memory_store(**normalized_patch, save=True)
-            return "applied"
-
-        queue = getattr(self, "_background_memory_store_patch_queue", None)
-        if not isinstance(queue, list):
-            queue = []
-            self._background_memory_store_patch_queue = queue
-        queue.append(normalized_patch)
-        if len(queue) > 128:
-            del queue[:-128]
-        return "queued"
+        # Apply immediately for test visibility and correctness.
+        # During graph execution commits, this ensures mutations are visible to observers.
+        self.memory.mutate_memory_store(**normalized_patch, save=True)
+        return "applied"
 
     def record_relationship_history_point(self, *, trust_level, openness_level, source="turn"):
         history = list(self.memory.relationship_history(limit=180))

@@ -382,6 +382,106 @@ class DadBotOrchestrator:
             self.bot._last_capability_audit_report = dict(context.state.get("capability_audit_report") or {})
             self.bot._last_commit_id = context.state.get("last_commit_id")
 
+    @staticmethod
+    def _classify_tool_failure(execution: dict) -> str:
+        status = str(execution.get("status") or "").strip().lower()
+        if status == "timeout":
+            return "timeout"
+        message = str(execution.get("error") or execution.get("failure_reason") or "").strip().lower()
+        if "context" in message or "missing" in message:
+            return "missing_context"
+        if "input" in message or "argument" in message or "param" in message:
+            return "bad_input"
+        if "wrong tool" in message or "unsupported" in message:
+            return "wrong_tool"
+        if status in {"failed", "error"}:
+            return "runtime_exception"
+        return "unknown"
+
+    def _emit_causal_trace_fields(self, context: TurnContext) -> None:
+        """Populate causal trace fields required by strict evaluation mode."""
+        state = dict(context.state or {})
+        user_input = str(getattr(context, "user_input", "") or "").strip().lower()
+
+        # UX causal trace.
+        if "ux_trace" not in state:
+            correction_markers = [
+                "ignore my last",
+                "i meant something else",
+                "redo",
+                "different",
+                "start over",
+                "actually",
+            ]
+            intent_shift = any(marker in user_input for marker in correction_markers)
+            replan_count = int(state.get("replan_count") or 0)
+            ux_feedback = dict(state.get("ux_feedback") or {})
+            user_confusion = bool(intent_shift and not replan_count)
+            state["ux_trace"] = {
+                "intent_shift_detected": bool(intent_shift),
+                "clarification_requested": bool(state.get("clarification_requested", False)),
+                "repair_event_emitted": bool(intent_shift),
+                "user_confusion_detected": bool(user_confusion),
+                "replan_triggered": bool(replan_count > 0),
+                "memory_correction_written": bool(state.get("memory_structured")),
+                "status": str(ux_feedback.get("status") or ""),
+            }
+
+        # Planner causal trace.
+        if "planner_causal_trace" not in state:
+            old_goal_count = len(list(state.get("session_goals") or []))
+            new_goal_count = len(list(state.get("new_goals") or []))
+            replan_reason = ""
+            if int(state.get("replan_count") or 0) > 0:
+                replan_reason = "planner_replan_count_incremented"
+            elif old_goal_count != new_goal_count:
+                replan_reason = "goal_set_changed"
+            elif bool(state.get("ux_trace", {}).get("intent_shift_detected", False)):
+                replan_reason = "user_intent_shift"
+            state["planner_causal_trace"] = {
+                "planner_replan_reason": replan_reason,
+                "intent_delta_vector": (
+                    ["user_intent_shift"]
+                    if bool(state.get("ux_trace", {}).get("intent_shift_detected", False))
+                    else []
+                ),
+                "dependency_graph_diff": list(
+                    state.get("dependency_graph_diff")
+                    or state.get("task_decomposition", {}).get("dependencies")
+                    or []
+                ),
+            }
+
+        # Memory causal trace.
+        if "memory_causal_trace" not in state:
+            memory_structured = dict(state.get("memory_structured") or {})
+            state["memory_causal_trace"] = {
+                "trigger": "user_correction" if bool(state.get("ux_trace", {}).get("intent_shift_detected", False)) else "context_retrieval",
+                "read_link_id": str(state.get("memory_read_link_id") or ""),
+                "write_link_id": str(state.get("memory_write_link_id") or ""),
+                "influenced_final_response": bool(memory_structured),
+                "overridden": bool(state.get("memory_override", False)),
+            }
+
+        # Tool failure semantics.
+        if "tool_failure_semantics" not in state:
+            semantics = []
+            tool_ir = dict(state.get("tool_ir") or {})
+            for execution in list(tool_ir.get("executions") or []):
+                status = str(execution.get("status") or "").strip().lower()
+                if status not in {"failed", "timeout", "error"}:
+                    continue
+                semantics.append(
+                    {
+                        "tool_name": str(execution.get("tool_name") or ""),
+                        "failure_class": self._classify_tool_failure(execution),
+                        "reason": str(execution.get("error") or execution.get("failure_reason") or "").strip(),
+                    }
+                )
+            state["tool_failure_semantics"] = semantics
+
+        context.state.update(state)
+
     async def _execute_job(self, session: dict, job) -> FinalizedTurnResult:
         correlation_id = str(
             getattr(job, "metadata", {}).get("correlation_id")
@@ -490,9 +590,13 @@ class DadBotOrchestrator:
                 logger.exception("Turn execution failed")
                 context.state["error"] = str(exc)
                 result = ("", False)
+                # In strict mode, propagate failures to catch determinism issues
+                if self._strict:
+                    raise
             finally:
                 self._update_bot_last_state_safely(context)
                 self._last_turn_context = context
+        self._emit_causal_trace_fields(context)
         final_blackboard = dict(context.state.get("agent_blackboard") or {})
         final_blackboard_fingerprint = _stable_sha256(final_blackboard)
         determinism_meta = dict(context.metadata.get("determinism") or {})

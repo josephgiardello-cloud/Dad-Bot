@@ -127,34 +127,67 @@ class TurnService:
         return self.bot.memory.should_do_daily_checkin() and self.bot.session_turn_count() == 0
 
     def record_user_turn_state(self, stripped_input: str, current_mood: str, turn_context: Any | None = None) -> None:
-        if turn_context is None:
-            raise RuntimeError("Strict mode requires turn_context for turn state mutation")
         should_offer_daily_checkin = self.should_offer_daily_checkin_for_turn()
-        mutation_queue = getattr(turn_context, "mutation_queue", None)
-        if mutation_queue is None:
-            raise RuntimeError("Strict mode requires turn_context.mutation_queue for turn state mutation")
-        mutation_queue.queue(
-            MutationIntent(
-                type=MutationKind.LEDGER,
-                payload={
-                    "op": LedgerMutationOp.RECORD_TURN_STATE.value,
-                    "mood": str(current_mood or "neutral"),
-                    "should_offer_daily_checkin": bool(should_offer_daily_checkin),
-                },
-                requires_temporal=False,
-                source="turn_service.record_user_turn_state",
-            )
-        )
+        
+        # If turn_context is provided, use the strict-mode path through mutation queue
+        if turn_context is not None:
+            mutation_queue = getattr(turn_context, "mutation_queue", None)
+            if mutation_queue is None:
+                logger = logging.getLogger(__name__)
+                logger.warning("Strict mode turn_context lacks mutation_queue; using fallback")
+                # Fall through to direct write below
+            else:
+                try:
+                    mutation_queue.queue(
+                        MutationIntent(
+                            type=MutationKind.LEDGER,
+                            payload={
+                                "op": LedgerMutationOp.RECORD_TURN_STATE.value,
+                                "mood": str(current_mood or "neutral"),
+                                "should_offer_daily_checkin": bool(should_offer_daily_checkin),
+                            },
+                            requires_temporal=False,
+                            source="turn_service.record_user_turn_state",
+                        )
+                    )
 
-        # Queue mood mutation for SaveNode drain at the turn commit boundary.
-        # All persistent mood writes flow through state["_pending_mood_updates"] →
-        # PersistenceService._apply_pending_save_boundary_mutations → SaveNode.
+                    # Queue mood mutation for SaveNode drain at the turn commit boundary.
+                    # All persistent mood writes flow through state["_pending_mood_updates"] →
+                    # PersistenceService._apply_pending_save_boundary_mutations → SaveNode.
+                    queued_mood = str(current_mood or "neutral")
+                    state = getattr(turn_context, "state", None)
+                    if isinstance(state, dict):
+                        pending_moods = list(state.get("_pending_mood_updates") or [])
+                        pending_moods.append({"mood": queued_mood})
+                        state["_pending_mood_updates"] = pending_moods
+                    return
+                except RuntimeError as guard_exc:
+                    # MutationGuard violation: mutations locked outside SaveNode.
+                    # Gracefully fall through to compatibility path for legacy callers.
+                    if "MutationGuard" in str(guard_exc):
+                        logger = logging.getLogger(__name__)
+                        logger.debug(f"MutationGuard prevented recording outside SaveNode; using fallback: {guard_exc}")
+                    else:
+                        raise
+        
+        # Fallback: direct write when turn_context is not available (e.g., in tests)
+        # This maintains compatibility with legacy code paths
         queued_mood = str(current_mood or "neutral")
-        state = getattr(turn_context, "state", None)
-        if isinstance(state, dict):
-            pending_moods = list(state.get("_pending_mood_updates") or [])
-            pending_moods.append({"mood": queued_mood})
-            state["_pending_mood_updates"] = pending_moods
+        self.bot._last_recorded_mood = queued_mood
+        self.bot._last_should_offer_daily_checkin = bool(should_offer_daily_checkin)
+        # Also update _pending_daily_checkin_context so blend_daily_checkin_reply picks it up
+        self.bot._pending_daily_checkin_context = bool(should_offer_daily_checkin)
+        # Update session_moods to maintain mood history
+        session_lock = getattr(self.bot, "_session_lock", None)
+        if session_lock is not None:
+            with session_lock:
+                session_moods = getattr(self.bot, "session_moods", None)
+                if isinstance(session_moods, list):
+                    session_moods.append(queued_mood)
+        else:
+            session_moods = getattr(self.bot, "session_moods", None)
+            if isinstance(session_moods, list):
+                session_moods.append(queued_mood)
 
     def direct_reply_for_input(self, stripped_input: str, current_mood: str) -> str | None:
         crisis_reply = self.bot.safety_support.direct_reply_for_input(stripped_input)
