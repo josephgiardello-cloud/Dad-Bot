@@ -1,0 +1,91 @@
+{
+  "protocol": {
+    "name": "phase4-certification-protocol",
+    "version": "1.0",
+    "signature_algorithm": "HMAC-SHA256",
+    "trace_versions_supported": [
+      "1.0",
+      "legacy-0"
+    ],
+    "generated_at_utc": "2026-04-27T04:00:07+00:00"
+  },
+  "GLOBAL_PASS": true,
+  "subsystem_scores": {
+    "static_completeness": 1.0,
+    "structural_integrity": 1.0,
+    "runtime_trace": 1.0,
+    "determinism": 1.0,
+    "mutation_integrity": 1.0,
+    "persistence_compliance": 1.0,
+    "replay_correctness": 1.0,
+    "overall": 1.0
+  },
+  "determinism_verdict": true,
+  "mutation_integrity_verdict": true,
+  "persistence_compliance_verdict": true,
+  "replay_correctness_verdict": true,
+  "replay_guarantees": {
+    "verdict": true,
+    "backward_compatible": true,
+    "supported_trace_versions": [
+      "1.0",
+      "legacy-0"
+    ],
+    "observed_trace_version": "legacy-0",
+    "replay_anchor": "0c95012e5c54edba446e783c51c19d2439ec0fb3d902dfaee8ff8dcfbf89ac30",
+    "requires": {
+      "canonical_stage_order": true,
+      "execution_identity": true,
+      "trace_contract": true
+    }
+  },
+  "static": {
+    "score": 1.0,
+    "signals": {
+      "TurnGraph": true,
+      "MutationQueue": true,
+      "VirtualClock": true,
+      "TurnTemporalAxis": true,
+      "Persistence": true,
+      "checkpoint_hash": true,
+      "KernelRejectionSemantics": true
+    },
+    "files_scanned": 413
+  },
+  "structural": {
+    "ok": true,
+    "violations": [],
+    "graph_file": "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\dadbot\\core\\graph.py"
+  },
+  "runtime": {
+    "ok": true,
+    "missing": [],
+    "stages": [
+      "temporal",
+      "health",
+      "context_builder",
+      "inference",
+      "safety",
+      "reflection",
+      "save"
+    ],
+    "order_ok": true,
+    "mutation_queue_empty": true,
+    "persistence_contract_ok": true,
+    "execution_trace_contract_ok": true,
+    "execution_identity_ok": true,
+    "identity_event_emitted": true,
+    "source": "artifact",
+    "trace_version": "legacy-0",
+    "replay_backward_compatible": true,
+    "replay_anchor": "0c95012e5c54edba446e783c51c19d2439ec0fb3d902dfaee8ff8dcfbf89ac30",
+    "reason": ""
+  },
+  "final_certification_hash": "c60de5d7b19c05d1d252d80c6c884055411981e64779b804de20d7a00edcfebf",
+  "signature": {
+    "algorithm": "HMAC-SHA256",
+    "key_id": "local-dev",
+    "value": "e4743db398b54081c1dd3f89ac650ed22a3a5343a2152578c1d4451d24b4f268",
+    "using_default_key": "true"
+  }
+}

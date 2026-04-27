@@ -31,6 +31,10 @@ from dadbot.registry import DadBotServiceContainer
 from dadbot.background import BackgroundTaskManager
 from dadbot.config import DadBotConfig, DadRuntimeConfig as PackagedDadRuntimeConfig
 from dadbot.contracts import AttachmentList, ChunkCallback, DadBotContext, FinalizedTurnResult
+from dadbot.runtime.model import ModelPort, ModelConfig, OllamaModelAdapter
+from dadbot.runtime.mcp import LocalMcpServerController
+from dadbot.core.offline_replay_validator import OfflineReplayValidator
+from dadbot.core.ux_projection_gateway import TurnUxProjectionGateway
 from dadbot.constants import MOOD_CATEGORIES, MOOD_ALIASES
 from dadbot.defaults import (
     default_planner_debug_state as _default_planner_debug_state,
@@ -493,6 +497,19 @@ class DadBot(DadBotCompatMixin, DadBotConvenienceMixin, DadBotActionMixin):
 
         # Bootstrap managers required before profile/memory hydration.
         self.services.wire_bootstrap()
+        
+        # Initialize model port after runtime_client is available.
+        self._model_port: ModelPort | None = None
+        
+        # Initialize MCP server controller.
+        self._mcp_controller = LocalMcpServerController(self.runtime_root_path())
+        
+        # Initialize UX projection gateway (wired but not part of execute() semantics).
+        self._ux_gateway = TurnUxProjectionGateway()
+        
+        # Initialize model port after runtime_client is available.
+        # This port deterministically gates all LLM and embedding calls.
+        self._model_port: ModelPort | None = None
 
     def _hydrate_profile_and_memory(self) -> None:
         self.profile_runtime.load_profile()
@@ -508,6 +525,18 @@ class DadBot(DadBotCompatMixin, DadBotConvenienceMixin, DadBotActionMixin):
         self.profile_runtime.refresh_profile_runtime()
         self.services.wire_runtime()
         self.service_registry = self.services.registry
+        
+        # Initialize model port now that runtime is fully wired.
+        config = ModelConfig(
+            active_model=str(self.config.active_model or "llama3.2"),
+            temperature=None,
+            request_timeout_seconds=30.0,
+        )
+        self._model_port = OllamaModelAdapter(
+            runtime_client=self.runtime_client,
+            model_runtime=self.model_runtime,
+            config=config,
+        )
 
     def _initialize_runtime_caches(self) -> None:
         self._model_metadata_cache = {}
@@ -1008,27 +1037,21 @@ class DadBot(DadBotCompatMixin, DadBotConvenienceMixin, DadBotActionMixin):
         return {"status": "unknown"}
 
     def estimate_token_count(self, text):
-        if not text:
-            return 0
-
-        normalized = str(text)
-        tokenizer = self.current_tokenizer(model_name=self.ACTIVE_MODEL)
-        if tokenizer is not None:
-            try:
-                return len(tokenizer.encode(normalized))
-            except Exception:
-                pass
-
-        chars_per_token = self.model_chars_per_token_estimate(self.ACTIVE_MODEL)
-        return max(1, int((len(normalized) + chars_per_token - 1) // chars_per_token))
+        """Estimate token count via deterministic model port.
+        
+        Routes through: self.model_port.estimate_token_count()
+        """
+        return self.model_port.estimate_token_count(text, model=self.ACTIVE_MODEL)
 
     def estimate_tokens(self, text):
         return self.estimate_token_count(text)
 
     def initialize_tokenizer(self, model_name=None):
+        """Initialize tokenizer via model runtime manager."""
         return self.model_runtime.initialize_tokenizer(model_name)
 
     def current_tokenizer(self, model_name=None):
+        """Get tokenizer via model runtime manager."""
         return self.model_runtime.current_tokenizer(model_name)
 
     def model_chars_per_token_estimate(self, model_name=None):
@@ -1045,6 +1068,29 @@ class DadBot(DadBotCompatMixin, DadBotConvenienceMixin, DadBotActionMixin):
     # These remain on DadBot for current callers, tests, and interactive usage
     # while the facade is being thinned down incrementally.
 
+    @property
+    def model_port(self) -> ModelPort:
+        """Deterministic model interaction port.
+        
+        All LLM and embedding calls MUST route through this port to ensure
+        replay correctness, deterministic execution, and certification validity.
+        """
+        if self._model_port is None:
+            raise RuntimeError("Model port not initialized — services not ready")
+        return self._model_port
+
+    @property
+    def ux_gateway(self) -> TurnUxProjectionGateway:
+        """UX projection gateway (post-execution assembly).
+        
+        Wired but not part of execution semantics. Used by runtime adapter
+        to assemble health and feedback after TurnGraph.execute() completes.
+        
+        Constraint: DadBot does NOT access state/fidelity directly.
+        All reads route through cached values from previous gateway projections.
+        """
+        return self._ux_gateway
+
     def call_llm(
         self,
         messages,
@@ -1058,14 +1104,17 @@ class DadBot(DadBotCompatMixin, DadBotConvenienceMixin, DadBotActionMixin):
         chunk_callback=None,
         **kwargs,
     ):
-        """Main unified LLM entrypoint delegated to the runtime client manager."""
-        return self.runtime_client.call_llm(
+        """Main unified LLM entrypoint via deterministic model port.
+        
+        Deprecated: prefer model_port.generate() directly.
+        Routes through: self.model_port.generate()
+        """
+        return self.model_port.generate(
             messages,
             model=model,
             temperature=temperature,
             stream=stream,
             purpose=purpose,
-            options=options,
             response_format=response_format,
             chunk_callback=chunk_callback,
             **kwargs,
@@ -1084,14 +1133,17 @@ class DadBot(DadBotCompatMixin, DadBotConvenienceMixin, DadBotActionMixin):
         chunk_callback=None,
         **kwargs,
     ):
-        """Async unified LLM entrypoint delegated to the runtime client manager."""
-        return await self.runtime_client.call_llm_async(
+        """Async unified LLM entrypoint via deterministic model port.
+        
+        Deprecated: prefer model_port.generate_async() directly.
+        Routes through: self.model_port.generate_async()
+        """
+        return await self.model_port.generate_async(
             messages,
             model=model,
             temperature=temperature,
             stream=stream,
             purpose=purpose,
-            options=options,
             response_format=response_format,
             chunk_callback=chunk_callback,
             **kwargs,
@@ -1122,7 +1174,11 @@ class DadBot(DadBotCompatMixin, DadBotConvenienceMixin, DadBotActionMixin):
         )
 
     def embed_texts(self, texts, purpose="semantic retrieval"):
-        return self.memory.embed_texts(texts, purpose=purpose)
+        """Embed texts via deterministic model port.
+        
+        Routes through: self.model_port.embed()
+        """
+        return self.model_port.embed(texts, purpose=purpose)
 
     def chat_loop(self):
         return self.runtime_interface.chat_loop()
@@ -1324,6 +1380,14 @@ class DadBot(DadBotCompatMixin, DadBotConvenienceMixin, DadBotActionMixin):
         return dict(snapshot)
 
     def turn_health_state(self) -> dict[str, Any]:
+        """Get cached turn health state from last execution.
+        
+        Wired through UX gateway for assembly. This method returns the cached
+        values stamped by TurnUxProjectionGateway after prior graph execution.
+        
+        Constraint: Does NOT compute health directly. Single source of truth
+        is in the gateway. DadBot does NOT access ctx.state or fidelity.
+        """
         payload = dict(getattr(self, "_last_turn_health_state", {}) or {})
         if payload:
             return payload
@@ -1337,6 +1401,11 @@ class DadBot(DadBotCompatMixin, DadBotConvenienceMixin, DadBotActionMixin):
         }
 
     def turn_fidelity_state(self) -> dict[str, Any]:
+        """Get cached turn fidelity state from last execution.
+        
+        Wired through UX gateway. This method returns cached values from
+        the last executed turn. DadBot does NOT access fidelity fields directly.
+        """
         payload = dict(getattr(self, "_last_turn_health_state", {}) or {})
         fidelity = dict(payload.get("fidelity") or {}) if isinstance(payload, dict) else {}
         if fidelity:
@@ -1356,6 +1425,14 @@ class DadBot(DadBotCompatMixin, DadBotConvenienceMixin, DadBotActionMixin):
         }
 
     def turn_ux_feedback(self) -> dict[str, Any]:
+        """Get cached UX feedback from last execution.
+        
+        Wired through UX gateway. This method returns cached feedback
+        stamped by TurnUxProjectionGateway after prior graph execution.
+        
+        Constraint: Does NOT compute feedback. Single source of truth
+        is in the gateway. DadBot does NOT access state directly.
+        """
         payload = dict(getattr(self, "_last_turn_ux_feedback", {}) or {})
         if payload:
             return payload
@@ -1369,6 +1446,10 @@ class DadBot(DadBotCompatMixin, DadBotConvenienceMixin, DadBotActionMixin):
         }
 
     def local_mcp_status(self) -> dict[str, Any]:
+        """Get MCP server status.
+        
+        Routes through: LocalMcpServerController.get_status()
+        """
         try:
             from dadbot_system.local_mcp_server import local_mcp_status as describe_local_mcp
         except Exception as exc:
@@ -1381,122 +1462,57 @@ class DadBot(DadBotCompatMixin, DadBotConvenienceMixin, DadBotActionMixin):
                 "error": str(exc).strip() or exc.__class__.__name__,
                 "running": False,
             }
+        
         payload = dict(describe_local_mcp(self) or {})
-        runtime_paths = self.local_mcp_runtime_paths()
-        pid = self._read_local_mcp_pid()
-        running = self._local_mcp_process_running(pid)
-        if pid is not None and not running:
-            try:
-                runtime_paths["pid"].unlink(missing_ok=True)
-            except OSError:
-                pass
+        controller_status = self._mcp_controller.get_status()
         payload.setdefault("local_state_entries", len(dict(self.MEMORY_STORE.get("mcp_local_store") or {})))
-        payload.update(
-            {
-                "running": running,
-                "pid": pid if running else None,
-                "stdout_log_path": str(runtime_paths["stdout"]),
-                "stderr_log_path": str(runtime_paths["stderr"]),
-                "task_label": "Run Dad Bot MCP Server",
-            }
-        )
+        payload.update(controller_status)
+        payload.setdefault("task_label", "Run Dad Bot MCP Server")
         return payload
 
     def local_mcp_runtime_paths(self) -> dict[str, Path]:
-        # Always anchor to the project root so this matches _resolve_pid_path() in the server module.
-        base_dir = self.runtime_root_path() / "session_logs"
-        base_dir.mkdir(parents=True, exist_ok=True)
-        return {
-            "pid": base_dir / "local_mcp_server.pid",
-            "stdout": base_dir / "local_mcp_server.stdout.log",
-            "stderr": base_dir / "local_mcp_server.stderr.log",
-        }
+        """Get MCP runtime file paths (pid, logs).
+        
+        Routes through: LocalMcpServerController.get_runtime_paths()
+        """
+        return self._mcp_controller.get_runtime_paths()
 
     @staticmethod
     def _local_mcp_process_running(pid: int | None) -> bool:
-        if pid is None:
-            return False
-        try:
-            os.kill(pid, 0)
-        except OSError:
-            return False
-        return True
+        """Check if MCP process is running.
+        
+        Routes through: LocalMcpServerController.is_process_running()
+        """
+        return LocalMcpServerController.is_process_running(pid)
 
     def _read_local_mcp_pid(self) -> int | None:
-        pid_path = self.local_mcp_runtime_paths()["pid"]
-        if not pid_path.exists():
-            return None
-        try:
-            return int(pid_path.read_text(encoding="utf-8").strip())
-        except (OSError, ValueError):
-            return None
+        """Read stored MCP process ID.
+        
+        Routes through: LocalMcpServerController.read_pid()
+        """
+        return self._mcp_controller.read_pid()
 
     def local_mcp_log_tail(self, *, lines: int = 20) -> dict[str, str]:
-        def _tail(path: Path) -> str:
-            try:
-                content = path.read_text(encoding="utf-8", errors="replace").splitlines()
-            except OSError:
-                return ""
-            return "\n".join(content[-max(1, int(lines or 1)):])
-
-        paths = self.local_mcp_runtime_paths()
-        return {
-            "stdout": _tail(paths["stdout"]),
-            "stderr": _tail(paths["stderr"]),
-        }
+        """Get last N lines from MCP server logs.
+        
+        Routes through: LocalMcpServerController.get_log_tail()
+        """
+        return self._mcp_controller.get_log_tail(lines=lines)
 
     def start_local_mcp_server_process(self, *, restart: bool = False) -> dict[str, Any]:
-        if restart:
-            self.stop_local_mcp_server_process()
-
-        status = self.local_mcp_status()
-        if status.get("running"):
-            return status
-
-        runtime_paths = self.local_mcp_runtime_paths()
-        creationflags = 0
-        if os.name == "nt":
-            creationflags = getattr(subprocess, "DETACHED_PROCESS", 0x00000008) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
-
-        stdout_handle = runtime_paths["stdout"].open("ab")
-        stderr_handle = runtime_paths["stderr"].open("ab")
-        try:
-            process = subprocess.Popen(
-                [sys.executable, "-m", "dadbot_system.local_mcp_server"],
-                cwd=str(self.runtime_root_path()),
-                stdin=subprocess.DEVNULL,
-                stdout=stdout_handle,
-                stderr=stderr_handle,
-                creationflags=creationflags,
-                close_fds=True,
-            )
-        finally:
-            stdout_handle.close()
-            stderr_handle.close()
-
-        runtime_paths["pid"].write_text(str(process.pid), encoding="utf-8")
+        """Start MCP server process.
+        
+        Routes through: LocalMcpServerController.start_process()
+        """
+        self._mcp_controller.start_process(restart=restart)
         return self.local_mcp_status()
 
     def stop_local_mcp_server_process(self) -> dict[str, Any]:
-        runtime_paths = self.local_mcp_runtime_paths()
-        pid = self._read_local_mcp_pid()
-        if pid is not None and self._local_mcp_process_running(pid):
-            if os.name == "nt":
-                subprocess.run(
-                    ["taskkill", "/PID", str(pid), "/T", "/F"],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-            else:
-                try:
-                    os.kill(pid, 15)
-                except OSError:
-                    pass
-        try:
-            runtime_paths["pid"].unlink(missing_ok=True)
-        except OSError:
-            pass
+        """Stop MCP server process.
+        
+        Routes through: LocalMcpServerController.stop_process()
+        """
+        self._mcp_controller.stop_process()
         return self.local_mcp_status()
 
     def load_latest_graph_checkpoint(self, trace_id: str = "") -> dict[str, Any] | None:
@@ -1512,10 +1528,48 @@ class DadBot(DadBotCompatMixin, DadBotConvenienceMixin, DadBotActionMixin):
         return self.conversation_persistence.replay_turn_events(trace_id=trace_id)
 
     def validate_replay_determinism(self, trace_id: str, expected_lock_hash: str = "") -> dict[str, Any]:
-        return self.conversation_persistence.validate_replay_determinism(
-            trace_id=trace_id,
-            expected_lock_hash=expected_lock_hash,
+        """Validate replay determinism using OfflineReplayValidator.
+        
+        Routes through: OfflineReplayValidator.validate_full()
+        Constraint: No logic duplication. Single source of truth in validator module.
+        """
+        replay = self.conversation_persistence.replay_turn_events(trace_id=trace_id)
+        determinism = dict(replay.get("determinism") or {})
+        
+        # Extract data for offline validator
+        events = list(replay.get("events") or [])
+        contract = dict(determinism.get("contract") or {})
+        identity = dict(determinism.get("execution_identity") or {})
+        
+        # Run validation through OfflineReplayValidator (single source of truth)
+        validator = OfflineReplayValidator()
+        report = validator.validate_full(
+            contract=contract,
+            events=events,
+            identity=identity,
+            trace_id=str(trace_id or "").strip(),
         )
+        
+        # Format result compatible with existing callers
+        observed_hash = str(determinism.get("lock_hash") or "").strip()
+        expected_hash = str(expected_lock_hash or "").strip()
+        matches_expected = True
+        if expected_hash:
+            matches_expected = observed_hash == expected_hash
+        
+        return {
+            "trace_id": str(trace_id or "").strip(),
+            "replay_valid": report.passed,
+            "replay_verdict": report.verdict,
+            "replay_violations": report.violations,
+            "consistent": bool(determinism.get("consistent", True)),
+            "observed_lock_hash": observed_hash,
+            "expected_lock_hash": expected_hash,
+            "matches_expected": matches_expected,
+            "lock_hashes": list(determinism.get("lock_hashes") or []),
+            "execution_identity": identity,
+            "execution_fingerprint": str(determinism.get("execution_fingerprint") or ""),
+        }
 
     def build_local_mcp_server(self):
         from dadbot_system.local_mcp_server import build_server

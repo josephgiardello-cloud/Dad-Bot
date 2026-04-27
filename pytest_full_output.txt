@@ -1,0 +1,326 @@
+﻿=========================================================================================================================================== test session starts ===========================================================================================================================================
+collecting ... collected 1 item
+
+tests/stress/test_next_layer_resilience.py::test_replay_under_perturbation_keeps_deterministic_signature FAILED                                                                                                                                                                                      [100%]
+
+================================================================================================================================================ FAILURES =================================================================================================================================================
+______________________________________________________________________________________________________________________ test_replay_under_perturbation_keeps_deterministic_signature _______________________________________________________________________________________________________________________
+
+    @pytest.mark.slow
+    def test_replay_under_perturbation_keeps_deterministic_signature():
+        """D) Same seed + jitter + safe branch reorder should preserve deterministic output contract."""
+    
+        def run_signature(seed: int, *, reverse_branches: bool, jitter_ms: dict[str, float]) -> dict[str, Any]:
+            registry = MockRegistry()
+            graph = TurnGraph(registry=registry)
+    
+            branch_names = [f"p{i}" for i in range(8)]
+            branches = [_BranchNode(name=n, default_jitter_ms=0.0) for n in branch_names]
+            if reverse_branches:
+                branches = list(reversed(branches))
+    
+            graph.add_node("temporal", TemporalNode())
+            graph.add_node("fanout", tuple(branches))
+            graph.add_node("compose", _ComposeNode())
+            graph.add_node("save", SaveNode())
+            graph.set_edge("temporal", "fanout")
+            graph.set_edge("fanout", "compose")
+            graph.set_edge("compose", "save")
+    
+            ctx = TurnFactory().build_turn(seed=seed, mutations=[_goal_intent(priority=17), _goal_intent(priority=3)])
+            ctx.metadata["jitter_ms"] = dict(jitter_ms)
+            run = GraphRunner().run(graph, ctx, registry)
+            run.assert_succeeded()
+    
+            branch_state = {
+                key: value
+                for key, value in sorted(ctx.state.items())
+                if str(key).startswith("branch_")
+            }
+            return {
+                "trace_id": ctx.trace_id,
+                "phase_history": list(ctx.phase_history),
+                "fidelity": ctx.fidelity.to_dict(),
+                "mutation_snapshot": ctx.mutation_queue.snapshot(),
+                "safe_result": ctx.state.get("safe_result"),
+                "determinism_boundary": ctx.determinism_boundary.snapshot(),
+                "branch_state": branch_state,
+                "checkpoint_hashes": list(run.checkpoint_hashes),
+            }
+    
+        seed = 1_234_567
+        base_jitter = {f"p{i}": float((i % 3) * 2) for i in range(8)}
+        perturbed_jitter = {f"p{i}": float(((7 - i) % 4) * 3) for i in range(8)}
+    
+        signature_a = run_signature(seed, reverse_branches=False, jitter_ms=base_jitter)
+        signature_b = run_signature(seed, reverse_branches=True, jitter_ms=perturbed_jitter)
+    
+>       assert signature_a == signature_b, (
+            "Determinism boundary did not hold under timing jitter + safe branch reordering"
+        )
+E       AssertionError: Determinism boundary did not hold under timing jitter + safe branch reordering
+E       assert {'trace_id': '3aa6f726bc5c4cd67fb6aedffd85359e', 'phase_history': [{'from': 'PLAN', 'to': 'ACT', 'reason': 'enter:save'}, {'from': 'ACT', 'to': 'OBSERVE', 'reason': 'enter:save'}, {'from': 'OBSERVE', 'to': 'RESPOND', 'reason': 'enter:save'}], 'fidelity': {'temporal': True, 'inference': False, 'reflection': False, 'save': True, 'full_pipeline': False}, 'mutation_snapshot': {'owner_trace_id': '3aa6f726bc5c4cd67fb6aedffd85359e', 'pending': 0, 'drained': 2, 'failed': 0, 'ledger_pending': 0, 'ledger_drained': 0, 'ledger_failed': 0, 'transactions': 1, 'latest_transaction': {'transaction_id': '12ba15a16bc841c282f56d2d451e3cc0', 'status': 'committed', 'applied_count': 2, 'failed_count': 0, 'rollback_count': 0, 'rollback_failures': 0, 'trace_id': '3aa6f726bc5c4cd67fb6aedffd85359e', 'error': ''}}, 'safe_result': ('branch_p0=ok:p0|branch_p1=ok:p1|branch_p2=ok:p2|branch_p3=ok:p3|branch_p4=ok:p4|branch_p5=ok:p5|branch_p6=ok:p6|branch_p7=ok:p7', False), 'determinism_boundary': {'mode': 'RECORD', 'slots': [], 'hashes': {}, 'call_counts': {}, 'violations': [], 'consistent': True}, 'branch_state': {'branch_p0': 'ok:p0', 'branch_p1': 'ok:p1', 'branch_p2': 'ok:p2', 'branch_p3': 'ok:p3', 'branch_p4': 'ok:p4', 'branch_p5': 'ok:p5', 'branch_p6': 'ok:p6', 'branch_p7': 'ok:p7'}, 'checkpoint_hashes': ['87e0df8a9acc0a400d20e38ded772d10', 'cd8628185eaacb18d4354bab53bd6bbd', '4287a2dd27320d9c2551f6d8c5ce56cc', 'de68df267649e22170928fa7022d8116', 'fd93275a7ac572ece6cdd79d7aa23536', 'eda0b737dca2584dad58ba3dbe73b457', '73738bfdf16e8d800de036e0fa4a7348', '18da7d8e33339957dd0dbddbb11babf1', 'ce18c153dd7b1408fb577af456cbb611', '5c56c7021093d81da629797104d99323', '82ef718492f203eab9fd20f31351f21a', 'a67b2945cb4fbadf910760354b9f4d48']} == {'trace_id': '3aa6f726bc5c4cd67fb6aedffd85359e', 'phase_history': [{'from': 'PLAN', 'to': 'ACT', 'reason': 'enter:save'}, {'from': 'ACT', 'to': 'OBSERVE', 'reason': 'enter:save'}, {'from': 'OBSERVE', 'to': 'RESPOND', 'reason': 'enter:save'}], 'fidelity': {'temporal': True, 'inference': False, 'reflection': False, 'save': True, 'full_pipeline': False}, 'mutation_snapshot': {'owner_trace_id': '3aa6f726bc5c4cd67fb6aedffd85359e', 'pending': 0, 'drained': 2, 'failed': 0, 'ledger_pending': 0, 'ledger_drained': 0, 'ledger_failed': 0, 'transactions': 1, 'latest_transaction': {'transaction_id': '1ce8288ba9744c5c813c793951c78509', 'status': 'committed', 'applied_count': 2, 'failed_count': 0, 'rollback_count': 0, 'rollback_failures': 0, 'trace_id': '3aa6f726bc5c4cd67fb6aedffd85359e', 'error': ''}}, 'safe_result': ('branch_p0=ok:p0|branch_p1=ok:p1|branch_p2=ok:p2|branch_p3=ok:p3|branch_p4=ok:p4|branch_p5=ok:p5|branch_p6=ok:p6|branch_p7=ok:p7', False), 'determinism_boundary': {'mode': 'RECORD', 'slots': [], 'hashes': {}, 'call_counts': {}, 'violations': [], 'consistent': True}, 'branch_state': {'branch_p0': 'ok:p0', 'branch_p1': 'ok:p1', 'branch_p2': 'ok:p2', 'branch_p3': 'ok:p3', 'branch_p4': 'ok:p4', 'branch_p5': 'ok:p5', 'branch_p6': 'ok:p6', 'branch_p7': 'ok:p7'}, 'checkpoint_hashes': ['87e0df8a9acc0a400d20e38ded772d10', 'cd8628185eaacb18d4354bab53bd6bbd', '4287a2dd27320d9c2551f6d8c5ce56cc', 'de68df267649e22170928fa7022d8116', 'fd93275a7ac572ece6cdd79d7aa23536', 'eda0b737dca2584dad58ba3dbe73b457', '73738bfdf16e8d800de036e0fa4a7348', '18da7d8e33339957dd0dbddbb11babf1', 'ce18c153dd7b1408fb577af456cbb611', '5c56c7021093d81da629797104d99323', '82ef718492f203eab9fd20f31351f21a', 'a67b2945cb4fbadf910760354b9f4d48']}
+E         
+E         Common items:
+E         {'branch_state': {'branch_p0': 'ok:p0',
+E                           'branch_p1': 'ok:p1',
+E                           'branch_p2': 'ok:p2',
+E                           'branch_p3': 'ok:p3',
+E                           'branch_p4': 'ok:p4',
+E                           'branch_p5': 'ok:p5',
+E                           'branch_p6': 'ok:p6',
+E                           'branch_p7': 'ok:p7'},
+E          'checkpoint_hashes': ['87e0df8a9acc0a400d20e38ded772d10',
+E                                'cd8628185eaacb18d4354bab53bd6bbd',
+E                                '4287a2dd27320d9c2551f6d8c5ce56cc',
+E                                'de68df267649e22170928fa7022d8116',
+E                                'fd93275a7ac572ece6cdd79d7aa23536',
+E                                'eda0b737dca2584dad58ba3dbe73b457',
+E                                '73738bfdf16e8d800de036e0fa4a7348',
+E                                '18da7d8e33339957dd0dbddbb11babf1',
+E                                'ce18c153dd7b1408fb577af456cbb611',
+E                                '5c56c7021093d81da629797104d99323',
+E                                '82ef718492f203eab9fd20f31351f21a',
+E                                'a67b2945cb4fbadf910760354b9f4d48'],
+E          'determinism_boundary': {'call_counts': {},
+E                                   'consistent': True,
+E                                   'hashes': {},
+E                                   'mode': 'RECORD',
+E                                   'slots': [],
+E                                   'violations': []},
+E          'fidelity': {'full_pipeline': False,
+E                       'inference': False,
+E                       'reflection': False,
+E                       'save': True,
+E                       'temporal': True},
+E          'phase_history': [{'from': 'PLAN', 'reason': 'enter:save', 'to': 'ACT'},
+E                            {'from': 'ACT', 'reason': 'enter:save', 'to': 'OBSERVE'},
+E                            {'from': 'OBSERVE',
+E                             'reason': 'enter:save',
+E                             'to': 'RESPOND'}],
+E          'safe_result': ('branch_p0=ok:p0|branch_p1=ok:p1|branch_p2=ok:p2|branch_p3=ok:p3|branch_p4=ok:p4|branch_p5=ok:p5|branch_p6=ok:p6|branch_p7=ok:p7',
+E                          False),
+E          'trace_id': '3aa6f726bc5c4cd67fb6aedffd85359e'}
+E         Differing items:
+E         {'mutation_snapshot': {'drained': 2, 'failed': 0, 'latest_transaction': {'applied_count': 2, 'error': '', 'failed_count': 0, 'rollback_count': 0, ...}, 'ledger_drained': 0, ...}} != {'mutation_snapshot': {'drained': 2, 'failed': 0, 'latest_transaction': {'applied_count': 2, 'error': '', 'failed_count': 0, 'rollback_count': 0, ...}, 'ledger_drained': 0, ...}}
+E         
+E         Full diff:
+E           {
+E               'branch_state': {
+E                   'branch_p0': 'ok:p0',
+E                   'branch_p1': 'ok:p1',
+E                   'branch_p2': 'ok:p2',
+E                   'branch_p3': 'ok:p3',
+E                   'branch_p4': 'ok:p4',
+E                   'branch_p5': 'ok:p5',
+E                   'branch_p6': 'ok:p6',
+E                   'branch_p7': 'ok:p7',
+E               },
+E               'checkpoint_hashes': [
+E                   '87e0df8a9acc0a400d20e38ded772d10',
+E                   'cd8628185eaacb18d4354bab53bd6bbd',
+E                   '4287a2dd27320d9c2551f6d8c5ce56cc',
+E                   'de68df267649e22170928fa7022d8116',
+E                   'fd93275a7ac572ece6cdd79d7aa23536',
+E                   'eda0b737dca2584dad58ba3dbe73b457',
+E                   '73738bfdf16e8d800de036e0fa4a7348',
+E                   '18da7d8e33339957dd0dbddbb11babf1',
+E                   'ce18c153dd7b1408fb577af456cbb611',
+E                   '5c56c7021093d81da629797104d99323',
+E                   '82ef718492f203eab9fd20f31351f21a',
+E                   'a67b2945cb4fbadf910760354b9f4d48',
+E               ],
+E               'determinism_boundary': {
+E                   'call_counts': {},
+E                   'consistent': True,
+E                   'hashes': {},
+E                   'mode': 'RECORD',
+E                   'slots': [],
+E                   'violations': [],
+E               },
+E               'fidelity': {
+E                   'full_pipeline': False,
+E                   'inference': False,
+E                   'reflection': False,
+E                   'save': True,
+E                   'temporal': True,
+E               },
+E               'mutation_snapshot': {
+E                   'drained': 2,
+E                   'failed': 0,
+E                   'latest_transaction': {
+E                       'applied_count': 2,
+E                       'error': '',
+E                       'failed_count': 0,
+E                       'rollback_count': 0,
+E                       'rollback_failures': 0,
+E                       'status': 'committed',
+E                       'trace_id': '3aa6f726bc5c4cd67fb6aedffd85359e',
+E         -             'transaction_id': '1ce8288ba9744c5c813c793951c78509',
+E         +             'transaction_id': '12ba15a16bc841c282f56d2d451e3cc0',
+E                   },
+E                   'ledger_drained': 0,
+E                   'ledger_failed': 0,
+E                   'ledger_pending': 0,
+E                   'owner_trace_id': '3aa6f726bc5c4cd67fb6aedffd85359e',
+E                   'pending': 0,
+E                   'transactions': 1,
+E               },
+E               'phase_history': [
+E                   {
+E                       'from': 'PLAN',
+E                       'reason': 'enter:save',
+E                       'to': 'ACT',
+E                   },
+E                   {
+E                       'from': 'ACT',
+E                       'reason': 'enter:save',
+E                       'to': 'OBSERVE',
+E                   },
+E                   {
+E                       'from': 'OBSERVE',
+E                       'reason': 'enter:save',
+E                       'to': 'RESPOND',
+E                   },
+E               ],
+E               'safe_result': (
+E                   'branch_p0=ok:p0|branch_p1=ok:p1|branch_p2=ok:p2|branch_p3=ok:p3|branch_p4=ok:p4|branch_p5=ok:p5|branch_p6=ok:p6|branch_p7=ok:p7',
+E                   False,
+E               ),
+E               'trace_id': '3aa6f726bc5c4cd67fb6aedffd85359e',
+E           }
+
+tests\stress\test_next_layer_resilience.py:353: AssertionError
+========================================================================================================================================= short test summary info =========================================================================================================================================
+FAILED tests/stress/test_next_layer_resilience.py::test_replay_under_perturbation_keeps_deterministic_signature - AssertionError: Determinism boundary did not hold under timing jitter + safe branch reordering
+assert {'trace_id': '3aa6f726bc5c4cd67fb6aedffd85359e', 'phase_history': [{'from': 'PLAN', 'to': 'ACT', 'reason': 'enter:save'}, {'from': 'ACT', 'to': 'OBSERVE', 'reason': 'enter:save'}, {'from': 'OBSERVE', 'to': 'RESPOND', 'reason': 'enter:save'}], 'fidelity': {'temporal': True, 'inference': False, 'reflection': False, 'save': True, 'full_pipeline': False}, 'mutation_snapshot': {'owner_trace_id': '3aa6f726bc5c4cd67fb6aedffd85359e', 'pending': 0, 'drained': 2, 'failed': 0, 'ledger_pending': 0, 'ledger_drained': 0, 'ledger_failed': 0, 'transactions': 1, 'latest_transaction': {'transaction_id': '12ba15a16bc841c282f56d2d451e3cc0', 'status': 'committed', 'applied_count': 2, 'failed_count': 0, 'rollback_count': 0, 'rollback_failures': 0, 'trace_id': '3aa6f726bc5c4cd67fb6aedffd85359e', 'error': ''}}, 'safe_result': ('branch_p0=ok:p0|branch_p1=ok:p1|branch_p2=ok:p2|branch_p3=ok:p3|branch_p4=ok:p4|branch_p5=ok:p5|branch_p6=ok:p6|branch_p7=ok:p7', False), 'determinism_boundary': {'mode': 'RECORD', 'slots': [], 'hashes': {}, 'call_counts': {}, 'violations': [], 'consistent': True}, 'branch_state': {'branch_p0': 'ok:p0', 'branch_p1': 'ok:p1', 'branch_p2': 'ok:p2', 'branch_p3': 'ok:p3', 'branch_p4': 'ok:p4', 'branch_p5': 'ok:p5', 'branch_p6': 'ok:p6', 'branch_p7': 'ok:p7'}, 'checkpoint_hashes': ['87e0df8a9acc0a400d20e38ded772d10', 'cd8628185eaacb18d4354bab53bd6bbd', '4287a2dd27320d9c2551f6d8c5ce56cc', 'de68df267649e22170928fa7022d8116', 'fd93275a7ac572ece6cdd79d7aa23536', 'eda0b737dca2584dad58ba3dbe73b457', '73738bfdf16e8d800de036e0fa4a7348', '18da7d8e33339957dd0dbddbb11babf1', 'ce18c153dd7b1408fb577af456cbb611', '5c56c7021093d81da629797104d99323', '82ef718492f203eab9fd20f31351f21a', 'a67b2945cb4fbadf910760354b9f4d48']} == {'trace_id': '3aa6f726bc5c4cd67fb6aedffd85359e', 'phase_history': [{'from': 'PLAN', 'to': 'ACT', 'reason': 'enter:save'}, {'from': 'ACT', 'to': 'OBSERVE', 'reason': 'enter:save'}, {'from': 'OBSERVE', 'to': 'RESPOND', 'reason': 'enter:save'}], 'fidelity': {'temporal': True, 'inference': False, 'reflection': False, 'save': True, 'full_pipeline': False}, 'mutation_snapshot': {'owner_trace_id': '3aa6f726bc5c4cd67fb6aedffd85359e', 'pending': 0, 'drained': 2, 'failed': 0, 'ledger_pending': 0, 'ledger_drained': 0, 'ledger_failed': 0, 'transactions': 1, 'latest_transaction': {'transaction_id': '1ce8288ba9744c5c813c793951c78509', 'status': 'committed', 'applied_count': 2, 'failed_count': 0, 'rollback_count': 0, 'rollback_failures': 0, 'trace_id': '3aa6f726bc5c4cd67fb6aedffd85359e', 'error': ''}}, 'safe_result': ('branch_p0=ok:p0|branch_p1=ok:p1|branch_p2=ok:p2|branch_p3=ok:p3|branch_p4=ok:p4|branch_p5=ok:p5|branch_p6=ok:p6|branch_p7=ok:p7', False), 'determinism_boundary': {'mode': 'RECORD', 'slots': [], 'hashes': {}, 'call_counts': {}, 'violations': [], 'consistent': True}, 'branch_state': {'branch_p0': 'ok:p0', 'branch_p1': 'ok:p1', 'branch_p2': 'ok:p2', 'branch_p3': 'ok:p3', 'branch_p4': 'ok:p4', 'branch_p5': 'ok:p5', 'branch_p6': 'ok:p6', 'branch_p7': 'ok:p7'}, 'checkpoint_hashes': ['87e0df8a9acc0a400d20e38ded772d10', 'cd8628185eaacb18d4354bab53bd6bbd', '4287a2dd27320d9c2551f6d8c5ce56cc', 'de68df267649e22170928fa7022d8116', 'fd93275a7ac572ece6cdd79d7aa23536', 'eda0b737dca2584dad58ba3dbe73b457', '73738bfdf16e8d800de036e0fa4a7348', '18da7d8e33339957dd0dbddbb11babf1', 'ce18c153dd7b1408fb577af456cbb611', '5c56c7021093d81da629797104d99323', '82ef718492f203eab9fd20f31351f21a', 'a67b2945cb4fbadf910760354b9f4d48']}
+  
+  Common items:
+  {'branch_state': {'branch_p0': 'ok:p0',
+                    'branch_p1': 'ok:p1',
+                    'branch_p2': 'ok:p2',
+                    'branch_p3': 'ok:p3',
+                    'branch_p4': 'ok:p4',
+                    'branch_p5': 'ok:p5',
+                    'branch_p6': 'ok:p6',
+                    'branch_p7': 'ok:p7'},
+   'checkpoint_hashes': ['87e0df8a9acc0a400d20e38ded772d10',
+                         'cd8628185eaacb18d4354bab53bd6bbd',
+                         '4287a2dd27320d9c2551f6d8c5ce56cc',
+                         'de68df267649e22170928fa7022d8116',
+                         'fd93275a7ac572ece6cdd79d7aa23536',
+                         'eda0b737dca2584dad58ba3dbe73b457',
+                         '73738bfdf16e8d800de036e0fa4a7348',
+                         '18da7d8e33339957dd0dbddbb11babf1',
+                         'ce18c153dd7b1408fb577af456cbb611',
+                         '5c56c7021093d81da629797104d99323',
+                         '82ef718492f203eab9fd20f31351f21a',
+                         'a67b2945cb4fbadf910760354b9f4d48'],
+   'determinism_boundary': {'call_counts': {},
+                            'consistent': True,
+                            'hashes': {},
+                            'mode': 'RECORD',
+                            'slots': [],
+                            'violations': []},
+   'fidelity': {'full_pipeline': False,
+                'inference': False,
+                'reflection': False,
+                'save': True,
+                'temporal': True},
+   'phase_history': [{'from': 'PLAN', 'reason': 'enter:save', 'to': 'ACT'},
+                     {'from': 'ACT', 'reason': 'enter:save', 'to': 'OBSERVE'},
+                     {'from': 'OBSERVE',
+                      'reason': 'enter:save',
+                      'to': 'RESPOND'}],
+   'safe_result': ('branch_p0=ok:p0|branch_p1=ok:p1|branch_p2=ok:p2|branch_p3=ok:p3|branch_p4=ok:p4|branch_p5=ok:p5|branch_p6=ok:p6|branch_p7=ok:p7',
+                   False),
+   'trace_id': '3aa6f726bc5c4cd67fb6aedffd85359e'}
+  Differing items:
+  {'mutation_snapshot': {'drained': 2, 'failed': 0, 'latest_transaction': {'applied_count': 2, 'error': '', 'failed_count': 0, 'rollback_count': 0, ...}, 'ledger_drained': 0, ...}} != {'mutation_snapshot': {'drained': 2, 'failed': 0, 'latest_transaction': {'applied_count': 2, 'error': '', 'failed_count': 0, 'rollback_count': 0, ...}, 'ledger_drained': 0, ...}}
+  
+  Full diff:
+    {
+        'branch_state': {
+            'branch_p0': 'ok:p0',
+            'branch_p1': 'ok:p1',
+            'branch_p2': 'ok:p2',
+            'branch_p3': 'ok:p3',
+            'branch_p4': 'ok:p4',
+            'branch_p5': 'ok:p5',
+            'branch_p6': 'ok:p6',
+            'branch_p7': 'ok:p7',
+        },
+        'checkpoint_hashes': [
+            '87e0df8a9acc0a400d20e38ded772d10',
+            'cd8628185eaacb18d4354bab53bd6bbd',
+            '4287a2dd27320d9c2551f6d8c5ce56cc',
+            'de68df267649e22170928fa7022d8116',
+            'fd93275a7ac572ece6cdd79d7aa23536',
+            'eda0b737dca2584dad58ba3dbe73b457',
+            '73738bfdf16e8d800de036e0fa4a7348',
+            '18da7d8e33339957dd0dbddbb11babf1',
+            'ce18c153dd7b1408fb577af456cbb611',
+            '5c56c7021093d81da629797104d99323',
+            '82ef718492f203eab9fd20f31351f21a',
+            'a67b2945cb4fbadf910760354b9f4d48',
+        ],
+        'determinism_boundary': {
+            'call_counts': {},
+            'consistent': True,
+            'hashes': {},
+            'mode': 'RECORD',
+            'slots': [],
+            'violations': [],
+        },
+        'fidelity': {
+            'full_pipeline': False,
+            'inference': False,
+            'reflection': False,
+            'save': True,
+            'temporal': True,
+        },
+        'mutation_snapshot': {
+            'drained': 2,
+            'failed': 0,
+            'latest_transaction': {
+                'applied_count': 2,
+                'error': '',
+                'failed_count': 0,
+                'rollback_count': 0,
+                'rollback_failures': 0,
+                'status': 'committed',
+                'trace_id': '3aa6f726bc5c4cd67fb6aedffd85359e',
+  -             'transaction_id': '1ce8288ba9744c5c813c793951c78509',
+  +             'transaction_id': '12ba15a16bc841c282f56d2d451e3cc0',
+            },
+            'ledger_drained': 0,
+            'ledger_failed': 0,
+            'ledger_pending': 0,
+            'owner_trace_id': '3aa6f726bc5c4cd67fb6aedffd85359e',
+            'pending': 0,
+            'transactions': 1,
+        },
+        'phase_history': [
+            {
+                'from': 'PLAN',
+                'reason': 'enter:save',
+                'to': 'ACT',
+            },
+            {
+                'from': 'ACT',
+                'reason': 'enter:save',
+                'to': 'OBSERVE',
+            },
+            {
+                'from': 'OBSERVE',
+                'reason': 'enter:save',
+                'to': 'RESPOND',
+            },
+        ],
+        'safe_result': (
+            'branch_p0=ok:p0|branch_p1=ok:p1|branch_p2=ok:p2|branch_p3=ok:p3|branch_p4=ok:p4|branch_p5=ok:p5|branch_p6=ok:p6|branch_p7=ok:p7',
+            False,
+        ),
+        'trace_id': '3aa6f726bc5c4cd67fb6aedffd85359e',
+    }
+============================================================================================================================================ 1 failed in 0.22s ============================================================================================================================================

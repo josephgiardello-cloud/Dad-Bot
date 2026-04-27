@@ -288,10 +288,21 @@ class PersistenceService:
 
             raise RuntimeError(f"MutationIntent: unknown type={intent_type!r} source={source!r}")
 
-        mutation_queue.drain(
-            _dispatch_mutation_intent,
-            hard_fail_on_error=True,
-        )
+        try:
+            mutation_queue.drain(
+                _dispatch_mutation_intent,
+                hard_fail_on_error=True,
+                transactional=True,
+            )
+        except TypeError as exc:
+            # Backward compatibility for tests/wrappers that monkeypatch
+            # MutationQueue.drain with a legacy two-parameter signature.
+            if "unexpected keyword argument 'transactional'" not in str(exc):
+                raise
+            mutation_queue.drain(
+                _dispatch_mutation_intent,
+                hard_fail_on_error=True,
+            )
         if not mutation_queue.is_empty():
             pending = mutation_queue.size()
             raise FatalTurnError(

@@ -310,6 +310,7 @@ class ConversationPersistenceManager:
 		replayed_metadata: dict[str, Any] = {}
 		phase = "PLAN"
 		seen_lock_hashes: set[str] = set()
+		latest_execution_identity: dict[str, Any] = {}
 		for event in events:
 			if not isinstance(event, dict):
 				continue
@@ -334,6 +335,10 @@ class ConversationPersistenceManager:
 				checkpoint_phase = str(checkpoint.get("phase") or "").strip()
 				if checkpoint_phase:
 					phase = checkpoint_phase
+			if str(event.get("event_type") or "") == "execution_identity":
+				identity_data = event.get("identity")
+				if isinstance(identity_data, dict):
+					latest_execution_identity = dict(identity_data)
 			event_phase = str(event.get("phase") or "").strip()
 			if event_phase:
 				phase = event_phase
@@ -342,6 +347,8 @@ class ConversationPersistenceManager:
 			"lock_hash": next(iter(seen_lock_hashes)) if len(seen_lock_hashes) == 1 else "",
 			"lock_hashes": sorted(seen_lock_hashes),
 			"consistent": len(seen_lock_hashes) <= 1,
+			"execution_identity": latest_execution_identity,
+			"execution_fingerprint": str(latest_execution_identity.get("fingerprint") or ""),
 		}
 		return replayed_state, replayed_metadata, phase, determinism_summary
 
@@ -374,6 +381,8 @@ class ConversationPersistenceManager:
 			"expected_lock_hash": expected_hash,
 			"matches_expected": matches_expected,
 			"lock_hashes": list(determinism.get("lock_hashes") or []),
+			"execution_identity": dict(determinism.get("execution_identity") or {}),
+			"execution_fingerprint": str(determinism.get("execution_fingerprint") or ""),
 		}
 
 	def load_latest_graph_checkpoint(self, trace_id: str = "") -> dict | None:

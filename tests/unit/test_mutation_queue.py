@@ -171,6 +171,27 @@ class TestMutationQueueDrainOrdering:
         failures = q.drain(_fail_every_other, hard_fail_on_error=False)
         assert len(failures) == 3
 
+    def test_hard_fail_transactional_requeues_full_batch(self):
+        q = self._q()
+        q.queue(_intent("goal", priority=10))
+        q.queue(_intent("goal", priority=20))
+
+        calls = {"n": 0}
+
+        def _fail_second(_intent: MutationIntent) -> None:
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise RuntimeError("second failed")
+
+        with pytest.raises(FatalTurnError, match="MutationQueue drain failed"):
+            q.drain(_fail_second, hard_fail_on_error=True, transactional=True)
+
+        # Replay-safe: full batch is back in queue.
+        assert q.size() == 2
+        snap = q.snapshot()
+        latest = dict(snap.get("latest_transaction") or {})
+        assert latest.get("status") in {"rolled_back", "rollback_failed"}
+
 
 # ---------------------------------------------------------------------------
 # Snapshot ledger split
@@ -207,6 +228,15 @@ class TestMutationQueueSnapshot:
         q = self._q()
         snap = q.snapshot()
         assert snap["owner_trace_id"] == "drain-order" or snap["owner_trace_id"] == "snap-test"
+
+    def test_snapshot_exposes_transaction_summary(self):
+        q = self._q()
+        q.queue(_intent("goal"))
+        q.drain(lambda _intent: None, hard_fail_on_error=False)
+        snap = q.snapshot()
+        assert int(snap.get("transactions", 0)) >= 1
+        latest = dict(snap.get("latest_transaction") or {})
+        assert latest.get("status") == "committed"
 
 
 # ---------------------------------------------------------------------------

@@ -121,3 +121,29 @@ def test_persistence_contract_strict_mode_enforced():
     strict_ctx.metadata["persistence_contract_strict"] = True
     with pytest.raises(RuntimeError, match="Persistence service contract violation"):
         asyncio.run(graph.execute(strict_ctx))
+
+
+def test_execution_trace_contract_emitted_on_success():
+    registry = MockRegistry()
+    graph = _build_canonical(registry)
+
+    ctx = TurnContext(user_input="hello")
+    asyncio.run(graph.execute(ctx))
+
+    contract = dict(ctx.state.get("execution_trace_contract") or {})
+    assert contract.get("version") == "1.0"
+    assert int(contract.get("event_count", 0)) > 0
+    assert str(contract.get("trace_hash") or "")
+    events = list(ctx.state.get("execution_trace") or [])
+    assert events
+    assert events[0].get("event_type") == "turn_start"
+
+
+def test_execution_trace_expected_hash_mismatch_raises():
+    registry = MockRegistry()
+    graph = _build_canonical(registry)
+
+    ctx = TurnContext(user_input="hello")
+    ctx.metadata["expected_execution_trace_hash"] = "not-the-real-hash"
+    with pytest.raises(RuntimeError, match="Execution trace determinism mismatch"):
+        asyncio.run(graph.execute(ctx))
