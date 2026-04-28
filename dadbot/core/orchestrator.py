@@ -12,7 +12,16 @@ import time
 
 from dadbot.contracts import AttachmentList, FinalizedTurnResult
 from dadbot.core.control_plane import ExecutionControlPlane, SessionRegistry
+from dadbot.core.execution_commitment import ExecutionCommitment
 from dadbot.core.graph import TurnContext, TurnGraph, TurnTemporalAxis
+from dadbot.core.invariance_contract import (
+    build_boundary_compliance,
+    evaluation_contract_hash,
+    evaluation_contract_payload,
+    get_evaluation_contract,
+    resolve_boundary_declaration,
+    serialize_boundary_declarations,
+)
 from dadbot.core.kernel import TurnKernel, bayesian_policy_gate
 from dadbot.core.system_identity import (
     SYSTEM_SNAPSHOT_V0_HASH,
@@ -40,12 +49,42 @@ from dadbot.core.nodes import (
 )
 from dadbot.core.planner import PlannerNode
 from dadbot.core.critic import CritiqueEngine
-from dadbot.memory.goal_scorer import GoalAwareRanker
+from dadbot.core.goal_scorer import GoalAwareRanker
 from dadbot.core.observability import CorrelationContext, configure_exporter
 from dadbot.core.persistence import CheckpointIntegrityError, CheckpointNotFoundError
+from dadbot.core.contracts_adapter import ContractViolationError, FallbackEvent, FallbackRegistration, FallbackRegistry
+from dadbot.core.execution_boundary import ControlPlaneExecutionBoundary
+from dadbot.core.execution_trace_context import (
+    ExecutionTraceRecorder,
+    bind_execution_trace,
+    build_execution_trace_context,
+    record_execution_step,
+)
+from dadbot.core.execution_terminal_state import build_execution_terminal_state
+from dadbot.core.truth_system import enforce_authoritative_truth_system
 from dadbot.registry import ServiceRegistry, boot_registry
 
 logger = logging.getLogger(__name__)
+
+EXECUTION_ROLE = "production_kernel"
+
+
+# ---------------------------------------------------------------------------
+# Phase 4.1 — Orchestrator-scoped fallback registry
+# All implicit attribute injections must be declared here.
+# ---------------------------------------------------------------------------
+
+_ORCHESTRATOR_FALLBACK_REGISTRY = FallbackRegistry()
+_ORCHESTRATOR_FALLBACK_REGISTRY.register(FallbackRegistration(
+    name="set_checkpointer",
+    version="1.0.0",
+    fallback_callable=lambda storage, checkpointer: setattr(storage, "checkpointer", checkpointer),
+    contract_description=(
+        "Persistence service does not implement set_checkpointer(); "
+        "direct attribute injection is the safe fallback for legacy adapters."
+    ),
+    substituted_signature="set_checkpointer(self, checkpointer: Any) -> None",
+))
 
 
 # Rollback switch: keep baseline graph as default until tool-native path is promoted.
@@ -149,6 +188,32 @@ class DadBotOrchestrator:
         self.checkpoint_every_node = bool(checkpoint_every_node)
         self.tool_system_v2_enabled = bool(tool_system_v2_enabled)
         self.registry = registry or boot_registry(config_path=config_path, bot=bot)
+        self.evaluation_contract = get_evaluation_contract()
+        registry_declaration = getattr(self.registry, "boundary_contracts", {}).get("registry")
+        boot_declaration = getattr(self.registry, "boundary_contracts", {}).get("boot")
+        if boot_declaration is None and bot is not None:
+            boot_declaration = getattr(bot, "_boundary_contracts", {}).get("boot")
+        self.boundary_contracts = {
+            "boot": resolve_boundary_declaration("boot", boot_declaration),
+            "registry": resolve_boundary_declaration("registry", registry_declaration),
+            "orchestrator": resolve_boundary_declaration(
+                "orchestrator",
+                build_boundary_compliance("orchestrator"),
+            ),
+        }
+        if hasattr(self.registry, "declare_boundary_compliance"):
+            for declaration in self.boundary_contracts.values():
+                self.registry.declare_boundary_compliance(declaration)
+        boundary_issues = [
+            f"{name}: {'; '.join(declaration.notes)}"
+            for name, declaration in self.boundary_contracts.items()
+            if not declaration.compliant
+        ]
+        if boundary_issues:
+            message = "Invariance contract boundary mismatch: " + " | ".join(boundary_issues)
+            if self._strict:
+                raise DeterminismViolation(message)
+            logger.warning(message)
         if enable_observability:
             configure_exporter(enabled=True)
         self.graph = self._build_turn_graph()
@@ -197,6 +262,14 @@ class DadBotOrchestrator:
             if callable(set_checkpointer):
                 set_checkpointer(self.checkpointer)
             else:
+                # Phase 4.1: Declared fallback — emit event instead of silently mutating.
+                _ORCHESTRATOR_FALLBACK_REGISTRY.use(
+                    "set_checkpointer",
+                    source="DadBotOrchestrator._build_turn_graph",
+                    reason=f"storage type '{type(storage).__name__}' has no callable set_checkpointer; "
+                           "falling back to direct attribute injection.",
+                    strict=bool(self._strict),
+                )
                 setattr(storage, "checkpointer", self.checkpointer)
             setattr(storage, "strict_mode", bool(self._strict))
 
@@ -253,6 +326,16 @@ class DadBotOrchestrator:
         return graph
 
     def _build_turn_context(self, user_input: str, attachments: AttachmentList | None = None) -> TurnContext:
+        """Build a TurnContext and seal the lock-hash execution primitive.
+
+        Lock-hash primitive contract:
+        - The ``ExecutionCommitment`` payload is the single source of truth for per-turn
+          determinism identity (input + model identity + memory/tool/env fingerprints).
+        - Identical payloads MUST yield identical ``lock_hash`` values.
+        - Any payload drift MUST change ``lock_hash`` and therefore replay identity.
+        - Model adapters consume this lock via ``determinism_context`` and normalize
+          generated output under the same commitment boundary.
+        """
         context = TurnContext(user_input=user_input, attachments=attachments)
         context.metadata.setdefault("temporal", context.temporal_snapshot())
         previous_health = dict(getattr(self.bot, "_last_turn_health_state", {}) or {}) if self.bot is not None else {}
@@ -270,6 +353,10 @@ class DadBotOrchestrator:
         blackboard_seed_fingerprint = _stable_sha256(blackboard_seed)
         context.metadata.setdefault("agent_blackboard_seed", dict(blackboard_seed))
         context.state.setdefault("agent_blackboard", dict(blackboard_seed))
+        context.metadata["truth_system"] = enforce_authoritative_truth_system(
+            metadata=context.metadata,
+            state=context.state,
+        )
         context.state.setdefault(
             "tool_ir",
             {
@@ -289,8 +376,12 @@ class DadBotOrchestrator:
             **component_hashes,
             "system_snapshot_v0_hash": SYSTEM_SNAPSHOT_V0_HASH,
             "tool_system_v2_enabled": bool(self.tool_system_v2_enabled),
+            "evaluation_contract_hash": evaluation_contract_hash(),
             "turn_graph": turn_graph_structure(tool_system_v2_enabled=bool(self.tool_system_v2_enabled)),
         }
+
+        context.metadata["evaluation_contract"] = evaluation_contract_payload()
+        context.metadata["boundary_contracts"] = serialize_boundary_declarations(self.boundary_contracts)
 
         # Environment manifest: fingerprints Python version, env vars, and dependency
         # versions so cross-machine replay drift is detected at the envelope level.
@@ -299,21 +390,22 @@ class DadBotOrchestrator:
         context.metadata["determinism_manifest"] = manifest
 
         base_tool_trace_hash = _tool_trace_hash(context)
-        lock_payload = {
-            "user_input": str(user_input or ""),
-            "attachments": list(attachments or []),
-            "llm_provider": llm_provider,
-            "llm_model": llm_model,
-            "state_machine": "PLAN_ACT_OBSERVE_RESPOND",
-            "agent_blackboard_seed": blackboard_seed,
-            "agent_blackboard_seed_fingerprint": blackboard_seed_fingerprint,
-            "agent_blackboard": blackboard,
-            "agent_blackboard_fingerprint": blackboard_fingerprint,
-            "memory_fingerprint": memory_fingerprint,
-            "determinism_manifest_hash": manifest_hash,
-            "tool_trace_hash": base_tool_trace_hash,
-        }
-        lock_hash = _stable_sha256(lock_payload)
+        commitment = ExecutionCommitment(
+            user_input=str(user_input or ""),
+            attachments=list(attachments or []),
+            llm_provider=llm_provider,
+            llm_model=llm_model,
+            state_machine="PLAN_ACT_OBSERVE_RESPOND",
+            agent_blackboard_seed=blackboard_seed,
+            agent_blackboard_seed_fingerprint=blackboard_seed_fingerprint,
+            agent_blackboard=blackboard,
+            agent_blackboard_fingerprint=blackboard_fingerprint,
+            memory_fingerprint=memory_fingerprint,
+            determinism_manifest_hash=manifest_hash,
+            tool_trace_hash=base_tool_trace_hash,
+            lock_version=3,
+        )
+        lock_hash = commitment.lock_hash
         if self._strict:
             determinism = {
                 "state_machine": "PLAN_ACT_OBSERVE_RESPOND",
@@ -322,9 +414,9 @@ class DadBotOrchestrator:
                 "llm_model": llm_model,
                 "seed_policy": "fixed_seed",
                 "temperature_policy": "0.0",
-                "lock_version": 3,
+                "lock_version": int(commitment.lock_version),
                 "lock_hash": lock_hash,
-                "lock_id": f"det-{lock_hash[:16]}",
+                "lock_id": commitment.lock_id,
                 "memory_layers_included": True,
                 "memory_fingerprint": memory_fingerprint,
                 "blackboard_fingerprint": blackboard_fingerprint,
@@ -332,6 +424,7 @@ class DadBotOrchestrator:
                 "tool_trace_hash": base_tool_trace_hash,
                 "manifest": manifest,
                 "manifest_hash": manifest_hash,
+                "execution_commitment": commitment.payload(),
             }
         else:
             determinism = {
@@ -341,9 +434,9 @@ class DadBotOrchestrator:
                 "llm_model": llm_model,
                 "seed_policy": "unseeded",
                 "temperature_policy": "runtime_default",
-                "lock_version": 3,
+                "lock_version": int(commitment.lock_version),
                 "lock_hash": lock_hash,
-                "lock_id": f"det-{lock_hash[:16]}",
+                "lock_id": commitment.lock_id,
                 "memory_layers_included": True,
                 "memory_fingerprint": memory_fingerprint,
                 "blackboard_fingerprint": blackboard_fingerprint,
@@ -351,6 +444,7 @@ class DadBotOrchestrator:
                 "tool_trace_hash": base_tool_trace_hash,
                 "manifest": manifest,
                 "manifest_hash": manifest_hash,
+                "execution_commitment": commitment.payload(),
             }
         context.metadata.setdefault("determinism", determinism)
         context.metadata["tool_system_v2_enabled"] = bool(self.tool_system_v2_enabled)
@@ -582,20 +676,52 @@ class DadBotOrchestrator:
                 "enforced": True,
             },
         )
+        trace_recorder = ExecutionTraceRecorder(
+            trace_id=str(context.trace_id or ""),
+            prompt=str(context.user_input or ""),
+            metadata={
+                "session_id": str(session.get("session_id") or job.session_id),
+                "job_id": str(getattr(job, "job_id", "")),
+            },
+        )
+        context.metadata["execution_trace_required"] = True
         with CorrelationContext.bind(correlation_id):
-            try:
-                context.metadata["audit_mode"] = bool(getattr(job, "metadata", {}).get("audit_mode", False))
-                result = await self.graph.execute(context, audit_mode=bool(context.metadata.get("audit_mode")))
-            except Exception as exc:
-                logger.exception("Turn execution failed")
-                context.state["error"] = str(exc)
-                result = ("", False)
-                # In strict mode, propagate failures to catch determinism issues
-                if self._strict:
-                    raise
-            finally:
-                self._update_bot_last_state_safely(context)
-                self._last_turn_context = context
+            with bind_execution_trace(trace_recorder, required=True):
+                record_execution_step(
+                    "kernel_turn_start",
+                    payload={
+                        "session_id": str(session.get("session_id") or job.session_id),
+                        "job_id": str(getattr(job, "job_id", "")),
+                    },
+                    required=True,
+                )
+                try:
+                    context.metadata["audit_mode"] = bool(getattr(job, "metadata", {}).get("audit_mode", False))
+                    with ControlPlaneExecutionBoundary.bind(self.control_plane.execution_token):
+                        result = await self.graph.execute(
+                            context,
+                            audit_mode=bool(context.metadata.get("audit_mode")),
+                        )
+                except Exception as exc:
+                    logger.exception("Turn execution failed")
+                    context.state["error"] = str(exc)
+                    result = ("", False)
+                    # In strict mode, propagate failures to catch determinism issues
+                    if self._strict:
+                        raise
+                finally:
+                    record_execution_step(
+                        "kernel_turn_end",
+                        payload={"has_error": bool(context.state.get("error"))},
+                        required=True,
+                    )
+                    self._update_bot_last_state_safely(context)
+                    self._last_turn_context = context
+                context.metadata["execution_trace_context"] = build_execution_trace_context(
+                    context=context,
+                    result=result,
+                    recorder=trace_recorder,
+                )
         self._emit_causal_trace_fields(context)
         final_blackboard = dict(context.state.get("agent_blackboard") or {})
         final_blackboard_fingerprint = _stable_sha256(final_blackboard)
@@ -617,7 +743,14 @@ class DadBotOrchestrator:
 
         context.metadata["determinism"] = determinism_meta
         context.metadata["determinism_hash_with_tools"] = lock_with_tools
-
+        terminal_state = build_execution_terminal_state(context, finalized_result=result)
+        context.metadata["terminal_state"] = terminal_state.to_dict()
+        # Runtime hot path stays minimal: replay/oracle verification is post-hoc.
+        context.metadata["terminal_state_replay_equivalence"] = {
+            "mode": "deferred",
+            "equivalent": None,
+            "violations": [],
+        }
         session_state = session.setdefault("state", {})
         session_state["last_result"] = result
         # Persist new goals detected this turn into session state.
@@ -639,7 +772,14 @@ class DadBotOrchestrator:
         session_state["last_arbitration_log"] = list(context.state.get("delegation_arbitration_log") or [])
         session_state["last_determinism"] = dict(context.metadata.get("determinism") or {})
         session_state["last_determinism_manifest"] = dict(context.metadata.get("determinism_manifest") or {})
-        
+        session_state["last_execution_trace_context"] = dict(context.metadata.get("execution_trace_context") or {})
+        session_state["last_terminal_state"] = dict(context.metadata.get("terminal_state") or {})
+        session_state["last_terminal_state_replay_equivalence"] = dict(
+            context.metadata.get("terminal_state_replay_equivalence") or {}
+        )
+        session_state["last_evaluation_contract"] = dict(context.metadata.get("evaluation_contract") or {})
+        session_state["last_boundary_contracts"] = dict(context.metadata.get("boundary_contracts") or {})
+
         return result
 
     async def handle_turn(

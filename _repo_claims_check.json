@@ -1,0 +1,72 @@
+﻿[
+    {
+        "path":  "dad_capability_record.md",
+        "exists":  true,
+        "readable":  true,
+        "size":  1453,
+        "error":  null
+    },
+    {
+        "path":  "tests/phase4_baselines.json",
+        "exists":  true,
+        "readable":  true,
+        "size":  2198,
+        "error":  null
+    },
+    {
+        "path":  "phase4_certification_report.json",
+        "exists":  true,
+        "readable":  true,
+        "size":  3742,
+        "error":  null
+    },
+    {
+        "path":  "phase4_launch_readiness_report.json",
+        "exists":  true,
+        "readable":  true,
+        "size":  1503,
+        "error":  null
+    },
+    {
+        "path":  "phase4_freeze_gate_report.json",
+        "exists":  true,
+        "readable":  true,
+        "size":  2272,
+        "error":  null
+    },
+    {
+        "path":  "graph_legacy_entropy_report.json",
+        "exists":  true,
+        "readable":  true,
+        "size":  598,
+        "error":  null
+    },
+    {
+        "path":  "save_node_enforcement_report.json",
+        "exists":  true,
+        "readable":  true,
+        "size":  396,
+        "error":  null
+    },
+    {
+        "path":  "temporal_audit_report.json",
+        "exists":  true,
+        "readable":  true,
+        "size":  746,
+        "error":  null
+    },
+    {
+        "path":  "session_logs/cert_baseline_recovery_20260427T162210/baseline_record.json",
+        "exists":  true,
+        "readable":  true,
+        "size":  1839,
+        "error":  null
+    },
+    {
+        "path":  "session_logs/cert_baseline_recovery_20260427T162210/dad_capability_record.md",
+        "exists":  true,
+        "readable":  true,
+        "size":  1453,
+        "error":  null
+    }
+]

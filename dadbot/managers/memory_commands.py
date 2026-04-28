@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from dadbot.contracts import DadBotContext, SupportsDadBotAccess
+from dadbot.core.rtbf_proof import record_rtbf_receipt
 
 
 class MemoryCommandManager:
@@ -134,6 +135,10 @@ class MemoryCommandManager:
 	def _handle_data_delete(self) -> str:
 		"""Clear all stored personal data (memories, relationship state)."""
 		try:
+			before_snapshot = {
+				"memory_count": len(list(self.bot.memory_catalog() or [])),
+				"consolidated_count": len(list(getattr(self.bot, "consolidated_memories", lambda: [])() or [])),
+			}
 			self.bot.memory.clear_memory_store()
 			try:
 				# Reset relationship state if the method exists
@@ -142,9 +147,27 @@ class MemoryCommandManager:
 					reset()
 			except Exception:
 				pass
+			if bool(getattr(self.bot.config, "rtbf_proof_enabled", True)):
+				after_snapshot = {
+					"memory_count": len(list(self.bot.memory_catalog() or [])),
+					"consolidated_count": len(list(getattr(self.bot, "consolidated_memories", lambda: [])() or [])),
+				}
+				receipt_path = Path(self.bot.SESSION_LOG_DIR) / "rtbf_receipts.jsonl"
+				receipt = record_rtbf_receipt(
+					receipt_path=receipt_path,
+					actor="user",
+					reason="gdpr_delete_command",
+					before_snapshot=before_snapshot,
+					after_snapshot=after_snapshot,
+				)
+				receipt_id = str(receipt.get("receipt_id") or "")
+				receipt_hint = f" RTBF receipt: {receipt_id}."
+			else:
+				receipt_hint = ""
 			return (
 				"Done. I've erased everything I had saved about you â€” memories, relationship history, all of it. "
 				"We're starting completely fresh. I'll still be your dad, I just won't remember the specifics from before."
+				+ receipt_hint
 			)
 		except Exception as exc:  # pragma: no cover
 			return f"I tried to delete your data but hit a snag: {exc}"

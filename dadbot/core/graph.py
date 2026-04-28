@@ -19,6 +19,7 @@ from dadbot.core.determinism import DeterminismBoundary, DeterminismMode
 from dadbot.core.execution_boundary import ControlPlaneExecutionBoundary
 from dadbot.core.execution_firewall import ExecutionFirewall
 from dadbot.core.execution_kernel import ExecutionKernel
+from dadbot.core.execution_kernel_spec import validate_execution_kernel_spec
 from dadbot.core.invariant_registry import InvariantRegistry
 from dadbot.core.kernel import TurnKernel
 from dadbot.core.execution_identity import ExecutionIdentity, ExecutionIdentityViolation
@@ -54,6 +55,12 @@ from dadbot.core.ux_projection import TurnHealthState, TurnUxProjector  # re-exp
 
 
 logger = logging.getLogger(__name__)
+
+# Canonical durability boundary contract for the execution graph.
+SAVE_NODE_COMMIT_CONTRACT = (
+    "All durable mutations MUST go through SaveNode. "
+    "The graph guarantees speculative execution until that boundary."
+)
 
 # ---------------------------------------------------------------------------
 # Mutation intent payload schema (pre-commit validation gate)
@@ -225,6 +232,11 @@ class GoalMutationOp(StrEnum):
     UPSERT_GOAL = "upsert_goal"
     COMPLETE_GOAL = "complete_goal"
     ABANDON_GOAL = "abandon_goal"
+
+
+class NodeType(StrEnum):
+    STANDARD = "standard"
+    COMMIT = "commit"
 
 
 class MutationTransactionStatus(StrEnum):
@@ -809,6 +821,7 @@ class SafetyNode:
 
 class SaveNode:
     name = "save"
+    node_type = NodeType.COMMIT
 
     async def execute(self, registry: Any, turn_context: TurnContext) -> None:
         service = registry.get("persistence_service")
@@ -835,6 +848,7 @@ class SaveNode:
 
 class TemporalNode:
     name = "temporal"
+    node_type = NodeType.STANDARD
 
     async def execute(self, _registry: Any, turn_context: TurnContext) -> None:
         if getattr(turn_context, "temporal", None) is None:
@@ -846,6 +860,7 @@ class TemporalNode:
 
 class ReflectionNode:
     name = "reflection"
+    node_type = NodeType.STANDARD
 
     async def execute(self, registry: Any, turn_context: TurnContext) -> None:
         try:
@@ -906,6 +921,7 @@ class TurnGraph:
             quarantine=None,
             strict=False,
         )
+        validate_execution_kernel_spec(self._execution_kernel, raise_on_failure=True)
         self._persistence_contract = PersistenceServiceContract()
         self._policy_engine = ExecutionPolicyEngine(
             persistence_contract=self._persistence_contract,
@@ -1121,6 +1137,7 @@ class TurnGraph:
         )
 
     def set_execution_kernel(self, kernel: ExecutionKernel) -> None:
+        validate_execution_kernel_spec(kernel, raise_on_failure=True)
         self._execution_kernel = kernel
 
     def _pipeline_items(self) -> list[tuple[str, Any]]:
@@ -1348,6 +1365,14 @@ class TurnGraph:
             return turn_context
 
         return await _call_node()
+
+    @staticmethod
+    def _is_commit_boundary_node(node: Any) -> bool:
+        node_type = getattr(node, "node_type", None)
+        if isinstance(node_type, NodeType):
+            return node_type is NodeType.COMMIT
+        return str(node_type or "").strip().lower() == NodeType.COMMIT.value
+
     def _emit_checkpoint(self, turn_context: TurnContext, *, stage: str, status: str, error: str | None = None) -> None:
         active_stage = str(turn_context.state.get("_active_graph_stage") or "")
         self._side_effects.emit_checkpoint(
@@ -1521,7 +1546,7 @@ class TurnGraph:
             try:
                 _guard = (
                     MutationGuard(stage_context.mutation_queue)
-                    if stage_name != "save"
+                    if not self._is_commit_boundary_node(node)
                     else contextlib.nullcontext()
                 )
                 with _guard:

@@ -6,6 +6,21 @@ from contextlib import closing
 from pathlib import Path
 
 
+def _stable_cache_key(payload):
+    return json.dumps(payload, sort_keys=True, ensure_ascii=True, default=str)
+
+
+def _normalize_tokens(tokens):
+    return sorted({str(token or "").strip().lower() for token in list(tokens or []) if str(token or "").strip()})
+
+
+def _stable_row_tiebreaker(row):
+    return (
+        str(row.get("updated_at") or ""),
+        str(row.get("summary_key") or ""),
+    )
+
+
 class SemanticIndexBackend:
     name = "unknown"
 
@@ -40,6 +55,36 @@ class SQLiteSemanticIndex(SemanticIndexBackend):
     def __init__(self, bot, db_path):
         self.bot = bot
         self.db_path = Path(db_path)
+        self._cache_epoch = 0
+        self._candidate_cache = {}
+
+    def _invalidate_cache(self):
+        self._cache_epoch += 1
+        self._candidate_cache.clear()
+
+    def _get_cached_candidates(self, key):
+        cached = self._candidate_cache.get(key)
+        if cached is None:
+            return None
+        return json.loads(json.dumps(cached))
+
+    def _set_cached_candidates(self, key, rows):
+        self._candidate_cache[key] = json.loads(json.dumps(list(rows or [])))
+
+    def _candidate_cache_key(self, query_embedding, query_tokens, query_category, query_mood, limit):
+        embedding_key = None
+        if query_embedding is not None:
+            embedding_key = [round(float(value), 8) for value in list(query_embedding or [])]
+        return _stable_cache_key(
+            {
+                "epoch": int(self._cache_epoch),
+                "query_embedding": embedding_key,
+                "query_tokens": _normalize_tokens(query_tokens),
+                "query_category": str(query_category or ""),
+                "query_mood": str(query_mood or ""),
+                "limit": int(limit or 0),
+            }
+        )
 
     def with_connection(self, operation, write=False):
         last_error = None
@@ -118,6 +163,7 @@ class SQLiteSemanticIndex(SemanticIndexBackend):
             ),
             write=True,
         )
+        self._invalidate_cache()
 
     def upsert_rows(self, rows):
         if not rows:
@@ -151,6 +197,7 @@ class SQLiteSemanticIndex(SemanticIndexBackend):
             ),
             write=True,
         )
+        self._invalidate_cache()
 
     def _row_dicts(self, rows):
         return [
@@ -173,7 +220,7 @@ class SQLiteSemanticIndex(SemanticIndexBackend):
                 """
                 SELECT summary_key, summary, category, mood, updated_at, embedding_json
                 FROM semantic_memories
-                ORDER BY updated_at DESC
+                ORDER BY updated_at DESC, summary_key ASC
                 LIMIT ?
                 """,
                 [limit],
@@ -184,9 +231,10 @@ class SQLiteSemanticIndex(SemanticIndexBackend):
     def _filtered_rows(self, query_tokens, query_category, query_mood, limit):
         where_clauses = []
         params = []
-        if query_tokens:
-            where_clauses.append("(" + " OR ".join("LOWER(summary) LIKE ?" for _ in query_tokens) + ")")
-            params.extend([f"%{token.lower()}%" for token in query_tokens])
+        normalized_tokens = _normalize_tokens(query_tokens)
+        if normalized_tokens:
+            where_clauses.append("(" + " OR ".join("LOWER(summary) LIKE ?" for _ in normalized_tokens) + ")")
+            params.extend([f"%{token}%" for token in normalized_tokens])
         if query_category not in {None, "", "general"}:
             where_clauses.append("category = ?")
             params.append(query_category)
@@ -200,8 +248,8 @@ class SQLiteSemanticIndex(SemanticIndexBackend):
                 f"""
                 SELECT summary_key, summary, category, mood, updated_at, embedding_json
                 FROM semantic_memories
-                WHERE {' OR '.join(where_clauses)}
-                ORDER BY updated_at DESC
+                WHERE {' AND '.join(where_clauses)}
+                ORDER BY updated_at DESC, summary_key ASC
                 LIMIT ?
                 """,
                 [*params, limit],
@@ -230,26 +278,55 @@ class SQLiteSemanticIndex(SemanticIndexBackend):
             score = self._cosine_similarity(query_embedding, embedding)
             if score < 0:
                 continue
-            ranked.append((score, row))
-        ranked.sort(key=lambda item: (item[0], item[1].get("updated_at", "")), reverse=True)
+            materialized = dict(row)
+            materialized["retrieval_score"] = round(float(score), 8)
+            ranked.append((materialized["retrieval_score"], materialized))
+        ranked.sort(
+            key=lambda item: (
+                item[0],
+                str(item[1].get("updated_at") or ""),
+                str(item[1].get("summary_key") or ""),
+            ),
+            reverse=True,
+        )
         return [row for _score, row in ranked[:limit]]
 
     def fetch_candidates(self, query_embedding, query_tokens, query_category, query_mood, limit):
         if not self.db_path.exists():
             return []
-        rows = self._filtered_rows(query_tokens, query_category, query_mood, limit)
+        safe_limit = max(1, int(limit or 1))
+        cache_key = self._candidate_cache_key(query_embedding, query_tokens, query_category, query_mood, safe_limit)
+        cached = self._get_cached_candidates(cache_key)
+        if cached is not None:
+            return cached
+
+        rows = self._filtered_rows(query_tokens, query_category, query_mood, safe_limit)
+        selected = []
         if rows and query_embedding is not None:
-            ranked = self._rank_rows_by_embedding(rows, query_embedding, limit)
+            ranked = self._rank_rows_by_embedding(rows, query_embedding, safe_limit)
             if ranked:
-                return ranked
-        if rows:
-            return rows
-        if query_embedding is not None:
-            candidates = self.fetch_recent(max(limit * 20, 100))
-            ranked = self._rank_rows_by_embedding(candidates, query_embedding, limit)
+                selected = ranked
+        if not selected and rows:
+            selected = rows
+        if not selected and query_embedding is not None:
+            candidates = self.fetch_recent(max(safe_limit * 20, 100))
+            ranked = self._rank_rows_by_embedding(candidates, query_embedding, safe_limit)
             if ranked:
-                return ranked
-        return self.fetch_recent(limit)
+                selected = ranked
+        if not selected:
+            selected = self.fetch_recent(safe_limit)
+
+        # Normalize final ordering to guarantee stable replay when scores tie.
+        selected = sorted(
+            list(selected or []),
+            key=lambda row: (
+                -float(row.get("retrieval_score", -1.0)),
+                str(row.get("updated_at") or ""),
+                str(row.get("summary_key") or ""),
+            ),
+        )
+        self._set_cached_candidates(cache_key, selected)
+        return selected
 
     def count(self):
         if not self.db_path.exists():
@@ -262,6 +339,7 @@ class SQLiteSemanticIndex(SemanticIndexBackend):
             return
         try:
             self.with_connection(lambda connection: connection.execute("DELETE FROM semantic_memories"), write=True)
+            self._invalidate_cache()
         except Exception:
             try:
                 self.db_path.unlink()
@@ -295,6 +373,27 @@ class PGVectorSemanticIndex(SemanticIndexBackend):
         self.hnsw_m = max(4, int(hnsw_m))
         self.hnsw_ef_construction = max(8, int(hnsw_ef_construction))
         self.ivfflat_lists = max(1, int(ivfflat_lists))
+        self._cache_epoch = 0
+        self._candidate_cache = {}
+
+    def _invalidate_cache(self):
+        self._cache_epoch += 1
+        self._candidate_cache.clear()
+
+    def _candidate_cache_key(self, query_embedding, query_tokens, query_category, query_mood, limit):
+        embedding_key = None
+        if query_embedding is not None:
+            embedding_key = [round(float(value), 8) for value in list(query_embedding or [])]
+        return _stable_cache_key(
+            {
+                "epoch": int(self._cache_epoch),
+                "query_embedding": embedding_key,
+                "query_tokens": _normalize_tokens(query_tokens),
+                "query_category": str(query_category or ""),
+                "query_mood": str(query_mood or ""),
+                "limit": int(limit or 0),
+            }
+        )
 
     def with_connection(self, operation):
         import psycopg
@@ -419,6 +518,7 @@ class PGVectorSemanticIndex(SemanticIndexBackend):
                 )
 
         self.with_connection(operation)
+        self._invalidate_cache()
 
     def upsert_rows(self, rows):
         if not rows:
@@ -464,6 +564,7 @@ class PGVectorSemanticIndex(SemanticIndexBackend):
                 )
 
         self.with_connection(operation)
+        self._invalidate_cache()
 
     @staticmethod
     def _row_dicts(rows):
@@ -494,7 +595,7 @@ class PGVectorSemanticIndex(SemanticIndexBackend):
                     f"""
                     SELECT summary_key, summary, category, mood, updated_at, embedding_json
                     FROM {self.table}
-                    ORDER BY updated_at DESC
+                    ORDER BY updated_at DESC, summary_key ASC
                     LIMIT %s
                     """,
                     (limit,),
@@ -506,9 +607,10 @@ class PGVectorSemanticIndex(SemanticIndexBackend):
     def _filtered_rows(self, query_embedding, query_tokens, query_category, query_mood, limit):
         where_clauses = []
         params = []
-        if query_tokens:
-            where_clauses.append("(" + " OR ".join("LOWER(summary) LIKE %s" for _ in query_tokens) + ")")
-            params.extend([f"%{token.lower()}%" for token in query_tokens])
+        normalized_tokens = _normalize_tokens(query_tokens)
+        if normalized_tokens:
+            where_clauses.append("(" + " OR ".join("LOWER(summary) LIKE %s" for _ in normalized_tokens) + ")")
+            params.extend([f"%{token}%" for token in normalized_tokens])
         if query_category not in {None, "", "general"}:
             where_clauses.append("category = %s")
             params.append(query_category)
@@ -523,8 +625,13 @@ class PGVectorSemanticIndex(SemanticIndexBackend):
 
         order_clause = "updated_at DESC"
         if query_embedding is not None:
-            order_clause = f"{self._embedding_expression()} {self._distance_operator()} {self._query_vector_cast()}, updated_at DESC"
+            order_clause = (
+                f"{self._embedding_expression()} {self._distance_operator()} {self._query_vector_cast()}, "
+                "updated_at DESC, summary_key ASC"
+            )
             params.append(self._vector_literal(query_embedding))
+        else:
+            order_clause = "updated_at DESC, summary_key ASC"
         params.append(limit)
 
         def operation(connection):
@@ -533,7 +640,7 @@ class PGVectorSemanticIndex(SemanticIndexBackend):
                     f"""
                     SELECT summary_key, summary, category, mood, updated_at, embedding_json
                     FROM {self.table}
-                    WHERE {' OR '.join(where_clauses)}
+                    WHERE {' AND '.join(where_clauses)}
                     ORDER BY {order_clause}
                     LIMIT %s
                     """,
@@ -544,13 +651,25 @@ class PGVectorSemanticIndex(SemanticIndexBackend):
         return self.with_connection(operation)
 
     def fetch_candidates(self, query_embedding, query_tokens, query_category, query_mood, limit):
+        safe_limit = max(1, int(limit or 1))
+        cache_key = self._candidate_cache_key(query_embedding, query_tokens, query_category, query_mood, safe_limit)
+        cached = self._candidate_cache.get(cache_key)
+        if cached is not None:
+            return json.loads(json.dumps(cached))
+
         self.ensure_storage()
-        rows = self._filtered_rows(query_embedding, query_tokens, query_category, query_mood, limit)
+        rows = self._filtered_rows(query_embedding, query_tokens, query_category, query_mood, safe_limit)
         if rows:
+            self._candidate_cache[cache_key] = json.loads(json.dumps(rows))
             return rows
 
         if query_embedding is None:
-            return self.fetch_recent(limit)
+            rows = self.fetch_recent(safe_limit)
+            self._candidate_cache[cache_key] = json.loads(json.dumps(rows))
+            return rows
+
+        dimension_filter = self._dimension_filter_sql()
+        where_clause = f"WHERE {dimension_filter}" if dimension_filter else ""
 
         def operation(connection):
             with connection.cursor() as cursor:
@@ -558,15 +677,17 @@ class PGVectorSemanticIndex(SemanticIndexBackend):
                     f"""
                     SELECT summary_key, summary, category, mood, updated_at, embedding_json
                     FROM {self.table}
-                    WHERE {self._dimension_filter_sql()}
-                    ORDER BY {self._embedding_expression()} {self._distance_operator()} {self._query_vector_cast()}, updated_at DESC
+                    {where_clause}
+                    ORDER BY {self._embedding_expression()} {self._distance_operator()} {self._query_vector_cast()}, updated_at DESC, summary_key ASC
                     LIMIT %s
                     """,
-                    (self._vector_literal(query_embedding), limit),
+                    (self._vector_literal(query_embedding), safe_limit),
                 )
                 return self._row_dicts(cursor.fetchall())
 
-        return self.with_connection(operation)
+        rows = self.with_connection(operation)
+        self._candidate_cache[cache_key] = json.loads(json.dumps(rows))
+        return rows
 
     def count(self):
         self.ensure_storage()
@@ -587,3 +708,4 @@ class PGVectorSemanticIndex(SemanticIndexBackend):
                 cursor.execute(f"TRUNCATE {self.table}")
 
         self.with_connection(operation)
+        self._invalidate_cache()

@@ -1,0 +1,98 @@
+{
+  "total": 1488,
+  "by_bucket": {
+    "root": 1076,
+    "unit": 133,
+    "integration": 58,
+    "phase4": 50,
+    "uril": 36,
+    "replay": 31,
+    "adversarial": 30,
+    "stress": 22,
+    "chaos": 21,
+    "invariants": 18,
+    "ux_overlay": 13
+  },
+  "top_files": [
+    [
+      "tests/test_dadbot_regression.py",
+      154
+    ],
+    [
+      "tests/test_production_hardening_wave4.py",
+      104
+    ],
+    [
+      "tests/test_graph_unit_contracts.py",
+      60
+    ],
+    [
+      "tests/test_determinism_capability_receipts.py",
+      57
+    ],
+    [
+      "tests/test_production_hardening_wave5.py",
+      53
+    ],
+    [
+      "tests/test_service_split.py",
+      53
+    ],
+    [
+      "tests/test_production_hardening_wave3.py",
+      42
+    ],
+    [
+      "tests/phase4/test_phase4_compliance.py",
+      41
+    ],
+    [
+      "tests/unit/test_mutation_intent.py",
+      38
+    ],
+    [
+      "tests/test_durable_execution.py",
+      34
+    ],
+    [
+      "tests/test_memory_decay_policy.py",
+      33
+    ],
+    [
+      "tests/test_phase4a.py",
+      33
+    ],
+    [
+      "tests/replay/test_determinism.py",
+      31
+    ],
+    [
+      "tests/test_bitemporal_graph_edges.py",
+      28
+    ],
+    [
+      "tests/test_execution_truth_binding.py",
+      28
+    ],
+    [
+      "tests/test_durability_and_leases.py",
+      27
+    ],
+    [
+      "tests/test_memory_manager.py",
+      26
+    ],
+    [
+      "tests/test_turn_kernel.py",
+      26
+    ],
+    [
+      "tests/unit/test_mutation_queue.py",
+      25
+    ],
+    [
+      "tests/integration/test_canonical_pipeline.py",
+      24
+    ]
+  ]
+}

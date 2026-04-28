@@ -10,7 +10,11 @@ from dataclasses import dataclass
 from typing import Any
 
 
-from dadbot.core.graph import TurnContext
+from dadbot.core.graph import NodeType, TurnContext
+from dadbot.core.execution_trace_context import (
+    record_execution_step,
+    record_external_system_call,
+)
 from dadbot.core.tool_ir import (
     ToolEvent,
     ToolEventLog,
@@ -438,8 +442,42 @@ class ToolExecutorNode:
             try:
                 output = _dispatch_builtin_tool(tool_name, dict(args), context)
                 event = build_execution_event(tool_name, dict(args), output, "ok", started)
+                record_external_system_call(
+                    operation="tool_dispatch",
+                    system=f"builtin_tool:{tool_name}",
+                    request_payload={
+                        "sequence": sequence,
+                        "args": dict(args),
+                        "deterministic_id": expected_id,
+                    },
+                    response_payload={
+                        "status": "ok",
+                        "output": output,
+                    },
+                    status="ok",
+                    source="tool_executor",
+                    deterministic_id=expected_id,
+                    required=False,
+                )
             except Exception as exc:
                 event = build_execution_event(tool_name, dict(args), str(exc), "error", started)
+                record_external_system_call(
+                    operation="tool_dispatch",
+                    system=f"builtin_tool:{tool_name}",
+                    request_payload={
+                        "sequence": sequence,
+                        "args": dict(args),
+                        "deterministic_id": expected_id,
+                    },
+                    response_payload={
+                        "status": "error",
+                        "error": str(exc),
+                    },
+                    status="error",
+                    source="tool_executor",
+                    deterministic_id=expected_id,
+                    required=False,
+                )
 
             if expected_id and expected_id != event.deterministic_id:
                 raise RuntimeError(
@@ -905,7 +943,28 @@ class InferenceNode:
         """
         tool_name = str(block.get("name") or "").strip().lower()
         tool_args = dict(block.get("args") or {})
-        tool_result = _dispatch_builtin_tool(tool_name, tool_args, context)
+        try:
+            tool_result = _dispatch_builtin_tool(tool_name, tool_args, context)
+            record_external_system_call(
+                operation="inference_tool_call",
+                system=f"builtin_tool:{tool_name}",
+                request_payload={"args": dict(tool_args)},
+                response_payload={"output": tool_result, "status": "ok"},
+                status="ok",
+                source="inference_node",
+                required=False,
+            )
+        except Exception as exc:
+            record_external_system_call(
+                operation="inference_tool_call",
+                system=f"builtin_tool:{tool_name}",
+                request_payload={"args": dict(tool_args)},
+                response_payload={"status": "error", "error": str(exc)},
+                status="error",
+                source="inference_node",
+                required=False,
+            )
+            raise
         context.state["tool_result"] = tool_result
         context.state["tool_called"] = tool_name
         context.metadata["tool_called"] = tool_name
@@ -991,10 +1050,24 @@ class InferenceNode:
         rich_context = context.state.get("rich_context", {})
         candidate: Any = None
         for iteration in range(self._max_loop_iterations):
+            record_execution_step(
+                "iteration_start",
+                payload={"iteration": int(iteration)},
+                required=False,
+            )
             try:
                 raw_result = await run_agent(context, rich_context)
                 # Resolve structured blocks (delegation / reasoning / tool call).
                 candidate = await self._resolve_candidate(context, raw_result, depth=0)
+                reply_text = candidate[0] if isinstance(candidate, tuple) else str(candidate or "")
+                record_execution_step(
+                    "iteration_output",
+                    payload={
+                        "iteration": int(iteration),
+                        "reply_preview": str(reply_text)[:160],
+                    },
+                    required=False,
+                )
             except Exception as exc:
                 logger.error("InferenceNode.run_agent failed (iteration %d): %s", iteration, exc)
                 candidate = self._fallback_candidate("Something went sideways. Try again in a moment.")
@@ -1005,27 +1078,47 @@ class InferenceNode:
                 turn_plan = dict(context.state.get("turn_plan") or {})
                 reply_text = candidate[0] if isinstance(candidate, tuple) else str(candidate or "")
                 try:
-                    critique = self._critique_engine.critique(
-                        reply_text,
-                        context.user_input,
-                        turn_plan,
-                        iteration,
-                        tool_ir=dict(context.state.get("tool_ir") or {}),
-                        tool_results=list(context.state.get("tool_results") or []),
-                    )
+                    try:
+                        critique = self._critique_engine.critique(
+                            reply_text,
+                            context.user_input,
+                            turn_plan,
+                            iteration,
+                            tool_ir=dict(context.state.get("tool_ir") or {}),
+                            tool_results=list(context.state.get("tool_results") or []),
+                        )
+                    except TypeError:
+                        critique = self._critique_engine.critique(
+                            reply_text,
+                            context.user_input,
+                            turn_plan,
+                            iteration,
+                        )
+                    critique_passed = bool(getattr(critique, "passed", False))
+                    critique_issues = list(getattr(critique, "issues", []) or [])
+                    revision_hint = str(getattr(critique, "revision_hint", "") or "")
                     context.state["critique_record"] = {
                         "iteration": iteration,
-                        "score": critique.score,
-                        "passed": critique.passed,
-                        "issues": critique.issues,
-                        "revision_hint": critique.revision_hint,
-                        "tool_necessity_score": critique.tool_necessity_score,
-                        "tool_correctness_score": critique.tool_correctness_score,
+                        "score": getattr(critique, "score", 0.0),
+                        "passed": critique_passed,
+                        "issues": critique_issues,
+                        "revision_hint": revision_hint,
+                        "tool_necessity_score": getattr(critique, "tool_necessity_score", 0.0),
+                        "tool_correctness_score": getattr(critique, "tool_correctness_score", 0.0),
                     }
-                    if critique.passed:
+                    record_execution_step(
+                        "critique_iteration",
+                        payload={
+                            "iteration": int(iteration),
+                            "passed": critique_passed,
+                            "issue_count": len(critique_issues),
+                        },
+                        required=False,
+                    )
+                    if critique_passed:
                         break
                     # Inject revision hint so the agent can read it on re-run.
-                    context.state["_critique_revision_context"] = critique.revision_hint
+                    context.state["_critique_revision_context"] = revision_hint
                 except Exception as exc:
                     logger.warning("CritiqueEngine.critique failed (non-fatal): %s", exc)
                     break
@@ -1070,7 +1163,13 @@ class SafetyNode:
 
 
 class SaveNode:
-    """Atomically commits history, maintenance, health snapshot, and persistence."""
+    """Atomically commits history, maintenance, health snapshot, and persistence.
+
+    Contract: All durable mutations MUST go through SaveNode. The graph
+    guarantees speculative execution until that boundary.
+    """
+
+    node_type = NodeType.COMMIT
 
     def __init__(self, storage_manager: Any):
         self.mgr = storage_manager

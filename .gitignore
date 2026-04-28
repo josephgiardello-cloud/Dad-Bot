@@ -19,9 +19,9 @@ dad_profile.json.bak
 *.sqlite3-wal
 
 # Runtime directory (created to hold mutable state in production)
-runtime/
+/runtime/
 data/
-memory/
+/memory/
 
 # Session logs (ephemeral turn records)
 session_logs/

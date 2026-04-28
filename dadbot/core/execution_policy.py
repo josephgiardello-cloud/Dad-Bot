@@ -6,6 +6,7 @@ contains no policy logic.
 """
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Literal
@@ -133,6 +134,32 @@ class ExecutionPolicyEngine:
             "*": KernelRejectionSemantics(),
         }
 
+    @staticmethod
+    def _validate_callable_arity(callable_obj: Any, *, attr_name: str, required_arity: int) -> str | None:
+        try:
+            signature = inspect.signature(callable_obj)
+        except (TypeError, ValueError):
+            return None
+
+        parameters = list(signature.parameters.values())
+        if any(
+            parameter.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+            for parameter in parameters
+        ):
+            return None
+
+        positional_capacity = sum(
+            1
+            for parameter in parameters
+            if parameter.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        )
+        if positional_capacity < int(required_arity):
+            return (
+                f"{attr_name}: callable arity too small "
+                f"(expected >= {required_arity} positional args, got {positional_capacity})"
+            )
+        return None
+
     def set_kernel_rejection_semantics(self, stage: str, semantics: KernelRejectionSemantics) -> None:
         key = str(stage or "*").strip().lower() or "*"
         self._kernel_rejection_semantics[key] = semantics
@@ -175,13 +202,29 @@ class ExecutionPolicyEngine:
             return payload
 
         missing: list[str] = []
+        signature_issues: list[str] = []
         for attr in (
             self._persistence_contract.save_turn,
             self._persistence_contract.save_graph_checkpoint,
             self._persistence_contract.save_turn_event,
         ):
-            if not callable(getattr(service, attr, None)):
+            candidate = getattr(service, attr, None)
+            if not callable(candidate):
                 missing.append(attr)
+                continue
+
+            required_arity = {
+                self._persistence_contract.save_turn: 2,
+                self._persistence_contract.save_graph_checkpoint: 1,
+                self._persistence_contract.save_turn_event: 1,
+            }.get(attr, 0)
+            issue = self._validate_callable_arity(
+                candidate,
+                attr_name=attr,
+                required_arity=required_arity,
+            )
+            if issue:
+                signature_issues.append(issue)
 
         backend_version = str(
             getattr(service, "contract_version", None)
@@ -197,16 +240,18 @@ class ExecutionPolicyEngine:
 
         payload = {
             "version": expected_version,
-            "ok": len(missing) == 0,
+            "ok": len(missing) == 0 and len(signature_issues) == 0,
             "missing": list(missing),
+            "signature_issues": list(signature_issues),
             "backend_version": backend_version,
             "compatible": bool(compatible),
         }
 
-        if strict_mode and (missing or not compatible):
+        if strict_mode and (missing or signature_issues or not compatible):
             raise RuntimeError(
                 "Persistence service contract violation: "
-                f"missing callables={missing!r}, contract_version={expected_version}, "
+                f"missing callables={missing!r}, signature_issues={signature_issues!r}, "
+                f"contract_version={expected_version}, "
                 f"backend_version={backend_version!r}, compatible={compatible}"
             )
         return payload

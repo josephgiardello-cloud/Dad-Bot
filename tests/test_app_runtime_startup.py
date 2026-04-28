@@ -57,6 +57,73 @@ def test_runtime_contract_errors_reports_missing_and_non_callable():
     assert "missing attribute: default_planner_debug_state" in errors
 
 
+def test_runtime_contract_errors_reports_descriptor_mismatch():
+    class _BadDescriptorRuntime:
+        def initialize_profile_file(cls, profile_path=None, force=False):
+            return True
+
+        @classmethod
+        def default_planner_debug_state(cls):
+            return {}
+
+        def clear_memory_store(self):
+            return None
+
+        def export_memory_store(self, export_path):
+            return None
+
+        def print_system_message(self, message):
+            return None
+
+        def chat_loop(self):
+            return None
+
+        def chat_loop_via_service(self, service_client, session_id=None):
+            return None
+
+    errors = runtime_contract_errors(_BadDescriptorRuntime)
+
+    assert "attribute has wrong descriptor: initialize_profile_file (expected classmethod)" in errors
+    assert "attribute has wrong descriptor: default_planner_debug_state (expected staticmethod)" in errors
+
+
+def test_runtime_contract_errors_reports_required_parameter_mismatch():
+    class _BadSignatureRuntime:
+        @classmethod
+        def initialize_profile_file(cls, profile_path=None, force=False):
+            return True
+
+        @staticmethod
+        def default_planner_debug_state():
+            return {}
+
+        def __init__(self, model_name="llama3.2", *, append_signoff=True):
+            return None
+
+        def clear_memory_store(self):
+            return None
+
+        def export_memory_store(self):
+            return None
+
+        def print_system_message(self):
+            return None
+
+        def chat_loop(self):
+            return None
+
+        def chat_loop_via_service(self, session_id=None):
+            return None
+
+    errors = runtime_contract_errors(_BadSignatureRuntime)
+
+    assert "attribute missing parameter: export_memory_store.export_path" in errors
+    assert "attribute missing parameter: print_system_message.message" in errors
+    assert "attribute missing parameter: chat_loop_via_service.service_client" in errors
+    assert "attribute missing parameter: __init__.light_mode" in errors
+    assert "attribute missing parameter: __init__.tenant_id" in errors
+
+
 def test_check_dependencies_skips_when_pytest_env_set(monkeypatch, tmp_path):
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "x")
     args = _args()

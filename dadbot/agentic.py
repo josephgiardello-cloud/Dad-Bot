@@ -13,6 +13,7 @@ from urllib.request import Request, urlopen
 
 from dateutil import parser as dateutil_parser
 from dateutil.relativedelta import relativedelta
+from dadbot.core.egress_policy import enforce_url
 
 
 class ToolRegistry:
@@ -535,6 +536,11 @@ class AgenticHandler:
             }
         )
         url = f"https://api.duckduckgo.com/?{params}"
+        try:
+            allowlist = tuple(getattr(self.bot.config, "egress_allowlist", ()) or ())
+            enforce_url(url, allowlist=allowlist)
+        except Exception:
+            return None
         request = Request(
             url,
             headers={

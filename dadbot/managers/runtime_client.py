@@ -9,6 +9,7 @@ import time
 import ollama
 
 from dadbot.contracts import DadBotContext, SupportsDadBotAccess
+from dadbot.core.execution_boundary import enforce_model_gateway
 
 logger = logging.getLogger(__name__)
 litellm = importlib.import_module("litellm") if importlib.util.find_spec("litellm") else None
@@ -40,6 +41,7 @@ class RuntimeClientManager:
 		self,
 		messages,
 		*,
+		caller=None,
 		model=None,
 		temperature=None,
 		stream=False,
@@ -50,6 +52,7 @@ class RuntimeClientManager:
 		**kwargs,
 	):
 		"""Unified LLM entrypoint; prefers LiteLLM and falls back to Ollama."""
+		enforce_model_gateway(caller=str(caller or ""))
 		provider = self.bot.model_runtime.normalized_llm_provider()
 		selected_model = self.bot.model_runtime.normalized_llm_model(model)
 		temp = temperature if temperature is not None else self.bot.model_runtime.resolve_temperature(options)
@@ -62,6 +65,7 @@ class RuntimeClientManager:
 			if stream:
 				return self.call_ollama_chat_stream(
 					guarded_messages,
+					caller="ModelPort",
 					options=ollama_options,
 					purpose=purpose,
 					chunk_callback=chunk_callback,
@@ -69,6 +73,7 @@ class RuntimeClientManager:
 			return self.call_ollama_chat_with_model(
 				selected_model,
 				guarded_messages,
+				caller="ModelPort",
 				options=ollama_options,
 				response_format=response_format,
 				purpose=purpose,
@@ -106,6 +111,7 @@ class RuntimeClientManager:
 			if stream:
 				return self.call_ollama_chat_stream(
 					guarded_messages,
+					caller="ModelPort",
 					options=ollama_options,
 					purpose=purpose,
 					chunk_callback=chunk_callback,
@@ -113,6 +119,7 @@ class RuntimeClientManager:
 			return self.call_ollama_chat_with_model(
 				selected_model,
 				guarded_messages,
+				caller="ModelPort",
 				options=ollama_options,
 				response_format=response_format,
 				purpose=purpose,
@@ -122,6 +129,7 @@ class RuntimeClientManager:
 		self,
 		messages,
 		*,
+		caller=None,
 		model=None,
 		temperature=None,
 		stream=False,
@@ -132,6 +140,7 @@ class RuntimeClientManager:
 		**kwargs,
 	):
 		"""Async unified LLM entrypoint; prefers LiteLLM and falls back to Ollama."""
+		enforce_model_gateway(caller=str(caller or ""))
 		provider = self.bot.model_runtime.normalized_llm_provider()
 		selected_model = self.bot.model_runtime.normalized_llm_model(model)
 		temp = temperature if temperature is not None else self.bot.model_runtime.resolve_temperature(options)
@@ -144,12 +153,14 @@ class RuntimeClientManager:
 			if stream:
 				return await self.call_ollama_chat_stream_async(
 					guarded_messages,
+					caller="ModelPort",
 					options=ollama_options,
 					purpose=purpose,
 					chunk_callback=chunk_callback,
 				)
 			return await self.call_ollama_chat_async(
 				guarded_messages,
+				caller="ModelPort",
 				options=ollama_options,
 				response_format=response_format,
 				purpose=purpose,
@@ -187,12 +198,14 @@ class RuntimeClientManager:
 			if stream:
 				return await self.call_ollama_chat_stream_async(
 					guarded_messages,
+					caller="ModelPort",
 					options=ollama_options,
 					purpose=purpose,
 					chunk_callback=chunk_callback,
 				)
 			return await self.call_ollama_chat_async(
 				guarded_messages,
+				caller="ModelPort",
 				options=ollama_options,
 				response_format=response_format,
 				purpose=purpose,
@@ -214,7 +227,8 @@ class RuntimeClientManager:
 				self.bot._ollama_async_client_loop_id = None
 		return client
 
-	def call_ollama_chat(self, messages, options=None, response_format=None, purpose="chat"):
+	def call_ollama_chat(self, messages, caller=None, options=None, response_format=None, purpose="chat"):
+		enforce_model_gateway(caller=str(caller or ""))
 		last_error = None
 
 		for candidate in [self.bot.ACTIVE_MODEL, *[model for model in self.bot.model_candidates() if model != self.bot.ACTIVE_MODEL]]:
@@ -236,7 +250,8 @@ class RuntimeClientManager:
 		error_summary = self.bot.ollama_error_summary(last_error)
 		raise RuntimeError(f"Ollama {purpose} failed for all configured models ({error_summary})") from last_error
 
-	async def call_ollama_chat_async(self, messages, options=None, response_format=None, purpose="chat"):
+	async def call_ollama_chat_async(self, messages, caller=None, options=None, response_format=None, purpose="chat"):
+		enforce_model_gateway(caller=str(caller or ""))
 		last_error = None
 		self._ensure_event_loop_context()
 
@@ -280,7 +295,8 @@ class RuntimeClientManager:
 		error_summary = self.bot.ollama_error_summary(last_error)
 		raise RuntimeError(f"Ollama {purpose} failed for all configured models ({error_summary})") from last_error
 
-	def call_ollama_chat_with_model(self, model_name, messages, options=None, response_format=None, purpose="chat"):
+	def call_ollama_chat_with_model(self, model_name, messages, caller=None, options=None, response_format=None, purpose="chat"):
+		enforce_model_gateway(caller=str(caller or ""))
 		kwargs = {
 			"model": model_name,
 			"messages": messages,
@@ -295,7 +311,8 @@ class RuntimeClientManager:
 			error_summary = self.bot.ollama_error_summary(exc)
 			raise RuntimeError(f"Ollama {purpose} failed for model {model_name} ({error_summary})") from exc
 
-	def call_ollama_chat_stream(self, messages, options=None, purpose="chat", chunk_callback=None):
+	def call_ollama_chat_stream(self, messages, caller=None, options=None, purpose="chat", chunk_callback=None):
+		enforce_model_gateway(caller=str(caller or ""))
 		last_error = None
 
 		for candidate in [self.bot.ACTIVE_MODEL, *[model for model in self.bot.model_candidates() if model != self.bot.ACTIVE_MODEL]]:
@@ -375,7 +392,8 @@ class RuntimeClientManager:
 		if inspect.isawaitable(callback_result):
 			await callback_result
 
-	async def call_ollama_chat_stream_async(self, messages, options=None, purpose="chat", chunk_callback=None):
+	async def call_ollama_chat_stream_async(self, messages, caller=None, options=None, purpose="chat", chunk_callback=None):
+		enforce_model_gateway(caller=str(caller or ""))
 		last_error = None
 		client = self.ollama_async_client()
 
@@ -383,6 +401,7 @@ class RuntimeClientManager:
 			return await asyncio.to_thread(
 				self.call_ollama_chat_stream,
 				messages,
+				"ModelPort",
 				options,
 				purpose,
 				chunk_callback,

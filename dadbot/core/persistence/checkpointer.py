@@ -59,7 +59,12 @@ class SQLiteCheckpointer(AbstractCheckpointer):
         prune_every: int = 10,
         default_keep_count: int = 10,
     ):
-        self.db_path = Path(db_path)
+        raw_db_path = str(db_path or "").strip()
+        self._db_uri = raw_db_path.startswith("file:")
+        if raw_db_path == ":memory:" or self._db_uri:
+            self.db_path = raw_db_path
+        else:
+            self.db_path = str(Path(db_path))
         self.prune_every = int(prune_every or 0)
         self.default_keep_count = int(default_keep_count or 10)
         self._save_counter = 0
@@ -67,7 +72,7 @@ class SQLiteCheckpointer(AbstractCheckpointer):
             self.migrate()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.db_path), timeout=10.0)
+        conn = sqlite3.connect(self.db_path, timeout=10.0, uri=self._db_uri)
         conn.row_factory = sqlite3.Row
         return conn
 

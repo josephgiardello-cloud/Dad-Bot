@@ -57,4 +57,10 @@ markers = [
     "postgres: tests that require a live Postgres DSN",
     "adversarial: adversarial input and resilience tests (Phase 5 hardening)",
     "property_verification: property-based behavioral assertions (Phase 4/5)",
+    "phase4: phase4 orchestration/certification domain tests",
+    "durability: restart and persistence integrity checks",
+    "phase4_cert: certification-grade phase4 evidence (no mocked orchestrator.handle_turn)",
+    "phase4_harness: harness-grade phase4 checks (mocking/stubs allowed; excluded from certification scoring)",
+    "soak: high-load or long-running stability checks",
+    "stress: full-stack integration/stress tests — run with --run-stress",
 ]

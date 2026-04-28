@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import pytest
-
+pytestmark = pytest.mark.unit
 from dadbot.managers.safety import SafetySupportManager, _INJECTION_PATTERNS, _INJECTION_REPLY
 
 

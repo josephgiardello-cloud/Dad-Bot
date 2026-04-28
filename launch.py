@@ -2,35 +2,26 @@
 """
 Quick launcher — double-click friendly.
 Run: python launch.py
+
+Routes through app_runtime.main() so all startup safety checks,
+contract validation, and resource guards are always enforced.
 """
 
-import subprocess
 import sys
-import time
-import webbrowser
 
 
 def main():
     print("🧔 Starting DadBot...")
     try:
-        proc = subprocess.Popen([
-            sys.executable, "-m", "streamlit", "run", "dad_streamlit.py",
-            "--server.headless=false",
-            "--server.port=8501",
-        ])
-
-        # Give Streamlit a moment to start before opening browser
-        time.sleep(4)
-        webbrowser.open("http://localhost:8501")
-
-        print("✅ DadBot is running at http://localhost:8501")
-        print("   Browser should open automatically.")
-        print("   Press Ctrl+C to stop.\n")
-        proc.wait()
+        from dadbot.app_runtime import main as app_main
+        raise SystemExit(app_main())
     except KeyboardInterrupt:
         print("\n👋 DadBot stopped.")
+    except SystemExit:
+        raise
     except Exception as e:
         print(f"❌ Error: {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

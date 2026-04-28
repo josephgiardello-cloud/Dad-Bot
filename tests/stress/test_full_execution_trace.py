@@ -10,6 +10,7 @@ from unittest.mock import patch
 import pytest
 
 from dadbot.core.canonical_event import validate_trace
+from dadbot.core.execution_trace_context import ExecutionTraceRecorder, bind_execution_trace
 
 from dadbot.core.graph import MutationQueue, TurnContext
 from tests.stress.phase4_certification_gate import build_bot
@@ -142,7 +143,9 @@ def _committed_turn_contract(bot: Any) -> dict[str, Any]:
 
 def _assert_turn_event_integrity(bot: Any, trace_id: str, *, expect_save_after: bool) -> dict[str, Any]:
     assert trace_id, "Expected non-empty trace_id for turn event integrity audit"
-    events = bot.list_turn_events(trace_id)
+    recorder = ExecutionTraceRecorder(trace_id=trace_id, prompt="stress-replay-audit")
+    with bind_execution_trace(recorder, required=True):
+        events = bot.list_turn_events(trace_id)
     assert events, f"No turn events persisted for trace_id={trace_id!r}"
 
     # Global canonicalization assertion: no forbidden wall-clock fields must
@@ -171,7 +174,8 @@ def _assert_turn_event_integrity(bot: Any, trace_id: str, *, expect_save_after: 
     else:
         assert len(save_error) >= 1
 
-    replay = bot.validate_replay_determinism(trace_id)
+    with bind_execution_trace(recorder, required=True):
+        replay = bot.validate_replay_determinism(trace_id)
 
     return {
         "event_count": len(events),
@@ -272,7 +276,11 @@ def test_audit_mode_emits_capability_report(isolated_bot):
     assert checks["save_node_single_execution"]["details"]["save_count"] == 1
     assert checks["capability_audit_emission"]["status"] == "pass"
 
-    turn_events = bot.list_turn_events("audit-trace-001")
+    with bind_execution_trace(
+        ExecutionTraceRecorder(trace_id="audit-trace-001", prompt="stress-audit-events"),
+        required=True,
+    ):
+        turn_events = bot.list_turn_events("audit-trace-001")
     capability_events = [
         event for event in turn_events
         if str(event.get("event_type") or "") == "CAPABILITY_AUDIT_EVENT"

@@ -110,32 +110,41 @@ class DadBotLlmMixin:
     # ------------------------------------------------------------------
 
     def call_ollama_chat(self, messages, options=None, response_format=None, purpose="chat"):
-        return self.runtime_client.call_llm(
-            messages, purpose=purpose, options=options, response_format=response_format
+        content = self.model_port.generate(
+            messages,
+            purpose=purpose,
+            response_format=response_format,
+            options=options,
         )
+        return {"message": {"content": str(content or "")}}
 
     async def call_ollama_chat_async(
         self, messages, options=None, response_format=None, purpose="chat"
     ):
-        return await self.runtime_client.call_llm_async(
-            messages, purpose=purpose, options=options, response_format=response_format
+        content = await self.model_port.generate_async(
+            messages,
+            purpose=purpose,
+            response_format=response_format,
+            options=options,
         )
+        return {"message": {"content": str(content or "")}}
 
     def call_ollama_chat_with_model(
         self, model_name, messages, options=None, response_format=None, purpose="chat"
     ):
-        return self.runtime_client.call_llm(
+        content = self.model_port.generate(
             messages,
             model=model_name,
             purpose=purpose,
             options=options,
             response_format=response_format,
         )
+        return {"message": {"content": str(content or "")}}
 
     def call_ollama_chat_stream(
         self, messages, options=None, purpose="chat", chunk_callback=None
     ):
-        return self.runtime_client.call_llm(
+        return self.model_port.generate(
             messages,
             stream=True,
             purpose=purpose,
@@ -146,7 +155,7 @@ class DadBotLlmMixin:
     async def call_ollama_chat_stream_async(
         self, messages, options=None, purpose="chat", chunk_callback=None
     ):
-        return await self.runtime_client.call_llm_async(
+        return await self.model_port.generate_async(
             messages,
             stream=True,
             purpose=purpose,

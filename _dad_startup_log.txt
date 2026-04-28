@@ -1,0 +1,14 @@
+﻿python.exe : usage: Dad.py [-h] [--cli] [--serve-api] [--stop-streamlit]
+At line:1 char:80
++ ... StartNew(); & .venv\Scripts\python.exe Dad.py --startup-check 2>&1 |  ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (usage: Dad.py [...stop-streamlit] 
+   :String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+              [--service-url URL] [--disable-service-client] [--clear-memory]
+              [--export-memory PATH] [--init-profile] [--model NAME]
+              [--worker-count N] [--api-host HOST] [--api-port PORT]
+              [--redis-url URL] [--postgres-dsn DSN] [--tenant-id ID] [--otel]
+              [--no-signoff] [--light]
+Dad.py: error: unrecognized arguments: --startup-check

@@ -1,6 +1,7 @@
 from datetime import date, datetime
 
 import pytest
+pytestmark = pytest.mark.unit
 from pydantic import ValidationError
 
 from dadbot.models import ActiveThreadSnapshot, AgenticToolPlan, BackgroundTaskOverview, BackgroundTaskRecord, ChatThreadState, ConsolidatedMemory, DashboardStatusSnapshot, MemoryEntry, MemoryStore, ModerationSnapshot, OutputModerationDecision, PersonaTrait, PersistenceStatusSnapshot, PlannerDebugState, RelationshipState, RelationshipStatusSnapshot, ReplySupervisorSnapshot, RuntimeStatusSnapshot, SecurityStatusSnapshot, ServiceStatusSnapshot, SessionStatusSnapshot, StatusTraitMetric, SupervisorDecisionState, SupervisorJudgment, ThreadRuntimeSnapshot, ThreadsStatusSnapshot, TurnPipelineSnapshot, TurnPipelineStep, VisionStatusSnapshot, WisdomInsight

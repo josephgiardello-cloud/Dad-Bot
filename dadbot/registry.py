@@ -1,56 +1,104 @@
 ﻿from __future__ import annotations
 
+from functools import lru_cache
+from importlib import import_module
 from typing import Any
 
-from dadbot.config_schema import ConfigSchema
-from dadbot.context import ContextBuilder
-from dadbot.core.graph import TurnGraph
-from dadbot.infrastructure.llm import OllamaModelAdapter
-from dadbot.infrastructure.storage import FileSystemAdapter
-from dadbot.infrastructure.telemetry import Logger
-from dadbot.managers.conversation_persistence import ConversationPersistenceManager
-from dadbot.managers.long_term import LongTermSignalsManager
-from dadbot.managers.maintenance import MaintenanceScheduler
-from dadbot.managers.memory_commands import MemoryCommandManager as PackagedMemoryCommandManager
-from dadbot.managers.memory_coordination import MemoryCoordinator as PackagedMemoryCoordinator
-from dadbot.managers.memory_query import MemoryQueryManager as PackagedMemoryQueryManager
-from dadbot.managers.multimodal import MultimodalManager as PackagedMultimodalManager
-from dadbot.managers.profile_runtime import ProfileRuntimeManager as PackagedProfileRuntimeManager
-from dadbot.managers.prompt_assembly import PromptAssemblyManager as PackagedPromptAssemblyManager
-from dadbot.managers.internal_state import InternalStateManager as PackagedInternalStateManager
-from dadbot.managers.reply_finalization import ReplyFinalizationManager as PackagedReplyFinalizationManager
-from dadbot.managers.reply_supervisor import ReplySupervisorManager as PackagedReplySupervisorManager
-from dadbot.managers.runtime_client import RuntimeClientManager as PackagedRuntimeClientManager
-from dadbot.managers.runtime_interface import RuntimeInterfaceManager as PackagedRuntimeInterfaceManager
-from dadbot.managers.runtime_model import RuntimeModelManager as PackagedRuntimeModelManager
-from dadbot.managers.runtime_orchestration import RuntimeOrchestrationManager as PackagedRuntimeOrchestrationManager
-from dadbot.managers.runtime_storage import RuntimeStorageManager as PackagedRuntimeStorageManager
-from dadbot.managers.safety import SafetySupportManager as PackagedSafetySupportManager
-from dadbot.managers.status_reporting import StatusReportingManager as PackagedStatusReportingManager
-from dadbot.memory.manager import MemoryManager as PackagedMemoryManager
-from dadbot.mood import MoodManager as PackagedMoodManager
-from dadbot.profile import ProfileContextManager as PackagedProfileContextManager
-from dadbot.relationship import RelationshipManager as PackagedRelationshipManager
-from dadbot.managers.health import RuntimeHealthManager as PackagedRuntimeHealthManager
-from dadbot.managers.tts import TTSManager as PackagedTTSManager
-from dadbot.managers.avatar import AvatarManager as PackagedAvatarManager
-from dadbot.managers.calendar import CalendarManager as PackagedCalendarManager
-from dadbot.managers.email import EmailManager as PackagedEmailManager
-from dadbot.managers.session_summary import SessionSummaryManager as PackagedSessionSummaryManager
-from dadbot.agentic import AgenticHandler as PackagedAgenticHandler, ToolRegistry as PackagedToolRegistry
-from dadbot.tone import ToneContextBuilder as PackagedToneContextBuilder
-from dadbot.state import RuntimeStateManager as PackagedRuntimeStateManager
-from dadbot.services.agent_service import AgentService
-from dadbot.services.context_service import ContextService
-from dadbot.services.maintenance_service import MaintenanceService
-from dadbot.services.persistence import PersistenceService
-from dadbot.services.runtime_service import RuntimeService
-from dadbot.services.safety_service import SafetyService
-from dadbot.services.turn_service import TurnService
-from dadbot.core.facade_validator import validate_dadbot_facade
+from dadbot.core.invariance_contract import (
+    build_boundary_compliance,
+    get_evaluation_contract,
+    resolve_boundary_declaration,
+    serialize_boundary_declarations,
+)
+from dadbot.models import BoundaryComplianceDeclaration
+
+
+# ---------------------------------------------------------------------------
+# Service descriptor + topological wiring
+# ---------------------------------------------------------------------------
+
+class ServiceDescriptor:
+    """Declarative description of a wirable manager/service.
+
+    ``depends_on`` names must refer to other descriptors in the same wiring
+    batch, or to managers already resolved on the bot before this batch runs.
+    The topological sort uses this information to detect cycles and validate
+    that the declared order is realizable.
+    """
+
+    __slots__ = ("name", "factory", "depends_on")
+
+    def __init__(self, name: str, factory: Callable[[], Any], depends_on: tuple[str, ...] = ()) -> None:
+        self.name = name
+        self.factory = factory
+        self.depends_on = depends_on
+
+
+def _topo_sort_descriptors(descriptors: list[ServiceDescriptor]) -> list[ServiceDescriptor]:
+    """Return *descriptors* in a valid topological order based on ``depends_on``.
+
+    Only considers intra-batch dependencies (names in ``depends_on`` that
+    refer to other descriptors in the same batch).  External dependencies
+    (already-wired managers on the bot) are assumed satisfied.
+
+    Raises ``RuntimeError`` if a cycle is detected.
+    """
+    batch_names: set[str] = {d.name for d in descriptors}
+    index: dict[str, ServiceDescriptor] = {d.name: d for d in descriptors}
+
+    visited: set[str] = set()
+    on_stack: set[str] = set()
+    order: list[ServiceDescriptor] = []
+
+    def visit(name: str) -> None:
+        if name not in batch_names or name in visited:
+            return
+        if name in on_stack:
+            raise RuntimeError(
+                f"Cycle detected in service dependency graph involving '{name}'. "
+                "Check depends_on declarations in wire_bootstrap_managers / "
+                "wire_runtime_managers."
+            )
+        on_stack.add(name)
+        for dep in index[name].depends_on:
+            if dep in batch_names:
+                visit(dep)
+        on_stack.discard(name)
+        visited.add(name)
+        order.append(index[name])
+
+    for descriptor in descriptors:
+        visit(descriptor.name)
+
+    return order
+
+
+def _wire_from_descriptors(bot: Any, descriptors: list[ServiceDescriptor]) -> None:
+    """Wire *descriptors* onto *bot* in a validated topological order.
+
+    Each descriptor's factory is a zero-argument callable that closes over
+    the bot reference.  The resolved instance is both returned from
+    ``bot._resolve_dependency`` (for injection-registry overrides) and set
+    as a named attribute on bot, matching the behaviour of the old imperative
+    ``bot.name = bot._resolve_dependency(name, factory)`` pattern.
+    """
+    for descriptor in _topo_sort_descriptors(descriptors):
+        instance = bot._resolve_dependency(descriptor.name, descriptor.factory)
+        setattr(bot, descriptor.name, instance)
 
 
 _registry_logger = __import__("logging").getLogger(__name__)
+
+
+@lru_cache(maxsize=None)
+def _resolve_attr(path: str) -> Any:
+    module_name, attr_name = path.split(":", 1)
+    module = import_module(module_name)
+    return getattr(module, attr_name)
+
+
+def _instantiate(path: str, *args: Any, **kwargs: Any) -> Any:
+    return _resolve_attr(path)(*args, **kwargs)
 
 
 class ServiceRegistry:
@@ -68,6 +116,24 @@ class ServiceRegistry:
     def __init__(self):
         self._services: dict[str, Any] = {}
         self._provider_map: dict[str, Any] = {}
+        self.evaluation_contract = get_evaluation_contract()
+        self.boundary_contracts: dict[str, BoundaryComplianceDeclaration] = {}
+        self.declare_boundary_compliance(build_boundary_compliance("registry"))
+
+    def declare_boundary_compliance(
+        self,
+        declaration: BoundaryComplianceDeclaration | dict[str, Any],
+    ) -> BoundaryComplianceDeclaration:
+        model = BoundaryComplianceDeclaration.model_validate(declaration)
+        resolved = resolve_boundary_declaration(model.boundary, model)
+        self.boundary_contracts[resolved.boundary] = resolved
+        return resolved
+
+    def snapshot_contract_compliance(self) -> dict[str, Any]:
+        return {
+            "evaluation_contract": self.evaluation_contract.model_dump(mode="json"),
+            "boundary_contracts": serialize_boundary_declarations(self.boundary_contracts),
+        }
 
     def register(self, name: str, instance: Any) -> Any:
         self._services[name] = instance
@@ -104,22 +170,36 @@ class ServiceRegistry:
     @classmethod
     def boot(cls, config_path: str = "config.yaml", *, bot: Any | None = None) -> "ServiceRegistry":
         registry = cls()
-        config = ConfigSchema.from_file(config_path)
+        config = _resolve_attr("dadbot.config_schema:ConfigSchema").from_file(config_path)
         registry.register("config", config)
 
-        telemetry = registry.register("telemetry", Logger("dadbot.orchestration"))
-        registry.register("storage_backend", FileSystemAdapter())
-        registry.register("model_adapter", OllamaModelAdapter())
+        telemetry = registry.register(
+            "telemetry",
+            _instantiate("dadbot.infrastructure.telemetry:Logger", "dadbot.orchestration"),
+        )
+        registry.register(
+            "storage_backend",
+            _instantiate("dadbot.infrastructure.storage:FileSystemAdapter"),
+        )
+        registry.register(
+            "model_adapter",
+            _instantiate("dadbot.infrastructure.llm:OllamaModelAdapter"),
+        )
+
+        if bot is not None:
+            boot_declaration = getattr(bot, "_boundary_contracts", {}).get("boot")
+            if boot_declaration is not None:
+                registry.declare_boundary_compliance(boot_declaration)
 
         if bot is None:
             telemetry.warning("Booted registry without bot runtime; service wrappers disabled")
-            registry.register("turn_graph", TurnGraph(registry))
+            registry.register("turn_graph", _instantiate("dadbot.core.graph:TurnGraph", registry))
             return registry
 
-        persistence_manager = ConversationPersistenceManager(bot)
-        context_builder = ContextBuilder(bot)
-        maintenance_manager = MaintenanceScheduler(bot)
-        long_term_manager = LongTermSignalsManager(bot)
+        persistence_manager = _instantiate("dadbot.managers.conversation_persistence:ConversationPersistenceManager", bot)
+        context_builder = _instantiate("dadbot.context:ContextBuilder", bot)
+        maintenance_manager = _instantiate("dadbot.managers.maintenance:MaintenanceScheduler", bot)
+        long_term_manager = _instantiate("dadbot.managers.long_term:LongTermSignalsManager", bot)
 
         # turn_service is already wired by wire_runtime_managers before the registry
         # is first booted (lazy, on the first graph turn). Passing it here enables
@@ -133,18 +213,46 @@ class ServiceRegistry:
         semantic_db_path = getattr(bot, "SEMANTIC_MEMORY_DB_PATH", None)
         if semantic_db_path is not None:
             try:
-                from dadbot_system.semantic_index import SQLiteSemanticIndex
-                semantic_index = SQLiteSemanticIndex(bot, semantic_db_path)
+                semantic_index = _instantiate(
+                    "dadbot_system.semantic_index:SQLiteSemanticIndex",
+                    bot,
+                    semantic_db_path,
+                )
                 semantic_index.ensure_storage()
             except Exception:
                 pass  # Non-fatal: ContextService degrades to base context without RAG
 
-        registry.register("persistence_service", PersistenceService(persistence_manager, turn_service=turn_service))
-        registry.register("context_service", ContextService(context_builder, bot.memory_manager, semantic_index=semantic_index))
-        registry.register("runtime_service", RuntimeService(bot, registry.get("model_adapter")))
-        registry.register("maintenance_service", MaintenanceService(maintenance_manager, long_term_manager))
-        registry.register("agent_service", AgentService(bot))
-        registry.register("safety_service", SafetyService(bot))
+        registry.register(
+            "persistence_service",
+            _instantiate(
+                "dadbot.services.persistence:PersistenceService",
+                persistence_manager,
+                turn_service=turn_service,
+            ),
+        )
+        registry.register(
+            "context_service",
+            _instantiate(
+                "dadbot.services.context_service:ContextService",
+                context_builder,
+                bot.memory_manager,
+                semantic_index=semantic_index,
+            ),
+        )
+        registry.register(
+            "runtime_service",
+            _instantiate("dadbot.services.runtime_service:RuntimeService", bot, registry.get("model_adapter")),
+        )
+        registry.register(
+            "maintenance_service",
+            _instantiate(
+                "dadbot.services.maintenance_service:MaintenanceService",
+                maintenance_manager,
+                long_term_manager,
+            ),
+        )
+        registry.register("agent_service", _instantiate("dadbot.services.agent_service:AgentService", bot))
+        registry.register("safety_service", _instantiate("dadbot.services.safety_service:SafetyService", bot))
 
         # Canonical aliases used by DadBotOrchestrator node lookup
         registry.register("health", registry.get("maintenance_service"))
@@ -154,7 +262,7 @@ class ServiceRegistry:
         registry.register("storage", registry.get("persistence_service"))
         reflection_service = getattr(bot, "internal_state_manager", None) or registry.get("persistence_service")
         registry.register("reflection", reflection_service)
-        registry.register("turn_graph", TurnGraph(registry))
+        registry.register("turn_graph", _instantiate("dadbot.core.graph:TurnGraph", registry))
 
         telemetry.info("ServiceRegistry boot complete", services=list(registry._services.keys()))
         return registry
@@ -166,65 +274,188 @@ def boot_registry(config_path: str = "config.yaml", *, bot: Any | None = None) -
 
 def wire_bootstrap_managers(bot: Any) -> None:
     """Attach managers required before profile/memory hydration."""
-    bot.runtime_storage = bot._resolve_dependency("runtime_storage", lambda: PackagedRuntimeStorageManager(bot.bot_context))
-    bot.profile_runtime = bot._resolve_dependency("profile_runtime", lambda: PackagedProfileRuntimeManager(bot))
-    bot.memory_manager = bot._resolve_dependency("memory_manager", lambda: PackagedMemoryManager(bot.bot_context))
+    descriptors: list[ServiceDescriptor] = [
+        ServiceDescriptor(
+            "runtime_storage",
+            lambda: _instantiate("dadbot.managers.runtime_storage:RuntimeStorageManager", bot.bot_context),
+        ),
+        ServiceDescriptor(
+            "profile_runtime",
+            lambda: _instantiate("dadbot.managers.profile_runtime:ProfileRuntimeManager", bot),
+            depends_on=("runtime_storage",),
+        ),
+        ServiceDescriptor(
+            "memory_manager",
+            lambda: _instantiate("dadbot.memory.manager:MemoryManager", bot.bot_context),
+        ),
+    ]
+    _wire_from_descriptors(bot, descriptors)
 
 
 def wire_runtime_managers(bot: Any) -> None:
-    """Attach all turn/runtime managers after profile/memory hydration."""
+    """Attach all turn/runtime managers after profile/memory hydration.
 
-    bot.long_term_signals = bot._resolve_dependency("long_term_signals", lambda: LongTermSignalsManager(bot))
-    bot.memory_query = bot._resolve_dependency("memory_query", lambda: PackagedMemoryQueryManager(bot.bot_context))
-    bot.memory_commands = bot._resolve_dependency("memory_commands", lambda: PackagedMemoryCommandManager(bot.bot_context))
-    bot.safety_support = bot._resolve_dependency("safety_support", lambda: PackagedSafetySupportManager(bot))
-    bot.profile_context = bot._resolve_dependency("profile_context", lambda: PackagedProfileContextManager(bot))
-    bot.context_builder = bot._resolve_dependency("context_builder", lambda: ContextBuilder(bot))
-    bot.tone_context = bot._resolve_dependency("tone_context", lambda: PackagedToneContextBuilder(bot.bot_context))
-    bot.mood_manager = bot._resolve_dependency("mood_manager", lambda: PackagedMoodManager(bot))
-    bot.relationship_manager = bot._resolve_dependency("relationship_manager", lambda: PackagedRelationshipManager(bot.bot_context))
-    bot.internal_state_manager = bot._resolve_dependency("internal_state_manager", lambda: PackagedInternalStateManager(bot))
+    The first descriptor batch covers all managers with computable factories.
+    ``prompt_composer`` and ``reply_generation`` are pure attribute aliases
+    resolved after their respective owners are wired.  The runtime-state
+    bundle is resolved last because it has side-effects (setting private
+    attrs on bot) that ``runtime_state_manager`` depends on.
+    """
+    descriptors: list[ServiceDescriptor] = [
+        # ── signal / memory helpers ─────────────────────────────────────────
+        ServiceDescriptor(
+            "long_term_signals",
+            lambda: _instantiate("dadbot.managers.long_term:LongTermSignalsManager", bot),
+        ),
+        ServiceDescriptor(
+            "memory_query",
+            lambda: _instantiate("dadbot.managers.memory_query:MemoryQueryManager", bot.bot_context),
+        ),
+        ServiceDescriptor(
+            "memory_commands",
+            lambda: _instantiate("dadbot.managers.memory_commands:MemoryCommandManager", bot.bot_context),
+        ),
+        ServiceDescriptor(
+            "memory_coordinator",
+            lambda: _instantiate("dadbot.managers.memory_coordination:MemoryCoordinator", bot),
+        ),
+        # ── safety / profile / context ──────────────────────────────────────
+        ServiceDescriptor(
+            "safety_support",
+            lambda: _instantiate("dadbot.managers.safety:SafetySupportManager", bot),
+        ),
+        ServiceDescriptor(
+            "profile_context",
+            lambda: _instantiate("dadbot.profile:ProfileContextManager", bot),
+        ),
+        ServiceDescriptor(
+            "context_builder",
+            lambda: _instantiate("dadbot.context:ContextBuilder", bot),
+        ),
+        ServiceDescriptor(
+            "tone_context",
+            lambda: _instantiate("dadbot.tone:ToneContextBuilder", bot.bot_context),
+        ),
+        ServiceDescriptor(
+            "mood_manager",
+            lambda: _instantiate("dadbot.mood:MoodManager", bot),
+        ),
+        ServiceDescriptor(
+            "relationship_manager",
+            lambda: _instantiate("dadbot.relationship:RelationshipManager", bot.bot_context),
+        ),
+        ServiceDescriptor(
+            "internal_state_manager",
+            lambda: _instantiate("dadbot.managers.internal_state:InternalStateManager", bot),
+        ),
+        # ── prompt / multimodal / turn ──────────────────────────────────────
+        ServiceDescriptor(
+            "prompt_assembly",
+            lambda: _instantiate("dadbot.managers.prompt_assembly:PromptAssemblyManager", bot.bot_context),
+        ),
+        ServiceDescriptor(
+            "multimodal_handler",
+            lambda: _instantiate("dadbot.managers.multimodal:MultimodalManager", bot.bot_context),
+        ),
+        ServiceDescriptor(
+            "turn_service",
+            lambda: _instantiate("dadbot.services.turn_service:TurnService", bot.bot_context),
+        ),
+        # ── reply pipeline ──────────────────────────────────────────────────
+        ServiceDescriptor(
+            "reply_supervisor",
+            lambda: _instantiate("dadbot.managers.reply_supervisor:ReplySupervisorManager", bot.bot_context),
+        ),
+        ServiceDescriptor(
+            "reply_finalization",
+            lambda: _instantiate("dadbot.managers.reply_finalization:ReplyFinalizationManager", bot),
+        ),
+        # ── conversation / orchestration / scheduling ───────────────────────
+        ServiceDescriptor(
+            "conversation_persistence",
+            lambda: _instantiate("dadbot.managers.conversation_persistence:ConversationPersistenceManager", bot),
+        ),
+        ServiceDescriptor(
+            "runtime_orchestration",
+            lambda: _instantiate("dadbot.managers.runtime_orchestration:RuntimeOrchestrationManager", bot.bot_context),
+        ),
+        ServiceDescriptor(
+            "status_reporting",
+            lambda: _instantiate("dadbot.managers.status_reporting:StatusReportingManager", bot.bot_context),
+        ),
+        ServiceDescriptor(
+            "maintenance_scheduler",
+            lambda: _instantiate("dadbot.managers.maintenance:MaintenanceScheduler", bot),
+        ),
+        # ── interface / tools ───────────────────────────────────────────────
+        ServiceDescriptor(
+            "runtime_interface",
+            lambda: _instantiate("dadbot.managers.runtime_interface:RuntimeInterfaceManager", bot.bot_context),
+        ),
+        ServiceDescriptor(
+            "tool_registry",
+            lambda: _instantiate("dadbot.agentic:ToolRegistry", bot),
+        ),
+        ServiceDescriptor(
+            "agentic_handler",
+            lambda: _instantiate("dadbot.agentic:AgenticHandler", bot, bot.tool_registry),
+            depends_on=("tool_registry",),
+        ),
+        # ── peripheral managers ─────────────────────────────────────────────
+        ServiceDescriptor(
+            "health_manager",
+            lambda: _instantiate("dadbot.managers.health:RuntimeHealthManager", bot),
+        ),
+        ServiceDescriptor(
+            "tts_manager",
+            lambda: _instantiate("dadbot.managers.tts:TTSManager", bot),
+        ),
+        ServiceDescriptor(
+            "avatar_manager",
+            lambda: _instantiate("dadbot.managers.avatar:AvatarManager", bot),
+        ),
+        ServiceDescriptor(
+            "calendar_manager",
+            lambda: _instantiate("dadbot.managers.calendar:CalendarManager", bot),
+        ),
+        ServiceDescriptor(
+            "email_manager",
+            lambda: _instantiate("dadbot.managers.email:EmailManager", bot),
+        ),
+        ServiceDescriptor(
+            "model_runtime",
+            lambda: _instantiate("dadbot.managers.runtime_model:RuntimeModelManager", bot.bot_context),
+        ),
+        ServiceDescriptor(
+            "runtime_client",
+            lambda: _instantiate("dadbot.managers.runtime_client:RuntimeClientManager", bot.bot_context),
+        ),
+        ServiceDescriptor(
+            "session_summary_manager",
+            lambda: _instantiate("dadbot.managers.session_summary:SessionSummaryManager", bot.bot_context),
+        ),
+    ]
+    _wire_from_descriptors(bot, descriptors)
 
-    bot.prompt_assembly = bot._resolve_dependency("prompt_assembly", lambda: PackagedPromptAssemblyManager(bot.bot_context))
+    # ── post-wire aliases (sub-attribute reads, not independent managers) ──
+    # prompt_composer is a pure alias for prompt_assembly.
     bot.prompt_composer = bot.prompt_assembly
-    bot.multimodal_handler = bot._resolve_dependency("multimodal_handler", lambda: PackagedMultimodalManager(bot.bot_context))
-    bot.turn_service = bot._resolve_dependency(
-        "turn_service",
-        lambda: TurnService(bot.bot_context),
-    )
+    # reply_generation is a sub-attribute of turn_service.
     bot.reply_generation = bot.turn_service.reply_generation
-    bot.reply_supervisor = bot._resolve_dependency("reply_supervisor", lambda: PackagedReplySupervisorManager(bot.bot_context))
-    bot.reply_finalization = bot._resolve_dependency("reply_finalization", lambda: PackagedReplyFinalizationManager(bot))
-    bot.conversation_persistence = bot._resolve_dependency("conversation_persistence", lambda: ConversationPersistenceManager(bot))
-    bot.runtime_orchestration = bot._resolve_dependency("runtime_orchestration", lambda: PackagedRuntimeOrchestrationManager(bot.bot_context))
-    bot.status_reporting = bot._resolve_dependency("status_reporting", lambda: PackagedStatusReportingManager(bot.bot_context))
-    bot.maintenance_scheduler = bot._resolve_dependency("maintenance_scheduler", lambda: MaintenanceScheduler(bot))
-    bot.runtime_interface = bot._resolve_dependency("runtime_interface", lambda: PackagedRuntimeInterfaceManager(bot.bot_context))
-    bot.tool_registry = bot._resolve_dependency("tool_registry", lambda: PackagedToolRegistry(bot))
-    bot.agentic_handler = bot._resolve_dependency("agentic_handler", lambda: PackagedAgenticHandler(bot, bot.tool_registry))
-    bot.memory_coordinator = bot._resolve_dependency("memory_coordinator", lambda: PackagedMemoryCoordinator(bot))
 
-    bot.health_manager = bot._resolve_dependency("health_manager", lambda: PackagedRuntimeHealthManager(bot))
-    bot.tts_manager = bot._resolve_dependency("tts_manager", lambda: PackagedTTSManager(bot))
-    bot.avatar_manager = bot._resolve_dependency("avatar_manager", lambda: PackagedAvatarManager(bot))
-    bot.calendar_manager = bot._resolve_dependency("calendar_manager", lambda: PackagedCalendarManager(bot))
-    bot.email_manager = bot._resolve_dependency("email_manager", lambda: PackagedEmailManager(bot))
-
-    bot.model_runtime = bot._resolve_dependency("model_runtime", lambda: PackagedRuntimeModelManager(bot.bot_context))
-    bot.runtime_client = bot._resolve_dependency("runtime_client", lambda: PackagedRuntimeClientManager(bot.bot_context))
-
+    # ── runtime-state bundle (side-effect step required before runtime_state_manager) ──
+    # _resolve_runtime_state_bundle populates private bot attrs that
+    # RuntimeStateManager reads at construction time; it cannot be a descriptor factory.
     runtime_state_bundle = bot._resolve_runtime_state_bundle()
     bot._runtime_state_store = runtime_state_bundle.get("store")
     bot._runtime_event_bus = runtime_state_bundle.get("event_bus")
     bot._runtime_state = runtime_state_bundle["container"]
     bot.runtime_state_manager = bot._resolve_dependency(
         "runtime_state_manager",
-        lambda: PackagedRuntimeStateManager(bot, bot._runtime_state),
+        lambda: _instantiate("dadbot.state:RuntimeStateManager", bot, bot._runtime_state),
     )
-    bot.session_summary_manager = bot._resolve_dependency(
-        "session_summary_manager",
-        lambda: PackagedSessionSummaryManager(bot.bot_context),
-    )
+
+
 
 
 _EXTRA_MANAGER_ATTRS = ("internal_state_manager",)
@@ -242,6 +473,9 @@ def build_manager_registry(bot: Any) -> ServiceRegistry:
     have run so that every manager is present on the bot.
     """
     registry = ServiceRegistry()
+    boot_declaration = getattr(bot, "_boundary_contracts", {}).get("boot")
+    if boot_declaration is not None:
+        registry.declare_boundary_compliance(boot_declaration)
     chain = getattr(type(bot), "_MANAGER_DELEGATE_CHAIN", ())
     for manager_name in (*chain, *_EXTRA_MANAGER_ATTRS):
         try:
@@ -280,7 +514,11 @@ class DadBotServiceContainer:
         self.refresh_registry()
 
     def refresh_registry(self) -> ServiceRegistry:
+        previous_declarations = dict(getattr(self.registry, "boundary_contracts", {}) or {})
         self.registry = build_manager_registry(self.bot)
+        for boundary, declaration in previous_declarations.items():
+            if boundary != "registry":
+                self.registry.declare_boundary_compliance(declaration)
         for name, instance in self.registry._services.items():
             setattr(self, name, instance)
         return self.registry
@@ -294,9 +532,8 @@ class DadBotServiceContainer:
     @property
     def turn_orchestrator(self):
         if self._turn_orchestrator is None:
-            from dadbot.core.orchestrator import DadBotOrchestrator
-
-            self._turn_orchestrator = DadBotOrchestrator(
+            orchestrator_cls = _resolve_attr("dadbot.core.orchestrator:DadBotOrchestrator")
+            self._turn_orchestrator = orchestrator_cls(
                 config_path=self.bot.config.turn_graph_config_path,
                 bot=self.bot,
                 strict=bool(getattr(self.bot.config, "strict_graph_mode", True)),
@@ -310,4 +547,7 @@ class DadBotServiceContainer:
 
     def validate_facade(self, *, smoke: bool = False) -> None:
         """Validate DadBot facade wiring using the extracted validator."""
-        validate_dadbot_facade(self.bot, smoke=smoke)
+        _resolve_attr("dadbot.core.facade_validator:validate_dadbot_facade")(
+            self.bot,
+            smoke=smoke,
+        )

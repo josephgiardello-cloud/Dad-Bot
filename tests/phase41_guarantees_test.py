@@ -224,6 +224,35 @@ def test_delegation_state_isolation_to_allowed_keys(orchestrator: DadBotOrchestr
     assert delegation_keys.issubset(allowed)
 
 
+def test_all_operations_emit_trace(orchestrator: DadBotOrchestrator, monkeypatch):
+    service = orchestrator.registry.get("agent_service")
+
+    def _fake_call_llm(messages, **kwargs):
+        _ = messages
+        _ = kwargs
+        return "trace-model-output"
+
+    monkeypatch.setattr(orchestrator.bot.runtime_client, "call_llm", _fake_call_llm)
+
+    async def _agent(context: TurnContext, _rich: dict[str, Any]) -> tuple[str, bool]:
+        output = orchestrator.bot.model_port.generate(
+            [{"role": "user", "content": str(context.user_input or "")}],
+            purpose="trace_test",
+        )
+        orchestrator.bot.mutate_memory_store(health_quiet_mode=False, save=False)
+        return (str(output), False)
+
+    monkeypatch.setattr(service, "run_agent", _agent)
+
+    _, ctx = asyncio.run(_run(orchestrator, "trace all operations", "g-trace-ops"))
+    trace = dict(ctx.metadata.get("execution_trace_context") or {})
+    operations = set(str(item) for item in list(trace.get("operations") or []))
+
+    assert "model_call" in operations
+    assert "memory_read" in operations
+    assert "memory_write" in operations
+
+
 def _minimal_temporal() -> dict[str, Any]:
     return {
         "wall_time": "2026-01-01T00:00:00+00:00",

@@ -13,6 +13,7 @@ from unittest.mock import patch
 import ollama
 
 from Dad import DadBot
+from dadbot.core.execution_trace_context import ExecutionTraceRecorder, bind_execution_trace
 from dadbot.core.graph import LedgerMutationOp, TurnContext
 from dadbot_system.state import InMemoryStateStore
 
@@ -2246,9 +2247,9 @@ class DadBotRegressionTests(unittest.TestCase):
         class _FakeProcess:
             pid = 43210
 
-        with patch("dadbot.core.dadbot.subprocess.Popen", return_value=_FakeProcess()), patch(
-            "dadbot.core.dadbot.os.kill", return_value=None
-        ), patch("dadbot.core.dadbot.subprocess.run") as taskkill_mock:
+        with patch("dadbot.runtime.mcp.local_mcp_server_controller.subprocess.Popen", return_value=_FakeProcess()), patch(
+            "dadbot.runtime.mcp.local_mcp_server_controller.os.kill", return_value=None
+        ), patch("dadbot.runtime.mcp.local_mcp_server_controller.subprocess.run") as taskkill_mock:
             started = self.bot.start_local_mcp_server_process()
             self.assertEqual(started["pid"], 43210)
             self.assertTrue(runtime_paths["pid"].exists())
@@ -2262,17 +2263,20 @@ class DadBotRegressionTests(unittest.TestCase):
         self.bot.history.append({"role": "user", "content": "Checkpoint this turn."})
         self.bot.sync_active_thread_snapshot()
 
-        self.bot.persist_graph_checkpoint(
-            {
-                "trace_id": "trace-123",
-                "stage": "inference",
-                "status": "after",
-                "state": {"candidate": "draft reply"},
-            }
-        )
+        recorder = ExecutionTraceRecorder(trace_id="trace-123", prompt="checkpoint")
+        with bind_execution_trace(recorder, required=True):
+            self.bot.persist_graph_checkpoint(
+                {
+                    "trace_id": "trace-123",
+                    "stage": "inference",
+                    "status": "after",
+                    "state": {"candidate": "draft reply"},
+                }
+            )
         self.bot.reset_session_state()
 
-        checkpoint = self.bot.resume_turn_from_checkpoint("trace-123")
+        with bind_execution_trace(recorder, required=True):
+            checkpoint = self.bot.resume_turn_from_checkpoint("trace-123")
 
         self.assertIsNotNone(checkpoint)
         self.assertEqual(checkpoint["trace_id"], "trace-123")

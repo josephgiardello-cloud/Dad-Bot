@@ -105,12 +105,9 @@ def launch():
     print("\n🚀 Launching DadBot...")
     time.sleep(1)
     try:
-        subprocess.Popen([
-            sys.executable, "-m", "streamlit", "run", "dad_streamlit.py",
-            "--server.headless=false",
-            "--server.port=8501",
-            "--browser.serverAddress=localhost",
-        ])
+        # Route through Dad.py so app_runtime.main() enforces all startup
+        # safety checks, contract validation, and resource guards.
+        subprocess.Popen([sys.executable, "Dad.py"])
         print("✅ DadBot should open in your browser shortly at http://localhost:8501")
         print("   If it doesn't open automatically, navigate there manually.")
     except Exception as e:

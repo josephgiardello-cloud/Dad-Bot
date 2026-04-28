@@ -19,11 +19,7 @@ The remaining body of this class is pure delegation plumbing:
 """
 from __future__ import annotations
 
-import importlib
-from importlib import util as import_util
 import logging
-import os
-import subprocess
 from typing import Any
 
 try:
@@ -31,7 +27,6 @@ try:
 except ImportError:  # pragma: no cover
     ollama = None  # type: ignore[assignment]
 
-from dadbot.app_runtime import main as run_app_main
 from dadbot.core.action_mixin import DadBotActionMixin
 from dadbot.core.boot_mixin import DadBotBootMixin
 from dadbot.core.compat_mixin import DadBotCompatMixin
@@ -44,23 +39,10 @@ from dadbot.core.turn_mixin import DadBotTurnMixin
 from dadbot.core.ux_projection_gateway import TurnUxProjectionGateway
 from dadbot.runtime.model import ModelPort
 
-tiktoken = importlib.import_module("tiktoken") if import_util.find_spec("tiktoken") else None
-litellm = importlib.import_module("litellm") if import_util.find_spec("litellm") else None
-
 if ollama is None:
     logging.getLogger(__name__).warning(
         "ollama package is not installed; Ollama-backed features will be unavailable. "
         "Install with: pip install ollama"
-    )
-if tiktoken is None:
-    logging.getLogger(__name__).warning(
-        "tiktoken is not installed; token counting will use the character-based estimate, "
-        "which may cause context-budget drift. Install with: pip install tiktoken"
-    )
-if litellm is None:
-    logging.getLogger(__name__).warning(
-        "litellm is not installed; multi-provider LLM routing is disabled and Dad Bot will use Ollama. "
-        "Install with: pip install litellm"
     )
 
 logger = logging.getLogger(__name__)
@@ -186,7 +168,7 @@ class DadBot(
         "relationship_hypotheses": "relationship.hypotheses",
         "relationship_snapshot": "relationship.snapshot",
         "update_relationship_state": "relationship.current_state",
-        "apply_relationship_feedback": "relationship.current_state",
+        "apply_relationship_feedback": "relationship.apply_feedback",
         "build_relationship_reflection_prompt": "relationship.build_reflection_prompt",
         "reflect_relationship_state": "relationship.current_state",
         "internal_state_snapshot": "internal_state_manager.snapshot",
@@ -664,6 +646,13 @@ class DadBot(
     def _apply_thread_snapshot_unlocked(self, snapshot):
         return self.runtime_state_manager.apply_thread_snapshot_unlocked(snapshot)
 
+    @property
+    def script_path(self):
+        """Resolved runtime entry script path used by persistence helpers."""
+        return self.runtime_script_path()
+
 
 if __name__ == "__main__":
+    from dadbot.app_runtime import main as run_app_main
+
     raise SystemExit(run_app_main(dadbot_cls=DadBot, script_path=__file__))

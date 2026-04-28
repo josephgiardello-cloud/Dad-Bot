@@ -28,7 +28,27 @@ def test_repo_phase4_auditor_main_emits_json_report() -> None:
     with redirect_stdout(buffer):
         exit_code = repo_phase4_auditor.main()
 
-    payload = json.loads(buffer.getvalue())
+    raw = buffer.getvalue()
+    # Scan all JSON objects in the buffer to find the auditor report.
+    # Other tests (e.g. phase4a concurrent-session tests) may leak JSON to
+    # stdout via background threads; we want specifically the object that
+    # carries "phase4_status".
+    decoder = json.JSONDecoder()
+    payload = None
+    pos = 0
+    while pos < len(raw):
+        start = raw.find("{", pos)
+        if start == -1:
+            break
+        try:
+            obj, _ = decoder.raw_decode(raw, start)
+            if isinstance(obj, dict) and "phase4_status" in obj:
+                payload = obj
+                break
+            pos = start + 1
+        except json.JSONDecodeError:
+            pos = start + 1
+    assert payload is not None, f"No auditor JSON report found in output: {raw!r}"
     assert exit_code in {0, 1}
     assert payload["phase4_status"] in {"PASS", "FAIL"}
     assert "coverage" in payload

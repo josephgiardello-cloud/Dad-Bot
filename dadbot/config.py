@@ -134,6 +134,16 @@ class DadRuntimeConfig:
     graph_walk_hops: int = 2
     graph_walk_edge_limit: int = 18
     graph_walk_node_limit: int = 16
+    egress_allowlist: Tuple[str, ...] = (
+        "localhost",
+        "127.0.0.1",
+        "api.duckduckgo.com",
+    )
+    egress_enforce: bool = False
+    merkle_anchor_enabled: bool = True
+    dual_control_enabled: bool = False
+    dual_control_approvals_required: int = 2
+    rtbf_proof_enabled: bool = True
 
     cadence_defaults: Dict[str, int] = field(default_factory=lambda: {
         "persona_evolution_min_sessions": 10,
@@ -277,6 +287,33 @@ class DadBotConfig:
             and ("PYTEST_CURRENT_TEST" not in os.environ)
         )
         self.turn_graph_config_path = str(os.environ.get("DADBOT_TURN_GRAPH_CONFIG_PATH") or "config.yaml").strip() or "config.yaml"
+        self.egress_enforce = bool(
+            self.runtime_config.egress_enforce
+            or env_truthy("DADBOT_EGRESS_ENFORCE", default=False)
+        )
+        configured_allowlist = str(os.environ.get("DADBOT_EGRESS_ALLOWLIST", "")).strip()
+        if configured_allowlist:
+            hosts = [item.strip() for item in configured_allowlist.split(",")]
+            self.egress_allowlist = tuple(host for host in hosts if host)
+        else:
+            self.egress_allowlist = tuple(self.runtime_config.egress_allowlist)
+        self.merkle_anchor_enabled = bool(
+            self.runtime_config.merkle_anchor_enabled
+            and env_truthy("DADBOT_MERKLE_ANCHOR_ENABLED", default=True)
+        )
+        self.dual_control_enabled = bool(
+            self.runtime_config.dual_control_enabled
+            or env_truthy("DADBOT_DUAL_CONTROL_ENABLED", default=False)
+        )
+        self.dual_control_approvals_required = max(
+            1,
+            int(os.environ.get("DADBOT_DUAL_CONTROL_APPROVALS", self.runtime_config.dual_control_approvals_required) or 1),
+        )
+        self.rtbf_proof_enabled = bool(
+            self.runtime_config.rtbf_proof_enabled
+            and env_truthy("DADBOT_RTBF_PROOF_ENABLED", default=True)
+        )
+        self._approval_workflow = None
 
     def apply_profile_llm_settings(self, provider: str, model: str) -> None:
         normalized_provider = str(provider or self.llm_provider).strip().lower() or self.llm_provider
@@ -285,3 +322,46 @@ class DadBotConfig:
         self.llm_model = normalized_model
         if self.llm_provider == "ollama" and self.llm_model:
             self.active_model = self.llm_model
+
+    def _config_approval_workflow(self):
+        if self._approval_workflow is not None:
+            return self._approval_workflow
+        from dadbot.core.config_approval import ConfigApprovalWorkflow
+
+        store_path = self.session_log_dir / "config_approvals.json"
+        self._approval_workflow = ConfigApprovalWorkflow(
+            store_path,
+            approvals_required=self.dual_control_approvals_required,
+        )
+        return self._approval_workflow
+
+    def propose_profile_llm_change(self, provider: str, model: str, requested_by: str = "system") -> str:
+        workflow = self._config_approval_workflow()
+        proposal = workflow.propose(
+            key="llm.profile",
+            requested_value={
+                "provider": str(provider or "").strip().lower(),
+                "model": str(model or "").strip(),
+            },
+            requested_by=requested_by,
+        )
+        return proposal.proposal_id
+
+    def approve_profile_llm_change(self, proposal_id: str, approver: str) -> bool:
+        workflow = self._config_approval_workflow()
+        proposal = workflow.approve(proposal_id, approver)
+        if proposal is None:
+            return False
+        return str(proposal.status or "") in {"approved", "applied"}
+
+    def apply_profile_llm_change_if_approved(self, proposal_id: str) -> bool:
+        workflow = self._config_approval_workflow()
+        proposal = workflow.consume_approved(proposal_id)
+        if proposal is None:
+            return False
+        value = dict(proposal.requested_value or {})
+        self.apply_profile_llm_settings(
+            str(value.get("provider") or "").strip().lower(),
+            str(value.get("model") or "").strip(),
+        )
+        return True

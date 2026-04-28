@@ -438,5 +438,21 @@ Rules:
         _ = turn_context
         return self.current_state()
 
+    def apply_feedback(self, feedback_type: str, *, turn_context=None) -> dict:
+        """Record a lightweight user-provided relationship feedback signal.
+
+        Maps UI reactions ("supportive", "distant") to a state snapshot annotated
+        with the feedback.  This is a read-only projection — no mutation is
+        persisted here; the signal is available to callers for logging or future
+        SaveNode commit.
+        """
+        _ = turn_context
+        state = self.current_state()
+        return {**state, "feedback_applied": str(feedback_type or "").strip().lower()}
+
+    def apply_relationship_feedback(self, feedback_type: str, *, turn_context=None) -> dict:
+        """Deprecated alias for apply_feedback."""
+        return self.apply_feedback(feedback_type, turn_context=turn_context)
+
 
 __all__ = ["RelationshipManager"]

@@ -10,6 +10,34 @@ class DadBotModel(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
 
+class InvarianceGate(DadBotModel):
+    role: Literal["CORE", "SECONDARY"]
+    question: str
+    signals: list[str] = Field(default_factory=list)
+    allowed_influences: list[str] = Field(default_factory=list)
+    must_not_depend_on: list[str] = Field(default_factory=list)
+    coverage: list[str] = Field(default_factory=list)
+    examples: list[str] = Field(default_factory=list)
+    correctness_critical: bool = True
+
+
+class EvaluationContract(DadBotModel):
+    version: str = "1.0"
+    owner: str = "dadbot"
+    behavioral_invariance: InvarianceGate
+    envelope_invariance: InvarianceGate
+
+
+class BoundaryComplianceDeclaration(DadBotModel):
+    boundary: Literal["boot", "registry", "orchestrator"]
+    contract_version: str
+    contract_hash: str
+    compliant: bool = True
+    declared_behavioral_signals: list[str] = Field(default_factory=list)
+    declared_envelope_signals: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
 class MemoryEntry(DadBotModel):
     summary: str
     category: str = "general"
@@ -482,6 +510,7 @@ class MemoryGraph(DadBotModel):
 
 
 class MemoryStore(DadBotModel):
+    schema_version: int = Field(1, ge=1)
     memories: list[MemoryEntry] = Field(default_factory=list)
     consolidated_memories: list[ConsolidatedMemory] = Field(default_factory=list)
     persona_evolution: list[PersonaTrait] = Field(default_factory=list)
@@ -522,6 +551,9 @@ __all__ = [
     "AgenticToolPlan",
     "BackgroundTaskRecord",
     "BackgroundTaskOverview",
+    "BoundaryComplianceDeclaration",
+    "EvaluationContract",
+    "InvarianceGate",
     "ChatThreadState",
     "CircuitBreakerStatusSnapshot",
     "ConsolidatedMemory",

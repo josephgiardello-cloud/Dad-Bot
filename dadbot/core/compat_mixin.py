@@ -1,23 +1,15 @@
 ﻿from __future__ import annotations
 
 from datetime import datetime
+from functools import lru_cache
+from importlib import import_module
 
-from dadbot.agentic import AgenticHandler as PackagedAgenticHandler, ToolRegistry as PackagedToolRegistry
 from dadbot.constants import PERSONA_PRESETS
 from dadbot.defaults import (
     default_memory_store as _default_memory_store,
     default_relationship_state as _default_relationship_state,
     relationship_hypothesis_profiles as _relationship_hypothesis_profiles,
 )
-from dadbot.managers.internal_state import InternalStateManager as PackagedInternalStateManager
-from dadbot.managers.memory_commands import MemoryCommandManager as PackagedMemoryCommandManager
-from dadbot.managers.memory_coordination import MemoryCoordinator as PackagedMemoryCoordinator
-from dadbot.managers.memory_query import MemoryQueryManager as PackagedMemoryQueryManager
-from dadbot.managers.multimodal import MultimodalManager as PackagedMultimodalManager
-from dadbot.managers.runtime_storage import RuntimeStorageManager as PackagedRuntimeStorageManager
-from dadbot.memory.manager import MemoryManager as PackagedMemoryManager
-from dadbot.profile import ProfileContextManager as PackagedProfileContextManager
-from dadbot.relationship import RelationshipManager as PackagedRelationshipManager
 from dadbot.utils import (
     normalize_memory_text as cached_normalize_memory_text,
     significant_tokens as cached_significant_tokens,
@@ -58,6 +50,13 @@ from dadbot.utils.relationship import (
 )
 
 
+@lru_cache(maxsize=None)
+def _resolve_attr(path: str):
+    module_name, attr_name = path.split(":", 1)
+    module = import_module(module_name)
+    return getattr(module, attr_name)
+
+
 class DadBotCompatMixin:
     """Compatibility helpers that do not own orchestration or mutable runtime state."""
 
@@ -69,11 +68,13 @@ class DadBotCompatMixin:
 
     @staticmethod
     def json_backup_path(destination):
-        return PackagedRuntimeStorageManager.json_backup_path(destination)
+        runtime_storage_manager = _resolve_attr("dadbot.managers.runtime_storage:RuntimeStorageManager")
+        return runtime_storage_manager.json_backup_path(destination)
 
     @staticmethod
     def corrupt_json_snapshot_path(destination):
-        return PackagedRuntimeStorageManager.corrupt_json_snapshot_path(destination)
+        runtime_storage_manager = _resolve_attr("dadbot.managers.runtime_storage:RuntimeStorageManager")
+        return runtime_storage_manager.corrupt_json_snapshot_path(destination)
 
     @staticmethod
     def extract_ollama_message_payload(response):
@@ -120,7 +121,8 @@ class DadBotCompatMixin:
 
     @staticmethod
     def default_internal_state():
-        return PackagedInternalStateManager.default_state()
+        internal_state_manager = _resolve_attr("dadbot.managers.internal_state:InternalStateManager")
+        return internal_state_manager.default_state()
 
     @staticmethod
     def default_memory_graph():
@@ -159,7 +161,8 @@ class DadBotCompatMixin:
 
     @staticmethod
     def snapshot_memory_entries(memories):
-        return PackagedMemoryManager.snapshot_memory_entries(memories)
+        memory_manager = _resolve_attr("dadbot.memory.manager:MemoryManager")
+        return memory_manager.snapshot_memory_entries(memories)
 
     @staticmethod
     def extract_embeddings_from_response(response):
@@ -207,15 +210,18 @@ class DadBotCompatMixin:
 
     @staticmethod
     def normalize_chat_attachment(attachment):
-        return PackagedMultimodalManager.normalize_chat_attachment(attachment)
+        multimodal_manager = _resolve_attr("dadbot.managers.multimodal:MultimodalManager")
+        return multimodal_manager.normalize_chat_attachment(attachment)
 
     @staticmethod
     def history_attachment_metadata(attachment):
-        return PackagedMultimodalManager.history_attachment_metadata(attachment)
+        multimodal_manager = _resolve_attr("dadbot.managers.multimodal:MultimodalManager")
+        return multimodal_manager.history_attachment_metadata(attachment)
 
     @staticmethod
     def semantic_memory_filters(query_tokens, query_category, query_mood):
-        return PackagedMemoryManager.semantic_memory_filters(query_tokens, query_category, query_mood)
+        memory_manager = _resolve_attr("dadbot.memory.manager:MemoryManager")
+        return memory_manager.semantic_memory_filters(query_tokens, query_category, query_mood)
 
     @staticmethod
     def command_help_text():
@@ -223,23 +229,28 @@ class DadBotCompatMixin:
 
     @staticmethod
     def reminder_has_date_signal(detail):
-        return PackagedToolRegistry.reminder_has_date_signal(detail)
+        tool_registry = _resolve_attr("dadbot.agentic:ToolRegistry")
+        return tool_registry.reminder_has_date_signal(detail)
 
     @staticmethod
     def normalize_relative_reminder_phrase(detail, reference):
-        return PackagedToolRegistry.normalize_relative_reminder_phrase(detail, reference)
+        tool_registry = _resolve_attr("dadbot.agentic:ToolRegistry")
+        return tool_registry.normalize_relative_reminder_phrase(detail, reference)
 
     @classmethod
     def split_reminder_details(cls, detail):
-        return PackagedToolRegistry.split_reminder_details(detail)
+        tool_registry = _resolve_attr("dadbot.agentic:ToolRegistry")
+        return tool_registry.split_reminder_details(detail)
 
     @staticmethod
     def extract_related_topic_results(related_topics):
-        return PackagedAgenticHandler.extract_related_topic_results(related_topics)
+        agentic_handler = _resolve_attr("dadbot.agentic:AgenticHandler")
+        return agentic_handler.extract_related_topic_results(related_topics)
 
     @staticmethod
     def normalize_lookup_query(user_input):
-        return PackagedToolRegistry.normalize_lookup_query(user_input)
+        tool_registry = _resolve_attr("dadbot.agentic:ToolRegistry")
+        return tool_registry.normalize_lookup_query(user_input)
 
     @staticmethod
     def persona_announcement(trait, reason):
@@ -267,11 +278,13 @@ class DadBotCompatMixin:
 
     @staticmethod
     def ordinal(day):
-        return PackagedProfileContextManager.ordinal(day)
+        profile_context_manager = _resolve_attr("dadbot.profile:ProfileContextManager")
+        return profile_context_manager.ordinal(day)
 
     @staticmethod
     def natural_list(items):
-        return PackagedProfileContextManager.natural_list(items)
+        profile_context_manager = _resolve_attr("dadbot.profile:ProfileContextManager")
+        return profile_context_manager.natural_list(items)
 
     @staticmethod
     def normalize_memory_text(text):
@@ -295,11 +308,13 @@ class DadBotCompatMixin:
 
     @staticmethod
     def infer_memory_category(summary):
-        return PackagedMemoryManager.infer_memory_category(summary)
+        memory_manager = _resolve_attr("dadbot.memory.manager:MemoryManager")
+        return memory_manager.infer_memory_category(summary)
 
     @staticmethod
     def relationship_level_label(score):
-        return PackagedRelationshipManager.level_label(score)
+        relationship_manager = _resolve_attr("dadbot.relationship:RelationshipManager")
+        return relationship_manager.level_label(score)
 
     @staticmethod
     def build_style_examples():
@@ -307,19 +322,23 @@ class DadBotCompatMixin:
 
     @staticmethod
     def memory_impact_score(memory):
-        return PackagedMemoryQueryManager.memory_impact_score(memory)
+        memory_query_manager = _resolve_attr("dadbot.managers.memory_query:MemoryQueryManager")
+        return memory_query_manager.memory_impact_score(memory)
 
     @staticmethod
     def format_memories_for_reply(memories):
-        return PackagedMemoryQueryManager.format_memories_for_reply(memories)
+        memory_query_manager = _resolve_attr("dadbot.managers.memory_query:MemoryQueryManager")
+        return memory_query_manager.format_memories_for_reply(memories)
 
     @staticmethod
     def parse_memory_command(user_input):
-        return PackagedMemoryCommandManager.parse_memory_command(user_input)
+        memory_command_manager = _resolve_attr("dadbot.managers.memory_commands:MemoryCommandManager")
+        return memory_command_manager.parse_memory_command(user_input)
 
     @staticmethod
     def memory_extraction_prompt():
-        return PackagedMemoryCoordinator.memory_extraction_prompt()
+        memory_coordinator = _resolve_attr("dadbot.managers.memory_coordination:MemoryCoordinator")
+        return memory_coordinator.memory_extraction_prompt()
 
     @staticmethod
     def significant_tokens(text):

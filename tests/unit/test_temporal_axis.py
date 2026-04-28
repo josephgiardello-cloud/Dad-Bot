@@ -5,7 +5,7 @@ import datetime as dt
 import json
 
 import pytest
-
+pytestmark = pytest.mark.unit
 from dadbot.core.graph import TurnTemporalAxis
 from harness.deterministic_seeds import REPLAY_A, REPLAY_B, TEMPORAL_FREEZE
 

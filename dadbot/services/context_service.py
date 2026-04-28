@@ -8,6 +8,7 @@ import time
 from typing import Any
 
 from dadbot.context import ContextBuilder
+from dadbot.core.execution_trace_context import record_execution_step
 from dadbot.utils import significant_tokens as _significant_tokens
 
 logger = logging.getLogger(__name__)
@@ -166,6 +167,16 @@ class ContextService:
         if temporal is None:
             raise RuntimeError("TemporalNode required — execution invalid")
         user_input = str(getattr(turn_context, "user_input", "") or "")
+        session_id = str((getattr(turn_context, "metadata", {}) or {}).get("control_plane", {}).get("session_id") or "default")
+        record_execution_step(
+            "memory_read",
+            payload={
+                "source": "ContextService.build_context",
+                "session_id": session_id,
+                "query_length": len(user_input),
+            },
+            required=True,
+        )
         temporal_snapshot = {}
         temporal_builder = getattr(turn_context, "temporal_snapshot", None)
         if callable(temporal_builder):
@@ -185,7 +196,6 @@ class ContextService:
             "temporal": temporal_snapshot,
         }
 
-        session_id = str((getattr(turn_context, "metadata", {}) or {}).get("control_plane", {}).get("session_id") or "default")
         memory_snapshot = self.get_snapshot(session_id)
 
         # Guard against missing context_builder.bot (e.g., in test stubs)
@@ -211,6 +221,7 @@ class ContextService:
             state["memory_rolling_summary"] = str(memory_snapshot.get("rolling_summary") or "")
             state["memory_structured"] = dict(memory_snapshot.get("structured_memory") or {})
             state["memory_full_history_id"] = str(memory_snapshot.get("full_history_id") or "")
+            state["memory_retrieval_set"] = []
 
         # Semantic RAG: query long-term index for targeted memory hits
         if self.semantic_index is not None and user_input.strip():
@@ -227,6 +238,15 @@ class ContextService:
                     query_mood="neutral",
                     limit=5,
                 )
+                record_execution_step(
+                    "memory_retrieval",
+                    payload={
+                        "query_token_count": len(list(tokens or [])),
+                        "has_embedding": bool(query_embedding is not None),
+                        "hit_count": len(list(hits or [])),
+                    },
+                    required=True,
+                )
                 if hits:
                     # Deduplicate against already-included base memory summaries
                     base_summaries = {
@@ -237,6 +257,8 @@ class ContextService:
                     unique_hits = [h for h in hits if str(h.get("summary", "")) not in base_summaries]
                     if unique_hits:
                         ctx["semantic"] = unique_hits
+                    if isinstance(state, dict):
+                        state["memory_retrieval_set"] = list(unique_hits or hits)
             except Exception as exc:
                 logger.debug("ContextService: semantic index query failed (non-fatal): %s", exc)
 

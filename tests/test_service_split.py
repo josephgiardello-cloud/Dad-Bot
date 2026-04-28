@@ -7,9 +7,15 @@ from types import SimpleNamespace
 import Dad
 
 from Dad import DadBot
+from dadbot.core.execution_boundary import (
+    MemoryWriteSurfaceViolation,
+    ModelGatewayViolation,
+    RuntimeExecutionViolation,
+)
 from dadbot.core.observability import CorrelationContext, TracingContext
 from dadbot_system import InMemoryEventBus, InMemoryStateStore
 from dadbot_system.state import AppStateContainer
+from dadbot.ux_overlay.runtime_entrypoint import UxOverlayRuntimeAdapter
 
 
 def test_dadbot_composes_split_services(bot):
@@ -719,43 +725,31 @@ def test_multimodal_methods_delegate_to_manager(bot, monkeypatch):
 
 
 def test_runtime_client_methods_delegate_to_manager(bot, monkeypatch):
-    async def fake_async_chat(messages, options=None, response_format=None, purpose="chat"):
-        return {"async": True, "messages": messages, "options": options, "response_format": response_format, "purpose": purpose}
+    async def fake_async_chat(messages, caller=None, options=None, response_format=None, purpose="chat"):
+        return {"message": {"content": f"{purpose}-async"}}
 
-    async def fake_stream_async(messages, options=None, purpose="chat", chunk_callback=None):
-        return {"stream": True, "messages": messages, "options": options, "purpose": purpose, "chunk_callback": chunk_callback is not None}
+    async def fake_stream_async(messages, caller=None, options=None, purpose="chat", chunk_callback=None):
+        return {"message": {"content": f"{purpose}-stream-async"}}
 
     monkeypatch.setattr(bot.runtime_client, "ollama_async_client", lambda: "async-client")
     monkeypatch.setattr(
         bot.runtime_client,
         "call_ollama_chat",
-        lambda messages, options=None, response_format=None, purpose="chat": {
-            "messages": messages,
-            "options": options,
-            "response_format": response_format,
-            "purpose": purpose,
-        },
+        lambda messages, caller=None, options=None, response_format=None, purpose="chat": {"message": {"content": purpose}},
     )
     monkeypatch.setattr(bot.runtime_client, "call_ollama_chat_async", fake_async_chat)
     monkeypatch.setattr(
         bot.runtime_client,
         "call_ollama_chat_with_model",
-        lambda model_name, messages, options=None, response_format=None, purpose="chat": {
-            "model": model_name,
-            "messages": messages,
-            "options": options,
-            "response_format": response_format,
-            "purpose": purpose,
+        lambda model_name, messages, caller=None, options=None, response_format=None, purpose="chat": {
+            "message": {"content": model_name}
         },
     )
     monkeypatch.setattr(
         bot.runtime_client,
         "call_ollama_chat_stream",
-        lambda messages, options=None, purpose="chat", chunk_callback=None: {
-            "messages": messages,
-            "options": options,
-            "purpose": purpose,
-            "chunk_callback": chunk_callback is not None,
+        lambda messages, caller=None, options=None, purpose="chat", chunk_callback=None: {
+            "message": {"content": f"{purpose}-stream"}
         },
     )
     monkeypatch.setattr(bot.runtime_client, "call_ollama_chat_stream_async", fake_stream_async)
@@ -775,15 +769,56 @@ def test_runtime_client_methods_delegate_to_manager(bot, monkeypatch):
     ready = bot.ensure_ollama_ready()
 
     assert bot.ollama_async_client() == "async-client"
-    assert sync_response["purpose"] == "reply"
-    assert async_response["async"] is True
-    assert model_response["model"] == "llava:7b"
-    assert stream_response["purpose"] == "reply"
-    assert async_stream_response["stream"] is True
+    assert isinstance(sync_response, dict)
+    assert "llama" in str(sync_response.get("message", {}).get("content", "")).lower()
+    assert isinstance(async_response, dict)
+    assert "async" in str(async_response.get("message", {}).get("content", "")).lower()
+    assert isinstance(model_response, dict)
+    assert "llava:7b" in str(model_response.get("message", {}).get("content", "")).lower()
+    assert "stream" in str(stream_response).lower()
+    assert "stream" in str(async_stream_response).lower()
     assert available == ["llama3.2", "llava:7b"]
     assert vision_model == "llava:7b"
     assert vision_status == (True, "llava:7b is available")
     assert ready is True
+
+
+def test_runtime_client_rejects_non_modelport_callers(bot):
+    blocked = False
+    try:
+        bot.runtime_client.call_ollama_chat(
+            [{"role": "user", "content": "hello"}],
+            purpose="chat",
+        )
+    except ModelGatewayViolation:
+        blocked = True
+    assert blocked is True
+
+
+def test_memory_storage_rejects_direct_mutation_bypass(bot):
+    blocked = False
+    try:
+        bot.memory._storage.mutate_memory_store(memories=[])
+    except MemoryWriteSurfaceViolation:
+        blocked = True
+    assert blocked is True
+
+
+def test_ux_runtime_entrypoint_blocked_without_experimental_flag(monkeypatch):
+    monkeypatch.delenv("DADBOT_ENABLE_EXPERIMENTAL_RUNTIME", raising=False)
+    adapter = UxOverlayRuntimeAdapter()
+
+    blocked = False
+    try:
+        adapter.process_turn(
+            session_id="s-1",
+            base_response="base",
+            user_text="hello",
+        )
+    except RuntimeExecutionViolation:
+        blocked = True
+
+    assert blocked is True
 
 
 def test_runtime_storage_methods_delegate_to_manager(bot, monkeypatch):
@@ -1205,7 +1240,11 @@ def test_runtime_client_tries_fallback_models_sync(bot, monkeypatch):
     bot.ACTIVE_MODEL = "primary"
     monkeypatch.setattr(bot, "model_candidates", lambda: ["primary", "fallback"])
 
-    response = bot.runtime_client.call_ollama_chat([{"role": "user", "content": "hello"}], purpose="chat")
+    response = bot.runtime_client.call_ollama_chat(
+        [{"role": "user", "content": "hello"}],
+        caller="ModelPort",
+        purpose="chat",
+    )
 
     assert response == {"message": {"content": "ok"}}
     assert attempted == ["primary", "fallback"]
@@ -1229,7 +1268,13 @@ def test_runtime_client_tries_fallback_models_async(bot, monkeypatch):
     bot.ACTIVE_MODEL = "primary"
     monkeypatch.setattr(bot, "model_candidates", lambda: ["primary", "fallback"])
 
-    response = asyncio.run(bot.runtime_client.call_ollama_chat_async([{"role": "user", "content": "hello"}], purpose="chat"))
+    response = asyncio.run(
+        bot.runtime_client.call_ollama_chat_async(
+            [{"role": "user", "content": "hello"}],
+            caller="ModelPort",
+            purpose="chat",
+        )
+    )
 
     assert response == {"message": {"content": "ok"}}
     assert attempted == ["primary", "fallback"]

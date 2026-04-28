@@ -217,6 +217,12 @@ class BenchmarkRunner:
             self._sandbox_applied = True
             return
 
+        # Phase 4A tests validate orchestrator behavior, not external model latency.
+        # Keep maintenance deterministic and offline-safe by avoiding network-backed
+        # summary refresh work from background threads.
+        self._stabilize_llm_calls(bot)
+        self._stabilize_background_maintenance(bot)
+
         if self.sandbox_outputs:
             try:
                 bot.SESSION_LOG_DIR = session_logs
@@ -261,6 +267,60 @@ class BenchmarkRunner:
                 logger.debug("Failed to install in-memory persistence sandbox", exc_info=True)
 
         self._sandbox_applied = True
+
+    @staticmethod
+    def _stabilize_llm_calls(bot: Any) -> None:
+        """Replace live model calls with deterministic offline responses for benchmarks."""
+        def _offline_llm_response(*_args: Any, **_kwargs: Any) -> Dict[str, Any]:
+            return {"message": {"content": "[benchmark-offline]"}}
+
+        try:
+            bot.call_ollama_chat = _offline_llm_response
+        except Exception:
+            logger.debug("Failed to patch bot.call_ollama_chat for benchmark sandbox", exc_info=True)
+
+        try:
+            runtime_client = getattr(bot, "runtime_client", None)
+            if runtime_client is not None:
+                runtime_client.call_llm = _offline_llm_response
+                runtime_client.call_ollama_chat = _offline_llm_response
+                runtime_client.call_ollama_chat_with_model = _offline_llm_response
+        except Exception:
+            logger.debug("Failed to patch runtime client LLM methods for benchmark sandbox", exc_info=True)
+
+    @staticmethod
+    def _stabilize_background_maintenance(bot: Any) -> None:
+        """Prevent background maintenance from issuing blocking external LLM calls."""
+        try:
+            def _offline_refresh_session_summary(force: bool = False) -> str:
+                return str(getattr(bot, "session_summary", "") or "")
+
+            bot.refresh_session_summary = _offline_refresh_session_summary
+        except Exception:
+            logger.debug("Failed to patch refresh_session_summary for benchmark sandbox", exc_info=True)
+
+        try:
+            maintenance_scheduler = getattr(bot, "maintenance_scheduler", None)
+            if maintenance_scheduler is not None:
+                def _offline_post_turn_maintenance(user_input: str, current_mood: str) -> Dict[str, Any]:
+                    return {
+                        "summary_refreshed": False,
+                        "scheduled_proactive": False,
+                        "scheduled_proactive_count": 0,
+                        "relationship_reflected": False,
+                        "wisdom_generated": False,
+                        "periodic_synthesis": False,
+                        "periodic_archive_delta": 0,
+                        "persona_evolved": False,
+                        "memory_compaction": False,
+                        "memory_compaction_updated_at": None,
+                        "memory_graph_refreshed": True,
+                        "offline_stub": True,
+                    }
+
+                maintenance_scheduler.run_post_turn_maintenance = _offline_post_turn_maintenance
+        except Exception:
+            logger.debug("Failed to patch maintenance manager for benchmark sandbox", exc_info=True)
 
     def _score_trace(self, trace: ExecutionTrace, scenario: Scenario) -> ScoreResult:
         """Apply minimal scoring to execution trace (backward-compatible)."""

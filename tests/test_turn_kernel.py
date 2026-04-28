@@ -7,6 +7,7 @@ Validates the three architecture guarantees:
 """
 import asyncio
 import pytest
+pytestmark = pytest.mark.unit
 from types import SimpleNamespace
 from dadbot.core.kernel import (
     TurnKernel,

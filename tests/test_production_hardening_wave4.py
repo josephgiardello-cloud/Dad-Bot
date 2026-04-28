@@ -12,7 +12,7 @@ import uuid
 from pathlib import Path
 
 import pytest
-
+pytestmark = pytest.mark.unit
 from dadbot.core.authorization import (
     AuthorizationError,
     Capability,

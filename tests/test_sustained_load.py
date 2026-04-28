@@ -4,6 +4,8 @@ import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+import pytest
+
 from Dad import DadBot
 
 
@@ -24,6 +26,7 @@ def _make_temp_bot(temp_path: Path) -> DadBot:
     return bot
 
 
+@pytest.mark.soak
 def test_long_session_stress_harness_tracks_pressure_and_stability():
     with TemporaryDirectory() as temp_dir:
         bot = _make_temp_bot(Path(temp_dir))

@@ -292,6 +292,19 @@ class ProfileRuntimeManager:
 			self.bot.save_profile()
 		return dict(normalized)
 
+	def update_voice_profile(self, settings=None, save=True, **overrides):
+		current = self.bot.PROFILE.get("voice", {})
+		merged = dict(current) if isinstance(current, dict) else {}
+		if isinstance(settings, dict):
+			merged.update(settings)
+		merged.update(overrides)
+
+		self.bot.PROFILE["voice"] = merged
+		self.refresh_profile_runtime()
+		if save:
+			self.bot.save_profile()
+		return dict(merged)
+
 	def update_opening_messages_profile(self, opening_messages=None, save=True):
 		values = opening_messages if isinstance(opening_messages, list) else []
 		normalized = []

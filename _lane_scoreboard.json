@@ -1,0 +1,44 @@
+[
+    {
+        "Lane":  "DEV",
+        "ExitCode":  1,
+        "Seconds":  93.48,
+        "Summary":  "============================== warnings summary ===============================",
+        "Report":  "_lane_DEV_report.txt"
+    },
+    {
+        "Lane":  "INTEGRATION",
+        "ExitCode":  1,
+        "Seconds":  41.79,
+        "Summary":  "(no compact summary line found)",
+        "Report":  "_lane_INTEGRATION_report.txt"
+    },
+    {
+        "Lane":  "DURABILITY_PHASE4",
+        "ExitCode":  0,
+        "Seconds":  18.07,
+        "Summary":  "(no compact summary line found)",
+        "Report":  "_lane_DURABILITY_PHASE4_report.txt"
+    },
+    {
+        "Lane":  "SOAK",
+        "ExitCode":  1,
+        "Seconds":  172.98,
+        "Summary":  "(no compact summary line found)",
+        "Report":  "_lane_SOAK_report.txt"
+    },
+    {
+        "Lane":  "UI",
+        "ExitCode":  0,
+        "Seconds":  17.97,
+        "Summary":  "(no compact summary line found)",
+        "Report":  "_lane_UI_report.txt"
+    },
+    {
+        "Lane":  "FULL_CERT",
+        "ExitCode":  0,
+        "Seconds":  226.25,
+        "Summary":  "============================== warnings summary ===============================",
+        "Report":  "_lane_FULL_CERT_report.txt"
+    }
+]

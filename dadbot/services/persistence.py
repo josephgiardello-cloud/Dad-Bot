@@ -1,6 +1,8 @@
 ﻿from __future__ import annotations
 
 from copy import deepcopy
+import hashlib
+import json
 import logging
 import time
 import uuid
@@ -12,7 +14,9 @@ from dadbot.core.capability_audit_runner import (
     build_runtime_capability_audit_report,
 )
 from dadbot.core.graph import FatalTurnError, LedgerMutationOp, MemoryMutationOp, MutationIntent, MutationKind
+from dadbot.core.merkle_anchor import append_leaf_and_anchor
 from dadbot.core.persistence import AbstractCheckpointer
+from dadbot.core.execution_trace_context import RuntimeTraceViolation
 from dadbot.managers.conversation_persistence import ConversationPersistenceManager
 
 logger = logging.getLogger(__name__)
@@ -34,6 +38,54 @@ class PersistenceService:
         self.turn_service = turn_service
         self.checkpointer: AbstractCheckpointer | None = None
         self.strict_mode: bool = False
+        self._merkle_session_leaves: dict[str, list[str]] = {}
+
+    @staticmethod
+    def _stable_hash(payload: Any) -> str:
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, ensure_ascii=True, default=str).encode("utf-8")
+        ).hexdigest()
+
+    def _record_merkle_anchor(self, turn_context: Any, *, commit_id: str) -> None:
+        runtime = getattr(getattr(self.turn_service, "bot", None), "config", None)
+        enabled = bool(getattr(runtime, "merkle_anchor_enabled", True))
+        if not enabled:
+            return
+
+        metadata = getattr(turn_context, "metadata", None)
+        control_plane = dict(metadata.get("control_plane") or {}) if isinstance(metadata, dict) else {}
+        session_id = str(control_plane.get("session_id") or "default")
+        trace_id = str(getattr(turn_context, "trace_id", "") or "")
+        temporal = getattr(turn_context, "temporal", None)
+        occurred_at = str(getattr(temporal, "wall_time", "") or "")
+        payload = {
+            "session_id": session_id,
+            "trace_id": trace_id,
+            "commit_id": str(commit_id or ""),
+            "occurred_at": occurred_at,
+            "state_hash": self._stable_hash(getattr(turn_context, "state", {}) or {}),
+            "metadata_hash": self._stable_hash(getattr(turn_context, "metadata", {}) or {}),
+        }
+        leaves = self._merkle_session_leaves.setdefault(session_id, [])
+        anchor = append_leaf_and_anchor(leaves, payload)
+        if isinstance(metadata, dict):
+            metadata["merkle_anchor"] = dict(anchor)
+        if isinstance(getattr(turn_context, "state", None), dict):
+            turn_context.state["merkle_anchor"] = dict(anchor)
+        self.save_turn_event(
+            {
+                "event_type": "merkle_anchor_commit",
+                "trace_id": trace_id,
+                "occurred_at": occurred_at,
+                "stage": "save",
+                "status": "after",
+                "payload": {
+                    "session_id": session_id,
+                    "commit_id": str(commit_id or ""),
+                    **anchor,
+                },
+            }
+        )
 
     def set_checkpointer(self, checkpointer: AbstractCheckpointer | None) -> None:
         self.checkpointer = checkpointer
@@ -537,6 +589,7 @@ class PersistenceService:
                     metadata["last_commit_id"] = commit_id
                     metadata["last_transaction_status"] = "committed"
                 self._persist_hierarchical_memory_commit(turn_context, commit_id=commit_id)
+                self._record_merkle_anchor(turn_context, commit_id=commit_id)
             state["_save_transaction_active"] = False
             state["_save_mutations_applied"] = False
 
@@ -668,18 +721,24 @@ class PersistenceService:
     def save_graph_checkpoint(self, checkpoint: dict[str, Any], _skip_turn_event: bool = False) -> None:
         try:
             self.persistence_manager.persist_graph_checkpoint(checkpoint, _skip_turn_event=_skip_turn_event)
+        except RuntimeTraceViolation:
+            raise
         except Exception as exc:
             logger.error("PersistenceService.save_graph_checkpoint failed: %s", exc)
 
     def save_turn_event(self, event: dict[str, Any]) -> None:
         try:
             self.persistence_manager.persist_turn_event(event)
+        except RuntimeTraceViolation:
+            raise
         except Exception as exc:
             logger.error("PersistenceService.save_turn_event failed: %s", exc)
 
     def list_turn_events(self, trace_id: str, limit: int = 0) -> list[dict[str, Any]]:
         try:
             return self.persistence_manager.list_turn_events(trace_id=trace_id, limit=limit)
+        except RuntimeTraceViolation:
+            raise
         except Exception as exc:
             logger.error("PersistenceService.list_turn_events failed: %s", exc)
             return []
@@ -687,6 +746,8 @@ class PersistenceService:
     def replay_turn_events(self, trace_id: str) -> dict[str, Any]:
         try:
             return self.persistence_manager.replay_turn_events(trace_id=trace_id)
+        except RuntimeTraceViolation:
+            raise
         except Exception as exc:
             logger.error("PersistenceService.replay_turn_events failed: %s", exc)
             return {"trace_id": str(trace_id or ""), "events": [], "replayed_state": {}}
@@ -697,6 +758,8 @@ class PersistenceService:
                 trace_id=trace_id,
                 expected_lock_hash=expected_lock_hash,
             )
+        except RuntimeTraceViolation:
+            raise
         except Exception as exc:
             logger.error("PersistenceService.validate_replay_determinism failed: %s", exc)
             return {

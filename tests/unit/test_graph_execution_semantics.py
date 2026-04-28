@@ -11,7 +11,7 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
-
+pytestmark = pytest.mark.unit
 from dadbot.core.graph import (
     ContextBuilderNode,
     HealthNode,

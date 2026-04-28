@@ -8,7 +8,7 @@ from pathlib import Path
 
 from dadbot.contracts import DadBotContext, SupportsDadBotAccess
 from dadbot.models import PersistenceStatusSnapshot
-from dadbot.utils import env_truthy, json_dump, json_dumps, json_load
+from dadbot.utils import json_dump, json_dumps, json_load
 from dadbot_system import CompositeStateStore, PostgresStateStore
 
 
@@ -98,13 +98,12 @@ class RuntimeStorageManager:
 			return profile
 
 		if not self.bot.PROFILE_PATH.exists():
-			if env_truthy("DADBOT_AUTO_INIT_PROFILE", default=False):
-				self.bot.initialize_profile_file(profile_path=self.bot.PROFILE_PATH, force=False)
+			# Deterministic bootstrap: always initialize a missing profile artifact.
+			self.bot.initialize_profile_file(profile_path=self.bot.PROFILE_PATH, force=False)
 
 		if not self.bot.PROFILE_PATH.exists():
-			raise FileNotFoundError(
-				f"Missing {self.bot.PROFILE_PATH.name} at {self.bot.PROFILE_PATH}. Create it from {self.bot.profile_template_path().name} or run 'python Dad.py --init-profile'."
-			)
+			# Final fallback if custom initialization hook did not materialize the file.
+			self.write_json_atomically(self.bot.PROFILE_PATH, self.bot.default_profile(), backup=False)
 		with self.bot.PROFILE_PATH.open("r", encoding="utf-8") as profile_file:
 			return json_load(profile_file)
 

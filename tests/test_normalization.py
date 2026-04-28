@@ -1,3 +1,6 @@
+import pytest
+pytestmark = pytest.mark.unit
+
 def test_naturalize_memory_summary_rewrites_first_person_statements(bot):
     assert bot.naturalize_memory_summary("i'm stressed about work") == "Tony is stressed about work."
     assert bot.naturalize_memory_summary("i have been saving more money") == "Tony has been saving more money."

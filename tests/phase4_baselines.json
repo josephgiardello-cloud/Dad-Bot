@@ -1,0 +1,82 @@
+{
+  "records": [
+    {
+      "baseline_store": "tests/phase4_baselines.json",
+      "cold_start": {
+        "dadbot_class_import_s": 2.198796,
+        "dadbot_import_s": 0.30568,
+        "dadbot_init_s": 0.283752,
+        "total_s": 2.788228
+      },
+      "db_sizes_bytes": {
+        "dad_memory_graph.sqlite3": 65536,
+        "dad_memory_semantic.sqlite3": 53248
+      },
+      "generated_at": "2026-04-27T20:37:43+00:00",
+      "lanes": {
+        "DEV": {
+          "command": "pytest lane DEV",
+          "elapsed_s": 7.209,
+          "exit_code": 0,
+          "result": "pass",
+          "summary": {},
+          "tests": 411,
+          "timed_out": false,
+          "top_slowest": []
+        },
+        "DURABILITY_P4": {
+          "command": "pytest lane DURABILITY_P4",
+          "elapsed_s": 22.167,
+          "exit_code": 0,
+          "result": "pass",
+          "summary": {},
+          "tests": 22,
+          "timed_out": false,
+          "top_slowest": []
+        },
+        "FULL_CERT": {
+          "command": "pytest lane FULL_CERT",
+          "elapsed_s": 251.94,
+          "exit_code": 0,
+          "result": "pass",
+          "summary": {},
+          "tests": 1491,
+          "timed_out": false,
+          "top_slowest": []
+        },
+        "INTEGRATION": {
+          "command": "pytest lane INTEGRATION",
+          "elapsed_s": 35.514,
+          "exit_code": 0,
+          "result": "pass",
+          "summary": {},
+          "tests": 27,
+          "timed_out": false,
+          "top_slowest": []
+        },
+        "SOAK": {
+          "command": "pytest lane SOAK",
+          "elapsed_s": 108.215,
+          "exit_code": 0,
+          "result": "pass",
+          "summary": {},
+          "tests": 4,
+          "timed_out": false,
+          "top_slowest": []
+        },
+        "UI": {
+          "command": "pytest lane UI",
+          "elapsed_s": 21.209,
+          "exit_code": 0,
+          "result": "pass",
+          "summary": {},
+          "tests": 5,
+          "timed_out": false,
+          "top_slowest": []
+        }
+      },
+      "top_slowest_tests": []
+    }
+  ],
+  "schema_version": 1
+}

@@ -4,6 +4,8 @@ import time
 
 import pytest
 
+pytestmark = pytest.mark.integration
+
 uvicorn = pytest.importorskip("uvicorn")
 pytest.importorskip("fastapi")
 testclient = pytest.importorskip("fastapi.testclient")

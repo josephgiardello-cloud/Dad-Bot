@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import pytest
-
+pytestmark = pytest.mark.unit
 from dadbot.pii_scrubber import contains_pii, scrub_memory_entry, scrub_memory_list, scrub_text
 
 

@@ -2,6 +2,97 @@
 	"version": "2.0.0",
 	"tasks": [
 		{
+			"label": "Test Lane: DEV",
+			"type": "shell",
+			"command": "c:/Users/josep/OneDrive/Desktop/Dad-Bot/.venv/Scripts/python.exe",
+			"args": [
+				"-m",
+				"pytest",
+				"-m",
+				"unit",
+				"--durations=15",
+				"-q"
+			],
+			"group": "test"
+		},
+		{
+			"label": "Test Lane: INTEGRATION",
+			"type": "shell",
+			"command": "c:/Users/josep/OneDrive/Desktop/Dad-Bot/.venv/Scripts/python.exe",
+			"args": [
+				"-m",
+				"pytest",
+				"-m",
+				"integration",
+				"-q"
+			],
+			"group": "test"
+		},
+		{
+			"label": "Test Lane: DURABILITY / PHASE4",
+			"type": "shell",
+			"command": "c:/Users/josep/OneDrive/Desktop/Dad-Bot/.venv/Scripts/python.exe",
+			"args": [
+				"-m",
+				"pytest",
+				"-m",
+				"durability or phase4",
+				"--durations=15",
+				"-q"
+			],
+			"group": "test"
+		},
+		{
+			"label": "Test Lane: SOAK",
+			"type": "shell",
+			"command": "c:/Users/josep/OneDrive/Desktop/Dad-Bot/.venv/Scripts/python.exe",
+			"args": [
+				"-m",
+				"pytest",
+				"-m",
+				"soak",
+				"-q"
+			],
+			"group": "test"
+		},
+		{
+			"label": "Test Lane: UI",
+			"type": "shell",
+			"command": "c:/Users/josep/OneDrive/Desktop/Dad-Bot/.venv/Scripts/python.exe",
+			"args": [
+				"-m",
+				"pytest",
+				"-m",
+				"ui",
+				"-q"
+			],
+			"group": "test"
+		},
+		{
+			"label": "Test Lane: CERT / REGRESSION",
+			"type": "shell",
+			"command": "c:/Users/josep/OneDrive/Desktop/Dad-Bot/.venv/Scripts/python.exe",
+			"args": [
+				"tools/cert_baseline_capture.py",
+				"--durations",
+				"20",
+				"--write-baseline",
+				"--report-markdown"
+			],
+			"group": "test"
+		},
+		{
+			"label": "Test Lane: FULL CERT",
+			"type": "shell",
+			"command": "c:/Users/josep/OneDrive/Desktop/Dad-Bot/.venv/Scripts/python.exe",
+			"args": [
+				"-m",
+				"pytest",
+				"-q"
+			],
+			"group": "test"
+		},
+		{
 			"label": "Run Dad Bot",
 			"type": "shell",
 			"command": "c:/Users/josep/OneDrive/Desktop/Dad-Bot/.venv/Scripts/python.exe",

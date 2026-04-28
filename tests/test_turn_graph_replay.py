@@ -1,7 +1,10 @@
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from dadbot.core.graph import TurnContext, TurnGraph
+from dadbot.core.execution_trace_context import ExecutionTraceRecorder, RuntimeTraceViolation, bind_execution_trace
 from dadbot.core.nodes import TemporalNode
 
 
@@ -82,19 +85,21 @@ def test_temporal_node_exposes_canonical_turn_time_to_context_builder():
 
 
 def test_graph_checkpoint_events_are_replayable(bot):
-    bot.persist_graph_checkpoint(
-        {
-            "trace_id": "trace-replay-001",
-            "stage": "inference",
-            "status": "after",
-            "phase": "ACT",
-            "state": {"candidate": "draft reply"},
-            "metadata": {"determinism": {"enforced": True, "lock_hash": "det-lock-001"}},
-        }
-    )
+    recorder = ExecutionTraceRecorder(trace_id="trace-replay-001", prompt="replay")
+    with bind_execution_trace(recorder, required=True):
+        bot.persist_graph_checkpoint(
+            {
+                "trace_id": "trace-replay-001",
+                "stage": "inference",
+                "status": "after",
+                "phase": "ACT",
+                "state": {"candidate": "draft reply"},
+                "metadata": {"determinism": {"enforced": True, "lock_hash": "det-lock-001"}},
+            }
+        )
 
-    events = bot.list_turn_events("trace-replay-001")
-    replay = bot.replay_turn_events("trace-replay-001")
+        events = bot.list_turn_events("trace-replay-001")
+        replay = bot.replay_turn_events("trace-replay-001")
 
     assert len(events) >= 1
     assert replay["trace_id"] == "trace-replay-001"
@@ -106,20 +111,34 @@ def test_graph_checkpoint_events_are_replayable(bot):
 
 
 def test_validate_replay_determinism_detects_expected_hash(bot):
-    bot.persist_graph_checkpoint(
-        {
-            "trace_id": "trace-replay-002",
-            "stage": "safety",
-            "status": "after",
-            "phase": "OBSERVE",
-            "state": {"safe_result": "ok"},
-            "metadata": {"determinism": {"enforced": True, "lock_hash": "det-lock-xyz"}},
-        }
-    )
+    recorder = ExecutionTraceRecorder(trace_id="trace-replay-002", prompt="replay")
+    with bind_execution_trace(recorder, required=True):
+        bot.persist_graph_checkpoint(
+            {
+                "trace_id": "trace-replay-002",
+                "stage": "safety",
+                "status": "after",
+                "phase": "OBSERVE",
+                "state": {"safe_result": "ok"},
+                "metadata": {"determinism": {"enforced": True, "lock_hash": "det-lock-xyz"}},
+            }
+        )
 
-    valid = bot.validate_replay_determinism("trace-replay-002", expected_lock_hash="det-lock-xyz")
-    invalid = bot.validate_replay_determinism("trace-replay-002", expected_lock_hash="det-lock-mismatch")
+        valid = bot.validate_replay_determinism("trace-replay-002", expected_lock_hash="det-lock-xyz")
+        invalid = bot.validate_replay_determinism("trace-replay-002", expected_lock_hash="det-lock-mismatch")
 
     assert valid["consistent"] is True
     assert valid["matches_expected"] is True
     assert invalid["matches_expected"] is False
+
+
+def test_persistence_replay_operations_require_active_trace(bot):
+    with pytest.raises(RuntimeTraceViolation):
+        bot.persist_graph_checkpoint(
+            {
+                "trace_id": "trace-no-context",
+                "stage": "inference",
+                "status": "after",
+                "state": {"candidate": "draft"},
+            }
+        )

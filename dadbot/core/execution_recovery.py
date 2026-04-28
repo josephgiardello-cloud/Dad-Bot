@@ -292,3 +292,74 @@ class ExecutionRecovery:
         Returns number of records removed.
         """
         return self._store.purge_expired(max_age_seconds=self._policy.max_age_seconds)
+
+    # ------------------------------------------------------------------
+    # Failure-domain recovery semantics (Phase 3)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def repair_partial_trace_context(trace_context: dict[str, Any] | None) -> dict[str, Any]:
+        """Repair partial/invalid trace payloads into a replay-safe envelope."""
+        trace = dict(trace_context or {})
+        raw_steps = list(trace.get("steps") or [])
+        repaired_steps: list[dict[str, Any]] = []
+        for seq, step in enumerate(raw_steps):
+            if not isinstance(step, dict):
+                continue
+            repaired_steps.append(
+                {
+                    "seq": int(step.get("seq") if isinstance(step.get("seq"), int) else seq),
+                    "operation": str(step.get("operation") or "unknown").strip().lower() or "unknown",
+                    "payload": dict(step.get("payload") or {}),
+                }
+            )
+        trace["steps"] = repaired_steps
+        trace.setdefault("schema_version", "2.0")
+        trace.setdefault("normalized_response", "")
+        trace.setdefault("memory_retrieval_set", [])
+        trace.setdefault("execution_dag", {})
+        return trace
+
+    @staticmethod
+    def reconcile_checkpoint_with_trace(
+        *, checkpoint: dict[str, Any] | None, trace_context: dict[str, Any] | None
+    ) -> dict[str, Any]:
+        """Reconcile durable checkpoint metadata with repaired trace context."""
+        cp = dict(checkpoint or {})
+        trace = ExecutionRecovery.repair_partial_trace_context(trace_context)
+        checkpoint_state = dict(cp.get("state") or {})
+        checkpoint_meta = dict(cp.get("metadata") or {})
+        reconciled = {
+            "state": checkpoint_state,
+            "metadata": checkpoint_meta,
+            "trace_context": trace,
+            "reconciliation": {
+                "checkpoint_present": bool(cp),
+                "trace_step_count": len(list(trace.get("steps") or [])),
+                "trace_final_hash": str(trace.get("final_hash") or ""),
+            },
+        }
+        return reconciled
+
+    @staticmethod
+    def safe_fallback_reconstruction(
+        *, checkpoint: dict[str, Any] | None, trace_context: dict[str, Any] | None
+    ) -> dict[str, Any]:
+        """Build a minimal safe state when full replay reconstruction is unavailable."""
+        reconciled = ExecutionRecovery.reconcile_checkpoint_with_trace(
+            checkpoint=checkpoint,
+            trace_context=trace_context,
+        )
+        state = dict(reconciled.get("state") or {})
+        metadata = dict(reconciled.get("metadata") or {})
+        trace = dict(reconciled.get("trace_context") or {})
+        return {
+            "state": state,
+            "metadata": metadata,
+            "trace_context": trace,
+            "fallback": {
+                "mode": "safe_reconstruction",
+                "final_output": str(trace.get("normalized_response") or ""),
+                "step_count": len(list(trace.get("steps") or [])),
+            },
+        }

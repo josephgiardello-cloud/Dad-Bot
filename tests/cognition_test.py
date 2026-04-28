@@ -28,7 +28,7 @@ from dadbot.core.planner import (
     TurnPlan,
 )
 from dadbot.core.critic import CritiqueEngine, CritiqueResult, PASS_THRESHOLD
-from dadbot.memory.goal_scorer import GoalAwareRanker
+from dadbot.core.goal_scorer import GoalAwareRanker
 from dadbot.core.graph import TurnContext
 from dadbot.core.nodes import ToolExecutorNode, ToolRouterNode
 from dadbot.core.orchestrator import DadBotOrchestrator

@@ -12,6 +12,13 @@ from pathlib import Path
 from typing import Any
 
 from dadbot.contracts import DadBotContext, SupportsDadBotAccess
+from dadbot.core.execution_trace_context import (
+	RuntimeTraceViolation,
+	active_execution_trace,
+	record_execution_step,
+)
+from dadbot.core.execution_recovery import ExecutionRecovery
+from dadbot.core.execution_replay_engine import verify_terminal_state_replay_equivalence
 
 
 class ConversationPersistenceManager:
@@ -57,6 +64,14 @@ class ConversationPersistenceManager:
 		compact = compact.split(".")[0]
 		return compact or datetime.now().strftime("%Y%m%d-%H%M%S")
 
+	def _require_active_trace(self, operation: str) -> None:
+		recorder = active_execution_trace()
+		if recorder is None:
+			raise RuntimeTraceViolation(
+				f"ConversationPersistenceManager operation '{operation}' requires an active trace context"
+			)
+		record_execution_step(operation, payload={"layer": "persistence"}, required=True)
+
 	def _apply_snapshot_mutations(self, snapshot_payload: dict[str, Any], *, turn_context: Any | None = None) -> None:
 		chat_history = list(snapshot_payload.get("history", []))
 		if chat_history and chat_history[0].get("role") == "system":
@@ -101,6 +116,7 @@ class ConversationPersistenceManager:
 		return processed
 
 	def persist_conversation(self) -> None:
+		self._require_active_trace("persist_conversation")
 		chat_history = list(self.bot.conversation_history() or [])
 		if not chat_history:
 			return
@@ -108,6 +124,7 @@ class ConversationPersistenceManager:
 		self.save_session_log(chat_history)
 
 	def persist_conversation_snapshot(self, snapshot: dict, turn_context: Any | None = None) -> None:
+		self._require_active_trace("persist_conversation_snapshot")
 		snapshot_payload = copy.deepcopy(dict(snapshot or {}))
 		chat_history = list(snapshot_payload.get("history", []))
 		if chat_history and chat_history[0].get("role") == "system":
@@ -123,6 +140,7 @@ class ConversationPersistenceManager:
 		self._apply_snapshot_mutations(snapshot_payload, turn_context=turn_context)
 
 	def save_session_log(self, history: list[dict]) -> None:
+		self._require_active_trace("save_session_log")
 		created_at = self._active_turn_wall_time()
 		payload = {
 			"created_at": created_at,
@@ -153,6 +171,7 @@ class ConversationPersistenceManager:
 			self.bot.write_json_atomically(session_path, payload, backup=False)
 
 	def persist_graph_checkpoint(self, checkpoint: dict, _skip_turn_event: bool = False) -> None:
+		self._require_active_trace("persist_graph_checkpoint")
 		payload = copy.deepcopy(dict(checkpoint or {}))
 		if not payload:
 			return
@@ -233,6 +252,7 @@ class ConversationPersistenceManager:
 		return int(events[-1].get("sequence") or len(events)) + 1
 
 	def persist_turn_event(self, event: dict[str, Any]) -> None:
+		self._require_active_trace("persist_turn_event")
 		payload = copy.deepcopy(dict(event or {}))
 		if not payload:
 			return
@@ -276,6 +296,7 @@ class ConversationPersistenceManager:
 				snapshot_path.write_text(json.dumps(snapshot_payload, sort_keys=True, ensure_ascii=True), encoding="utf-8")
 
 	def list_turn_events(self, trace_id: str, limit: int = 0) -> list[dict[str, Any]]:
+		self._require_active_trace("list_turn_events")
 		normalized = str(trace_id or "").strip()
 		if not normalized:
 			return []
@@ -353,6 +374,7 @@ class ConversationPersistenceManager:
 		return replayed_state, replayed_metadata, phase, determinism_summary
 
 	def replay_turn_events(self, trace_id: str) -> dict[str, Any]:
+		self._require_active_trace("replay_turn_events")
 		normalized = str(trace_id or "").strip()
 		events = self.list_turn_events(trace_id=normalized)
 		replayed_state, replayed_metadata, phase, determinism = self._fold_events(events)
@@ -366,7 +388,15 @@ class ConversationPersistenceManager:
 			"event_count": len(events),
 		}
 
-	def validate_replay_determinism(self, trace_id: str, expected_lock_hash: str = "") -> dict[str, Any]:
+	def validate_replay_determinism(
+		self,
+		trace_id: str,
+		expected_lock_hash: str = "",
+		*,
+		expected_terminal_state: dict[str, Any] | None = None,
+		expected_execution_trace_context: dict[str, Any] | None = None,
+	) -> dict[str, Any]:
+		self._require_active_trace("validate_replay_determinism")
 		replay = self.replay_turn_events(trace_id=trace_id)
 		determinism = dict(replay.get("determinism") or {})
 		observed_hash = str(determinism.get("lock_hash") or "").strip()
@@ -374,6 +404,28 @@ class ConversationPersistenceManager:
 		matches_expected = True
 		if expected_hash:
 			matches_expected = observed_hash == expected_hash
+
+		terminal_equivalence: dict[str, Any] = {}
+		repaired_trace_context: dict[str, Any] = {}
+		effective_terminal_state = (
+			expected_terminal_state
+			if isinstance(expected_terminal_state, dict)
+			else dict((replay.get("replayed_metadata") or {}).get("terminal_state") or {})
+		)
+		effective_trace_context = (
+			expected_execution_trace_context
+			if isinstance(expected_execution_trace_context, dict)
+			else dict((replay.get("replayed_metadata") or {}).get("execution_trace_context") or {})
+		)
+		if isinstance(effective_terminal_state, dict) and isinstance(effective_trace_context, dict) and effective_terminal_state and effective_trace_context:
+			repaired_trace_context = ExecutionRecovery.repair_partial_trace_context(
+				effective_trace_context
+			)
+			terminal_equivalence = verify_terminal_state_replay_equivalence(
+				terminal_state_seed=effective_terminal_state,
+				execution_trace_context=repaired_trace_context,
+				enforce_dag_equivalence=True,
+			)
 		return {
 			"trace_id": str(trace_id or "").strip(),
 			"consistent": bool(determinism.get("consistent", True)),
@@ -383,9 +435,16 @@ class ConversationPersistenceManager:
 			"lock_hashes": list(determinism.get("lock_hashes") or []),
 			"execution_identity": dict(determinism.get("execution_identity") or {}),
 			"execution_fingerprint": str(determinism.get("execution_fingerprint") or ""),
+			"terminal_state_equivalence": terminal_equivalence,
+			"trace_repair_applied": bool(
+				isinstance(effective_trace_context, dict)
+				and effective_trace_context != repaired_trace_context
+			),
+			"verification_path": "posthoc",
 		}
 
 	def load_latest_graph_checkpoint(self, trace_id: str = "") -> dict | None:
+		self._require_active_trace("load_latest_graph_checkpoint")
 		encoded_payload = None
 		normalized_trace_id = str(trace_id or "").strip()
 		if self.bot._tenant_document_store is not None:
@@ -410,6 +469,7 @@ class ConversationPersistenceManager:
 			return None
 
 	def resume_graph_checkpoint(self, trace_id: str = "") -> dict | None:
+		self._require_active_trace("resume_graph_checkpoint")
 		checkpoint = self.load_latest_graph_checkpoint(trace_id=trace_id)
 		if not isinstance(checkpoint, dict):
 			return None

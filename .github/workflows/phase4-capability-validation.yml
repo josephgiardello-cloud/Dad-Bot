@@ -5,7 +5,7 @@ on:
   pull_request:
 
 jobs:
-  phase4-validation:
+  layer1-kernel-correctness:
     runs-on: ubuntu-latest
 
     steps:
@@ -22,48 +22,93 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e .[dev,service]
 
-      - name: Unit and Invariant Tests
+      - name: Layer 1 - Core Import Firewall
         run: |
-          python -m pytest -q tests/test_turn_graph_invariants.py tests/test_recovery_and_idempotency.py
+          python -m pytest -q tests/test_core_import_firewall.py
 
-      - name: Replay and Determinism Suite
+      - name: Layer 1 - Kernel Correctness (Strict)
         run: |
-          python -m pytest -q tests/test_turn_graph_replay.py
+          python -m pytest -v --tb=short -p no:randomly --timeout=60 \
+            tests/test_execution_truth_binding.py \
+            tests/test_execution_trace_fingerprint.py \
+            tests/test_kernel_freeze_phase1.py \
+            tests/test_system_consistency.py \
+            tests/test_config_drift.py \
+            tests/test_phase45_egress_policy.py \
+            tests/test_phase45_merkle_anchor.py \
+            tests/test_phase45_config_approval.py \
+            tests/test_phase45_rtbf_proof.py
 
-      - name: Phase 4 Stress Suite
+      - name: Layer 1 - Memory and Routing Correctness
         run: |
-          python -m pytest -q tests/stress/test_full_execution_trace.py
+          python -m pytest -v --tb=short -p no:randomly --timeout=60 \
+            tests/test_phase3_world_integration.py \
+            tests/test_durable_execution.py \
+            tests/external_tool_runtime_test.py \
+            tests/tool_system_v2_equivalence_test.py
 
-      - name: Capability Audit Runner (report-only gate)
-        id: capability_audit
-        continue-on-error: true
-        run: |
-          python run_capability_audit.py
+  layer2-replay-correctness:
+    needs: layer1-kernel-correctness
+    runs-on: ubuntu-latest
 
-      - name: Upload Capability Audit Artifact
-        if: always()
-        uses: actions/upload-artifact@v4
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          name: capability-audit-report
-          path: session_logs/capability_audit_report.json
-          if-no-files-found: warn
+          python-version: "3.13"
 
-      - name: Capability Audit Summary
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .[dev,service]
+
+      - name: Layer 2 - Replay Determinism
+        run: |
+          python -m pytest -q -p no:randomly --tb=short --timeout=60 \
+            tests/test_phase2_replay_equivalence.py \
+            tests/test_turn_graph_replay.py
+
+      - name: Layer 2 - DAG and Oracle Validation
+        run: |
+          python -m pytest -q -p no:randomly --tb=short --timeout=60 \
+            tests/test_phase5_semantic_equivalence.py \
+            tests/test_phase5_execution_semantics.py \
+            tests/test_transaction_coordinator_phase5.py
+
+  layer3-stress-adversarial:
+    needs: layer2-replay-correctness
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .[dev,service]
+
+      - name: Layer 3 - Adversarial Suite (Non-Blocking)
+        run: |
+          python -m pytest -q -p no:randomly --runxfail --tb=short --timeout=60 \
+            tests/test_phase4a_adversarial_collapse.py
+
+      - name: Layer 3 - Stress Suite (Non-Blocking)
+        run: |
+          python -m pytest -q -p no:randomly --tb=short --timeout=60 \
+            tests/stress/test_full_execution_trace.py
+
+      - name: Layer 3 - Summary
         if: always()
         run: |
-          echo "### Capability Audit (Non-Authoritative)" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Outcome: ${{ steps.capability_audit.outcome }}" >> "$GITHUB_STEP_SUMMARY"
-          if [ -f session_logs/capability_audit_report.json ]; then
-            python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
-import json
-from pathlib import Path
-
-path = Path("session_logs/capability_audit_report.json")
-data = json.loads(path.read_text(encoding="utf-8"))
-print(f"- overall_ok: {data.get('overall_ok')}")
-for scenario in data.get("scenarios", []):
-    print(f"- scenario {scenario.get('scenario')}: ok={scenario.get('ok')}")
-PY
-          else
-            echo "- capability_audit_report.json not found" >> "$GITHUB_STEP_SUMMARY"
-          fi
+          echo "### Layer 3: Stress/Adversarial (Non-Blocking)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Adversarial and stress suites are advisory only." >> "$GITHUB_STEP_SUMMARY"

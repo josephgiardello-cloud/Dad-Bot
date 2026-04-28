@@ -1,0 +1,16 @@
+﻿{
+    "generated_at_utc":  "2026-04-27T21:06:23.9780856Z",
+    "claim_snapshot_file":  "_repo_claims_check.json",
+    "claim_entries_total":  10,
+    "claim_entries_exact_match":  10,
+    "claim_entries_mismatch":  0,
+    "claim_mismatches":  [
+
+                         ],
+    "db_claim_entries_total":  4,
+    "db_claim_entries_exact_match":  4,
+    "db_claim_entries_mismatch":  0,
+    "db_claim_mismatches":  [
+
+                            ]
+}

@@ -42,7 +42,12 @@ class SQLiteGraphStore(GraphStoreBackend):
                             connection.execute("PRAGMA busy_timeout = 5000")
                             if write:
                                 connection.execute("PRAGMA journal_mode=WAL")
-                            return operation(connection)
+                            result = operation(connection)
+                        if write:
+                            # Revert to DELETE mode before close to avoid WAL
+                            # checkpoint stalls on Windows when io_lock is held.
+                            connection.execute("PRAGMA journal_mode=DELETE")
+                        return result
 
                 with io_lock:
                     with closing(sqlite3.connect(self.db_path, timeout=5)) as connection:
@@ -50,7 +55,12 @@ class SQLiteGraphStore(GraphStoreBackend):
                             connection.execute("PRAGMA busy_timeout = 5000")
                             if write:
                                 connection.execute("PRAGMA journal_mode=WAL")
-                            return operation(connection)
+                            result = operation(connection)
+                        if write:
+                            # Revert to DELETE mode before close to avoid WAL
+                            # checkpoint stalls on Windows when io_lock is held.
+                            connection.execute("PRAGMA journal_mode=DELETE")
+                        return result
             except sqlite3.OperationalError as exc:
                 last_error = exc
                 if "locked" not in str(exc).lower() or attempt == 3:

@@ -1,0 +1,2522 @@
+{
+  "memories": [
+    {
+      "summary": "Tony shared that overwhelmed.",
+      "category": "mood",
+      "mood": "neutral",
+      "confidence": 0.5,
+      "impact_score": 1.0,
+      "importance_score": 0.289,
+      "emotional_intensity": 0.25,
+      "relationship_impact": 0.5,
+      "pinned": false,
+      "created_at": "2024-06-09",
+      "updated_at": "2024-06-09",
+      "contradictions": []
+    },
+    {
+      "summary": "Tony shared that struggling with work and personal responsibilities.",
+      "category": "work",
+      "mood": "neutral",
+      "confidence": 0.5,
+      "impact_score": 1.0,
+      "importance_score": 0.289,
+      "emotional_intensity": 0.25,
+      "relationship_impact": 0.5,
+      "pinned": false,
+      "created_at": "2024-06-09",
+      "updated_at": "2024-06-09",
+      "contradictions": []
+    }
+  ],
+  "consolidated_memories": [],
+  "persona_evolution": [
+    {
+      "trait": "coach-like",
+      "reason": "Tony responds well to direct next-step support.",
+      "announcement": "",
+      "session_count": 10,
+      "applied_at": "2026-04-27T08:00:00",
+      "last_reinforced_at": "2026-04-27T08:00:00",
+      "strength": 1.8,
+      "impact_score": 2.2,
+      "critique_score": 8,
+      "critique_feedback": "specific and useful"
+    }
+  ],
+  "wisdom_insights": [
+    {
+      "summary": "Reflect on your work pressure like a small mirror",
+      "topic": "work management",
+      "trigger": "small mirror turn 5",
+      "created_at": "2026-04-27T14:59:30"
+    },
+    {
+      "summary": "Prioritize your well-being over work pressure",
+      "topic": "work stress management",
+      "trigger": "hello dad",
+      "created_at": "2026-04-27T15:01:13"
+    },
+    {
+      "summary": "Prioritize your work pressure over stressful tasks",
+      "topic": "work management",
+      "trigger": "proc boundary test",
+      "created_at": "2026-04-27T15:01:42"
+    },
+    {
+      "summary": "Manage work pressure like a coach manages a team",
+      "topic": "work management",
+      "trigger": "prune count turn 0",
+      "created_at": "2026-04-27T15:01:57"
+    },
+    {
+      "summary": "Prioritize your work pressure over meeting deadlines",
+      "topic": "work management",
+      "trigger": "prune count turn 2",
+      "created_at": "2026-04-27T15:01:59"
+    },
+    {
+      "summary": "Don",
+      "topic": "prioritize self-care to avoid work pressure buildup",
+      "trigger": "prune count turn 3",
+      "created_at": "2026-04-27T15:02:01"
+    },
+    {
+      "summary": "Prioritize your well-being amidst work pressure",
+      "topic": "work management",
+      "trigger": "prune count turn 4",
+      "created_at": "2026-04-27T15:02:02"
+    },
+    {
+      "summary": "Manage your work pressure like a pruning operation",
+      "topic": "productivity",
+      "trigger": "prune count turn 5",
+      "created_at": "2026-04-27T15:02:03"
+    },
+    {
+      "summary": "Prioritize tasks that ease work pressure",
+      "topic": "productivity",
+      "trigger": "prune count turn 6",
+      "created_at": "2026-04-27T15:02:04"
+    },
+    {
+      "summary": "Deadlines are like pruning - they help shape your growth",
+      "topic": "work",
+      "trigger": "prune count turn 7",
+      "created_at": "2026-04-27T15:02:05"
+    },
+    {
+      "summary": "Manage work pressure like a garden",
+      "topic": "productivity",
+      "trigger": "prune count turn 8",
+      "created_at": "2026-04-27T15:02:06"
+    },
+    {
+      "summary": "Stay focused on the tasks that can be controlled",
+      "topic": "work pressure management",
+      "trigger": "prune count turn 9",
+      "created_at": "2026-04-27T15:02:07"
+    },
+    {
+      "summary": "Don",
+      "topic": "prioritize self-care to avoid burnout",
+      "trigger": "prune count turn 10",
+      "created_at": "2026-04-27T15:02:08"
+    },
+    {
+      "summary": "Tony needs to prioritize self-care amidst work pressure",
+      "topic": "work-life balance",
+      "trigger": "prune count turn 11",
+      "created_at": "2026-04-27T15:02:09"
+    },
+    {
+      "summary": "Tony",
+      "topic": "work pressure management",
+      "trigger": "prune count turn 13",
+      "created_at": "2026-04-27T15:02:11"
+    },
+    {
+      "summary": "When faced with work pressure, prioritize your well-being like a coach prioritizes their team.",
+      "topic": "work stress management",
+      "trigger": "prune count turn 16",
+      "created_at": "2026-04-27T15:02:14"
+    }
+  ],
+  "life_patterns": [
+    {
+      "summary": "Tony often carries work stress on Mondays.",
+      "topic": "work",
+      "mood": "stressed",
+      "day_hint": "Monday",
+      "confidence": 85,
+      "last_seen_at": "2026-04-27T10:00:00",
+      "proactive_message": "",
+      "last_proactive_at": "2026-04-27T12:31:00"
+    }
+  ],
+  "pending_proactive_messages": [],
+  "health_history": [
+    {
+      "recorded_at": "2026-04-27T13:29:07-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T13:29:10-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T13:29:14-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T13:29:15-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T13:29:15-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T13:29:16-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T13:29:16-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T13:29:17-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T13:29:17-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T13:29:18-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T13:29:18-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T13:29:19-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T13:29:19-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T13:29:20-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T13:29:20-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T13:29:21-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T13:29:21-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T13:29:22-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T13:29:22-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T13:32:01-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T13:42:51-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T13:42:56-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T13:47:04-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T13:47:07-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T13:54:50-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T13:54:53-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T13:54:54-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:16-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.008,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:16-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:17-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.02,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:17-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:18-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:19-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:19-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:20-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:21-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:22-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:24-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:27-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:30-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:34-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:38-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:41-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:41-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:42-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:42-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:42-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:43-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:43-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:44-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:44-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:45-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:45-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:45-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:46-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:46-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:47-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:47-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:48-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:48-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:49-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:49-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:50-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:50-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:51-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:51-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:51-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:52-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:52-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:53-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:53-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:54-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:54-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:54-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:55-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:55-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:56-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:56-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:57-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:57-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:58-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:58-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:58-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:59-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:07:59-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:00-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:00-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:01-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:01-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:01-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:02-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:02-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:03-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:03-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:04-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:04-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:05-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:05-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:06-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:06-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:06-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:07-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:07-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:08-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:08-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:09-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:09-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:09-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:10-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:10-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:11-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:11-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:12-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:12-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:13-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:13-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:13-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:14-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:14-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:15-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:15-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:16-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:16-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:17-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:17-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:18-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:18-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:18-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:19-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:19-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:20-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:20-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:21-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:21-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:22-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:22-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:23-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:23-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:24-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:24-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:25-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:25-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:25-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:26-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:26-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:27-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:27-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:28-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:28-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:29-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:29-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:30-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:30-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:08:30-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:21:43",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:21:43",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:22:08",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:22:08",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2024-08-09T00:19:07-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.02,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:27:18",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:27:19",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:27:36",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:27:36",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:27:36",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:27:38",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:27:38",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:27:38",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:27:38",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:27:39",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:27:39",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:27:39",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:27:39",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:27:39",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:27:39",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:27:40",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:27:40",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:27:41",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:27:41",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:27:41",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:27:44",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:27:51",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:27:51",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:27:53",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:27:53",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:27:53",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2024-09-23T14:54:50-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.02,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:30:26",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:30:26",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:30:38",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:30:38",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:30:38",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:30:38",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:30:39",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:30:39",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:30:39",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:30:39",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:30:40",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:30:40",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:30:40",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:30:40",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:30:41",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:30:41",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:30:41",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:30:41",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:30:41",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:30:41",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:30:42",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:30:42",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:31:44",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:31:44",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2024-04-08T18:44:43-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:31:51",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:31:51",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:32:07",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:32:08",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:32:08",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:32:14",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:32:14",
+      "level": "green",
+      "memory_context_ratio": 0.012,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2024-12-22T06:57:28-05:00",
+      "level": "green",
+      "memory_context_ratio": 0.013,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:32:22",
+      "level": "green",
+      "memory_context_ratio": 0.013,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:32:22",
+      "level": "green",
+      "memory_context_ratio": 0.013,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:32:32",
+      "level": "green",
+      "memory_context_ratio": 0.013,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:32:33",
+      "level": "green",
+      "memory_context_ratio": 0.013,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:32:33",
+      "level": "green",
+      "memory_context_ratio": 0.013,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:32:36",
+      "level": "green",
+      "memory_context_ratio": 0.013,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:32:36",
+      "level": "green",
+      "memory_context_ratio": 0.013,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2024-09-04T00:34:07-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.013,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:40:40-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.018,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:40:41-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.018,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:40:43-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.018,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:40:49-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.026,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:40:49-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.019,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:40:51-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.01,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:40:52-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.018,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:40:54-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.017,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:40:55-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.019,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:41:34-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.022,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:42:05-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.027,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T14:42:37-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.026,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    },
+    {
+      "recorded_at": "2026-04-27T15:09:45-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.035,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    }
+  ],
+  "health_quiet_mode": false,
+  "runtime_optimization": {},
+  "last_consolidated_at": null,
+  "last_pattern_detection_at": null,
+  "last_mood": "neutral",
+  "last_mood_updated_at": "2026-04-27",
+  "recent_moods": [],
+  "relationship_state": {
+    "trust_level": 50,
+    "openness_level": 50,
+    "emotional_momentum": "steady",
+    "recurring_topics": {},
+    "recent_checkins": [],
+    "hypotheses": [
+      {
+        "name": "supportive_baseline",
+        "label": "Supportive Baseline",
+        "summary": "Tony is fundamentally trusting and wants steady support, even if a turn is rough.",
+        "probability": 0.52
+      },
+      {
+        "name": "acute_stress",
+        "label": "Acute Stress Spike",
+        "summary": "Tony is reacting to current pressure or overload more than to the relationship itself.",
+        "probability": 0.23
+      },
+      {
+        "name": "guarded_distance",
+        "label": "Guarded Distance",
+        "summary": "Tony may be holding back or testing safety before opening up further.",
+        "probability": 0.15
+      },
+      {
+        "name": "positive_rebound",
+        "label": "Positive Rebound",
+        "summary": "Tony may be emerging from a heavy stretch and reconnecting with relief or momentum.",
+        "probability": 0.1
+      }
+    ],
+    "active_hypothesis": "supportive_baseline",
+    "last_hypothesis_updated": "2026-04-27",
+    "last_reflection": "",
+    "last_updated": "2026-04-27"
+  },
+  "internal_state": {
+    "belief_vector": {
+      "stability": 0.6199999999589181,
+      "stress_load": 0.30000000008531624,
+      "connection": 0.5800000022198477
+    },
+    "goal_vector": {
+      "support": 0.6800000000246152,
+      "challenge": 0.41999999960729145,
+      "proactive": 0.32000000405735113
+    },
+    "tone_targets": {
+      "warmth": 0.6800000000024433,
+      "directness": 0.49999999999732525,
+      "playfulness": 0.3499999999966489
+    },
+    "proactive_recommended": false,
+    "last_reflection": "Mood=neutral, support=0.68, challenge=0.42, stress=0.30, proactive=false",
+    "last_reflection_at": "2026-04-27T15:09:45",
+    "recent_reflections": [
+      "Mood=neutral, support=0.68, challenge=0.42, stress=0.30, proactive=false",
+      "Mood=neutral, support=0.68, challenge=0.42, stress=0.30, proactive=false",
+      "Mood=neutral, support=0.68, challenge=0.42, stress=0.30, proactive=false",
+      "Mood=neutral, support=0.68, challenge=0.42, stress=0.30, proactive=false",
+      "Mood=neutral, support=0.68, challenge=0.42, stress=0.30, proactive=false",
+      "Mood=neutral, support=0.68, challenge=0.42, stress=0.30, proactive=false",
+      "Mood=neutral, support=0.68, challenge=0.42, stress=0.30, proactive=false",
+      "Mood=neutral, support=0.68, challenge=0.42, stress=0.30, proactive=false"
+    ],
+    "target_history": [
+      {
+        "recorded_at": "2026-04-27T14:42:05",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T14:42:06",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T14:42:07",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T14:42:08",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T14:42:09",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T14:42:10",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T14:42:11",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T14:42:12",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T14:42:13",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T14:42:14",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T14:42:15",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T14:42:16",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T14:42:18",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T14:42:19",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T14:42:20",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T14:42:21",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T14:42:23",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T14:42:24",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T14:42:25",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T14:42:26",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T14:42:28",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T14:42:29",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T14:42:30",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T14:42:31",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T14:42:33",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T14:42:34",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T14:42:36",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T14:42:37",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T14:42:38",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T14:59:26",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T14:59:27",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T14:59:28",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T14:59:29",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T14:59:30",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T14:59:31",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T14:59:31",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T14:59:31",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T14:59:32",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T14:59:32",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T14:59:33",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T14:59:33",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T15:01:13",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T15:01:42",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T15:01:58",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T15:01:59",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T15:02:00",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T15:02:01",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T15:02:02",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T15:02:03",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T15:02:04",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T15:02:05",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T15:02:06",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T15:02:07",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T15:02:08",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T15:02:09",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T15:02:10",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T15:02:11",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T15:02:12",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T15:02:13",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T15:02:14",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T15:02:16",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T15:02:16",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T15:02:17",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      },
+      {
+        "recorded_at": "2026-04-27T15:09:45",
+        "support": 0.68,
+        "challenge": 0.42,
+        "proactive": 0.32
+      }
+    ],
+    "turn_count": 552,
+    "updated_at": "2026-04-27T15:09:45",
+    "last_user_input": "small mirror turn 0",
+    "last_reply_excerpt": "[phase4a-offline]"
+  },
+  "relationship_history": [],
+  "reminders": [],
+  "session_archive": [
+    {
+      "id": "archive-1",
+      "created_at": "2026-04-27T09:00:00",
+      "summary": "Work deadlines felt especially heavy this week.",
+      "topics": [
+        "work"
+      ],
+      "dominant_mood": "stressed",
+      "turn_count": 5
+    },
+    {
+      "id": "ceec10b27e59",
+      "created_at": "2024-06-09T18:47:01-04:00",
+      "summary": "Hey Dad, based on our recent talks, how am I doing lately?",
+      "topics": [
+        "family"
+      ],
+      "dominant_mood": "stressed",
+      "turn_count": 1
+    }
+  ],
+  "last_background_synthesis_at": "2026-04-27T12:49:30",
+  "last_background_synthesis_turn": 108,
+  "last_memory_compaction_at": "2026-04-27T12:31:00",
+  "last_memory_compaction_summary": "Relationship graph summary:\n- [consolidated memory] Tony has been saving money for an emergency fund.\n  links: categorized as finance; plans for finance; plans for emergency_fund; plans for saving_money",
+  "last_daily_checkin_at": null,
+  "last_scheduled_proactive_at": "2026-04-27T15:09:00",
+  "relationship_timeline": "Here is the updated digest:\n\n• Recurring struggle: Work-related stress remains a challenge for Tony; his dad has been supportive in offering guidance and encouragement.\n• Notable win: Tony's recent open conversation about family dynamics led to a deeper understanding between them, improving their relationship.\n• Follow-up on 2024-06-09: The dad is still checking in with Tony to ensure he's doing okay, as discussed previously.\n• Ongoing movement: Both parties are committed to maintaining regular check-ins to address any new challenges or celebrate successes.\n• Future focus: Continuing to explore ways to support each other through life's ups and downs.",
+  "memory_graph": {
+    "nodes": [
+      {
+        "id": "topic:work",
+        "label": "work",
+        "type": "topic",
+        "weight": 8
+      },
+      {
+        "id": "topic:stressed",
+        "label": "stressed",
+        "type": "topic",
+        "weight": 4
+      },
+      {
+        "id": "topic:work_pressure",
+        "label": "work_pressure",
+        "type": "topic",
+        "weight": 2
+      },
+      {
+        "id": "topic:work_deadlines",
+        "label": "work_deadlines",
+        "type": "topic",
+        "weight": 2
+      },
+      {
+        "id": "topic:monday",
+        "label": "monday",
+        "type": "topic",
+        "weight": 2
+      },
+      {
+        "id": "topic:coach_like",
+        "label": "coach_like",
+        "type": "topic",
+        "weight": 2
+      },
+      {
+        "id": "topic:felt",
+        "label": "felt",
+        "type": "topic",
+        "weight": 2
+      },
+      {
+        "id": "topic:mondays",
+        "label": "mondays",
+        "type": "topic",
+        "weight": 2
+      },
+      {
+        "id": "topic:stress",
+        "label": "stress",
+        "type": "topic",
+        "weight": 2
+      },
+      {
+        "id": "topic:direct",
+        "label": "direct",
+        "type": "topic",
+        "weight": 2
+      },
+      {
+        "id": "topic:responds",
+        "label": "responds",
+        "type": "topic",
+        "weight": 2
+      },
+      {
+        "id": "topic:well",
+        "label": "well",
+        "type": "topic",
+        "weight": 2
+      },
+      {
+        "id": "topic:neutral",
+        "label": "neutral",
+        "type": "topic",
+        "weight": 1
+      },
+      {
+        "id": "category:persona",
+        "label": "persona",
+        "type": "category",
+        "weight": 1
+      }
+    ],
+    "edges": [
+      {
+        "source": "stressed",
+        "target": "work",
+        "weight": 2
+      },
+      {
+        "source": "stressed",
+        "target": "work_pressure",
+        "weight": 2
+      },
+      {
+        "source": "work",
+        "target": "work_pressure",
+        "weight": 2
+      },
+      {
+        "source": "coach_like",
+        "target": "direct",
+        "weight": 1
+      },
+      {
+        "source": "coach_like",
+        "target": "persona",
+        "weight": 1
+      },
+      {
+        "source": "coach_like",
+        "target": "responds",
+        "weight": 1
+      },
+      {
+        "source": "coach_like",
+        "target": "well",
+        "weight": 1
+      },
+      {
+        "source": "direct",
+        "target": "persona",
+        "weight": 1
+      },
+      {
+        "source": "direct",
+        "target": "responds",
+        "weight": 1
+      },
+      {
+        "source": "direct",
+        "target": "well",
+        "weight": 1
+      },
+      {
+        "source": "felt",
+        "target": "stressed",
+        "weight": 1
+      },
+      {
+        "source": "felt",
+        "target": "work",
+        "weight": 1
+      },
+      {
+        "source": "felt",
+        "target": "work_deadlines",
+        "weight": 1
+      },
+      {
+        "source": "felt",
+        "target": "work_pressure",
+        "weight": 1
+      },
+      {
+        "source": "monday",
+        "target": "mondays",
+        "weight": 1
+      },
+      {
+        "source": "monday",
+        "target": "neutral",
+        "weight": 1
+      },
+      {
+        "source": "monday",
+        "target": "stress",
+        "weight": 1
+      },
+      {
+        "source": "monday",
+        "target": "stressed",
+        "weight": 1
+      }
+    ],
+    "updated_at": "2026-04-27T10:00:00"
+  },
+  "mcp_local_store": {},
+  "narrative_memories": [],
+  "heritage_cross_links": [],
+  "advice_audits": [],
+  "environmental_cues_history": [],
+  "longitudinal_insights": []
+}

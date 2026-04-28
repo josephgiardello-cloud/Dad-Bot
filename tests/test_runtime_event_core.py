@@ -5,7 +5,7 @@ import logging
 from pathlib import Path
 
 import pytest
-
+pytestmark = pytest.mark.unit
 from dadbot.consumers.streamlit import load_thread_projection
 from dadbot.runtime_core import AgentRuntime, ConversationStore, EventBus, RuntimeEventAPI, FileEventJournal, new_event
 from dadbot.runtime_core.services import UserMessageResult

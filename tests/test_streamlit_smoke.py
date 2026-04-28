@@ -6,7 +6,11 @@ import sys
 import textwrap
 from pathlib import Path
 
+import pytest
+
 from Dad import ensure_streamlit_app_file
+
+pytestmark = pytest.mark.ui
 
 
 def test_ensure_streamlit_app_file_creates_minimal_stub(tmp_path):

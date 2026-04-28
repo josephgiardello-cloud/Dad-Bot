@@ -1,3 +1,6 @@
+import pytest
+pytestmark = pytest.mark.unit
+
 from dataclasses import dataclass, field
 
 from tests.scoring_engine import ScoringEngine

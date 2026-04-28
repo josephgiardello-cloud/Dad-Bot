@@ -436,6 +436,37 @@ def test_persistence_contract_passes_for_full_service():
     assert result["missing"] == []
 
 
+def test_persistence_contract_strict_mode_raises_on_invalid_method_signature():
+    """Strict mode must reject persistence services with invalid required method arity."""
+    policy_mod = importlib.import_module("dadbot.core.execution_policy")
+    engine = policy_mod.ExecutionPolicyEngine(
+        persistence_contract=policy_mod.PersistenceServiceContract()
+    )
+    malformed_service = SimpleNamespace(
+        save_turn=lambda _context: None,
+        save_graph_checkpoint=lambda _checkpoint: None,
+        save_turn_event=lambda _event: None,
+    )
+    with pytest.raises(RuntimeError, match="signature_issues"):
+        engine.validate_persistence_service_contract(malformed_service, strict_mode=True)
+
+
+def test_persistence_contract_lenient_mode_surfaces_signature_issues():
+    """Lenient mode should return signature diagnostics without raising."""
+    policy_mod = importlib.import_module("dadbot.core.execution_policy")
+    engine = policy_mod.ExecutionPolicyEngine(
+        persistence_contract=policy_mod.PersistenceServiceContract()
+    )
+    malformed_service = SimpleNamespace(
+        save_turn=lambda _context: None,
+        save_graph_checkpoint=lambda _checkpoint: None,
+        save_turn_event=lambda _event: None,
+    )
+    result = engine.validate_persistence_service_contract(malformed_service, strict_mode=False)
+    assert result["ok"] is False
+    assert any("save_turn" in issue for issue in list(result.get("signature_issues") or []))
+
+
 # ---------------------------------------------------------------------------
 # E. ExecutionIdentity contract (GAP-1/GAP-2 enforcement)
 # ---------------------------------------------------------------------------
