@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from dadbot.core.graph import TurnContext
+    from dadbot.core.graph_context import TurnContext
 
 import logging
 

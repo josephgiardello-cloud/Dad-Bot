@@ -16,7 +16,8 @@ from dadbot.core.control_plane import (
     ExecutionJob,
     SessionRegistry,
 )
-from dadbot.core.graph import TurnContext, TurnGraph
+from dadbot.core.graph import TurnGraph
+from dadbot.core.graph_context import TurnContext
 from dadbot.core.interfaces import (
     HealthService,
     InferenceService,

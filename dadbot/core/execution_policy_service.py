@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from dadbot.core.capability_registry import CapabilityRegistry
     from dadbot.core.execution_recovery import ExecutionRecovery
-    from dadbot.core.graph import TurnContext
+    from dadbot.core.graph_context import TurnContext
 
 from dadbot.core.capability_registry import EnforcementMode, enforce_node_entry
 

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from dadbot.core.execution_memory_view import ExecutionMemoryView
-from dadbot.core.graph import TurnContext
+from dadbot.core.graph_context import TurnContext
 
 _SCHEMA_VERSION = "1.0"
 

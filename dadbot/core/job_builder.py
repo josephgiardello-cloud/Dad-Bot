@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from dadbot.contracts import AttachmentList
-from dadbot.core.graph import TurnContext
+from dadbot.core.graph_context import TurnContext
 
 
 class JobBuilder:

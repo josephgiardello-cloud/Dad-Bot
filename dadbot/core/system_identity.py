@@ -5,7 +5,7 @@ import json
 from typing import Any
 
 from dadbot.core.critic import MAX_LOOP_ITERATIONS, PASS_THRESHOLD
-from dadbot.core.graph import (
+from dadbot.core.graph_types import (
     GoalMutationOp,
     LedgerMutationOp,
     MemoryMutationOp,

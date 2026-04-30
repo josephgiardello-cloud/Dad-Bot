@@ -13,7 +13,8 @@ from dadbot.core.execution_trace_context import (
     record_execution_step,
     record_external_system_call,
 )
-from dadbot.core.graph import NodeType, TurnContext
+from dadbot.core.graph_context import TurnContext
+from dadbot.core.graph_types import NodeType
 from dadbot.core.tool_dag import build_dag_from_execution_plan
 from dadbot.core.tool_ir import (
     ToolEvent,
@@ -198,7 +199,7 @@ class TemporalNode:
             offset = vdt.utcoffset()
             offset_minutes = int(offset.total_seconds() // 60) if offset is not None else 0
             wall_time = vdt.isoformat(timespec="seconds")
-            from dadbot.core.graph import TurnTemporalAxis
+            from dadbot.core.graph_temporal import TurnTemporalAxis
 
             context.temporal = TurnTemporalAxis(
                 turn_started_at=wall_time,
