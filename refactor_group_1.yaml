@@ -380,7 +380,7 @@ modules:
       - "dadbot/core/orchestrator.py"
 
     gate_to_next: "post_checks must all pass; this is the final module in Group 1"
-    status: "pending"
+    status: "COMPLETE"  # Phases 1-3: LLMCallAdapter, TurnStateMutator, thin routing
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HARD GATE — Group 2 cannot start until ALL of the following are true

@@ -3,7 +3,6 @@
 import asyncio
 import json
 import logging
-from datetime import datetime
 from typing import Any
 
 from dadbot.contracts import (
@@ -17,7 +16,9 @@ from dadbot.contracts import (
 from dadbot.core.graph import LedgerMutationOp, MutationIntent, MutationKind, TurnContext
 from dadbot.core.tool_sandbox import ToolSandbox
 from dadbot.managers.reply_generation import ReplyGenerationManager
-from dadbot.models import AgenticToolPlan, TurnPipelineSnapshot, TurnPipelineStep
+from dadbot.services.llm_call_adapter import LLMCallAdapter
+from dadbot.services.turn_state_mutator import TurnStateMutator
+from dadbot.models import AgenticToolPlan
 from pydantic import ValidationError
 
 # Keep the historic logger name so existing tests and log pipelines remain stable
@@ -42,35 +43,20 @@ class TurnService:
         self.context = DadBotContext.from_runtime(bot)
         self.bot = self.context.bot
         self.reply_generation = ReplyGenerationManager(self.context)
+        self._llm_adapter = LLMCallAdapter(self.bot)
+        self._state_mutator = TurnStateMutator(self.bot)
 
     def _pipeline_timestamp(self) -> str:
-        temporal = getattr(self.bot, "_current_turn_time_base", None)
-        wall_time = str(getattr(temporal, "wall_time", "") or "").strip()
-        if wall_time:
-            return wall_time
-        return datetime.now().isoformat(timespec="seconds")
+        return self._state_mutator.pipeline_timestamp()
 
     def _store_turn_pipeline(self, payload: dict[str, object]) -> dict[str, object]:
-        validated = TurnPipelineSnapshot.model_validate(payload)
-        self.bot._last_turn_pipeline = validated.model_dump(mode="python")
-        return self.bot._last_turn_pipeline
+        return self._state_mutator.store_turn_pipeline(payload)
 
     def _start_turn_pipeline(self, mode: str, user_input: str) -> dict[str, object]:
-        return self._store_turn_pipeline(
-            {
-                "mode": str(mode or "sync").strip() or "sync",
-                "user_input": str(user_input or "").strip(),
-                "started_at": self._pipeline_timestamp(),
-                "steps": [],
-            }
-        )
+        return self._state_mutator.start_turn_pipeline(mode, user_input)
 
     def _update_turn_pipeline(self, **fields) -> dict[str, object] | None:
-        current = dict(getattr(self.bot, "_last_turn_pipeline", {}) or {})
-        if not current:
-            return None
-        current.update(fields)
-        return self._store_turn_pipeline(current)
+        return self._state_mutator.update_turn_pipeline(**fields)
 
     def _append_turn_pipeline_step(
         self,
@@ -79,23 +65,7 @@ class TurnService:
         detail: str = "",
         **metadata,
     ) -> dict[str, object] | None:
-        current = dict(getattr(self.bot, "_last_turn_pipeline", {}) or {})
-        if not current:
-            return None
-        steps = list(current.get("steps", []))
-        steps.append(
-            TurnPipelineStep.model_validate(
-                {
-                    "name": str(name or "step").strip() or "step",
-                    "status": str(status or "completed").strip().lower() or "completed",
-                    "detail": str(detail or "").strip(),
-                    "timestamp": self._pipeline_timestamp(),
-                    "metadata": dict(metadata or {}),
-                }
-            ).model_dump(mode="python")
-        )
-        current["steps"] = steps
-        return self._store_turn_pipeline(current)
+        return self._state_mutator.append_turn_pipeline_step(name, status, detail, **metadata)
 
     def _complete_turn_pipeline(
         self,
@@ -105,23 +75,15 @@ class TurnService:
         should_end: bool = False,
         error: str = "",
     ) -> dict[str, object] | None:
-        current = dict(getattr(self.bot, "_last_turn_pipeline", {}) or {})
-        if not current:
-            return None
-        current["completed_at"] = self._pipeline_timestamp()
-        if final_path:
-            current["final_path"] = str(final_path).strip()
-        if reply_source:
-            current["reply_source"] = str(reply_source).strip()
-        current["should_end"] = bool(should_end)
-        current["error"] = str(error or "").strip()
-        return self._store_turn_pipeline(current)
+        return self._state_mutator.complete_turn_pipeline(
+            final_path=final_path,
+            reply_source=reply_source,
+            should_end=should_end,
+            error=error,
+        )
 
     def turn_pipeline_snapshot(self):
-        payload = getattr(self.bot, "_last_turn_pipeline", None)
-        if not isinstance(payload, dict):
-            return None
-        return TurnPipelineSnapshot.model_validate(payload).model_dump(mode="python")
+        return self._state_mutator.turn_pipeline_snapshot()
 
     def should_offer_daily_checkin_for_turn(self) -> bool:
         return self.bot.memory.should_do_daily_checkin() and self.bot.session_turn_count() == 0
@@ -171,23 +133,9 @@ class TurnService:
                         raise
         
         # Fallback: direct write when turn_context is not available (e.g., in tests)
-        # This maintains compatibility with legacy code paths
-        queued_mood = str(current_mood or "neutral")
-        self.bot._last_recorded_mood = queued_mood
-        self.bot._last_should_offer_daily_checkin = bool(should_offer_daily_checkin)
-        # Also update _pending_daily_checkin_context so blend_daily_checkin_reply picks it up
-        self.bot._pending_daily_checkin_context = bool(should_offer_daily_checkin)
-        # Update session_moods to maintain mood history
-        session_lock = getattr(self.bot, "_session_lock", None)
-        if session_lock is not None:
-            with session_lock:
-                session_moods = getattr(self.bot, "session_moods", None)
-                if isinstance(session_moods, list):
-                    session_moods.append(queued_mood)
-        else:
-            session_moods = getattr(self.bot, "session_moods", None)
-            if isinstance(session_moods, list):
-                session_moods.append(queued_mood)
+        # This maintains compatibility with legacy code paths.
+        # All direct attribute writes are owned by TurnStateMutator.
+        self._state_mutator.write_mood_fallback(current_mood, should_offer_daily_checkin)
 
     def direct_reply_for_input(self, stripped_input: str, current_mood: str) -> str | None:
         crisis_reply = self.bot.safety_support.direct_reply_for_input(stripped_input)
@@ -250,7 +198,7 @@ Return ONLY valid JSON (no extra text):
         for attempt in range(max_retries):
             attempts_used = attempt + 1
             try:
-                response = self.bot.call_ollama_chat(
+                response = self._llm_adapter.call(
                     messages=[
                         {
                             "role": "user",
@@ -337,7 +285,7 @@ Return ONLY valid JSON (no extra text):
         for attempt in range(max_retries):
             attempts_used = attempt + 1
             try:
-                response = await self.bot.call_ollama_chat_async(
+                response = await self._llm_adapter.call_async(
                     messages=[
                         {
                             "role": "user",
@@ -827,7 +775,7 @@ Return ONLY valid JSON (no extra text):
             return None, None
 
         try:
-            response = self.bot.call_ollama_chat(
+            response = self._llm_adapter.call(
                 messages=[{"role": "user", "content": self._planning_prompt(stripped_input, current_mood, tools)}],
                 options={"temperature": 0.1},
                 response_format="json",
@@ -930,7 +878,7 @@ Return ONLY valid JSON (no extra text):
             return None, None
 
         try:
-            response = await self.bot.call_ollama_chat_async(
+            response = await self._llm_adapter.call_async(
                 messages=[{"role": "user", "content": self._planning_prompt(stripped_input, current_mood, tools)}],
                 options={"temperature": 0.1},
                 response_format="json",
