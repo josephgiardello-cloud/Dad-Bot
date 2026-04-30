@@ -26,15 +26,10 @@ from dadbot.core.execution_identity import ExecutionIdentity, ExecutionIdentityV
 from dadbot.core.capability_registry import (
     CapabilityRegistry,
     CapabilityViolationError,
-    EnforcementMode,
-    enforce_node_entry,
-    freeze_capabilities,
-    verify_capability_freeze,
 )
 from dadbot.core.determinism_seal import DEFAULT_SEAL as _DETERMINISM_SEAL
 from dadbot.core.execution_receipt import (
     DEFAULT_SIGNER as _DEFAULT_RECEIPT_SIGNER,
-    ReceiptChain,
     ReceiptSigner,
 )
 from dadbot.core.execution_policy import (
@@ -51,6 +46,7 @@ from dadbot.core.turn_resume_store import TurnResumeStore
 from dadbot.core.execution_trace_schema import stamp_trace_contract_version
 from dadbot.core.graph_side_effects import GraphSideEffectsOrchestrator
 from dadbot.core.execution_policy_service import StageEntryGate
+from dadbot.core.side_effect_adapter import SideEffectAdapter
 from dadbot.core.lg_topology import TurnPipelineState, build_turn_pipeline
 from dadbot.core.persistence_event_adapter import GraphPersistenceEventAdapter  # re-export
 from dadbot.core.ux_projection import TurnHealthState, TurnUxProjector  # re-export
@@ -945,6 +941,8 @@ class TurnGraph:
         )
         # Stage-entry policy gate: idempotency, capability, and ordering checks.
         self._stage_entry_gate = StageEntryGate()
+        # Side-effect adapter: all record-and-emit writes go through this layer.
+        self._side_effect_adapter = SideEffectAdapter()
         # Durable execution: crash-safe resume.  None unless configure_resume() is called.
         self._recovery: ExecutionRecovery | None = None
         # Capability security: stage-level enforcement.  None unless configure_capabilities() is called.
@@ -1041,23 +1039,14 @@ class TurnGraph:
         event_type: str,
         stage: str,
         detail: dict[str, Any] | None = None,
-    ) -> ExecutionTraceEvent:
-        sequence = int(turn_context.state.get("_execution_trace_sequence", 0) or 0) + 1
-        turn_context.state["_execution_trace_sequence"] = sequence
-        event = ExecutionTraceEvent(
-            sequence=sequence,
-            event_type=str(event_type or ""),
-            stage=str(stage or ""),
-            phase=turn_context.phase.value,
-            trace_id=str(turn_context.trace_id or ""),
-            detail=dict(detail or {}),
+    ) -> None:
+        """Delegate to SideEffectAdapter.emit_execution_event."""
+        self._side_effect_adapter.emit_execution_event(
+            turn_context,
+            event_type=event_type,
+            stage=stage,
+            detail=detail,
         )
-        trace = turn_context.state.setdefault("execution_trace", [])
-        if not isinstance(trace, list):
-            trace = []
-            turn_context.state["execution_trace"] = trace
-        trace.append(event.to_dict())
-        return event
 
     def _finalize_execution_trace_contract(self, turn_context: TurnContext) -> None:
         trace = list(turn_context.state.get("execution_trace") or [])
@@ -1215,9 +1204,11 @@ class TurnGraph:
         self._execution_witness_emitter = emitter
 
     def _emit_execution_witness(self, component: str, turn_context: TurnContext) -> None:
-        emitter = self._execution_witness_emitter
-        if callable(emitter):
-            emitter(str(component or ""), turn_context)
+        self._side_effect_adapter.record_witness(
+            component,
+            turn_context,
+            emitter=self._execution_witness_emitter,
+        )
 
     @staticmethod
     def _fork_context(turn_context: TurnContext) -> TurnContext:
@@ -1420,7 +1411,7 @@ class TurnGraph:
             if _resume_pt is not None if self._recovery is not None else False:
                 # Resumed turn: verify no escalation since turn started.
                 try:
-                    verify_capability_freeze(
+                    self._side_effect_adapter.verify_capability_freeze(
                         turn_context,
                         policy=self._capability_policy,
                         session_id=_sid,
@@ -1429,7 +1420,7 @@ class TurnGraph:
                     raise
             else:
                 # Fresh turn: freeze the current capability set.
-                freeze_capabilities(
+                self._side_effect_adapter.freeze_capabilities(
                     turn_context,
                     policy=self._capability_policy,
                     session_id=_sid,
@@ -1545,17 +1536,13 @@ class TurnGraph:
                         list(executed_stage_names),
                     )
                 # Execution receipt: signed proof of stage completion.
-                _chain = ReceiptChain.from_state(stage_context.state)
-                _receipt = self._receipt_signer.sign(
-                    turn_id=str(stage_context.trace_id or ""),
-                    stage=stage_name,
-                    sequence=_chain.next_sequence,
+                self._side_effect_adapter.record_receipt(
+                    stage_context,
+                    stage_name,
+                    signer=self._receipt_signer,
                     stage_call_id=str(stage_context.state.get("_stage_call_id") or ""),
                     checkpoint_hash=str(stage_context.last_checkpoint_hash or ""),
-                    prev_receipt_sig=_chain.last_signature,
                 )
-                _chain.append(_receipt)
-                _chain.write_to_state(stage_context.state)
                 # Emit edge checkpoint immediately after this stage completes,
                 # if there's a next stage in the pipeline.
                 pipeline_names = list(stage_context.state.get("_pipeline_stage_names") or [])
