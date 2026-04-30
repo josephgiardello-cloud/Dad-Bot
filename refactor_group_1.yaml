@@ -212,7 +212,7 @@ modules:
       - "dadbot/core/control_plane.py"
 
     gate_to_next: "post_checks must all pass; position 3 may not start until position 2 is status=complete"
-    status: "pending"
+    status: "COMPLETE"  # commit 3882401 (P1+P2+P3)
 
   # ─── MODULE 3 ──────────────────────────────────────────────────────────────
   - position: 3
@@ -293,7 +293,7 @@ modules:
       - "tools/cert_baseline_capture.py"
 
     gate_to_next: "post_checks must all pass; position 4 may not start until position 3 is status=complete"
-    status: "pending"
+    status: "COMPLETE"  # commits: Phase 1-3 pure post-hoc refactor
 
   # ─── MODULE 4 ──────────────────────────────────────────────────────────────
   - position: 4
