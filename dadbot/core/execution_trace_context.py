@@ -2,15 +2,16 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
-from dataclasses import asdict, dataclass
 import hashlib
 import json
+from dataclasses import asdict, dataclass
 from typing import Any
+from uuid import uuid4
 
 
 def _stable_sha256(payload: dict[str, Any]) -> str:
     return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        json.dumps(payload, sort_keys=True, default=str).encode("utf-8"),
     ).hexdigest()
 
 
@@ -39,7 +40,13 @@ class ExternalSystemCallGraph:
         return asdict(self)
 
 
-def _normalize_time_token(*, seq: int, operation: str, system: str, request_hash: str) -> str:
+def _normalize_time_token(
+    *,
+    seq: int,
+    operation: str,
+    system: str,
+    request_hash: str,
+) -> str:
     payload = {
         "seq": int(seq),
         "operation": str(operation or "").strip().lower(),
@@ -85,7 +92,11 @@ def record_external_system_call(
         "response_hash": response_hash,
         "time_token": time_token,
     }
-    return record_execution_step("external_system_call", payload=payload, required=required)
+    return record_execution_step(
+        "external_system_call",
+        payload=payload,
+        required=required,
+    )
 
 
 def build_external_system_call_graph(steps: list[dict[str, Any]]) -> dict[str, Any]:
@@ -118,7 +129,9 @@ def build_external_system_call_graph(steps: list[dict[str, Any]]) -> dict[str, A
         nodes.append(node.to_dict())
 
     for idx in range(1, len(node_ids)):
-        edges.append({"from": node_ids[idx - 1], "to": node_ids[idx], "type": "sequence"})
+        edges.append(
+            {"from": node_ids[idx - 1], "to": node_ids[idx], "type": "sequence"},
+        )
 
     graph_payload = {"nodes": nodes, "edges": edges}
     graph = ExternalSystemCallGraph(
@@ -148,7 +161,11 @@ class ExecutionTraceRecorder:
         self.metadata = dict(metadata or {})
         self._steps: list[dict[str, Any]] = []
 
-    def record(self, operation: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    def record(
+        self,
+        operation: str,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         step = {
             "seq": len(self._steps),
             "operation": str(operation or "").strip().lower(),
@@ -180,7 +197,7 @@ def require_execution_trace(*, operation: str) -> ExecutionTraceRecorder | None:
     recorder = active_execution_trace()
     if recorder is None and bool(_TRACE_REQUIRED.get()):
         raise RuntimeTraceViolation(
-            f"Execution trace required for operation '{operation}' but no active trace recorder was bound"
+            f"Execution trace required for operation '{operation}' but no active trace recorder was bound",
         )
     return recorder
 
@@ -207,10 +224,43 @@ def record_execution_step(
     if recorder is None:
         if must_exist:
             raise RuntimeTraceViolation(
-                f"Execution trace step '{operation}' emitted without active trace recorder"
+                f"Execution trace step '{operation}' emitted without active trace recorder",
             )
         return None
     return recorder.record(operation=operation, payload=payload)
+
+
+@contextlib.contextmanager
+def ensure_execution_trace_root(
+    *,
+    operation: str,
+    prompt: str = "",
+    metadata: dict[str, Any] | None = None,
+    required: bool = True,
+):
+    """Ensure an active trace recorder exists for side-effecting entrypoints.
+
+    If a recorder is already bound, this is a no-op passthrough. Otherwise a
+    synthetic out-of-band root recorder is created and bound for the scope.
+    """
+    active = active_execution_trace()
+    if active is not None:
+        yield active
+        return
+
+    root_op = str(operation or "out_of_band_entry").strip().lower() or "out_of_band_entry"
+    synthetic_trace_id = f"oob-{uuid4().hex}"
+    recorder = ExecutionTraceRecorder(
+        trace_id=synthetic_trace_id,
+        prompt=str(prompt or f"[{root_op}]"),
+        metadata={
+            "out_of_band": True,
+            "root_operation": root_op,
+            **dict(metadata or {}),
+        },
+    )
+    with bind_execution_trace(recorder, required=required):
+        yield recorder
 
 
 @dataclass(frozen=True)
@@ -241,19 +291,26 @@ def _normalized_steps(raw_steps: list[Any]) -> list[dict[str, Any]]:
             continue
         steps.append(
             {
-                "seq": int(item.get("seq") if isinstance(item.get("seq"), int) else index),
+                "seq": int(
+                    item.get("seq") if isinstance(item.get("seq"), int) else index,
+                ),
                 "operation": str(item.get("operation") or "").strip().lower(),
                 "payload": dict(item.get("payload") or {}),
-            }
+            },
         )
     return steps
 
 
-def canonicalize_execution_trace_context(trace_context: dict[str, Any]) -> dict[str, Any]:
+def canonicalize_execution_trace_context(
+    trace_context: dict[str, Any],
+) -> dict[str, Any]:
     trace = dict(trace_context or {})
     steps = _normalized_steps(list(trace.get("steps") or []))
     external_system_calls = build_external_system_call_graph(steps)
-    execution_dag = _build_execution_dag(steps, external_system_calls=external_system_calls)
+    execution_dag = _build_execution_dag(
+        steps,
+        external_system_calls=external_system_calls,
+    )
     operations = [str(step.get("operation") or "") for step in steps]
 
     return {
@@ -278,29 +335,27 @@ def derive_execution_trace_hash(trace_context: dict[str, Any]) -> str:
     return _stable_sha256(canonical)
 
 
-def build_execution_trace_context(*, context, result, recorder: ExecutionTraceRecorder | None = None) -> dict[str, Any]:
+def build_execution_trace_context(
+    *,
+    context,
+    result,
+    recorder: ExecutionTraceRecorder | None = None,
+) -> dict[str, Any]:
     state = dict(getattr(context, "state", {}) or {})
     metadata = dict(getattr(context, "metadata", {}) or {})
     determinism = dict(metadata.get("determinism") or {})
 
-    normalized_response = str((result[0] if isinstance(result, tuple) else result) or "")
+    normalized_response = str(
+        (result[0] if isinstance(result, tuple) else result) or "",
+    )
 
     retrieval_set = list(
-        state.get("memory_retrieval_set")
-        or state.get("retrieval_set")
-        or state.get("memory_retrieval_results")
-        or []
+        state.get("memory_retrieval_set") or state.get("retrieval_set") or state.get("memory_retrieval_results") or [],
     )
-    retrieval_records = [
-        item if isinstance(item, dict) else {"value": item}
-        for item in retrieval_set
-    ]
+    retrieval_records = [item if isinstance(item, dict) else {"value": item} for item in retrieval_set]
 
     tool_outputs = list(state.get("tool_results") or [])
-    tool_output_records = [
-        item if isinstance(item, dict) else {"value": item}
-        for item in tool_outputs
-    ]
+    tool_output_records = [item if isinstance(item, dict) else {"value": item} for item in tool_outputs]
 
     memory_snapshot_used = {
         "memory_fingerprint": str(determinism.get("memory_fingerprint") or ""),
@@ -315,11 +370,7 @@ def build_execution_trace_context(*, context, result, recorder: ExecutionTraceRe
         "temperature_policy": str(determinism.get("temperature_policy") or ""),
     }
 
-    model_output = (
-        state.get("model_output")
-        or state.get("inference_output")
-        or normalized_response
-    )
+    model_output = state.get("model_output") or state.get("inference_output") or normalized_response
 
     trace_recorder = recorder or active_execution_trace()
     recorded_steps = trace_recorder.steps if trace_recorder is not None else []
@@ -332,7 +383,10 @@ def build_execution_trace_context(*, context, result, recorder: ExecutionTraceRe
         model_call_parameters=model_call_parameters,
     )
     external_system_calls = build_external_system_call_graph(recorded_steps)
-    execution_dag = _build_execution_dag(recorded_steps, external_system_calls=external_system_calls)
+    execution_dag = _build_execution_dag(
+        recorded_steps,
+        external_system_calls=external_system_calls,
+    )
 
     payload = {
         "schema_version": "2.0",
@@ -373,7 +427,15 @@ def build_execution_trace_context(*, context, result, recorder: ExecutionTraceRe
 def _step_input_payload(step: dict[str, Any]) -> dict[str, Any]:
     payload = dict(step.get("payload") or {})
     projection: dict[str, Any] = {}
-    for key in ("iteration", "mode", "provider", "model", "purpose", "message_count", "input_hash"):
+    for key in (
+        "iteration",
+        "mode",
+        "provider",
+        "model",
+        "purpose",
+        "message_count",
+        "input_hash",
+    ):
         if key in payload:
             projection[key] = payload.get(key)
     return projection
@@ -382,7 +444,14 @@ def _step_input_payload(step: dict[str, Any]) -> dict[str, Any]:
 def _step_output_payload(step: dict[str, Any]) -> dict[str, Any]:
     payload = dict(step.get("payload") or {})
     projection: dict[str, Any] = {}
-    for key in ("passed", "issue_count", "reply_preview", "has_error", "output_hash", "output_length"):
+    for key in (
+        "passed",
+        "issue_count",
+        "reply_preview",
+        "has_error",
+        "output_hash",
+        "output_length",
+    ):
         if key in payload:
             projection[key] = payload.get(key)
     return projection
@@ -399,7 +468,9 @@ def _build_execution_snapshot(
     metadata = dict(getattr(context, "metadata", {}) or {})
     state = dict(getattr(context, "state", {}) or {})
     control_plane = dict(metadata.get("control_plane") or {})
-    normalized_response = str((result[0] if isinstance(result, tuple) else result) or "")
+    normalized_response = str(
+        (result[0] if isinstance(result, tuple) else result) or "",
+    )
 
     outputs_per_step = [
         {
@@ -412,11 +483,7 @@ def _build_execution_snapshot(
         for step in steps
     ]
 
-    model_inputs = [
-        _step_input_payload(step)
-        for step in steps
-        if str(step.get("operation") or "") == "model_call"
-    ]
+    model_inputs = [_step_input_payload(step) for step in steps if str(step.get("operation") or "") == "model_call"]
 
     snapshot = {
         "inputs": {
@@ -459,7 +526,7 @@ def _build_execution_dag(
                 "seq": seq,
                 "operation": operation,
                 "payload_hash": _stable_sha256(dict(step.get("payload") or {})),
-            }
+            },
         )
 
     for idx in range(1, len(node_ids)):
@@ -468,7 +535,7 @@ def _build_execution_dag(
                 "from": node_ids[idx - 1],
                 "to": node_ids[idx],
                 "type": "sequence",
-            }
+            },
         )
 
     iteration_starts: dict[int, str] = {}
@@ -488,7 +555,7 @@ def _build_execution_dag(
                     "from": source,
                     "to": node_id,
                     "type": "iteration",
-                }
+                },
             )
 
     graph = {
@@ -496,7 +563,9 @@ def _build_execution_dag(
         "edges": edges,
         "entry": node_ids[0] if node_ids else "",
         "topological_order": node_ids,
-        "external_system_call_graph_hash": str((external_system_calls or {}).get("graph_hash") or ""),
+        "external_system_call_graph_hash": str(
+            (external_system_calls or {}).get("graph_hash") or "",
+        ),
     }
     graph["dag_hash"] = _stable_sha256(graph)
     return graph
