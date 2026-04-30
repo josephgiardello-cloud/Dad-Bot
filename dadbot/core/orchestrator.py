@@ -9,6 +9,7 @@ from dadbot.contracts import AttachmentList, FinalizedTurnResult
 from dadbot.core.control_plane import ExecutionControlPlane, ExecutionJob, SessionRegistry
 from dadbot.core.graph import TurnContext, TurnGraph
 from dadbot.core.job_builder import JobBuilder
+from dadbot.core.lg_topology import create_topology_provider
 from dadbot.core.trace_binder import TraceBinder
 from dadbot.core.interfaces import HealthService, InferenceService, validate_pipeline_services
 from dadbot.registry import ServiceRegistry, boot_registry
@@ -65,7 +66,10 @@ class DadBotOrchestrator:
             },
             raise_on_failure=self._strict,
         )
-        return TurnGraph(registry=self.registry)
+        return TurnGraph(
+            registry=self.registry,
+            topology_provider_factory=create_topology_provider,
+        )
 
     def _build_turn_context(
         self,

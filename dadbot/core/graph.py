@@ -47,12 +47,58 @@ from dadbot.core.execution_trace_schema import stamp_trace_contract_version
 from dadbot.core.graph_side_effects import GraphSideEffectsOrchestrator
 from dadbot.core.execution_policy_service import StageEntryGate
 from dadbot.core.side_effect_adapter import SideEffectAdapter
-from dadbot.core.lg_topology import TurnPipelineState, build_turn_pipeline
 from dadbot.core.persistence_event_adapter import GraphPersistenceEventAdapter  # re-export
+from dadbot.core.topology_provider import TopologyProvider, TopologyProviderFactory, TurnPipelineState
 from dadbot.core.ux_projection import TurnHealthState, TurnUxProjector  # re-export
 
 
 logger = logging.getLogger(__name__)
+
+
+class _LinearTopologyGraph:
+    """Minimal interface-only topology runtime used as a local fallback.
+
+    This keeps TurnGraph decoupled from concrete topology engines and
+    preserves direct TurnGraph() test usage when no provider is injected.
+    """
+
+    def __init__(
+        self,
+        pipeline_items: list[tuple[str, Any]],
+        node_executor: Callable[[str, Any, TurnPipelineState], Any],
+    ) -> None:
+        self._pipeline_items = pipeline_items
+        self._node_executor = node_executor
+
+    async def ainvoke(self, state: TurnPipelineState) -> TurnPipelineState:
+        current_state = dict(state)
+        for stage_name, node in self._pipeline_items:
+            updates = await self._node_executor(stage_name, node, current_state)
+            if isinstance(updates, dict):
+                current_state.update(updates)
+            if current_state.get("abort") or current_state.get("short_circuit"):
+                break
+        return current_state  # type: ignore[return-value]
+
+
+class _LinearTopologyProvider(TopologyProvider):
+    def __init__(
+        self,
+        pipeline_items: list[tuple[str, Any]],
+        node_executor: Callable[[str, Any, TurnPipelineState], Any],
+    ) -> None:
+        self._pipeline_items = pipeline_items
+        self._node_executor = node_executor
+
+    def build(self) -> _LinearTopologyGraph:
+        return _LinearTopologyGraph(self._pipeline_items, self._node_executor)
+
+
+def _default_topology_provider_factory(
+    pipeline_items: list[tuple[str, Any]],
+    node_executor: Callable[[str, Any, TurnPipelineState], Any],
+) -> TopologyProvider:
+    return _LinearTopologyProvider(pipeline_items, node_executor)
 
 # Canonical durability boundary contract for the execution graph.
 SAVE_NODE_COMMIT_CONTRACT = (
@@ -892,7 +938,13 @@ class ReflectionNode:
 class TurnGraph:
     """Declarative turn execution graph."""
 
-    def __init__(self, registry: Any = None, nodes: list[GraphNode] | None = None):
+    def __init__(
+        self,
+        registry: Any = None,
+        nodes: list[GraphNode] | None = None,
+        *,
+        topology_provider_factory: TopologyProviderFactory | None = None,
+    ):
         self.registry = registry
         self.nodes = nodes or [
             TemporalNode(),
@@ -952,6 +1004,7 @@ class TurnGraph:
         # Execution receipts: signed per-stage proof of completion.
         # Uses the module-level DEFAULT_SIGNER; override via configure_receipt_signer().
         self._receipt_signer: ReceiptSigner = _DEFAULT_RECEIPT_SIGNER
+        self._topology_provider_factory = topology_provider_factory or _default_topology_provider_factory
 
     def set_kernel_rejection_semantics(self, stage: str, semantics: KernelRejectionSemantics) -> None:
         """Override rejection semantics for a stage name.
@@ -1643,7 +1696,8 @@ class TurnGraph:
                     "error": None,
                 }
 
-            _lg_pipeline = build_turn_pipeline(pipeline, _lg_node_executor)
+            _topology_provider = self._topology_provider_factory(pipeline, _lg_node_executor)
+            _lg_pipeline = _topology_provider.build()
             _lg_state: TurnPipelineState = {
                 "context": turn_context,
                 "short_circuit": False,
