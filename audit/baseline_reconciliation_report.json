@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-04-30T19:15:35.587192+00:00",
+  "generated_at": "2026-04-30T20:04:01.669508+00:00",
   "bucket_labels": {
     "A": "real_regression",
     "B": "migration_inflation",
@@ -27,7 +27,7 @@
       "suppressed": [],
       "current": {
         "dadbot/core/graph.py": {
-          "loc": 1085,
+          "loc": 1089,
           "cc_total": 171,
           "cc_max": 12,
           "decision_points": 59
@@ -57,16 +57,16 @@
           "decision_points": 31
         },
         "dadbot/core/graph_context.py": {
-          "loc": 180,
+          "loc": 182,
           "cc_total": 41,
           "cc_max": 12,
           "decision_points": 5
         },
         "dadbot/core/graph_pipeline_nodes.py": {
-          "loc": 111,
-          "cc_total": 55,
+          "loc": 118,
+          "cc_total": 58,
           "cc_max": 10,
-          "decision_points": 7
+          "decision_points": 8
         }
       },
       "_exit_code": 0
@@ -77,12 +77,12 @@
       "report": [
         {
           "file": "dadbot/core/graph.py",
-          "loc": 1085,
+          "loc": 1089,
           "cc_total": 171,
           "cc_max": 12,
           "decision_points": 72,
-          "baseline_loc": 1085,
-          "baseline_cc_total": 169,
+          "baseline_loc": 1089,
+          "baseline_cc_total": 171,
           "baseline_dp": 72,
           "violations": []
         },
@@ -92,7 +92,7 @@
           "cc_total": 384,
           "cc_max": 20,
           "decision_points": 130,
-          "baseline_loc": 1216,
+          "baseline_loc": 1210,
           "baseline_cc_total": 384,
           "baseline_dp": 130,
           "violations": []
@@ -125,31 +125,31 @@
           "cc_total": 98,
           "cc_max": 17,
           "decision_points": 46,
-          "baseline_loc": 286,
-          "baseline_cc_total": 101,
-          "baseline_dp": 48,
+          "baseline_loc": 283,
+          "baseline_cc_total": 98,
+          "baseline_dp": 46,
           "violations": []
         },
         {
           "file": "dadbot/core/graph_context.py",
-          "loc": 180,
+          "loc": 182,
           "cc_total": 41,
           "cc_max": 12,
           "decision_points": 7,
-          "baseline_loc": 180,
+          "baseline_loc": 182,
           "baseline_cc_total": 41,
           "baseline_dp": 7,
           "violations": []
         },
         {
           "file": "dadbot/core/graph_pipeline_nodes.py",
-          "loc": 111,
-          "cc_total": 55,
+          "loc": 118,
+          "cc_total": 58,
           "cc_max": 10,
-          "decision_points": 8,
+          "decision_points": 9,
           "baseline_loc": 118,
-          "baseline_cc_total": 55,
-          "baseline_dp": 11,
+          "baseline_cc_total": 58,
+          "baseline_dp": 9,
           "violations": []
         }
       ],
