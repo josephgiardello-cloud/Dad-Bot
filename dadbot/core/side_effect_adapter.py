@@ -156,3 +156,21 @@ class SideEffectAdapter:
             trace = []
             context.state["execution_trace"] = trace
         trace.append(event_dict)
+
+    def record_failure_taxonomy(
+        self,
+        context: Any,
+        *,
+        severity_str: str,
+        error_str: str,
+    ) -> None:
+        """Write the standardized failure taxonomy payload to context.state.
+
+        Called only on turn failure, after classification.  No decision logic —
+        the caller (TurnGraph) already holds the classified severity; this method
+        only persists the result.
+        """
+        context.state["failure_taxonomy"] = {
+            "severity": str(severity_str or ""),
+            "error": str(error_str or ""),
+        }

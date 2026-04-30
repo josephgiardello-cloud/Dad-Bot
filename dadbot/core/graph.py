@@ -1377,6 +1377,171 @@ class TurnGraph:
         logger.info("capability_audit_report=%s", json.dumps(payload, sort_keys=True, default=str))
         return payload
 
+    # ------------------------------------------------------------------
+    # Dispatcher authority: structural fidelity validator
+    # ------------------------------------------------------------------
+
+    def _check_structural_fidelity(self, turn_context: TurnContext) -> None:
+        """Enforce post-execution structural invariants.
+
+        Named authority holder for the fidelity check: the dispatcher calls this
+        instead of inlining conditional logic.  Raises RuntimeError on violation.
+        """
+        fidelity = getattr(turn_context, "fidelity", None)
+        if fidelity is None:
+            self._mark_structural_degradation(turn_context, "fidelity_state_missing")
+            raise RuntimeError("Structural turn invariant violated: turn fidelity state missing")
+        if not bool(getattr(fidelity, "temporal", False)):
+            self._mark_structural_degradation(turn_context, "temporal_stage_missing")
+            raise RuntimeError("Structural turn invariant violated: TemporalNode missing")
+        if not bool(getattr(fidelity, "save", False)):
+            self._mark_structural_degradation(turn_context, "save_stage_missing")
+            raise RuntimeError("Structural turn invariant violated: SaveNode did not execute")
+        # Strict mode: only enforced when the graph was built with an "inference" node
+        # so that unit-test graphs with partial pipelines are not rejected.
+        if "inference" in self._node_map and not bool(getattr(fidelity, "inference", False)):
+            self._mark_structural_degradation(turn_context, "inference_stage_missing")
+            raise RuntimeError("Structural turn invariant violated: InferenceNode missing")
+
+    # ------------------------------------------------------------------
+    # Dispatcher authority: per-stage execution worker
+    # ------------------------------------------------------------------
+
+    async def _run_stage(
+        self,
+        stage_name: str,
+        node: Any,
+        stage_context: TurnContext,
+        *,
+        telemetry: Any,
+        executed_stage_names: list[str],
+    ) -> TurnContext:
+        """Execute a single pipeline stage.
+
+        Authority contract
+        ------------------
+        - Reads own configuration via ``self.*`` attributes.
+        - Delegates entry policy decisions to ``self._stage_entry_gate``.
+        - Delegates all side-effect writes to ``self._side_effect_adapter``.
+        - Receives mutable ``executed_stage_names`` list; appends stage name on
+          completion so the outer dispatcher can read the completed set.
+        - ``telemetry`` is passed explicitly; no implicit capture from execute().
+        """
+        started_at = time.perf_counter()
+        error_msg: str | None = None
+
+        # ── Stage-entry policy gate (delegated to StageEntryGate) ──────────
+        # Idempotency guard: skip stages already completed in a prior run.
+        if self._stage_entry_gate.check_recovery_skip(stage_name, stage_context, self._recovery):
+            executed_stage_names.append(stage_name)
+            return stage_context
+        # Capability gate: skip if session lacks required capabilities.
+        _sid = str(stage_context.metadata.get("session_id") or self._capability_session_id or "")
+        if self._stage_entry_gate.check_capability_skip(
+            stage_name, stage_context, self._capability_registry, self._capability_policy, _sid
+        ):
+            executed_stage_names.append(stage_name)
+            return stage_context
+        # Ordering + temporal invariants: raises on violation.
+        self._stage_entry_gate.enforce_stage_ordering(stage_context, stage_name)
+
+        self._record_execution_trace(
+            stage_context,
+            event_type="stage_enter",
+            stage=stage_name,
+            detail={"active_stage": stage_name},
+        )
+        self._sync_stage_phase(stage_context, stage=stage_name)
+        self._emit_checkpoint(stage_context, stage=stage_name, status="before")
+        if telemetry is not None:
+            telemetry.trace("turn_graph.node_start", node=stage_name, trace_id=stage_context.trace_id)
+
+        # Side-effect deduplication: persist in_flight marker + inject call_id
+        # BEFORE the node runs so a crash between here and record_stage_completion
+        # leaves a recoverable record.
+        if self._recovery is not None:
+            self._recovery.mark_stage_started(stage_name, stage_context)
+
+        try:
+            _guard = (
+                MutationGuard(stage_context.mutation_queue)
+                if not self._is_commit_boundary_node(node)
+                else contextlib.nullcontext()
+            )
+            with _guard:
+                stage_context = await self._execute_node(node, stage_context)
+        except Exception as exc:
+            error_msg = str(exc)
+            self._record_execution_trace(
+                stage_context,
+                event_type="stage_error",
+                stage=stage_name,
+                detail={"error": error_msg},
+            )
+            self._emit_checkpoint(stage_context, stage=stage_name, status="error", error=error_msg)
+            raise
+        finally:
+            stage_context.state["_active_graph_stage"] = ""
+            duration_ms = round((time.perf_counter() - started_at) * 1000, 3)
+            stage_context.stage_traces.append(
+                StageTrace(stage=stage_name, duration_ms=duration_ms, error=error_msg)
+            )
+            if telemetry is not None:
+                telemetry.trace(
+                    "turn_graph.node_done",
+                    node=stage_name,
+                    duration_ms=duration_ms,
+                    trace_id=stage_context.trace_id,
+                )
+
+        if error_msg is None:
+            self._record_execution_trace(
+                stage_context,
+                event_type="stage_done",
+                stage=stage_name,
+                detail={"duration_ms": duration_ms},
+            )
+            self._emit_checkpoint(stage_context, stage=stage_name, status="after")
+            executed_stage_names.append(stage_name)
+
+            # Persist a durable resume point after each successful stage.
+            if self._recovery is not None:
+                pipeline_names = list(stage_context.state.get("_pipeline_stage_names") or [])
+                _next_for_resume = ""
+                if pipeline_names and stage_name in pipeline_names:
+                    _cidx = pipeline_names.index(stage_name)
+                    if _cidx + 1 < len(pipeline_names):
+                        _next_for_resume = pipeline_names[_cidx + 1]
+                self._recovery.record_stage_completion(
+                    stage_name,
+                    _next_for_resume,
+                    stage_context,
+                    list(executed_stage_names),
+                )
+
+            # Execution receipt: signed proof of stage completion.
+            self._side_effect_adapter.record_receipt(
+                stage_context,
+                stage_name,
+                signer=self._receipt_signer,
+                stage_call_id=str(stage_context.state.get("_stage_call_id") or ""),
+                checkpoint_hash=str(stage_context.last_checkpoint_hash or ""),
+            )
+
+            # Emit edge checkpoint immediately after this stage completes.
+            pipeline_names = list(stage_context.state.get("_pipeline_stage_names") or [])
+            if pipeline_names and stage_name in pipeline_names:
+                current_idx = pipeline_names.index(stage_name)
+                if current_idx + 1 < len(pipeline_names):
+                    next_stage_name = pipeline_names[current_idx + 1]
+                    self._emit_checkpoint(
+                        stage_context,
+                        stage=f"{stage_name}\u2192{next_stage_name}",
+                        status="edge",
+                    )
+
+        return stage_context
+
     async def execute(self, turn_context: TurnContext, *, audit_mode: bool = False) -> FinalizedTurnResult:
         if self._required_execution_token:
             active_token = ControlPlaneExecutionBoundary.current()
@@ -1394,6 +1559,10 @@ class TurnGraph:
         )
         turn_context.state["_execution_kernel"] = self._execution_kernel
         execute_started_at = time.perf_counter()
+
+        # Initialise resume point.  Assigned inside the recovery block below;
+        # declared here so the capability block can reference it unconditionally.
+        _resume_pt: Any = None
 
         # Crash-safe recovery: restore completed stages from a durable resume record
         # so that already-executed stages are skipped on this invocation.
@@ -1426,142 +1595,19 @@ class TurnGraph:
                     session_id=_sid,
                 )
 
-        def _enforce_fidelity_invariants() -> None:
-            fidelity = getattr(turn_context, "fidelity", None)
-            if fidelity is None:
-                self._mark_structural_degradation(turn_context, "fidelity_state_missing")
-                raise RuntimeError("Structural turn invariant violated: turn fidelity state missing")
-            if not bool(getattr(fidelity, "temporal", False)):
-                self._mark_structural_degradation(turn_context, "temporal_stage_missing")
-                raise RuntimeError("Structural turn invariant violated: TemporalNode missing")
-            if not bool(getattr(fidelity, "save", False)):
-                self._mark_structural_degradation(turn_context, "save_stage_missing")
-                raise RuntimeError("Structural turn invariant violated: SaveNode did not execute")
-            # Strict mode: inference must always execute in the canonical pipeline.
-            # Only enforce this when the graph was built with an "inference" node
-            # so that unit-test graphs with partial pipelines are not rejected.
-            if "inference" in self._node_map and not bool(getattr(fidelity, "inference", False)):
-                self._mark_structural_degradation(turn_context, "inference_stage_missing")
-                raise RuntimeError("Structural turn invariant violated: InferenceNode missing")
-
         telemetry = self.registry.get("telemetry") if self.registry is not None else None
         executed_stage_names: list[str] = []
         audit_enabled = bool(audit_mode or turn_context.metadata.get("audit_mode"))
 
-        async def _execute_stage(stage_name: str, node: Any, stage_context: TurnContext) -> TurnContext:
-            started_at = time.perf_counter()
-            error_msg: str | None = None
-            # ── Stage-entry policy gate (delegated to StageEntryGate) ──────────
-            # Idempotency guard: skip stages already completed in a prior run.
-            if self._stage_entry_gate.check_recovery_skip(stage_name, stage_context, self._recovery):
-                executed_stage_names.append(stage_name)
-                return stage_context
-            # Capability gate: skip if session lacks required capabilities.
-            _sid = str(stage_context.metadata.get("session_id") or self._capability_session_id or "")
-            if self._stage_entry_gate.check_capability_skip(
-                stage_name, stage_context, self._capability_registry, self._capability_policy, _sid
-            ):
-                executed_stage_names.append(stage_name)
-                return stage_context
-            # Ordering + temporal invariants: raises on violation.
-            self._stage_entry_gate.enforce_stage_ordering(stage_context, stage_name)
-            self._record_execution_trace(
-                stage_context,
-                event_type="stage_enter",
-                stage=stage_name,
-                detail={"active_stage": stage_name},
-            )
-            self._sync_stage_phase(stage_context, stage=stage_name)
-            self._emit_checkpoint(stage_context, stage=stage_name, status="before")
-            if telemetry is not None:
-                telemetry.trace("turn_graph.node_start", node=stage_name, trace_id=stage_context.trace_id)
-            # Side-effect deduplication: persist in_flight marker + inject call_id
-            # BEFORE the node runs so a crash between here and record_stage_completion
-            # leaves a recoverable record.
-            if self._recovery is not None:
-                self._recovery.mark_stage_started(stage_name, stage_context)
-            try:
-                _guard = (
-                    MutationGuard(stage_context.mutation_queue)
-                    if not self._is_commit_boundary_node(node)
-                    else contextlib.nullcontext()
-                )
-                with _guard:
-                    stage_context = await self._execute_node(node, stage_context)
-            except Exception as exc:
-                error_msg = str(exc)
-                self._record_execution_trace(
-                    stage_context,
-                    event_type="stage_error",
-                    stage=stage_name,
-                    detail={"error": error_msg},
-                )
-                self._emit_checkpoint(stage_context, stage=stage_name, status="error", error=error_msg)
-                raise
-            finally:
-                stage_context.state["_active_graph_stage"] = ""
-                duration_ms = round((time.perf_counter() - started_at) * 1000, 3)
-                stage_context.stage_traces.append(
-                    StageTrace(stage=stage_name, duration_ms=duration_ms, error=error_msg)
-                )
-                if telemetry is not None:
-                    telemetry.trace(
-                        "turn_graph.node_done",
-                        node=stage_name,
-                        duration_ms=duration_ms,
-                        trace_id=stage_context.trace_id,
-                    )
-            if error_msg is None:
-                self._record_execution_trace(
-                    stage_context,
-                    event_type="stage_done",
-                    stage=stage_name,
-                    detail={"duration_ms": duration_ms},
-                )
-                self._emit_checkpoint(stage_context, stage=stage_name, status="after")
-                executed_stage_names.append(stage_name)
-                # Persist a durable resume point after each successful stage so
-                # that a crash can be recovered on the next invocation.
-                if self._recovery is not None:
-                    pipeline_names = list(stage_context.state.get("_pipeline_stage_names") or [])
-                    _next_for_resume = ""
-                    if pipeline_names and stage_name in pipeline_names:
-                        _cidx = pipeline_names.index(stage_name)
-                        if _cidx + 1 < len(pipeline_names):
-                            _next_for_resume = pipeline_names[_cidx + 1]
-                    self._recovery.record_stage_completion(
-                        stage_name,
-                        _next_for_resume,
-                        stage_context,
-                        list(executed_stage_names),
-                    )
-                # Execution receipt: signed proof of stage completion.
-                self._side_effect_adapter.record_receipt(
-                    stage_context,
-                    stage_name,
-                    signer=self._receipt_signer,
-                    stage_call_id=str(stage_context.state.get("_stage_call_id") or ""),
-                    checkpoint_hash=str(stage_context.last_checkpoint_hash or ""),
-                )
-                # Emit edge checkpoint immediately after this stage completes,
-                # if there's a next stage in the pipeline.
-                pipeline_names = list(stage_context.state.get("_pipeline_stage_names") or [])
-                if pipeline_names and stage_name in pipeline_names:
-                    current_idx = pipeline_names.index(stage_name)
-                    if current_idx + 1 < len(pipeline_names):
-                        next_stage_name = pipeline_names[current_idx + 1]
-                        self._emit_checkpoint(stage_context, stage=f"{stage_name}\u2192{next_stage_name}", status="edge")
-            return stage_context
-
         try:
             pipeline = self._pipeline_items()
-            # Store all pipeline stage names in turn_context so _execute_stage can find the next stage
+            # Store all pipeline stage names in turn_context so _run_stage can find the next stage
             pipeline_stage_names = [name for name, _ in pipeline]
             turn_context.state["_pipeline_stage_names"] = pipeline_stage_names
             # ------------------------------------------------------------------
             # Layer 1 — LangGraph declarative dispatch
             # The execution loop is now owned by LangGraph's StateGraph.
-            # Policy, mutation, and recovery logic stay in Layer 2 (_execute_stage).
+            # Policy, mutation, and recovery logic stay in Layer 2 (_run_stage).
             # ------------------------------------------------------------------
 
             # Pre-execute kernel validation (previously inside ExecutionKernel.run)
@@ -1576,7 +1622,7 @@ class TurnGraph:
             async def _lg_node_executor(
                 stage_name: str, node: Any, state: TurnPipelineState
             ) -> dict:
-                """Bridge: per-stage kernel validation (Layer 1→2) + stage execution (Layer 2)."""
+                """Bridge: per-stage kernel validation (Layer 1→2) + stage dispatch (Layer 2)."""
                 _tc = state["context"]
                 _stage_check = self._execution_kernel.validate(
                     stage=stage_name,
@@ -1585,7 +1631,11 @@ class TurnGraph:
                 )
                 if not _stage_check.ok:
                     logger.warning("[KERNEL SHADOW VIOLATION] %s", _stage_check.reason)
-                _tc = await _execute_stage(stage_name, node, _tc)
+                _tc = await self._run_stage(
+                    stage_name, node, _tc,
+                    telemetry=telemetry,
+                    executed_stage_names=executed_stage_names,
+                )
                 return {
                     "context": _tc,
                     "short_circuit": bool(getattr(_tc, "short_circuit", False)),
@@ -1620,10 +1670,11 @@ class TurnGraph:
                 stage="graph",
                 detail={"severity": str(failure_class), "error": str(exc)},
             )
-            turn_context.state["failure_taxonomy"] = {
-                "severity": str(failure_class),
-                "error": str(exc),
-            }
+            self._side_effect_adapter.record_failure_taxonomy(
+                turn_context,
+                severity_str=str(failure_class),
+                error_str=str(exc),
+            )
             total_ms = round((time.perf_counter() - execute_started_at) * 1000, 3)
             self._emit_turn_health_state(turn_context, total_latency_ms=total_ms, failed=True)
             self._finalize_execution_trace_contract(turn_context)
@@ -1640,7 +1691,7 @@ class TurnGraph:
         if turn_context.short_circuit and turn_context.short_circuit_result is not None:
             total_ms = round((time.perf_counter() - execute_started_at) * 1000, 3)
             self._emit_turn_health_state(turn_context, total_latency_ms=total_ms, failed=False)
-            _enforce_fidelity_invariants()
+            self._check_structural_fidelity(turn_context)
             self._record_execution_trace(
                 turn_context,
                 event_type="turn_short_circuit",
@@ -1658,7 +1709,7 @@ class TurnGraph:
         result = turn_context.state.get("safe_result")
         total_ms = round((time.perf_counter() - execute_started_at) * 1000, 3)
         self._emit_turn_health_state(turn_context, total_latency_ms=total_ms, failed=False)
-        _enforce_fidelity_invariants()
+        self._check_structural_fidelity(turn_context)
         self._record_execution_trace(
             turn_context,
             event_type="turn_succeeded",
