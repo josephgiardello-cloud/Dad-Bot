@@ -24,7 +24,17 @@ class ExecutionJob:
     user_input: str
     attachments: AttachmentList | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    trace_id: str = ""
     job_id: str = field(default_factory=lambda: f"job-{uuid4().hex}")
+
+    def __post_init__(self) -> None:
+        metadata = dict(self.metadata or {})
+        trace_id = str(self.trace_id or metadata.get("trace_id") or "").strip()
+        if not trace_id:
+            trace_id = f"tr-{uuid4().hex}"
+        metadata["trace_id"] = trace_id
+        self.metadata = metadata
+        self.trace_id = trace_id
 
 
 @dataclass(slots=True)
@@ -179,6 +189,7 @@ class Scheduler:
     async def register(self, job: ExecutionJob) -> asyncio.Future[FinalizedTurnResult]:
         if len(self._jobs) >= self.max_inflight_jobs:
             raise RuntimeError("backpressure: max inflight jobs reached")
+        assert str(job.trace_id or "").strip(), "Missing trace_id at scheduler register"
 
         loop = asyncio.get_running_loop()
         future: asyncio.Future[FinalizedTurnResult] = loop.create_future()
@@ -202,6 +213,7 @@ class Scheduler:
         if job_pair is None:
             return False
         job, future = job_pair
+        assert str(job.trace_id or "").strip(), "Missing trace_id at scheduler drain"
 
         lease_acquired = False
         started_at = time.perf_counter()
@@ -354,6 +366,9 @@ class ExecutionControlPlane:
             raise RuntimeError(f"session {session_key!r} has been terminated")
 
         md = dict(metadata or {})
+        trace_id = str(md.get("trace_id") or "").strip() or f"tr-{uuid4().hex}"
+        md["trace_id"] = trace_id
+        assert trace_id, "Missing trace_id at control plane entry"
         request_id = str(md.get("request_id") or "")
         inflight_key = (session_key, request_id) if request_id else None
         if inflight_key is not None:
@@ -366,10 +381,16 @@ class ExecutionControlPlane:
             user_input=str(user_input or ""),
             attachments=attachments,
             metadata=md,
+            trace_id=trace_id,
         )
 
         self.ledger_writer.append_job_submitted(job)
-        self.ledger_writer.append_session_bound(session_key, job.job_id)
+        self.ledger_writer.append_session_bound(
+            session_key,
+            job.job_id,
+            trace_id=job.trace_id,
+            kernel_step_id="control_plane.bind_session",
+        )
         future = await self.scheduler.register(job)
         if inflight_key is not None:
             self._inflight_by_request[inflight_key] = future
