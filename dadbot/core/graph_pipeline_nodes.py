@@ -12,7 +12,6 @@ from __future__ import annotations
 import logging
 from typing import Any, Protocol
 
-from dadbot.contracts import FinalizedTurnResult
 from dadbot.core.graph_context import TurnContext
 from dadbot.core.graph_types import NodeType
 
@@ -54,10 +53,7 @@ class ContextBuilderNode(_NodeContractMixin):
         turn_context.state["rich_context"] = service.build_context(turn_context)
 
 
-class MemoryNode(ContextBuilderNode):
-    """Backward-compatible alias for legacy graph stage naming."""
-
-    name = "memory"
+MemoryNode = ContextBuilderNode
 
 
 class InferenceNode(_NodeContractMixin):
@@ -95,8 +91,6 @@ class SaveNode(_NodeContractMixin):
         if callable(finalize):
             try:
                 turn_context.state["safe_result"] = finalize(turn_context, result)
-                # Ensure hash-chain checkpoints are also emitted from SaveNode so
-                # commit-time state is captured inside the finalize boundary.
                 save_checkpoint = getattr(service, "save_graph_checkpoint", None)
                 if callable(save_checkpoint):
                     checkpoint = turn_context.checkpoint_snapshot(
@@ -143,25 +137,13 @@ class ReflectionNode(_NodeContractMixin):
 
         reflect_after_turn = getattr(service, "reflect_after_turn", None)
         if callable(reflect_after_turn):
-            try:
-                turn_context.state["reflection"] = reflect_after_turn(
-                    turn_text,
-                    current_mood,
-                    reply_text,
-                )
-            except TypeError:
-                turn_context.state["reflection"] = reflect_after_turn(
-                    turn_context,
-                    result,
-                )
+            turn_context.state["reflection"] = reflect_after_turn(
+                turn_text,
+                current_mood,
+                reply_text,
+            )
             return
 
         reflect = getattr(service, "reflect", None)
         if callable(reflect):
-            try:
-                turn_context.state["reflection"] = reflect(turn_context, result)
-            except TypeError:
-                try:
-                    turn_context.state["reflection"] = reflect(force=True)
-                except TypeError:
-                    turn_context.state["reflection"] = reflect(turn_context)
+            turn_context.state["reflection"] = reflect(turn_context, result)

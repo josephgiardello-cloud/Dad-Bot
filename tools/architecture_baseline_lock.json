@@ -13,19 +13,8 @@
     "prevent_decision_point_growth": true
   },
   "reconciliation": {
-    "generated_at": "2026-04-30T18:09:51.115174+00:00",
-    "migration_inflation_allowlist": [
-      {
-        "source": "complexity_diff_gate",
-        "file": "dadbot/core/graph_pipeline_nodes.py",
-        "reason": "Contract migration inflation in known transition hotfile"
-      },
-      {
-        "source": "god_class_audit",
-        "file": "dadbot/core/graph_pipeline_nodes.py",
-        "reason": "Contract migration inflation in known transition hotfile"
-      }
-    ],
+    "generated_at": "2026-04-30T19:15:35.588303+00:00",
+    "migration_inflation_allowlist": [],
     "baseline_invalidations": [],
     "real_regressions": [],
     "policy": {

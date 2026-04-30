@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-04-30T18:09:51.113906+00:00",
+  "generated_at": "2026-04-30T19:15:35.587192+00:00",
   "bucket_labels": {
     "A": "real_regression",
     "B": "migration_inflation",
@@ -7,25 +7,12 @@
   },
   "summary": {
     "A": 0,
-    "B": 2,
+    "B": 0,
     "C": 0
   },
   "findings": {
     "A": [],
-    "B": [
-      {
-        "source": "complexity_diff_gate",
-        "file": "dadbot/core/graph_pipeline_nodes.py",
-        "detail": "dadbot/core/graph_pipeline_nodes.py: LOC 118->126 and CC 55->62",
-        "reason": "Contract migration inflation in known transition hotfile"
-      },
-      {
-        "source": "god_class_audit",
-        "file": "dadbot/core/graph_pipeline_nodes.py",
-        "detail": "  LOC grew 118\u2192126 (+8) but CC did not decrease (55\u219262)",
-        "reason": "Contract migration inflation in known transition hotfile"
-      }
-    ],
+    "B": [],
     "C": []
   },
   "sources": {
@@ -36,9 +23,7 @@
       "_exit_code": 0
     },
     "complexity_diff_gate": {
-      "violations": [
-        "dadbot/core/graph_pipeline_nodes.py: LOC 118->126 and CC 55->62"
-      ],
+      "violations": [],
       "suppressed": [],
       "current": {
         "dadbot/core/graph.py": {
@@ -78,20 +63,16 @@
           "decision_points": 5
         },
         "dadbot/core/graph_pipeline_nodes.py": {
-          "loc": 126,
-          "cc_total": 62,
-          "cc_max": 13,
-          "decision_points": 10
+          "loc": 111,
+          "cc_total": 55,
+          "cc_max": 10,
+          "decision_points": 7
         }
       },
-      "_exit_code": 1
+      "_exit_code": 0
     },
     "god_class_audit": {
-      "violations": {
-        "dadbot/core/graph_pipeline_nodes.py": [
-          "  LOC grew 118\u2192126 (+8) but CC did not decrease (55\u219262)"
-        ]
-      },
+      "violations": {},
       "suppressed": {},
       "report": [
         {
@@ -162,16 +143,14 @@
         },
         {
           "file": "dadbot/core/graph_pipeline_nodes.py",
-          "loc": 126,
-          "cc_total": 62,
-          "cc_max": 13,
-          "decision_points": 11,
+          "loc": 111,
+          "cc_total": 55,
+          "cc_max": 10,
+          "decision_points": 8,
           "baseline_loc": 118,
           "baseline_cc_total": 55,
           "baseline_dp": 11,
-          "violations": [
-            "  LOC grew 118\u2192126 (+8) but CC did not decrease (55\u219262)"
-          ]
+          "violations": []
         }
       ],
       "_exit_code": 0
