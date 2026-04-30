@@ -1,0 +1,434 @@
+version: 1
+group: 1
+label: "Group 1 — Critical God Modules"
+generated_at: "2026-04-29T00:00:00Z"
+baseline_dev_lane: 216  # passing at HEAD 6c3322a (phase5c/verified-baseline-2026-04-28)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CRITICAL CONSTRAINTS
+# ─────────────────────────────────────────────────────────────────────────────
+constraints:
+  - "ONE module active at a time — never batch."
+  - "Branch naming enforced: refactor/group-01-<module-slug>"
+  - "Tag rollback checkpoint BEFORE every module starts."
+  - "DEV lane must stay green (216 passed) after every module."
+  - "DO NOT start LangGraph boundary work until this group is fully complete."
+  - "DO NOT start Group 2 until hard gate below passes."
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EXECUTION ORDER — strict linear, score DESC → coupling DESC → size DESC
+# ─────────────────────────────────────────────────────────────────────────────
+#
+#  Position | Module                     | Score | Coupling | Lines
+#  ---------|----------------------------|-------|----------|-------
+#  1        | dadbot.core.graph          | 14    | 10       | 1745
+#  2        | dadbot.core.orchestrator   | 10    |  8       |  165
+#  3        | system_audit               |  9    | 10       |  856
+#  4        | dadbot.services.turn_service|  9    |  8       | 1451
+#
+# Note: system_audit (pos 3) has higher coupling than turn_service (pos 4),
+# placing it earlier in the same score bucket.  It is also completely isolated
+# from the other three, making it a safe, non-destructive checkpoint.
+
+modules:
+
+  # ─── MODULE 1 ──────────────────────────────────────────────────────────────
+  - position: 1
+    name: "dadbot.core.graph"
+    path: "dadbot/core/graph.py"
+    score: 14
+    signals:
+      size_lines: 1745
+      coupling_score: 10
+      category: "execution_engine_god_module"
+      responsibilities:
+        - orchestration
+        - state_mutation
+        - io_calls
+        - recovery
+        - multi_responsibility
+        - monolith_size
+
+    branch_name: "refactor/group-01-graph"
+    rollback_tag:  "rollback/group1/graph"
+
+    rollback_procedure:
+      tag_command:  "git tag rollback/group1/graph HEAD"
+      restore_command: "git checkout rollback/group1/graph -- dadbot/core/graph.py"
+      note: "Tag BEFORE any edits; restore resets only graph.py, leaving other files clean."
+
+    pre_checks:
+      - command: '.venv\Scripts\python.exe -m pytest -m unit -q --tb=short'
+        must_pass: true
+        description: "DEV lane green at baseline before starting"
+      - command: '.venv\Scripts\python.exe _ci_gate_check.py --pre-module dadbot.core.graph'
+        must_pass: true
+        description: "CI gate: no active parallel refactor branches"
+
+    refactor_phases:
+      phase_1:
+        status: "COMPLETE"  # commit 27d52b5 — DEV lane 216/0, CI gate PASSED
+        goal: "Extract ExecutionPolicyService — separate policy checks from dispatch loop"
+        scope:
+          - "_execute_stage() nested function — policy sections only"
+          - "ExecutionPolicyEngine call sites"
+        actions:
+          - "Create dadbot/core/execution_policy_service.py with policy evaluation only"
+          - "Move stage-entry policy checks from _execute_stage into new class"
+          - "graph.py delegates to ExecutionPolicyService; no logic duplication"
+        test_command: '.venv\Scripts\python.exe -m pytest -m unit -q --tb=short'
+        test_must_pass: true
+
+      phase_2:
+        status: "COMPLETE"  # commit 13ffa6a — DEV lane 216/0, CI gate PASSED, 9/9 sep checks
+        goal: "Extract SideEffectAdapter — isolate I/O calls behind adapter interface"
+        scope:
+          - "GraphSideEffectsOrchestrator call sites in execute()"
+          - "receipt chain, capability freeze, execution witness writes"
+        actions:
+          - "Create dadbot/core/side_effect_adapter.py with explicit adapter interface"
+          - "Replace scattered side-effect calls in graph.py with adapter.call()"
+          - "No new state reads inside adapter — receives values, does not query context"
+        test_command: '.venv\Scripts\python.exe -m pytest -m unit -q --tb=short'
+        test_must_pass: true
+
+      phase_3:
+        status: "COMPLETE"  # commit babb3c6
+        goal: "Thin dispatcher — graph.py becomes delegation-only facade"
+        scope:
+          - "execute() entry point"
+          - "_lg_node_executor closure"
+        actions:
+          - "execute() calls: policy → lg_dispatch → adapter.flush(); no inline logic"
+          - "Remove all state mutation from graph.py itself"
+          - "Score target: <= 6 after phase 3 completes"
+        test_command: '.venv\Scripts\python.exe -m pytest -m unit -q --tb=short'
+        test_must_pass: true
+
+    post_checks:
+      - command: '.venv\Scripts\python.exe -m pytest -m unit -q --tb=short'
+        must_pass: true
+        description: "Full DEV lane still green"
+      - command: '.venv\Scripts\python.exe -m pytest -m integration -q --tb=short'
+        must_pass: true
+        description: "Integration slice passes"
+      - command: '.venv\Scripts\python.exe _ci_gate_check.py --post-module dadbot.core.graph'
+        must_pass: true
+        description: "CI gate: no new import cycles vs baseline"
+
+    known_test_files:
+      - "tests/unit/test_graph.py"
+      - "tests/integration/test_graph_integration.py"
+
+    known_dependencies_on_this_module:
+      # Other modules that import graph — do NOT break their interfaces
+      - "dadbot.core.orchestrator"
+      - "dadbot.core.control_plane"
+
+    gate_to_next: "post_checks must all pass; position 2 may not start until position 1 is status=complete"
+    status: "COMPLETE"  # commits 27d52b5 (P1), 13ffa6a (P2), babb3c6 (P3)
+
+  # ─── MODULE 2 ──────────────────────────────────────────────────────────────
+  - position: 2
+    name: "dadbot.core.orchestrator"
+    path: "dadbot/core/orchestrator.py"
+    score: 10
+    signals:
+      size_lines: 165
+      coupling_score: 8
+      category: "orchestration_control_module"
+      responsibilities:
+        - orchestration
+        - state_mutation
+        - multi_responsibility
+
+    branch_name: "refactor/group-01-orchestrator"
+    rollback_tag: "rollback/group1/orchestrator"
+
+    rollback_procedure:
+      tag_command: "git tag rollback/group1/orchestrator HEAD"
+      restore_command: "git checkout rollback/group1/orchestrator -- dadbot/core/orchestrator.py"
+      note: "Orchestrator wraps graph — only refactor AFTER position 1 is complete."
+
+    pre_checks:
+      - command: '.venv\Scripts\python.exe -m pytest -m unit -q --tb=short'
+        must_pass: true
+        description: "DEV lane green before starting"
+      - command: '.venv\Scripts\python.exe _ci_gate_check.py --pre-module dadbot.core.orchestrator'
+        must_pass: true
+        description: "CI gate: position 1 status must be complete"
+
+    refactor_phases:
+      phase_1:
+        goal: "Extract JobBuilder — isolate TurnContext/trace_id construction"
+        scope:
+          - "_execute_job() method — context-building block only"
+        actions:
+          - "Create dadbot/core/job_builder.py: builds TurnContext from job input"
+          - "orchestrator._execute_job() calls job_builder.build(job) → context"
+          - "No policy logic in JobBuilder; pure data assembly"
+        test_command: '.venv\Scripts\python.exe -m pytest -m unit -q --tb=short'
+        test_must_pass: true
+
+      phase_2:
+        goal: "Extract TraceBinder — separate bind_execution_trace concern"
+        scope:
+          - "bind_execution_trace call in _execute_job"
+        actions:
+          - "TraceBinder wraps trace lifecycle: bind, validate trace_id, release"
+          - "orchestrator._execute_job() delegates to trace_binder.bind(context)"
+        test_command: '.venv\Scripts\python.exe -m pytest -m unit -q --tb=short'
+        test_must_pass: true
+
+      phase_3:
+        goal: "Thin orchestrator — DadBotOrchestrator is routing-only"
+        scope:
+          - "handle_turn → submit_turn dispatch"
+          - "__init__ construction"
+        actions:
+          - "orchestrator only holds: graph ref, control_plane ref, job_builder ref, trace_binder ref"
+          - "handle_turn: build job → submit; zero inline logic"
+          - "Score target: <= 4 after phase 3"
+        test_command: '.venv\Scripts\python.exe -m pytest -m unit -q --tb=short'
+        test_must_pass: true
+
+    post_checks:
+      - command: '.venv\Scripts\python.exe -m pytest -m unit -q --tb=short'
+        must_pass: true
+        description: "Full DEV lane still green"
+      - command: '.venv\Scripts\python.exe -m pytest -m integration -q --tb=short'
+        must_pass: true
+        description: "Integration slice passes"
+      - command: '.venv\Scripts\python.exe _ci_gate_check.py --post-module dadbot.core.orchestrator'
+        must_pass: true
+        description: "CI gate: no new import cycles"
+
+    known_test_files:
+      - "tests/unit/test_orchestrator.py"
+      - "tests/integration/test_orchestrator_integration.py"
+
+    known_dependencies_on_this_module:
+      - "Dad.py"
+      - "dadbot/core/control_plane.py"
+
+    gate_to_next: "post_checks must all pass; position 3 may not start until position 2 is status=complete"
+    status: "pending"
+
+  # ─── MODULE 3 ──────────────────────────────────────────────────────────────
+  - position: 3
+    name: "system_audit"
+    path: "system_audit.py"
+    score: 9
+    signals:
+      size_lines: 856
+      coupling_score: 10
+      category: "audit_certification_module"
+      responsibilities:
+        - io_calls
+        - multi_responsibility
+        - monolith_size
+
+    branch_name: "refactor/group-01-system-audit"
+    rollback_tag: "rollback/group1/system-audit"
+
+    rollback_procedure:
+      tag_command: "git tag rollback/group1/system-audit HEAD"
+      restore_command: "git checkout rollback/group1/system-audit -- system_audit.py"
+      note: "system_audit is fully isolated from the other Group 1 modules — safe to proceed independently after position 2."
+
+    pre_checks:
+      - command: '.venv\Scripts\python.exe -m pytest -m unit -q --tb=short'
+        must_pass: true
+        description: "DEV lane green before starting"
+      - command: '.venv\Scripts\python.exe _ci_gate_check.py --pre-module system_audit'
+        must_pass: true
+        description: "CI gate: position 2 status must be complete"
+
+    refactor_phases:
+      phase_1:
+        goal: "Separate audit runners from report formatters"
+        scope:
+          - "All check/scan functions that produce raw result dicts"
+          - "All render/format functions that produce strings/markdown"
+        actions:
+          - "Create audit_runners.py: pure check functions, no I/O, return dicts"
+          - "Create audit_reporter.py: format functions, receive dicts, produce output"
+          - "system_audit.py imports and delegates — no logic duplication"
+        test_command: '.venv\Scripts\python.exe -m pytest -m unit -q --tb=short'
+        test_must_pass: true
+
+      phase_2:
+        goal: "Extract AuditRegistry — decouple check registration from execution"
+        scope:
+          - "check dispatch map / runner selection logic"
+        actions:
+          - "AuditRegistry holds check_name → runner function mapping"
+          - "system_audit.py iterates registry; adds no new check logic itself"
+        test_command: '.venv\Scripts\python.exe -m pytest -m unit -q --tb=short'
+        test_must_pass: true
+
+      phase_3:
+        goal: "Thin audit entrypoint"
+        scope:
+          - "main() / CLI entry in system_audit.py"
+        actions:
+          - "system_audit.py: parse args → registry.run(selected) → reporter.output()"
+          - "Score target: <= 4 after phase 3"
+        test_command: '.venv\Scripts\python.exe -m pytest -m unit -q --tb=short'
+        test_must_pass: true
+
+    post_checks:
+      - command: '.venv\Scripts\python.exe -m pytest -m unit -q --tb=short'
+        must_pass: true
+        description: "Full DEV lane still green"
+      - command: '.venv\Scripts\python.exe _ci_gate_check.py --post-module system_audit'
+        must_pass: true
+        description: "CI gate: no new import cycles"
+
+    known_test_files:
+      - "tests/unit/test_system_audit.py"
+      - "tests/integration/test_system_audit_integration.py"
+
+    known_dependencies_on_this_module:
+      - "tools/cert_baseline_capture.py"
+
+    gate_to_next: "post_checks must all pass; position 4 may not start until position 3 is status=complete"
+    status: "pending"
+
+  # ─── MODULE 4 ──────────────────────────────────────────────────────────────
+  - position: 4
+    name: "dadbot.services.turn_service"
+    path: "dadbot/services/turn_service.py"
+    score: 9
+    signals:
+      size_lines: 1451
+      coupling_score: 8
+      category: "critical_god_module"
+      responsibilities:
+        - state_mutation
+        - io_calls
+        - multi_responsibility
+        - monolith_size
+
+    branch_name: "refactor/group-01-turn-service"
+    rollback_tag: "rollback/group1/turn-service"
+
+    rollback_procedure:
+      tag_command: "git tag rollback/group1/turn-service HEAD"
+      restore_command: "git checkout rollback/group1/turn-service -- dadbot/services/turn_service.py"
+      note: "Largest service in Group 1; most risk. Do NOT start until positions 1-3 are complete and regression is green."
+
+    pre_checks:
+      - command: '.venv\Scripts\python.exe -m pytest -m unit -q --tb=short'
+        must_pass: true
+        description: "DEV lane green before starting"
+      - command: '.venv\Scripts\python.exe _ci_gate_check.py --pre-module dadbot.services.turn_service'
+        must_pass: true
+        description: "CI gate: positions 1-3 must ALL be status=complete"
+
+    refactor_phases:
+      phase_1:
+        goal: "Extract LLMCallAdapter — isolate all LLM I/O behind single boundary"
+        scope:
+          - "All call_ollama_* / model call sites in turn_service"
+        actions:
+          - "Create dadbot/services/llm_call_adapter.py with explicit input/output types"
+          - "turn_service receives LLMCallAdapter via constructor; no direct model calls"
+          - "No state mutation in LLMCallAdapter — receives payload, returns response"
+        test_command: '.venv\Scripts\python.exe -m pytest -m unit -q --tb=short'
+        test_must_pass: true
+
+      phase_2:
+        goal: "Extract TurnStateMutator — isolate all context/memory state writes"
+        scope:
+          - "All state mutation helpers writing to memory, context, or session"
+        actions:
+          - "Create dadbot/services/turn_state_mutator.py: owns all write operations"
+          - "turn_service calls mutator.apply(event) — no direct dict/attribute writes"
+          - "Preserves Wave-5 determinism: mutation order must not change"
+        test_command: '.venv\Scripts\python.exe -m pytest -m unit -q --tb=short'
+        test_must_pass: true
+
+      phase_3:
+        goal: "Thin turn_service — becomes pipeline router only"
+        scope:
+          - "Primary service entry method(s)"
+        actions:
+          - "turn_service orchestrates: build input → llm_adapter.call → mutator.apply → return"
+          - "No business logic inline in service method"
+          - "Score target: <= 5 after phase 3"
+        test_command: '.venv\Scripts\python.exe -m pytest -m unit -q --tb=short'
+        test_must_pass: true
+
+    post_checks:
+      - command: '.venv\Scripts\python.exe -m pytest -m unit -q --tb=short'
+        must_pass: true
+        description: "Full DEV lane still green"
+      - command: '.venv\Scripts\python.exe -m pytest -m integration -q --tb=short'
+        must_pass: true
+        description: "Integration slice passes"
+      - command: '.venv\Scripts\python.exe _ci_gate_check.py --post-module dadbot.services.turn_service'
+        must_pass: true
+        description: "CI gate: no new import cycles; full group 1 complete check"
+
+    known_test_files:
+      - "tests/unit/test_turn_service.py"
+      - "tests/integration/test_turn_service_integration.py"
+
+    known_dependencies_on_this_module:
+      - "dadbot/core/graph.py"
+      - "dadbot/core/orchestrator.py"
+
+    gate_to_next: "post_checks must all pass; this is the final module in Group 1"
+    status: "pending"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HARD GATE — Group 2 cannot start until ALL of the following are true
+# ─────────────────────────────────────────────────────────────────────────────
+group_2_hard_gate:
+  description: >
+    Group 2 is LOCKED until every condition below is explicitly confirmed.
+    Run `python _ci_gate_check.py --group-gate 1` to evaluate.
+  conditions:
+    - id: "all_modules_complete"
+      description: "All 4 Group 1 modules have status=complete in this file"
+      check: "group1_modules_all_complete"
+
+    - id: "dev_lane_green"
+      description: "DEV lane passes at >= baseline count (216) with 0 failures"
+      check: "dev_lane_passes"
+      command: '.venv\Scripts\python.exe -m pytest -m unit -q --tb=short'
+      expected_result: "0 failed"
+
+    - id: "integration_lane_green"
+      description: "Integration lane passes with 0 failures"
+      check: "integration_lane_passes"
+      command: '.venv\Scripts\python.exe -m pytest -m integration -q --tb=short'
+      expected_result: "0 failed"
+
+    - id: "no_new_cycles"
+      description: "Dependency graph has no new import cycles vs baseline snapshot"
+      check: "no_new_import_cycles"
+      command: '.venv\Scripts\python.exe _ci_gate_check.py --cycle-check'
+
+    - id: "no_parallel_branches"
+      description: "No other group refactor branches exist alongside group-01 branches"
+      check: "no_parallel_group_branches"
+      command: '.venv\Scripts\python.exe _ci_gate_check.py --no-parallel-groups'
+
+    - id: "langgraph_boundary_work_not_started"
+      description: "No LangGraph boundary expansion commits exist on any open branch"
+      check: "no_langgraph_boundary_expansion"
+      note: "Manual confirmation required — do not automate away this human gate."
+
+  failure_action: "BLOCK — do not proceed to Group 2 under any condition"
+  gate_owner: "pipeline lead (human)"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REFERENCE — what Group 2 contains (informational only — DO NOT ACT YET)
+# ─────────────────────────────────────────────────────────────────────────────
+group_2_preview:
+  note: "This section is READ-ONLY until the hard gate above passes."
+  modules_count: 15
+  highest_score: 8
+  see: "refactor_backlog.yaml — group_2_high_risk"

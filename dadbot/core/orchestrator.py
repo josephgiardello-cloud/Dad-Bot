@@ -8,7 +8,8 @@ from typing import Any, cast
 from dadbot.contracts import AttachmentList, FinalizedTurnResult
 from dadbot.core.control_plane import ExecutionControlPlane, ExecutionJob, SessionRegistry
 from dadbot.core.graph import TurnContext, TurnGraph
-from dadbot.core.execution_trace_context import ExecutionTraceRecorder, bind_execution_trace
+from dadbot.core.job_builder import JobBuilder
+from dadbot.core.trace_binder import TraceBinder
 from dadbot.core.interfaces import HealthService, InferenceService, validate_pipeline_services
 from dadbot.registry import ServiceRegistry, boot_registry
 
@@ -43,6 +44,8 @@ class DadBotOrchestrator:
         if checkpointer is not None and storage is not None and callable(getattr(storage, "set_checkpointer", None)):
             storage.set_checkpointer(checkpointer)
 
+        self._job_builder = JobBuilder()
+        self._trace_binder = TraceBinder()
         self.graph = self._build_turn_graph()
         self.control_plane = ExecutionControlPlane(
             registry=SessionRegistry(),
@@ -72,20 +75,16 @@ class DadBotOrchestrator:
         session_id: str,
         metadata: dict[str, Any] | None,
     ) -> TurnContext:
-        md = dict(metadata or {})
-        trace_id = str(md.get("trace_id") or "")
-        context_kwargs: dict[str, Any] = {
-            "user_input": user_input,
-            "attachments": attachments,
-            "metadata": {"session_id": str(session_id or "default"), **md},
-        }
-        if trace_id:
-            context_kwargs["trace_id"] = trace_id
-        context = TurnContext(**context_kwargs)
-        return context
+        """Backward-compat shim — delegates to JobBuilder.build."""
+        return self._job_builder.build(
+            user_input=user_input,
+            attachments=attachments,
+            session_id=session_id,
+            metadata=metadata,
+        )
 
     async def _execute_job(self, session: dict[str, Any], job: ExecutionJob) -> FinalizedTurnResult:
-        context = self._build_turn_context(
+        context = self._job_builder.build(
             user_input=str(job.user_input or ""),
             attachments=job.attachments,
             session_id=str(job.session_id or "default"),
@@ -94,14 +93,15 @@ class DadBotOrchestrator:
         if not context.trace_id:
             raise RuntimeError("TurnContext.trace_id must be non-empty")
 
-        recorder = ExecutionTraceRecorder(
+        async def _run() -> FinalizedTurnResult:
+            return await self.graph.execute(context)
+
+        result = await self._trace_binder.run(
             trace_id=context.trace_id,
             prompt=str(job.user_input or ""),
             metadata={"session_id": str(job.session_id or "default")},
+            fn=_run,
         )
-
-        with bind_execution_trace(recorder, required=False):
-            result = await self.graph.execute(context)
 
         self._last_turn_context = context
         state = session.setdefault("state", {})
