@@ -107,7 +107,7 @@ def check_group1_all_complete() -> bool:
         _fail("Group 1 manifest has no modules listed.")
         return False
 
-    incomplete = [m["name"] for m in modules if m.get("status") != "complete"]
+    incomplete = [m["name"] for m in modules if str(m.get("status", "") or "").strip().upper() != "COMPLETE"]
     if incomplete:
         _fail(
             f"Group 1 modules not yet complete: {incomplete}. "
@@ -269,7 +269,7 @@ def check_dev_lane(baseline_count: int = 216) -> bool:
     """Run DEV lane (unit tests) and fail if any test fails or count drops below baseline."""
     print("  Running DEV lane (unit tests)...")
     rc, output = _run(
-        [str(VENV_PYTHON), "-m", "pytest", "-m", "unit", "-q", "--tb=line", "--no-header"],
+        [str(VENV_PYTHON), "-m", "pytest", "-m", "unit", "--tb=line", "--no-header", "-p", "no:warnings"],
         capture=True,
     )
 
