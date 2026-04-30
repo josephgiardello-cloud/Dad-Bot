@@ -59,7 +59,6 @@ from dadbot.core.graph_temporal import (  # re-export temporal types
     _PHASE_ORDER,
 )
 from dadbot.core.graph_types import (  # re-export trace/op types
-    ExecutionTraceEvent,
     GoalMutationOp,
     LedgerMutationOp,
     MemoryMutationOp,
@@ -72,7 +71,6 @@ from dadbot.core.graph_types import (  # re-export trace/op types
     _json_safe,
 )
 from dadbot.core.graph_mutation import (  # re-export mutation primitives
-    SAVE_NODE_COMMIT_CONTRACT,
     MutationGuard,
     MutationIntent,
     MutationQueue,
@@ -91,6 +89,7 @@ from dadbot.core.graph_pipeline_nodes import (  # re-export pipeline node stubs
     SafetyNode,
     SaveNode,
     TemporalNode,
+    _invoke_node_run_compat,
 )
 
 logger = logging.getLogger(__name__)
@@ -572,9 +571,14 @@ class TurnGraph:
         )
 
         async def _call_node() -> TurnContext:
-            if callable(getattr(node, "run", None)):
-                result = await node.run(turn_context)
-                return result or turn_context
+            run_method = getattr(node, "run", None)
+            if callable(run_method):
+                result = await _invoke_node_run_compat(
+                    run_method,
+                    self.registry,
+                    turn_context,
+                )
+                return cast("TurnContext", result or turn_context)
             execute_method = getattr(node, "execute", None)
             if callable(execute_method):
                 await cast("Any", execute_method)(self.registry, turn_context)

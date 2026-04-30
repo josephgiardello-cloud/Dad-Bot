@@ -296,7 +296,7 @@ class FaultBoundary:
             self._injector.check(self._name)
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
+    def __exit__(self, exc_type, exc_val, _exc_tb) -> bool:
         if exc_val is None:
             return False
         c = classify_error(exc_val)

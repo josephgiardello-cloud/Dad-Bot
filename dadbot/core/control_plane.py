@@ -13,6 +13,7 @@ from dadbot.core.execution_lease import ExecutionLease, LeaseConflictError
 from dadbot.core.execution_ledger import ExecutionLedger
 from dadbot.core.execution_ledger_memory import InMemoryExecutionLedger
 from dadbot.core.ledger_reader import LedgerReader
+from dadbot.core.ledger_writer import LedgerWriter
 from dadbot.core.ledger_writer_adapter import LedgerWriterAdapter
 from dadbot.core.observability import get_exporter, get_metrics, get_tracer
 from dadbot.core.recovery_manager import RecoveryManager

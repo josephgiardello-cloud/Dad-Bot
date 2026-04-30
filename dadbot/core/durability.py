@@ -376,7 +376,7 @@ class _Transaction:
         )
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+    def __exit__(self, exc_type, exc_val, _exc_tb) -> None:
         if exc_type is None:
             self._writer.write_event(
                 event_type=UNIT_COMMIT_TYPE,

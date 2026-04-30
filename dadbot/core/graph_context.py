@@ -58,6 +58,8 @@ class TurnContext:
     state: dict[str, Any] = field(default_factory=dict)
     # Correlation ID propagated through all log/telemetry calls for this turn.
     trace_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    kernel_step_id: str = ""
+    determinism_manifest: dict[str, Any] = field(default_factory=dict)
     # Ordered per-stage timing records appended by TurnGraph.execute().
     stage_traces: list[StageTrace] = field(default_factory=list)
     # Deterministic state-machine phase for this turn.

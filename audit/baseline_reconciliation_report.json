@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-04-30T20:04:01.669508+00:00",
+  "generated_at": "2026-04-30T20:34:03.942678+00:00",
   "bucket_labels": {
     "A": "real_regression",
     "B": "migration_inflation",
@@ -33,7 +33,7 @@
           "decision_points": 59
         },
         "dadbot/core/nodes.py": {
-          "loc": 1210,
+          "loc": 1211,
           "cc_total": 384,
           "cc_max": 20,
           "decision_points": 117
@@ -45,7 +45,7 @@
           "decision_points": 151
         },
         "dadbot/core/orchestrator.py": {
-          "loc": 330,
+          "loc": 331,
           "cc_total": 94,
           "cc_max": 15,
           "decision_points": 20
@@ -88,11 +88,11 @@
         },
         {
           "file": "dadbot/core/nodes.py",
-          "loc": 1210,
+          "loc": 1211,
           "cc_total": 384,
           "cc_max": 20,
           "decision_points": 130,
-          "baseline_loc": 1210,
+          "baseline_loc": 1211,
           "baseline_cc_total": 384,
           "baseline_dp": 130,
           "violations": []
@@ -110,11 +110,11 @@
         },
         {
           "file": "dadbot/core/orchestrator.py",
-          "loc": 330,
+          "loc": 331,
           "cc_total": 94,
           "cc_max": 15,
           "decision_points": 25,
-          "baseline_loc": 330,
+          "baseline_loc": 331,
           "baseline_cc_total": 94,
           "baseline_dp": 25,
           "violations": []

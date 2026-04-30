@@ -9,6 +9,7 @@ All names are re-exported from dadbot.core.graph for backward compatibility.
 """
 from __future__ import annotations
 
+import inspect
 import logging
 from typing import Any, Protocol
 
@@ -35,6 +36,14 @@ class _NodeContractMixin:
 
     async def run(self, registry: Any, ctx: TurnContext) -> None:
         await self.execute(registry, ctx)
+
+
+async def _invoke_node_run_compat(run_method: Any, registry: Any, turn_context: TurnContext) -> Any:
+    run_params = inspect.signature(run_method).parameters
+    result = run_method(registry, turn_context) if len(run_params) >= 2 else run_method(turn_context)
+    if inspect.isawaitable(result):
+        result = await result
+    return result
 
 
 class HealthNode(_NodeContractMixin):
