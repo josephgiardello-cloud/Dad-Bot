@@ -1,4 +1,5 @@
-﻿"""Runtime health monitoring, adaptive pressure management, and hardware optimization."""
+"""Runtime health monitoring, adaptive pressure management, and hardware optimization."""
+
 from __future__ import annotations
 
 import logging
@@ -16,7 +17,15 @@ class RuntimeHealthManager:
 
     # â”€â”€ Issue tracking â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-    def record_runtime_issue(self, purpose, fallback, exc=None, *, level=logging.WARNING, metadata=None):
+    def record_runtime_issue(
+        self,
+        purpose,
+        fallback,
+        exc=None,
+        *,
+        level=logging.WARNING,
+        metadata=None,
+    ):
         summary = self.bot.ollama_error_summary(exc) if exc is not None else ""
         level_name = logging.getLevelName(level)
         if not isinstance(level_name, str):
@@ -33,9 +42,20 @@ class RuntimeHealthManager:
         if recent is not None:
             recent.append(issue)
         if summary:
-            logger.log(level, "%s degraded: %s. Fallback: %s", issue["purpose"], summary, issue["fallback"])
+            logger.log(
+                level,
+                "%s degraded: %s. Fallback: %s",
+                issue["purpose"],
+                summary,
+                issue["fallback"],
+            )
         else:
-            logger.log(level, "%s degraded. Fallback: %s", issue["purpose"], issue["fallback"])
+            logger.log(
+                level,
+                "%s degraded. Fallback: %s",
+                issue["purpose"],
+                issue["fallback"],
+            )
 
     def recent_runtime_issues(self, limit=3):
         try:
@@ -77,10 +97,22 @@ class RuntimeHealthManager:
             }
         return dict(stats)
 
-    def record_memory_context_stats(self, *, tokens, budget_tokens, selected_sections, total_sections, pruned, user_input=""):
+    def record_memory_context_stats(
+        self,
+        *,
+        tokens,
+        budget_tokens,
+        selected_sections,
+        total_sections,
+        pruned,
+        user_input="",
+    ):
         self.bot._last_memory_context_stats = {
             "tokens": max(0, int(tokens or 0)),
-            "budget_tokens": max(1, int(budget_tokens or self.bot.CONTEXT_TOKEN_BUDGET or 1)),
+            "budget_tokens": max(
+                1,
+                int(budget_tokens or self.bot.CONTEXT_TOKEN_BUDGET or 1),
+            ),
             "selected_sections": max(0, int(selected_sections or 0)),
             "total_sections": max(0, int(total_sections or 0)),
             "pruned": bool(pruned),
@@ -104,12 +136,23 @@ class RuntimeHealthManager:
                 continue
             normalized.append(
                 {
-                    "recorded_at": str(item.get("recorded_at") or item.get("updated_at") or self.bot.runtime_timestamp()).strip(),
+                    "recorded_at": str(
+                        item.get("recorded_at") or item.get("updated_at") or self.bot.runtime_timestamp(),
+                    ).strip(),
                     "level": str(item.get("level") or "green").strip().lower() or "green",
-                    "memory_context_ratio": max(0.0, float(item.get("memory_context_ratio", 0.0) or 0.0)),
-                    "prompt_guard_trim_count": max(0, int(item.get("prompt_guard_trim_count", 0) or 0)),
-                    "recent_runtime_issue_count": max(0, int(item.get("recent_runtime_issue_count", 0) or 0)),
-                }
+                    "memory_context_ratio": max(
+                        0.0,
+                        float(item.get("memory_context_ratio", 0.0) or 0.0),
+                    ),
+                    "prompt_guard_trim_count": max(
+                        0,
+                        int(item.get("prompt_guard_trim_count", 0) or 0),
+                    ),
+                    "recent_runtime_issue_count": max(
+                        0,
+                        int(item.get("recent_runtime_issue_count", 0) or 0),
+                    ),
+                },
             )
         return normalized
 
@@ -119,13 +162,25 @@ class RuntimeHealthManager:
         point = {
             "recorded_at": self.bot.runtime_timestamp(),
             "level": str(snapshot.get("level") or "green").strip().lower() or "green",
-            "memory_context_ratio": round(max(0.0, float(snapshot.get("memory_context_ratio", 0.0) or 0.0)), 3),
-            "prompt_guard_trim_count": max(0, int(snapshot.get("prompt_guard_trim_count", 0) or 0)),
-            "recent_runtime_issue_count": max(0, int(snapshot.get("recent_runtime_issue_count", 0) or 0)),
+            "memory_context_ratio": round(
+                max(0.0, float(snapshot.get("memory_context_ratio", 0.0) or 0.0)),
+                3,
+            ),
+            "prompt_guard_trim_count": max(
+                0,
+                int(snapshot.get("prompt_guard_trim_count", 0) or 0),
+            ),
+            "recent_runtime_issue_count": max(
+                0,
+                int(snapshot.get("recent_runtime_issue_count", 0) or 0),
+            ),
         }
         history = list(self.health_history(limit=max_points))
         history.append(point)
-        self.bot.mutate_memory_store(health_history=history[-max(8, int(max_points or 240)):], save=False)
+        self.bot.mutate_memory_store(
+            health_history=history[-max(8, int(max_points or 240)) :],
+            save=False,
+        )
 
     # â”€â”€ Adaptive budgets â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -151,8 +206,15 @@ class RuntimeHealthManager:
 
     def adaptive_background_worker_limit(self, health_snapshot=None):
         if health_snapshot is None:
-            health_snapshot = self.current_runtime_health_snapshot(log_warnings=False, persist=False, max_age_seconds=60)
-        base_limit = max(2, int(getattr(self.bot, "_base_background_worker_limit", 12) or 12))
+            health_snapshot = self.current_runtime_health_snapshot(
+                log_warnings=False,
+                persist=False,
+                max_age_seconds=60,
+            )
+        base_limit = max(
+            2,
+            int(getattr(self.bot, "_base_background_worker_limit", 12) or 12),
+        )
         if not self.bot.LIGHT_MODE:
             return base_limit
         level = "green"
@@ -166,14 +228,23 @@ class RuntimeHealthManager:
 
     def should_delay_noncritical_maintenance(self, health_snapshot=None):
         if health_snapshot is None:
-            health_snapshot = self.current_runtime_health_snapshot(log_warnings=False, persist=False, max_age_seconds=60)
+            health_snapshot = self.current_runtime_health_snapshot(
+                log_warnings=False,
+                persist=False,
+                max_age_seconds=60,
+            )
         level = "green"
         if isinstance(health_snapshot, dict):
             level = str(health_snapshot.get("level") or "green").strip().lower() or "green"
         return level == "red" or (level == "yellow" and self.bot.LIGHT_MODE)
 
     def adaptive_memory_context_budget(self, baseline_budget):
-        return max(96, int(max(1, int(baseline_budget or 1)) * self.adaptive_prompt_pressure_factor()))
+        return max(
+            96,
+            int(
+                max(1, int(baseline_budget or 1)) * self.adaptive_prompt_pressure_factor(),
+            ),
+        )
 
     # â”€â”€ Forecasting â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -207,7 +278,10 @@ class RuntimeHealthManager:
         memory_penalty = int(max(0.0, min(1.0, float(memory_ratio or 0.0))) * 22)
         trim_penalty = min(24, int(max(0, int(trim_count or 0)) * 0.8))
         issue_penalty = min(28, int(max(0, int(issue_count or 0)) * 8))
-        return max(0, min(100, base - memory_penalty - trim_penalty - issue_penalty + 8))
+        return max(
+            0,
+            min(100, base - memory_penalty - trim_penalty - issue_penalty + 8),
+        )
 
     @staticmethod
     def runtime_reasoning_confidence(level, memory_ratio, trim_count, issue_count):
@@ -225,31 +299,58 @@ class RuntimeHealthManager:
     def clarification_guidance(level, reasoning_confidence, trim_count, issue_count):
         normalized_level = str(level or "green").strip().lower() or "green"
         confidence = float(reasoning_confidence or 0.0)
-        clarification_needed = normalized_level == "red" or confidence < 0.55 or int(trim_count or 0) >= 8 or int(issue_count or 0) >= 2
+        clarification_needed = (
+            normalized_level == "red" or confidence < 0.55 or int(trim_count or 0) >= 8 or int(issue_count or 0) >= 2
+        )
         if not clarification_needed:
             return False, ""
         if normalized_level == "red":
-            return True, "Dad is under heavier runtime pressure right now. A short, specific clarification will keep the reply grounded."
+            return (
+                True,
+                "Dad is under heavier runtime pressure right now. A short, specific clarification will keep the reply grounded.",
+            )
         if int(issue_count or 0) >= 2:
-            return True, "Dad hit a couple runtime bumps. A quick restatement of what matters most will reduce drift."
+            return (
+                True,
+                "Dad hit a couple runtime bumps. A quick restatement of what matters most will reduce drift.",
+            )
         if int(trim_count or 0) >= 8:
-            return True, "Dad has been trimming context more than usual. A concise clarification will help preserve the important part."
-        return True, "Dad's reasoning confidence dipped a bit. A short clarification will help lock onto the right thread."
+            return (
+                True,
+                "Dad has been trimming context more than usual. A concise clarification will help preserve the important part.",
+            )
+        return (
+            True,
+            "Dad's reasoning confidence dipped a bit. A short clarification will help lock onto the right thread.",
+        )
 
     # â”€â”€ Hardware optimization â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     def hardware_optimization_status(self):
-        payload = self.bot.MEMORY_STORE.get("runtime_optimization", {}) if isinstance(self.bot.MEMORY_STORE, dict) else {}
+        payload = (
+            self.bot.MEMORY_STORE.get("runtime_optimization", {}) if isinstance(self.bot.MEMORY_STORE, dict) else {}
+        )
         if not isinstance(payload, dict):
-            return {"applied": False, "last_applied_at": None, "worker_limit": self.bot._base_background_worker_limit}
+            return {
+                "applied": False,
+                "last_applied_at": None,
+                "worker_limit": self.bot._base_background_worker_limit,
+            }
         return {
             "applied": bool(payload.get("applied", False)),
             "last_applied_at": payload.get("last_applied_at"),
-            "worker_limit": int(payload.get("worker_limit", self.bot._base_background_worker_limit) or self.bot._base_background_worker_limit),
+            "worker_limit": int(
+                payload.get("worker_limit", self.bot._base_background_worker_limit)
+                or self.bot._base_background_worker_limit,
+            ),
         }
 
     def suggest_hardware_optimization(self, health_snapshot=None):
-        snapshot = health_snapshot if isinstance(health_snapshot, dict) else self.current_runtime_health_snapshot(log_warnings=False, persist=False)
+        snapshot = (
+            health_snapshot
+            if isinstance(health_snapshot, dict)
+            else self.current_runtime_health_snapshot(log_warnings=False, persist=False)
+        )
         level = str(snapshot.get("level") or "green").strip().lower() or "green"
         recommended = level in {"yellow", "red"}
         worker_limit = self.adaptive_background_worker_limit(snapshot)
@@ -270,7 +371,13 @@ class RuntimeHealthManager:
                 "worker_limit": self.bot._base_background_worker_limit,
                 "prompt_budget_factor": suggestion.get("prompt_budget_factor", 1.0),
             }
-        self.bot._base_background_worker_limit = max(1, int(suggestion.get("worker_limit", self.bot._base_background_worker_limit) or self.bot._base_background_worker_limit))
+        self.bot._base_background_worker_limit = max(
+            1,
+            int(
+                suggestion.get("worker_limit", self.bot._base_background_worker_limit)
+                or self.bot._base_background_worker_limit,
+            ),
+        )
         self.bot.set_health_quiet_mode(True, save=False)
         self.bot.mutate_memory_store(
             runtime_optimization={
@@ -287,17 +394,32 @@ class RuntimeHealthManager:
 
     # â”€â”€ Main snapshot â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-    def current_runtime_health_snapshot(self, *, force=False, log_warnings=False, persist=False, max_age_seconds=None):
+    def current_runtime_health_snapshot(
+        self,
+        *,
+        force=False,
+        log_warnings=False,
+        persist=False,
+        max_age_seconds=None,
+    ):
         now = time.monotonic()
         if max_age_seconds is None:
-            max_age_seconds = max(30, int(getattr(self.bot, "_health_snapshot_interval_seconds", 300) or 300))
+            max_age_seconds = max(
+                30,
+                int(getattr(self.bot, "_health_snapshot_interval_seconds", 300) or 300),
+            )
         else:
             max_age_seconds = max(0, int(max_age_seconds or 0))
         cached = getattr(self.bot, "_cached_runtime_health_snapshot", None)
-        last = float(getattr(self.bot, "_last_runtime_health_snapshot_monotonic", 0.0) or 0.0)
+        last = float(
+            getattr(self.bot, "_last_runtime_health_snapshot_monotonic", 0.0) or 0.0,
+        )
         if not force and isinstance(cached, dict) and (now - last) <= max_age_seconds:
             return dict(cached)
-        snapshot = self.runtime_health_snapshot(log_warnings=log_warnings, persist=persist)
+        snapshot = self.runtime_health_snapshot(
+            log_warnings=log_warnings,
+            persist=persist,
+        )
         self.bot._cached_runtime_health_snapshot = dict(snapshot)
         self.bot._last_runtime_health_snapshot_monotonic = now
         return dict(snapshot)
@@ -327,29 +449,54 @@ class RuntimeHealthManager:
         warnings = []
         if memory_ratio >= 0.95:
             level = "red"
-            warnings.append("Dad is working a bit hard today - memory context is near the model limit.")
+            warnings.append(
+                "Dad is working a bit hard today - memory context is near the model limit.",
+            )
         elif memory_ratio >= 0.85 and level == "green":
             level = "yellow"
-            warnings.append("Dad is getting close to the memory limit and may prune more often.")
+            warnings.append(
+                "Dad is getting close to the memory limit and may prune more often.",
+            )
         if trim_count >= 20:
             level = "red"
-            warnings.append("Dad trimmed prompts a lot today - consider clearing older memories.")
+            warnings.append(
+                "Dad trimmed prompts a lot today - consider clearing older memories.",
+            )
         elif trim_count >= 5 and level == "green":
             level = "yellow"
             warnings.append("Dad has started trimming prompts more than usual.")
         if issue_count >= 3:
             level = "red"
-            warnings.append("Dad hit multiple runtime bumps, but fallback safety is active.")
+            warnings.append(
+                "Dad hit multiple runtime bumps, but fallback safety is active.",
+            )
         elif issue_count >= 1 and level == "green":
             level = "yellow"
-            warnings.append("Dad saw a small runtime hiccup and switched to fallback behavior.")
+            warnings.append(
+                "Dad saw a small runtime hiccup and switched to fallback behavior.",
+            )
         adaptive_worker_limit = self.adaptive_background_worker_limit({"level": level})
         prompt_budget_factor = self.adaptive_prompt_pressure_factor()
-        delayed_noncritical = self.should_delay_noncritical_maintenance({"level": level})
-        quiet_mode_active = self.health_quiet_mode_enabled() and level in {"yellow", "red"}
+        delayed_noncritical = self.should_delay_noncritical_maintenance(
+            {"level": level},
+        )
+        quiet_mode_active = self.health_quiet_mode_enabled() and level in {
+            "yellow",
+            "red",
+        }
         projected_minutes_to_red = self.forecast_minutes_to_red()
-        health_score = self.runtime_health_score(level, memory_ratio, trim_count, issue_count)
-        reasoning_confidence = self.runtime_reasoning_confidence(level, memory_ratio, trim_count, issue_count)
+        health_score = self.runtime_health_score(
+            level,
+            memory_ratio,
+            trim_count,
+            issue_count,
+        )
+        reasoning_confidence = self.runtime_reasoning_confidence(
+            level,
+            memory_ratio,
+            trim_count,
+            issue_count,
+        )
         clarification_recommended, clarification_message = self.clarification_guidance(
             level,
             reasoning_confidence,
@@ -359,7 +506,9 @@ class RuntimeHealthManager:
         optimization = self.suggest_hardware_optimization({"level": level})
         optimization_state = self.hardware_optimization_status()
         if quiet_mode_active:
-            warnings.append("Quiet mode is active while Dad recovers, so proactive nudges are paused.")
+            warnings.append(
+                "Quiet mode is active while Dad recovers, so proactive nudges are paused.",
+            )
         snapshot = {
             "level": level,
             "warnings": warnings,
@@ -383,8 +532,14 @@ class RuntimeHealthManager:
             self.record_runtime_health_snapshot(snapshot)
         if log_warnings and warnings:
             now = time.monotonic()
-            last_logged = float(getattr(self.bot, "_last_runtime_health_log_monotonic", 0.0) or 0.0)
+            last_logged = float(
+                getattr(self.bot, "_last_runtime_health_log_monotonic", 0.0) or 0.0,
+            )
             if now - last_logged >= 60.0:
-                logger.warning("Runtime self-health is %s: %s", level, " | ".join(warnings))
+                logger.warning(
+                    "Runtime self-health is %s: %s",
+                    level,
+                    " | ".join(warnings),
+                )
                 self.bot._last_runtime_health_log_monotonic = now
         return snapshot

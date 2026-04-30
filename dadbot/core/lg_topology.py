@@ -14,13 +14,20 @@ No policy, mutation, recovery, retry, or execution logic lives here.
 All execution concerns are handled by Layer 2 (TurnGraph) via the
 ``node_executor`` callback.
 """
+
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from langgraph.graph import END, StateGraph
-from dadbot.core.topology_provider import NodeExecutorFn, TopologyProvider, TurnPipelineState
+
+from dadbot.core.topology_provider import (
+    NodeExecutorFn,
+    TopologyProvider,
+    TurnPipelineState,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +54,7 @@ def _route_after_stage(state: TurnPipelineState) -> str:
 # ---------------------------------------------------------------------------
 # Pipeline builder — declarative topology construction
 # ---------------------------------------------------------------------------
+
 
 class LangGraphTopologyProvider(TopologyProvider):
     """LangGraph-backed implementation of the TopologyProvider interface."""
@@ -101,6 +109,7 @@ def _build_turn_pipeline(
     Returns
     -------
     A compiled LangGraph runnable that supports ``.ainvoke(initial_state)``.
+
     """
     if not pipeline_items:
         raise ValueError("build_turn_pipeline: pipeline_items must be non-empty")
@@ -114,9 +123,11 @@ def _build_turn_pipeline(
     # would capture the loop variable by reference and resolve to the last
     # iteration's values.
     for stage_name, stage_node in pipeline_items:
+
         def _make_lg_node(sn: str = stage_name, node: Any = stage_node) -> Callable:
             async def _lg_node_fn(state: TurnPipelineState) -> dict:
                 return await node_executor(sn, node, state)
+
             _lg_node_fn.__name__ = f"lg_stage_{sn}"
             return _lg_node_fn
 

@@ -1,4 +1,4 @@
-﻿"""dadbot/core/dadbot.py — DadBot public facade.
+"""dadbot/core/dadbot.py — DadBot public facade.
 
 DadBot is intentionally thin.  Logic lives in dedicated managers held by
 ``self.services`` and in the five behaviour mixins:
@@ -17,10 +17,11 @@ The remaining body of this class is pure delegation plumbing:
     * model_port / ux_gateway properties (access private attrs set by boot mixin)
     * reset_session_state and two small turn-state helpers
 """
+
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, cast
 
 try:
     import ollama
@@ -31,7 +32,9 @@ from dadbot.core.action_mixin import DadBotActionMixin
 from dadbot.core.boot_mixin import DadBotBootMixin
 from dadbot.core.compat_mixin import DadBotCompatMixin
 from dadbot.core.convenience_mixin import DadBotConvenienceMixin
-from dadbot.core.facade_compat import DadBotFacadeCompat
+from dadbot.core.facade_compat import (
+    DadBotFacadeCompat,  # noqa: F401  # type: ignore[reportUnusedImport]
+)
 from dadbot.core.health_mixin import DadBotHealthMixin
 from dadbot.core.llm_mixin import DadBotLlmMixin
 from dadbot.core.mcp_mixin import DadBotMcpMixin
@@ -41,8 +44,7 @@ from dadbot.runtime.model import ModelPort
 
 if ollama is None:
     logging.getLogger(__name__).warning(
-        "ollama package is not installed; Ollama-backed features will be unavailable. "
-        "Install with: pip install ollama"
+        "ollama package is not installed; Ollama-backed features will be unavailable. Install with: pip install ollama",
     )
 
 logger = logging.getLogger(__name__)
@@ -91,7 +93,6 @@ class DadBot(
         "runtime_storage",
         "profile_runtime",
         "memory_manager",
-        "memory_query",
         "memory_coordinator",
         "long_term_signals",
         "relationship_manager",
@@ -104,6 +105,7 @@ class DadBot(
         "conversation_persistence",
         "session_summary_manager",
         "turn_service",
+        "memory_query",
         "memory_commands",
         "safety_support",
         "profile_context",
@@ -113,7 +115,7 @@ class DadBot(
         "model_runtime",
         "agentic_handler",
         "tool_registry",
-        "context_builder",
+        "context_service",
         "tone_context",
         "prompt_assembly",
         "runtime_client",
@@ -122,9 +124,7 @@ class DadBot(
         "mood_manager",
     )
 
-    _MANAGER_DELEGATE_CHAIN: tuple[str, ...] = (
-        _LEGACY_MANAGER_DELEGATE_CHAIN + _SERVICE_MANAGER_DELEGATE_CHAIN
-    )
+    _MANAGER_DELEGATE_CHAIN: tuple[str, ...] = _LEGACY_MANAGER_DELEGATE_CHAIN + _SERVICE_MANAGER_DELEGATE_CHAIN
 
     _CONFIG_ATTR_MAP: dict[str, str] = {
         "MODEL_NAME": "model_name",
@@ -234,7 +234,10 @@ class DadBot(
         runtime_state_attr = self.__class__._RUNTIME_STATE_ATTR_MAP.get(name)
         if runtime_state_attr is not None:
             try:
-                runtime_state_manager = object.__getattribute__(self, "runtime_state_manager")
+                runtime_state_manager = object.__getattribute__(
+                    self,
+                    "runtime_state_manager",
+                )
                 return getattr(runtime_state_manager, runtime_state_attr)
             except AttributeError:
                 pass
@@ -267,9 +270,11 @@ class DadBot(
             _val = getattr(_mgr, name, _sentinel)
             if _val is not _sentinel:
                 return _val
-        raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name!r}'")
+        raise AttributeError(
+            f"'{type(self).__name__}' object has no attribute '{name!r}'",
+        )
 
-    def __setattr__(self, name: str, value) -> None:
+    def __setattr__(self, name: str, value: Any) -> None:
         """Route mutations of config-mirrored names to self.config."""
         config_attr = self.__class__._CONFIG_ATTR_MAP.get(name)
         if config_attr is not None:
@@ -283,7 +288,10 @@ class DadBot(
         runtime_state_attr = self.__class__._RUNTIME_STATE_ATTR_MAP.get(name)
         if runtime_state_attr is not None:
             try:
-                runtime_state_manager = object.__getattribute__(self, "runtime_state_manager")
+                runtime_state_manager = object.__getattribute__(
+                    self,
+                    "runtime_state_manager",
+                )
                 setattr(runtime_state_manager, runtime_state_attr, value)
                 return
             except AttributeError:
@@ -300,7 +308,7 @@ class DadBot(
 
         object.__setattr__(self, name, value)
 
-    def _get_explicit_manager(self, name: str):
+    def _get_explicit_manager(self, name: str) -> Any:
         sentinel = object()
         value = self.__dict__.get(f"_{name}", sentinel)
         if value is not sentinel:
@@ -312,10 +320,10 @@ class DadBot(
                 return value
         raise AttributeError(name)
 
-    def _set_explicit_manager(self, name: str, value) -> None:
+    def _set_explicit_manager(self, name: str, value: Any) -> None:
         object.__setattr__(self, f"_{name}", value)
 
-    def _resolve_dependency(self, name: str, factory):
+    def _resolve_dependency(self, name: str, factory: Any) -> Any:
         """Resolve a runtime dependency from the optional injection registry."""
         registry = getattr(self, "_dependency_registry", None)
         candidate = None
@@ -332,23 +340,23 @@ class DadBot(
     # ------------------------------------------------------------------
 
     @property
-    def memory(self):
-        return self.services.memory_manager
+    def memory(self) -> Any:
+        return getattr(self.services, "memory_manager", None)
 
     @property
-    def relationship(self):
-        return self.services.relationship_manager
+    def relationship(self) -> Any:
+        return getattr(self.services, "relationship_manager", None)
 
     @property
     def mood(self) -> Any:
-        return self.services.mood_manager
+        return getattr(self.services, "mood_manager", None)
 
     @property
     def profile(self) -> Any:
-        return self.services.profile_runtime
+        return getattr(self.services, "profile_runtime", None)
 
     @property
-    def turn_orchestrator(self):
+    def turn_orchestrator(self) -> Any:
         return self.services.turn_orchestrator
 
     # ------------------------------------------------------------------
@@ -360,7 +368,7 @@ class DadBot(
         return self._get_explicit_manager("runtime_storage")
 
     @runtime_storage.setter
-    def runtime_storage(self, value):
+    def runtime_storage(self, value: Any):
         self._set_explicit_manager("runtime_storage", value)
 
     @property
@@ -368,7 +376,7 @@ class DadBot(
         return self._get_explicit_manager("profile_runtime")
 
     @profile_runtime.setter
-    def profile_runtime(self, value):
+    def profile_runtime(self, value: Any):
         self._set_explicit_manager("profile_runtime", value)
 
     @property
@@ -376,7 +384,7 @@ class DadBot(
         return self._get_explicit_manager("mood_manager")
 
     @mood_manager.setter
-    def mood_manager(self, value):
+    def mood_manager(self, value: Any):
         self._set_explicit_manager("mood_manager", value)
 
     @property
@@ -384,7 +392,7 @@ class DadBot(
         return self._get_explicit_manager("turn_service")
 
     @turn_service.setter
-    def turn_service(self, value):
+    def turn_service(self, value: Any):
         self._set_explicit_manager("turn_service", value)
 
     @property
@@ -392,7 +400,7 @@ class DadBot(
         return self._get_explicit_manager("reply_finalization")
 
     @reply_finalization.setter
-    def reply_finalization(self, value):
+    def reply_finalization(self, value: Any):
         self._set_explicit_manager("reply_finalization", value)
 
     @property
@@ -400,7 +408,7 @@ class DadBot(
         return self._get_explicit_manager("runtime_interface")
 
     @runtime_interface.setter
-    def runtime_interface(self, value):
+    def runtime_interface(self, value: Any):
         self._set_explicit_manager("runtime_interface", value)
 
     @property
@@ -408,7 +416,7 @@ class DadBot(
         return self._get_explicit_manager("status_reporting")
 
     @status_reporting.setter
-    def status_reporting(self, value):
+    def status_reporting(self, value: Any):
         self._set_explicit_manager("status_reporting", value)
 
     @property
@@ -416,7 +424,7 @@ class DadBot(
         return self._get_explicit_manager("model_runtime")
 
     @model_runtime.setter
-    def model_runtime(self, value):
+    def model_runtime(self, value: Any):
         self._set_explicit_manager("model_runtime", value)
 
     @property
@@ -424,7 +432,7 @@ class DadBot(
         return self._get_explicit_manager("runtime_client")
 
     @runtime_client.setter
-    def runtime_client(self, value):
+    def runtime_client(self, value: Any):
         self._set_explicit_manager("runtime_client", value)
 
     @property
@@ -432,7 +440,7 @@ class DadBot(
         return self._get_explicit_manager("maintenance_scheduler")
 
     @maintenance_scheduler.setter
-    def maintenance_scheduler(self, value):
+    def maintenance_scheduler(self, value: Any):
         self._set_explicit_manager("maintenance_scheduler", value)
 
     @property
@@ -440,7 +448,7 @@ class DadBot(
         return self._get_explicit_manager("health_manager")
 
     @health_manager.setter
-    def health_manager(self, value):
+    def health_manager(self, value: Any):
         self._set_explicit_manager("health_manager", value)
 
     @property
@@ -448,7 +456,7 @@ class DadBot(
         return self._get_explicit_manager("internal_state_manager")
 
     @internal_state_manager.setter
-    def internal_state_manager(self, value):
+    def internal_state_manager(self, value: Any):
         self._set_explicit_manager("internal_state_manager", value)
 
     @property
@@ -456,7 +464,7 @@ class DadBot(
         return self._get_explicit_manager("runtime_state_manager")
 
     @runtime_state_manager.setter
-    def runtime_state_manager(self, value):
+    def runtime_state_manager(self, value: Any):
         self._set_explicit_manager("runtime_state_manager", value)
 
     @property
@@ -464,39 +472,49 @@ class DadBot(
         return self._get_explicit_manager("prompt_assembly")
 
     @prompt_assembly.setter
-    def prompt_assembly(self, value):
+    def prompt_assembly(self, value: Any):
         self._set_explicit_manager("prompt_assembly", value)
 
     @property
+    def context_service(self):
+        return self._get_explicit_manager("context_service")
+
+    @context_service.setter
+    def context_service(self, value: Any):
+        self._set_explicit_manager("context_service", value)
+
+    @property
     def context_builder(self):
-        return self._get_explicit_manager("context_builder")
+        # Compatibility alias during context_builder collapse.
+        return self._get_explicit_manager("context_service")
 
     @context_builder.setter
-    def context_builder(self, value):
-        self._set_explicit_manager("context_builder", value)
+    def context_builder(self, value: Any):
+        self._set_explicit_manager("context_service", value)
 
     @property
     def tone_context(self):
         return self._get_explicit_manager("tone_context")
 
     @tone_context.setter
-    def tone_context(self, value):
+    def tone_context(self, value: Any):
         self._set_explicit_manager("tone_context", value)
 
     @property
     def memory_query(self):
-        return self._get_explicit_manager("memory_query")
+        # Compatibility alias during memory_query collapse.
+        return self._get_explicit_manager("memory_manager")
 
     @memory_query.setter
-    def memory_query(self, value):
-        self._set_explicit_manager("memory_query", value)
+    def memory_query(self, value: Any):
+        self._set_explicit_manager("memory_manager", value)
 
     @property
     def memory_commands(self):
         return self._get_explicit_manager("memory_commands")
 
     @memory_commands.setter
-    def memory_commands(self, value):
+    def memory_commands(self, value: Any):
         self._set_explicit_manager("memory_commands", value)
 
     @property
@@ -504,7 +522,7 @@ class DadBot(
         return self._get_explicit_manager("memory_coordinator")
 
     @memory_coordinator.setter
-    def memory_coordinator(self, value):
+    def memory_coordinator(self, value: Any):
         self._set_explicit_manager("memory_coordinator", value)
 
     @property
@@ -512,7 +530,7 @@ class DadBot(
         return self._get_explicit_manager("long_term_signals")
 
     @long_term_signals.setter
-    def long_term_signals(self, value):
+    def long_term_signals(self, value: Any):
         self._set_explicit_manager("long_term_signals", value)
 
     @property
@@ -520,7 +538,7 @@ class DadBot(
         return self._get_explicit_manager("safety_support")
 
     @safety_support.setter
-    def safety_support(self, value):
+    def safety_support(self, value: Any):
         self._set_explicit_manager("safety_support", value)
 
     @property
@@ -528,7 +546,7 @@ class DadBot(
         return self._get_explicit_manager("reply_supervisor")
 
     @reply_supervisor.setter
-    def reply_supervisor(self, value):
+    def reply_supervisor(self, value: Any):
         self._set_explicit_manager("reply_supervisor", value)
 
     @property
@@ -536,7 +554,7 @@ class DadBot(
         return self._get_explicit_manager("multimodal_handler")
 
     @multimodal_handler.setter
-    def multimodal_handler(self, value):
+    def multimodal_handler(self, value: Any):
         self._set_explicit_manager("multimodal_handler", value)
 
     @property
@@ -544,7 +562,7 @@ class DadBot(
         return self._get_explicit_manager("runtime_orchestration")
 
     @runtime_orchestration.setter
-    def runtime_orchestration(self, value):
+    def runtime_orchestration(self, value: Any):
         self._set_explicit_manager("runtime_orchestration", value)
 
     @property
@@ -552,7 +570,7 @@ class DadBot(
         return self._get_explicit_manager("session_summary_manager")
 
     @session_summary_manager.setter
-    def session_summary_manager(self, value):
+    def session_summary_manager(self, value: Any):
         self._set_explicit_manager("session_summary_manager", value)
 
     @property
@@ -560,7 +578,7 @@ class DadBot(
         return self._get_explicit_manager("tool_registry")
 
     @tool_registry.setter
-    def tool_registry(self, value):
+    def tool_registry(self, value: Any):
         self._set_explicit_manager("tool_registry", value)
 
     @property
@@ -568,7 +586,7 @@ class DadBot(
         return self._get_explicit_manager("agentic_handler")
 
     @agentic_handler.setter
-    def agentic_handler(self, value):
+    def agentic_handler(self, value: Any):
         self._set_explicit_manager("agentic_handler", value)
 
     @property
@@ -576,7 +594,7 @@ class DadBot(
         return self._get_explicit_manager("conversation_persistence")
 
     @conversation_persistence.setter
-    def conversation_persistence(self, value):
+    def conversation_persistence(self, value: Any):
         self._set_explicit_manager("conversation_persistence", value)
 
     # ------------------------------------------------------------------
@@ -588,7 +606,7 @@ class DadBot(
         return self.profile_runtime.profile
 
     @PROFILE.setter
-    def PROFILE(self, value):
+    def PROFILE(self, value: Any):
         self.profile_runtime.profile = value
 
     @property
@@ -596,15 +614,24 @@ class DadBot(
         return self.memory.memory_store
 
     @MEMORY_STORE.setter
-    def MEMORY_STORE(self, value):
-        self.memory.memory_store = value
+    def MEMORY_STORE(self, value: Any):
+        # Preserve reference identity for callers that intentionally pass a
+        # prebuilt in-memory store (used by service-split compatibility tests).
+        _mem = self.memory
+        if _mem is not None:
+            store: dict[str, Any] = cast("dict[str, Any]", value) if isinstance(value, dict) else {}
+            replace_unchecked = getattr(_mem, "_replace_memory_store_unchecked", None)
+            if callable(replace_unchecked):
+                replace_unchecked(store)
+            else:
+                _mem.memory_store = store
 
     @property
     def STYLE(self):
         return self.profile_runtime.style
 
     @STYLE.setter
-    def STYLE(self, value):
+    def STYLE(self, value: Any):
         self.profile_runtime.style = value
 
     # ------------------------------------------------------------------
@@ -638,12 +665,15 @@ class DadBot(
 
     def reset_session_state(self) -> Any:
         """Explicit facade delegate for runtime session reset."""
-        return self.runtime_state_manager.reset_session_state()
+        mgr = getattr(self, "runtime_state_manager", None)
+        if mgr is not None:
+            return mgr.reset_session_state()
+        return None
 
-    def _thread_timestamp(self):
+    def _thread_timestamp(self) -> Any:
         return self.runtime_state_manager.thread_timestamp()
 
-    def _apply_thread_snapshot_unlocked(self, snapshot):
+    def _apply_thread_snapshot_unlocked(self, snapshot: Any) -> Any:
         return self.runtime_state_manager.apply_thread_snapshot_unlocked(snapshot)
 
     @property
@@ -653,6 +683,8 @@ class DadBot(
 
 
 if __name__ == "__main__":
-    from dadbot.app_runtime import main as run_app_main
+    from dadbot.app_runtime import (
+        main as run_app_main,  # type: ignore[reportUnknownVariableType]
+    )
 
     raise SystemExit(run_app_main(dadbot_cls=DadBot, script_path=__file__))

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import time
 import uuid
@@ -31,7 +31,12 @@ class Event:
     payload: dict
 
 
-def new_event(event_type: EventType, *, thread_id: str, payload: dict | None = None) -> Event:
+def new_event(
+    event_type: EventType,
+    *,
+    thread_id: str,
+    payload: dict | None = None,
+) -> Event:
     return Event(
         id=uuid.uuid4().hex,
         type=event_type,

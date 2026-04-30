@@ -23,16 +23,16 @@ Record schema (v1)
   "updated_at":           <float epoch>,
 }
 """
+
 from __future__ import annotations
 
 import json
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from threading import RLock
 from typing import Any
-
 
 _SCHEMA_VERSION = "1"
 
@@ -40,6 +40,7 @@ _SCHEMA_VERSION = "1"
 @dataclass(frozen=True)
 class ResumePoint:
     """Immutable snapshot of a durable turn resume record."""
+
     turn_id: str
     last_completed_stage: str
     next_stage: str
@@ -70,7 +71,7 @@ class ResumePoint:
         }
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "ResumePoint":
+    def from_dict(cls, d: dict[str, Any]) -> ResumePoint:
         return cls(
             turn_id=str(d.get("turn_id") or ""),
             last_completed_stage=str(d.get("last_completed_stage") or ""),
@@ -212,7 +213,10 @@ class TurnResumeStore:
                     data["updated_at"] = now
                     tmp_path = path.with_suffix(".tmp")
                     try:
-                        tmp_path.write_text(json.dumps(data, sort_keys=True, indent=2), encoding="utf-8")
+                        tmp_path.write_text(
+                            json.dumps(data, sort_keys=True, indent=2),
+                            encoding="utf-8",
+                        )
                         os.replace(str(tmp_path), str(path))
                     except OSError:
                         tmp_path.unlink(missing_ok=True)

@@ -45,11 +45,7 @@ def test_control_plane_idempotency_dedupes_concurrent_requests():
     assert results == [("ok", False), ("ok", False)]
     assert calls["count"] == 1
 
-    queued = [
-        event
-        for event in control_plane.ledger_events()
-        if str(event.get("type") or "") == "JOB_QUEUED"
-    ]
+    queued = [event for event in control_plane.ledger_events() if str(event.get("type") or "") == "JOB_QUEUED"]
     assert len(queued) == 1
     assert queued[0]["payload"]["request_id"] == "req-1"
 
@@ -170,6 +166,7 @@ def test_replay_hash_ignores_job_submission_wall_clock_metadata():
 # Canonicalization boundary — system-wide policy tests (Step 1–5)
 # ---------------------------------------------------------------------------
 
+
 def test_lease_time_not_in_replay_hash():
     """Lease temporal fields (acquired_at, expires_at) must not affect the
     canonical replay hash even if they accidentally appear in an event payload.
@@ -193,8 +190,12 @@ def test_lease_time_not_in_replay_hash():
         "parent_event_id": "",
         "payload": {"job_id": "job-lease-1"},
     }
-    event_with_lease_t1 = dict(event_base, payload={**event_base["payload"], "acquired_at": 1000.0, "expires_at": 1030.0})
-    event_with_lease_t2 = dict(event_base, payload={**event_base["payload"], "acquired_at": 2000.0, "expires_at": 2030.0})
+    event_with_lease_t1 = dict(
+        event_base, payload={**event_base["payload"], "acquired_at": 1000.0, "expires_at": 1030.0}
+    )
+    event_with_lease_t2 = dict(
+        event_base, payload={**event_base["payload"], "acquired_at": 2000.0, "expires_at": 2030.0}
+    )
 
     canon1 = canonicalize_event_payload(event_with_lease_t1["payload"])
     canon2 = canonicalize_event_payload(event_with_lease_t2["payload"])
@@ -235,6 +236,7 @@ def test_validate_trace_catches_all_forbidden_fields():
     not just submitted_at or acquired_at.
     """
     import pytest
+
     from dadbot.core.canonical_event import FORBIDDEN_TRACE_FIELDS, validate_trace
 
     base_event = {

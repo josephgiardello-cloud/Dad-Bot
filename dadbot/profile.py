@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from datetime import date
 
@@ -61,7 +61,9 @@ class ProfileContextManager:
             "university": self.bot.EDUCATION["university"],
             "years_attended": self.bot.EDUCATION["years_attended"],
             "degree": self.bot.EDUCATION["degree"],
-            "other_subjects_list": self.natural_list(self.bot.EDUCATION["other_subjects"]),
+            "other_subjects_list": self.natural_list(
+                self.bot.EDUCATION["other_subjects"],
+            ),
         }
 
     def render_template(self, template):
@@ -100,7 +102,9 @@ class ProfileContextManager:
                 matches.append(rule)
 
         if "born" in message and "where" in message and not any(rule["name"] == "dad_birthplace" for rule in matches):
-            matches.append(next(rule for rule in self.bot.TOPIC_RULES if rule["name"] == "dad_birthplace"))
+            matches.append(
+                next(rule for rule in self.bot.TOPIC_RULES if rule["name"] == "dad_birthplace"),
+            )
 
         return matches
 
@@ -149,32 +153,53 @@ class ProfileContextManager:
         if primary_fact_id == "dad_birthplace":
             birthplace = str(self.bot.FAMILY["dad"].get("birthplace", "")).lower()
             birthplace_tokens = self.bot.significant_tokens(birthplace)
-            return "providence" in reply_lower and "rhode island" in reply_lower or len(birthplace_tokens & self.bot.significant_tokens(reply)) >= 2
+            return ("providence" in reply_lower and "rhode island" in reply_lower) or len(
+                birthplace_tokens & self.bot.significant_tokens(reply)
+            ) >= 2
 
         if primary_fact_id == "dad_age":
-            return str(self.bot.DAD_BIRTHDATE.year) in reply_lower or str(self.bot.age_on_date(self.bot.DAD_BIRTHDATE)) in reply_lower
+            return (
+                str(self.bot.DAD_BIRTHDATE.year) in reply_lower
+                or str(self.bot.age_on_date(self.bot.DAD_BIRTHDATE)) in reply_lower
+            )
 
         if primary_fact_id == "carrie_age":
-            return str(self.bot.CARRIE_BIRTHDATE.year) in reply_lower or str(self.bot.age_on_date(self.bot.CARRIE_BIRTHDATE)) in reply_lower
+            return (
+                str(self.bot.CARRIE_BIRTHDATE.year) in reply_lower
+                or str(self.bot.age_on_date(self.bot.CARRIE_BIRTHDATE)) in reply_lower
+            )
 
         if primary_fact_id == "tony_age":
-            return str(self.bot.TONY_BIRTHDATE.year) in reply_lower or str(self.bot.age_on_date(self.bot.TONY_BIRTHDATE)) in reply_lower
+            return (
+                str(self.bot.TONY_BIRTHDATE.year) in reply_lower
+                or str(self.bot.age_on_date(self.bot.TONY_BIRTHDATE)) in reply_lower
+            )
 
         if primary_fact_id == "marriage":
             marriage_month = self.bot.MARRIAGE_DATE.strftime("%B").lower()
             return str(self.bot.MARRIAGE_DATE.year) in reply_lower and marriage_month in reply_lower
 
         if primary_fact_id == "boarding_school":
-            school_tokens = self.bot.significant_tokens(str(self.bot.EDUCATION.get("boarding_school", "")))
+            school_tokens = self.bot.significant_tokens(
+                str(self.bot.EDUCATION.get("boarding_school", "")),
+            )
             return len(school_tokens & self.bot.significant_tokens(reply)) >= 2
 
         if primary_fact_id == "university":
-            university_tokens = self.bot.significant_tokens(str(self.bot.EDUCATION.get("university", "")))
-            degree_tokens = self.bot.significant_tokens(str(self.bot.EDUCATION.get("degree", "")))
-            overlap = (university_tokens | degree_tokens) & self.bot.significant_tokens(reply)
+            university_tokens = self.bot.significant_tokens(
+                str(self.bot.EDUCATION.get("university", "")),
+            )
+            degree_tokens = self.bot.significant_tokens(
+                str(self.bot.EDUCATION.get("degree", "")),
+            )
+            overlap = (university_tokens | degree_tokens) & self.bot.significant_tokens(
+                reply,
+            )
             return len(overlap) >= 2
 
-        expected_tokens = self.bot.expected_tokens_for_fact_ids(rule.get("fact_ids", []))
+        expected_tokens = self.bot.expected_tokens_for_fact_ids(
+            rule.get("fact_ids", []),
+        )
         if not expected_tokens:
             return True
 

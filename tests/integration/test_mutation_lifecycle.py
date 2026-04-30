@@ -1,7 +1,12 @@
 """Integration — mutation lifecycle: pre-queue, run, verify drain via MockPersistenceService."""
+
 from __future__ import annotations
 
-import pytest
+from harness.deterministic_seeds import BASELINE, MUTATION_FUZZ
+from harness.graph_runner import GraphRunner
+from harness.kernel_mock import MockRegistry
+from harness.mutation_fuzzer import MutationFuzzer
+from harness.turn_factory import TurnFactory
 
 from dadbot.core.graph import (
     ContextBuilderNode,
@@ -14,12 +19,6 @@ from dadbot.core.graph import (
     TemporalNode,
     TurnGraph,
 )
-from harness.deterministic_seeds import BASELINE, MUTATION_FUZZ
-from harness.graph_runner import GraphRunner
-from harness.mutation_fuzzer import MutationFuzzer
-from harness.kernel_mock import MockRegistry
-from harness.turn_factory import TurnFactory
-
 
 _T = {"wall_time": "2026-01-01T00:00:00", "wall_date": "2026-01-01"}
 

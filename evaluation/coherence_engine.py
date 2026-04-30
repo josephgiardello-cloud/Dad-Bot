@@ -2,16 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Dict, List
-
 from evaluation.trace_schema import CrossSubsystemCoherenceScore
 
 
 class CoherenceEngine:
     """Computes global consistency penalties across subsystem traces."""
 
-    def score(self, raw_state: Dict) -> CrossSubsystemCoherenceScore:
-        penalties: List[str] = []
+    def score(self, raw_state: dict) -> CrossSubsystemCoherenceScore:
+        penalties: list[str] = []
 
         planner = dict(raw_state.get("planner_causal_trace") or {})
         memory = dict(raw_state.get("memory_causal_trace") or {})
@@ -19,11 +17,18 @@ class CoherenceEngine:
         tool_failures = list(raw_state.get("tool_failure_semantics") or [])
 
         # If planner changed intent but no replan reason is logged, causality is weak.
-        if list(planner.get("intent_delta_vector") or []) and not str(planner.get("planner_replan_reason") or "").strip():
+        if (
+            list(planner.get("intent_delta_vector") or [])
+            and not str(planner.get("planner_replan_reason") or "").strip()
+        ):
             penalties.append("planner_intent_delta_without_replan_reason")
 
         # If memory says contradiction resolved but UX still reports confusion.
-        if bool(memory.get("influenced_final_response", False)) and bool(memory.get("overridden", False)) and bool(ux.get("user_confusion_detected", False)):
+        if (
+            bool(memory.get("influenced_final_response", False))
+            and bool(memory.get("overridden", False))
+            and bool(ux.get("user_confusion_detected", False))
+        ):
             penalties.append("memory_override_but_ux_confusion_persists")
 
         # If tool failed but planner did not adapt.

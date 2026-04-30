@@ -7,7 +7,6 @@ import pytest
 
 from dadbot.core.system_identity import compute_system_snapshot_v0_hash
 
-
 SNAPSHOT_DIR = Path(__file__).resolve().parents[1] / "snapshots" / "system_snapshot_v0"
 
 

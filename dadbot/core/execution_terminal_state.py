@@ -1,20 +1,19 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import hashlib
 import json
+from dataclasses import dataclass
 from typing import Any
 
 from dadbot.core.execution_memory_view import ExecutionMemoryView
 from dadbot.core.graph import TurnContext
-
 
 _SCHEMA_VERSION = "1.0"
 
 
 def _stable_sha256(payload: Any) -> str:
     return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        json.dumps(payload, sort_keys=True, default=str).encode("utf-8"),
     ).hexdigest()
 
 
@@ -80,7 +79,6 @@ class ExecutionTerminalState:
             "tool_trace_hash": self.tool_trace_hash,
             "determinism_closure_hash": self.determinism_closure_hash,
         }
-
 
 
 def build_execution_terminal_state(

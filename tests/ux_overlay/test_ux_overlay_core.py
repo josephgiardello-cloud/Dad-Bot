@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from dadbot.uril.truth_binding import ClaimEvidenceValidator, build_synthetic_state
 from dadbot.ux_overlay import (
@@ -30,7 +30,7 @@ def test_interaction_state_engine_updates_social_state_only() -> None:
 
 
 def test_memory_curator_filters_scores_and_compresses() -> None:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     curator = MemoryCurator(minimum_length=10, meaningful_terms=("remember", "important"))
 
     raw = [

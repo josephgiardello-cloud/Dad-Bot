@@ -11,6 +11,7 @@ Covers the four gaps identified in the field-norms audit:
   8. Double-execution  — lease conflict → second worker re-queues, not executes
   9. Crash recovery    — pending jobs detected; completed jobs not pending
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -19,10 +20,10 @@ import inspect
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Shared async executor stubs
 # ---------------------------------------------------------------------------
+
 
 async def _noop_executor(session: dict, job) -> tuple[str | None, bool]:
     return ("ok", True)
@@ -35,6 +36,7 @@ async def _failing_executor(session: dict, job) -> tuple[str | None, bool]:
 # ===========================================================================
 # 1. Module Integrity
 # ===========================================================================
+
 
 class TestModuleIntegrity:
     REQUIRED = [
@@ -90,9 +92,11 @@ class TestModuleIntegrity:
 # 2. Tracing Propagation
 # ===========================================================================
 
+
 class TestTracingPropagation:
     def test_turn_context_trace_id_auto_generated(self):
         from dadbot.core.graph import TurnContext
+
         ctx = TurnContext(user_input="hello")
         assert ctx.trace_id, "TurnContext.trace_id must be auto-generated"
         assert len(ctx.trace_id) >= 16
@@ -111,6 +115,7 @@ class TestTracingPropagation:
 
     def test_turn_context_trace_id_unique_per_instance(self):
         from dadbot.core.graph import TurnContext
+
         ids = {TurnContext(user_input="x").trace_id for _ in range(20)}
         assert len(ids) == 20, "Each TurnContext must have a unique trace_id"
 
@@ -120,6 +125,7 @@ class TestTracingPropagation:
 
         async def capturing_executor(session, job):
             from dadbot.core.graph import TurnContext
+
             ctx = TurnContext(user_input=job.user_input)
             trace_ids_seen.append(ctx.trace_id)
             return ("ok", True)
@@ -127,6 +133,7 @@ class TestTracingPropagation:
         def _run():
             async def _inner():
                 from dadbot.core.control_plane import ExecutionControlPlane, SessionRegistry
+
                 cp = ExecutionControlPlane(
                     registry=SessionRegistry(),
                     kernel_executor=capturing_executor,
@@ -134,6 +141,7 @@ class TestTracingPropagation:
                 await cp.submit_turn(session_id="trace-test", user_input="hi")
                 assert trace_ids_seen
                 assert trace_ids_seen[0], "trace_id was empty inside executor"
+
             asyncio.run(_inner())
 
         _run()
@@ -141,18 +149,19 @@ class TestTracingPropagation:
     def test_orchestrator_execute_job_asserts_trace_id(self):
         """DadBotOrchestrator._execute_job must assert context.trace_id."""
         from dadbot.core.orchestrator import DadBotOrchestrator
+
         source = inspect.getsource(DadBotOrchestrator._execute_job)
-        assert "context.trace_id" in source, (
-            "_execute_job must assert context.trace_id is non-empty"
-        )
+        assert "context.trace_id" in source, "_execute_job must assert context.trace_id is non-empty"
 
     def test_orchestrator_strict_param_in_signature(self):
         from dadbot.core.orchestrator import DadBotOrchestrator
+
         sig = inspect.signature(DadBotOrchestrator.__init__)
         assert "strict" in sig.parameters
 
     def test_orchestrator_enable_observability_param_in_signature(self):
         from dadbot.core.orchestrator import DadBotOrchestrator
+
         sig = inspect.signature(DadBotOrchestrator.__init__)
         assert "enable_observability" in sig.parameters
 
@@ -161,30 +170,37 @@ class TestTracingPropagation:
 # 3. Control Plane Wiring — no bypass
 # ===========================================================================
 
+
 class TestControlPlaneWiring:
     def test_handle_turn_routes_through_control_plane_not_direct_graph(self):
         """handle_turn must call control_plane.submit_turn, not graph.execute."""
         from dadbot.core.orchestrator import DadBotOrchestrator
+
         source = inspect.getsource(DadBotOrchestrator.handle_turn)
         assert "control_plane.submit_turn" in source
         assert "graph.execute" not in source
 
     def test_submit_turn_produces_ledger_events(self):
         """Every submit_turn must write at least one event to the ledger."""
+
         def _run():
             async def _inner():
                 from dadbot.core.control_plane import ExecutionControlPlane, SessionRegistry
+
                 cp = ExecutionControlPlane(
                     registry=SessionRegistry(),
                     kernel_executor=_noop_executor,
                 )
                 await cp.submit_turn(session_id="wire-test", user_input="hello")
                 assert cp.ledger_events(), "Ledger must be non-empty after submit_turn"
+
             asyncio.run(_inner())
+
         _run()
 
     def test_control_plane_exposes_ledger(self):
         from dadbot.core.control_plane import ExecutionControlPlane, SessionRegistry
+
         cp = ExecutionControlPlane(
             registry=SessionRegistry(),
             kernel_executor=_noop_executor,
@@ -194,6 +210,7 @@ class TestControlPlaneWiring:
 
     def test_control_plane_exposes_scheduler(self):
         from dadbot.core.control_plane import ExecutionControlPlane, SessionRegistry
+
         cp = ExecutionControlPlane(
             registry=SessionRegistry(),
             kernel_executor=_noop_executor,
@@ -202,6 +219,7 @@ class TestControlPlaneWiring:
 
     def test_control_plane_exposes_recovery(self):
         from dadbot.core.control_plane import ExecutionControlPlane, SessionRegistry
+
         cp = ExecutionControlPlane(
             registry=SessionRegistry(),
             kernel_executor=_noop_executor,
@@ -210,6 +228,7 @@ class TestControlPlaneWiring:
 
     def test_control_plane_exposes_execution_token(self):
         from dadbot.core.control_plane import ExecutionControlPlane, SessionRegistry
+
         cp = ExecutionControlPlane(
             registry=SessionRegistry(),
             kernel_executor=_noop_executor,
@@ -222,6 +241,7 @@ class TestControlPlaneWiring:
             async def _inner():
                 from dadbot.core.control_plane import ExecutionControlPlane, SessionRegistry
                 from dadbot.core.graph import TurnContext, TurnGraph
+
                 graph = TurnGraph(nodes=[])
                 cp = ExecutionControlPlane(
                     registry=SessionRegistry(),
@@ -230,7 +250,9 @@ class TestControlPlaneWiring:
                 graph.set_required_execution_token(cp.execution_token)
                 with pytest.raises(RuntimeError, match="boundary violation"):
                     await graph.execute(TurnContext(user_input="hi"))
+
             asyncio.run(_inner())
+
         _run()
 
 
@@ -238,12 +260,15 @@ class TestControlPlaneWiring:
 # 4. Ledger Write-Through
 # ===========================================================================
 
+
 class TestLedgerWriteThrough:
     def test_complete_turn_has_all_lifecycle_events(self):
         """SUBMITTED → QUEUED → STARTED → COMPLETED must all appear in ledger."""
+
         def _run():
             async def _inner():
                 from dadbot.core.control_plane import ExecutionControlPlane, SessionRegistry
+
                 cp = ExecutionControlPlane(
                     registry=SessionRegistry(),
                     kernel_executor=_noop_executor,
@@ -252,32 +277,38 @@ class TestLedgerWriteThrough:
                 types = [e.get("type") for e in cp.ledger_events()]
                 for required in ("JOB_SUBMITTED", "JOB_QUEUED", "JOB_STARTED", "JOB_COMPLETED"):
                     assert required in types, f"Missing {required!r}; found: {types}"
+
             asyncio.run(_inner())
+
         _run()
 
     def test_lifecycle_events_in_correct_order(self):
         """Events must appear in submission → execution → completion order."""
+
         def _run():
             async def _inner():
                 from dadbot.core.control_plane import ExecutionControlPlane, SessionRegistry
+
                 cp = ExecutionControlPlane(
                     registry=SessionRegistry(),
                     kernel_executor=_noop_executor,
                 )
                 await cp.submit_turn(session_id="order-test", user_input="hi")
                 types = [e.get("type") for e in cp.ledger_events()]
-                idx = {t: types.index(t) for t in
-                       ("JOB_SUBMITTED", "JOB_QUEUED", "JOB_STARTED", "JOB_COMPLETED")}
+                idx = {t: types.index(t) for t in ("JOB_SUBMITTED", "JOB_QUEUED", "JOB_STARTED", "JOB_COMPLETED")}
                 assert idx["JOB_SUBMITTED"] < idx["JOB_QUEUED"]
                 assert idx["JOB_QUEUED"] < idx["JOB_STARTED"]
                 assert idx["JOB_STARTED"] < idx["JOB_COMPLETED"]
+
             asyncio.run(_inner())
+
         _run()
 
     def test_failed_turn_writes_job_failed_not_completed(self):
         def _run():
             async def _inner():
                 from dadbot.core.control_plane import ExecutionControlPlane, SessionRegistry
+
                 cp = ExecutionControlPlane(
                     registry=SessionRegistry(),
                     kernel_executor=_failing_executor,
@@ -287,13 +318,16 @@ class TestLedgerWriteThrough:
                 types = [e.get("type") for e in cp.ledger_events()]
                 assert "JOB_FAILED" in types
                 assert "JOB_COMPLETED" not in types
+
             asyncio.run(_inner())
+
         _run()
 
     def test_session_bound_event_written(self):
         def _run():
             async def _inner():
                 from dadbot.core.control_plane import ExecutionControlPlane, SessionRegistry
+
                 cp = ExecutionControlPlane(
                     registry=SessionRegistry(),
                     kernel_executor=_noop_executor,
@@ -301,27 +335,33 @@ class TestLedgerWriteThrough:
                 await cp.submit_turn(session_id="bound-test", user_input="hi")
                 types = [e.get("type") for e in cp.ledger_events()]
                 assert "SESSION_BOUND" in types
+
             asyncio.run(_inner())
+
         _run()
 
     def test_ledger_events_scoped_to_session(self):
         """Each event in the ledger must carry the correct session_id."""
+
         def _run():
             async def _inner():
                 from dadbot.core.control_plane import ExecutionControlPlane, SessionRegistry
+
                 cp = ExecutionControlPlane(
                     registry=SessionRegistry(),
                     kernel_executor=_noop_executor,
                 )
                 await cp.submit_turn(session_id="my-session", user_input="hi")
                 job_events = [
-                    e for e in cp.ledger_events()
-                    if e.get("type") in {"JOB_SUBMITTED", "JOB_QUEUED",
-                                         "JOB_STARTED", "JOB_COMPLETED"}
+                    e
+                    for e in cp.ledger_events()
+                    if e.get("type") in {"JOB_SUBMITTED", "JOB_QUEUED", "JOB_STARTED", "JOB_COMPLETED"}
                 ]
                 for e in job_events:
                     assert e.get("session_id") == "my-session"
+
             asyncio.run(_inner())
+
         _run()
 
 
@@ -329,12 +369,14 @@ class TestLedgerWriteThrough:
 # 5. Observability Wiring
 # ===========================================================================
 
+
 class TestObservabilityWiring:
     def test_completed_turn_increments_job_completed_counter(self):
         def _run():
             async def _inner():
                 from dadbot.core.control_plane import ExecutionControlPlane, SessionRegistry
                 from dadbot.core.observability import get_metrics
+
                 metrics = get_metrics()
                 before = metrics.counter("scheduler.job.completed")
                 cp = ExecutionControlPlane(
@@ -343,7 +385,9 @@ class TestObservabilityWiring:
                 )
                 await cp.submit_turn(session_id="metrics-ok", user_input="hi")
                 assert metrics.counter("scheduler.job.completed") == before + 1
+
             asyncio.run(_inner())
+
         _run()
 
     def test_failed_turn_increments_job_failed_counter(self):
@@ -351,6 +395,7 @@ class TestObservabilityWiring:
             async def _inner():
                 from dadbot.core.control_plane import ExecutionControlPlane, SessionRegistry
                 from dadbot.core.observability import get_metrics
+
                 metrics = get_metrics()
                 before = metrics.counter("scheduler.job.failed")
                 cp = ExecutionControlPlane(
@@ -360,15 +405,19 @@ class TestObservabilityWiring:
                 with pytest.raises(RuntimeError):
                     await cp.submit_turn(session_id="metrics-fail", user_input="hi")
                 assert metrics.counter("scheduler.job.failed") == before + 1
+
             asyncio.run(_inner())
+
         _run()
 
     def test_exporter_sink_captures_job_completed(self):
         """configure_exporter with a callable sink captures job.completed records."""
+
         def _run():
             async def _inner():
                 from dadbot.core.control_plane import ExecutionControlPlane, SessionRegistry
                 from dadbot.core.observability import configure_exporter
+
                 sink: list[dict] = []
                 configure_exporter(sink=sink.append, enabled=True)
                 cp = ExecutionControlPlane(
@@ -379,7 +428,9 @@ class TestObservabilityWiring:
                 assert sink, "Exporter sink must have captured events"
                 exported_event_names = [r.get("event") for r in sink]
                 assert "job.completed" in exported_event_names
+
             asyncio.run(_inner())
+
         _run()
 
     def test_latency_histogram_has_samples_after_turn(self):
@@ -387,6 +438,7 @@ class TestObservabilityWiring:
             async def _inner():
                 from dadbot.core.control_plane import ExecutionControlPlane, SessionRegistry
                 from dadbot.core.observability import get_metrics
+
                 cp = ExecutionControlPlane(
                     registry=SessionRegistry(),
                     kernel_executor=_noop_executor,
@@ -394,11 +446,14 @@ class TestObservabilityWiring:
                 await cp.submit_turn(session_id="latency-test", user_input="hi")
                 summary = get_metrics().histogram_summary("scheduler.job.latency_ms")
                 assert summary["count"] > 0, "No latency samples recorded"
+
             asyncio.run(_inner())
+
         _run()
 
     def test_configure_exporter_replaces_global(self):
         from dadbot.core.observability import configure_exporter, get_exporter
+
         captured: list[dict] = []
         configure_exporter(sink=captured.append, enabled=True)
         get_exporter().export({"event": "test.probe"})
@@ -409,9 +464,10 @@ class TestObservabilityWiring:
 # 6. Service Validation — strict mode
 # ===========================================================================
 
+
 class TestServiceValidation:
     def test_missing_method_returns_issues_in_lenient_mode(self):
-        from dadbot.core.interfaces import validate_pipeline_services, InferenceService
+        from dadbot.core.interfaces import InferenceService, validate_pipeline_services
 
         class Stub:
             pass  # missing run_agent
@@ -424,7 +480,7 @@ class TestServiceValidation:
         assert any("run_agent" in i for i in issues)
 
     def test_missing_method_raises_in_strict_mode(self):
-        from dadbot.core.interfaces import validate_pipeline_services, InferenceService
+        from dadbot.core.interfaces import InferenceService, validate_pipeline_services
 
         class Stub:
             pass
@@ -436,7 +492,7 @@ class TestServiceValidation:
             )
 
     def test_sync_run_agent_flagged_as_issue(self):
-        from dadbot.core.interfaces import validate_pipeline_services, InferenceService
+        from dadbot.core.interfaces import InferenceService, validate_pipeline_services
 
         class SyncLLM:
             def run_agent(self, ctx, rich):  # sync, not async
@@ -449,7 +505,7 @@ class TestServiceValidation:
         assert any("async" in i.lower() or "run_agent" in i for i in issues)
 
     def test_conformant_service_has_no_issues(self):
-        from dadbot.core.interfaces import validate_pipeline_services, HealthService
+        from dadbot.core.interfaces import HealthService, validate_pipeline_services
 
         class GoodHealth:
             def tick(self, ctx):
@@ -464,6 +520,7 @@ class TestServiceValidation:
     def test_orchestrator_validate_services_wired_to_strict(self):
         """_build_turn_graph must pass raise_on_failure=self._strict."""
         from dadbot.core.orchestrator import DadBotOrchestrator
+
         source = inspect.getsource(DadBotOrchestrator._build_turn_graph)
         assert "raise_on_failure" in source, (
             "validate_pipeline_services must be called with raise_on_failure in _build_turn_graph"
@@ -474,17 +531,21 @@ class TestServiceValidation:
 # 7. Queue Saturation / Backpressure
 # ===========================================================================
 
+
 class TestQueueSaturation:
     def test_register_beyond_max_inflight_raises(self):
         """Registering a second job when max_inflight_jobs=1 must raise RuntimeError."""
+
         def _run():
             async def _inner():
                 from dadbot.core.control_plane import (
-                    Scheduler, ExecutionJob, SessionRegistry,
+                    ExecutionJob,
+                    Scheduler,
+                    SessionRegistry,
                 )
                 from dadbot.core.execution_ledger import ExecutionLedger
-                from dadbot.core.ledger_writer import LedgerWriter
                 from dadbot.core.ledger_reader import LedgerReader
+                from dadbot.core.ledger_writer import LedgerWriter
 
                 registry = SessionRegistry()
                 ledger = ExecutionLedger()
@@ -498,19 +559,24 @@ class TestQueueSaturation:
                 job2 = ExecutionJob(session_id="s2", user_input="second")
                 with pytest.raises(RuntimeError, match="backpressure"):
                     await sched.register(job2)
+
             asyncio.run(_inner())
+
         _run()
 
     def test_slot_frees_after_drain(self):
         """After draining one job, the scheduler accepts a new registration."""
+
         def _run():
             async def _inner():
                 from dadbot.core.control_plane import (
-                    Scheduler, ExecutionJob, SessionRegistry,
+                    ExecutionJob,
+                    Scheduler,
+                    SessionRegistry,
                 )
                 from dadbot.core.execution_ledger import ExecutionLedger
-                from dadbot.core.ledger_writer import LedgerWriter
                 from dadbot.core.ledger_reader import LedgerReader
+                from dadbot.core.ledger_writer import LedgerWriter
 
                 registry = SessionRegistry()
                 ledger = ExecutionLedger()
@@ -531,19 +597,24 @@ class TestQueueSaturation:
                 # Should not raise — slot is free
                 future2 = await sched.register(job2)
                 assert future2 is not None
+
             asyncio.run(_inner())
+
         _run()
 
     def test_inflight_count_matches_registered_jobs(self):
         """len(scheduler._jobs) reflects registered-but-not-drained jobs."""
+
         def _run():
             async def _inner():
                 from dadbot.core.control_plane import (
-                    Scheduler, ExecutionJob, SessionRegistry,
+                    ExecutionJob,
+                    Scheduler,
+                    SessionRegistry,
                 )
                 from dadbot.core.execution_ledger import ExecutionLedger
-                from dadbot.core.ledger_writer import LedgerWriter
                 from dadbot.core.ledger_reader import LedgerReader
+                from dadbot.core.ledger_writer import LedgerWriter
 
                 registry = SessionRegistry()
                 ledger = ExecutionLedger()
@@ -555,7 +626,9 @@ class TestQueueSaturation:
                 job = ExecutionJob(session_id="s1", user_input="hi")
                 await sched.register(job)
                 assert len(sched._jobs) == 1
+
             asyncio.run(_inner())
+
         _run()
 
 
@@ -563,18 +636,22 @@ class TestQueueSaturation:
 # 8. Double-Execution Prevention
 # ===========================================================================
 
+
 class TestDoubleExecutionPrevention:
     def test_lease_conflict_makes_drain_return_false(self):
         """When worker-1 holds the lease, worker-2's drain_once returns False."""
+
         def _run():
             async def _inner():
                 from dadbot.core.control_plane import (
-                    Scheduler, ExecutionJob, SessionRegistry,
+                    ExecutionJob,
+                    Scheduler,
+                    SessionRegistry,
                 )
-                from dadbot.core.execution_ledger import ExecutionLedger
                 from dadbot.core.execution_lease import ExecutionLease
-                from dadbot.core.ledger_writer import LedgerWriter
+                from dadbot.core.execution_ledger import ExecutionLedger
                 from dadbot.core.ledger_reader import LedgerReader
+                from dadbot.core.ledger_writer import LedgerWriter
 
                 registry = SessionRegistry()
                 lease = ExecutionLease()
@@ -601,20 +678,25 @@ class TestDoubleExecutionPrevention:
                 # Worker-2 drain → lease conflict → re-queues → False
                 drained = await sched2.drain_once(_noop_executor)
                 assert drained is False, "Expected False: lease held by worker-1"
+
             asyncio.run(_inner())
+
         _run()
 
     def test_job_requeued_on_lease_conflict(self):
         """After a lease conflict, the job must remain in _pending_job_ids."""
+
         def _run():
             async def _inner():
                 from dadbot.core.control_plane import (
-                    Scheduler, ExecutionJob, SessionRegistry,
+                    ExecutionJob,
+                    Scheduler,
+                    SessionRegistry,
                 )
-                from dadbot.core.execution_ledger import ExecutionLedger
                 from dadbot.core.execution_lease import ExecutionLease
-                from dadbot.core.ledger_writer import LedgerWriter
+                from dadbot.core.execution_ledger import ExecutionLedger
                 from dadbot.core.ledger_reader import LedgerReader
+                from dadbot.core.ledger_writer import LedgerWriter
 
                 registry = SessionRegistry()
                 lease = ExecutionLease()
@@ -623,8 +705,11 @@ class TestDoubleExecutionPrevention:
                 reader = LedgerReader(ledger)
 
                 sched2 = Scheduler(
-                    registry, reader=reader, writer=writer,
-                    execution_lease=lease, worker_id="worker-2",
+                    registry,
+                    reader=reader,
+                    writer=writer,
+                    execution_lease=lease,
+                    worker_id="worker-2",
                 )
                 lease.acquire(session_id="sess1", owner_id="worker-1", ttl_seconds=30)
 
@@ -637,11 +722,14 @@ class TestDoubleExecutionPrevention:
 
                 # Job must have been re-queued into pending.
                 assert len(sched2._pending_job_ids) >= 1
+
             asyncio.run(_inner())
+
         _run()
 
     def test_same_worker_renews_lease_without_conflict(self):
         from dadbot.core.execution_lease import ExecutionLease
+
         lease = ExecutionLease()
         t1 = lease.acquire(session_id="s1", owner_id="w1", ttl_seconds=5)
         t2 = lease.acquire(session_id="s1", owner_id="w1", ttl_seconds=10)
@@ -650,6 +738,7 @@ class TestDoubleExecutionPrevention:
 
     def test_fencing_token_increments_on_new_acquisition(self):
         from dadbot.core.execution_lease import ExecutionLease
+
         lease = ExecutionLease()
         t1 = lease.acquire(session_id="s1", owner_id="w1")
         lease.release(session_id="s1", owner_id="w1")
@@ -659,7 +748,9 @@ class TestDoubleExecutionPrevention:
     def test_expired_lease_allows_new_acquisition(self):
         """After TTL expires, a different worker can take the lease."""
         import time
+
         from dadbot.core.execution_lease import ExecutionLease
+
         lease = ExecutionLease()
         # Acquire with 0.01s TTL — will expire immediately
         lease.acquire(session_id="s1", owner_id="w1", ttl_seconds=0.01)
@@ -673,6 +764,7 @@ class TestDoubleExecutionPrevention:
 # 9. Crash Recovery
 # ===========================================================================
 
+
 class TestCrashRecovery:
     def _make_cp(self):
         """Returns (ledger, writer, recovery, store)."""
@@ -680,6 +772,7 @@ class TestCrashRecovery:
         from dadbot.core.ledger_writer import LedgerWriter
         from dadbot.core.recovery_manager import RecoveryManager
         from dadbot.core.session_store import SessionStore
+
         ledger = ExecutionLedger()
         writer = LedgerWriter(ledger)
         recovery = RecoveryManager(ledger=ledger)
@@ -689,6 +782,7 @@ class TestCrashRecovery:
     def test_queued_job_detected_as_pending(self):
         """SUBMITTED + QUEUED with no COMPLETED = pending (crash scenario)."""
         from dadbot.core.control_plane import ExecutionJob
+
         _, writer, recovery, store = self._make_cp()
 
         job = ExecutionJob(session_id="crashed-sess", user_input="hello")
@@ -701,6 +795,7 @@ class TestCrashRecovery:
 
     def test_completed_job_not_in_pending(self):
         from dadbot.core.control_plane import ExecutionJob
+
         _, writer, recovery, store = self._make_cp()
 
         job = ExecutionJob(session_id="clean-sess", user_input="hi")
@@ -714,6 +809,7 @@ class TestCrashRecovery:
 
     def test_failed_job_not_in_pending(self):
         from dadbot.core.control_plane import ExecutionJob
+
         _, writer, recovery, store = self._make_cp()
 
         job = ExecutionJob(session_id="failed-sess", user_input="hi")
@@ -727,12 +823,10 @@ class TestCrashRecovery:
     def test_partial_completion_leaves_others_pending(self):
         """Three queued jobs, only the first completed → two remain pending."""
         from dadbot.core.control_plane import ExecutionJob
+
         _, writer, recovery, store = self._make_cp()
 
-        jobs = [
-            ExecutionJob(session_id=f"s{i}", user_input=f"msg{i}")
-            for i in range(3)
-        ]
+        jobs = [ExecutionJob(session_id=f"s{i}", user_input=f"msg{i}") for i in range(3)]
         for j in jobs:
             writer.append_job_submitted(j)
             writer.append_job_queued(j)
@@ -746,6 +840,7 @@ class TestCrashRecovery:
 
     def test_ledger_event_count_accurate(self):
         from dadbot.core.control_plane import ExecutionJob
+
         _, writer, recovery, store = self._make_cp()
 
         job = ExecutionJob(session_id="count-sess", user_input="hi")
@@ -762,6 +857,7 @@ class TestCrashRecovery:
     def test_boot_reconcile_succeeds_on_clean_state(self):
         """boot_reconcile must pass when all jobs are terminal."""
         from dadbot.core.control_plane import ExecutionControlPlane, SessionRegistry
+
         cp = ExecutionControlPlane(
             registry=SessionRegistry(),
             kernel_executor=_noop_executor,
@@ -771,6 +867,7 @@ class TestCrashRecovery:
 
     def test_recover_returns_replay_hash(self):
         from dadbot.core.control_plane import ExecutionJob
+
         _, writer, recovery, store = self._make_cp()
 
         job = ExecutionJob(session_id="hash-sess", user_input="hi")
@@ -785,6 +882,7 @@ class TestCrashRecovery:
         """replay_hash is deterministic: same events → same hash."""
         from dadbot.core.control_plane import ExecutionJob
         from dadbot.core.session_store import SessionStore
+
         ledger, writer, recovery, store = self._make_cp()
 
         job = ExecutionJob(session_id="det-sess", user_input="hi")

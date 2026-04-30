@@ -1,27 +1,26 @@
 """Chaos — parallel node mutation merging: deterministic, no lost updates."""
+
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
 
 import pytest
-
-from dadbot.core.graph import (
-    TurnContext,
-    TurnGraph,
-    TemporalNode,
-    HealthNode,
-    ContextBuilderNode,
-    InferenceNode,
-    SafetyNode,
-    ReflectionNode,
-    SaveNode,
-)
 from harness.deterministic_seeds import CHAOS_BASE, PARALLEL_MERGE
 from harness.graph_runner import GraphRunner
 from harness.invariant_checker import InvariantChecker
 from harness.kernel_mock import MockRegistry
 from harness.turn_factory import TurnFactory
+
+from dadbot.core.graph import (
+    ContextBuilderNode,
+    HealthNode,
+    InferenceNode,
+    ReflectionNode,
+    SafetyNode,
+    SaveNode,
+    TemporalNode,
+    TurnGraph,
+)
 
 
 def _build_canonical(registry: MockRegistry) -> TurnGraph:
@@ -50,6 +49,7 @@ class TestParallelChaos:
 
     def test_concurrent_runs_independent_persistence(self):
         """10 concurrent runs must each produce exactly 1 finalize_call."""
+
         async def _run_one(seed: int):
             registry = MockRegistry()
             graph = _build_canonical(registry)
@@ -67,6 +67,7 @@ class TestParallelChaos:
 
     def test_concurrent_runs_independent_trace_ids(self):
         """Each concurrent run must produce a distinct trace_id."""
+
         async def _run_one(seed: int) -> str:
             registry = MockRegistry()
             graph = _build_canonical(registry)
@@ -109,6 +110,7 @@ class TestParallelChaos:
 
     def test_parallel_same_seed_produces_same_fidelity(self):
         """Same seed across parallel runs must produce identical fidelity snapshots."""
+
         async def _run_one(seed: int):
             registry = MockRegistry()
             graph = _build_canonical(registry)

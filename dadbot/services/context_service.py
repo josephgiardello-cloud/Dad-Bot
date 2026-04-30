@@ -1,14 +1,16 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import hashlib
 import json
 import logging
-import os
 import time
 from typing import Any
 
 from dadbot.context import ContextBuilder
-from dadbot.core.execution_trace_context import record_execution_step
+from dadbot.core.execution_trace_context import (
+    ensure_execution_trace_root,
+    record_execution_step,
+)
 from dadbot.utils import significant_tokens as _significant_tokens
 
 logger = logging.getLogger(__name__)
@@ -63,7 +65,12 @@ class ContextService:
             recent_messages = [dict(m) for m in history[-24:] if isinstance(m, dict)]
 
         summary_text = str(runtime.session_summary or "")
-        claims = list(getattr(runtime, "_last_hierarchical_memory_stats", {}).get("structured_claims") or [])
+        claims = list(
+            getattr(runtime, "_last_hierarchical_memory_stats", {}).get(
+                "structured_claims",
+            )
+            or [],
+        )
         full_history_id = hashlib.sha256(
             json.dumps(
                 {
@@ -79,7 +86,7 @@ class ContextService:
                 },
                 sort_keys=True,
                 ensure_ascii=True,
-            ).encode("utf-8")
+            ).encode("utf-8"),
         ).hexdigest()[:16]
 
         return {
@@ -108,10 +115,21 @@ class ContextService:
             "full_history_id": str(snapshot.get("full_history_id") or ""),
         }
         return hashlib.sha256(
-            json.dumps(normalized, sort_keys=True, ensure_ascii=True, default=str).encode("utf-8")
+            json.dumps(
+                normalized,
+                sort_keys=True,
+                ensure_ascii=True,
+                default=str,
+            ).encode("utf-8"),
         ).hexdigest()[:16]
 
-    def _maybe_schedule_background_compression(self, turn_context: Any, *, context_total_tokens: int, recent_tokens: int) -> bool:
+    def _maybe_schedule_background_compression(
+        self,
+        turn_context: Any,
+        *,
+        context_total_tokens: int,
+        recent_tokens: int,
+    ) -> bool:
         runtime = self._runtime()
         if runtime is None:
             return False
@@ -126,8 +144,14 @@ class ContextService:
                 metadata["compression_disabled_in_strict"] = True
             return False
 
-        should_start_background_tasks = getattr(runtime, "should_start_background_tasks", None)
-        if callable(should_start_background_tasks) and not bool(should_start_background_tasks()):
+        should_start_background_tasks = getattr(
+            runtime,
+            "should_start_background_tasks",
+            None,
+        )
+        if callable(should_start_background_tasks) and not bool(
+            should_start_background_tasks(),
+        ):
             return False
 
         if isinstance(metadata, dict) and metadata.get("compression_scheduled"):
@@ -161,31 +185,17 @@ class ContextService:
         except Exception:
             return False
 
-    def build_context(self, turn_context: Any) -> dict[str, Any]:
-        started = time.perf_counter()
-        temporal = getattr(turn_context, "temporal", None)
-        if temporal is None:
-            raise RuntimeError("TemporalNode required — execution invalid")
-        user_input = str(getattr(turn_context, "user_input", "") or "")
-        session_id = str((getattr(turn_context, "metadata", {}) or {}).get("control_plane", {}).get("session_id") or "default")
-        record_execution_step(
-            "memory_read",
-            payload={
-                "source": "ContextService.build_context",
-                "session_id": session_id,
-                "query_length": len(user_input),
-            },
-            required=True,
-        )
-        temporal_snapshot = {}
-        temporal_builder = getattr(turn_context, "temporal_snapshot", None)
-        if callable(temporal_builder):
-            temporal_snapshot = temporal_builder()
-        wall_time = str(temporal_snapshot.get("wall_time") or "").strip()
-        wall_date = str(temporal_snapshot.get("wall_date") or "").strip()
-        if not wall_time or not wall_date:
-            raise RuntimeError("TemporalNode required — execution invalid")
-        ctx: dict[str, Any] = {
+    # ------------------------------------------------------------------
+    # build_context helpers
+    # ------------------------------------------------------------------
+
+    def _build_base_context_sections(
+        self,
+        user_input: str,
+        temporal_snapshot: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Assemble the core context dict from all context_builder methods."""
+        return {
             "core_persona": self.context_builder.build_core_persona_prompt(),
             "dynamic_profile": self.context_builder.build_dynamic_profile_context(),
             "relationship": self.context_builder.build_relationship_context(),
@@ -196,79 +206,67 @@ class ContextService:
             "temporal": temporal_snapshot,
         }
 
-        memory_snapshot = self.get_snapshot(session_id)
-
-        # Guard against missing context_builder.bot (e.g., in test stubs)
+    def _extract_layer_stats(self) -> dict[str, Any]:
+        """Return a copy of the bot's last hierarchical memory stats (or empty dict)."""
         bot = getattr(self.context_builder, "bot", None)
-        layer_stats = dict(getattr(bot, "_last_hierarchical_memory_stats", {}) or {}) if bot else {}
+        return dict(getattr(bot, "_last_hierarchical_memory_stats", {}) or {}) if bot else {}
+
+    def _run_semantic_rag(
+        self,
+        user_input: str,
+        ctx: dict[str, Any],
+        state: Any,
+    ) -> None:
+        """Query the semantic index and write hits into *ctx* and *state*."""
+        if self.semantic_index is None or not user_input.strip():
+            return
+        try:
+            tokens = _significant_tokens(user_input)
+            query_embedding = None
+            embed_text = getattr(self.memory_manager, "embed_text", None)
+            if callable(embed_text):
+                query_embedding = embed_text(user_input)
+            hits = self.semantic_index.fetch_candidates(
+                query_embedding=query_embedding,
+                query_tokens=tokens,
+                query_category="general",
+                query_mood="neutral",
+                limit=5,
+            )
+            record_execution_step(
+                "memory_retrieval",
+                payload={
+                    "query_token_count": len(list(tokens or [])),
+                    "has_embedding": bool(query_embedding is not None),
+                    "hit_count": len(list(hits or [])),
+                },
+                required=True,
+            )
+            if hits:
+                base_summaries = {str(m.get("summary", "")) for m in (ctx.get("memory") or []) if isinstance(m, dict)}
+                unique_hits = [h for h in hits if str(h.get("summary", "")) not in base_summaries]
+                if unique_hits:
+                    ctx["semantic"] = unique_hits
+                if isinstance(state, dict):
+                    state["memory_retrieval_set"] = list(unique_hits or hits)
+        except Exception as exc:
+            logger.debug("ContextService: semantic index query failed (non-fatal): %s", exc)
+
+    def _stamp_build_results(
+        self,
+        turn_context: Any,
+        memory_snapshot: dict[str, Any],
+        layer_stats: dict[str, Any],
+        context_total_tokens: int,
+        context_build_ms: float,
+    ) -> None:
+        """Stamp determinism hashes, timing metadata, and schedule compression."""
+        state = getattr(turn_context, "state", None)
+        metadata = getattr(turn_context, "metadata", None)
         recent_tokens = int(layer_stats.get("recent_tokens", 0) or 0)
         summary_tokens = int(layer_stats.get("summary_tokens", 0) or 0)
         structured_tokens = int(layer_stats.get("structured_tokens", 0) or 0)
-        structured_claims = list(layer_stats.get("structured_claims") or [])
-        selected_layers = list(layer_stats.get("selected_layers") or [])
 
-        ctx["memory_layers"] = {
-            "selected_layers": selected_layers,
-            "structured_claims": structured_claims,
-            "recent_tokens": recent_tokens,
-            "summary_tokens": summary_tokens,
-            "structured_tokens": structured_tokens,
-        }
-
-        state = getattr(turn_context, "state", None)
-        if isinstance(state, dict):
-            state["memory_recent_buffer"] = list(memory_snapshot.get("recent_buffer") or [])
-            state["memory_rolling_summary"] = str(memory_snapshot.get("rolling_summary") or "")
-            state["memory_structured"] = dict(memory_snapshot.get("structured_memory") or {})
-            state["memory_full_history_id"] = str(memory_snapshot.get("full_history_id") or "")
-            state["memory_retrieval_set"] = []
-
-        # Semantic RAG: query long-term index for targeted memory hits
-        if self.semantic_index is not None and user_input.strip():
-            try:
-                tokens = _significant_tokens(user_input)
-                query_embedding = None
-                embed_text = getattr(self.memory_manager, "embed_text", None)
-                if callable(embed_text):
-                    query_embedding = embed_text(user_input)
-                hits = self.semantic_index.fetch_candidates(
-                    query_embedding=query_embedding,
-                    query_tokens=tokens,
-                    query_category="general",
-                    query_mood="neutral",
-                    limit=5,
-                )
-                record_execution_step(
-                    "memory_retrieval",
-                    payload={
-                        "query_token_count": len(list(tokens or [])),
-                        "has_embedding": bool(query_embedding is not None),
-                        "hit_count": len(list(hits or [])),
-                    },
-                    required=True,
-                )
-                if hits:
-                    # Deduplicate against already-included base memory summaries
-                    base_summaries = {
-                        str(m.get("summary", ""))
-                        for m in (ctx.get("memory") or [])
-                        if isinstance(m, dict)
-                    }
-                    unique_hits = [h for h in hits if str(h.get("summary", "")) not in base_summaries]
-                    if unique_hits:
-                        ctx["semantic"] = unique_hits
-                    if isinstance(state, dict):
-                        state["memory_retrieval_set"] = list(unique_hits or hits)
-            except Exception as exc:
-                logger.debug("ContextService: semantic index query failed (non-fatal): %s", exc)
-
-        context_total_tokens = 0
-        for key in ("core_persona", "dynamic_profile", "relationship", "session_summary", "memory", "relevant", "cross_session"):
-            context_total_tokens += self._estimate_tokens(str(ctx.get(key) or ""))
-        context_total_tokens += recent_tokens + summary_tokens + structured_tokens
-
-        context_build_ms = round((time.perf_counter() - started) * 1000, 3)
-        metadata = getattr(turn_context, "metadata", None)
         if isinstance(metadata, dict):
             determinism = dict(metadata.get("determinism") or {})
             if bool(determinism.get("enforced", False)):
@@ -276,20 +274,17 @@ class ContextService:
                 base_lock_hash = str(determinism.get("lock_hash") or "")
                 composite_lock_hash = hashlib.sha256(
                     json.dumps(
-                        {
-                            "base_lock_hash": base_lock_hash,
-                            "memory_fingerprint": memory_fingerprint,
-                        },
+                        {"base_lock_hash": base_lock_hash, "memory_fingerprint": memory_fingerprint},
                         sort_keys=True,
                         ensure_ascii=True,
-                    ).encode("utf-8")
+                    ).encode("utf-8"),
                 ).hexdigest()
                 determinism["memory_fingerprint"] = memory_fingerprint
                 determinism["lock_hash"] = composite_lock_hash
                 determinism["lock_id"] = f"det-{composite_lock_hash[:16]}"
                 determinism["lock_version"] = max(2, int(determinism.get("lock_version") or 2))
                 metadata["determinism"] = determinism
-                setattr(self.context_builder.bot, "_last_memory_fingerprint", memory_fingerprint)
+                self.context_builder.bot._last_memory_fingerprint = memory_fingerprint
             metadata["context_build_ms"] = context_build_ms
             metadata["prefill_ms"] = float(metadata.get("prefill_ms") or 0.0)
             metadata["recent_tokens"] = recent_tokens
@@ -306,6 +301,84 @@ class ContextService:
             recent_tokens=recent_tokens,
         )
         if isinstance(metadata, dict):
-            metadata["compression_scheduled"] = bool(metadata.get("compression_scheduled") or compression_scheduled)
+            metadata["compression_scheduled"] = bool(
+                metadata.get("compression_scheduled") or compression_scheduled,
+            )
 
+    def build_context(self, turn_context: Any) -> dict[str, Any]:
+        started = time.perf_counter()
+        temporal = getattr(turn_context, "temporal", None)
+        if temporal is None:
+            raise RuntimeError("TemporalNode required — execution invalid")
+        user_input = str(getattr(turn_context, "user_input", "") or "")
+        session_id = str(
+            (getattr(turn_context, "metadata", {}) or {}).get("control_plane", {}).get("session_id") or "default",
+        )
+        with ensure_execution_trace_root(
+            operation="memory_read",
+            prompt="[context-service-build]",
+            metadata={"source": "ContextService.build_context", "session_id": session_id},
+            required=True,
+        ):
+            record_execution_step(
+                "memory_read",
+                payload={
+                    "source": "ContextService.build_context",
+                    "session_id": session_id,
+                    "query_length": len(user_input),
+                },
+                required=True,
+            )
+
+        temporal_snapshot: dict[str, Any] = {}
+        temporal_builder = getattr(turn_context, "temporal_snapshot", None)
+        if callable(temporal_builder):
+            temporal_snapshot = temporal_builder()
+        wall_time = str(temporal_snapshot.get("wall_time") or "").strip()
+        wall_date = str(temporal_snapshot.get("wall_date") or "").strip()
+        if not wall_time or not wall_date:
+            raise RuntimeError("TemporalNode required — execution invalid")
+
+        ctx = self._build_base_context_sections(user_input, temporal_snapshot)
+        memory_snapshot = self.get_snapshot(session_id)
+        layer_stats = self._extract_layer_stats()
+
+        ctx["memory_layers"] = {
+            "selected_layers": list(layer_stats.get("selected_layers") or []),
+            "structured_claims": list(layer_stats.get("structured_claims") or []),
+            "recent_tokens": int(layer_stats.get("recent_tokens", 0) or 0),
+            "summary_tokens": int(layer_stats.get("summary_tokens", 0) or 0),
+            "structured_tokens": int(layer_stats.get("structured_tokens", 0) or 0),
+        }
+
+        state = getattr(turn_context, "state", None)
+        if isinstance(state, dict):
+            state["memory_recent_buffer"] = list(memory_snapshot.get("recent_buffer") or [])
+            state["memory_rolling_summary"] = str(memory_snapshot.get("rolling_summary") or "")
+            state["memory_structured"] = dict(memory_snapshot.get("structured_memory") or {})
+            state["memory_full_history_id"] = str(memory_snapshot.get("full_history_id") or "")
+            state["memory_retrieval_set"] = []
+
+        self._run_semantic_rag(user_input, ctx, state)
+
+        context_total_tokens = sum(
+            self._estimate_tokens(str(ctx.get(key) or ""))
+            for key in (
+                "core_persona",
+                "dynamic_profile",
+                "relationship",
+                "session_summary",
+                "memory",
+                "relevant",
+                "cross_session",
+            )
+        )
+        context_total_tokens += (
+            int(layer_stats.get("recent_tokens", 0) or 0)
+            + int(layer_stats.get("summary_tokens", 0) or 0)
+            + int(layer_stats.get("structured_tokens", 0) or 0)
+        )
+
+        context_build_ms = round((time.perf_counter() - started) * 1000, 3)
+        self._stamp_build_results(turn_context, memory_snapshot, layer_stats, context_total_tokens, context_build_ms)
         return ctx

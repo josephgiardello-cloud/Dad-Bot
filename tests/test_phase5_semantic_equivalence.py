@@ -4,7 +4,6 @@ from dadbot.core.execution_equivalence_oracle import ExecutionEquivalenceOracle
 from dadbot.core.execution_replay_engine import reconstruct_terminal_state_from_trace
 
 
-
 def _trace(tool_output: str = "Weather: Sunny") -> dict:
     return {
         "schema_version": "2.0",
@@ -19,11 +18,14 @@ def _trace(tool_output: str = "Weather: Sunny") -> dict:
         "tool_outputs": [{"tool": "weather", "output": tool_output}],
         "steps": [
             {"seq": 0, "operation": "model_call", "payload": {"purpose": "chat"}},
-            {"seq": 1, "operation": "external_system_call", "payload": {"operation": "tool_dispatch", "system": "builtin_tool:weather", "status": "ok"}},
+            {
+                "seq": 1,
+                "operation": "external_system_call",
+                "payload": {"operation": "tool_dispatch", "system": "builtin_tool:weather", "status": "ok"},
+            },
             {"seq": 2, "operation": "model_output", "payload": {"output_hash": "out-1"}},
         ],
     }
-
 
 
 def _seed(trace: dict) -> dict:
@@ -35,7 +37,6 @@ def _seed(trace: dict) -> dict:
         },
         execution_trace_context=trace,
     )
-
 
 
 def test_semantic_oracle_reports_semantic_fields():
@@ -54,7 +55,6 @@ def test_semantic_oracle_reports_semantic_fields():
     assert "semantic_action_equivalent" in result.semantic_report
 
 
-
 def test_semantic_oracle_approximate_mode_normalizes_tool_output_formatting():
     trace = _trace(tool_output=" Weather:   SUNNY ")
     seed = _seed(trace)
@@ -70,7 +70,6 @@ def test_semantic_oracle_approximate_mode_normalizes_tool_output_formatting():
     assert result.equivalent is True
 
 
-
 def test_semantic_oracle_exact_mode_preserves_strictness():
     trace = _trace(tool_output=" Weather:   SUNNY ")
     seed = _seed(trace)
@@ -84,7 +83,6 @@ def test_semantic_oracle_exact_mode_preserves_strictness():
     )
     assert result.semantic_mode == "exact"
     assert isinstance(result.violations, list)
-
 
 
 def test_semantic_oracle_detects_memory_state_divergence():

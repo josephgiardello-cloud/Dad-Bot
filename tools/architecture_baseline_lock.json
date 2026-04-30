@@ -1,0 +1,36 @@
+{
+  "baseline_tag": "baseline/audit-start",
+  "locked_artifacts": {
+    "god_class": "tools/baseline_metrics.json",
+    "complexity": "tools/complexity_baseline.json",
+    "contract_guard": "tools/contract_guard_baseline.json",
+    "reconciliation_report": "audit/baseline_reconciliation_report.json"
+  },
+  "thresholds": {
+    "block_new_trace_signature_params": true,
+    "block_new_kernel_step_signature_params": true,
+    "prevent_hotpath_growth_without_complexity_reduction": true,
+    "prevent_decision_point_growth": true
+  },
+  "reconciliation": {
+    "generated_at": "2026-04-30T18:09:51.115174+00:00",
+    "migration_inflation_allowlist": [
+      {
+        "source": "complexity_diff_gate",
+        "file": "dadbot/core/graph_pipeline_nodes.py",
+        "reason": "Contract migration inflation in known transition hotfile"
+      },
+      {
+        "source": "god_class_audit",
+        "file": "dadbot/core/graph_pipeline_nodes.py",
+        "reason": "Contract migration inflation in known transition hotfile"
+      }
+    ],
+    "baseline_invalidations": [],
+    "real_regressions": [],
+    "policy": {
+      "rebaseline_only_after_classification": true,
+      "strict_bucket_for_failures": "A"
+    }
+  }
+}

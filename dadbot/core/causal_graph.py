@@ -22,15 +22,15 @@ introduced in the external tool runtime.
      Traces the influence of a routing decision on final answer quality,
      expressed as a weighted influence score.
 """
+
 from __future__ import annotations
 
 import hashlib
-import json
 import time
 from dataclasses import dataclass, field
 from enum import Enum
 from threading import RLock
-from typing import Any, Optional
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # Node types
@@ -48,9 +48,9 @@ class CausalNodeKind(str, Enum):
 class CausalEdgeKind(str, Enum):
     CAUSED = "caused"
     TRIGGERED = "triggered"
-    SELECTED_OVER = "selected_over"       # tool A was selected over tool B
-    REPLACED_BY = "replaced_by"           # tool A was replaced by B (fallback)
-    INFLUENCED = "influenced"             # routing decision influenced outcome quality
+    SELECTED_OVER = "selected_over"  # tool A was selected over tool B
+    REPLACED_BY = "replaced_by"  # tool A was replaced by B (fallback)
+    INFLUENCED = "influenced"  # routing decision influenced outcome quality
 
 
 # ---------------------------------------------------------------------------
@@ -172,13 +172,21 @@ class CausalGraph:
     # ------------------------------------------------------------------
 
     def record_planner_decision(
-        self, decision_id: str, intent: str, selected_plan: str, alternatives: list[str] | None = None
+        self,
+        decision_id: str,
+        intent: str,
+        selected_plan: str,
+        alternatives: list[str] | None = None,
     ) -> CausalNode:
         return self.add_node(
             decision_id,
             CausalNodeKind.PLANNER_DECISION,
             label=f"plan:{selected_plan}",
-            metadata={"intent": intent, "selected_plan": selected_plan, "alternatives": list(alternatives or [])},
+            metadata={
+                "intent": intent,
+                "selected_plan": selected_plan,
+                "alternatives": list(alternatives or []),
+            },
         )
 
     def record_tool_selection(
@@ -194,15 +202,31 @@ class CausalGraph:
             selection_id,
             CausalNodeKind.TOOL_SELECTION,
             label=f"select:{tool_name}",
-            metadata={"tool_name": tool_name, "intent": intent, "score": score, "rejected": list(rejected_tools or [])},
+            metadata={
+                "tool_name": tool_name,
+                "intent": intent,
+                "score": score,
+                "rejected": list(rejected_tools or []),
+            },
         )
         if decision_id:
             self.add_edge(decision_id, selection_id, CausalEdgeKind.CAUSED, weight=1.0)
         # Create SELECTED_OVER edges for rejected alternatives
-        for rejected in (rejected_tools or []):
+        for rejected in rejected_tools or []:
             rejected_node_id = f"rejected:{rejected}:{selection_id}"
-            self.add_node(rejected_node_id, CausalNodeKind.TOOL_SELECTION, label=f"rejected:{rejected}", metadata={"tool_name": rejected, "rejected": True})
-            self.add_edge(selection_id, rejected_node_id, CausalEdgeKind.SELECTED_OVER, weight=score, reason=f"{tool_name} scored higher than {rejected}")
+            self.add_node(
+                rejected_node_id,
+                CausalNodeKind.TOOL_SELECTION,
+                label=f"rejected:{rejected}",
+                metadata={"tool_name": rejected, "rejected": True},
+            )
+            self.add_edge(
+                selection_id,
+                rejected_node_id,
+                CausalEdgeKind.SELECTED_OVER,
+                weight=score,
+                reason=f"{tool_name} scored higher than {rejected}",
+            )
         return node
 
     def record_tool_outcome(
@@ -218,7 +242,12 @@ class CausalGraph:
             outcome_id,
             CausalNodeKind.TOOL_OUTCOME,
             label=f"outcome:{tool_name}:{status}",
-            metadata={"tool_name": tool_name, "status": status, "latency_ms": latency_ms, "confidence": confidence},
+            metadata={
+                "tool_name": tool_name,
+                "status": status,
+                "latency_ms": latency_ms,
+                "confidence": confidence,
+            },
         )
         if selection_id:
             self.add_edge(selection_id, outcome_id, CausalEdgeKind.CAUSED, weight=1.0)
@@ -239,7 +268,13 @@ class CausalGraph:
             metadata={"from_tool": from_tool, "to_tool": to_tool, "reason": reason},
         )
         if outcome_id:
-            self.add_edge(outcome_id, fallback_id, CausalEdgeKind.TRIGGERED, weight=1.0, reason=reason)
+            self.add_edge(
+                outcome_id,
+                fallback_id,
+                CausalEdgeKind.TRIGGERED,
+                weight=1.0,
+                reason=reason,
+            )
         return node
 
     def record_retry_event(
@@ -257,14 +292,20 @@ class CausalGraph:
             metadata={"tool_name": tool_name, "attempt": attempt, "reason": reason},
         )
         if outcome_id:
-            self.add_edge(outcome_id, retry_id, CausalEdgeKind.TRIGGERED, weight=1.0, reason=reason)
+            self.add_edge(
+                outcome_id,
+                retry_id,
+                CausalEdgeKind.TRIGGERED,
+                weight=1.0,
+                reason=reason,
+            )
         return node
 
     # ------------------------------------------------------------------
     # Read-only accessors
     # ------------------------------------------------------------------
 
-    def get_node(self, node_id: str) -> Optional[CausalNode]:
+    def get_node(self, node_id: str) -> CausalNode | None:
         with self._lock:
             return self._nodes.get(node_id)
 
@@ -304,11 +345,12 @@ class CausalGraph:
 @dataclass(frozen=True)
 class SelectionRationale:
     """Why tool B was chosen instead of A."""
+
     selected_tool: str
     rejected_tools: list[str]
-    reason_chain: list[str]          # ordered explanation steps
+    reason_chain: list[str]  # ordered explanation steps
     selection_score: float
-    fallback_depth: int              # 0 = primary selection, >0 = fallback Nth
+    fallback_depth: int  # 0 = primary selection, >0 = fallback Nth
 
 
 class CausalReconstructionAPI:
@@ -323,7 +365,7 @@ class CausalReconstructionAPI:
     def __init__(self, graph: CausalGraph) -> None:
         self._graph = graph
 
-    def why_tool_selected(self, selection_id: str) -> Optional[SelectionRationale]:
+    def why_tool_selected(self, selection_id: str) -> SelectionRationale | None:
         """Return a human-readable rationale for why a tool selection was made."""
         node = self._graph.get_node(selection_id)
         if node is None or node.kind != CausalNodeKind.TOOL_SELECTION:
@@ -342,15 +384,17 @@ class CausalReconstructionAPI:
             if src and src.kind == CausalNodeKind.PLANNER_DECISION:
                 reason_chain.append(
                     f"Planner chose plan '{src.metadata.get('selected_plan', '?')}' "
-                    f"for intent '{src.metadata.get('intent', '?')}'."
+                    f"for intent '{src.metadata.get('intent', '?')}'.",
                 )
 
         if rejected_tools:
             reason_chain.append(
-                f"'{selected_tool}' scored {score:.3f}, outscoring: {', '.join(rejected_tools)}."
+                f"'{selected_tool}' scored {score:.3f}, outscoring: {', '.join(rejected_tools)}.",
             )
         else:
-            reason_chain.append(f"'{selected_tool}' was the only candidate for this intent.")
+            reason_chain.append(
+                f"'{selected_tool}' was the only candidate for this intent.",
+            )
 
         # Determine fallback depth by walking REPLACED_BY chains
         fallback_depth = self._fallback_depth(selection_id)
@@ -371,8 +415,7 @@ class CausalReconstructionAPI:
 
         meta = node.metadata
         steps: list[str] = [
-            f"Tool '{meta.get('from_tool', '?')}' failed; "
-            f"fallback to '{meta.get('to_tool', '?')}' activated.",
+            f"Tool '{meta.get('from_tool', '?')}' failed; fallback to '{meta.get('to_tool', '?')}' activated.",
         ]
         if meta.get("reason"):
             steps.append(f"Failure reason: {meta['reason']}.")
@@ -384,7 +427,7 @@ class CausalReconstructionAPI:
                 steps.append(
                     f"'{src.metadata.get('tool_name', '?')}' returned status "
                     f"'{src.metadata.get('status', '?')}' "
-                    f"(latency={src.metadata.get('latency_ms', 0):.0f}ms)."
+                    f"(latency={src.metadata.get('latency_ms', 0):.0f}ms).",
                 )
         return steps
 
@@ -392,6 +435,7 @@ class CausalReconstructionAPI:
         """Return the shortest causal path from one node to another as a list of node IDs."""
         # BFS
         from collections import deque
+
         visited: set[str] = set()
         queue: deque[list[str]] = deque([[from_id]])
         while queue:
@@ -432,10 +476,11 @@ class CausalReconstructionAPI:
 @dataclass(frozen=True)
 class InfluenceTrace:
     """How much a routing decision influenced the final answer quality."""
+
     source_node_id: str
     target_node_id: str
-    influence_score: float          # 0.0 – 1.0; higher = more influential
-    path: list[str]                 # node IDs on the influence path
+    influence_score: float  # 0.0 – 1.0; higher = more influential
+    path: list[str]  # node IDs on the influence path
     explanation: str
 
 
@@ -455,7 +500,7 @@ class InfluenceTracer:
         source_id: str,
         target_id: str,
         decay_per_hop: float = 0.85,
-    ) -> Optional[InfluenceTrace]:
+    ) -> InfluenceTrace | None:
         """Compute the influence of source_id on target_id.
 
         Returns None if no causal path exists.
@@ -505,7 +550,7 @@ class InfluenceTracer:
             tr = self.trace(node.node_id, target_id, decay_per_hop=decay_per_hop)
             if tr is not None:
                 traces.append(tr)
-        return sorted(traces, key=lambda t: t.influence_score, reverse=True)[:max(1, top_k)]
+        return sorted(traces, key=lambda t: t.influence_score, reverse=True)[: max(1, top_k)]
 
     def _edge_weight(self, source_id: str, target_id: str) -> float:
         for edge in self._graph.out_edges(source_id):

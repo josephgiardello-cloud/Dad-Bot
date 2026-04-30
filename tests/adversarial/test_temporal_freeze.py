@@ -1,13 +1,14 @@
 """Adversarial — TurnTemporalAxis freezing: temporal axis must remain
 frozen even if VirtualClock ticks mid-execution.
 """
+
 from __future__ import annotations
 
 import pytest
-
-from dadbot.core.graph import TurnTemporalAxis, TurnContext, VirtualClock
 from harness.deterministic_seeds import TEMPORAL_FREEZE
 from harness.turn_factory import TurnFactory
+
+from dadbot.core.graph import TurnTemporalAxis, VirtualClock
 
 
 class TestTemporalFreeze:
@@ -57,13 +58,16 @@ class TestTemporalFreeze:
     def test_temporal_state_in_context_unchanged_after_clock_ticks(self):
         """state['temporal'] snapshot (set by TemporalNode) must not update on clock tick."""
         import asyncio
-        from dadbot.core.graph import TemporalNode, TurnGraph, ContextBuilderNode, HealthNode
+
         from harness.kernel_mock import MockRegistry
+
+        from dadbot.core.graph import ContextBuilderNode, HealthNode, TemporalNode, TurnGraph
 
         registry = MockRegistry()
         # Build minimal graph: just temporal node
         g = TurnGraph(registry=registry)
-        from dadbot.core.graph import SaveNode, InferenceNode, SafetyNode, ReflectionNode
+        from dadbot.core.graph import InferenceNode, ReflectionNode, SafetyNode, SaveNode
+
         prev = None
         for name, node in [
             ("temporal", TemporalNode()),

@@ -33,16 +33,15 @@ OUTPUT STRUCTURE:
 
 import asyncio
 import logging
-import time
 import tempfile
 import uuid
-from typing import Dict, List, Any, Optional, Literal
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any, Literal
 
-from tests.scenario_suite import Scenario, SCENARIOS
+from tests.scenario_suite import SCENARIOS, Scenario
+from tests.scoring_engine import CapabilityScore, ScoringEngine
 from tests.trace_schema import NormalizedTrace
-from tests.scoring_engine import ScoringEngine, CapabilityScore
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +50,7 @@ class _InMemorySessionStore:
     """Minimal save/load store used to bypass filesystem persistence in tests."""
 
     def __init__(self) -> None:
-        self._data: Dict[str, Any] = {}
+        self._data: dict[str, Any] = {}
 
     def save_session_state(self, key: str, value: Any) -> None:
         self._data[str(key)] = value
@@ -63,16 +62,17 @@ class _InMemorySessionStore:
 @dataclass
 class ExecutionTrace:
     """Captured execution trace from a scenario run."""
+
     scenario_name: str
     category: str
     input_text: str
-    planner_output: Optional[Dict[str, Any]] = None
-    tools_executed: List[str] = None
-    memory_accessed: List[str] = None
+    planner_output: dict[str, Any] | None = None
+    tools_executed: list[str] = None
+    memory_accessed: list[str] = None
     final_response: str = ""
     steps: int = 0
     completed: bool = False
-    error: Optional[str] = None
+    error: str | None = None
 
     def __post_init__(self):
         if self.tools_executed is None:
@@ -84,10 +84,11 @@ class ExecutionTrace:
 @dataclass
 class ScoreResult:
     """Minimal scoring result."""
+
     success: bool
     steps: int
     tool_used_correctly: bool
-    error: Optional[str] = None
+    error: str | None = None
 
 
 @dataclass
@@ -95,27 +96,28 @@ class ExecutionResult:
     """Execution validity separate from capability/intelligence scoring."""
 
     valid_run: bool
-    execution_error: Optional[str]
+    execution_error: str | None
     trace_available: bool
     execution_error_class: str = "none"
 
 
 class BenchmarkRunner:
     """Executes scenarios and captures execution traces.
-    
+
     Supports two modes:
     1. mock: Fast validation with synthetic execution (Phase 1)
     2. orchestrator: Real orchestrator execution (Phase 4A)
     """
+
     _scoring_engine = ScoringEngine()
 
     def __init__(
         self,
         strict: bool = False,
         mode: Literal["mock", "orchestrator"] = "mock",
-        orchestrator: Optional[Any] = None,
+        orchestrator: Any | None = None,
         sandbox_outputs: bool = True,
-        sandbox_root: Optional[str] = None,
+        sandbox_root: str | None = None,
         disable_persistence_disk: bool = True,
     ):
         """Initialize benchmark runner.
@@ -133,18 +135,15 @@ class BenchmarkRunner:
         self.sandbox_outputs = bool(sandbox_outputs)
         self.disable_persistence_disk = bool(disable_persistence_disk)
         self._sandbox_root = Path(sandbox_root) if sandbox_root else None
-        self._sandbox_tmp: Optional[tempfile.TemporaryDirectory[str]] = None
+        self._sandbox_tmp: tempfile.TemporaryDirectory[str] | None = None
         self._sandbox_applied = False
-        
+
         if mode == "orchestrator" and orchestrator is None:
-            logger.warning(
-                "⚠️  Orchestrator mode selected but no orchestrator provided. "
-                "Falling back to mock mode."
-            )
+            logger.warning("⚠️  Orchestrator mode selected but no orchestrator provided. Falling back to mock mode.")
             self.mode = "mock"
 
     @staticmethod
-    def _classify_execution_error(error: Optional[str]) -> str:
+    def _classify_execution_error(error: str | None) -> str:
         if not error:
             return "none"
         lowered = str(error).lower()
@@ -158,7 +157,7 @@ class BenchmarkRunner:
             return "timeout"
         return "runtime"
 
-    def _build_execution_result(self, completed: bool, error: Optional[str], trace_available: bool) -> ExecutionResult:
+    def _build_execution_result(self, completed: bool, error: str | None, trace_available: bool) -> ExecutionResult:
         error_class = self._classify_execution_error(error)
         valid_run = bool(completed)
         if not valid_run and error_class.startswith("io_") and trace_available:
@@ -172,7 +171,7 @@ class BenchmarkRunner:
         )
 
     @staticmethod
-    def _condense_capability_score(capability_score: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    def _condense_capability_score(capability_score: dict[str, Any] | None) -> dict[str, Any] | None:
         if not isinstance(capability_score, dict):
             return None
 
@@ -271,7 +270,8 @@ class BenchmarkRunner:
     @staticmethod
     def _stabilize_llm_calls(bot: Any) -> None:
         """Replace live model calls with deterministic offline responses for benchmarks."""
-        def _offline_llm_response(*_args: Any, **_kwargs: Any) -> Dict[str, Any]:
+
+        def _offline_llm_response(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
             return {"message": {"content": "[benchmark-offline]"}}
 
         try:
@@ -292,6 +292,7 @@ class BenchmarkRunner:
     def _stabilize_background_maintenance(bot: Any) -> None:
         """Prevent background maintenance from issuing blocking external LLM calls."""
         try:
+
             def _offline_refresh_session_summary(force: bool = False) -> str:
                 return str(getattr(bot, "session_summary", "") or "")
 
@@ -302,7 +303,8 @@ class BenchmarkRunner:
         try:
             maintenance_scheduler = getattr(bot, "maintenance_scheduler", None)
             if maintenance_scheduler is not None:
-                def _offline_post_turn_maintenance(user_input: str, current_mood: str) -> Dict[str, Any]:
+
+                def _offline_post_turn_maintenance(user_input: str, current_mood: str) -> dict[str, Any]:
                     return {
                         "summary_refreshed": False,
                         "scheduled_proactive": False,
@@ -325,7 +327,7 @@ class BenchmarkRunner:
     def _score_trace(self, trace: ExecutionTrace, scenario: Scenario) -> ScoreResult:
         """Apply minimal scoring to execution trace (backward-compatible)."""
         success = trace.completed and trace.error is None
-        
+
         tool_used_correctly = True
         if scenario.category == "tool":
             tool_used_correctly = len(trace.tools_executed) > 0 or not self.strict
@@ -351,7 +353,7 @@ class BenchmarkRunner:
             memory_accessed=trace.memory_accessed,
         )
 
-    def _score_normalized(self, normalized: NormalizedTrace, scenario: Scenario) -> Dict[str, Any]:
+    def _score_normalized(self, normalized: NormalizedTrace, scenario: Scenario) -> dict[str, Any]:
         """Run the scoring engine and return serializable dict."""
         try:
             cap_score: CapabilityScore = self._scoring_engine.score(normalized, scenario)
@@ -360,9 +362,7 @@ class BenchmarkRunner:
             logger.warning(f"Scoring engine error for {scenario.name}: {e}")
             return {"error": str(e), "overall": 0.0}
 
-    async def _run_scenario_orchestrator_async(
-        self, scenario: Scenario
-    ) -> Dict[str, Any]:
+    async def _run_scenario_orchestrator_async(self, scenario: Scenario) -> dict[str, Any]:
         """Execute scenario through real orchestrator (Phase 4A)."""
         trace = ExecutionTrace(
             scenario_name=scenario.name,
@@ -373,7 +373,7 @@ class BenchmarkRunner:
         try:
             self._turn_counter += 1
             self._ensure_orchestrator_sandbox()
-            
+
             # Execute through orchestrator
             response_text, success = await self.orchestrator.handle_turn(
                 user_input=scenario.input_text,
@@ -397,15 +397,13 @@ class BenchmarkRunner:
                 # Tools executed
                 tool_ir = context.state.get("tool_ir", {})
                 executions = tool_ir.get("executions", [])
-                trace.tools_executed = [
-                    e.get("tool_name") for e in executions if e.get("tool_name")
-                ]
+                trace.tools_executed = [e.get("tool_name") for e in executions if e.get("tool_name")]
 
                 # Memory accessed
                 memory_structured = context.state.get("memory_structured", {})
                 trace.memory_accessed = list(memory_structured.keys())
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
             trace.error = "Execution timeout (15s)"
             trace.completed = False
             logger.warning(f"Scenario {scenario.name} timed out")
@@ -419,7 +417,7 @@ class BenchmarkRunner:
 
         # Build normalized trace from orchestrator context
         context = getattr(self.orchestrator, "_last_turn_context", None)
-        normalized: Optional[NormalizedTrace] = None
+        normalized: NormalizedTrace | None = None
         if context:
             try:
                 normalized = NormalizedTrace.from_orchestrator_context(
@@ -464,7 +462,7 @@ class BenchmarkRunner:
             "capability_score_detail": capability_score,
         }
 
-    def _run_scenario_orchestrator(self, scenario: Scenario) -> Dict[str, Any]:
+    def _run_scenario_orchestrator(self, scenario: Scenario) -> dict[str, Any]:
         """Execute scenario through orchestrator (sync wrapper)."""
         try:
             loop = asyncio.get_running_loop()
@@ -475,14 +473,15 @@ class BenchmarkRunner:
         if loop and loop.is_running():
             # Already in async context
             import concurrent.futures
+
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                 return pool.submit(asyncio.run, coro).result()
         else:
             return asyncio.run(coro)
 
-    def run_scenario(self, scenario: Scenario) -> Dict[str, Any]:
+    def run_scenario(self, scenario: Scenario) -> dict[str, Any]:
         """Execute a single scenario with appropriate backend.
-        
+
         Dispatches to orchestrator or mock based on configured mode.
         """
         if self.mode == "orchestrator":
@@ -490,7 +489,7 @@ class BenchmarkRunner:
         else:
             return self._run_scenario_mock(scenario)
 
-    def _run_scenario_mock(self, scenario: Scenario) -> Dict[str, Any]:
+    def _run_scenario_mock(self, scenario: Scenario) -> dict[str, Any]:
         """Execute scenario with mock execution (Phase 1)."""
         trace = ExecutionTrace(
             scenario_name=scenario.name,
@@ -502,19 +501,19 @@ class BenchmarkRunner:
             # PHASE 1: Validate scenario definition
             if not scenario.name or not scenario.input_text:
                 raise ValueError("Scenario must have name and input_text")
-            
+
             # PHASE 1: Mock execution
             trace.completed = True
             trace.steps = 1
             trace.final_response = f"[PHASE 1 MOCK] Response for: {scenario.input_text[:50]}..."
-            
+
             # PHASE 1: Mock trace capture
             if scenario.category == "tool":
                 trace.tools_executed = ["mock_tool"]
-            
+
             if scenario.category == "memory":
                 trace.memory_accessed = ["memory_store"]
-            
+
             if scenario.category == "planning":
                 trace.planner_output = {
                     "plan": f"Plan: {scenario.input_text[:40]}...",
@@ -522,7 +521,7 @@ class BenchmarkRunner:
                 }
 
         except Exception as e:
-            trace.error = f"{type(e).__name__}: {str(e)}"
+            trace.error = f"{type(e).__name__}: {e!s}"
             trace.completed = False
             logger.exception(f"Error executing scenario {scenario.name}")
 
@@ -562,10 +561,10 @@ class BenchmarkRunner:
 
     def run_all_scenarios(
         self,
-        scenarios: Optional[List[Scenario]] = None,
-    ) -> List[Dict[str, Any]]:
+        scenarios: list[Scenario] | None = None,
+    ) -> list[dict[str, Any]]:
         """Execute all scenarios (or specified subset).
-        
+
         Uses configured backend (mock or orchestrator).
         """
         if scenarios is None:
@@ -578,8 +577,8 @@ class BenchmarkRunner:
 
     def _run_all_scenarios_mock(
         self,
-        scenarios: List[Scenario],
-    ) -> List[Dict[str, Any]]:
+        scenarios: list[Scenario],
+    ) -> list[dict[str, Any]]:
         """Execute all scenarios with mock backend."""
         results = []
         for scenario in scenarios:
@@ -589,8 +588,8 @@ class BenchmarkRunner:
 
     def _run_all_scenarios_orchestrator(
         self,
-        scenarios: List[Scenario],
-    ) -> List[Dict[str, Any]]:
+        scenarios: list[Scenario],
+    ) -> list[dict[str, Any]]:
         """Execute all scenarios with orchestrator backend (sequentially)."""
         try:
             loop = asyncio.get_running_loop()
@@ -600,6 +599,7 @@ class BenchmarkRunner:
         coro = self._run_all_scenarios_orchestrator_async(scenarios)
         if loop and loop.is_running():
             import concurrent.futures
+
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                 return pool.submit(asyncio.run, coro).result()
         else:
@@ -607,8 +607,8 @@ class BenchmarkRunner:
 
     async def _run_all_scenarios_orchestrator_async(
         self,
-        scenarios: List[Scenario],
-    ) -> List[Dict[str, Any]]:
+        scenarios: list[Scenario],
+    ) -> list[dict[str, Any]]:
         """Execute all scenarios sequentially through orchestrator."""
         results = []
         for scenario in scenarios:
@@ -617,10 +617,10 @@ class BenchmarkRunner:
         return results
 
 
-def print_benchmark_results(results: List[Dict[str, Any]], mode: str = "mock") -> None:
+def print_benchmark_results(results: list[dict[str, Any]], mode: str = "mock") -> None:
     """Pretty-print benchmark results."""
     mode_label = "PHASE 4A - ORCHESTRATOR EXECUTION" if mode == "orchestrator" else "PHASE 1 - MOCK EXECUTION"
-    
+
     print("\n" + "=" * 80)
     print(f"BENCHMARK RESULTS ({mode_label})")
     print("=" * 80)
@@ -631,7 +631,7 @@ def print_benchmark_results(results: List[Dict[str, Any]], mode: str = "mock") -
         cat = result.get("category", "unknown")
         if cat not in by_category:
             by_category[cat] = {"pass": 0, "fail": 0}
-        
+
         if result["scoring"]["success"]:
             by_category[cat]["pass"] += 1
         else:
@@ -706,7 +706,7 @@ if __name__ == "__main__":
     print("   results = runner.run_all_scenarios()")
     print("\n" + "=" * 80)
     print("\nRunning PHASE 1 (mock) validation by default...")
-    
+
     runner = BenchmarkRunner(strict=False, mode="mock")
     results = runner.run_all_scenarios()
     print_benchmark_results(results, mode="mock")

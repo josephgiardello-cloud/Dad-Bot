@@ -1,4 +1,4 @@
-﻿"""LedgerBackend abstraction â€” pluggable durability tier for ExecutionLedger.
+"""LedgerBackend abstraction â€” pluggable durability tier for ExecutionLedger.
 
 Two implementations:
   InMemoryLedgerBackend  â€” current behavior; no durability guarantee.
@@ -8,6 +8,7 @@ Usage:
     from dadbot.core.ledger_backend import FileWALLedgerBackend
     ledger = ExecutionLedger(backend=FileWALLedgerBackend("runtime/ledger.wal"))
 """
+
 from __future__ import annotations
 
 import json
@@ -18,10 +19,10 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-
 # ---------------------------------------------------------------------------
 # Abstract contract
 # ---------------------------------------------------------------------------
+
 
 class LedgerBackend(ABC):
     """Pluggable storage tier for ExecutionLedger events."""
@@ -42,6 +43,7 @@ class LedgerBackend(ABC):
 # ---------------------------------------------------------------------------
 # In-memory (existing behaviour â€” default)
 # ---------------------------------------------------------------------------
+
 
 class InMemoryLedgerBackend(LedgerBackend):
     """Volatile in-memory backend.  Correct but not crash-durable."""
@@ -66,6 +68,7 @@ class InMemoryLedgerBackend(LedgerBackend):
 # File WAL backend â€” append-only JSONL with fsync commit semantics
 # ---------------------------------------------------------------------------
 
+
 class FileWALLedgerBackend(LedgerBackend):
     """Append-only JSONL Write-Ahead Log backed by a local file.
 
@@ -84,13 +87,15 @@ class FileWALLedgerBackend(LedgerBackend):
     """
 
     #: Event types that always trigger an fsync regardless of the committed flag.
-    COMMITTED_TYPES: frozenset[str] = frozenset({
-        "JOB_QUEUED",
-        "JOB_STARTED",
-        "JOB_COMPLETED",
-        "JOB_FAILED",
-        "SESSION_STATE_UPDATED",
-    })
+    COMMITTED_TYPES: frozenset[str] = frozenset(
+        {
+            "JOB_QUEUED",
+            "JOB_STARTED",
+            "JOB_COMPLETED",
+            "JOB_FAILED",
+            "SESSION_STATE_UPDATED",
+        },
+    )
 
     def __init__(self, path: str | Path, *, fsync: bool = True) -> None:
         self._path = Path(path)
@@ -103,22 +108,19 @@ class FileWALLedgerBackend(LedgerBackend):
 
     def append(self, event: dict[str, Any], *, committed: bool = False) -> None:
         line = json.dumps(event, default=str) + "\n"
-        should_fsync = self._fsync_enabled and (
-            committed or str(event.get("type") or "") in self.COMMITTED_TYPES
-        )
-        with self._lock:
-            with open(self._path, "a", encoding="utf-8") as handle:
-                handle.write(line)
-                handle.flush()
-                if should_fsync:
-                    os.fsync(handle.fileno())
+        should_fsync = self._fsync_enabled and (committed or str(event.get("type") or "") in self.COMMITTED_TYPES)
+        with self._lock, open(self._path, "a", encoding="utf-8") as handle:
+            handle.write(line)
+            handle.flush()
+            if should_fsync:
+                os.fsync(handle.fileno())
 
     def load(self) -> list[dict[str, Any]]:
         with self._lock:
             if not self._path.exists():
                 return []
             events: list[dict[str, Any]] = []
-            with open(self._path, "r", encoding="utf-8") as handle:
+            with open(self._path, encoding="utf-8") as handle:
                 for line_number, raw in enumerate(handle, start=1):
                     raw = raw.strip()
                     if not raw:
@@ -128,9 +130,9 @@ class FileWALLedgerBackend(LedgerBackend):
                     except json.JSONDecodeError as exc:
                         # Tolerate a partial write at the tail â€” skip and continue.
                         import warnings
+
                         warnings.warn(
-                            f"FileWALLedgerBackend: skipping corrupt line {line_number} in "
-                            f"{self._path}: {exc}",
+                            f"FileWALLedgerBackend: skipping corrupt line {line_number} in {self._path}: {exc}",
                             RuntimeWarning,
                             stacklevel=2,
                         )
@@ -146,6 +148,7 @@ class FileWALLedgerBackend(LedgerBackend):
 # ---------------------------------------------------------------------------
 # CRC-checksummed WAL backend (Tier 0 â€” crash-safe corruption detection)
 # ---------------------------------------------------------------------------
+
 
 class CRCFileWALLedgerBackend(LedgerBackend):
     """WAL backend that encodes every line with a CRC-32 checksum.
@@ -173,33 +176,32 @@ class CRCFileWALLedgerBackend(LedgerBackend):
 
     def append(self, event: dict[str, Any], *, committed: bool = False) -> None:
         from dadbot.core.durability import CRC32LineCodec
+
         line = CRC32LineCodec.encode(event)
-        should_fsync = self._fsync_enabled and (
-            committed or str(event.get("type") or "") in self.COMMITTED_TYPES
-        )
-        with self._lock:
-            with open(self._path, "a", encoding="utf-8") as handle:
-                handle.write(line)
-                handle.flush()
-                if should_fsync:
-                    os.fsync(handle.fileno())
+        should_fsync = self._fsync_enabled and (committed or str(event.get("type") or "") in self.COMMITTED_TYPES)
+        with self._lock, open(self._path, "a", encoding="utf-8") as handle:
+            handle.write(line)
+            handle.flush()
+            if should_fsync:
+                os.fsync(handle.fileno())
 
     def load(self) -> list[dict[str, Any]]:
         from dadbot.core.durability import CRC32LineCodec
+
         with self._lock:
             if not self._path.exists():
                 return []
             events: list[dict[str, Any]] = []
-            with open(self._path, "r", encoding="utf-8") as handle:
+            with open(self._path, encoding="utf-8") as handle:
                 for line_number, raw in enumerate(handle, start=1):
                     if not raw.strip():
                         continue
                     event = CRC32LineCodec.decode(raw)
                     if event is None:
                         import warnings
+
                         warnings.warn(
-                            f"CRCFileWALLedgerBackend: corrupt/partial line {line_number} "
-                            f"in {self._path} â€” skipping",
+                            f"CRCFileWALLedgerBackend: corrupt/partial line {line_number} in {self._path} â€” skipping",
                             RuntimeWarning,
                             stacklevel=2,
                         )
@@ -218,6 +220,7 @@ class CRCFileWALLedgerBackend(LedgerBackend):
 # ---------------------------------------------------------------------------
 # Sequence validator (Tier 1 item 4 â€” backend-enforced ordering)
 # ---------------------------------------------------------------------------
+
 
 class SequenceValidator:
     """Validates that events loaded from a backend have monotonically increasing
@@ -242,8 +245,7 @@ class SequenceValidator:
             seq = int(seq)
             if prev_seq is not None and seq <= prev_seq:
                 violations.append(
-                    f"Event #{i} sequence {seq} is not > previous {prev_seq} "
-                    f"(type={event.get('type')!r})"
+                    f"Event #{i} sequence {seq} is not > previous {prev_seq} (type={event.get('type')!r})",
                 )
             prev_seq = seq
         return {
@@ -257,6 +259,7 @@ class SequenceValidator:
 # Consistency-mode wrappers (Tier 3 item 11)
 # ---------------------------------------------------------------------------
 
+
 class StrongConsistencyBackend(LedgerBackend):
     """Wrapper that forces fsync on *every* append, regardless of event type.
 
@@ -265,10 +268,13 @@ class StrongConsistencyBackend(LedgerBackend):
     """
 
     def __init__(self, inner: LedgerBackend) -> None:
-        if not isinstance(inner, FileWALLedgerBackend) and not isinstance(inner, CRCFileWALLedgerBackend):
+        if not isinstance(inner, FileWALLedgerBackend) and not isinstance(
+            inner,
+            CRCFileWALLedgerBackend,
+        ):
             raise TypeError(
                 "StrongConsistencyBackend requires a file-based backend "
-                "(FileWALLedgerBackend or CRCFileWALLedgerBackend)"
+                "(FileWALLedgerBackend or CRCFileWALLedgerBackend)",
             )
         self._inner = inner
 
@@ -355,10 +361,10 @@ class BatchWriteBackend(LedgerBackend):
         *,
         batch_size: int = 50,
     ) -> None:
-        self._inner      = inner
+        self._inner = inner
         self._batch_size = max(1, int(batch_size))
-        self._buffer:    list[tuple[dict[str, Any], bool]] = []
-        self._lock       = threading.RLock()
+        self._buffer: list[tuple[dict[str, Any], bool]] = []
+        self._lock = threading.RLock()
 
     def append(self, event: dict[str, Any], *, committed: bool = False) -> None:
         with self._lock:

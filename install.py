@@ -44,12 +44,17 @@ def setup_static_and_profile():
             shutil.copy(template, profile)
             print("✅ Created dad_profile.json from template")
         else:
-            profile.write_text(json.dumps({
-                "name": "Dad",
-                "voice": {"tts_backend": "pyttsx3", "piper_model_path": ""},
-                "avatar": {},
-                "ical_feed_url": "",
-            }, indent=2))
+            profile.write_text(
+                json.dumps(
+                    {
+                        "name": "Dad",
+                        "voice": {"tts_backend": "pyttsx3", "piper_model_path": ""},
+                        "avatar": {},
+                        "ical_feed_url": "",
+                    },
+                    indent=2,
+                )
+            )
             print("✅ Created minimal dad_profile.json")
 
     memory = Path("dad_memory.json")
@@ -83,7 +88,8 @@ def pull_models():
         try:
             subprocess.check_call(
                 ["ollama", "pull", model],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
             print("✅")
         except Exception:
@@ -94,7 +100,8 @@ def pull_models():
         try:
             subprocess.check_call(
                 ["ollama", "pull", model],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
             print("✅")
         except Exception:

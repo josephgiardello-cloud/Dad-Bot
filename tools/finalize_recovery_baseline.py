@@ -1,4 +1,5 @@
 """Finalize certification baseline artifacts from per-lane recovery outputs."""
+
 from __future__ import annotations
 
 import json
@@ -53,9 +54,7 @@ def _parse_top_slowest(log_path: Path) -> list[str]:
     text = log_path.read_text(encoding="utf-8", errors="replace")
     for line in text.splitlines():
         stripped = line.strip()
-        if re.match(r"^\d+\.\d+s\s+", stripped) and (
-            " call " in f" {stripped} " or stripped.endswith(" call")
-        ):
+        if re.match(r"^\d+\.\d+s\s+", stripped) and (" call " in f" {stripped} " or stripped.endswith(" call")):
             items.append(stripped)
     return items[:10]
 

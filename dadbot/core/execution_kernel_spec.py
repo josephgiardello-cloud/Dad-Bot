@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import inspect
-from typing import Any, Iterable, Protocol, runtime_checkable
+from collections.abc import Iterable
+from typing import Any, Protocol, runtime_checkable
 
 
 @runtime_checkable
@@ -15,16 +16,14 @@ class ExecutionKernelSpec(Protocol):
         context: Any,
         *,
         mutation_outside_save_node: bool = False,
-    ) -> Any:
-        ...
+    ) -> Any: ...
 
     async def run(
         self,
         turn_context: Any,
         pipeline: Iterable[tuple[str, Any]],
         execute_stage: Any,
-    ) -> Any:
-        ...
+    ) -> Any: ...
 
 
 class ExecutionKernelContractViolation(RuntimeError):
@@ -58,7 +57,7 @@ def validate_execution_kernel_spec(
 
 
 __all__ = [
-    "ExecutionKernelSpec",
     "ExecutionKernelContractViolation",
+    "ExecutionKernelSpec",
     "validate_execution_kernel_spec",
 ]

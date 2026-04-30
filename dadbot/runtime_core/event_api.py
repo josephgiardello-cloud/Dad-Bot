@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import logging
 
@@ -7,7 +7,6 @@ from .journal import EventJournal
 from .models import Event, new_event
 from .runtime import AgentRuntime
 from .store import ConversationStore
-
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +21,14 @@ class RuntimeEventAPI:
     Versioned view access is explicit so projection evolution stays additive.
     """
 
-    def __init__(self, *, runtime: AgentRuntime, store: ConversationStore, bus: EventBus, journal: EventJournal | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        runtime: AgentRuntime,
+        store: ConversationStore,
+        bus: EventBus,
+        journal: EventJournal | None = None,
+    ) -> None:
         self.runtime = runtime
         self.store = store
         self.bus = bus
@@ -32,9 +38,18 @@ class RuntimeEventAPI:
                 self.store.apply_event(event)
 
     def seed_thread(self, thread_id: str, messages: list[dict] | None) -> None:
-        self.store.seed_thread_messages(str(thread_id or "default"), list(messages or []))
+        self.store.seed_thread_messages(
+            str(thread_id or "default"),
+            list(messages or []),
+        )
 
-    def emit_user_message(self, *, thread_id: str, text: str, attachments: list[dict] | None = None) -> None:
+    def emit_user_message(
+        self,
+        *,
+        thread_id: str,
+        text: str,
+        attachments: list[dict] | None = None,
+    ) -> None:
         self.emit_event(
             new_event(
                 "user_message",
@@ -43,7 +58,7 @@ class RuntimeEventAPI:
                     "text": str(text or ""),
                     "attachments": list(attachments or []),
                 },
-            )
+            ),
         )
 
     def emit_event(self, event: Event) -> None:
@@ -57,7 +72,7 @@ class RuntimeEventAPI:
                 "assistant_attachment_added",
                 thread_id=str(thread_id or "default"),
                 payload={"attachment": dict(attachment or {})},
-            )
+            ),
         )
 
     def process_until_idle(self, *, max_events: int = 256) -> list[Event]:
@@ -86,7 +101,12 @@ class RuntimeEventAPI:
     def view_schema_policy(self) -> dict:
         return self.store.thread_view_schema_policy()
 
-    def get_view(self, thread_id: str, *, version: str = ConversationStore.THREAD_VIEW_DEFAULT_VERSION) -> dict:
+    def get_view(
+        self,
+        thread_id: str,
+        *,
+        version: str = ConversationStore.THREAD_VIEW_DEFAULT_VERSION,
+    ) -> dict:
         """Return the canonical thread projection.
 
         The default view is the live projection contract (`v2`). Replay and audit
@@ -99,7 +119,11 @@ class RuntimeEventAPI:
     @staticmethod
     def result_for_thread(thread_id: str, processed: list[Event]) -> dict:
         assistant_event = next(
-            (item for item in processed if item.type == "assistant_reply" and item.thread_id == str(thread_id or "default")),
+            (
+                item
+                for item in processed
+                if item.type == "assistant_reply" and item.thread_id == str(thread_id or "default")
+            ),
             None,
         )
         photo_requested = any(

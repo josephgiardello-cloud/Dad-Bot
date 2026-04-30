@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from dadbot.ux_overlay.models import CuratedMemory
@@ -18,11 +18,18 @@ class MemoryIngestionItem:
 class MemoryCurator:
     """Converts raw interaction snippets into narrative-memory units."""
 
-    def __init__(self, minimum_length: int = 20, meaningful_terms: tuple[str, ...] = ("feel", "remember", "important", "family")) -> None:
+    def __init__(
+        self,
+        minimum_length: int = 20,
+        meaningful_terms: tuple[str, ...] = ("feel", "remember", "important", "family"),
+    ) -> None:
         self.minimum_length = minimum_length
         self.meaningful_terms = tuple(t.lower() for t in meaningful_terms)
 
-    def ingestion_filter(self, raw_events: list[dict[str, Any]]) -> list[MemoryIngestionItem]:
+    def ingestion_filter(
+        self,
+        raw_events: list[dict[str, Any]],
+    ) -> list[MemoryIngestionItem]:
         items: list[MemoryIngestionItem] = []
         for event in raw_events:
             text = str(event.get("text") or "").strip()
@@ -33,12 +40,24 @@ class MemoryCurator:
                 continue
             created = event.get("created_at")
             if not isinstance(created, datetime):
-                created = datetime.now(timezone.utc)
+                created = datetime.now(UTC)
             intensity = float(event.get("emotional_intensity") or 0.0)
-            items.append(MemoryIngestionItem(text=text, created_at=created, emotional_intensity=max(0.0, min(1.0, intensity))))
+            items.append(
+                MemoryIngestionItem(
+                    text=text,
+                    created_at=created,
+                    emotional_intensity=max(0.0, min(1.0, intensity)),
+                ),
+            )
         return items
 
-    def importance_score(self, item: MemoryIngestionItem, *, recency_hours: float, repetition_count: int) -> float:
+    def importance_score(
+        self,
+        item: MemoryIngestionItem,
+        *,
+        recency_hours: float,
+        repetition_count: int,
+    ) -> float:
         emotional = item.emotional_intensity * 0.5
         repetition = min(1.0, repetition_count / 5.0) * 0.3
         recency = max(0.0, 1.0 - min(1.0, recency_hours / (24.0 * 14.0))) * 0.2
@@ -54,7 +73,7 @@ class MemoryCurator:
             buckets[topic_key].append(item)
 
         curated: list[CuratedMemory] = []
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         for key, bucket in buckets.items():
             latest = max(bucket, key=lambda x: x.created_at)
             avg_emotion = sum(x.emotional_intensity for x in bucket) / len(bucket)
@@ -67,12 +86,18 @@ class MemoryCurator:
             curated.append(
                 CuratedMemory(
                     summary=f"{key}: {self._summary_from_bucket(bucket)}",
-                    emotional_weight=max(0.0, min(1.0, (score * 0.7) + (avg_emotion * 0.3))),
+                    emotional_weight=max(
+                        0.0,
+                        min(1.0, (score * 0.7) + (avg_emotion * 0.3)),
+                    ),
                     last_reinforced=latest.created_at,
-                )
+                ),
             )
 
-        curated.sort(key=lambda x: (x.emotional_weight, x.last_reinforced), reverse=True)
+        curated.sort(
+            key=lambda x: (x.emotional_weight, x.last_reinforced),
+            reverse=True,
+        )
         return curated
 
     @staticmethod

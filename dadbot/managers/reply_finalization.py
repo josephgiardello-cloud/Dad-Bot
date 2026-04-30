@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import re
 
@@ -54,9 +54,20 @@ class ReplyFinalizationManager:
 
     def finalize(self, reply, current_mood, user_input=None):
         blended_reply = self.apply_calibrated_pushback(reply, user_input, current_mood)
-        blended_reply = self.bot.tone_context.blend_daily_checkin_reply(blended_reply, current_mood)
-        blended_reply = self.bot.maybe_add_family_echo(blended_reply, user_input, current_mood)
-        blended_reply = self.bot.moderate_output_reply(user_input, blended_reply, current_mood)
+        blended_reply = self.bot.tone_context.blend_daily_checkin_reply(
+            blended_reply,
+            current_mood,
+        )
+        blended_reply = self.bot.maybe_add_family_echo(
+            blended_reply,
+            user_input,
+            current_mood,
+        )
+        blended_reply = self.bot.moderate_output_reply(
+            user_input,
+            blended_reply,
+            current_mood,
+        )
         try:
             ShadowAuditManager(self.bot).audit_and_record(
                 user_input=str(user_input or ""),
@@ -72,9 +83,20 @@ class ReplyFinalizationManager:
 
     async def finalize_async(self, reply, current_mood, user_input=None):
         blended_reply = self.apply_calibrated_pushback(reply, user_input, current_mood)
-        blended_reply = self.bot.tone_context.blend_daily_checkin_reply(blended_reply, current_mood)
-        blended_reply = self.bot.maybe_add_family_echo(blended_reply, user_input, current_mood)
-        blended_reply = await self.bot.moderate_output_reply_async(user_input, blended_reply, current_mood)
+        blended_reply = self.bot.tone_context.blend_daily_checkin_reply(
+            blended_reply,
+            current_mood,
+        )
+        blended_reply = self.bot.maybe_add_family_echo(
+            blended_reply,
+            user_input,
+            current_mood,
+        )
+        blended_reply = await self.bot.moderate_output_reply_async(
+            user_input,
+            blended_reply,
+            current_mood,
+        )
         try:
             ShadowAuditManager(self.bot).audit_and_record(
                 user_input=str(user_input or ""),

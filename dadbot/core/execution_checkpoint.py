@@ -19,6 +19,7 @@ Provides three complementary guarantees for crash-safe, replay-safe execution:
      means the output type-class and status are identical; raw text is
      compared only when strict_mode=True.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -28,7 +29,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
 from threading import RLock
-from typing import Any, Optional
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -37,7 +38,7 @@ from typing import Any, Optional
 
 def _sha256(payload: Any) -> str:
     return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        json.dumps(payload, sort_keys=True, default=str).encode("utf-8"),
     ).hexdigest()
 
 
@@ -59,26 +60,28 @@ class NodeState(str, Enum):
 @dataclass
 class FallbackChainEntry:
     """One link in a fallback chain: what was tried and why it was rejected."""
+
     tool_name: str
     attempt: int
-    status: str                    # ok / error / timeout / partial / degraded
+    status: str  # ok / error / timeout / partial / degraded
     error_message: str = ""
     latency_ms: float = 0.0
-    fallback_reason: str = ""      # why execution fell through to next candidate
+    fallback_reason: str = ""  # why execution fell through to next candidate
 
 
 @dataclass
 class NodeExecutionSnapshot:
     """Full execution state for one logical node at checkpoint time."""
+
     node_id: str
-    node_type: str                 # tool / planner / critic / router
+    node_type: str  # tool / planner / critic / router
     state: NodeState
     tool_name: str = ""
     intent: str = ""
-    request_hash: str = ""        # canonical request hash (from tool_idempotency)
+    request_hash: str = ""  # canonical request hash (from tool_idempotency)
     attempt_count: int = 0
     last_error: str = ""
-    output_type: str = ""         # structural output class (null/str/list/dict…)
+    output_type: str = ""  # structural output class (null/str/list/dict…)
     partial_confidence: float = 1.0
     fallback_chain: list[FallbackChainEntry] = field(default_factory=list)
     partial_output_available: bool = False
@@ -117,6 +120,7 @@ class NodeExecutionSnapshot:
 @dataclass
 class ExecutionCheckpoint:
     """An immutable point-in-time snapshot of all node execution states."""
+
     checkpoint_id: str
     label: str
     created_at: float
@@ -224,12 +228,16 @@ class ExecutionCheckpointKernel:
         with self._lock:
             snap = self._node_states.get(node_id)
             if snap is None:
-                snap = NodeExecutionSnapshot(node_id=node_id, node_type="tool", state=NodeState.FALLBACK)
+                snap = NodeExecutionSnapshot(
+                    node_id=node_id,
+                    node_type="tool",
+                    state=NodeState.FALLBACK,
+                )
                 self._node_states[node_id] = snap
             snap.fallback_chain.append(entry)
             snap.updated_at = time.time()
 
-    def get_node(self, node_id: str) -> Optional[NodeExecutionSnapshot]:
+    def get_node(self, node_id: str) -> NodeExecutionSnapshot | None:
         with self._lock:
             return self._node_states.get(node_id)
 
@@ -274,7 +282,7 @@ class ExecutionCheckpointKernel:
         with self._lock:
             self._node_states = {k: deepcopy(v) for k, v in checkpoint.node_snapshots.items()}
 
-    def latest_checkpoint(self) -> Optional[ExecutionCheckpoint]:
+    def latest_checkpoint(self) -> ExecutionCheckpoint | None:
         with self._lock:
             return self._checkpoints[-1] if self._checkpoints else None
 
@@ -299,7 +307,7 @@ class ExecutionCheckpointKernel:
         if stored_hash != recomputed:
             raise CheckpointIntegrityError(
                 f"Checkpoint {checkpoint.checkpoint_id!r} hash mismatch: "
-                f"stored={stored_hash[:8]!r} computed={recomputed[:8]!r}"
+                f"stored={stored_hash[:8]!r} computed={recomputed[:8]!r}",
             )
 
     def assert_checkpoint_integrity(self) -> None:
@@ -311,7 +319,7 @@ class ExecutionCheckpointKernel:
             if cp.prev_checkpoint_hash != expected_prev:
                 raise CheckpointIntegrityError(
                     f"Chain break at checkpoint {cp.checkpoint_id!r}: "
-                    f"expected prev={expected_prev[:8]!r}, got {cp.prev_checkpoint_hash[:8]!r}"
+                    f"expected prev={expected_prev[:8]!r}, got {cp.prev_checkpoint_hash[:8]!r}",
                 )
             self.assert_checkpoint_hash(cp)
             expected_prev = cp.checkpoint_hash
@@ -330,7 +338,7 @@ class DuplicateExecutionError(RuntimeError):
 class IdempotencyEntry:
     request_hash: str
     tool_name: str
-    status: str       # terminal status of the completed execution
+    status: str  # terminal status of the completed execution
     output_type: str
     completed_at: float
     attempt_count: int
@@ -354,7 +362,9 @@ class ExecutionIdempotencyRegistry:
     """
 
     # Statuses that are terminal successes and must not be re-executed
-    _SUCCESS_STATUSES: frozenset[str] = frozenset({"ok", "cached", "partial", "skipped"})
+    _SUCCESS_STATUSES: frozenset[str] = frozenset(
+        {"ok", "cached", "partial", "skipped"},
+    )
 
     def __init__(self) -> None:
         self._lock = RLock()
@@ -387,7 +397,7 @@ class ExecutionIdempotencyRegistry:
         with self._lock:
             return request_hash in self._entries
 
-    def get_cached_result(self, request_hash: str) -> Optional[IdempotencyEntry]:
+    def get_cached_result(self, request_hash: str) -> IdempotencyEntry | None:
         """Return the cached idempotency entry, or None if not yet executed."""
         with self._lock:
             return self._entries.get(request_hash)
@@ -414,6 +424,7 @@ class ReplayMismatchError(RuntimeError):
 @dataclass(frozen=True)
 class ReplayRecord:
     """The canonical fingerprint of one tool execution, used for replay comparison."""
+
     request_hash: str
     result_status: str
     result_output_type: str
@@ -421,13 +432,15 @@ class ReplayRecord:
     attempt_count: int
 
     def fingerprint(self) -> str:
-        return _sha256({
-            "request_hash": self.request_hash,
-            "result_status": self.result_status,
-            "result_output_type": self.result_output_type,
-            "fallback_chain_length": self.fallback_chain_length,
-            "attempt_count": self.attempt_count,
-        })
+        return _sha256(
+            {
+                "request_hash": self.request_hash,
+                "result_status": self.result_status,
+                "result_output_type": self.result_output_type,
+                "fallback_chain_length": self.fallback_chain_length,
+                "attempt_count": self.attempt_count,
+            },
+        )
 
 
 class DeterministicReplayValidator:
@@ -495,30 +508,29 @@ class DeterministicReplayValidator:
 
         if recorded is None:
             raise ReplayMismatchError(
-                f"No recorded fingerprint for request_hash={request_hash[:16]!r}. "
-                "Cannot validate replay."
+                f"No recorded fingerprint for request_hash={request_hash[:16]!r}. Cannot validate replay.",
             )
 
         if recorded.result_status != result_status:
             raise ReplayMismatchError(
                 f"Replay status mismatch for hash {request_hash[:16]!r}: "
-                f"recorded={recorded.result_status!r}, replayed={result_status!r}"
+                f"recorded={recorded.result_status!r}, replayed={result_status!r}",
             )
         if recorded.result_output_type != result_output_type:
             raise ReplayMismatchError(
                 f"Replay output type mismatch for hash {request_hash[:16]!r}: "
-                f"recorded={recorded.result_output_type!r}, replayed={result_output_type!r}"
+                f"recorded={recorded.result_output_type!r}, replayed={result_output_type!r}",
             )
         if self._strict:
             if recorded.fallback_chain_length != fallback_chain_length:
                 raise ReplayMismatchError(
                     f"Strict replay: fallback chain length mismatch for {request_hash[:16]!r}: "
-                    f"recorded={recorded.fallback_chain_length}, replayed={fallback_chain_length}"
+                    f"recorded={recorded.fallback_chain_length}, replayed={fallback_chain_length}",
                 )
             if recorded.attempt_count != attempt_count:
                 raise ReplayMismatchError(
                     f"Strict replay: attempt count mismatch for {request_hash[:16]!r}: "
-                    f"recorded={recorded.attempt_count}, replayed={attempt_count}"
+                    f"recorded={recorded.attempt_count}, replayed={attempt_count}",
                 )
 
         # Replay is valid — return the recorded fingerprint for audit trail
@@ -586,17 +598,23 @@ class ReplaySafeExecutionContext:
             attempt_count=attempt_count,
             output_type=output_type,
         )
-        for entry in (fallback_chain or []):
+        for entry in fallback_chain or []:
             self.kernel.add_fallback_entry(node_id, entry)
 
         # 2. Register with idempotency registry
         self.idempotency.register_success(
-            request_hash, tool_name, status, output_type, attempt_count
+            request_hash,
+            tool_name,
+            status,
+            output_type,
+            attempt_count,
         )
 
         # 3. Record replay fingerprint
         self.replay.record(
-            request_hash, status, output_type,
+            request_hash,
+            status,
+            output_type,
             fallback_chain_length=len(fallback_chain or []),
             attempt_count=attempt_count,
         )

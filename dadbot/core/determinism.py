@@ -1,4 +1,4 @@
-﻿"""Determinism enforcement boundary for the DadBot turn pipeline.
+"""Determinism enforcement boundary for the DadBot turn pipeline.
 
 Problem
 -------
@@ -44,16 +44,17 @@ import copy
 import hashlib
 import json
 import logging
+from collections.abc import Callable
 from enum import Enum
-from typing import Any, Callable
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
 
 class DeterminismMode(str, Enum):
-    RECORD = "RECORD"   # Execute + capture output; re-use if already captured
-    REPLAY = "REPLAY"   # Never execute; return sealed output or raise
-    OPEN = "OPEN"       # Passthrough: no recording, no enforcement
+    RECORD = "RECORD"  # Execute + capture output; re-use if already captured
+    REPLAY = "REPLAY"  # Never execute; return sealed output or raise
+    OPEN = "OPEN"  # Passthrough: no recording, no enforcement
 
 
 class DeterminismViolation(RuntimeError):
@@ -70,7 +71,7 @@ def _content_hash(value: Any) -> str:
     """Stable fingerprint of a JSON-serialisable value."""
     try:
         serialised = json.dumps(value, sort_keys=True, default=str).encode("utf-8")
-    except Exception:
+    except Exception:  # noqa: BLE001
         serialised = repr(value).encode("utf-8")
     return hashlib.sha256(serialised).hexdigest()[:16]
 
@@ -84,9 +85,10 @@ class DeterminismBoundary:
     sealed_values:  Slot â†’ captured output mapping.
     hashes:         Slot â†’ content hash of captured output.
     violations:     Accumulated violation records; non-empty means enforcement failed.
+
     """
 
-    __slots__ = ("mode", "sealed_values", "hashes", "violations", "_call_count")
+    __slots__ = ("_call_count", "hashes", "mode", "sealed_values", "violations")
 
     def __init__(self, mode: DeterminismMode = DeterminismMode.RECORD) -> None:
         self.mode: DeterminismMode = mode
@@ -111,7 +113,13 @@ class DeterminismBoundary:
         """Switch back to RECORD mode."""
         self.mode = DeterminismMode.RECORD
 
-    def capture(self, slot: str, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    def capture(
+        self,
+        slot: str,
+        fn: Callable[..., Any],
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
         """Execute *fn* or return the sealed value, depending on current mode.
 
         Parameters
@@ -127,6 +135,7 @@ class DeterminismBoundary:
         Raises
         ------
         DeterminismViolation  if REPLAY mode and no sealed value is present.
+
         """
         self._call_count[slot] = self._call_count.get(slot, 0) + 1
 
@@ -140,11 +149,13 @@ class DeterminismBoundary:
                     self.mode,
                     "no sealed value available; cannot guarantee deterministic replay",
                 )
-                self.violations.append({
-                    "slot": slot,
-                    "mode": self.mode.value,
-                    "reason": violation.reason,
-                })
+                self.violations.append(
+                    {
+                        "slot": slot,
+                        "mode": self.mode.value,
+                        "reason": violation.reason,
+                    },
+                )
                 raise violation
             logger.debug("DeterminismBoundary: REPLAY slot=%r", slot)
             return copy.deepcopy(self.sealed_values[slot])
@@ -157,10 +168,20 @@ class DeterminismBoundary:
 
         result = fn(*args, **kwargs)
         self._seal_slot(slot, result)
-        logger.debug("DeterminismBoundary: RECORD SEALED slot=%r hash=%s", slot, self.hashes[slot])
+        logger.debug(
+            "DeterminismBoundary: RECORD SEALED slot=%r hash=%s",
+            slot,
+            self.hashes[slot],
+        )
         return result
 
-    async def capture_async(self, slot: str, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    async def capture_async(
+        self,
+        slot: str,
+        fn: Callable[..., Any],
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
         """Async variant of :meth:`capture`."""
         self._call_count[slot] = self._call_count.get(slot, 0) + 1
 
@@ -174,11 +195,13 @@ class DeterminismBoundary:
                     self.mode,
                     "no sealed value available; cannot guarantee deterministic replay",
                 )
-                self.violations.append({
-                    "slot": slot,
-                    "mode": self.mode.value,
-                    "reason": violation.reason,
-                })
+                self.violations.append(
+                    {
+                        "slot": slot,
+                        "mode": self.mode.value,
+                        "reason": violation.reason,
+                    },
+                )
                 raise violation
             logger.debug("DeterminismBoundary: REPLAY (async) slot=%r", slot)
             return copy.deepcopy(self.sealed_values[slot])
@@ -189,7 +212,11 @@ class DeterminismBoundary:
 
         result = await fn(*args, **kwargs)
         self._seal_slot(slot, result)
-        logger.debug("DeterminismBoundary: RECORD SEALED (async) slot=%r hash=%s", slot, self.hashes[slot])
+        logger.debug(
+            "DeterminismBoundary: RECORD SEALED (async) slot=%r hash=%s",
+            slot,
+            self.hashes[slot],
+        )
         return result
 
     def inject(self, slot: str, value: Any) -> None:

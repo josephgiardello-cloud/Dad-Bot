@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import logging
 from typing import Any
@@ -22,7 +22,11 @@ class MaintenanceService:
        UI at next startup or via OS notifications when enabled.
     """
 
-    def __init__(self, maintenance: MaintenanceScheduler, long_term: LongTermSignalsManager):
+    def __init__(
+        self,
+        maintenance: MaintenanceScheduler,
+        long_term: LongTermSignalsManager,
+    ):
         self.maintenance = maintenance
         self.long_term = long_term
 
@@ -30,7 +34,9 @@ class MaintenanceService:
         trigger_text = str(getattr(turn_context, "user_input", "") or "")
 
         # 1. Periodic durable synthesis (memory archive, consolidation, etc.)
-        synthesis_result = self.maintenance.run_periodic_durable_synthesis(trigger_text=trigger_text)
+        synthesis_result = self.maintenance.run_periodic_durable_synthesis(
+            trigger_text=trigger_text,
+        )
 
         # 2. Proactive engagement: fire any due reminders or life-pattern check-ins.
         #    run_scheduled_proactive_jobs queues messages via bot.queue_proactive_message
@@ -38,6 +44,9 @@ class MaintenanceService:
         try:
             self.maintenance.run_scheduled_proactive_jobs()
         except Exception as exc:
-            logger.debug("MaintenanceService.tick: proactive jobs failed (non-fatal): %s", exc)
+            logger.debug(
+                "MaintenanceService.tick: proactive jobs failed (non-fatal): %s",
+                exc,
+            )
 
         return synthesis_result

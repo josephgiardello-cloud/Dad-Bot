@@ -1,16 +1,20 @@
 """Adversarial — mutation ordering attacks, locked mutation enforcement."""
+
 from __future__ import annotations
 
 import pytest
+from harness.deterministic_seeds import ADVERSARIAL
+from harness.graph_runner import GraphRunner
+from harness.kernel_mock import MockRegistry
+from harness.mutation_fuzzer import MutationFuzzer
+from harness.turn_factory import TurnFactory
 
 from dadbot.core.graph import (
     ContextBuilderNode,
-    FatalTurnError,
     HealthNode,
     InferenceNode,
     MutationGuard,
     MutationIntent,
-    MutationKind,
     MutationQueue,
     ReflectionNode,
     SafetyNode,
@@ -18,12 +22,6 @@ from dadbot.core.graph import (
     TemporalNode,
     TurnGraph,
 )
-from harness.deterministic_seeds import ADVERSARIAL, MUTATION_FUZZ
-from harness.graph_runner import GraphRunner
-from harness.mutation_fuzzer import MutationFuzzer
-from harness.kernel_mock import MockRegistry
-from harness.turn_factory import TurnFactory
-
 
 _T = {"wall_time": "2026-01-01T00:00:00", "wall_date": "2026-01-01"}
 
@@ -55,6 +53,7 @@ def _build_canonical(registry: MockRegistry) -> TurnGraph:
 # ---------------------------------------------------------------------------
 # Mutation priority override is still deterministic (reordering attack)
 # ---------------------------------------------------------------------------
+
 
 class TestMutationReorderingAttack:
     def test_reversed_priority_order_still_drains_ascending(self):
@@ -100,6 +99,7 @@ class TestMutationReorderingAttack:
 # Locked mutation attack — MutationGuard blocks all non-save stages
 # ---------------------------------------------------------------------------
 
+
 class TestLockedMutationAttack:
     def test_queue_call_inside_guard_raises(self):
         q = MutationQueue()
@@ -139,10 +139,10 @@ class TestLockedMutationAttack:
 # Duplicate execution attack
 # ---------------------------------------------------------------------------
 
+
 class TestDuplicateExecutionAttack:
     def test_finalize_turn_called_only_once_despite_duplicate_run_attempt(self):
         """Graph.execute() must not double-run even when called concurrently."""
-        import asyncio
 
         registry = MockRegistry()
         graph = _build_canonical(registry)

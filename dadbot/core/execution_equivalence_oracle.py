@@ -5,17 +5,17 @@ import json
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from dadbot.core.execution_replay_engine import verify_terminal_state_replay_equivalence
 from dadbot.core.execution_semantics import (
     AllowedTransformations,
     build_execution_state,
     execution_equivalence_relation,
 )
-from dadbot.core.execution_replay_engine import verify_terminal_state_replay_equivalence
 
 
 def _stable_hash(payload: dict[str, Any]) -> str:
     return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        json.dumps(payload, sort_keys=True, default=str).encode("utf-8"),
     ).hexdigest()
 
 
@@ -63,7 +63,9 @@ class ExecutionEquivalenceOracle:
             "trace_seed": str(trace_seed or ""),
             "memory_state_id": str(memory_state_id or ""),
             "trace_final_hash": str(execution_trace_context.get("final_hash") or ""),
-            "execution_dag_hash": str((execution_trace_context.get("execution_dag") or {}).get("dag_hash") or ""),
+            "execution_dag_hash": str(
+                (execution_trace_context.get("execution_dag") or {}).get("dag_hash") or "",
+            ),
         }
         return _stable_hash(payload)
 
@@ -86,8 +88,12 @@ class ExecutionEquivalenceOracle:
             execution_trace_context=execution_trace_context,
             enforce_dag_equivalence=True,
         )
-        expected_terminal_state = dict(replay_report.get("expected_terminal_state") or {})
-        replayed_terminal_state = dict(replay_report.get("replayed_terminal_state") or {})
+        expected_terminal_state = dict(
+            replay_report.get("expected_terminal_state") or {},
+        )
+        replayed_terminal_state = dict(
+            replay_report.get("replayed_terminal_state") or {},
+        )
 
         left_state = build_execution_state(
             terminal_state=expected_terminal_state,
@@ -127,7 +133,9 @@ class ExecutionEquivalenceOracle:
         violations = list(replay_report.get("violations") or [])
         violations.extend(list(relation.violations))
 
-        equivalent = bool(replay_report.get("equivalent", False)) and bool(relation.equivalent)
+        equivalent = bool(replay_report.get("equivalent", False)) and bool(
+            relation.equivalent,
+        )
         return ExecutionEquivalenceOracleResult(
             equivalent=equivalent,
             invariance_hash=invariance_hash,

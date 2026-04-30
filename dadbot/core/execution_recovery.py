@@ -43,6 +43,7 @@ effects (writes, HTTP calls, DB mutations) SHOULD check ``_stage_call_id`` again
 their own idempotency store before acting.  The call_id is deterministic:
 identical for every retry of the same stage in the same turn.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -58,7 +59,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _EXECUTED_STAGES_KEY = "_graph_executed_stages"
-_STAGE_CALL_ID_KEY   = "_stage_call_id"
+_STAGE_CALL_ID_KEY = "_stage_call_id"
 
 
 def _compute_stage_call_id(turn_id: str, stage_name: str) -> str:
@@ -68,7 +69,7 @@ def _compute_stage_call_id(turn_id: str, stage_name: str) -> str:
     It is injected into TurnContext.state before every node execution so that
     external tools can perform their own deduplication checks.
     """
-    payload = f"{turn_id}:{stage_name}".encode("utf-8")
+    payload = f"{turn_id}:{stage_name}".encode()
     return hashlib.sha256(payload).hexdigest()[:32]
 
 
@@ -81,12 +82,13 @@ class ExecutionRecovery:
         Durable storage for per-turn resume records.
     policy:
         ResumabilityPolicy controlling max age and whether to skip stages.
+
     """
 
     def __init__(
         self,
         resume_store: TurnResumeStore,
-        policy: "ResumabilityPolicy",
+        policy: ResumabilityPolicy,
     ) -> None:
         self._store = resume_store
         self._policy = policy
@@ -192,7 +194,9 @@ class ExecutionRecovery:
         except OSError as exc:
             logger.debug(
                 "mark_stage_started: non-fatal storage error for turn %r stage %r: %s",
-                turn_id, stage_name, exc,
+                turn_id,
+                stage_name,
+                exc,
             )
         return call_id
 
@@ -229,6 +233,7 @@ class ExecutionRecovery:
             Current TurnContext (used for trace_id and checkpoint_hash).
         completed_stages:
             Ordered list of all stages completed so far in this turn.
+
         """
         if not self._policy.enabled:
             return
@@ -298,7 +303,9 @@ class ExecutionRecovery:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def repair_partial_trace_context(trace_context: dict[str, Any] | None) -> dict[str, Any]:
+    def repair_partial_trace_context(
+        trace_context: dict[str, Any] | None,
+    ) -> dict[str, Any]:
         """Repair partial/invalid trace payloads into a replay-safe envelope."""
         trace = dict(trace_context or {})
         raw_steps = list(trace.get("steps") or [])
@@ -308,10 +315,12 @@ class ExecutionRecovery:
                 continue
             repaired_steps.append(
                 {
-                    "seq": int(step.get("seq") if isinstance(step.get("seq"), int) else seq),
+                    "seq": int(
+                        step.get("seq") if isinstance(step.get("seq"), int) else seq,
+                    ),
                     "operation": str(step.get("operation") or "unknown").strip().lower() or "unknown",
                     "payload": dict(step.get("payload") or {}),
-                }
+                },
             )
         trace["steps"] = repaired_steps
         trace.setdefault("schema_version", "2.0")
@@ -322,7 +331,9 @@ class ExecutionRecovery:
 
     @staticmethod
     def reconcile_checkpoint_with_trace(
-        *, checkpoint: dict[str, Any] | None, trace_context: dict[str, Any] | None
+        *,
+        checkpoint: dict[str, Any] | None,
+        trace_context: dict[str, Any] | None,
     ) -> dict[str, Any]:
         """Reconcile durable checkpoint metadata with repaired trace context."""
         cp = dict(checkpoint or {})
@@ -343,7 +354,9 @@ class ExecutionRecovery:
 
     @staticmethod
     def safe_fallback_reconstruction(
-        *, checkpoint: dict[str, Any] | None, trace_context: dict[str, Any] | None
+        *,
+        checkpoint: dict[str, Any] | None,
+        trace_context: dict[str, Any] | None,
     ) -> dict[str, Any]:
         """Build a minimal safe state when full replay reconstruction is unavailable."""
         reconciled = ExecutionRecovery.reconcile_checkpoint_with_trace(

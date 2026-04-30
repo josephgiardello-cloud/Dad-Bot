@@ -1,10 +1,15 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 
 
 class SafetyGuard:
-    def _handle_pii(self, text: str, *, scrubber: Callable[[str], tuple[str, list[str]]]) -> tuple[str, list[str]]:
+    def _handle_pii(
+        self,
+        text: str,
+        *,
+        scrubber: Callable[[str], tuple[str, list[str]]],
+    ) -> tuple[str, list[str]]:
         return scrubber(str(text or ""))
 
     @staticmethod
@@ -27,12 +32,26 @@ class SafetyGuard:
             truncated = True
         return normalized, truncated, removed_control
 
-    def _scrub_output(self, text: str, *, scrubber: Callable[[str], tuple[str, list[str]]]) -> tuple[str, list[str]]:
+    def _scrub_output(
+        self,
+        text: str,
+        *,
+        scrubber: Callable[[str], tuple[str, list[str]]],
+    ) -> tuple[str, list[str]]:
         scrubbed, pii_types = self._handle_pii(str(text or ""), scrubber=scrubber)
         return scrubbed, list(pii_types)
 
-    def sanitize_text(self, text: str, *, scrubber: Callable[[str], tuple[str, list[str]]], max_len: int = 16000) -> tuple[str, dict]:
-        normalized, truncated, removed_control = self._sanitize_input(text, max_len=max_len)
+    def sanitize_text(
+        self,
+        text: str,
+        *,
+        scrubber: Callable[[str], tuple[str, list[str]]],
+        max_len: int = 16000,
+    ) -> tuple[str, dict]:
+        normalized, truncated, removed_control = self._sanitize_input(
+            text,
+            max_len=max_len,
+        )
         scrubbed, pii_types = self._scrub_output(normalized, scrubber=scrubber)
         return scrubbed, {
             "pii_types": list(pii_types),

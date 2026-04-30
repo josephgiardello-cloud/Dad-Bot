@@ -1,4 +1,4 @@
-﻿"""PII scrubber for memory entries before persistence.
+"""PII scrubber for memory entries before persistence.
 
 Detects and redacts personally-identifiable information that should never be
 stored verbatim in Dad Bot's memory store.  This is a defence-in-depth layer,
@@ -8,6 +8,7 @@ not persist unredacted.
 
 Patterns are compiled once at import time so the scrubbing hot-path is fast.
 """
+
 from __future__ import annotations
 
 import re
@@ -15,40 +16,46 @@ import re
 # â”€â”€â”€ compiled PII patterns â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 _PATTERNS: list[tuple[str, re.Pattern]] = [
     # Visa / MC / Amex / Discover card numbers (with optional separators)
-    ("credit_card", re.compile(
-        r"\b(?:4[0-9]{3}|5[1-5][0-9]{2}|3[47][0-9]{2}|6(?:011|5[0-9]{2}))"
-        r"[-\s]?[0-9]{4}[-\s]?[0-9]{4}[-\s]?[0-9]{1,4}\b"
-    )),
+    (
+        "credit_card",
+        re.compile(
+            r"\b(?:4[0-9]{3}|5[1-5][0-9]{2}|3[47][0-9]{2}|6(?:011|5[0-9]{2}))"
+            r"[-\s]?[0-9]{4}[-\s]?[0-9]{4}[-\s]?[0-9]{1,4}\b",
+        ),
+    ),
     # US Social Security Numbers
-    ("ssn", re.compile(
-        r"\b(?!000|666|9\d{2})\d{3}[-\s]?(?!00)\d{2}[-\s]?(?!0{4})\d{4}\b"
-    )),
+    (
+        "ssn",
+        re.compile(r"\b(?!000|666|9\d{2})\d{3}[-\s]?(?!00)\d{2}[-\s]?(?!0{4})\d{4}\b"),
+    ),
     # US phone numbers in common formats
-    ("phone", re.compile(
-        r"\b(?:\+?1[-.\s]?)?"
-        r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b"
-    )),
+    (
+        "phone",
+        re.compile(
+            r"\b(?:\+?1[-.\s]?)?"
+            r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b",
+        ),
+    ),
     # Email addresses
-    ("email", re.compile(
-        r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b"
-    )),
+    ("email", re.compile(r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b")),
     # Passwords / API keys heuristic: long hex or base64-like tokens (â‰¥32 chars)
-    ("token", re.compile(
-        r"\b[A-Za-z0-9+/]{32,}={0,2}\b"
-    )),
+    ("token", re.compile(r"\b[A-Za-z0-9+/]{32,}={0,2}\b")),
     # Routing + account number pairs (bank)
-    ("bank_routing", re.compile(
-        r"\b(?:routing(?:\s+(?:number|#))?[\s:]+)(\d{9})\b",
-        re.IGNORECASE,
-    )),
+    (
+        "bank_routing",
+        re.compile(
+            r"\b(?:routing(?:\s+(?:number|#))?[\s:]+)(\d{9})\b",
+            re.IGNORECASE,
+        ),
+    ),
 ]
 
 _PLACEHOLDER = {
     "credit_card": "[CARD REDACTED]",
-    "ssn":         "[SSN REDACTED]",
-    "phone":       "[PHONE REDACTED]",
-    "email":       "[EMAIL REDACTED]",
-    "token":       "[TOKEN REDACTED]",
+    "ssn": "[SSN REDACTED]",
+    "phone": "[PHONE REDACTED]",
+    "email": "[EMAIL REDACTED]",
+    "token": "[TOKEN REDACTED]",
     "bank_routing": "[ROUTING REDACTED]",
 }
 

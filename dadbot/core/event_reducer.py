@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from copy import deepcopy
 from typing import Any
@@ -24,8 +24,7 @@ class CanonicalEventReducer:
             session_id = str(event.get("session_id") or "").strip()
             payload = dict(event.get("payload") or {})
             sequence = int(event.get("sequence") or 0)
-            if sequence > state["last_sequence"]:
-                state["last_sequence"] = sequence
+            state["last_sequence"] = max(state["last_sequence"], sequence)
 
             if not session_id:
                 continue

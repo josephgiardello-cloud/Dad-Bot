@@ -5,13 +5,17 @@ These tests enforce explicit runtime behavior for:
 - failure taxonomy emission
 - persistence contract validation modes
 """
+
 from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
 
 import pytest
+
 pytestmark = pytest.mark.unit
+from harness.kernel_mock import MockRegistry
+
 from dadbot.core.graph import (
     ContextBuilderNode,
     HealthNode,
@@ -24,7 +28,6 @@ from dadbot.core.graph import (
     TurnContext,
     TurnGraph,
 )
-from harness.kernel_mock import MockRegistry
 
 
 class _RejectInferenceKernel:

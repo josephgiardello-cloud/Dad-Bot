@@ -1,10 +1,11 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import base64
 import logging
 import os
 import uuid
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import ollama
 import streamlit as st
@@ -27,9 +28,18 @@ def get_chat_event_api() -> Any:
     return get_runtime().api
 
 
-def process_prompt_via_runtime(*, thread_id: str, prompt: str, attachments: list[dict] | None = None) -> dict:
+def process_prompt_via_runtime(
+    *,
+    thread_id: str,
+    prompt: str,
+    attachments: list[dict] | None = None,
+) -> dict:
     runtime = get_runtime()
-    return runtime.send_user_message(thread_id=thread_id, content=str(prompt or "").strip(), attachments=attachments)
+    return runtime.send_user_message(
+        thread_id=thread_id,
+        content=str(prompt or "").strip(),
+        attachments=attachments,
+    )
 
 
 def emit_voice_runtime_ledger_event(event_type: str, payload: dict) -> None:
@@ -38,8 +48,12 @@ def emit_voice_runtime_ledger_event(event_type: str, payload: dict) -> None:
     if event_name not in {"VOICE_STATE_TRANSITION", "VOICE_EVENT"}:
         return
     merged_payload = dict(payload or {})
-    trace_id = str(merged_payload.get("trace_id") or st.session_state.setdefault("voice_trace_id", uuid.uuid4().hex))
-    session_id = str(merged_payload.get("session_id") or api.active_thread_id or "voice-ui")
+    trace_id = str(
+        merged_payload.get("trace_id") or st.session_state.setdefault("voice_trace_id", uuid.uuid4().hex),
+    )
+    session_id = str(
+        merged_payload.get("session_id") or api.active_thread_id or "voice-ui",
+    )
     try:
         api.emit_voice_runtime_ledger_event(
             event_type=event_name,
@@ -53,7 +67,12 @@ def emit_voice_runtime_ledger_event(event_type: str, payload: dict) -> None:
         logger.debug("Voice ledger emission skipped for %s: %s", event_name, exc)
 
 
-def purge_session_context(*, bot: Any, initialize_session: Callable[[Any], None], mode: str = "full") -> dict:
+def purge_session_context(
+    *,
+    bot: Any,
+    initialize_session: Callable[[Any], None],
+    mode: str = "full",
+) -> dict:
     api = get_chat_event_api()
     normalized_mode = str(mode or "full").strip().lower()
     if normalized_mode == "soft":
@@ -72,14 +91,27 @@ def ui_shell_snapshot(bot: Any = None) -> dict:
 
 
 def default_thread_messages(initial_greeting: str) -> list[dict]:
-    return [{"role": "assistant", "content": get_chat_event_api().opening_message(initial_greeting)}]
+    return [
+        {
+            "role": "assistant",
+            "content": get_chat_event_api().opening_message(initial_greeting),
+        },
+    ]
 
 
 def bot_messages_for_thread(thread_id: str, *, default_greeting: str) -> list[dict]:
-    return get_chat_event_api().snapshot_thread_messages(thread_id, default_greeting=default_greeting)
+    return get_chat_event_api().snapshot_thread_messages(
+        thread_id,
+        default_greeting=default_greeting,
+    )
 
 
-def initialize_session(bot: Any, *, default_export_path: str, initial_greeting: str) -> None:
+def initialize_session(
+    bot: Any,
+    *,
+    default_export_path: str,
+    initial_greeting: str,
+) -> None:
     api = get_chat_event_api()
     api.ensure_chat_thread_state()
     api.sync_active_thread_snapshot()
@@ -170,7 +202,11 @@ def generate_dad_photo() -> bytes | None:
         return None
 
 
-def emit_generated_photo_message(*, thread_id: str, message: str = "Here's a quick photo I took for you, buddy. Love you.") -> bool:
+def emit_generated_photo_message(
+    *,
+    thread_id: str,
+    message: str = "Here's a quick photo I took for you, buddy. Love you.",
+) -> bool:
     photo = generate_dad_photo()
     if not photo:
         return False

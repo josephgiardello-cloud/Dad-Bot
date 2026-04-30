@@ -1,8 +1,7 @@
 """Tests for Bayesian governing authority over tool selection."""
-import asyncio
+
 from types import SimpleNamespace
 
-import pytest
 from dadbot.services.turn_service import TurnService
 
 
@@ -53,27 +52,21 @@ def test_planner_default_bias_permits_both_tools():
     allowed_reminder, _ = ts._bayesian_tool_gate(
         tool_name="set_reminder", tool_bias="planner_default", plan_reason="test"
     )
-    allowed_web, _ = ts._bayesian_tool_gate(
-        tool_name="web_search", tool_bias="planner_default", plan_reason="test"
-    )
+    allowed_web, _ = ts._bayesian_tool_gate(tool_name="web_search", tool_bias="planner_default", plan_reason="test")
     assert allowed_reminder is True
     assert allowed_web is True
 
 
 def test_minimal_tools_bias_blocks_web_search():
     ts = _make_turn_service("minimal_tools")
-    allowed, reason = ts._bayesian_tool_gate(
-        tool_name="web_search", tool_bias="minimal_tools", plan_reason="test"
-    )
+    allowed, reason = ts._bayesian_tool_gate(tool_name="web_search", tool_bias="minimal_tools", plan_reason="test")
     assert allowed is False
     assert "minimal_tools" in reason
 
 
 def test_minimal_tools_bias_permits_set_reminder():
     ts = _make_turn_service("minimal_tools")
-    allowed, _ = ts._bayesian_tool_gate(
-        tool_name="set_reminder", tool_bias="minimal_tools", plan_reason="test"
-    )
+    allowed, _ = ts._bayesian_tool_gate(tool_name="set_reminder", tool_bias="minimal_tools", plan_reason="test")
     assert allowed is True
 
 
@@ -89,9 +82,7 @@ def test_defer_tools_bias_blocks_all_tools():
 
 def test_unknown_bias_falls_back_to_default_permissions():
     ts = _make_turn_service("unknown_bias_xyz")
-    allowed, _ = ts._bayesian_tool_gate(
-        tool_name="set_reminder", tool_bias="unknown_bias_xyz", plan_reason=""
-    )
+    allowed, _ = ts._bayesian_tool_gate(tool_name="set_reminder", tool_bias="unknown_bias_xyz", plan_reason="")
     assert allowed is True
 
 

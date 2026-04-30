@@ -75,13 +75,13 @@ class TransactionCoordinator:
                 rolled_back_participants=0,
                 error="",
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             rolled_back = 0
             for participant in reversed(committed):
                 try:
                     participant.rollback()
                     rolled_back += 1
-                except Exception:
+                except Exception:  # noqa: BLE001
                     # Best-effort rollback: continue to restore remaining participants.
                     pass
 
@@ -92,7 +92,7 @@ class TransactionCoordinator:
                 try:
                     participant.rollback()
                     rolled_back += 1
-                except Exception:
+                except Exception:  # noqa: BLE001
                     pass
 
             return TransactionReport(

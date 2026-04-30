@@ -14,6 +14,7 @@ def main():
     print("🧔 Starting DadBot...")
     try:
         from dadbot.app_runtime import main as app_main
+
         raise SystemExit(app_main())
     except KeyboardInterrupt:
         print("\n👋 DadBot stopped.")

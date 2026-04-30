@@ -1,4 +1,5 @@
 """Regression tests for DadBot error boundaries and fallback semantics."""
+
 from __future__ import annotations
 
 from dadbot.core.dadbot import DadBot

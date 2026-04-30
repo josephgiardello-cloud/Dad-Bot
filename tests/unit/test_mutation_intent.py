@@ -1,18 +1,17 @@
 """Unit tests for MutationIntent — construction validation, payload_hash, op checks."""
+
 from __future__ import annotations
 
 import pytest
+
 pytestmark = pytest.mark.unit
+from harness.deterministic_seeds import MUTATION_FUZZ
+from harness.mutation_fuzzer import MutationFuzzer
+
 from dadbot.core.graph import (
-    GoalMutationOp,
-    LedgerMutationOp,
-    MemoryMutationOp,
     MutationIntent,
     MutationKind,
-    RelationshipMutationOp,
 )
-from harness.mutation_fuzzer import MutationFuzzer
-from harness.deterministic_seeds import MUTATION_FUZZ
 
 _T = {"wall_time": "2026-01-01T00:00:00", "wall_date": "2026-01-01"}
 
@@ -20,6 +19,7 @@ _T = {"wall_time": "2026-01-01T00:00:00", "wall_date": "2026-01-01"}
 # ---------------------------------------------------------------------------
 # Construction — positive paths
 # ---------------------------------------------------------------------------
+
 
 class TestMutationIntentConstruction:
     def test_memory_valid(self):
@@ -32,7 +32,9 @@ class TestMutationIntentConstruction:
     def test_all_kinds_accepted(self):
         for kind in MutationKind:
             payload: dict = {"temporal": _T} if kind.value in {"memory", "relationship", "ledger"} else {}
-            MutationIntent(type=kind.value, payload=payload, requires_temporal=kind.value in {"memory", "relationship", "ledger"})
+            MutationIntent(
+                type=kind.value, payload=payload, requires_temporal=kind.value in {"memory", "relationship", "ledger"}
+            )
 
     def test_requires_temporal_false_skips_check(self):
         intent = MutationIntent(type="memory", payload={}, requires_temporal=False)
@@ -67,6 +69,7 @@ class TestMutationIntentConstruction:
 # ---------------------------------------------------------------------------
 # Construction — negative paths (validation gates)
 # ---------------------------------------------------------------------------
+
 
 class TestMutationIntentValidation:
     @pytest.mark.parametrize("bad_type", ["bogus", "MEMORY", "save", "", "null"])
@@ -129,6 +132,7 @@ class TestMutationIntentValidation:
 # payload_hash stability
 # ---------------------------------------------------------------------------
 
+
 class TestMutationIntentPayloadHash:
     def test_identical_payloads_produce_identical_hash(self):
         p = {"op": "save_mood_state", "mood": "happy", "temporal": _T}
@@ -160,6 +164,7 @@ class TestMutationIntentPayloadHash:
 # ---------------------------------------------------------------------------
 # Fuzzer integration — fuzzer always produces constructable mutations
 # ---------------------------------------------------------------------------
+
 
 class TestMutationFuzzerIntegration:
     def test_fuzzer_valid_batch_all_construct(self):

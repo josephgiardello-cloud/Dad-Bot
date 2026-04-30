@@ -1,9 +1,11 @@
 """Unit tests for _json_safe — type coercion and fallback behaviour."""
+
 from __future__ import annotations
 
 import json
 
 import pytest
+
 pytestmark = pytest.mark.unit
 from dadbot.core.graph import _json_safe
 

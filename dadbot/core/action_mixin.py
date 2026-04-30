@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 
 class DadBotActionMixin:
@@ -11,7 +11,13 @@ class DadBotActionMixin:
         self.memory.mutate_memory_store(**normalized_patch, save=True)
         return "applied"
 
-    def record_relationship_history_point(self, *, trust_level, openness_level, source="turn"):
+    def record_relationship_history_point(
+        self,
+        *,
+        trust_level,
+        openness_level,
+        source="turn",
+    ):
         history = list(self.memory.relationship_history(limit=180))
         point = {
             "recorded_at": self.runtime_timestamp(),
@@ -38,7 +44,7 @@ class DadBotActionMixin:
             self.runtime_state_manager.sync_active_thread_snapshot()
         else:
             self._apply_thread_snapshot_unlocked(
-                getattr(self.runtime_state_manager, "thread_snapshot", lambda: {})()
+                getattr(self.runtime_state_manager, "thread_snapshot", dict)(),
             )
         return {
             "mode": "soft",

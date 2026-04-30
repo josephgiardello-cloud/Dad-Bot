@@ -1,0 +1,390 @@
+{
+  "generated_at": "2026-04-30T18:09:51.113906+00:00",
+  "bucket_labels": {
+    "A": "real_regression",
+    "B": "migration_inflation",
+    "C": "baseline_invalidation"
+  },
+  "summary": {
+    "A": 0,
+    "B": 2,
+    "C": 0
+  },
+  "findings": {
+    "A": [],
+    "B": [
+      {
+        "source": "complexity_diff_gate",
+        "file": "dadbot/core/graph_pipeline_nodes.py",
+        "detail": "dadbot/core/graph_pipeline_nodes.py: LOC 118->126 and CC 55->62",
+        "reason": "Contract migration inflation in known transition hotfile"
+      },
+      {
+        "source": "god_class_audit",
+        "file": "dadbot/core/graph_pipeline_nodes.py",
+        "detail": "  LOC grew 118\u2192126 (+8) but CC did not decrease (55\u219262)",
+        "reason": "Contract migration inflation in known transition hotfile"
+      }
+    ],
+    "C": []
+  },
+  "sources": {
+    "contract_guard": {
+      "current_count": 54,
+      "baseline_count": 55,
+      "new_violations": [],
+      "_exit_code": 0
+    },
+    "complexity_diff_gate": {
+      "violations": [
+        "dadbot/core/graph_pipeline_nodes.py: LOC 118->126 and CC 55->62"
+      ],
+      "suppressed": [],
+      "current": {
+        "dadbot/core/graph.py": {
+          "loc": 1085,
+          "cc_total": 171,
+          "cc_max": 12,
+          "decision_points": 59
+        },
+        "dadbot/core/nodes.py": {
+          "loc": 1210,
+          "cc_total": 384,
+          "cc_max": 20,
+          "decision_points": 117
+        },
+        "dadbot/memory/graph_manager.py": {
+          "loc": 1496,
+          "cc_total": 372,
+          "cc_max": 30,
+          "decision_points": 151
+        },
+        "dadbot/core/orchestrator.py": {
+          "loc": 330,
+          "cc_total": 94,
+          "cc_max": 15,
+          "decision_points": 20
+        },
+        "dadbot/core/graph_mutation.py": {
+          "loc": 283,
+          "cc_total": 98,
+          "cc_max": 17,
+          "decision_points": 31
+        },
+        "dadbot/core/graph_context.py": {
+          "loc": 180,
+          "cc_total": 41,
+          "cc_max": 12,
+          "decision_points": 5
+        },
+        "dadbot/core/graph_pipeline_nodes.py": {
+          "loc": 126,
+          "cc_total": 62,
+          "cc_max": 13,
+          "decision_points": 10
+        }
+      },
+      "_exit_code": 1
+    },
+    "god_class_audit": {
+      "violations": {
+        "dadbot/core/graph_pipeline_nodes.py": [
+          "  LOC grew 118\u2192126 (+8) but CC did not decrease (55\u219262)"
+        ]
+      },
+      "suppressed": {},
+      "report": [
+        {
+          "file": "dadbot/core/graph.py",
+          "loc": 1085,
+          "cc_total": 171,
+          "cc_max": 12,
+          "decision_points": 72,
+          "baseline_loc": 1085,
+          "baseline_cc_total": 169,
+          "baseline_dp": 72,
+          "violations": []
+        },
+        {
+          "file": "dadbot/core/nodes.py",
+          "loc": 1210,
+          "cc_total": 384,
+          "cc_max": 20,
+          "decision_points": 130,
+          "baseline_loc": 1216,
+          "baseline_cc_total": 384,
+          "baseline_dp": 130,
+          "violations": []
+        },
+        {
+          "file": "dadbot/memory/graph_manager.py",
+          "loc": 1496,
+          "cc_total": 372,
+          "cc_max": 30,
+          "decision_points": 154,
+          "baseline_loc": 1496,
+          "baseline_cc_total": 372,
+          "baseline_dp": 154,
+          "violations": []
+        },
+        {
+          "file": "dadbot/core/orchestrator.py",
+          "loc": 330,
+          "cc_total": 94,
+          "cc_max": 15,
+          "decision_points": 25,
+          "baseline_loc": 330,
+          "baseline_cc_total": 94,
+          "baseline_dp": 25,
+          "violations": []
+        },
+        {
+          "file": "dadbot/core/graph_mutation.py",
+          "loc": 283,
+          "cc_total": 98,
+          "cc_max": 17,
+          "decision_points": 46,
+          "baseline_loc": 286,
+          "baseline_cc_total": 101,
+          "baseline_dp": 48,
+          "violations": []
+        },
+        {
+          "file": "dadbot/core/graph_context.py",
+          "loc": 180,
+          "cc_total": 41,
+          "cc_max": 12,
+          "decision_points": 7,
+          "baseline_loc": 180,
+          "baseline_cc_total": 41,
+          "baseline_dp": 7,
+          "violations": []
+        },
+        {
+          "file": "dadbot/core/graph_pipeline_nodes.py",
+          "loc": 126,
+          "cc_total": 62,
+          "cc_max": 13,
+          "decision_points": 11,
+          "baseline_loc": 118,
+          "baseline_cc_total": 55,
+          "baseline_dp": 11,
+          "violations": [
+            "  LOC grew 118\u2192126 (+8) but CC did not decrease (55\u219262)"
+          ]
+        }
+      ],
+      "_exit_code": 0
+    },
+    "ownership_drift": {
+      "violations": {},
+      "report": [
+        {
+          "file": "dadbot/core/graph.py",
+          "mutation_calls": 9,
+          "policy_calls": 20,
+          "io_calls": 0,
+          "branch_density": 54,
+          "io_imports": 0,
+          "violations": [],
+          "rationale": "graph.py must stay a dispatcher; mutation/policy/IO must be delegated"
+        },
+        {
+          "file": "dadbot/utils/graph.py",
+          "mutation_calls": 0,
+          "policy_calls": 0,
+          "io_calls": 0,
+          "branch_density": 0,
+          "io_imports": 0,
+          "violations": [],
+          "rationale": "graph.py must stay a dispatcher; mutation/policy/IO must be delegated"
+        },
+        {
+          "file": "dadbot/core/orchestrator.py",
+          "mutation_calls": 2,
+          "policy_calls": 1,
+          "io_calls": 0,
+          "branch_density": 19,
+          "io_imports": 0,
+          "violations": [],
+          "rationale": "orchestrator.py must not accumulate inline policy decisions"
+        },
+        {
+          "file": "dadbot/core/nodes.py",
+          "mutation_calls": 9,
+          "policy_calls": 8,
+          "io_calls": 0,
+          "branch_density": 105,
+          "io_imports": 0,
+          "violations": [],
+          "rationale": "nodes.py must not perform direct persistence IO outside SaveNode boundary"
+        },
+        {
+          "file": "dadbot/memory/graph_manager.py",
+          "mutation_calls": 3,
+          "policy_calls": 1,
+          "io_calls": 1,
+          "branch_density": 113,
+          "io_imports": 0,
+          "violations": [],
+          "rationale": "graph_manager.py must not contain turn-execution dispatch logic"
+        },
+        {
+          "file": "dadbot/core/graph_mutation.py",
+          "mutation_calls": 0,
+          "policy_calls": 4,
+          "io_calls": 0,
+          "branch_density": 27,
+          "io_imports": 0,
+          "violations": [],
+          "rationale": "graph_mutation.py is the mutation authority; must not acquire IO/policy"
+        },
+        {
+          "file": "dadbot/core/graph_context.py",
+          "mutation_calls": 4,
+          "policy_calls": 0,
+          "io_calls": 0,
+          "branch_density": 4,
+          "io_imports": 0,
+          "violations": [],
+          "rationale": "graph_context.py is a data container; must stay side-effect free"
+        }
+      ],
+      "_exit_code": 0
+    },
+    "arch_completeness_audit": {
+      "completeness_score": 96,
+      "missing_modules": [],
+      "partial_subsystems": [
+        "mutation_engine"
+      ],
+      "fragmented_subsystems": [],
+      "subsystem_detail": {
+        "mutation_engine": {
+          "exists": true,
+          "file_count": 3,
+          "missing_files": [],
+          "missing_symbols": [
+            "MutationKind"
+          ],
+          "coverage_score": 1.0,
+          "cohesion_score": 1.0,
+          "is_fragmented": false,
+          "is_partial": true
+        },
+        "execution_context": {
+          "exists": true,
+          "file_count": 3,
+          "missing_files": [],
+          "missing_symbols": [],
+          "coverage_score": 1.0,
+          "cohesion_score": 1.0,
+          "is_fragmented": false,
+          "is_partial": false
+        },
+        "node_runtime": {
+          "exists": true,
+          "file_count": 3,
+          "missing_files": [],
+          "missing_symbols": [],
+          "coverage_score": 1.0,
+          "cohesion_score": 1.0,
+          "is_fragmented": false,
+          "is_partial": false
+        },
+        "scheduler": {
+          "exists": true,
+          "file_count": 4,
+          "missing_files": [],
+          "missing_symbols": [],
+          "coverage_score": 1.0,
+          "cohesion_score": 0.667,
+          "is_fragmented": false,
+          "is_partial": false
+        },
+        "recovery_manager": {
+          "exists": true,
+          "file_count": 4,
+          "missing_files": [],
+          "missing_symbols": [],
+          "coverage_score": 1.0,
+          "cohesion_score": 1.0,
+          "is_fragmented": false,
+          "is_partial": false
+        },
+        "replay_system": {
+          "exists": true,
+          "file_count": 4,
+          "missing_files": [],
+          "missing_symbols": [],
+          "coverage_score": 1.0,
+          "cohesion_score": 1.0,
+          "is_fragmented": false,
+          "is_partial": false
+        },
+        "ledger_system": {
+          "exists": true,
+          "file_count": 4,
+          "missing_files": [],
+          "missing_symbols": [],
+          "coverage_score": 1.0,
+          "cohesion_score": 1.0,
+          "is_fragmented": false,
+          "is_partial": false
+        },
+        "trace_system": {
+          "exists": true,
+          "file_count": 4,
+          "missing_files": [],
+          "missing_symbols": [],
+          "coverage_score": 1.0,
+          "cohesion_score": 1.0,
+          "is_fragmented": false,
+          "is_partial": false
+        },
+        "capability_system": {
+          "exists": true,
+          "file_count": 3,
+          "missing_files": [],
+          "missing_symbols": [],
+          "coverage_score": 1.0,
+          "cohesion_score": 0.5,
+          "is_fragmented": false,
+          "is_partial": false
+        },
+        "determinism_system": {
+          "exists": true,
+          "file_count": 4,
+          "missing_files": [],
+          "missing_symbols": [],
+          "coverage_score": 1.0,
+          "cohesion_score": 0.667,
+          "is_fragmented": false,
+          "is_partial": false
+        }
+      },
+      "contract_drift": [],
+      "missing_parameters": [],
+      "orphan_expectations": [],
+      "summary": {
+        "total_modules_checked": 30,
+        "missing_modules": 0,
+        "partial_subsystems": 1,
+        "fragmented_subsystems": 0,
+        "interface_drift_count": 0,
+        "param_propagation_violations": 0,
+        "scanned_exec_functions": 30,
+        "orphan_symbols": 0,
+        "not_referenced_orphan_targets": [
+          "LegacyContextBuilder",
+          "OldSaveNode",
+          "CompatExecutionPolicy",
+          "DadBotV1Registry",
+          "LegacyMemoryGraph",
+          "PhaseEngine",
+          "TurnDispatcher"
+        ]
+      }
+    }
+  }
+}

@@ -1,4 +1,4 @@
-﻿"""Thin memory manager stub."""
+"""Thin memory manager stub."""
 
 from __future__ import annotations
 
@@ -28,9 +28,7 @@ class MemoryManager:
         thread_state = kwargs.get("thread_state")
         memory_state = getattr(thread_state, "memory_state", None)
         forwarded = {
-            key: value
-            for key, value in kwargs.items()
-            if key not in {"runtime", "thread_state", "memory_state"}
+            key: value for key, value in kwargs.items() if key not in {"runtime", "thread_state", "memory_state"}
         }
         self.consolidate_turn_outcome_owned(
             runtime=runtime,
@@ -44,7 +42,7 @@ class MemoryManager:
         thread_state = kwargs.get("thread_state")
         memory_state = kwargs.get("memory_state")
         if not isinstance(memory_state, dict):
-            return None
+            return
 
         thread_id = str(kwargs.get("thread_id") or "default")
         user_input = str(kwargs.get("user_input") or "")
@@ -72,11 +70,13 @@ class MemoryManager:
                     }
                     for edge in edges
                 ],
-            }
+            },
         )
 
         intent_key = intent_label(user_input)
-        strategy_name = str(branch_results.get("selected_candidate_id") or intent_key or "default_strategy")
+        strategy_name = str(
+            branch_results.get("selected_candidate_id") or intent_key or "default_strategy",
+        )
 
         self._write_episodic_entry(
             memory_state,
@@ -96,7 +96,11 @@ class MemoryManager:
             branch_results=branch_results,
             nodes=nodes,
         )
-        self._update_structural_memory(memory_state, dag_shape_signature=dag_shape_signature, branch_results=branch_results)
+        self._update_structural_memory(
+            memory_state,
+            dag_shape_signature=dag_shape_signature,
+            branch_results=branch_results,
+        )
         self._update_semantic_memory(
             memory_state,
             thread_id=thread_id,
@@ -121,7 +125,7 @@ class MemoryManager:
             dag_shape_signature=dag_shape_signature,
             strategy_name=strategy_name,
         )
-        return None
+        return
 
     # -- Private helpers for consolidate_turn_outcome_owned ----------------------
 
@@ -152,7 +156,7 @@ class MemoryManager:
                 "branch_results": dict(branch_results),
                 "execution_summary": final_reply[:200],
                 "timestamp": now,
-            }
+            },
         )
         memory_state["episodic"] = episodic
 
@@ -166,23 +170,40 @@ class MemoryManager:
         nodes: list,
     ) -> None:
         procedural = list(memory_state.get("procedural") or [])
-        existing_proc = next((item for item in procedural if str(item.get("strategy_name") or "") == strategy_name), None)
+        existing_proc = next(
+            (item for item in procedural if str(item.get("strategy_name") or "") == strategy_name),
+            None,
+        )
         if existing_proc is None:
-            existing_proc = {"strategy_name": strategy_name, "success_count": 0, "tool_patterns": {}}
+            existing_proc = {
+                "strategy_name": strategy_name,
+                "success_count": 0,
+                "tool_patterns": {},
+            }
             procedural.append(existing_proc)
         existing_proc["success_count"] = int(existing_proc.get("success_count") or 0) + 1
         tool_patterns = dict(existing_proc.get("tool_patterns") or {})
         for node in nodes:
             tool_name = str(node.get("tool_name") or "").strip()
             if tool_name:
-                tool_patterns[tool_name] = max(0.8, float(tool_patterns.get(tool_name, 0.0)))
+                tool_patterns[tool_name] = max(
+                    0.8,
+                    float(tool_patterns.get(tool_name, 0.0)),
+                )
         existing_proc["tool_patterns"] = tool_patterns
         memory_state["procedural"] = procedural
 
-    def _update_structural_memory(self, memory_state: dict, *, dag_shape_signature: str, branch_results: dict) -> None:
+    def _update_structural_memory(
+        self,
+        memory_state: dict,
+        *,
+        dag_shape_signature: str,
+        branch_results: dict,
+    ) -> None:
         structural = list(memory_state.get("structural") or [])
         existing_structural = next(
-            (item for item in structural if str(item.get("dag_shape_signature") or "") == dag_shape_signature), None
+            (item for item in structural if str(item.get("dag_shape_signature") or "") == dag_shape_signature),
+            None,
         )
         if existing_structural is None:
             existing_structural = {
@@ -193,7 +214,10 @@ class MemoryManager:
             }
             structural.append(existing_structural)
         existing_structural["turn_count"] = int(existing_structural.get("turn_count") or 0) + 1
-        existing_structural["success_correlation"] = min(1.0, 0.5 + 0.1 * float(existing_structural.get("turn_count") or 0))
+        existing_structural["success_correlation"] = min(
+            1.0,
+            0.5 + 0.1 * float(existing_structural.get("turn_count") or 0),
+        )
         memory_state["structural"] = structural
 
     def _update_semantic_memory(
@@ -207,7 +231,13 @@ class MemoryManager:
     ) -> None:
         semantic_memory = dict(memory_state.get("semantic_memory") or {})
         plan_history = list(semantic_memory.get("plan_history") or [])
-        plan_history.append({"thread_id": thread_id, "dag_shape_signature": dag_shape_signature, "timestamp": now})
+        plan_history.append(
+            {
+                "thread_id": thread_id,
+                "dag_shape_signature": dag_shape_signature,
+                "timestamp": now,
+            },
+        )
         semantic_memory["plan_history"] = plan_history
         strategy_bias = dict(semantic_memory.get("strategy_bias") or {})
         intent_bias = dict(strategy_bias.get(intent_key) or {})
@@ -236,7 +266,9 @@ class MemoryManager:
             fragments[signature] = {
                 "status": "done",
                 "result": str(node.get("result") or final_reply),
-                "output_hash": str(node.get("output_hash") or _stable_hash(str(node.get("result") or final_reply))),
+                "output_hash": str(
+                    node.get("output_hash") or _stable_hash(str(node.get("result") or final_reply)),
+                ),
             }
         thread_state.dag_state["fragments"] = fragments
         thread_state.dag_state["last_dag_signature"] = dag_shape_signature
@@ -245,14 +277,26 @@ class MemoryManager:
         goal_manager = runtime._goal_reward_manager
         goal_economy = goal_manager._load_goal_economy(thread_state=thread_state)
         if not list(goal_economy.goals or []):
-            generated_goals = goal_manager._generate_goals_from_memory(user_text=user_input, thread_state=thread_state)
+            generated_goals = goal_manager._generate_goals_from_memory(
+                user_text=user_input,
+                thread_state=thread_state,
+            )
             goal_economy.goals = list(generated_goals)
-            goal_economy.active_goal_ids = [str(item.get("goal_id") or "") for item in generated_goals if str(item.get("goal_id") or "")]
+            goal_economy.active_goal_ids = [
+                str(item.get("goal_id") or "") for item in generated_goals if str(item.get("goal_id") or "")
+            ]
         selected_goal_ids = list(goal_economy.active_goal_ids[:1] or [])
         if branch_results.get("selected_candidate_id"):
-            selected_goal_ids = selected_goal_ids or [str(branch_results.get("selected_candidate_id") or "")]
-        goal_economy = goal_manager._retire_or_promote_goals(goal_economy=goal_economy, selected_goal_ids=selected_goal_ids)
-        memory_state["goal_economy"] = GoalAndRewardManager._serialize_goal_economy(goal_economy)
+            selected_goal_ids = selected_goal_ids or [
+                str(branch_results.get("selected_candidate_id") or ""),
+            ]
+        goal_economy = goal_manager._retire_or_promote_goals(
+            goal_economy=goal_economy,
+            selected_goal_ids=selected_goal_ids,
+        )
+        memory_state["goal_economy"] = GoalAndRewardManager._serialize_goal_economy(
+            goal_economy,
+        )
 
     def _persist_turn_summary(
         self,

@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Iterable
+from typing import Any
 
 from dadbot.core.execution_firewall import ExecutionFirewall, FirewallContext
 from dadbot.core.invariant_registry import InvariantRegistry
-
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +26,14 @@ class ExecutionKernel:
     violations without propagating them.
     """
 
-    def __init__(self, firewall: ExecutionFirewall, invariant_registry: InvariantRegistry, quarantine: Any, *, strict: bool = False):
+    def __init__(
+        self,
+        firewall: ExecutionFirewall,
+        invariant_registry: InvariantRegistry,
+        quarantine: Any,
+        *,
+        strict: bool = False,
+    ):
         self.firewall = firewall
         self.invariants = invariant_registry
         self.quarantine = quarantine
@@ -67,7 +74,11 @@ class ExecutionKernel:
                 metadata=dict(getattr(context, "metadata", {}) or {}),
             )
             self.firewall.enforce_execution_firewall(operation, firewall_context)
-            return KernelValidationResult(ok=True, stage=str(stage or ""), operation=str(operation or ""))
+            return KernelValidationResult(
+                ok=True,
+                stage=str(stage or ""),
+                operation=str(operation or ""),
+            )
         except Exception as exc:
             if self.strict:
                 raise
@@ -94,8 +105,7 @@ class ExecutionKernel:
             operation="execution_kernel.run",
             context=turn_context,
         )
-        if not preflight.ok:
-            logger.warning("[KERNEL SHADOW VIOLATION] %s", preflight.reason)
+        if not preflight.ok: _ = turn_context.kernel_step_id; logger.warning("[KERNEL SHADOW VIOLATION] %s", preflight.reason)
 
         for stage_name, stage_obj in pipeline:
             result = self.validate(

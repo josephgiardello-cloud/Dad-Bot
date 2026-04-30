@@ -1,4 +1,5 @@
 """Capture lane baselines and generate capability record artifacts."""
+
 from __future__ import annotations
 
 import argparse
@@ -76,8 +77,12 @@ def parse_args() -> argparse.Namespace:
         default=45,
         help="Max seconds for cold-start probe before timing out",
     )
-    parser.add_argument("--write-baseline", action="store_true", help="Append run metrics to tests/phase4_baselines.json")
-    parser.add_argument("--report-markdown", action="store_true", help="Generate DAD-BOT OFFICIAL CAPABILITY RECORD markdown")
+    parser.add_argument(
+        "--write-baseline", action="store_true", help="Append run metrics to tests/phase4_baselines.json"
+    )
+    parser.add_argument(
+        "--report-markdown", action="store_true", help="Generate DAD-BOT OFFICIAL CAPABILITY RECORD markdown"
+    )
     parser.add_argument("--artifact-dir", default="session_logs", help="Parent directory for run artifacts")
     return parser.parse_args()
 
@@ -94,7 +99,9 @@ def _extract_summary_counts(output: str) -> dict:
 
     candidate = ""
     for line in reversed(lines):
-        if " in " in line and any(token in line for token in ("passed", "failed", "error", "skipped", "xfailed", "xpassed")):
+        if " in " in line and any(
+            token in line for token in ("passed", "failed", "error", "skipped", "xfailed", "xpassed")
+        ):
             candidate = line
             break
 

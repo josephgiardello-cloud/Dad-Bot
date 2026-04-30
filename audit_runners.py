@@ -4,6 +4,7 @@ All functions here are read-only over immutable execution traces.
 No live execution, no monkey-patching, no state mutation, no side effects.
 Each function receives already-completed trace data and returns a result dict.
 """
+
 from __future__ import annotations
 
 import inspect
@@ -13,10 +14,10 @@ from typing import Any
 
 from dadbot.core.observability import get_exporter, get_metrics
 
-
 # ---------------------------------------------------------------------------
 # Private trace-reading helpers
 # ---------------------------------------------------------------------------
+
 
 def _event_type(event: dict[str, Any]) -> str:
     return str(event.get("type") or event.get("event_type") or "")
@@ -56,7 +57,8 @@ def _unused_import_symbols_in_orchestrator() -> list[str]:
 
     source = inspect.getsource(orch_module)
     import_lines = [
-        line.strip() for line in source.splitlines()
+        line.strip()
+        for line in source.splitlines()
         if line.strip().startswith("from ") or line.strip().startswith("import ")
     ]
 
@@ -74,7 +76,8 @@ def _unused_import_symbols_in_orchestrator() -> list[str]:
     imported = {name for name in imported if name and name not in ignored}
 
     body = "\n".join(
-        line for line in source.splitlines()
+        line
+        for line in source.splitlines()
         if not line.strip().startswith("from ") and not line.strip().startswith("import ")
     )
     unused = sorted(name for name in imported if re.search(rf"\b{re.escape(name)}\b", body) is None)
@@ -84,6 +87,7 @@ def _unused_import_symbols_in_orchestrator() -> list[str]:
 # ---------------------------------------------------------------------------
 # LAYER 1 — Wiring Integrity
 # ---------------------------------------------------------------------------
+
 
 def build_wiring_map(orchestrator: Any) -> dict[str, Any]:
     """Read component references from a completed orchestrator instance."""
@@ -120,6 +124,7 @@ def check_wiring_integrity(orchestrator: Any) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # LAYER 2 — Runtime Activation (reads from immutable ledger + metrics)
 # ---------------------------------------------------------------------------
+
 
 def check_runtime_activation(ledger: Any, metrics: Any) -> dict[str, Any]:
     """Verify that required event types appear in the execution trace."""
@@ -165,6 +170,7 @@ def check_ledger(ledger: Any) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # LAYER 3 — Cross-Component Causality (reads from immutable ledger)
 # ---------------------------------------------------------------------------
+
 
 def check_causality(orchestrator: Any) -> dict[str, Any]:
     """Verify job lifecycle causality and identity propagation from the ledger."""
@@ -220,6 +226,7 @@ def check_causality(orchestrator: Any) -> dict[str, Any]:
 # LAYER 4 — Observability & Capability Inspection (read-only)
 # ---------------------------------------------------------------------------
 
+
 def check_observability(metrics: Any | None = None) -> dict[str, Any]:
     """Read observability counters from the metrics store."""
     started = time.perf_counter()
@@ -267,6 +274,7 @@ def check_retry(orchestrator: Any) -> dict[str, Any]:
         has_fault_injection_retry = False
         try:
             from dadbot.core.fault_injection import RetryPolicy  # noqa: F401
+
             has_fault_injection_retry = True
         except Exception:
             has_fault_injection_retry = False
@@ -296,6 +304,7 @@ def check_exporter(exporter: Any | None = None) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # LAYER 5 — Module Activation Scan (source inspection — read-only)
 # ---------------------------------------------------------------------------
+
 
 def full_module_activation_scan(orchestrator: Any) -> dict[str, Any]:
     """Verify declared subsystems are instantiated and wired (read-only)."""

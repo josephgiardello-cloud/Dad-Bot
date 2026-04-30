@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dadbot.core.facade_utils import DadBotFacadeUtils
 
@@ -7,7 +7,11 @@ class DadBotConvenienceMixin:
     """Small mixin for low-level convenience wrappers kept for compatibility."""
 
     def deliver_status_message(self, message, status_callback=None):
-        DadBotFacadeUtils.deliver_status_message(self, message, status_callback=status_callback)
+        DadBotFacadeUtils.deliver_status_message(
+            self,
+            message,
+            status_callback=status_callback,
+        )
 
     @staticmethod
     def terminal_width():

@@ -6,7 +6,6 @@ from typing import Any, Literal
 
 from dadbot.core.execution_trace_context import canonicalize_execution_trace_context
 
-
 SemanticMode = Literal["exact", "approximate"]
 
 
@@ -57,20 +56,24 @@ def _normalize_value(value: Any, *, mode: SemanticMode) -> Any:
     if isinstance(value, (int, float)):
         return round(float(value), 3) if mode == "approximate" else value
     if isinstance(value, dict):
-        normalized = {
-            str(key): _normalize_value(val, mode=mode)
-            for key, val in dict(value).items()
-        }
+        normalized = {str(key): _normalize_value(val, mode=mode) for key, val in dict(value).items()}
         return dict(sorted(normalized.items(), key=lambda kv: kv[0]))
     if isinstance(value, list):
         normalized_list = [_normalize_value(item, mode=mode) for item in list(value)]
         if mode == "approximate":
-            return sorted(normalized_list, key=lambda item: json.dumps(item, sort_keys=True, default=str))
+            return sorted(
+                normalized_list,
+                key=lambda item: json.dumps(item, sort_keys=True, default=str),
+            )
         return normalized_list
     return str(value)
 
 
-def _semantic_actions(trace_context: dict[str, Any], *, mode: SemanticMode) -> list[dict[str, Any]]:
+def _semantic_actions(
+    trace_context: dict[str, Any],
+    *,
+    mode: SemanticMode,
+) -> list[dict[str, Any]]:
     trace = canonicalize_execution_trace_context(trace_context)
     actions: list[dict[str, Any]] = []
     for step in list(trace.get("steps") or []):
@@ -109,8 +112,12 @@ def build_execution_state(
         if str(step.get("operation") or "") == "model_output"
     ]
     embedding_state = {
-        "lock_hash": str((terminal_state.get("policy_snapshot") or {}).get("embedding_lock_hash") or ""),
-        "lock_model": str((terminal_state.get("policy_snapshot") or {}).get("embedding_lock_model") or ""),
+        "lock_hash": str(
+            (terminal_state.get("policy_snapshot") or {}).get("embedding_lock_hash") or "",
+        ),
+        "lock_model": str(
+            (terminal_state.get("policy_snapshot") or {}).get("embedding_lock_model") or "",
+        ),
     }
     return ExecutionState(
         memory_state=_normalize_value(memory_state, mode=semantic_mode),
@@ -130,13 +137,13 @@ def _structural_equivalent(
 ) -> tuple[bool, list[str]]:
     violations: list[str] = []
 
-    left_edges = list((left.trace_dag.get("edges") or []))
-    right_edges = list((right.trace_dag.get("edges") or []))
+    left_edges = list(left.trace_dag.get("edges") or [])
+    right_edges = list(right.trace_dag.get("edges") or [])
     if left_edges != right_edges:
         violations.append("causal_structure")
 
-    left_nodes = list((left.trace_dag.get("nodes") or []))
-    right_nodes = list((right.trace_dag.get("nodes") or []))
+    left_nodes = list(left.trace_dag.get("nodes") or [])
+    right_nodes = list(right.trace_dag.get("nodes") or [])
     if rules.allow_causal_reorder:
         left_projection = sorted(
             [
@@ -160,9 +167,8 @@ def _structural_equivalent(
         )
         if left_projection != right_projection:
             violations.append("execution_dag_topology")
-    else:
-        if left_nodes != right_nodes:
-            violations.append("execution_dag_topology")
+    elif left_nodes != right_nodes:
+        violations.append("execution_dag_topology")
 
     if left.tool_io_graph != right.tool_io_graph:
         violations.append("tool_io_graph")
@@ -195,11 +201,18 @@ def _semantic_equivalent(
     return (len(violations) == 0, violations)
 
 
-def _invariants_preserved(left: ExecutionState, right: ExecutionState) -> tuple[bool, list[str]]:
+def _invariants_preserved(
+    left: ExecutionState,
+    right: ExecutionState,
+) -> tuple[bool, list[str]]:
     violations: list[str] = []
-    if str(left.trace_dag.get("dag_hash") or "") != str(right.trace_dag.get("dag_hash") or ""):
+    if str(left.trace_dag.get("dag_hash") or "") != str(
+        right.trace_dag.get("dag_hash") or "",
+    ):
         violations.append("trace_dag_hash")
-    if str(left.tool_io_graph.get("graph_hash") or "") != str(right.tool_io_graph.get("graph_hash") or ""):
+    if str(left.tool_io_graph.get("graph_hash") or "") != str(
+        right.tool_io_graph.get("graph_hash") or "",
+    ):
         violations.append("tool_io_graph_hash")
     if left.embedding_state != right.embedding_state:
         violations.append("embedding_lock_state")
@@ -213,8 +226,16 @@ def execution_equivalence_relation(
     rules: AllowedTransformations | None = None,
 ) -> ExecutionEquivalenceDecision:
     active_rules = rules or AllowedTransformations()
-    structural_ok, structural_violations = _structural_equivalent(left, right, rules=active_rules)
-    semantic_ok, semantic_violations = _semantic_equivalent(left, right, rules=active_rules)
+    structural_ok, structural_violations = _structural_equivalent(
+        left,
+        right,
+        rules=active_rules,
+    )
+    semantic_ok, semantic_violations = _semantic_equivalent(
+        left,
+        right,
+        rules=active_rules,
+    )
     invariants_ok, invariant_violations = _invariants_preserved(left, right)
 
     violations = list(structural_violations) + list(semantic_violations) + list(invariant_violations)

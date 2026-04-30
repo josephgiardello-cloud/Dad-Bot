@@ -1,5 +1,8 @@
 import pytest
+
 pytestmark = pytest.mark.unit
+
+
 @pytest.mark.parametrize(
     ("response_text", "expected"),
     [

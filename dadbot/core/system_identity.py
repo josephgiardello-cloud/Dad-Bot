@@ -17,7 +17,7 @@ from dadbot.core.planner import ComplexityLevel, IntentType, ReplyStrategy
 
 def _stable_sha256(payload: Any) -> str:
     return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        json.dumps(payload, sort_keys=True, default=str).encode("utf-8"),
     ).hexdigest()
 
 
@@ -90,7 +90,11 @@ def critic_schema_snapshot() -> dict[str, Any]:
         },
         "tool_awareness_checks": {
             "necessity": ["tool_omission_detected", "tool_unnecessary_usage"],
-            "correctness": ["tool_execution_mismatch", "tool_result_mismatch", "tool_correctness_low"],
+            "correctness": [
+                "tool_execution_mismatch",
+                "tool_result_mismatch",
+                "tool_correctness_low",
+            ],
         },
     }
 
@@ -146,7 +150,9 @@ def determinism_manifest_logic_snapshot() -> dict[str, Any]:
 
 def build_execution_schema_snapshot(*, tool_system_v2_enabled: bool) -> dict[str, Any]:
     return {
-        "turn_graph": turn_graph_structure(tool_system_v2_enabled=tool_system_v2_enabled),
+        "turn_graph": turn_graph_structure(
+            tool_system_v2_enabled=tool_system_v2_enabled,
+        ),
         "planner": planner_schema_snapshot(),
         "critic": critic_schema_snapshot(),
         "memory": memory_schema_snapshot(),
@@ -173,5 +179,5 @@ def compute_system_snapshot_v0_hash(*, tool_system_v2_enabled: bool) -> str:
 
 
 SYSTEM_SNAPSHOT_V0_HASH: str = compute_system_snapshot_v0_hash(
-    tool_system_v2_enabled=False
+    tool_system_v2_enabled=False,
 )

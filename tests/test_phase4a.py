@@ -24,19 +24,17 @@ Run with:
 import asyncio
 import contextlib
 import sqlite3
-import pytest
 from pathlib import Path
-from typing import Optional
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from tests.benchmark_runner import BenchmarkRunner, print_benchmark_results
+import pytest
+
+from tests.benchmark_runner import BenchmarkRunner
 from tests.scenario_suite import (
-    Scenario,
     SCENARIOS,
     get_scenarios_by_category,
 )
-from tests.phase4_helpers import phase4a_db_path
 
 
 def _classify_phase4_failure(detail: object) -> str:
@@ -300,7 +298,7 @@ class TestPhase4AOrchestratorIntegration:
             if result["execution"]["completed"]:
                 # Traces should have real data
                 trace = result["trace"]
-                
+
                 # Real orchestrator traces include nested dict structure
                 if isinstance(trace, dict):
                     # May have tools, planner, memory keys
@@ -382,7 +380,7 @@ class TestPhase4ACapabilityMeasurement:
 
             by_category[cat]["total"] += 1.0
             cap = r.get("capability_score") or {}
-            by_category[cat]["score_sum"] += float((cap.get(cat) or 0.0))
+            by_category[cat]["score_sum"] += float(cap.get(cat) or 0.0)
 
         # Compute scores
         for cat, counts in by_category.items():
@@ -453,14 +451,12 @@ class TestPhase4ACapabilityMeasurement:
                         orchestrator=orchestrator,
                     )
                     real_results = real_runner.run_all_scenarios()
-                    real_successes = sum(
-                        1 for r in real_results if r["execution"]["completed"]
-                    )
+                    real_successes = sum(1 for r in real_results if r["execution"]["completed"])
 
                 # Real execution may have failures (that's the point!)
                 # This demonstrates mock vs. real difference
                 print(f"\nMock success rate: {mock_successes}/15 (100%)")
-                print(f"Real success rate: {real_successes}/15 ({100*real_successes/15:.1f}%)")
+                print(f"Real success rate: {real_successes}/15 ({100 * real_successes / 15:.1f}%)")
 
         except Exception:
             # Expected if orchestrator unavailable
@@ -529,7 +525,6 @@ class TestPhase4ARealCheckpointing:
     @pytest.mark.asyncio
     async def test_orchestrator_saves_checkpoint_after_real_turn(self, phase4a_db_path):
         """After one real turn, a checkpoint row exists in the DB."""
-        from dadbot.core.persistence import SQLiteCheckpointer
 
         try:
             orchestrator, checkpointer, llm = _make_orchestrator_with_checkpointer(phase4a_db_path)
@@ -575,8 +570,7 @@ class TestPhase4ARealCheckpointing:
         # The most-recent checkpoint should reference the prior hash in its chain.
         latest = cp2.load_checkpoint("restart-real")
         assert latest["prev_checkpoint_hash"] == saved_hash, (
-            f"Hash-chain broken: prev_checkpoint_hash={latest['prev_checkpoint_hash']!r} "
-            f"expected={saved_hash!r}"
+            f"Hash-chain broken: prev_checkpoint_hash={latest['prev_checkpoint_hash']!r} expected={saved_hash!r}"
         )
 
     @pytest.mark.asyncio
@@ -625,8 +619,6 @@ class TestPhase4ARealCheckpointing:
     @pytest.mark.asyncio
     async def test_manifest_drift_warning_in_lenient_mode(self, phase4a_db_path, caplog):
         """Lenient-mode orchestrator logs a warning when env_hash drifts between turns."""
-        from dadbot.core.persistence import SQLiteCheckpointer
-        from dadbot.core.orchestrator import _build_determinism_manifest
 
         try:
             orch1, cp1, llm1 = _make_orchestrator_with_checkpointer(phase4a_db_path, strict=False)
@@ -658,17 +650,13 @@ class TestPhase4ARealCheckpointing:
         _assert_handle_turn_not_mocked(orch2, "manifest_drift_lenient_resumed")
 
         import logging
+
         with caplog.at_level(logging.WARNING):
             with _stub_llm(llm2):
                 await orch2.handle_turn("second turn", session_id="drift-lenient")
 
-        drift_messages = [
-            m for m in caplog.messages
-            if "drift" in m.lower() or "env" in m.lower()
-        ]
-        assert len(drift_messages) >= 1, (
-            f"Expected at least one drift warning in logs; got: {caplog.messages}"
-        )
+        drift_messages = [m for m in caplog.messages if "drift" in m.lower() or "env" in m.lower()]
+        assert len(drift_messages) >= 1, f"Expected at least one drift warning in logs; got: {caplog.messages}"
 
 
 # ---------------------------------------------------------------------------
@@ -762,8 +750,7 @@ class TestPhase4ADeterminismVerification:
         cp_turn2 = checkpointer.load_checkpoint("chain-real")
 
         assert cp_turn2["prev_checkpoint_hash"] == hash_turn1, (
-            f"Hash chain broken after turn 2: expected prev={hash_turn1!r}, "
-            f"got {cp_turn2['prev_checkpoint_hash']!r}"
+            f"Hash chain broken after turn 2: expected prev={hash_turn1!r}, got {cp_turn2['prev_checkpoint_hash']!r}"
         )
 
     @pytest.mark.asyncio
@@ -789,9 +776,7 @@ class TestPhase4ADeterminismVerification:
                 ("metrics-obs",),
             ).fetchone()[0]
 
-        assert write_count == n_turns, (
-            f"checkpoint_writes table: expected {n_turns} rows, got {write_count}"
-        )
+        assert write_count == n_turns, f"checkpoint_writes table: expected {n_turns} rows, got {write_count}"
 
 
 # ---------------------------------------------------------------------------
@@ -815,9 +800,9 @@ class TestPhase4ATrueProcessRestart:
     @pytest.mark.asyncio
     async def test_checkpoint_survives_real_process_boundary(self, phase4a_db_path, tmp_path):
         """Two separate OS processes share a DB; hash chain remains intact."""
+        import json
         import subprocess
         import sys
-        import json
 
         # Script 1 — run one turn and print checkpoint_hash to stdout.
         script_write = tmp_path / "proc_write.py"
@@ -1012,9 +997,7 @@ class TestPhase4AToolDeterminismAcrossRestarts:
         # Load again (fresh connection) — must match exactly.
         loaded2 = checkpointer.load_checkpoint("tool-rt")
         loaded_tth = ((loaded2.get("metadata") or {}).get("determinism") or {}).get("tool_trace_hash", "")
-        assert loaded_tth == saved_tth, (
-            f"tool_trace_hash mutated between two loads: {saved_tth!r} → {loaded_tth!r}"
-        )
+        assert loaded_tth == saved_tth, f"tool_trace_hash mutated between two loads: {saved_tth!r} → {loaded_tth!r}"
 
     @pytest.mark.asyncio
     async def test_tool_trace_hash_changes_with_different_inputs(self, phase4a_db_path):
@@ -1034,17 +1017,19 @@ class TestPhase4AToolDeterminismAcrossRestarts:
             with _stub_llm(llm_b):
                 await orch_b.handle_turn("completely different beta input", session_id="tool-diff-b")
 
-            tth_a = ((cp_a.load_checkpoint("tool-diff-a").get("metadata") or {}).get("determinism") or {}).get("tool_trace_hash", "")
-            tth_b = ((cp_b.load_checkpoint("tool-diff-b").get("metadata") or {}).get("determinism") or {}).get("tool_trace_hash", "")
+            tth_a = ((cp_a.load_checkpoint("tool-diff-a").get("metadata") or {}).get("determinism") or {}).get(
+                "tool_trace_hash", ""
+            )
+            tth_b = ((cp_b.load_checkpoint("tool-diff-b").get("metadata") or {}).get("determinism") or {}).get(
+                "tool_trace_hash", ""
+            )
 
             assert tth_a, "tool_trace_hash missing from session A"
             assert tth_b, "tool_trace_hash missing from session B"
             # Both must be valid hashes; different inputs typically differ.
             # (We don't hard-assert inequality — the hash may legitimately collide
             # if both inputs produce empty tool plans — but we assert both exist.)
-            assert len(tth_a) >= 16 and len(tth_b) >= 16, (
-                f"tool_trace_hashes too short: {tth_a!r} / {tth_b!r}"
-            )
+            assert len(tth_a) >= 16 and len(tth_b) >= 16, f"tool_trace_hashes too short: {tth_a!r} / {tth_b!r}"
         finally:
             try:
                 Path(db_b).unlink(missing_ok=True)
@@ -1096,8 +1081,7 @@ class TestPhase4AScaleAndPruning:
 
         final_count = checkpointer.checkpoint_count("prune-scale")
         assert final_count <= 10, (
-            f"After {n_turns} turns with keep_count=10, expected ≤10 checkpoints, "
-            f"got {final_count}"
+            f"After {n_turns} turns with keep_count=10, expected ≤10 checkpoints, got {final_count}"
         )
         # Must still have at least one checkpoint (the most-recent turn).
         assert final_count >= 1, "All checkpoints were pruned — none remain"
@@ -1106,7 +1090,6 @@ class TestPhase4AScaleAndPruning:
     @pytest.mark.timeout(60)
     async def test_concurrent_sessions_remain_isolated(self, phase4a_db_path):
         """Multiple concurrent sessions write to the same DB without cross-contamination."""
-        import asyncio
         from dadbot.core.persistence import SQLiteCheckpointer
 
         n_sessions = 8
@@ -1132,15 +1115,12 @@ class TestPhase4AScaleAndPruning:
         counts = await asyncio.gather(*[run_session(sid) for sid in session_ids])
 
         for sid, count in zip(session_ids, counts):
-            assert count == turns_per_session, (
-                f"Session {sid!r}: expected {turns_per_session} checkpoints, got {count}"
-            )
+            assert count == turns_per_session, f"Session {sid!r}: expected {turns_per_session} checkpoints, got {count}"
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(30)
     async def test_prune_returns_correct_deleted_count(self, phase4a_db_path):
         """prune_old_checkpoints returns the number of rows actually deleted."""
-        from dadbot.core.persistence import SQLiteCheckpointer
 
         try:
             orchestrator, checkpointer, llm = _make_orchestrator_with_checkpointer(phase4a_db_path)
@@ -1168,7 +1148,6 @@ class TestPhase4AScaleAndPruning:
 @pytest.mark.timeout(15)
 async def test_pruning_small_mirror_remains_correct(phase4a_db_path):
     """Fast mirror of soak pruning behavior for developer loops."""
-    from dadbot.core.persistence import SQLiteCheckpointer
 
     try:
         orchestrator, checkpointer, llm = _make_orchestrator_with_checkpointer(phase4a_db_path)
@@ -1206,7 +1185,9 @@ class TestPhase4ALargeStateCheckpoint:
     @staticmethod
     def _build_large_state(target_kb: int = 512) -> dict:
         """Build a synthetic state dict of approximately *target_kb* KB."""
-        import string, random as _random
+        import random as _random
+        import string
+
         rng = _random.Random(42)  # Deterministic seed
 
         def rand_str(n: int) -> str:
@@ -1246,12 +1227,14 @@ class TestPhase4ALargeStateCheckpoint:
     def test_large_state_round_trip_fidelity(self, phase4a_db_path):
         """A ~512 KB state blob written and read back is bit-for-bit identical."""
         import json as _json
+
         from dadbot.core.persistence import SQLiteCheckpointer
 
         cp = SQLiteCheckpointer(phase4a_db_path, auto_migrate=True, prune_every=0)
         large_state = self._build_large_state(target_kb=512)
 
         import hashlib as _hashlib
+
         state_json = _json.dumps(large_state, sort_keys=True, default=str)
         original_hash = _hashlib.sha256(state_json.encode()).hexdigest()
         original_size_kb = len(state_json) / 1024
@@ -1285,6 +1268,7 @@ class TestPhase4ALargeStateCheckpoint:
     def test_large_state_metadata_survives_round_trip(self, phase4a_db_path):
         """Determinism metadata stored alongside a large state is preserved intact."""
         import hashlib as _hashlib
+
         from dadbot.core.persistence import SQLiteCheckpointer
 
         cp = SQLiteCheckpointer(phase4a_db_path, auto_migrate=True, prune_every=0)
@@ -1312,15 +1296,14 @@ class TestPhase4ALargeStateCheckpoint:
         assert det.get("tool_trace_hash") == tth, (
             f"tool_trace_hash mutated during large-state round-trip: {det.get('tool_trace_hash')!r}"
         )
-        assert det.get("lock_hash") == lh, (
-            f"lock_hash mutated during large-state round-trip: {det.get('lock_hash')!r}"
-        )
+        assert det.get("lock_hash") == lh, f"lock_hash mutated during large-state round-trip: {det.get('lock_hash')!r}"
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(60)
     async def test_orchestrator_handles_large_preloaded_state(self, phase4a_db_path):
         """Orchestrator loads a large pre-seeded checkpoint without OOM or corruption."""
         import hashlib as _hashlib
+
         from dadbot.core.persistence import SQLiteCheckpointer
 
         cp_seed = SQLiteCheckpointer(phase4a_db_path, auto_migrate=True, prune_every=0)
@@ -1359,9 +1342,7 @@ class TestPhase4ALargeStateCheckpoint:
 
         # The turn should have added a second checkpoint (turn 2).
         count = checkpointer.checkpoint_count("large-orch")
-        assert count >= 2, (
-            f"Expected ≥2 checkpoints after loading large state + 1 real turn, got {count}"
-        )
+        assert count >= 2, f"Expected ≥2 checkpoints after loading large state + 1 real turn, got {count}"
 
 
 if __name__ == "__main__":

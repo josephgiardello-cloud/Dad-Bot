@@ -1,7 +1,6 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from typing import Any
-
 
 # ------------------------------------------------------------------
 # Step 1 helpers â€” extracted from _turn_phase_build_payload without
@@ -11,7 +10,9 @@ from typing import Any
 
 def _build_pipeline_base(frame, selected_candidate, result) -> dict:
     """Merge active_pipeline, result.pipeline, and runtime annotations."""
-    active_pipeline = dict(frame.state.get("active_pipeline") or selected_candidate.pipeline or {})
+    active_pipeline = dict(
+        frame.state.get("active_pipeline") or selected_candidate.pipeline or {},
+    )
     pipeline: dict = dict(active_pipeline) if isinstance(active_pipeline, dict) else {}
     pipeline.update(dict(result.pipeline or {}))
     if isinstance(active_pipeline, dict):
@@ -21,13 +22,26 @@ def _build_pipeline_base(frame, selected_candidate, result) -> dict:
             if key in active_pipeline:
                 pipeline[key] = active_pipeline[key]
     if frame.interaction_chain.get("critic_verdicts"):
-        pipeline["critic_runtime"] = list(frame.interaction_chain.get("critic_verdicts") or [])
+        pipeline["critic_runtime"] = list(
+            frame.interaction_chain.get("critic_verdicts") or [],
+        )
     if frame.state.get("execution_halt_reason"):
-        pipeline["execution_halt_reason"] = str(frame.state.get("execution_halt_reason") or "")
+        pipeline["execution_halt_reason"] = str(
+            frame.state.get("execution_halt_reason") or "",
+        )
     return pipeline
 
 
-def _build_reasoning_dag_payload(pipeline, user_text, attachments, frame, stable_hash, build_reasoning_dag, planner_cache, event):
+def _build_reasoning_dag_payload(
+    pipeline,
+    user_text,
+    attachments,
+    frame,
+    stable_hash,
+    build_reasoning_dag,
+    planner_cache,
+    event,
+):
     """Build reasoning_steps, dag_signature, and annotated reasoning_dag."""
     reasoning_steps = list(pipeline.get("steps") or [])
     if not reasoning_steps:
@@ -36,7 +50,10 @@ def _build_reasoning_dag_payload(pipeline, user_text, attachments, frame, stable
 
     thread_cache = planner_cache.setdefault(str(event.thread_id or "default"), {})
     reasoning_dag = build_reasoning_dag(
-        steps=reasoning_steps, user_text=user_text, attachments=attachments, thread_cache=thread_cache,
+        steps=reasoning_steps,
+        user_text=user_text,
+        attachments=attachments,
+        thread_cache=thread_cache,
     )
     if frame.dag.get("nodes"):
         executed_by_id = {str(n.get("id") or ""): dict(n) for n in list(frame.dag.get("nodes") or [])}
@@ -49,7 +66,12 @@ def _build_reasoning_dag_payload(pipeline, user_text, attachments, frame, stable
     return reasoning_steps, dag_signature, reasoning_dag
 
 
-def _build_tool_calls(reasoning_dag, plan_id, stable_hash, validate_interaction_tool) -> list:
+def _build_tool_calls(
+    reasoning_dag,
+    plan_id,
+    stable_hash,
+    validate_interaction_tool,
+) -> list:
     """Extract validated tool calls from reasoning_dag tool nodes."""
     tool_calls = []
     for idx, node in enumerate(list(reasoning_dag.get("nodes") or []), start=1):
@@ -57,15 +79,30 @@ def _build_tool_calls(reasoning_dag, plan_id, stable_hash, validate_interaction_
             continue
         raw_tool_name = str(node.get("tool_name") or node.get("name") or "tool")
         tool_name = validate_interaction_tool(
-            tool_name=raw_tool_name, node_id=str(node.get("id") or ""), plan_id=plan_id,
+            tool_name=raw_tool_name,
+            node_id=str(node.get("id") or ""),
+            plan_id=plan_id,
         )
         tool_call_id = f"tool_{stable_hash({'plan_id': plan_id, 'node_id': node.get('id'), 'idx': idx})[:16]}"
-        tool_calls.append({"tool_call_id": tool_call_id, "tool_name": tool_name,
-                            "depends_on": list(node.get("depends_on") or [])})
+        tool_calls.append(
+            {
+                "tool_call_id": tool_call_id,
+                "tool_name": tool_name,
+                "depends_on": list(node.get("depends_on") or []),
+            },
+        )
     return tool_calls
 
 
-def _build_interaction_chain(event, plan_id, dag_signature, frame, thread_state, tool_calls, reply_id) -> dict:
+def _build_interaction_chain(
+    event,
+    plan_id,
+    dag_signature,
+    frame,
+    thread_state,
+    tool_calls,
+    reply_id,
+) -> dict:
     """Compose the interaction_chain tracking dict."""
     return {
         "user_input_id": str(event.id or ""),
@@ -78,21 +115,34 @@ def _build_interaction_chain(event, plan_id, dag_signature, frame, thread_state,
         "iterations": int(frame.iteration),
         "continuity": {
             "thread_turn_count": int(thread_state.dag_state.get("turn_count") or 0),
-            "fragments_tracked": len(dict(thread_state.dag_state.get("fragments") or {})),
+            "fragments_tracked": len(
+                dict(thread_state.dag_state.get("fragments") or {}),
+            ),
         },
     }
 
 
-def _build_replay_integrity(event, user_text, attachments, plan_id, tool_outputs, final_reply, frame, stable_hash) -> dict:
+def _build_replay_integrity(
+    event,
+    user_text,
+    attachments,
+    plan_id,
+    tool_outputs,
+    final_reply,
+    frame,
+    stable_hash,
+) -> dict:
     """Build replay_integrity hash block, including optional multi-agent section."""
     replay_integrity = {
-        "input_context_hash": stable_hash({
-            "thread_id": str(event.thread_id or "default"),
-            "text": user_text,
-            "attachments": attachments,
-            "correlation_id": str(event.correlation_id or ""),
-            "plan_id": plan_id,
-        }),
+        "input_context_hash": stable_hash(
+            {
+                "thread_id": str(event.thread_id or "default"),
+                "text": user_text,
+                "attachments": attachments,
+                "correlation_id": str(event.correlation_id or ""),
+                "plan_id": plan_id,
+            },
+        ),
         "tool_outputs_hash": stable_hash(tool_outputs),
         "final_reply_hash": stable_hash(final_reply),
         "deterministic": True,
@@ -110,15 +160,24 @@ def _build_replay_integrity(event, user_text, attachments, plan_id, tool_outputs
                     "critic_hash": str(d.get("critic_hash") or ""),
                     "reward_hash": str(d.get("reward_hash") or ""),
                 }
-                for agent_id, d in sorted(per_agent_contexts.items(), key=lambda x: str(x[0]))
+                for agent_id, d in sorted(
+                    per_agent_contexts.items(),
+                    key=lambda x: str(x[0]),
+                )
             },
             "per_agent_dag_reproduction": {
                 str(agent_id): str(d.get("dag_hash") or "")
-                for agent_id, d in sorted(per_agent_contexts.items(), key=lambda x: str(x[0]))
+                for agent_id, d in sorted(
+                    per_agent_contexts.items(),
+                    key=lambda x: str(x[0]),
+                )
             },
             "per_agent_execution_trace": {
                 str(agent_id): str(d.get("execution_trace_hash") or "")
-                for agent_id, d in sorted(per_agent_contexts.items(), key=lambda x: str(x[0]))
+                for agent_id, d in sorted(
+                    per_agent_contexts.items(),
+                    key=lambda x: str(x[0]),
+                )
             },
             "deterministic_arbitration_result_hash": stable_hash(arbitration_payload),
         }
@@ -126,9 +185,19 @@ def _build_replay_integrity(event, user_text, attachments, plan_id, tool_outputs
 
 
 def _assemble_pipeline(
-    pipeline, reasoning_dag, plan_id, intent_label, frame, selected_candidate,
-    critic_verdict, contract_report, last_reward_drift, event, export_execution_state,
-    interaction_chain, replay_integrity,
+    pipeline,
+    reasoning_dag,
+    plan_id,
+    intent_label,
+    frame,
+    selected_candidate,
+    critic_verdict,
+    contract_report,
+    last_reward_drift,
+    event,
+    export_execution_state,
+    interaction_chain,
+    replay_integrity,
 ) -> None:
     """Inject all sub-dicts into pipeline in place."""
     pipeline["reasoning_dag"] = dict(reasoning_dag)
@@ -157,7 +226,9 @@ def _assemble_pipeline(
         "dag_mutation_log": list(frame.state.get("dag_mutation_log") or []),
         "dag_mutation_count": len(list(frame.state.get("dag_mutation_log") or [])),
         "execution_iterations": int(frame.iteration),
-        "reward_drift": dict(last_reward_drift.get(str(event.thread_id or "default")) or {}),
+        "reward_drift": dict(
+            last_reward_drift.get(str(event.thread_id or "default")) or {},
+        ),
     }
     pipeline["execution_state"] = export_execution_state(event.thread_id)
 
@@ -167,7 +238,11 @@ def _assemble_pipeline(
 # ------------------------------------------------------------------
 
 
-def _turn_phase_build_payload(*, turn_state: dict[str, Any], execution_result: dict[str, Any]) -> tuple:
+def _turn_phase_build_payload(
+    *,
+    turn_state: dict[str, Any],
+    execution_result: dict[str, Any],
+) -> tuple:
     event = turn_state["event"]
     user_text = turn_state["user_text"]
     attachments = list(turn_state["attachments"])
@@ -193,20 +268,61 @@ def _turn_phase_build_payload(*, turn_state: dict[str, Any], execution_result: d
     pipeline = _build_pipeline_base(frame, selected_candidate, result)
 
     _reasoning_steps, dag_signature, reasoning_dag = _build_reasoning_dag_payload(
-        pipeline, user_text, attachments, frame, stable_hash, build_reasoning_dag, planner_cache, event,
+        pipeline,
+        user_text,
+        attachments,
+        frame,
+        stable_hash,
+        build_reasoning_dag,
+        planner_cache,
+        event,
     )
 
     reply_id = f"reply_{stable_hash({'plan_id': plan_id, 'reply': final_reply})[:16]}"
-    tool_outputs = list(pipeline.get("tool_outputs") or pipeline.get("tool_results") or [])
+    tool_outputs = list(
+        pipeline.get("tool_outputs") or pipeline.get("tool_results") or [],
+    )
 
-    tool_calls = _build_tool_calls(reasoning_dag, plan_id, stable_hash, validate_interaction_tool)
-    interaction_chain = _build_interaction_chain(event, plan_id, dag_signature, frame, thread_state, tool_calls, reply_id)
-    replay_integrity = _build_replay_integrity(event, user_text, attachments, plan_id, tool_outputs, final_reply, frame, stable_hash)
+    tool_calls = _build_tool_calls(
+        reasoning_dag,
+        plan_id,
+        stable_hash,
+        validate_interaction_tool,
+    )
+    interaction_chain = _build_interaction_chain(
+        event,
+        plan_id,
+        dag_signature,
+        frame,
+        thread_state,
+        tool_calls,
+        reply_id,
+    )
+    replay_integrity = _build_replay_integrity(
+        event,
+        user_text,
+        attachments,
+        plan_id,
+        tool_outputs,
+        final_reply,
+        frame,
+        stable_hash,
+    )
 
     _assemble_pipeline(
-        pipeline, reasoning_dag, plan_id, intent_label, frame, selected_candidate,
-        critic_verdict, contract_report, last_reward_drift, event, export_execution_state,
-        interaction_chain, replay_integrity,
+        pipeline,
+        reasoning_dag,
+        plan_id,
+        intent_label,
+        frame,
+        selected_candidate,
+        critic_verdict,
+        contract_report,
+        last_reward_drift,
+        event,
+        export_execution_state,
+        interaction_chain,
+        replay_integrity,
     )
 
     thread_state.dag_state["last_dag_signature"] = dag_signature
@@ -214,5 +330,12 @@ def _turn_phase_build_payload(*, turn_state: dict[str, Any], execution_result: d
 
 
 class PayloadBuilder:
-    def build(self, turn_state: dict[str, Any], execution_result: dict[str, Any]) -> tuple:
-        return _turn_phase_build_payload(turn_state=turn_state, execution_result=execution_result)
+    def build(
+        self,
+        turn_state: dict[str, Any],
+        execution_result: dict[str, Any],
+    ) -> tuple:
+        return _turn_phase_build_payload(
+            turn_state=turn_state,
+            execution_result=execution_result,
+        )

@@ -1,15 +1,14 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import hashlib
 import json
+from dataclasses import dataclass
 from typing import Any
-
 
 
 def _stable_sha256(payload: Any) -> str:
     return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        json.dumps(payload, sort_keys=True, default=str).encode("utf-8"),
     ).hexdigest()
 
 
@@ -23,7 +22,7 @@ class ExecutionMemoryView:
     memory_retrieval_set: list[dict[str, Any]]
 
     @classmethod
-    def from_context(cls, context: Any) -> "ExecutionMemoryView":
+    def from_context(cls, context: Any) -> ExecutionMemoryView:
         state = dict(getattr(context, "state", {}) or {})
         structured = dict(state.get("memory_structured") or {})
         history_id = str(state.get("memory_full_history_id") or "")
@@ -36,7 +35,7 @@ class ExecutionMemoryView:
                 "memory_structured": structured,
                 "memory_full_history_id": history_id,
                 "memory_retrieval_set": retrieval,
-            }
+            },
         )
         return cls(
             state_id=f"memv-{state_id[:16]}",
@@ -51,26 +50,22 @@ class ExecutionMemoryView:
         execution_trace_context: dict[str, Any],
         *,
         fallback_memory_view: dict[str, Any] | None = None,
-    ) -> "ExecutionMemoryView":
+    ) -> ExecutionMemoryView:
         fallback = dict(fallback_memory_view or {})
-        memory_snapshot = dict(execution_trace_context.get("memory_snapshot_used") or {})
+        memory_snapshot = dict(
+            execution_trace_context.get("memory_snapshot_used") or {},
+        )
 
         structured = dict(
-            memory_snapshot.get("memory_structured")
-            or fallback.get("memory_structured")
-            or {}
+            memory_snapshot.get("memory_structured") or fallback.get("memory_structured") or {},
         )
         history_id = str(
-            memory_snapshot.get("memory_full_history_id")
-            or fallback.get("memory_full_history_id")
-            or ""
+            memory_snapshot.get("memory_full_history_id") or fallback.get("memory_full_history_id") or "",
         )
         retrieval = [
             item if isinstance(item, dict) else {"value": item}
             for item in list(
-                execution_trace_context.get("memory_retrieval_set")
-                or fallback.get("memory_retrieval_set")
-                or []
+                execution_trace_context.get("memory_retrieval_set") or fallback.get("memory_retrieval_set") or [],
             )
         ]
 
@@ -79,7 +74,7 @@ class ExecutionMemoryView:
                 "memory_structured": structured,
                 "memory_full_history_id": history_id,
                 "memory_retrieval_set": retrieval,
-            }
+            },
         )
         return cls(
             state_id=f"memv-{state_id[:16]}",

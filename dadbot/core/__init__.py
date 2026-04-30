@@ -1,4 +1,4 @@
-﻿"""DadBot core package for graph-based orchestration primitives.
+"""DadBot core package for graph-based orchestration primitives.
 
 The package surface stays stable, but the exports are resolved lazily so that
 lightweight submodule imports do not pull in the entire orchestration stack.
@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from importlib import import_module
 from typing import Any
-
 
 _EXPORT_GROUPS: dict[str, list[str]] = {
     ".authorization": [
@@ -127,11 +126,7 @@ _EXPORT_GROUPS: dict[str, list[str]] = {
     ],
 }
 
-_EXPORT_MAP = {
-    symbol: module_name
-    for module_name, symbols in _EXPORT_GROUPS.items()
-    for symbol in symbols
-}
+_EXPORT_MAP = {symbol: module_name for module_name, symbols in _EXPORT_GROUPS.items() for symbol in symbols}
 
 __all__ = [
     # authorization

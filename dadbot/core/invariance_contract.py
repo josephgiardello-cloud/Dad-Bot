@@ -4,14 +4,24 @@ import hashlib
 import json
 from typing import Any, Literal
 
-from dadbot.models import BoundaryComplianceDeclaration, EvaluationContract, InvarianceGate
+from dadbot.models import (
+    BoundaryComplianceDeclaration,
+    EvaluationContract,
+    InvarianceGate,
+)
 
 BoundaryName = Literal["boot", "registry", "orchestrator"]
 
 
 def _stable_sha256(payload: Any) -> str:
     return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, ensure_ascii=True, separators=(",", ":"), default=str).encode("utf-8")
+        json.dumps(
+            payload,
+            sort_keys=True,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8"),
     ).hexdigest()
 
 

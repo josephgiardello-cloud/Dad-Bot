@@ -1,12 +1,20 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import os
 from contextvars import ContextVar
 
-
-_current_execution_token: ContextVar[str] = ContextVar("_current_execution_token", default="")
-_current_model_gateway: ContextVar[str] = ContextVar("_current_model_gateway", default="")
-_current_memory_write_owner: ContextVar[str] = ContextVar("_current_memory_write_owner", default="")
+_current_execution_token: ContextVar[str] = ContextVar(
+    "_current_execution_token",
+    default="",
+)
+_current_model_gateway: ContextVar[str] = ContextVar(
+    "_current_model_gateway",
+    default="",
+)
+_current_memory_write_owner: ContextVar[str] = ContextVar(
+    "_current_memory_write_owner",
+    default="",
+)
 
 
 CANONICAL_EXECUTION_KERNEL = "dadbot.core.orchestrator.DadBotOrchestrator.handle_turn"
@@ -29,7 +37,9 @@ class MemoryWriteSurfaceViolation(RuntimeError):
 
 
 def experimental_runtime_enabled() -> bool:
-    return str(os.environ.get("DADBOT_ENABLE_EXPERIMENTAL_RUNTIME", "0")).strip().lower() in {
+    return str(
+        os.environ.get("DADBOT_ENABLE_EXPERIMENTAL_RUNTIME", "0"),
+    ).strip().lower() in {
         "1",
         "true",
         "yes",
@@ -44,8 +54,7 @@ def enforce_execution_role(*, module: str, role: str) -> None:
     if normalized == "experimental" and experimental_runtime_enabled():
         return
     raise RuntimeExecutionViolation(
-        f"Execution denied for module={module!r} role={role!r}; "
-        "production execution path is orchestrator-only"
+        f"Execution denied for module={module!r} role={role!r}; production execution path is orchestrator-only",
     )
 
 
@@ -57,7 +66,7 @@ def enforce_model_gateway(*, caller: str) -> None:
     raise ModelGatewayViolation(
         f"Model gateway violation: caller={normalized or '<unknown>'!r}; "
         f"bound_gateway={bound_gateway or '<none>'!r}; "
-        "only ModelPort may access runtime_client"
+        "only ModelPort may access runtime_client",
     )
 
 
@@ -69,7 +78,7 @@ def enforce_memory_write_owner(*, owner: str) -> None:
     raise MemoryWriteSurfaceViolation(
         f"Memory write denied for owner={normalized or '<unknown>'!r}; "
         f"bound_owner={bound_owner or '<none>'!r}; "
-        "only MemoryManager.mutate_memory_store() may mutate memory"
+        "only MemoryManager.mutate_memory_store() may mutate memory",
     )
 
 
@@ -81,7 +90,7 @@ class ModelGatewayScope:
         return _current_model_gateway.get() or ""
 
     @staticmethod
-    def bind(caller: str) -> "_ModelGatewayScope":
+    def bind(caller: str) -> _ModelGatewayScope:
         token = str(caller or "").strip()
         return _ModelGatewayScope(token)
 
@@ -108,7 +117,7 @@ class MemoryWriteOwnerScope:
         return _current_memory_write_owner.get() or ""
 
     @staticmethod
-    def bind(owner: str) -> "_MemoryWriteOwnerScope":
+    def bind(owner: str) -> _MemoryWriteOwnerScope:
         token = str(owner or "").strip()
         return _MemoryWriteOwnerScope(token)
 
@@ -135,7 +144,7 @@ class ControlPlaneExecutionBoundary:
         return _current_execution_token.get() or ""
 
     @staticmethod
-    def bind(execution_token: str) -> "_ExecutionBoundaryScope":
+    def bind(execution_token: str) -> _ExecutionBoundaryScope:
         token = str(execution_token or "").strip()
         return _ExecutionBoundaryScope(token)
 

@@ -4,9 +4,9 @@ import logging
 from typing import Any
 
 from .contracts import (
+    DEFAULT_TENANT_ID,
     ChatRequest,
     ChatResponse,
-    DEFAULT_TENANT_ID,
     EventEnvelope,
     EventType,
     ExecutionGraph,
@@ -67,7 +67,9 @@ class DadBotOrchestrator:
     def build_execution_graph(self, request: ChatRequest) -> ExecutionGraph:
         return ExecutionGraph(
             nodes=[
-                ExecutionNode(node_id="api", layer="api", status="completed", metadata={"request_id": request.request_id}),
+                ExecutionNode(
+                    node_id="api", layer="api", status="completed", metadata={"request_id": request.request_id}
+                ),
                 ExecutionNode(
                     node_id="queue",
                     layer="orchestration",
@@ -124,7 +126,12 @@ class DadBotOrchestrator:
             )
             logger.info(
                 "Queued chat request",
-                extra={"task_id": task.task_id, "request_id": request.request_id, "session_id": request.session_id, "tenant_id": request.tenant_id},
+                extra={
+                    "task_id": task.task_id,
+                    "request_id": request.request_id,
+                    "session_id": request.session_id,
+                    "tenant_id": request.tenant_id,
+                },
             )
             return task
 

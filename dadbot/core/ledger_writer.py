@@ -4,7 +4,7 @@ import time
 from typing import Any
 
 from dadbot.core.execution_ledger import ExecutionLedger, WriteBoundaryGuard
-from dadbot.core.invariant_gate import InvariantGate
+from dadbot.core.invariant_gate import InvariantGate, InvariantViolationError
 from dadbot.core.observability import get_metrics
 
 
@@ -84,6 +84,13 @@ class LedgerWriter:
         payload: dict[str, Any] | None = None,
         committed: bool = False,
     ) -> dict[str, Any]:
+        # Structural integrity: empty event_type is an invariant violation.
+        # This check must fire BEFORE trace_id so InvariantViolationError
+        # is raised for invalid structure rather than ValueError for lineage.
+        if not str(event_type or "").strip():
+            raise InvariantViolationError(
+                "Event 'type' must be non-empty — structural invariant violation",
+            )
         trace = str(trace_id or "").strip()
         step = str(kernel_step_id or "").strip()
         if not trace:

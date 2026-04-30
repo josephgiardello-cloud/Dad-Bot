@@ -3,11 +3,10 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 from uuid import uuid4
-
 
 DEFAULT_TENANT_ID = "default"
 
@@ -19,7 +18,7 @@ def normalize_tenant_id(value: str | None) -> str:
 
 
 def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def env_flag(name: str, default: bool) -> bool:
@@ -61,7 +60,7 @@ class AttachmentPayload:
     analysis: str = ""
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "AttachmentPayload":
+    def from_dict(cls, payload: dict[str, Any]) -> AttachmentPayload:
         return cls(
             type=str(payload.get("type") or "").strip().lower(),
             name=str(payload.get("name") or "").strip(),
@@ -122,8 +121,10 @@ class ChatRequest:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any], *, session_id: str | None = None) -> "ChatRequest":
-        attachments = [AttachmentPayload.from_dict(item) for item in payload.get("attachments", []) if isinstance(item, dict)]
+    def from_dict(cls, payload: dict[str, Any], *, session_id: str | None = None) -> ChatRequest:
+        attachments = [
+            AttachmentPayload.from_dict(item) for item in payload.get("attachments", []) if isinstance(item, dict)
+        ]
         return cls(
             session_id=session_id or str(payload.get("session_id") or "").strip(),
             user_input=str(payload.get("user_input") or payload.get("message") or "").strip(),
@@ -226,7 +227,7 @@ class ServiceConfig:
     telemetry: TelemetrySettings = field(default_factory=TelemetrySettings)
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "ServiceConfig":
+    def from_dict(cls, payload: dict[str, Any]) -> ServiceConfig:
         return cls(
             default_model=str(payload.get("default_model") or "llama3.2"),
             api=ApiSettings(**dict(payload.get("api") or {})),
@@ -237,7 +238,7 @@ class ServiceConfig:
         )
 
     @classmethod
-    def from_environment(cls) -> "ServiceConfig":
+    def from_environment(cls) -> ServiceConfig:
         config = cls()
         config.default_model = str(os.environ.get("DADBOT_DEFAULT_MODEL") or config.default_model)
         config.api.host = str(os.environ.get("DADBOT_API_HOST") or config.api.host)

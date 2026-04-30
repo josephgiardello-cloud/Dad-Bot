@@ -1,4 +1,4 @@
-﻿"""Execution kernel â€” the single state-transition authority for turn processing.
+"""Execution kernel â€” the single state-transition authority for turn processing.
 
 Architecture contract
 ---------------------
@@ -29,10 +29,12 @@ authoritative chokepoint for Bayesian governance.
 snapshot.  It propagates the Bayesian tool-bias into turn state so downstream
 services (AgentService, TurnService) don't need to re-read planner_debug.
 """
+
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from dadbot.core.graph import TurnContext
@@ -46,6 +48,7 @@ logger = logging.getLogger(__name__)
 # Data contracts
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class PolicyDecision:
     """Result of a single policy gate evaluation."""
@@ -54,7 +57,7 @@ class PolicyDecision:
     reason: str = ""
     # Suggested recovery action when allowed=False.
     # "reject" = drop the step result; "replan" = ask the pipeline to re-plan.
-    action: str = "proceed"   # "proceed" | "reject" | "replan"
+    action: str = "proceed"  # "proceed" | "reject" | "replan"
 
 
 @dataclass
@@ -62,7 +65,7 @@ class KernelStepResult:
     """Execution record returned by ``TurnKernel.execute_step``."""
 
     step_name: str
-    status: str                               # "ok" | "rejected" | "error"
+    status: str  # "ok" | "rejected" | "error"
     state_keys_written: list[str] = field(default_factory=list)
     policy: PolicyDecision | None = None
     error: str = ""
@@ -75,20 +78,34 @@ class KernelViolation(RuntimeError):
 # Step names that map to TurnPhase.ACT.  The policy gate only inspects these;
 # all other steps are allowed unconditionally at the kernel level.
 _ACT_STEP_NAMES: frozenset[str] = frozenset(
-    {"inference", "agent", "tool", "act", "tool_execution"}
+    {"inference", "agent", "tool", "act", "tool_execution"},
 )
 
 # Tokens that signal an explicit user request for tool-assisted responses.
-_EXPLICIT_TOOL_KEYWORDS: frozenset[str] = frozenset({
-    "remind", "reminder", "set alarm", "alarm",
-    "search for", "search the web", "look up", "look it up",
-    "find out", "find me", "check if", "google", "what is", "who is",
-})
+_EXPLICIT_TOOL_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "remind",
+        "reminder",
+        "set alarm",
+        "alarm",
+        "search for",
+        "search the web",
+        "look up",
+        "look it up",
+        "find out",
+        "find me",
+        "check if",
+        "google",
+        "what is",
+        "who is",
+    },
+)
 
 
 # ---------------------------------------------------------------------------
 # Kernel
 # ---------------------------------------------------------------------------
+
 
 class TurnKernel:
     """Single execution authority for all turn state transitions.
@@ -109,13 +126,13 @@ class TurnKernel:
     def __init__(
         self,
         *,
-        policy_gate: Callable[["TurnContext", str], PolicyDecision] | None = None,
+        policy_gate: Callable[[TurnContext, str], PolicyDecision] | None = None,
     ) -> None:
         self._policy_gate = policy_gate
 
     async def execute_step(
         self,
-        turn_context: "TurnContext",
+        turn_context: TurnContext,
         step_name: str,
         step_fn: Callable[[], Awaitable[Any]],
     ) -> KernelStepResult:
@@ -134,6 +151,7 @@ class TurnKernel:
         step_fn:
             Zero-arg async callable that performs the step.  May mutate
             ``turn_context.state`` as a side effect.
+
         """
         # â”€â”€ Phase 1: Policy gate â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         turn_context.metadata["kernel_lineage"] = {
@@ -150,7 +168,9 @@ class TurnKernel:
                     "reason": policy.reason,
                     "action": policy.action,
                 }
-                turn_context.metadata.setdefault("kernel_rejections", []).append(rejection)
+                turn_context.metadata.setdefault("kernel_rejections", []).append(
+                    rejection,
+                )
                 logger.info(
                     "TurnKernel: step %r rejected by policy gate: %s (action=%s)",
                     step_name,
@@ -167,7 +187,7 @@ class TurnKernel:
         keys_before: frozenset[str] = frozenset(turn_context.state)
         try:
             await step_fn()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.error("TurnKernel: step %r raised: %s", step_name, exc)
             return KernelStepResult(
                 step_name=step_name,
@@ -201,7 +221,8 @@ class TurnKernel:
 # Bayesian policy gate factory
 # ---------------------------------------------------------------------------
 
-def bayesian_policy_gate(bot: Any) -> Callable[["TurnContext", str], PolicyDecision]:
+
+def bayesian_policy_gate(bot: Any) -> Callable[[TurnContext, str], PolicyDecision]:
     """Return a policy gate backed by the bot's Bayesian planner state.
 
     Gate behaviour
@@ -226,7 +247,8 @@ def bayesian_policy_gate(bot: Any) -> Callable[["TurnContext", str], PolicyDecis
     * Authoritative propagation of tool-bias into turn state.
     * The hook for future hard-block policies (maintenance mode, crisis override).
     """
-    def _gate(turn_context: "TurnContext", step_name: str) -> PolicyDecision:
+
+    def _gate(turn_context: TurnContext, step_name: str) -> PolicyDecision:
         if step_name not in _ACT_STEP_NAMES:
             return PolicyDecision(
                 allowed=True,
@@ -236,8 +258,8 @@ def bayesian_policy_gate(bot: Any) -> Callable[["TurnContext", str], PolicyDecis
         planner_debug: dict[str, Any] = {}
         try:
             planner_debug = bot.planner_debug_snapshot() or {}
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 — optional diagnostic; never fatal
+            logger.debug("planner_debug_snapshot unavailable: %s", exc)
 
         tool_bias = str(planner_debug.get("bayesian_tool_bias") or "planner_default")
 

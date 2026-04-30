@@ -11,15 +11,16 @@ and real-world connector execution:
 - Partial success / degraded-mode / fallback semantics
 - Execution isolation profiles with resource-limit prechecks
 """
+
 from __future__ import annotations
 
-from collections import deque
-from dataclasses import dataclass, field
-from enum import Enum
-import math
 import random
 import time
-from typing import Any, Callable, Protocol
+from collections import deque
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Protocol
 
 
 class ToolExecutionStatus(str, Enum):
@@ -70,13 +71,11 @@ class HttpResponse:
 class HttpTransport(Protocol):
     """Transport boundary so runtime logic is decoupled from requests/httpx."""
 
-    def send(self, request: HttpRequest) -> HttpResponse:
-        ...
+    def send(self, request: HttpRequest) -> HttpResponse: ...
 
 
 class AuthStrategy(Protocol):
-    def apply(self, headers: dict[str, str]) -> dict[str, str]:
-        ...
+    def apply(self, headers: dict[str, str]) -> dict[str, str]: ...
 
 
 @dataclass(frozen=True)
@@ -115,9 +114,15 @@ class RetryPolicy:
     max_delay_ms: float = 1_500.0
     backoff_factor: float = 2.0
     jitter_ratio: float = 0.2
-    retryable_statuses: frozenset[int] = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
+    retryable_statuses: frozenset[int] = frozenset(
+        {408, 409, 425, 429, 500, 502, 503, 504},
+    )
 
-    def delay_for_attempt(self, attempt: int, rng: Callable[[], float] | None = None) -> float:
+    def delay_for_attempt(
+        self,
+        attempt: int,
+        rng: Callable[[], float] | None = None,
+    ) -> float:
         """Return delay seconds for attempt number (1-indexed)."""
         rng_fn = rng or random.random
         exponential_ms = self.base_delay_ms * (self.backoff_factor ** max(0, int(attempt) - 1))
@@ -125,10 +130,22 @@ class RetryPolicy:
         jitter = bounded_ms * self.jitter_ratio * rng_fn()
         return max(0.0, (bounded_ms + jitter) / 1000.0)
 
-    def should_retry(self, *, attempt: int, status_code: int | None = None, failure_kind: NetworkFailureKind | None = None) -> bool:
+    def should_retry(
+        self,
+        *,
+        attempt: int,
+        status_code: int | None = None,
+        failure_kind: NetworkFailureKind | None = None,
+    ) -> bool:
         if int(attempt) >= max(1, int(self.max_attempts)):
             return False
-        if failure_kind in {NetworkFailureKind.DNS, NetworkFailureKind.TIMEOUT, NetworkFailureKind.CONNECTION, NetworkFailureKind.SERVER, NetworkFailureKind.RATE_LIMIT}:
+        if failure_kind in {
+            NetworkFailureKind.DNS,
+            NetworkFailureKind.TIMEOUT,
+            NetworkFailureKind.CONNECTION,
+            NetworkFailureKind.SERVER,
+            NetworkFailureKind.RATE_LIMIT,
+        }:
             return True
         if status_code is not None and int(status_code) in self.retryable_statuses:
             return True
@@ -144,7 +161,12 @@ class RateLimitPolicy:
 class SlidingWindowRateLimiter:
     """Lightweight throttling guard for tool invocations."""
 
-    def __init__(self, policy: RateLimitPolicy, *, clock: Callable[[], float] | None = None) -> None:
+    def __init__(
+        self,
+        policy: RateLimitPolicy,
+        *,
+        clock: Callable[[], float] | None = None,
+    ) -> None:
         self._policy = policy
         self._clock = clock or time.monotonic
         self._events: deque[float] = deque()
@@ -203,7 +225,11 @@ class IsolationGuard:
     def profile_for(self, tool_name: str) -> IsolationProfile | None:
         return self._profiles.get(str(tool_name).strip().lower())
 
-    def validate(self, tool_name: str, estimate: ResourceEstimate | None) -> tuple[bool, str]:
+    def validate(
+        self,
+        tool_name: str,
+        estimate: ResourceEstimate | None,
+    ) -> tuple[bool, str]:
         profile = self.profile_for(tool_name)
         if profile is None or estimate is None:
             return True, "ok"
@@ -251,10 +277,11 @@ class ToolExecutionResult:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def usable(self, *, min_confidence: float = 0.5) -> bool:
-        return (
-            self.status in {ToolExecutionStatus.OK, ToolExecutionStatus.PARTIAL, ToolExecutionStatus.DEGRADED}
-            and float(self.confidence) >= float(min_confidence)
-        )
+        return self.status in {
+            ToolExecutionStatus.OK,
+            ToolExecutionStatus.PARTIAL,
+            ToolExecutionStatus.DEGRADED,
+        } and float(self.confidence) >= float(min_confidence)
 
 
 ToolHandler = Callable[[dict[str, Any]], ToolExecutionResult]
@@ -270,10 +297,18 @@ class DynamicToolRegistry:
     def register(self, capability: ToolCapability, handler: ToolHandler) -> None:
         key = str(capability.name).strip().lower()
         self._capabilities.setdefault(key, []).append(capability)
-        self._capabilities[key].sort(key=lambda item: _parse_version(item.version), reverse=True)
+        self._capabilities[key].sort(
+            key=lambda item: _parse_version(item.version),
+            reverse=True,
+        )
         self._handlers[(key, capability.version)] = handler
 
-    def discover(self, *, intent: str | None = None, tag: str | None = None) -> list[ToolCapability]:
+    def discover(
+        self,
+        *,
+        intent: str | None = None,
+        tag: str | None = None,
+    ) -> list[ToolCapability]:
         found: list[ToolCapability] = []
         for versions in self._capabilities.values():
             for cap in versions:
@@ -282,9 +317,18 @@ class DynamicToolRegistry:
                 if tag and str(tag).strip().lower() not in {t.lower() for t in cap.tags}:
                     continue
                 found.append(cap)
-        return sorted(found, key=lambda item: (item.name, _parse_version(item.version)), reverse=True)
+        return sorted(
+            found,
+            key=lambda item: (item.name, _parse_version(item.version)),
+            reverse=True,
+        )
 
-    def negotiate(self, name: str, *, required_version: str | None = None) -> ToolCapability | None:
+    def negotiate(
+        self,
+        name: str,
+        *,
+        required_version: str | None = None,
+    ) -> ToolCapability | None:
         candidates = list(self._capabilities.get(str(name).strip().lower(), []))
         if not candidates:
             return None
@@ -294,7 +338,12 @@ class DynamicToolRegistry:
         compatible = [item for item in candidates if _parse_version(item.version)[0] == required_major]
         return compatible[0] if compatible else None
 
-    def handler_for(self, name: str, *, required_version: str | None = None) -> tuple[ToolCapability, ToolHandler] | None:
+    def handler_for(
+        self,
+        name: str,
+        *,
+        required_version: str | None = None,
+    ) -> tuple[ToolCapability, ToolHandler] | None:
         capability = self.negotiate(name, required_version=required_version)
         if capability is None:
             return None
@@ -343,7 +392,11 @@ class CostAwareToolRouter:
         return max(candidates, key=score)
 
 
-def classify_network_failure(*, exc: Exception | None = None, status_code: int | None = None) -> NetworkFailureKind:
+def classify_network_failure(
+    *,
+    exc: Exception | None = None,
+    status_code: int | None = None,
+) -> NetworkFailureKind:
     if status_code is not None:
         code = int(status_code)
         if code == 429:
@@ -424,7 +477,7 @@ class ExternalToolRuntime:
                     "status": result.status.value,
                     "error": result.error,
                     "attempts": result.attempts,
-                }
+                },
             )
 
         # If all fallback candidates are unusable, return an explicit degraded
@@ -434,7 +487,10 @@ class ExternalToolRuntime:
             status=ToolExecutionStatus.DEGRADED,
             output=None,
             error="all_tool_candidates_unusable",
-            attempts=max(1, sum(int(item.get("attempts", 1)) for item in failures) if failures else 1),
+            attempts=max(
+                1,
+                sum(int(item.get("attempts", 1)) for item in failures) if failures else 1,
+            ),
             confidence=0.0,
             degraded_reason="fallback_chain_exhausted",
             fallback_used=len(chain) > 1,
@@ -450,7 +506,11 @@ class ExternalToolRuntime:
         load_by_tool: dict[str, float] | None = None,
         min_confidence: float = 0.5,
     ) -> ToolExecutionResult:
-        selected = router.route(self._registry, intent=intent, load_by_tool=load_by_tool)
+        selected = router.route(
+            self._registry,
+            intent=intent,
+            load_by_tool=load_by_tool,
+        )
         if selected is None:
             return ToolExecutionResult(
                 tool_name="",
@@ -497,7 +557,10 @@ class ExternalToolRuntime:
                 degraded_reason="isolation_rejected",
             )
 
-        capability_and_handler = self._registry.handler_for(normalized_name, required_version=required_version)
+        capability_and_handler = self._registry.handler_for(
+            normalized_name,
+            required_version=required_version,
+        )
         if capability_and_handler is None:
             return ToolExecutionResult(
                 tool_name=normalized_name,
@@ -513,13 +576,20 @@ class ExternalToolRuntime:
         for attempt in range(1, max(1, int(self._retry_policy.max_attempts)) + 1):
             try:
                 result = handler(dict(payload))
-            except Exception as exc:  # Failure modeled as runtime event, not uncaught exception.
+            except Exception as exc:  # Failure modeled as runtime event, not uncaught exception.  # noqa: BLE001
                 failure_kind = classify_network_failure(exc=exc)
-                if self._retry_policy.should_retry(attempt=attempt, failure_kind=failure_kind):
+                if self._retry_policy.should_retry(
+                    attempt=attempt,
+                    failure_kind=failure_kind,
+                ):
                     self._sleeper(self._retry_policy.delay_for_attempt(attempt))
                     continue
                 elapsed_ms = (time.perf_counter() - start) * 1000.0
-                status = ToolExecutionStatus.TIMEOUT if failure_kind == NetworkFailureKind.TIMEOUT else ToolExecutionStatus.ERROR
+                status = (
+                    ToolExecutionStatus.TIMEOUT
+                    if failure_kind == NetworkFailureKind.TIMEOUT
+                    else ToolExecutionStatus.ERROR
+                )
                 return ToolExecutionResult(
                     tool_name=normalized_name,
                     status=status,
@@ -548,9 +618,13 @@ class ExternalToolRuntime:
             if isinstance(result.metadata, dict):
                 http_status = result.metadata.get("http_status")
             failure_kind = classify_network_failure(status_code=http_status)
-            if (
-                result.status in {ToolExecutionStatus.ERROR, ToolExecutionStatus.TIMEOUT}
-                and self._retry_policy.should_retry(attempt=attempt, status_code=http_status, failure_kind=failure_kind)
+            if result.status in {
+                ToolExecutionStatus.ERROR,
+                ToolExecutionStatus.TIMEOUT,
+            } and self._retry_policy.should_retry(
+                attempt=attempt,
+                status_code=http_status,
+                failure_kind=failure_kind,
             ):
                 self._sleeper(self._retry_policy.delay_for_attempt(attempt))
                 continue
@@ -580,6 +654,7 @@ def _parse_version(version: str) -> tuple[int, int, int]:
         "1.2.3" -> (1, 2, 3)
         "2.0" -> (2, 0, 0)
         "3" -> (3, 0, 0)
+
     """
     cleaned = str(version or "0").strip()
     parts = cleaned.split(".")

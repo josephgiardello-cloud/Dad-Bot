@@ -1,13 +1,13 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import os
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, Tuple
+from typing import Any
 
 from dadbot.utils import env_truthy
 from dadbot_system import ServiceConfig, normalize_tenant_id
-
 
 MOOD_CATEGORIES = {
     "positive": "happy, excited, proud, energetic, or upbeat",
@@ -109,7 +109,7 @@ class DadRuntimeConfig:
     mood_detection_temperature: float = 0.0
     stream_timeout_seconds: int = 60
     stream_max_chars: int = 12000
-    preferred_embedding_models: Tuple[str, ...] = (
+    preferred_embedding_models: tuple[str, ...] = (
         "bge-m3",
         "nomic-embed-text",
         "mxbai-embed-large",
@@ -119,7 +119,7 @@ class DadRuntimeConfig:
     memory_freshness_half_life_days: int = 30
     memory_min_freshness_weight: float = 0.2
     graph_refresh_debounce_seconds: int = 30
-    preferred_vision_model_hints: Tuple[str, ...] = (
+    preferred_vision_model_hints: tuple[str, ...] = (
         "qwen2.5-vl",
         "qwen2-vl",
         "llava",
@@ -134,7 +134,7 @@ class DadRuntimeConfig:
     graph_walk_hops: int = 2
     graph_walk_edge_limit: int = 18
     graph_walk_node_limit: int = 16
-    egress_allowlist: Tuple[str, ...] = (
+    egress_allowlist: tuple[str, ...] = (
         "localhost",
         "127.0.0.1",
         "api.duckduckgo.com",
@@ -145,49 +145,55 @@ class DadRuntimeConfig:
     dual_control_approvals_required: int = 2
     rtbf_proof_enabled: bool = True
 
-    cadence_defaults: Dict[str, int] = field(default_factory=lambda: {
-        "persona_evolution_min_sessions": 10,
-        "persona_evolution_session_gap": 10,
-        "wisdom_min_archived_sessions": 2,
-        "wisdom_turn_interval": 3,
-        "family_echo_turn_interval": 4,
-        "life_pattern_min_archived_sessions": 4,
-        "life_pattern_window": 12,
-        "life_pattern_min_occurrences": 3,
-        "life_pattern_confidence_threshold": 70,
-        "life_pattern_queue_limit": 2,
-        "deep_pattern_min_occurrences": 3,
-        "scheduled_reminder_lead_minutes": 45,
-        "scheduled_reminder_repeat_hours": 12,
-        "scheduled_pattern_hour": 8,
-        "scheduled_pattern_min_confidence": 80,
-    })
+    cadence_defaults: dict[str, int] = field(
+        default_factory=lambda: {
+            "persona_evolution_min_sessions": 10,
+            "persona_evolution_session_gap": 10,
+            "wisdom_min_archived_sessions": 2,
+            "wisdom_turn_interval": 3,
+            "family_echo_turn_interval": 4,
+            "life_pattern_min_archived_sessions": 4,
+            "life_pattern_window": 12,
+            "life_pattern_min_occurrences": 3,
+            "life_pattern_confidence_threshold": 70,
+            "life_pattern_queue_limit": 2,
+            "deep_pattern_min_occurrences": 3,
+            "scheduled_reminder_lead_minutes": 45,
+            "scheduled_reminder_repeat_hours": 12,
+            "scheduled_pattern_hour": 8,
+            "scheduled_pattern_min_confidence": 80,
+        },
+    )
 
-    store_limits: Dict[str, int] = field(default_factory=lambda: {
-        "consolidated_memories": 8,
-        "persona_evolution": 8,
-        "wisdom_insights": 16,
-        "life_patterns": 12,
-        "pending_proactive_messages": 8,
-        "health_history": 240,
-        "reminders": 50,
-        "session_archive": 24,
-        "recent_checkins": 24,
-        "relationship_history": 180,
-    })
+    store_limits: dict[str, int] = field(
+        default_factory=lambda: {
+            "consolidated_memories": 8,
+            "persona_evolution": 8,
+            "wisdom_insights": 16,
+            "life_patterns": 12,
+            "pending_proactive_messages": 8,
+            "health_history": 240,
+            "reminders": 50,
+            "session_archive": 24,
+            "recent_checkins": 24,
+            "relationship_history": 180,
+        },
+    )
 
-    lookbacks: Dict[str, int] = field(default_factory=lambda: {
-        "mood_detection_context": 6,
-        "recent_mood_history": 12,
-        "recent_wisdom_dedup": 6,
-        "supporting_summaries": 4,
-        "contradictions": 4,
-        "pending_proactive_dedup": 3,
-        "semantic_query_tokens": 6,
-        "deep_pattern_archive_window": 18,
-        "deep_pattern_candidates": 14,
-        "deep_pattern_context_limit": 3,
-    })
+    lookbacks: dict[str, int] = field(
+        default_factory=lambda: {
+            "mood_detection_context": 6,
+            "recent_mood_history": 12,
+            "recent_wisdom_dedup": 6,
+            "supporting_summaries": 4,
+            "contradictions": 4,
+            "pending_proactive_dedup": 3,
+            "semantic_query_tokens": 6,
+            "deep_pattern_archive_window": 18,
+            "deep_pattern_candidates": 14,
+            "deep_pattern_context_limit": 3,
+        },
+    )
 
     def tail(self, items: Iterable[Any], limit_key: str):
         values = list(items)
@@ -213,29 +219,44 @@ class DadRuntimeConfig:
 
     @property
     def profile_path(self) -> Path:
-        return self._env_path("DADBOT_PROFILE_PATH", self._project_root() / "dad_profile.json")
+        return self._env_path(
+            "DADBOT_PROFILE_PATH",
+            self._project_root() / "dad_profile.json",
+        )
 
     @property
     def memory_path(self) -> Path:
-        return self._env_path("DADBOT_MEMORY_PATH", self._project_root() / "dad_memory.json")
+        return self._env_path(
+            "DADBOT_MEMORY_PATH",
+            self._project_root() / "dad_memory.json",
+        )
 
     @property
     def semantic_memory_db_path(self) -> Path:
-        return self._env_path("DADBOT_SEMANTIC_DB_PATH", self._project_root() / "dad_memory_semantic.sqlite3")
+        return self._env_path(
+            "DADBOT_SEMANTIC_DB_PATH",
+            self._project_root() / "dad_memory_semantic.sqlite3",
+        )
 
     @property
     def graph_store_db_path(self) -> Path:
-        return self._env_path("DADBOT_GRAPH_DB_PATH", self._project_root() / "dad_memory_graph.sqlite3")
+        return self._env_path(
+            "DADBOT_GRAPH_DB_PATH",
+            self._project_root() / "dad_memory_graph.sqlite3",
+        )
 
     @property
     def session_log_dir(self) -> Path:
-        return self._env_path("DADBOT_SESSION_LOG_DIR", self._project_root() / "session_logs")
+        return self._env_path(
+            "DADBOT_SESSION_LOG_DIR",
+            self._project_root() / "session_logs",
+        )
 
 
 @dataclass
 class DadBotConfig:
     model_name: str = "llama3.2"
-    fallback_models: Tuple[str, ...] = (
+    fallback_models: tuple[str, ...] = (
         "phi4:mini",
         "qwen3.5:4b",
         "gemma3:4b",
@@ -247,21 +268,30 @@ class DadBotConfig:
     strict_graph_mode: bool = True
     tenant_id: str = ""
     runtime_config: DadRuntimeConfig = field(default_factory=DadRuntimeConfig)
-    service_config: ServiceConfig = field(default_factory=ServiceConfig.from_environment)
+    service_config: ServiceConfig = field(
+        default_factory=ServiceConfig.from_environment,
+    )
 
     def __post_init__(self) -> None:
-        self.tenant_id = normalize_tenant_id(self.tenant_id or os.environ.get("DADBOT_TENANT_ID") or "")
-        self.append_signoff = bool(self.append_signoff and not env_truthy("DADBOT_NO_SIGNOFF", default=False))
-        self.light_mode = bool(self.light_mode or env_truthy("DADBOT_LIGHT_MODE", default=False))
+        self.tenant_id = normalize_tenant_id(
+            self.tenant_id or os.environ.get("DADBOT_TENANT_ID") or "",
+        )
+        self.append_signoff = bool(
+            self.append_signoff and not env_truthy("DADBOT_NO_SIGNOFF", default=False),
+        )
+        self.light_mode = bool(
+            self.light_mode or env_truthy("DADBOT_LIGHT_MODE", default=False),
+        )
         self.strict_graph_mode = bool(
-            self.strict_graph_mode
-            and env_truthy("DADBOT_STRICT_GRAPH_MODE", default=True)
+            self.strict_graph_mode and env_truthy("DADBOT_STRICT_GRAPH_MODE", default=True),
         )
         self.active_model = str(self.model_name).strip() or "llama3.2"
         self.active_embedding_model = None
         self.llm_provider = str(os.environ.get("DADBOT_LLM_PROVIDER", "ollama")).strip().lower() or "ollama"
         self.llm_model = str(os.environ.get("DADBOT_LLM_MODEL", self.active_model)).strip() or self.active_model
-        self.preferred_embedding_models = tuple(self.runtime_config.preferred_embedding_models)
+        self.preferred_embedding_models = tuple(
+            self.runtime_config.preferred_embedding_models,
+        )
         self.recent_history_window = self.runtime_config.recent_history_window
         self.max_history_messages_scan = self.runtime_config.max_history_messages_scan
         self.summary_trigger_messages = self.runtime_config.summary_trigger_messages
@@ -283,35 +313,43 @@ class DadBotConfig:
             int(os.environ.get("DADBOT_PROACTIVE_HEARTBEAT_SECONDS") or 3600),
         )
         self.turn_graph_enabled = bool(
-            env_truthy("DADBOT_ENABLE_TURN_GRAPH", default=True)
-            and ("PYTEST_CURRENT_TEST" not in os.environ)
+            env_truthy("DADBOT_ENABLE_TURN_GRAPH", default=True) and ("PYTEST_CURRENT_TEST" not in os.environ),
         )
-        self.turn_graph_config_path = str(os.environ.get("DADBOT_TURN_GRAPH_CONFIG_PATH") or "config.yaml").strip() or "config.yaml"
+        self.turn_graph_config_path = (
+            str(
+                os.environ.get("DADBOT_TURN_GRAPH_CONFIG_PATH") or "config.yaml",
+            ).strip()
+            or "config.yaml"
+        )
         self.egress_enforce = bool(
-            self.runtime_config.egress_enforce
-            or env_truthy("DADBOT_EGRESS_ENFORCE", default=False)
+            self.runtime_config.egress_enforce or env_truthy("DADBOT_EGRESS_ENFORCE", default=False),
         )
-        configured_allowlist = str(os.environ.get("DADBOT_EGRESS_ALLOWLIST", "")).strip()
+        configured_allowlist = str(
+            os.environ.get("DADBOT_EGRESS_ALLOWLIST", ""),
+        ).strip()
         if configured_allowlist:
             hosts = [item.strip() for item in configured_allowlist.split(",")]
             self.egress_allowlist = tuple(host for host in hosts if host)
         else:
             self.egress_allowlist = tuple(self.runtime_config.egress_allowlist)
         self.merkle_anchor_enabled = bool(
-            self.runtime_config.merkle_anchor_enabled
-            and env_truthy("DADBOT_MERKLE_ANCHOR_ENABLED", default=True)
+            self.runtime_config.merkle_anchor_enabled and env_truthy("DADBOT_MERKLE_ANCHOR_ENABLED", default=True),
         )
         self.dual_control_enabled = bool(
-            self.runtime_config.dual_control_enabled
-            or env_truthy("DADBOT_DUAL_CONTROL_ENABLED", default=False)
+            self.runtime_config.dual_control_enabled or env_truthy("DADBOT_DUAL_CONTROL_ENABLED", default=False),
         )
         self.dual_control_approvals_required = max(
             1,
-            int(os.environ.get("DADBOT_DUAL_CONTROL_APPROVALS", self.runtime_config.dual_control_approvals_required) or 1),
+            int(
+                os.environ.get(
+                    "DADBOT_DUAL_CONTROL_APPROVALS",
+                    self.runtime_config.dual_control_approvals_required,
+                )
+                or 1,
+            ),
         )
         self.rtbf_proof_enabled = bool(
-            self.runtime_config.rtbf_proof_enabled
-            and env_truthy("DADBOT_RTBF_PROOF_ENABLED", default=True)
+            self.runtime_config.rtbf_proof_enabled and env_truthy("DADBOT_RTBF_PROOF_ENABLED", default=True),
         )
         self._approval_workflow = None
 
@@ -335,7 +373,12 @@ class DadBotConfig:
         )
         return self._approval_workflow
 
-    def propose_profile_llm_change(self, provider: str, model: str, requested_by: str = "system") -> str:
+    def propose_profile_llm_change(
+        self,
+        provider: str,
+        model: str,
+        requested_by: str = "system",
+    ) -> str:
         workflow = self._config_approval_workflow()
         proposal = workflow.propose(
             key="llm.profile",

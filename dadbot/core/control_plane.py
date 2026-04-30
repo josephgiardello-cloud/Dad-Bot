@@ -10,9 +10,10 @@ from uuid import uuid4
 from dadbot.contracts import AttachmentList, FinalizedTurnResult
 from dadbot.core.execution_boundary import ControlPlaneExecutionBoundary
 from dadbot.core.execution_lease import ExecutionLease, LeaseConflictError
-from dadbot.core.execution_ledger import ExecutionLedger, InMemoryExecutionLedger
+from dadbot.core.execution_ledger import ExecutionLedger
+from dadbot.core.execution_ledger_memory import InMemoryExecutionLedger
 from dadbot.core.ledger_reader import LedgerReader
-from dadbot.core.ledger_writer import LedgerWriter
+from dadbot.core.ledger_writer_adapter import LedgerWriterAdapter
 from dadbot.core.observability import get_exporter, get_metrics, get_tracer
 from dadbot.core.recovery_manager import RecoveryManager
 from dadbot.core.session_store import SessionStore
@@ -283,7 +284,7 @@ class ExecutionControlPlane:
         self.kernel_executor = kernel_executor
         self.execution_token = f"exec-{uuid4().hex}"
         self.ledger = resolved_options.ledger or InMemoryExecutionLedger()
-        self.ledger_writer = LedgerWriter(self.ledger)
+        self.ledger_writer = LedgerWriterAdapter(self.ledger)
         self.ledger_reader = LedgerReader(self.ledger)
         self.execution_lease = resolved_options.execution_lease or ExecutionLease()
         scheduler_options = SchedulerOptions(

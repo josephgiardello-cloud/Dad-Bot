@@ -1,8 +1,9 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Protocol, TypeAlias
+from typing import Any, Protocol, TypeAlias
 
 Attachment: TypeAlias = dict[str, Any]
 AttachmentList: TypeAlias = list[Attachment]
@@ -26,7 +27,11 @@ class SupportsProfileContext(Protocol):
 class SupportsLongTermSignals(Protocol):
     def build_wisdom_context(self, user_input: str) -> str | None: ...
 
-    def build_deep_pattern_context(self, user_input: str, limit: int | None = None) -> str | None: ...
+    def build_deep_pattern_context(
+        self,
+        user_input: str,
+        limit: int | None = None,
+    ) -> str | None: ...
 
     def trait_impact(self, entry: dict[str, Any]) -> float: ...
 
@@ -57,9 +62,17 @@ class SupportsContextRuntime(Protocol):
 
     def memory_context_limit_for_input(self, user_input: str) -> int: ...
 
-    def graph_retrieval_for_input(self, user_input: str, limit: int = 3) -> dict[str, Any] | None: ...
+    def graph_retrieval_for_input(
+        self,
+        user_input: str,
+        limit: int = 3,
+    ) -> dict[str, Any] | None: ...
 
-    def relevant_archive_entries_for_input(self, user_input: str, limit: int = 2) -> list[dict[str, Any]]: ...
+    def relevant_archive_entries_for_input(
+        self,
+        user_input: str,
+        limit: int = 2,
+    ) -> list[dict[str, Any]]: ...
 
     def relevant_memories_for_input(
         self,
@@ -117,11 +130,20 @@ class SupportsRelationshipRuntime(Protocol):
 
     def prompt_history(self) -> list[dict[str, Any]]: ...
 
-    def call_ollama_chat(self, messages: list[dict[str, Any]], **kwargs: Any) -> dict[str, Any]: ...
+    def call_ollama_chat(
+        self,
+        messages: list[dict[str, Any]],
+        **kwargs: Any,
+    ) -> dict[str, Any]: ...
 
     def extract_ollama_message_content(self, response: dict[str, Any]) -> str: ...
 
-    def record_runtime_issue(self, stage: str, fallback: str, exc: Exception | None = None) -> None: ...
+    def record_runtime_issue(
+        self,
+        stage: str,
+        fallback: str,
+        exc: Exception | None = None,
+    ) -> None: ...
 
     def parse_model_json_content(self, content: str) -> dict[str, Any]: ...
 
@@ -129,7 +151,11 @@ class SupportsRelationshipRuntime(Protocol):
 
     def mutate_memory_store(self, **changes: Any) -> dict[str, Any]: ...
 
-    def update_trait_impact_from_relationship_feedback(self, trust_delta: int, openness_delta: int) -> None: ...
+    def update_trait_impact_from_relationship_feedback(
+        self,
+        trust_delta: int,
+        openness_delta: int,
+    ) -> None: ...
 
     def infer_memory_category(self, user_input: str) -> str: ...
 
@@ -149,9 +175,17 @@ class SupportsTurnProcessingRuntime(Protocol):
 
     def get_available_tools(self) -> list[dict[str, Any]]: ...
 
-    def call_ollama_chat(self, messages: list[dict[str, Any]], **kwargs: Any) -> dict[str, Any]: ...
+    def call_ollama_chat(
+        self,
+        messages: list[dict[str, Any]],
+        **kwargs: Any,
+    ) -> dict[str, Any]: ...
 
-    async def call_ollama_chat_async(self, messages: list[dict[str, Any]], **kwargs: Any) -> dict[str, Any]: ...
+    async def call_ollama_chat_async(
+        self,
+        messages: list[dict[str, Any]],
+        **kwargs: Any,
+    ) -> dict[str, Any]: ...
 
     def parse_model_json_content(self, content: str) -> dict[str, Any]: ...
 
@@ -173,11 +207,22 @@ class SupportsTurnProcessingRuntime(Protocol):
 
     def normalize_lookup_query(self, user_input: str) -> str: ...
 
-    def normalize_chat_attachments(self, attachments: AttachmentList | None = None) -> AttachmentList: ...
+    def normalize_chat_attachments(
+        self,
+        attachments: AttachmentList | None = None,
+    ) -> AttachmentList: ...
 
-    def enrich_multimodal_attachments(self, attachments: AttachmentList | None = None, user_input: str = "") -> AttachmentList: ...
+    def enrich_multimodal_attachments(
+        self,
+        attachments: AttachmentList | None = None,
+        user_input: str = "",
+    ) -> AttachmentList: ...
 
-    def compose_user_turn_text(self, user_input: str, attachments: AttachmentList | None = None) -> str: ...
+    def compose_user_turn_text(
+        self,
+        user_input: str,
+        attachments: AttachmentList | None = None,
+    ) -> str: ...
 
     def is_session_exit_command(self, stripped_input: str) -> bool: ...
 
@@ -206,15 +251,30 @@ class SupportsTurnProcessingRuntime(Protocol):
 
     def set_active_tool_observation(self, observation: str | None) -> None: ...
 
-    def history_attachment_metadata(self, attachment: dict[str, Any]) -> dict[str, Any]: ...
+    def history_attachment_metadata(
+        self,
+        attachment: dict[str, Any],
+    ) -> dict[str, Any]: ...
 
     def sync_active_thread_snapshot(self) -> None: ...
 
-    def schedule_post_turn_maintenance(self, user_input: str, current_mood: str) -> dict[str, Any]: ...
+    def schedule_post_turn_maintenance(
+        self,
+        user_input: str,
+        current_mood: str,
+    ) -> dict[str, Any]: ...
 
-    def call_ollama_chat_stream(self, messages: list[dict[str, Any]], **kwargs: Any) -> str: ...
+    def call_ollama_chat_stream(
+        self,
+        messages: list[dict[str, Any]],
+        **kwargs: Any,
+    ) -> str: ...
 
-    async def call_ollama_chat_stream_async(self, messages: list[dict[str, Any]], **kwargs: Any) -> str: ...
+    async def call_ollama_chat_stream_async(
+        self,
+        messages: list[dict[str, Any]],
+        **kwargs: Any,
+    ) -> str: ...
 
     def build_chat_request_messages(
         self,
@@ -223,57 +283,27 @@ class SupportsTurnProcessingRuntime(Protocol):
         attachments: AttachmentList | None = None,
     ) -> list[dict[str, object]]: ...
 
-    def critique_reply(self, user_input: str, draft_reply: str, current_mood: str) -> str: ...
+    def critique_reply(
+        self,
+        user_input: str,
+        draft_reply: str,
+        current_mood: str,
+    ) -> str: ...
 
-    async def critique_reply_async(self, user_input: str, draft_reply: str, current_mood: str) -> str: ...
+    async def critique_reply_async(
+        self,
+        user_input: str,
+        draft_reply: str,
+        current_mood: str,
+    ) -> str: ...
 
     def validate_reply(self, user_input: str, candidate_reply: str) -> str: ...
 
-    def begin_planner_debug(self, user_input: str, current_mood: str) -> dict[str, Any]: ...
-
-
-# ---------------------------------------------------------------------------
-# L3/L4/L5 substrate protocols
-# ---------------------------------------------------------------------------
-
-
-class SupportsEventAuthority(Protocol):
-    """Protocol for EventAuthority: canonical source-of-truth event layer."""
-    def append(self, event: dict[str, Any]) -> int: ...
-    def derive_state(self) -> dict[str, Any]: ...
-    def is_defined(self) -> bool: ...
-    def assert_defined(self) -> None: ...
-    def rebuild_state_from_events(self, events: list[dict[str, Any]]) -> dict[str, Any]: ...
-    def authority_hash(self) -> str: ...
-
-
-class SupportsStatelessExecution(Protocol):
-    """Protocol for StatelessExecutor: pure-function execution mode."""
-    def execute(
+    def begin_planner_debug(
         self,
         user_input: str,
-        event_log: list[dict[str, Any]],
-        config: dict[str, Any] | None = None,
-    ) -> Any: ...
-    def is_bootstrapped(self, event_log: list[dict[str, Any]]) -> bool: ...
-
-
-class SupportsMemoryStateSpace(Protocol):
-    """Protocol for MemoryStateVector: ordered state vector space."""
-    entries: tuple[dict[str, Any], ...]
-    space_hash: str
-
-    @classmethod
-    def from_memories(cls, memories: list[dict[str, Any]]) -> Any: ...
-    def project(self, indices: list[int]) -> Any: ...
-    def to_list(self) -> list[dict[str, Any]]: ...
-
-
-class SupportsEvolutionHooks(Protocol):
-    """Protocol for GraphIntrospectionAPI: read-only introspection + hooks."""
-    def introspect(self, dag: Any) -> dict[str, Any]: ...
-    def hook_pre_mutation(self, callback: Any) -> None: ...
-    def hook_post_mutation(self, callback: Any) -> None: ...
+        current_mood: str,
+    ) -> dict[str, Any]: ...
 
 
 @dataclass(frozen=True)
@@ -283,11 +313,14 @@ class DadBotContext:
     bot: Any
 
     @classmethod
-    def from_runtime(cls, runtime: Any | SupportsDadBotAccess | "DadBotContext") -> "DadBotContext":
+    def from_runtime(
+        cls,
+        runtime: Any | SupportsDadBotAccess | DadBotContext,
+    ) -> DadBotContext:
         if isinstance(runtime, cls):
             return runtime
         if hasattr(runtime, "bot"):
-            return cls(getattr(runtime, "bot"))
+            return cls(runtime.bot)
         return cls(runtime)
 
     def __getattr__(self, name: str) -> Any:

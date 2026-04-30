@@ -24,12 +24,12 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
-
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # Enums – stable categorical values
 # ---------------------------------------------------------------------------
+
 
 class ToolStatus(str, Enum):
     SUCCESS = "success"
@@ -40,11 +40,11 @@ class ToolStatus(str, Enum):
 
 
 class MemoryType(str, Enum):
-    GRAPH = "graph"         # semantic graph memory
-    SEMANTIC = "semantic"   # vector/embedding memory
-    ARCHIVE = "archive"     # long-term archive
-    WORKING = "working"     # in-context working memory
-    GOAL = "goal"           # goal tracker memory
+    GRAPH = "graph"  # semantic graph memory
+    SEMANTIC = "semantic"  # vector/embedding memory
+    ARCHIVE = "archive"  # long-term archive
+    WORKING = "working"  # in-context working memory
+    GOAL = "goal"  # goal tracker memory
     UNKNOWN = "unknown"
 
 
@@ -62,14 +62,16 @@ class ErrorClass(str, Enum):
 # Node Transitions
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class NodeTransition:
     """Records a single node's execution in the pipeline."""
+
     node: str
     started_at_ms: float
     completed_at_ms: float
     success: bool
-    error: Optional[str] = None
+    error: str | None = None
 
     @property
     def duration_ms(self) -> float:
@@ -79,11 +81,11 @@ class NodeTransition:
     def from_state(
         cls,
         node: str,
-        started_at_ms: Optional[float] = None,
-        completed_at_ms: Optional[float] = None,
+        started_at_ms: float | None = None,
+        completed_at_ms: float | None = None,
         success: bool = True,
-        error: Optional[str] = None,
-    ) -> "NodeTransition":
+        error: str | None = None,
+    ) -> NodeTransition:
         now = time.monotonic() * 1000
         return cls(
             node=node,
@@ -98,18 +100,20 @@ class NodeTransition:
 # Tool Execution
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class ToolTrace:
     """Records a single tool invocation with inputs, outputs, and quality signals."""
+
     tool_name: str
     intent: str
-    inputs: Dict[str, Any]
+    inputs: dict[str, Any]
     output: Any
     status: ToolStatus
     duration_ms: float
     sequence: int
     is_retry: bool = False
-    retry_of: Optional[str] = None   # deterministic_id of original invocation
+    retry_of: str | None = None  # deterministic_id of original invocation
     is_fallback: bool = False
     deterministic_id: str = ""
 
@@ -122,7 +126,7 @@ class ToolTrace:
         return self.status in (ToolStatus.FAILED, ToolStatus.TIMEOUT)
 
     @classmethod
-    def from_execution(cls, execution: dict, results: list) -> "ToolTrace":
+    def from_execution(cls, execution: dict, results: list) -> ToolTrace:
         """Build ToolTrace from orchestrator's tool_ir execution dict."""
         tool_name = str(execution.get("tool_name") or "")
         sequence = int(execution.get("sequence") or 0)
@@ -166,15 +170,17 @@ class ToolTrace:
 # Memory Access
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class MemoryAccess:
     """Records a single memory read with type and relevance signal."""
+
     key: str
     memory_type: MemoryType
     retrieved: bool
     value_summary: str = ""
-    relevance_score: Optional[float] = None
-    source: str = ""       # session|long_term|goal_tracker|...
+    relevance_score: float | None = None
+    source: str = ""  # session|long_term|goal_tracker|...
 
     @property
     def is_hit(self) -> bool:
@@ -186,7 +192,7 @@ class MemoryAccess:
         key: str,
         value: Any,
         memory_type: str = "unknown",
-    ) -> "MemoryAccess":
+    ) -> MemoryAccess:
         """Build MemoryAccess from context.state['memory_structured'] entry."""
         try:
             mtype = MemoryType(memory_type.lower())
@@ -210,12 +216,14 @@ class MemoryAccess:
 # Planner Diagnostics
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class PlannerTrace:
     """Structured planner output with quality signals."""
-    goals_detected: List[str] = field(default_factory=list)
-    plan_steps: List[Dict[str, Any]] = field(default_factory=list)
-    dependencies: List[Tuple[str, str]] = field(default_factory=list)
+
+    goals_detected: list[str] = field(default_factory=list)
+    plan_steps: list[dict[str, Any]] = field(default_factory=list)
+    dependencies: list[tuple[str, str]] = field(default_factory=list)
     replan_count: int = 0
     plan_completeness: float = 0.0  # 0.0-1.0 estimated completeness
 
@@ -243,13 +251,13 @@ class PlannerTrace:
         return dep_count / self.step_count
 
     @classmethod
-    def from_context_state(cls, state: dict) -> "PlannerTrace":
+    def from_context_state(cls, state: dict) -> PlannerTrace:
         """Extract planner diagnostics from TurnContext.state."""
         plan = state.get("plan") or []
         goals = state.get("detected_goals") or state.get("new_goals") or []
 
         # Normalize goals to str list
-        goal_strs: List[str] = []
+        goal_strs: list[str] = []
         for g in goals:
             if isinstance(g, dict):
                 goal_strs.append(str(g.get("description") or g.get("id") or ""))
@@ -257,7 +265,7 @@ class PlannerTrace:
                 goal_strs.append(str(g))
 
         # Normalize plan to step list
-        plan_steps: List[Dict] = []
+        plan_steps: list[dict] = []
         if isinstance(plan, list):
             plan_steps = [dict(s) if isinstance(s, dict) else {"step": str(s)} for s in plan]
         elif isinstance(plan, dict):
@@ -265,7 +273,7 @@ class PlannerTrace:
 
         # Extract dependencies from task decomposition
         decomp = state.get("task_decomposition") or {}
-        deps: List[Tuple[str, str]] = []
+        deps: list[tuple[str, str]] = []
         for dep in decomp.get("dependencies") or []:
             if isinstance(dep, (list, tuple)) and len(dep) >= 2:
                 deps.append((str(dep[0]), str(dep[1])))
@@ -296,16 +304,18 @@ class PlannerTrace:
 # Error Records
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class ErrorRecord:
     """Structured error record with classification."""
+
     error_class: ErrorClass
     message: str
-    node: Optional[str] = None
+    node: str | None = None
     recoverable: bool = False
 
     @classmethod
-    def classify(cls, message: str, node: Optional[str] = None) -> "ErrorRecord":
+    def classify(cls, message: str, node: str | None = None) -> ErrorRecord:
         """Classify error from message string."""
         msg_lower = message.lower()
         if "timeout" in msg_lower:
@@ -333,12 +343,14 @@ class ErrorRecord:
 # Normalized Trace (top-level container)
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class NormalizedTrace:
     """Complete normalized execution trace for one scenario run.
 
     This is the source of truth for all scoring, diagnostics, and reporting.
     """
+
     scenario_name: str
     category: str
     input_text: str
@@ -346,17 +358,17 @@ class NormalizedTrace:
     completed: bool
     total_duration_ms: float
 
-    node_transitions: List[NodeTransition] = field(default_factory=list)
-    planner: Optional[PlannerTrace] = None
-    tools: List[ToolTrace] = field(default_factory=list)
-    memory_accesses: List[MemoryAccess] = field(default_factory=list)
-    errors: List[ErrorRecord] = field(default_factory=list)
+    node_transitions: list[NodeTransition] = field(default_factory=list)
+    planner: PlannerTrace | None = None
+    tools: list[ToolTrace] = field(default_factory=list)
+    memory_accesses: list[MemoryAccess] = field(default_factory=list)
+    errors: list[ErrorRecord] = field(default_factory=list)
 
     # Preserved for extensibility – future scorers can read directly
-    raw_state: Dict[str, Any] = field(default_factory=dict)
+    raw_state: dict[str, Any] = field(default_factory=dict)
 
     # Execution mode – signals how to interpret the trace
-    execution_mode: str = "mock"   # "mock" | "orchestrator"
+    execution_mode: str = "mock"  # "mock" | "orchestrator"
 
     # -----------------------------------------------------------------------
     # Derived properties
@@ -367,11 +379,11 @@ class NormalizedTrace:
         return len(self.tools)
 
     @property
-    def tools_succeeded(self) -> List[ToolTrace]:
+    def tools_succeeded(self) -> list[ToolTrace]:
         return [t for t in self.tools if t.succeeded]
 
     @property
-    def tools_failed(self) -> List[ToolTrace]:
+    def tools_failed(self) -> list[ToolTrace]:
         return [t for t in self.tools if t.failed]
 
     @property
@@ -403,7 +415,7 @@ class NormalizedTrace:
         return len(self.errors) > 0
 
     @property
-    def error_classes(self) -> List[ErrorClass]:
+    def error_classes(self) -> list[ErrorClass]:
         return [e.error_class for e in self.errors]
 
     @property
@@ -422,11 +434,11 @@ class NormalizedTrace:
         input_text: str,
         final_response: str,
         completed: bool,
-        error: Optional[str] = None,
-        planner_output: Optional[Dict] = None,
-        tools_executed: Optional[List[str]] = None,
-        memory_accessed: Optional[List[str]] = None,
-    ) -> "NormalizedTrace":
+        error: str | None = None,
+        planner_output: dict | None = None,
+        tools_executed: list[str] | None = None,
+        memory_accessed: list[str] | None = None,
+    ) -> NormalizedTrace:
         """Build a NormalizedTrace from Phase 1 mock execution output."""
         errors = [ErrorRecord.classify(error)] if error else []
         tools = [
@@ -441,10 +453,7 @@ class NormalizedTrace:
             )
             for i, t in enumerate(tools_executed or [])
         ]
-        memory = [
-            MemoryAccess.from_structured(k, True)
-            for k in (memory_accessed or [])
-        ]
+        memory = [MemoryAccess.from_structured(k, True) for k in (memory_accessed or [])]
         planner = None
         if planner_output:
             plan_steps = [planner_output] if isinstance(planner_output, dict) else []
@@ -476,10 +485,10 @@ class NormalizedTrace:
         completed: bool,
         context: Any,  # TurnContext – avoid hard import
         duration_ms: float = 0.0,
-        error: Optional[str] = None,
-    ) -> "NormalizedTrace":
+        error: str | None = None,
+    ) -> NormalizedTrace:
         """Build a NormalizedTrace from a real TurnContext after execution."""
-        state: Dict[str, Any] = dict(getattr(context, "state", {}) or {})
+        state: dict[str, Any] = dict(getattr(context, "state", {}) or {})
 
         # Planner
         planner = PlannerTrace.from_context_state(state)
@@ -492,13 +501,10 @@ class NormalizedTrace:
 
         # Memory
         memory_structured = dict(state.get("memory_structured") or {})
-        memory_accesses = [
-            MemoryAccess.from_structured(k, v)
-            for k, v in memory_structured.items()
-        ]
+        memory_accesses = [MemoryAccess.from_structured(k, v) for k, v in memory_structured.items()]
 
         # Node transitions (from checkpoint/execution witness if available)
-        node_transitions: List[NodeTransition] = []
+        node_transitions: list[NodeTransition] = []
         checkpoint_log = list(state.get("_checkpoint_log") or [])
         for entry in checkpoint_log:
             if isinstance(entry, dict) and entry.get("node"):
@@ -513,7 +519,7 @@ class NormalizedTrace:
                 )
 
         # Errors
-        errors: List[ErrorRecord] = []
+        errors: list[ErrorRecord] = []
         if error:
             errors.append(ErrorRecord.classify(error))
         state_error = state.get("error")

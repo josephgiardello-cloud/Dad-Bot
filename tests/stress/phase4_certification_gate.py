@@ -25,16 +25,13 @@ PASS threshold: score >= 90.
 
 from __future__ import annotations
 
-import asyncio
 import concurrent.futures
 import hashlib
 import json
 import logging
-import os
 import threading
 import time
 import traceback
-from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -47,13 +44,13 @@ logger = logging.getLogger("dadbot.stress.phase4_certification_gate")
 # ---------------------------------------------------------------------------
 
 _SCORE_WEIGHTS: dict[str, int] = {
-    "long_horizon":   25,
-    "adversarial":    20,
-    "concurrency":    20,
+    "long_horizon": 25,
+    "adversarial": 20,
+    "concurrency": 20,
     "crash_recovery": 15,
-    "memory_growth":  10,
-    "tool_failure":    5,
-    "large_replay":   10,
+    "memory_growth": 10,
+    "tool_failure": 5,
+    "large_replay": 10,
 }
 _PASS_THRESHOLD = 90
 
@@ -62,11 +59,12 @@ _PASS_THRESHOLD = 90
 # Shared data types
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class ModuleResult:
     name: str
     passed: bool
-    score: int          # points still awarded (0 or full weight, or partial)
+    score: int  # points still awarded (0 or full weight, or partial)
     max_score: int
     metrics: dict[str, Any] = field(default_factory=dict)
     failures: list[str] = field(default_factory=list)
@@ -89,6 +87,7 @@ class ModuleResult:
 # ---------------------------------------------------------------------------
 # Bot factory helpers
 # ---------------------------------------------------------------------------
+
 
 def _fake_embed(texts, purpose="semantic retrieval"):
     items = [texts] if isinstance(texts, str) else list(texts)
@@ -119,7 +118,7 @@ def build_bot(
 ) -> Any:
     """Build a fully isolated DadBot with all external I/O stubbed."""
     # Import here to avoid module-level import errors when running standalone.
-    from Dad import DadBot  # noqa: PLC0415
+    from Dad import DadBot
 
     bot = DadBot(light_mode=True)
     bot.CONTEXT_TOKEN_BUDGET = 512
@@ -153,6 +152,7 @@ def build_bot(
 # ---------------------------------------------------------------------------
 # Utility helpers
 # ---------------------------------------------------------------------------
+
 
 def _sha256(payload: Any) -> str:
     data = json.dumps(payload, sort_keys=True, ensure_ascii=True, default=str).encode()
@@ -212,6 +212,7 @@ def _generate_mixed_input(index: int) -> str:
 # ---------------------------------------------------------------------------
 # Module 1: Long Horizon Stress Runner
 # ---------------------------------------------------------------------------
+
 
 def _run_long_horizon(bot: Any, turns: int = 200) -> ModuleResult:
     name = "long_horizon"
@@ -362,8 +363,10 @@ def _run_adversarial(bot: Any) -> ModuleResult:
             if inp.strip() and reply is None:
                 risk_flags.append(f"Case {i}: non-empty input produced None reply")
             # should_end=True only for explicit exit commands
-            if should_end and inp.strip() and not any(
-                word in inp.lower() for word in ("bye", "goodbye", "goodnight", "exit", "quit")
+            if (
+                should_end
+                and inp.strip()
+                and not any(word in inp.lower() for word in ("bye", "goodbye", "goodnight", "exit", "quit"))
             ):
                 risk_flags.append(f"Case {i}: unexpected should_end=True for non-exit input: {inp[:60]!r}")
             completed += 1
@@ -410,6 +413,7 @@ def _run_adversarial(bot: Any) -> ModuleResult:
 # Module 3: Concurrency Simulator
 # ---------------------------------------------------------------------------
 
+
 def _run_concurrency(bot: Any, num_threads: int = 50) -> ModuleResult:
     name = "concurrency"
     max_score = _SCORE_WEIGHTS[name]
@@ -441,21 +445,25 @@ def _run_concurrency(bot: Any, num_threads: int = 50) -> ModuleResult:
             except Exception as exc:
                 completed = False
                 with results_lock:
-                    turn_results.append({
-                        "worker": worker_id,
-                        "turn": t,
-                        "ok": False,
-                        "error": f"{type(exc).__name__}: {exc!s:.80}",
-                    })
+                    turn_results.append(
+                        {
+                            "worker": worker_id,
+                            "turn": t,
+                            "ok": False,
+                            "error": f"{type(exc).__name__}: {exc!s:.80}",
+                        }
+                    )
                 return
             time.sleep(((worker_id * 13 + t * 5) % 3) * 0.002)
             with results_lock:
-                turn_results.append({
-                    "worker": worker_id,
-                    "turn": t,
-                    "ok": completed,
-                    "error": None if completed else "None reply",
-                })
+                turn_results.append(
+                    {
+                        "worker": worker_id,
+                        "turn": t,
+                        "ok": completed,
+                        "error": None if completed else "None reply",
+                    }
+                )
 
     with concurrent.futures.ThreadPoolExecutor(
         max_workers=max(1, num_threads),
@@ -518,6 +526,7 @@ def _run_concurrency(bot: Any, num_threads: int = 50) -> ModuleResult:
 # Module 4: Crash Injection Framework
 # ---------------------------------------------------------------------------
 
+
 class _SimulatedCrash(RuntimeError):
     """Sentinel exception for controlled crash injection."""
 
@@ -556,9 +565,9 @@ def _run_crash_recovery(bot: Any) -> ModuleResult:
     original_save = getattr(bot, "save_memory_store", None)
 
     crash_scenarios = [
-        ("llm_crash",        "call_ollama_chat",  _crash_llm),
-        ("embed_crash",      "embed_texts",        _crash_embed),
-        ("event_loop_crash", "call_ollama_chat",  _crash_event_loop),
+        ("llm_crash", "call_ollama_chat", _crash_llm),
+        ("embed_crash", "embed_texts", _crash_embed),
+        ("event_loop_crash", "call_ollama_chat", _crash_event_loop),
     ]
     if original_save is not None:
         crash_scenarios.append(("save_crash", "save_memory_store", _crash_save))
@@ -627,6 +636,7 @@ def _run_crash_recovery(bot: Any) -> ModuleResult:
 # Module 5: Memory Growth Monitor
 # ---------------------------------------------------------------------------
 
+
 def _run_memory_growth(bot: Any, turns: int = 200) -> ModuleResult:
     name = "memory_growth"
     max_score = _SCORE_WEIGHTS[name]
@@ -656,7 +666,9 @@ def _run_memory_growth(bot: Any, turns: int = 200) -> ModuleResult:
     if len(memory_samples) >= 2:
         growth_ratio = memory_samples[-1] / max(memory_samples[0], 1)
         if growth_ratio > 10.0:
-            risk_flags.append(f"Memory store grew {growth_ratio:.1f}x ({memory_samples[0]} → {memory_samples[-1]} bytes)")
+            risk_flags.append(
+                f"Memory store grew {growth_ratio:.1f}x ({memory_samples[0]} → {memory_samples[-1]} bytes)"
+            )
         if growth_ratio > 20.0:
             failures.append(f"Critical memory bloat: {growth_ratio:.1f}x growth over {turns} turns")
 
@@ -689,7 +701,9 @@ def _run_memory_growth(bot: Any, turns: int = 200) -> ModuleResult:
             "turns": turns,
             "memory_samples_bytes": memory_samples,
             "history_lengths": history_lengths,
-            "growth_ratio": round(memory_samples[-1] / max(memory_samples[0], 1), 2) if len(memory_samples) >= 2 else 1.0,
+            "growth_ratio": round(memory_samples[-1] / max(memory_samples[0], 1), 2)
+            if len(memory_samples) >= 2
+            else 1.0,
         },
         failures=failures,
         risk_flags=risk_flags,
@@ -700,6 +714,7 @@ def _run_memory_growth(bot: Any, turns: int = 200) -> ModuleResult:
 # ---------------------------------------------------------------------------
 # Module 6: Tool Failure Injector
 # ---------------------------------------------------------------------------
+
 
 def _run_tool_failure(bot: Any) -> ModuleResult:
     name = "tool_failure"
@@ -797,6 +812,7 @@ def _run_tool_failure(bot: Any) -> ModuleResult:
 # Module 7: Large Replay Comparator
 # ---------------------------------------------------------------------------
 
+
 def _replay_sequence(bot: Any, inputs: list[str]) -> dict[str, Any]:
     """Run a fixed turn sequence and collect structural fingerprints."""
     pipeline_steps: list[list[str]] = []
@@ -826,10 +842,7 @@ def _replay_sequence(bot: Any, inputs: list[str]) -> dict[str, Any]:
     step_fingerprint = _sha256([[s for s in steps] for steps in pipeline_steps])
     # Memory store structural fingerprint: keys present, list lengths (not content — LLM is stubbed but variable)
     memory_keys = sorted(bot.MEMORY_STORE.keys())
-    memory_list_lengths = {
-        k: len(v) if isinstance(v, list) else None
-        for k, v in bot.MEMORY_STORE.items()
-    }
+    memory_list_lengths = {k: len(v) if isinstance(v, list) else None for k, v in bot.MEMORY_STORE.items()}
 
     return {
         "completion_rate": round(completion_rate, 3),
@@ -888,25 +901,21 @@ def _run_large_replay(turns: int = 100) -> ModuleResult:
         extra_in_r2 = sorted(r2_keys - r1_keys)
         missing_in_r2 = sorted(r1_keys - r2_keys)
         if extra_in_r2 or missing_in_r2:
-            risk_flags.append(
-                f"Memory store key divergence: extra={extra_in_r2}, missing={missing_in_r2}"
-            )
+            risk_flags.append(f"Memory store key divergence: extra={extra_in_r2}, missing={missing_in_r2}")
 
     r1_rate = run1_result.get("completion_rate", 0)
     r2_rate = run2_result.get("completion_rate", 0)
     if abs(r1_rate - r2_rate) > 0.05:
-        failures.append(
-            f"Completion rate diverged: run1={r1_rate:.3f} run2={r2_rate:.3f}"
-        )
+        failures.append(f"Completion rate diverged: run1={r1_rate:.3f} run2={r2_rate:.3f}")
 
     if r1_rate < 0.95:
         failures.append(f"Run 1 completion rate below threshold: {r1_rate:.3f}")
     if r2_rate < 0.95:
         failures.append(f"Run 2 completion rate below threshold: {r2_rate:.3f}")
 
-    for err in (run1_result.get("turn_errors") or []):
+    for err in run1_result.get("turn_errors") or []:
         failures.append(f"Run 1 error: {err}")
-    for err in (run2_result.get("turn_errors") or []):
+    for err in run2_result.get("turn_errors") or []:
         failures.append(f"Run 2 error: {err}")
 
     passed = len(failures) == 0
@@ -931,6 +940,7 @@ def _run_large_replay(turns: int = 100) -> ModuleResult:
 # ---------------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------------
+
 
 class Phase4CertificationGate:
     """Master validator for Phase 4 architectural invariants.
@@ -993,13 +1003,13 @@ class Phase4CertificationGate:
         _log.info("Phase 4 Certification Gate starting")
 
         modules = [
-            ("long_horizon",   lambda: self.run_long_horizon(turns=long_horizon_turns)),
-            ("adversarial",    lambda: self.run_adversarial()),
-            ("concurrency",    lambda: self.run_concurrency(num_threads=concurrency_threads)),
+            ("long_horizon", lambda: self.run_long_horizon(turns=long_horizon_turns)),
+            ("adversarial", lambda: self.run_adversarial()),
+            ("concurrency", lambda: self.run_concurrency(num_threads=concurrency_threads)),
             ("crash_recovery", lambda: self.run_crash_recovery()),
-            ("memory_growth",  lambda: self.run_memory_growth(turns=memory_growth_turns)),
-            ("tool_failure",   lambda: self.run_tool_failure()),
-            ("large_replay",   lambda: self.run_large_replay(turns=replay_turns)),
+            ("memory_growth", lambda: self.run_memory_growth(turns=memory_growth_turns)),
+            ("tool_failure", lambda: self.run_tool_failure()),
+            ("large_replay", lambda: self.run_large_replay(turns=replay_turns)),
         ]
 
         for module_name, runner in modules:
@@ -1017,9 +1027,15 @@ class Phase4CertificationGate:
                 )
             self.results[module_name] = result
             status = "PASS" if result.passed else "FAIL"
-            _log.info("    %s: %s (score=%d/%d, failures=%d, duration=%.1fs)",
-                      module_name, status, result.score, result.max_score,
-                      len(result.failures), result.duration_s)
+            _log.info(
+                "    %s: %s (score=%d/%d, failures=%d, duration=%.1fs)",
+                module_name,
+                status,
+                result.score,
+                result.max_score,
+                len(result.failures),
+                result.duration_s,
+            )
 
         return self.evaluate()
 

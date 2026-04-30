@@ -200,7 +200,9 @@ async def run_controlled_turn() -> dict[str, Any]:
     )
 
     graph = TurnGraph(registry=registry)
-    graph.add_node("preflight", (TemporalNode(), HealthNode(registry["health"]), ContextBuilderNode(registry["memory"])))
+    graph.add_node(
+        "preflight", (TemporalNode(), HealthNode(registry["health"]), ContextBuilderNode(registry["memory"]))
+    )
     graph.add_node("inference", InferenceNode(registry["llm"]))
     graph.add_node("safety", SafetyNode(registry["safety"]))
     graph.add_node("reflection", ReflectionNode(registry["reflection"]))
@@ -370,7 +372,14 @@ def main() -> int:
     print("WROTE:", TURN_TRACE_PATH.name)
     print("WROTE:", TEMPORAL_AUDIT_PATH.name, "status=", temporal_report["status"])
     print("WROTE:", SAVE_ENFORCEMENT_PATH.name, "order_valid=", save_report["order_valid"])
-    print("WROTE:", ENTROPY_PATH.name, "entropy_detected=", entropy_report["entropy_detected"], "matches=", entropy_report["match_count"])
+    print(
+        "WROTE:",
+        ENTROPY_PATH.name,
+        "entropy_detected=",
+        entropy_report["entropy_detected"],
+        "matches=",
+        entropy_report["match_count"],
+    )
     return 0
 
 

@@ -13,7 +13,6 @@ Required coverage:
 from __future__ import annotations
 
 import contextlib
-import json
 import sqlite3
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
@@ -142,7 +141,9 @@ class TestHashChainIntegrity:
 
 class TestManifestDriftDetection:
     def test_manifest_drift_raises_in_strict_mode(self, checkpointer: SQLiteCheckpointer):
-        checkpointer.save_checkpoint("s1", "t1", _checkpoint(turn=1, checkpoint_hash="h1"), _manifest(env_hash="env-old"))
+        checkpointer.save_checkpoint(
+            "s1", "t1", _checkpoint(turn=1, checkpoint_hash="h1"), _manifest(env_hash="env-old")
+        )
 
         with pytest.raises(CheckpointIntegrityError, match="Manifest drift"):
             checkpointer.load_checkpoint(
@@ -167,10 +168,20 @@ class TestConcurrentSessionIsolation:
     def test_session_checkpoint_count_per_session(self, checkpointer: SQLiteCheckpointer):
         for idx in range(3):
             prev = f"a-{idx - 1}" if idx else ""
-            checkpointer.save_checkpoint("a", f"t{idx}", _checkpoint(turn=idx, checkpoint_hash=f"a-{idx}", prev_checkpoint_hash=prev), _manifest())
+            checkpointer.save_checkpoint(
+                "a",
+                f"t{idx}",
+                _checkpoint(turn=idx, checkpoint_hash=f"a-{idx}", prev_checkpoint_hash=prev),
+                _manifest(),
+            )
         for idx in range(2):
             prev = f"b-{idx - 1}" if idx else ""
-            checkpointer.save_checkpoint("b", f"t{idx}", _checkpoint(turn=idx, checkpoint_hash=f"b-{idx}", prev_checkpoint_hash=prev), _manifest())
+            checkpointer.save_checkpoint(
+                "b",
+                f"t{idx}",
+                _checkpoint(turn=idx, checkpoint_hash=f"b-{idx}", prev_checkpoint_hash=prev),
+                _manifest(),
+            )
 
         assert checkpointer.checkpoint_count("a") == 3
         assert checkpointer.checkpoint_count("b") == 2
@@ -180,7 +191,12 @@ class TestCheckpointPruning:
     def test_prune_keeps_most_recent(self, checkpointer: SQLiteCheckpointer):
         for idx in range(15):
             prev = f"h-{idx - 1}" if idx else ""
-            checkpointer.save_checkpoint("s1", f"t{idx}", _checkpoint(turn=idx, checkpoint_hash=f"h-{idx}", prev_checkpoint_hash=prev), _manifest())
+            checkpointer.save_checkpoint(
+                "s1",
+                f"t{idx}",
+                _checkpoint(turn=idx, checkpoint_hash=f"h-{idx}", prev_checkpoint_hash=prev),
+                _manifest(),
+            )
 
         deleted = checkpointer.prune_old_checkpoints("s1", keep_count=10)
         latest = checkpointer.load_checkpoint("s1")
@@ -192,7 +208,12 @@ class TestCheckpointPruning:
     def test_prune_no_op_when_under_limit(self, checkpointer: SQLiteCheckpointer):
         for idx in range(3):
             prev = f"h-{idx - 1}" if idx else ""
-            checkpointer.save_checkpoint("s1", f"t{idx}", _checkpoint(turn=idx, checkpoint_hash=f"h-{idx}", prev_checkpoint_hash=prev), _manifest())
+            checkpointer.save_checkpoint(
+                "s1",
+                f"t{idx}",
+                _checkpoint(turn=idx, checkpoint_hash=f"h-{idx}", prev_checkpoint_hash=prev),
+                _manifest(),
+            )
 
         deleted = checkpointer.prune_old_checkpoints("s1", keep_count=10)
         assert deleted == 0
@@ -204,7 +225,9 @@ class TestCrashRecovery:
         checkpointer.save_checkpoint("s1", "t1", _checkpoint(turn=1, checkpoint_hash="h1"), _manifest())
 
         with contextlib.closing(sqlite3.connect(temp_db_path)) as conn:
-            conn.execute("UPDATE checkpoints SET payload = ? WHERE session_id = ? AND trace_id = ?", ("{bad-json", "s1", "t1"))
+            conn.execute(
+                "UPDATE checkpoints SET payload = ? WHERE session_id = ? AND trace_id = ?", ("{bad-json", "s1", "t1")
+            )
             conn.commit()
 
         with pytest.raises(CheckpointError):
@@ -228,7 +251,9 @@ class TestCheckpointReplacement:
 class TestSessionDeletion:
     def test_delete_session_removes_all_checkpoints(self, checkpointer: SQLiteCheckpointer):
         checkpointer.save_checkpoint("s-del", "t1", _checkpoint(turn=1, checkpoint_hash="h1"), _manifest())
-        checkpointer.save_checkpoint("s-del", "t2", _checkpoint(turn=2, checkpoint_hash="h2", prev_checkpoint_hash="h1"), _manifest())
+        checkpointer.save_checkpoint(
+            "s-del", "t2", _checkpoint(turn=2, checkpoint_hash="h2", prev_checkpoint_hash="h1"), _manifest()
+        )
 
         deleted = checkpointer.delete_session("s-del")
         assert deleted == 2

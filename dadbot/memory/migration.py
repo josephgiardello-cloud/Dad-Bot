@@ -18,10 +18,11 @@ Adding a new migration:
 
 The registry auto-increments to_version = from_version + 1.
 """
+
 from __future__ import annotations
 
 import logging
-from typing import Callable
+from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +39,7 @@ def _register(from_version: int, fn: MigrationFn) -> MigrationFn:
     if from_version in _MIGRATIONS:
         raise ValueError(
             f"Migration from v{from_version} is already registered as "
-            f"{_MIGRATIONS[from_version].__name__!r}; cannot register {fn.__name__!r}"
+            f"{_MIGRATIONS[from_version].__name__!r}; cannot register {fn.__name__!r}",
         )
     _MIGRATIONS[from_version] = fn
     return fn
@@ -63,8 +64,10 @@ class MemoryMigrationRegistry:
                 store["new_key"] = []
                 return store
         """
+
         def decorator(fn: MigrationFn) -> MigrationFn:
             return _register(from_version, fn)
+
         return decorator
 
     @staticmethod
@@ -109,7 +112,12 @@ class MemoryMigrationRegistry:
                 store = migration_fn(store)
                 current += 1
                 store["schema_version"] = current
-                logger.debug("Memory store migrated v%d→v%d via %s.", current - 1, current, migration_fn.__name__)
+                logger.debug(
+                    "Memory store migrated v%d→v%d via %s.",
+                    current - 1,
+                    current,
+                    migration_fn.__name__,
+                )
             except Exception as exc:
                 logger.error(
                     "Memory store migration v%d→v%d failed (%s); "
@@ -135,6 +143,7 @@ class MemoryMigrationRegistry:
 # Every store without a schema_version is treated as v0 (pre-versioning).
 # This migration stamps it to v1 and seeds the mcp_local_store key if absent,
 # which was the last key added during the unversioned era.
+
 
 @MemoryMigrationRegistry.register(from_version=0)
 def _migrate_v0_to_v1(store: dict) -> dict:

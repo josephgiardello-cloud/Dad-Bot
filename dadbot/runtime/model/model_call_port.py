@@ -10,16 +10,18 @@ All model interactions MUST route through this port to ensure:
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
-from dataclasses import dataclass
 import hashlib
 import json
-from typing import Any, Callable, Literal
+from abc import ABC, abstractmethod
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass(frozen=True)
 class ModelConfig:
     """Immutable model runtime configuration."""
+
     active_model: str
     temperature: float | None = None
     request_timeout_seconds: float = 30.0
@@ -37,12 +39,11 @@ class DeterminismContext:
 
 class ModelCallError(Exception):
     """Raised when a model call fails."""
-    pass
 
 
 class ModelPort(ABC):
     """Abstract boundary for all model I/O.
-    
+
     Implementations MUST be deterministic:
     - Same input seed → same output (unless model differs)
     - All non-determinism explicitly sealed in adapters
@@ -64,7 +65,7 @@ class ModelPort(ABC):
         **kwargs: Any,
     ) -> str:
         """Generate a response from messages.
-        
+
         Args:
             messages: Message list in { "role", "content" } format
             model: Model name override; uses config default if None
@@ -76,12 +77,13 @@ class ModelPort(ABC):
             chunk_callback: Called with each token if stream=True
             purpose: Audit tag for logging/tracing (e.g., "chat", "mood_detection")
             **kwargs: Backend-specific options (e.g., ollama "options")
-        
+
         Returns:
             Complete response text
-        
+
         Raises:
             ModelCallError: If generation fails after retries
+
         """
         ...
 
@@ -133,7 +135,7 @@ class ModelPort(ABC):
                     },
                     sort_keys=True,
                     ensure_ascii=True,
-                ).encode("utf-8")
+                ).encode("utf-8"),
             ).hexdigest()
         return normalized
 
@@ -146,50 +148,54 @@ class ModelPort(ABC):
         purpose: str = "semantic_retrieval",
     ) -> list[list[float]]:
         """Generate embeddings for text list.
-        
+
         Args:
             texts: List of text strings to embed
             model: Model override; uses config default if None
             purpose: Audit tag (e.g., "semantic_retrieval", "memory_indexing")
-        
+
         Returns:
             List of embedding vectors (one per input text)
-        
+
         Raises:
             ModelCallError: If embedding fails
+
         """
         ...
 
     @abstractmethod
     def estimate_token_count(self, text: str, *, model: str | None = None) -> int:
         """Estimate token count for text using tokenizer or heuristic.
-        
+
         Args:
             text: Text to tokenize
             model: Model override; uses config default if None
-        
+
         Returns:
             Estimated token count (>=1)
+
         """
         ...
 
     @abstractmethod
     def initialize_tokenizer(self, model_name: str | None = None) -> None:
         """Initialize/cache tokenizer for a model.
-        
+
         Args:
             model_name: Model to preload; uses config default if None
+
         """
         ...
 
     @abstractmethod
     def get_tokenizer(self, model_name: str | None = None) -> Any:
         """Get cached tokenizer instance.
-        
+
         Args:
             model_name: Model to retrieve; uses config default if None
-        
+
         Returns:
             Tokenizer object (or None if not available)
+
         """
         ...

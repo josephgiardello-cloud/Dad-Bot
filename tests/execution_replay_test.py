@@ -1,22 +1,19 @@
 """Tests for Phase 2 — Execution Replay Safety (execution_checkpoint.py)."""
+
 from __future__ import annotations
 
 import pytest
-import time
 
 from dadbot.core.execution_checkpoint import (
+    CheckpointIntegrityError,
+    DeterministicReplayValidator,
     ExecutionCheckpointKernel,
     ExecutionIdempotencyRegistry,
-    DeterministicReplayValidator,
-    ReplaySafeExecutionContext,
     FallbackChainEntry,
     NodeState,
-    NodeExecutionSnapshot,
-    CheckpointIntegrityError,
-    DuplicateExecutionError,
     ReplayMismatchError,
+    ReplaySafeExecutionContext,
 )
-
 
 # ---------------------------------------------------------------------------
 # 2.1 Checkpoint Kernel
@@ -300,8 +297,6 @@ class TestReplaySafeContext:
             FallbackChainEntry("primary", 1, "timeout", fallback_reason="primary timed out"),
             FallbackChainEntry("secondary", 1, "ok"),
         ]
-        self.ctx.record_execution(
-            "n1", "h1", "secondary", "ok", "list", fallback_chain=chain
-        )
+        self.ctx.record_execution("n1", "h1", "secondary", "ok", "list", fallback_chain=chain)
         snap = self.ctx.kernel.get_node("n1")
         assert len(snap.fallback_chain) == 2

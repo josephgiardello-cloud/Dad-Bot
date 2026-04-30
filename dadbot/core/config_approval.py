@@ -3,13 +3,13 @@ from __future__ import annotations
 import json
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 
 def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 @dataclass
@@ -46,14 +46,23 @@ class ConfigApprovalWorkflow:
             return {"proposals": []}
         try:
             return json.loads(self.store_path.read_text(encoding="utf-8"))
-        except Exception:
+        except Exception:  # noqa: BLE001
             return {"proposals": []}
 
     def _save(self, payload: dict[str, Any]) -> None:
         self.store_path.parent.mkdir(parents=True, exist_ok=True)
-        self.store_path.write_text(json.dumps(payload, indent=2, ensure_ascii=True, default=str), encoding="utf-8")
+        self.store_path.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=True, default=str),
+            encoding="utf-8",
+        )
 
-    def propose(self, *, key: str, requested_value: Any, requested_by: str) -> ConfigProposal:
+    def propose(
+        self,
+        *,
+        key: str,
+        requested_value: Any,
+        requested_by: str,
+    ) -> ConfigProposal:
         raw = self._load()
         proposal = ConfigProposal(
             proposal_id=uuid.uuid4().hex,
@@ -89,7 +98,9 @@ class ConfigApprovalWorkflow:
         if len(approvals) >= self.approvals_required and str(target.get("status") or "") == "pending":
             target["status"] = "approved"
         self._save({"proposals": proposals})
-        return ConfigProposal(**{k: target.get(k) for k in ConfigProposal.__dataclass_fields__.keys()})
+        return ConfigProposal(
+            **{k: target.get(k) for k in ConfigProposal.__dataclass_fields__.keys()},
+        )
 
     def consume_approved(self, proposal_id: str) -> ConfigProposal | None:
         raw = self._load()
@@ -107,7 +118,9 @@ class ConfigApprovalWorkflow:
         target["status"] = "applied"
         target["applied_at"] = _utc_now_iso()
         self._save({"proposals": proposals})
-        return ConfigProposal(**{k: target.get(k) for k in ConfigProposal.__dataclass_fields__.keys()})
+        return ConfigProposal(
+            **{k: target.get(k) for k in ConfigProposal.__dataclass_fields__.keys()},
+        )
 
 
 __all__ = ["ConfigApprovalWorkflow", "ConfigProposal"]

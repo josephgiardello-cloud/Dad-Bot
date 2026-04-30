@@ -1,11 +1,11 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
-from copy import deepcopy
 import hashlib
 import json
 import logging
 import time
 import uuid
+from copy import deepcopy
 from typing import Any
 
 from dadbot.core.capability_audit_runner import (
@@ -13,10 +13,19 @@ from dadbot.core.capability_audit_runner import (
     build_capability_audit_event_payload,
     build_runtime_capability_audit_report,
 )
-from dadbot.core.graph import FatalTurnError, LedgerMutationOp, MemoryMutationOp, MutationIntent, MutationKind
+from dadbot.core.execution_trace_context import (
+    RuntimeTraceViolation,
+    ensure_execution_trace_root,
+)
+from dadbot.core.graph import (
+    FatalTurnError,
+    LedgerMutationOp,
+    MemoryMutationOp,
+    MutationIntent,
+    MutationKind,
+)
 from dadbot.core.merkle_anchor import append_leaf_and_anchor
 from dadbot.core.persistence import AbstractCheckpointer
-from dadbot.core.execution_trace_context import RuntimeTraceViolation
 from dadbot.managers.conversation_persistence import ConversationPersistenceManager
 
 logger = logging.getLogger(__name__)
@@ -32,7 +41,11 @@ class PersistenceService:
     single call so no partial-state is ever written to disk.
     """
 
-    def __init__(self, persistence_manager: ConversationPersistenceManager, turn_service: Any = None):
+    def __init__(
+        self,
+        persistence_manager: ConversationPersistenceManager,
+        turn_service: Any = None,
+    ):
         self.persistence_manager = persistence_manager
         # Wired by ServiceRegistry.boot() after wire_runtime_managers has run.
         self.turn_service = turn_service
@@ -43,7 +56,9 @@ class PersistenceService:
     @staticmethod
     def _stable_hash(payload: Any) -> str:
         return hashlib.sha256(
-            json.dumps(payload, sort_keys=True, ensure_ascii=True, default=str).encode("utf-8")
+            json.dumps(payload, sort_keys=True, ensure_ascii=True, default=str).encode(
+                "utf-8",
+            ),
         ).hexdigest()
 
     def _record_merkle_anchor(self, turn_context: Any, *, commit_id: str) -> None:
@@ -64,7 +79,9 @@ class PersistenceService:
             "commit_id": str(commit_id or ""),
             "occurred_at": occurred_at,
             "state_hash": self._stable_hash(getattr(turn_context, "state", {}) or {}),
-            "metadata_hash": self._stable_hash(getattr(turn_context, "metadata", {}) or {}),
+            "metadata_hash": self._stable_hash(
+                getattr(turn_context, "metadata", {}) or {},
+            ),
         }
         leaves = self._merkle_session_leaves.setdefault(session_id, [])
         anchor = append_leaf_and_anchor(leaves, payload)
@@ -84,7 +101,7 @@ class PersistenceService:
                     "commit_id": str(commit_id or ""),
                     **anchor,
                 },
-            }
+            },
         )
 
     def set_checkpointer(self, checkpointer: AbstractCheckpointer | None) -> None:
@@ -97,7 +114,10 @@ class PersistenceService:
         try:
             return callable_obj(*args, **kwargs)
         except Exception as exc:
-            logger.warning("PersistenceService post-finalize hook failed (non-fatal): %s", exc)
+            logger.warning(
+                "PersistenceService post-finalize hook failed (non-fatal): %s",
+                exc,
+            )
             return None
 
     def _apply_memory_decay(self, memory_manager: Any, turn_context: Any) -> None:
@@ -127,7 +147,10 @@ class PersistenceService:
                 if eid in weakened_ids:
                     entry = dict(entry)
                     old = float(entry.get("importance_score", 0.0) or 0.0)
-                    entry["importance_score"] = round(max(0.0, old * policy.weaken_factor), 4)
+                    entry["importance_score"] = round(
+                        max(0.0, old * policy.weaken_factor),
+                        4,
+                    )
                 updated.append(entry)
             memory_manager.mutate_memory_store(consolidated_memories=updated)
 
@@ -141,9 +164,16 @@ class PersistenceService:
                     "total_score_map": result.total_score_map,
                 }
         except Exception as exc:
-            logger.warning("PersistenceService._apply_memory_decay failed (non-fatal): %s", exc)
+            logger.warning(
+                "PersistenceService._apply_memory_decay failed (non-fatal): %s",
+                exc,
+            )
 
-    def _apply_pending_save_boundary_mutations(self, runtime: Any, turn_context: Any) -> None:
+    def _apply_pending_save_boundary_mutations(
+        self,
+        runtime: Any,
+        turn_context: Any,
+    ) -> None:
         state = getattr(turn_context, "state", None)
         if not isinstance(state, dict):
             return
@@ -186,7 +216,9 @@ class PersistenceService:
 
         def _dispatch_mutation_intent(intent: Any) -> None:
             if not isinstance(intent, MutationIntent):
-                raise RuntimeError(f"MutationQueue received non-MutationIntent payload: {type(intent).__name__}")
+                raise RuntimeError(
+                    f"MutationQueue received non-MutationIntent payload: {type(intent).__name__}",
+                )
             intent_type = intent.type
             payload = dict(intent.payload or {})
             source = str(intent.source or "")
@@ -195,32 +227,36 @@ class PersistenceService:
                 op = str(payload.get("op") or "").strip().lower()
                 if op != MemoryMutationOp.SAVE_MOOD_STATE.value:
                     raise RuntimeError(
-                        f"MutationIntent(type=memory, source={source!r}): unsupported op={op!r}"
+                        f"MutationIntent(type=memory, source={source!r}): unsupported op={op!r}",
                     )
                 mood = str(payload.get("mood") or "neutral")
                 memory = getattr(runtime, "memory", None)
                 if memory is None:
                     raise RuntimeError(
-                        f"MutationIntent(type=memory, source={source!r}): runtime.memory unavailable"
+                        f"MutationIntent(type=memory, source={source!r}): runtime.memory unavailable",
                     )
                 memory.save_mood_state(mood)
                 return
 
             if intent_type is MutationKind.RELATIONSHIP:
                 raise RuntimeError(
-                    "MutationIntent(type=relationship) rejected: relationship subsystem is projection-only"
+                    "MutationIntent(type=relationship) rejected: relationship subsystem is projection-only",
                 )
 
             if intent_type is MutationKind.GRAPH:
                 memory_manager = getattr(runtime, "memory_manager", None)
                 graph_manager = getattr(memory_manager, "graph_manager", None) if memory_manager else None
                 if graph_manager is None:
-                    raise RuntimeError(f"MutationIntent(type=graph, source={source!r}): graph_manager unavailable")
+                    raise RuntimeError(
+                        f"MutationIntent(type=graph, source={source!r}): graph_manager unavailable",
+                    )
                 _fn = getattr(graph_manager, "apply_mutation", None)
                 if callable(_fn):
                     _fn(payload, turn_context=turn_context)
                     return
-                raise RuntimeError(f"MutationIntent(type=graph, source={source!r}): graph_manager.apply_mutation not callable")
+                raise RuntimeError(
+                    f"MutationIntent(type=graph, source={source!r}): graph_manager.apply_mutation not callable",
+                )
 
             if intent_type is MutationKind.LEDGER:
                 op = str(payload.get("op") or "").strip().lower()
@@ -231,7 +267,9 @@ class PersistenceService:
                     return
                 if op == LedgerMutationOp.RECORD_TURN_STATE.value:
                     mood = str(payload.get("mood") or "neutral")
-                    should_offer_daily_checkin = bool(payload.get("should_offer_daily_checkin", False))
+                    should_offer_daily_checkin = bool(
+                        payload.get("should_offer_daily_checkin", False),
+                    )
                     with runtime._session_lock:
                         runtime.session_moods.append(mood)
                         runtime._pending_daily_checkin_context = should_offer_daily_checkin
@@ -249,26 +287,50 @@ class PersistenceService:
                     mood = payload.get("mood")
                     if not bool(getattr(runtime, "LIGHT_MODE", False)):
                         runtime.schedule_post_turn_maintenance(turn_text, mood)
-                        append_step = getattr(service, "_append_turn_pipeline_step", None)
+                        append_step = getattr(
+                            service,
+                            "_append_turn_pipeline_step",
+                            None,
+                        )
                         if callable(append_step):
-                            append_step("schedule_maintenance", detail="queued post-turn maintenance")
+                            append_step(
+                                "schedule_maintenance",
+                                detail="queued post-turn maintenance",
+                            )
                     else:
-                        append_step = getattr(service, "_append_turn_pipeline_step", None)
+                        append_step = getattr(
+                            service,
+                            "_append_turn_pipeline_step",
+                            None,
+                        )
                         if callable(append_step):
-                            append_step("schedule_maintenance", status="skipped", detail="light mode skips maintenance")
+                            append_step(
+                                "schedule_maintenance",
+                                status="skipped",
+                                detail="light mode skips maintenance",
+                            )
                     return
                 if op == LedgerMutationOp.HEALTH_SNAPSHOT.value:
-                    runtime.current_runtime_health_snapshot(force=True, log_warnings=True, persist=True)
+                    runtime.current_runtime_health_snapshot(
+                        force=True,
+                        log_warnings=True,
+                        persist=True,
+                    )
                     append_step = getattr(service, "_append_turn_pipeline_step", None)
                     if callable(append_step):
-                        append_step("health_snapshot", detail="refreshed runtime health snapshot")
+                        append_step(
+                            "health_snapshot",
+                            detail="refreshed runtime health snapshot",
+                        )
                     return
                 if op == LedgerMutationOp.CAPABILITY_AUDIT_EVENT.value:
                     # Non-authoritative observability write: never block turn correctness.
                     try:
                         stage_order = [
                             str(getattr(trace, "stage", "") or "")
-                            for trace in list(getattr(turn_context, "stage_traces", []) or [])
+                            for trace in list(
+                                getattr(turn_context, "stage_traces", []) or [],
+                            )
                         ]
                         if "save" not in [s.strip().lower() for s in stage_order]:
                             stage_order = [*stage_order, "save"]
@@ -282,7 +344,9 @@ class PersistenceService:
                         if isinstance(getattr(turn_context, "state", None), dict):
                             turn_context.state["capability_audit_report"] = report_payload
                         if isinstance(getattr(turn_context, "metadata", None), dict):
-                            turn_context.metadata["capability_audit_report"] = dict(report_payload)
+                            turn_context.metadata["capability_audit_report"] = dict(
+                                report_payload,
+                            )
 
                         event_payload = build_capability_audit_event_payload(
                             report,
@@ -295,8 +359,12 @@ class PersistenceService:
                         else:
                             sequence = 0
 
-                        trace_id = str(getattr(turn_context, "trace_id", "") or "unknown")
-                        phase_value = str(getattr(getattr(turn_context, "phase", None), "value", "") or "")
+                        trace_id = str(
+                            getattr(turn_context, "trace_id", "") or "unknown",
+                        )
+                        phase_value = str(
+                            getattr(getattr(turn_context, "phase", None), "value", "") or "",
+                        )
                         occurred_at = ""
                         temporal = getattr(turn_context, "temporal", None)
                         if temporal is not None:
@@ -312,16 +380,20 @@ class PersistenceService:
                                 "status": "after",
                                 "phase": phase_value,
                                 "payload": event_payload,
-                            }
+                            },
                         )
 
-                        control_plane = getattr(getattr(runtime, "turn_orchestrator", None), "control_plane", None)
+                        control_plane = getattr(
+                            getattr(runtime, "turn_orchestrator", None),
+                            "control_plane",
+                            None,
+                        )
                         ledger_writer = getattr(control_plane, "ledger_writer", None)
                         write_event = getattr(ledger_writer, "write_event", None)
                         if callable(write_event):
                             session_id = str(
                                 (getattr(turn_context, "metadata", {}) or {}).get("control_plane", {}).get("session_id")
-                                or "default"
+                                or "default",
                             )
                             write_event(
                                 event_type=CAPABILITY_AUDIT_EVENT_TYPE,
@@ -332,13 +404,18 @@ class PersistenceService:
                                 committed=False,
                             )
                     except Exception as exc:
-                        logger.warning("PersistenceService capability audit persistence failed (non-fatal): %s", exc)
+                        logger.warning(
+                            "PersistenceService capability audit persistence failed (non-fatal): %s",
+                            exc,
+                        )
                     return
                 raise RuntimeError(
-                    f"MutationIntent(type=ledger, source={source!r}): unsupported op={op!r}"
+                    f"MutationIntent(type=ledger, source={source!r}): unsupported op={op!r}",
                 )
 
-            raise RuntimeError(f"MutationIntent: unknown type={intent_type!r} source={source!r}")
+            raise RuntimeError(
+                f"MutationIntent: unknown type={intent_type!r} source={source!r}",
+            )
 
         try:
             mutation_queue.drain(
@@ -359,7 +436,7 @@ class PersistenceService:
             pending = mutation_queue.size()
             raise FatalTurnError(
                 "Mutation queue not fully drained"
-                f" (pending={pending}, trace_id={getattr(turn_context, 'trace_id', '')!r})"
+                f" (pending={pending}, trace_id={getattr(turn_context, 'trace_id', '')!r})",
             )
 
     @staticmethod
@@ -397,7 +474,12 @@ class PersistenceService:
             },
         }
 
-    def _persist_hierarchical_memory_commit(self, turn_context: Any, *, commit_id: str) -> None:
+    def _persist_hierarchical_memory_commit(
+        self,
+        turn_context: Any,
+        *,
+        commit_id: str,
+    ) -> None:
         state = getattr(turn_context, "state", None)
         metadata = getattr(turn_context, "metadata", None)
         if not isinstance(state, dict):
@@ -409,7 +491,9 @@ class PersistenceService:
             metadata["hierarchical_memory_payload"] = dict(memory_payload)
 
         trace_id = str(getattr(turn_context, "trace_id", "") or "")
-        phase_value = str(getattr(getattr(turn_context, "phase", None), "value", "") or "")
+        phase_value = str(
+            getattr(getattr(turn_context, "phase", None), "value", "") or "",
+        )
         occurred_at = ""
         temporal = getattr(turn_context, "temporal", None)
         if temporal is not None:
@@ -428,7 +512,7 @@ class PersistenceService:
                     "trace_id": trace_id,
                     "memory": memory_payload,
                 },
-            }
+            },
         )
 
     def _commit_post_finalize_side_effects(self, turn_context: Any) -> None:
@@ -436,7 +520,9 @@ class PersistenceService:
         service = self.turn_service
         runtime = None if service is None else getattr(service, "bot", None)
         if runtime is None:
-            raise RuntimeError("SaveNode strict mode requires an attached turn_service runtime")
+            raise RuntimeError(
+                "SaveNode strict mode requires an attached turn_service runtime",
+            )
 
         memory_coordinator = getattr(runtime, "memory_coordinator", None)
         if memory_coordinator is None:
@@ -452,35 +538,55 @@ class PersistenceService:
         # Apply any pending non-SaveNode mutation intents at the canonical commit boundary.
         self._apply_pending_save_boundary_mutations(runtime, turn_context)
         self._flush_background_memory_store_patch_queue(runtime)
-        flush_deferred = getattr(self.persistence_manager, "flush_deferred_save_boundary_mutations", None)
+        flush_deferred = getattr(
+            self.persistence_manager,
+            "flush_deferred_save_boundary_mutations",
+            None,
+        )
         if callable(flush_deferred):
             self._call_nonfatal(flush_deferred, turn_context)
 
         consolidate_memories = getattr(memory_coordinator, "consolidate_memories", None)
         if not callable(consolidate_memories):
-            raise RuntimeError("SaveNode strict mode requires memory_coordinator.consolidate_memories")
+            raise RuntimeError(
+                "SaveNode strict mode requires memory_coordinator.consolidate_memories",
+            )
         memory_ops_started = time.perf_counter()
         consolidate_memories(turn_context=turn_context)
 
-        apply_controlled_forgetting = getattr(memory_coordinator, "apply_controlled_forgetting", None)
+        apply_controlled_forgetting = getattr(
+            memory_coordinator,
+            "apply_controlled_forgetting",
+            None,
+        )
         if not callable(apply_controlled_forgetting):
-            raise RuntimeError("SaveNode strict mode requires memory_coordinator.apply_controlled_forgetting")
+            raise RuntimeError(
+                "SaveNode strict mode requires memory_coordinator.apply_controlled_forgetting",
+            )
         apply_controlled_forgetting(turn_context=turn_context)
         memory_ops_ms = round((time.perf_counter() - memory_ops_started) * 1000, 3)
         if isinstance(getattr(turn_context, "state", None), dict):
             turn_context.state["_timing_memory_ops_ms"] = memory_ops_ms
 
         relationship_manager = getattr(runtime, "relationship_manager", None)
-        materialize_projection = getattr(relationship_manager, "materialize_projection", None)
+        materialize_projection = getattr(
+            relationship_manager,
+            "materialize_projection",
+            None,
+        )
         if not callable(materialize_projection):
-            raise RuntimeError("SaveNode strict mode requires relationship_projector.materialize_projection")
+            raise RuntimeError(
+                "SaveNode strict mode requires relationship_projector.materialize_projection",
+            )
         materialize_projection(turn_context=turn_context)
 
         memory_manager = getattr(runtime, "memory_manager", None)
         graph_manager = getattr(memory_manager, "graph_manager", None) if memory_manager is not None else None
         sync_graph_store = getattr(graph_manager, "sync_graph_store", None)
         if not callable(sync_graph_store):
-            raise RuntimeError("SaveNode strict mode requires memory_graph_manager.sync_graph_store")
+            raise RuntimeError(
+                "SaveNode strict mode requires memory_graph_manager.sync_graph_store",
+            )
         graph_sync_started = time.perf_counter()
         sync_graph_store(turn_context=turn_context)
         graph_sync_ms = round((time.perf_counter() - graph_sync_started) * 1000, 3)
@@ -488,10 +594,21 @@ class PersistenceService:
             turn_context.state["_timing_graph_sync_ms"] = graph_sync_ms
 
     @staticmethod
-    def _capture_transaction_snapshot(runtime: Any, turn_context: Any) -> dict[str, Any]:
-        graph_manager = getattr(getattr(runtime, "memory_manager", None), "graph_manager", None)
+    def _capture_transaction_snapshot(
+        runtime: Any,
+        turn_context: Any,
+    ) -> dict[str, Any]:
+        graph_manager = getattr(
+            getattr(runtime, "memory_manager", None),
+            "graph_manager",
+            None,
+        )
         graph_snapshot = {"nodes": [], "edges": [], "updated_at": None}
-        background_patch_queue = getattr(runtime, "_background_memory_store_patch_queue", None)
+        background_patch_queue = getattr(
+            runtime,
+            "_background_memory_store_patch_queue",
+            None,
+        )
         if graph_manager is not None:
             snapshot_builder = getattr(graph_manager, "graph_snapshot", None)
             if callable(snapshot_builder):
@@ -501,23 +618,37 @@ class PersistenceService:
             "memory_store": deepcopy(dict(getattr(runtime, "MEMORY_STORE", {}) or {})),
             "graph_snapshot": deepcopy(graph_snapshot),
             "session_state": deepcopy(runtime.snapshot_session_state()),
-            "last_turn_pipeline": deepcopy(dict(getattr(runtime, "_last_turn_pipeline", {}) or {})),
-            "background_patch_queue": deepcopy(list(background_patch_queue)) if isinstance(background_patch_queue, list) else None,
+            "last_turn_pipeline": deepcopy(
+                dict(getattr(runtime, "_last_turn_pipeline", {}) or {}),
+            ),
+            "background_patch_queue": deepcopy(list(background_patch_queue))
+            if isinstance(background_patch_queue, list)
+            else None,
             "turn_state": deepcopy(dict(getattr(turn_context, "state", {}) or {})),
             "metadata": deepcopy(dict(getattr(turn_context, "metadata", {}) or {})),
         }
 
     @staticmethod
-    def _restore_transaction_snapshot(runtime: Any, turn_context: Any, snapshot: dict[str, Any]) -> None:
+    def _restore_transaction_snapshot(
+        runtime: Any,
+        turn_context: Any,
+        snapshot: dict[str, Any],
+    ) -> None:
         session_state = dict(snapshot.get("session_state", {}) or {})
         if session_state:
             runtime.load_session_state_snapshot(deepcopy(session_state))
         else:
-            runtime.MEMORY_STORE = deepcopy(dict(snapshot.get("memory_store", {}) or {}))
-        runtime._last_turn_pipeline = deepcopy(dict(snapshot.get("last_turn_pipeline", {}) or {}))
-        background_patch_queue = snapshot.get("background_patch_queue", None)
+            runtime.MEMORY_STORE = deepcopy(
+                dict(snapshot.get("memory_store", {}) or {}),
+            )
+        runtime._last_turn_pipeline = deepcopy(
+            dict(snapshot.get("last_turn_pipeline", {}) or {}),
+        )
+        background_patch_queue = snapshot.get("background_patch_queue")
         if isinstance(background_patch_queue, list):
-            runtime._background_memory_store_patch_queue = deepcopy(background_patch_queue)
+            runtime._background_memory_store_patch_queue = deepcopy(
+                background_patch_queue,
+            )
 
         state = getattr(turn_context, "state", None)
         if isinstance(state, dict):
@@ -530,7 +661,11 @@ class PersistenceService:
             metadata.update(deepcopy(dict(snapshot.get("metadata", {}) or {})))
 
         graph_snapshot = dict(snapshot.get("graph_snapshot", {}) or {})
-        graph_manager = getattr(getattr(runtime, "memory_manager", None), "graph_manager", None)
+        graph_manager = getattr(
+            getattr(runtime, "memory_manager", None),
+            "graph_manager",
+            None,
+        )
         backend = getattr(graph_manager, "_graph_store_backend", None) if graph_manager is not None else None
         replace_graph = getattr(backend, "replace_graph", None)
         if callable(replace_graph):
@@ -579,7 +714,9 @@ class PersistenceService:
             if transaction:
                 temporal = getattr(turn_context, "temporal", None)
                 transaction["status"] = "committed"
-                transaction["committed_at"] = str(getattr(temporal, "wall_time", "") or "")
+                transaction["committed_at"] = str(
+                    getattr(temporal, "wall_time", "") or "",
+                )
                 state["_save_transaction"] = transaction
                 commit_id = str(transaction.get("commit_id") or "")
                 state["last_commit_id"] = commit_id
@@ -588,7 +725,10 @@ class PersistenceService:
                 if isinstance(metadata, dict):
                     metadata["last_commit_id"] = commit_id
                     metadata["last_transaction_status"] = "committed"
-                self._persist_hierarchical_memory_commit(turn_context, commit_id=commit_id)
+                self._persist_hierarchical_memory_commit(
+                    turn_context,
+                    commit_id=commit_id,
+                )
                 self._record_merkle_anchor(turn_context, commit_id=commit_id)
             state["_save_transaction_active"] = False
             state["_save_mutations_applied"] = False
@@ -605,7 +745,9 @@ class PersistenceService:
             if transaction:
                 temporal = getattr(turn_context, "temporal", None)
                 transaction["status"] = "rolled_back"
-                transaction["rolled_back_at"] = str(getattr(temporal, "wall_time", "") or "")
+                transaction["rolled_back_at"] = str(
+                    getattr(temporal, "wall_time", "") or "",
+                )
                 state["_save_transaction"] = transaction
             state["_save_transaction_active"] = False
             state["_save_mutations_applied"] = False
@@ -627,8 +769,16 @@ class PersistenceService:
         turn_context: Any,
     ) -> tuple:
         if self.turn_service is None:
-            raise RuntimeError("SaveNode strict mode requires graph turn_service wiring in Phase 4")
-        return self.turn_service.finalize_user_turn(turn_text, mood, reply, norm_attachments, turn_context=turn_context)
+            raise RuntimeError(
+                "SaveNode strict mode requires graph turn_service wiring in Phase 4",
+            )
+        return self.turn_service.finalize_user_turn(
+            turn_text,
+            mood,
+            reply,
+            norm_attachments,
+            turn_context=turn_context,
+        )
 
     def finalize_turn(self, turn_context: Any, result: Any) -> tuple:
         """Atomically commit history, maintenance, reflection, health snapshot, and persistence."""
@@ -636,7 +786,10 @@ class PersistenceService:
         if turn_context.state.get("already_finalized"):
             if isinstance(result, tuple) and len(result) >= 2:
                 return result
-            return (str(result or ""), bool(turn_context.state.get("should_end", False)))
+            return (
+                str(result or ""),
+                bool(turn_context.state.get("should_end", False)),
+            )
 
         turn_text = turn_context.state.get("turn_text") or turn_context.user_input
         mood = turn_context.state.get("mood") or "neutral"
@@ -645,7 +798,9 @@ class PersistenceService:
 
         service = self.turn_service
         if service is None:
-            raise RuntimeError("Strict mode requires graph turn_service wiring in Phase 4")
+            raise RuntimeError(
+                "Strict mode requires graph turn_service wiring in Phase 4",
+            )
 
         runtime = getattr(service, "bot", None)
         if runtime is None:
@@ -660,13 +815,19 @@ class PersistenceService:
             if previous_commit_active:
                 logger.warning(
                     "PersistenceService.finalize_turn detected stale _graph_commit_active=True; "
-                    "forcing fresh SaveNode boundary"
+                    "forcing fresh SaveNode boundary",
                 )
             runtime._current_turn_time_base = getattr(turn_context, "temporal", None)
             runtime._graph_commit_active = True
 
             # Strict sequence: finalize queues ledger intents; then one canonical SaveNode commit.
-            finalized = self.final_ledger_commit(turn_text, mood, reply, norm_attachments, turn_context)
+            finalized = self.final_ledger_commit(
+                turn_text,
+                mood,
+                reply,
+                norm_attachments,
+                turn_context,
+            )
             self._commit_post_finalize_side_effects(turn_context)
 
             # Atomic checkpoint capture: emit from inside finalize_turn boundary so
@@ -674,22 +835,31 @@ class PersistenceService:
             checkpoint = None
             checkpoint_snapshot = getattr(turn_context, "checkpoint_snapshot", None)
             if callable(checkpoint_snapshot):
-                checkpoint = checkpoint_snapshot(stage="save", status="atomic_finalize", error=None)
+                checkpoint = checkpoint_snapshot(
+                    stage="save",
+                    status="atomic_finalize",
+                    error=None,
+                )
                 turn_context.state["_atomic_checkpoint_saved"] = True
                 save_graph_checkpoint = getattr(self, "save_graph_checkpoint", None)
                 if callable(save_graph_checkpoint):
                     save_graph_checkpoint(checkpoint, _skip_turn_event=True)
 
             if self.checkpointer is not None and checkpoint is not None:
-                control_plane = dict(getattr(turn_context, "metadata", {}).get("control_plane") or {})
-                session_id = str(control_plane.get("session_id") or "default")
+                _md = dict(getattr(turn_context, "metadata", {}) or {})
+                control_plane = dict(_md.get("control_plane") or {})
+                session_id = str(
+                    control_plane.get("session_id") or _md.get("session_id") or "default",
+                )
                 trace_id = str(getattr(turn_context, "trace_id", "") or "")
-                manifest = dict(getattr(turn_context, "metadata", {}).get("determinism_manifest") or {})
+                manifest = dict(
+                    getattr(turn_context, "metadata", {}).get("determinism_manifest") or {},
+                )
                 try:
                     self.checkpointer.save_checkpoint(
                         session_id=session_id,
                         trace_id=trace_id,
-                        checkpoint=checkpoint,
+                        checkpoint=dict(checkpoint) if isinstance(checkpoint, dict) else {},
                         manifest=manifest,
                     )
                 except Exception as exc:
@@ -703,24 +873,47 @@ class PersistenceService:
                 complete_pipeline(should_end=False)
             return finalized
         except Exception as exc:
-            logger.error("PersistenceService.finalize_turn strict-mode failure: %s", exc)
+            logger.error(
+                "PersistenceService.finalize_turn strict-mode failure: %s",
+                exc,
+            )
             raise
         finally:
             if isinstance(getattr(turn_context, "state", None), dict):
-                turn_context.state["_timing_finalize_ms"] = round((time.perf_counter() - finalize_started) * 1000, 3)
+                turn_context.state["_timing_finalize_ms"] = round(
+                    (time.perf_counter() - finalize_started) * 1000,
+                    3,
+                )
             runtime._graph_commit_active = False
             runtime._current_turn_time_base = previous_temporal
 
     def save_turn(self, turn_context: Any, result: Any) -> None:
         snapshot_builder = getattr(turn_context, "snapshot", None)
         if callable(snapshot_builder):
-            self.persistence_manager.persist_conversation_snapshot(snapshot_builder(result), turn_context=turn_context)
+            _snap = snapshot_builder(result)
+            self.persistence_manager.persist_conversation_snapshot(
+                dict(_snap) if isinstance(_snap, dict) else {},
+                turn_context=turn_context,
+            )
             return
         self.persistence_manager.persist_conversation()
 
-    def save_graph_checkpoint(self, checkpoint: dict[str, Any], _skip_turn_event: bool = False) -> None:
+    def save_graph_checkpoint(
+        self,
+        checkpoint: dict[str, Any],
+        _skip_turn_event: bool = False,
+    ) -> None:
         try:
-            self.persistence_manager.persist_graph_checkpoint(checkpoint, _skip_turn_event=_skip_turn_event)
+            with ensure_execution_trace_root(
+                operation="persist_graph_checkpoint",
+                prompt="[persistence-service-save-checkpoint]",
+                metadata={"source": "PersistenceService.save_graph_checkpoint"},
+                required=True,
+            ):
+                self.persistence_manager.persist_graph_checkpoint(
+                    checkpoint,
+                    _skip_turn_event=_skip_turn_event,
+                )
         except RuntimeTraceViolation:
             raise
         except Exception as exc:
@@ -736,7 +929,10 @@ class PersistenceService:
 
     def list_turn_events(self, trace_id: str, limit: int = 0) -> list[dict[str, Any]]:
         try:
-            return self.persistence_manager.list_turn_events(trace_id=trace_id, limit=limit)
+            return self.persistence_manager.list_turn_events(
+                trace_id=trace_id,
+                limit=limit,
+            )
         except RuntimeTraceViolation:
             raise
         except Exception as exc:
@@ -752,7 +948,11 @@ class PersistenceService:
             logger.error("PersistenceService.replay_turn_events failed: %s", exc)
             return {"trace_id": str(trace_id or ""), "events": [], "replayed_state": {}}
 
-    def validate_replay_determinism(self, trace_id: str, expected_lock_hash: str = "") -> dict[str, Any]:
+    def validate_replay_determinism(
+        self,
+        trace_id: str,
+        expected_lock_hash: str = "",
+    ) -> dict[str, Any]:
         try:
             return self.persistence_manager.validate_replay_determinism(
                 trace_id=trace_id,
@@ -761,7 +961,10 @@ class PersistenceService:
         except RuntimeTraceViolation:
             raise
         except Exception as exc:
-            logger.error("PersistenceService.validate_replay_determinism failed: %s", exc)
+            logger.error(
+                "PersistenceService.validate_replay_determinism failed: %s",
+                exc,
+            )
             return {
                 "trace_id": str(trace_id or ""),
                 "consistent": False,

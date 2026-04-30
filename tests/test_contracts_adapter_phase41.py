@@ -10,22 +10,18 @@ Verifies:
 
 from __future__ import annotations
 
-import os
 from types import SimpleNamespace
-from typing import Any
 
 import pytest
 
 from dadbot.core.contracts_adapter import (
+    ContextSchemaAdapter,
     ContractAdapterRegistry,
     ContractViolationError,
-    ContextSchemaAdapter,
     FallbackEvent,
     FallbackRegistration,
     FallbackRegistry,
-    _CONTEXT_BUILDER_FALLBACK_REGISTRY,
 )
-
 
 # ---------------------------------------------------------------------------
 # FallbackRegistry unit tests
@@ -34,13 +30,15 @@ from dadbot.core.contracts_adapter import (
 
 def test_fallback_registry_declared_returns_callable():
     reg = FallbackRegistry()
-    reg.register(FallbackRegistration(
-        name="my_method",
-        version="1.0.0",
-        fallback_callable=lambda: "sentinel",
-        contract_description="test",
-        substituted_signature="my_method(self) -> str",
-    ))
+    reg.register(
+        FallbackRegistration(
+            name="my_method",
+            version="1.0.0",
+            fallback_callable=lambda: "sentinel",
+            contract_description="test",
+            substituted_signature="my_method(self) -> str",
+        )
+    )
     result = reg.use("my_method", source="test", reason="missing")
     assert callable(result)
     assert result() == "sentinel"
@@ -48,13 +46,15 @@ def test_fallback_registry_declared_returns_callable():
 
 def test_fallback_registry_emits_event_on_use():
     reg = FallbackRegistry()
-    reg.register(FallbackRegistration(
-        name="fn",
-        version="2.0.0",
-        fallback_callable=lambda: None,
-        contract_description="desc",
-        substituted_signature="fn() -> None",
-    ))
+    reg.register(
+        FallbackRegistration(
+            name="fn",
+            version="2.0.0",
+            fallback_callable=lambda: None,
+            contract_description="desc",
+            substituted_signature="fn() -> None",
+        )
+    )
     reg.use("fn", source="src", reason="absent")
     events = reg.audit()
     assert len(events) == 1
@@ -84,14 +84,24 @@ def test_fallback_registry_undeclared_strict_raises():
 
 def test_fallback_registry_declared_names():
     reg = FallbackRegistry()
-    reg.register(FallbackRegistration(
-        name="a", version="1", fallback_callable=lambda: None,
-        contract_description="", substituted_signature="",
-    ))
-    reg.register(FallbackRegistration(
-        name="b", version="1", fallback_callable=lambda: None,
-        contract_description="", substituted_signature="",
-    ))
+    reg.register(
+        FallbackRegistration(
+            name="a",
+            version="1",
+            fallback_callable=lambda: None,
+            contract_description="",
+            substituted_signature="",
+        )
+    )
+    reg.register(
+        FallbackRegistration(
+            name="b",
+            version="1",
+            fallback_callable=lambda: None,
+            contract_description="",
+            substituted_signature="",
+        )
+    )
     assert set(reg.declared_names()) == {"a", "b"}
 
 
@@ -188,10 +198,7 @@ def test_safe_build_memory_context_emits_event_on_exception():
     result = adapter.safe_build_memory_context(stub, "x", fallback="safe")
     assert result == "safe"
     events = adapter.fallback_audit()
-    assert any(
-        "build_memory_context" in e.contract_violation_trigger and "boom" in e.fallback_reason
-        for e in events
-    )
+    assert any("build_memory_context" in e.contract_violation_trigger and "boom" in e.fallback_reason for e in events)
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +211,7 @@ def test_contract_adapter_registry_audit_fallback_usage():
     # Use a fresh isolated registry to avoid cross-test event leakage from the module-level one.
     fresh_reg = FallbackRegistry()
     from dadbot.core.contracts_adapter import _CONTEXT_BUILDER_FALLBACK_REGISTRY as _module_reg
+
     for name in _module_reg.declared_names():
         decl = _module_reg._declarations[name]
         fresh_reg.register(decl)

@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
 import ast
+import asyncio
 import hashlib
 import hmac
 import json
 import os
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -134,7 +134,7 @@ def _build_protocol_metadata() -> dict[str, Any]:
         "version": PROTOCOL_VERSION,
         "signature_algorithm": SIGNATURE_ALGORITHM,
         "trace_versions_supported": list(SUPPORTED_TRACE_VERSIONS),
-        "generated_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "generated_at_utc": datetime.now(UTC).isoformat(timespec="seconds"),
     }
 
 
@@ -144,9 +144,7 @@ def _resolve_signing_key(*, require_explicit_key: bool) -> tuple[bytes, str, boo
     using_default = False
     if not key_raw:
         if require_explicit_key:
-            raise RuntimeError(
-                "Explicit signing key required but PHASE4_CERT_SIGNING_KEY is not set"
-            )
+            raise RuntimeError("Explicit signing key required but PHASE4_CERT_SIGNING_KEY is not set")
         key_raw = DEFAULT_DEV_SIGNING_KEY
         using_default = True
     return key_raw.encode("utf-8"), str(key_id or "local-dev"), using_default
@@ -266,7 +264,7 @@ def _iter_python_files() -> list[Path]:
 # 1. STATIC STRUCTURAL SCAN
 # ------------------------------------------------------------
 def static_scan() -> StaticScanResult:
-    signals = {key: False for key in REQUIRED_SIGNALS}
+    signals = dict.fromkeys(REQUIRED_SIGNALS, False)
     files = _iter_python_files()
 
     for py_file in files:
@@ -287,7 +285,7 @@ class _GraphExecuteDeterminismVisitor(ast.NodeVisitor):
     def __init__(self) -> None:
         self.violations: list[str] = []
 
-    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:  # noqa: N802
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
         if node.name == "execute":
             for child in ast.walk(node):
                 if not isinstance(child, ast.Call):
@@ -353,9 +351,7 @@ def structural_check() -> StructuralCheckResult:
                 t_idx = names.index("temporal")
                 for stage in ("inference", "reflection", "save"):
                     if stage in names and names.index(stage) <= t_idx:
-                        violations.append(
-                            f"Stage order violation: {stage!r} occurs before/at temporal"
-                        )
+                        violations.append(f"Stage order violation: {stage!r} occurs before/at temporal")
     except Exception as exc:
         violations.append(f"Unable to construct TurnGraph for structural verification: {exc}")
 
@@ -580,9 +576,9 @@ def runtime_check() -> RuntimeCheckResult:
             order_ok = False
 
     mutation_snapshot = dict(artifact.get("mutation_snapshot") or {})
-    mutation_queue_empty = int(mutation_snapshot.get("pending", 0) or 0) == 0 and int(
-        mutation_snapshot.get("ledger_pending", 0) or 0
-    ) == 0
+    mutation_queue_empty = (
+        int(mutation_snapshot.get("pending", 0) or 0) == 0 and int(mutation_snapshot.get("ledger_pending", 0) or 0) == 0
+    )
 
     execution_trace_contract = dict(artifact.get("execution_trace_contract") or {})
     trace_hash = str(execution_trace_contract.get("trace_hash") or "")
@@ -601,7 +597,7 @@ def runtime_check() -> RuntimeCheckResult:
     protocol_identity_fingerprint = str(artifact.get("protocol_identity_fingerprint") or "").strip()
     if not protocol_identity_fingerprint:
         mutation_snapshot = dict(artifact.get("mutation_snapshot") or {})
-        lock_hash = str((execution_identity.get("lock_hash") or "")).strip()
+        lock_hash = str(execution_identity.get("lock_hash") or "").strip()
         protocol_identity_fingerprint = _stable_identity_fingerprint(
             trace_id=str(execution_identity.get("trace_id") or artifact.get("trace_id") or ""),
             trace_hash=protocol_trace_hash,
@@ -610,9 +606,11 @@ def runtime_check() -> RuntimeCheckResult:
             mutation_tx_count=int(mutation_snapshot.get("transactions", 0) or 0),
             event_count=int(execution_trace_contract.get("event_count", 0) or 0),
         )
-    execution_identity_ok = bool(execution_identity.get("fingerprint")) and bool(
-        execution_identity.get("trace_hash")
-    ) and len(protocol_identity_fingerprint) == 64
+    execution_identity_ok = (
+        bool(execution_identity.get("fingerprint"))
+        and bool(execution_identity.get("trace_hash"))
+        and len(protocol_identity_fingerprint) == 64
+    )
 
     persistence_contract = dict(artifact.get("persistence_contract") or {})
     persistence_contract_ok = bool(persistence_contract.get("ok", False)) and bool(
@@ -625,10 +623,7 @@ def runtime_check() -> RuntimeCheckResult:
     trace_version = str(artifact.get("trace_version") or "legacy-0")
     replay_anchor = str(protocol_identity_fingerprint or protocol_trace_hash or trace_hash or "")
     replay_backward_compatible = bool(
-        trace_version in SUPPORTED_TRACE_VERSIONS
-        and replay_anchor
-        and len(missing) == 0
-        and order_ok
+        trace_version in SUPPORTED_TRACE_VERSIONS and replay_anchor and len(missing) == 0 and order_ok
     )
 
     ok = (
@@ -660,9 +655,7 @@ def runtime_check() -> RuntimeCheckResult:
     if not identity_event_emitted:
         reason_parts.append("execution_identity persistence event missing")
     if not replay_backward_compatible:
-        reason_parts.append(
-            "Replay compatibility violation: unsupported trace version or missing replay anchor"
-        )
+        reason_parts.append("Replay compatibility violation: unsupported trace version or missing replay anchor")
 
     return RuntimeCheckResult(
         ok=ok,
@@ -700,9 +693,7 @@ def _build_subsystem_scores(
     )
 
     mutation_integrity_verdict = bool(
-        static.signals.get("MutationQueue", False)
-        and runtime.mutation_queue_empty
-        and structural.ok
+        static.signals.get("MutationQueue", False) and runtime.mutation_queue_empty and structural.ok
     )
 
     persistence_compliance_verdict = bool(

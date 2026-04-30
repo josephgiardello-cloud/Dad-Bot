@@ -2,15 +2,11 @@
 
 from __future__ import annotations
 
-import pytest
-
 from dadbot.core.semantic_graph_validator import (
     GraphSemanticValidator,
     NodeIntentContract,
-    SemanticViolation,
     build_dadbot_semantic_validator,
 )
-
 
 # ---------------------------------------------------------------------------
 # NodeIntentContract / GraphSemanticValidator unit tests
@@ -19,20 +15,26 @@ from dadbot.core.semantic_graph_validator import (
 
 def _make_validator():
     v = GraphSemanticValidator()
-    v.register_node_contract(NodeIntentContract(
-        node_name="a",
-        output_provides=["x", "y"],
-    ))
-    v.register_node_contract(NodeIntentContract(
-        node_name="b",
-        input_intent_schema={"x": "required from a"},
-        output_provides=["z"],
-    ))
-    v.register_node_contract(NodeIntentContract(
-        node_name="c",
-        input_intent_schema={"z": "required from b", "y": "required from a"},
-        output_provides=["done"],
-    ))
+    v.register_node_contract(
+        NodeIntentContract(
+            node_name="a",
+            output_provides=["x", "y"],
+        )
+    )
+    v.register_node_contract(
+        NodeIntentContract(
+            node_name="b",
+            input_intent_schema={"x": "required from a"},
+            output_provides=["z"],
+        )
+    )
+    v.register_node_contract(
+        NodeIntentContract(
+            node_name="c",
+            input_intent_schema={"z": "required from b", "y": "required from a"},
+            output_provides=["done"],
+        )
+    )
     return v
 
 
@@ -44,15 +46,19 @@ def test_validate_graph_no_violations():
 
 def test_validate_graph_missing_input_key():
     v = GraphSemanticValidator()
-    v.register_node_contract(NodeIntentContract(
-        node_name="a",
-        output_provides=["x"],  # doesn't provide "y"
-    ))
-    v.register_node_contract(NodeIntentContract(
-        node_name="b",
-        input_intent_schema={"x": "ok", "y": "missing"},
-        output_provides=["z"],
-    ))
+    v.register_node_contract(
+        NodeIntentContract(
+            node_name="a",
+            output_provides=["x"],  # doesn't provide "y"
+        )
+    )
+    v.register_node_contract(
+        NodeIntentContract(
+            node_name="b",
+            input_intent_schema={"x": "ok", "y": "missing"},
+            output_provides=["z"],
+        )
+    )
     violations = v.validate_graph(["a", "b"])
     assert len(violations) == 1
     assert violations[0].missing_key == "y"
@@ -63,19 +69,25 @@ def test_validate_graph_missing_input_key():
 def test_validate_graph_cumulative_satisfies_later_node():
     """Node c requires 'x' which a provides, even though b is between them."""
     v = GraphSemanticValidator()
-    v.register_node_contract(NodeIntentContract(
-        node_name="a",
-        output_provides=["x"],
-    ))
-    v.register_node_contract(NodeIntentContract(
-        node_name="b",
-        output_provides=["y"],
-    ))
-    v.register_node_contract(NodeIntentContract(
-        node_name="c",
-        input_intent_schema={"x": "from a", "y": "from b"},
-        output_provides=["done"],
-    ))
+    v.register_node_contract(
+        NodeIntentContract(
+            node_name="a",
+            output_provides=["x"],
+        )
+    )
+    v.register_node_contract(
+        NodeIntentContract(
+            node_name="b",
+            output_provides=["y"],
+        )
+    )
+    v.register_node_contract(
+        NodeIntentContract(
+            node_name="c",
+            input_intent_schema={"x": "from a", "y": "from b"},
+            output_provides=["done"],
+        )
+    )
     violations = v.validate_graph(["a", "b", "c"])
     assert violations == []
 
@@ -96,14 +108,18 @@ def test_validate_edge_compatible():
 
 def test_validate_edge_missing_output():
     v = GraphSemanticValidator()
-    v.register_node_contract(NodeIntentContract(
-        node_name="a",
-        output_provides=[],  # provides nothing
-    ))
-    v.register_node_contract(NodeIntentContract(
-        node_name="b",
-        input_intent_schema={"x": "required"},
-    ))
+    v.register_node_contract(
+        NodeIntentContract(
+            node_name="a",
+            output_provides=[],  # provides nothing
+        )
+    )
+    v.register_node_contract(
+        NodeIntentContract(
+            node_name="b",
+            input_intent_schema={"x": "required"},
+        )
+    )
     violations = v.validate_edge("a", "b")
     assert len(violations) == 1
     assert violations[0].missing_key == "x"
@@ -147,7 +163,7 @@ def test_dadbot_validator_full_pipeline_no_violations():
     # Standard pipeline order (no tools)
     pipeline = ["temporal", "preflight", "planner", "inference", "safety", "reflection", "save"]
     violations = v.validate_graph(pipeline)
-    assert violations == [], f"Unexpected violations:\n" + "\n".join(v.detail for v in violations)
+    assert violations == [], "Unexpected violations:\n" + "\n".join(v.detail for v in violations)
 
 
 def test_dadbot_validator_skipped_temporal_causes_violation():
@@ -155,10 +171,7 @@ def test_dadbot_validator_skipped_temporal_causes_violation():
     v = build_dadbot_semantic_validator()
     pipeline = ["preflight", "planner", "inference", "safety", "reflection", "save"]
     violations = v.validate_graph(pipeline)
-    missing_temporal = [
-        viol for viol in violations
-        if "temporal_axis" in (viol.missing_key or "")
-    ]
+    missing_temporal = [viol for viol in violations if "temporal_axis" in (viol.missing_key or "")]
     assert len(missing_temporal) >= 1
 
 

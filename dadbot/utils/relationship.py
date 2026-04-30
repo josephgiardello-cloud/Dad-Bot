@@ -1,4 +1,4 @@
-﻿"""Relationship scoring, decay, recency, and confidence utilities.
+"""Relationship scoring, decay, recency, and confidence utilities.
 
 Pure functions with no DadBot dependency.  Use directly::
 

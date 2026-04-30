@@ -7,67 +7,50 @@ import json
 import logging
 import mimetypes
 import os
-import re
 import shutil
 import subprocess
 import tempfile
 import uuid
-from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlencode
-from urllib.request import urlopen
-from urllib.error import URLError
 
-import numpy as np
 import ollama
 import streamlit as st
 import streamlit.components.v1 as components
 
-from dadbot.heritage_import import build_heritage_memories
+from dadbot.consumers.streamlit import load_thread_projection
+from dadbot.runtime_core import ThreadView, UIRuntimeAPI
 from dadbot.runtime_core.streamlit_runtime import StreamlitRuntime
-from dadbot.ui.utils import (
-    maybe_fragment,
-    filter_memory_entries,
-    option_index,
-    titleize_token,
-    enabled_label,
-)
-from dadbot.ui.utils import ambient_fragment
-from dadbot.ui.prefs_state import (
-    default_ui_preferences,
-    _voice_defaults,
-    ui_preferences,
-    voice_preferences,
-    profile_voice_preferences,
-    sync_ui_voice_from_profile,
-    notification_settings,
-    voice_profile_catalog,
-)
-from dadbot.ui.voice_control_plane import VoiceSessionController
+from dadbot.ui import interaction_controller, state_manager
+from dadbot.ui.data import render_data_tab
 from dadbot.ui.helpers import (
     apply_power_mode,
     apply_ui_preferences,
     find_available_image_model,
-    fetch_ical_events,
-    export_bundle_payload,
-    render_voice_dependency_help,
     local_stt_backend_status,
     local_tts_backend_status,
-    heritage_files_with_limits,
+    render_voice_dependency_help,
 )
 from dadbot.ui.preferences import render_preferences_tab
-from dadbot.ui.data import render_memory_garden, render_data_tab
-from dadbot.ui import interaction_controller, state_manager
-from dadbot.consumers.streamlit import load_thread_projection
-from dadbot.runtime_core import UIRuntimeAPI, ThreadView
+from dadbot.ui.prefs_state import (
+    sync_ui_voice_from_profile,
+    ui_preferences,
+    voice_preferences,
+)
+from dadbot.ui.utils import (
+    ambient_fragment,
+    maybe_fragment,
+    titleize_token,
+)
+from dadbot.ui.voice_control_plane import VoiceSessionController
 
 if TYPE_CHECKING:
     from dadbot.core.dadbot import DadBot
 
 try:
-    STAGE_METADATA = getattr(importlib.import_module("dadbot.core.system_behavior_views"), "STAGE_METADATA")
+    STAGE_METADATA = importlib.import_module("dadbot.core.system_behavior_views").STAGE_METADATA
 except Exception:  # pragma: no cover - optional compatibility shim
     STAGE_METADATA = {}
 
@@ -94,7 +77,9 @@ except Exception:  # pragma: no cover - optional dependency
     pyttsx3 = None
 
 try:
-    from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration as WebRtcRTCConfiguration
+    from streamlit_webrtc import RTCConfiguration as WebRtcRTCConfiguration
+    from streamlit_webrtc import WebRtcMode, webrtc_streamer
+
     _WEBRTC_AVAILABLE = True
 except Exception:  # pragma: no cover - optional dependency
     _WEBRTC_AVAILABLE = False
@@ -179,7 +164,9 @@ def runtime_turn_timeline() -> list[dict]:
     return state_manager.runtime_turn_timeline()
 
 
-def record_turn_timeline_event(*, thread_id: str, event_type: str, summary: str, payload: dict | None = None, severity: str = "info") -> None:
+def record_turn_timeline_event(
+    *, thread_id: str, event_type: str, summary: str, payload: dict | None = None, severity: str = "info"
+) -> None:
     state_manager.record_turn_timeline_event(
         thread_id=thread_id,
         event_type=event_type,
@@ -221,9 +208,8 @@ def runtime_semantic_signal_snapshot(*, view: ThreadView | None, guardrail: Runt
                 "signal": "policy_decision",
                 "source": "decision_event",
                 "severity": "info",
-                "summary": ", ".join(
-                    key for key, value in dict(decision.get("decisions") or {}).items() if bool(value)
-                ) or "no side effects",
+                "summary": ", ".join(key for key, value in dict(decision.get("decisions") or {}).items() if bool(value))
+                or "no side effects",
             }
         )
 
@@ -289,7 +275,9 @@ def render_runtime_guardrails_card(*, dismiss_key: str = "dismiss-runtime-guardr
             st.rerun()
 
 
-def record_turn_inspector_from_runtime_result(*, thread_id: str, prompt: str, runtime_result: dict, view: ThreadView) -> None:
+def record_turn_inspector_from_runtime_result(
+    *, thread_id: str, prompt: str, runtime_result: dict, view: ThreadView
+) -> None:
     normalized_thread = str(thread_id or "default")
     prompt_text = str(prompt or "").strip()
     if prompt_text:
@@ -335,9 +323,13 @@ def record_turn_inspector_from_runtime_result(*, thread_id: str, prompt: str, ru
     turn_graph = dict(view.turn_graph or {})
     events_by_type = dict(turn_graph.get("events_by_type") or {})
     if _event_presence(events_by_type.get("photo_request")):
-        record_turn_timeline_event(thread_id=normalized_thread, event_type="photo_request", summary="photo effect requested")
+        record_turn_timeline_event(
+            thread_id=normalized_thread, event_type="photo_request", summary="photo effect requested"
+        )
     if _event_presence(events_by_type.get("tts_request")):
-        record_turn_timeline_event(thread_id=normalized_thread, event_type="tts_request", summary="tts effect requested")
+        record_turn_timeline_event(
+            thread_id=normalized_thread, event_type="tts_request", summary="tts effect requested"
+        )
 
     reply = str(runtime_result.get("reply") or "").strip()
     if reply:
@@ -392,11 +384,7 @@ def render_agentic_trace(runtime_result: dict) -> None:
 
 def render_turn_inspector(*, thread_id: str, view: ThreadView) -> None:
     normalized_thread = str(thread_id or "default")
-    timeline = [
-        item
-        for item in runtime_turn_timeline()
-        if str(item.get("thread_id") or "") == normalized_thread
-    ]
+    timeline = [item for item in runtime_turn_timeline() if str(item.get("thread_id") or "") == normalized_thread]
     thinking = dict(view.thinking or {})
     decision = dict(view.decision or {})
     if not timeline and not thinking and not decision:
@@ -453,10 +441,12 @@ def render_turn_inspector(*, thread_id: str, view: ThreadView) -> None:
                 stage_snapshot = dict(persisted_stage_diagnostics.get(stage_name) or {})
                 if stage_snapshot:
                     guard_items = list(stage_snapshot.get("guards") or [])
-                    guard_text = ", ".join(
-                        f"{item.get('name')}={'ok' if item.get('passed') else 'blocked'}"
-                        for item in guard_items
-                    ) or "none"
+                    guard_text = (
+                        ", ".join(
+                            f"{item.get('name')}={'ok' if item.get('passed') else 'blocked'}" for item in guard_items
+                        )
+                        or "none"
+                    )
                     emit_text = ", ".join(stage_snapshot.get("allowed_emits") or []) or "none"
                     next_text = ", ".join(stage_snapshot.get("allowed_next") or []) or "end"
                     observed_text = ", ".join(stage_snapshot.get("observed_runtime_emits") or []) or "none observed"
@@ -553,7 +543,9 @@ def get_runtime() -> StreamlitRuntime:
 
 
 def process_prompt_via_runtime(*, thread_id: str, prompt: str, attachments: list[dict] | None = None) -> dict:
-    return interaction_controller.process_prompt_via_runtime(thread_id=thread_id, prompt=prompt, attachments=attachments)
+    return interaction_controller.process_prompt_via_runtime(
+        thread_id=thread_id, prompt=prompt, attachments=attachments
+    )
 
 
 def emit_voice_runtime_ledger_event(event_type: str, payload: dict) -> None:
@@ -631,7 +623,7 @@ def build_chat_attachments_from_uploads(uploaded_files):
                     "name": str(getattr(uploaded_file, "name", "image")),
                     "mime_type": mime_type,
                     "image_b64": base64.b64encode(raw_bytes).decode("utf-8"),
-                    "note": f"Tony uploaded {str(getattr(uploaded_file, 'name', 'an image'))}",
+                    "note": f"Tony uploaded {getattr(uploaded_file, 'name', 'an image')!s}",
                 }
             )
             continue
@@ -801,7 +793,9 @@ def _render_voice_capture_layer(controller: VoiceSessionController, voice: dict,
     selected_device = st.selectbox(
         "Input device ID",
         options=known_devices,
-        index=known_devices.index(str(voice.get("last_used_device") or "default")) if str(voice.get("last_used_device") or "default") in known_devices else 0,
+        index=known_devices.index(str(voice.get("last_used_device") or "default"))
+        if str(voice.get("last_used_device") or "default") in known_devices
+        else 0,
         key=f"{key_prefix}-device-select",
         help="Persistent WebRTC device ID. Use default unless you need a specific microphone.",
     )
@@ -825,7 +819,11 @@ def _render_voice_capture_layer(controller: VoiceSessionController, voice: dict,
     controller.set_device(selected_device)
 
     if not _WEBRTC_AVAILABLE:
-        audio_label = "Hold mic, speak, release" if str(voice.get("mode") or "push_to_talk") == "push_to_talk" else "Always-listening capture"
+        audio_label = (
+            "Hold mic, speak, release"
+            if str(voice.get("mode") or "push_to_talk") == "push_to_talk"
+            else "Always-listening capture"
+        )
         st.caption("WebRTC unavailable; using Streamlit audio input fallback.")
         clip = st.audio_input(audio_label, key=f"{key_prefix}-audio-fallback")
         if clip is None:
@@ -1097,8 +1095,9 @@ def render_voice_controls(bot: DadBot):
 # ====================== REAL-TIME WEBRTC VOICE CALL ======================
 # ====================== AMBIENT VOICE LISTENER ===========================
 
+
 @ambient_fragment(run_every=2)
-def render_ambient_voice_listener(bot: "DadBot"):
+def render_ambient_voice_listener(bot: DadBot):
     """Hands-free continuous listener fragment — reruns every 2 s automatically.
 
     Uses Streamlit's ``st.fragment(run_every=N)`` to auto-refresh the audio
@@ -1155,7 +1154,7 @@ def render_ambient_voice_listener(bot: "DadBot"):
     # Queue the utterance — main chat tab drains this on its next render
     queue = st.session_state.setdefault("ambient_utterance_queue", [])
     queue.append(transcript_text.strip())
-    st.toast(f"Dad heard: \"{transcript_text[:60]}\"", icon="🎙️")
+    st.toast(f'Dad heard: "{transcript_text[:60]}"', icon="🎙️")
     persist_voice_profile_if_changed(bot, voice)
 
 
@@ -1168,7 +1167,7 @@ _WEBRTC_EXPERIMENTAL_ENABLED = str(os.environ.get("DADBOT_ENABLE_EXPERIMENTAL_WE
 
 
 @maybe_fragment
-def render_realtime_voice_call(bot: "DadBot"):
+def render_realtime_voice_call(bot: DadBot):
     """Live, hands-free two-way voice call powered by WebRTC + faster-whisper STT + Piper/pyttsx3 TTS."""
     controller = get_voice_session_controller(bot)
     voice = controller.voice_config
@@ -1182,10 +1181,7 @@ def render_realtime_voice_call(bot: "DadBot"):
         return
 
     if not _WEBRTC_AVAILABLE:
-        st.info(
-            "Install `streamlit-webrtc` to enable real-time voice calls:\n"
-            "```\npip install streamlit-webrtc\n```"
-        )
+        st.info("Install `streamlit-webrtc` to enable real-time voice calls:\n```\npip install streamlit-webrtc\n```")
         return
 
     if not voice.get("enabled", False):
@@ -1195,19 +1191,21 @@ def render_realtime_voice_call(bot: "DadBot"):
     st.subheader("📞 Talk to Dad — Live")
     st.caption("Hands-free, real-time voice conversation. Uses your mic → STT → Dad → TTS pipeline.")
 
-    known_devices = _voice_known_devices(voice, controller.runtime_state if isinstance(controller.runtime_state, dict) else {})
+    known_devices = _voice_known_devices(
+        voice, controller.runtime_state if isinstance(controller.runtime_state, dict) else {}
+    )
     selected_device = st.selectbox(
         "Realtime call input device ID",
         options=known_devices,
-        index=known_devices.index(str(voice.get("last_used_device") or "default")) if str(voice.get("last_used_device") or "default") in known_devices else 0,
+        index=known_devices.index(str(voice.get("last_used_device") or "default"))
+        if str(voice.get("last_used_device") or "default") in known_devices
+        else 0,
         key="webrtc-call-device",
     )
     controller.set_device(selected_device)
     _persist_known_devices(voice, known_devices)
 
-    rtc_config = WebRtcRTCConfiguration(
-        {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
-    )
+    rtc_config = WebRtcRTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
 
     media_audio: dict | bool = True
     if str(selected_device or "default") != "default":
@@ -1313,13 +1311,9 @@ def render_reply_tts(bot: DadBot, reply_text):
 
     cache = st.session_state.setdefault("voice_tts_cache", {})
     key = hashlib.sha1(
-        (
-            text
-            + "|"
-            + str(voice.get("tts_voice") or "warm_dad")
-            + "|"
-            + str(int(voice.get("tts_rate") or 0))
-        ).encode("utf-8")
+        (text + "|" + str(voice.get("tts_voice") or "warm_dad") + "|" + str(int(voice.get("tts_rate") or 0))).encode(
+            "utf-8"
+        )
     ).hexdigest()
 
     audio_bytes = cache.get(key)
@@ -1460,16 +1454,16 @@ def inject_custom_css(preferences):
         f"""
         <style>
         :root {{
-            --dad-primary: {palette['primary']};
-            --dad-accent: {palette['accent']};
-            --dad-bg: {palette['bg']};
-            --dad-surface: {palette['surface']};
-            --dad-surface-alt: {palette['surface_alt']};
-            --dad-text: {palette['text']};
-            --dad-muted: {palette['muted']};
-            --dad-border: {palette['border']};
-            --dad-hero-start: {palette['hero_start']};
-            --dad-hero-end: {palette['hero_end']};
+            --dad-primary: {palette["primary"]};
+            --dad-accent: {palette["accent"]};
+            --dad-bg: {palette["bg"]};
+            --dad-surface: {palette["surface"]};
+            --dad-surface-alt: {palette["surface_alt"]};
+            --dad-text: {palette["text"]};
+            --dad-muted: {palette["muted"]};
+            --dad-border: {palette["border"]};
+            --dad-hero-start: {palette["hero_start"]};
+            --dad-hero-end: {palette["hero_end"]};
             --dad-font-scale: {font_scale};
             --dad-shadow-soft: 0 12px 28px rgba(15, 23, 42, 0.10);
             --dad-shadow-card: 0 16px 32px rgba(15, 23, 42, 0.14);
@@ -1526,7 +1520,7 @@ def render_hero(bot: DadBot, active_thread: dict):
             <p style="margin:0.75rem 0 0; font-size:0.92rem; opacity:0.9;">
                 <span style="display:inline-block; width:11px; height:11px; border-radius:50%; background:{indicator_color}; vertical-align:middle; margin-right:8px;"></span>
                 Ollama {indicator_text} • Mood: <strong>{mood}</strong><br>
-                Thread: <strong>{active_thread.get('title', 'General Chat')}</strong>
+                Thread: <strong>{active_thread.get("title", "General Chat")}</strong>
             </p>
         </div>
         """,
@@ -1543,8 +1537,7 @@ def render_status_strip(bot: DadBot):
         (str(living["counts"]["proactive_queue"]), "Queued check-ins"),
     ]
     card_markup = "".join(
-        f'<div class="status-card"><strong>{value}</strong><span>{label}</span></div>'
-        for value, label in cards
+        f'<div class="status-card"><strong>{value}</strong><span>{label}</span></div>' for value, label in cards
     )
     st.markdown(f'<div class="status-strip">{card_markup}</div>', unsafe_allow_html=True)
 
@@ -1629,13 +1622,21 @@ def render_mobile_tab(bot: DadBot):
                 if emit_generated_photo_message(bot, str(api.active_thread_id or "default")):
                     st.rerun()
 
-        selected_thread_label = st.selectbox(
-            "Jump to thread without opening the sidebar",
-            options=list(thread_labels.keys()),
-            index=list(thread_labels.keys()).index(current_selection) if current_selection in thread_labels else 0,
-        ) if thread_labels else None
+        selected_thread_label = (
+            st.selectbox(
+                "Jump to thread without opening the sidebar",
+                options=list(thread_labels.keys()),
+                index=list(thread_labels.keys()).index(current_selection) if current_selection in thread_labels else 0,
+            )
+            if thread_labels
+            else None
+        )
         selected_thread_id = thread_labels.get(selected_thread_label) if selected_thread_label else None
-        if st.button("Switch to Selected Thread", use_container_width=True, disabled=not selected_thread_id or selected_thread_id == api.active_thread_id):
+        if st.button(
+            "Switch to Selected Thread",
+            use_container_width=True,
+            disabled=not selected_thread_id or selected_thread_id == api.active_thread_id,
+        ):
             switch_active_thread(selected_thread_id)
             st.rerun()
 
@@ -1795,7 +1796,9 @@ def first_run_wizard(bot: DadBot):
         )
         backend_key = "piper" if "Piper" in voice_backend else "pyttsx3"
         if backend_key == "piper":
-            st.info("Piper requires the `piper` binary and an `.onnx` model file. See Preferences → Voice to configure after setup.")
+            st.info(
+                "Piper requires the `piper` binary and an `.onnx` model file. See Preferences → Voice to configure after setup."
+            )
         if st.button("Next →", type="primary", use_container_width=True):
             api.update_voice_profile({"tts_backend": backend_key})
             st.session_state["onboarding_step"] = 3
@@ -1807,7 +1810,7 @@ def first_run_wizard(bot: DadBot):
         custom_prompt = st.text_area(
             "Avatar description",
             value="Photorealistic warm portrait of a friendly 56-year-old father with kind eyes, "
-                  "flannel shirt, cozy kitchen background, cinematic lighting",
+            "flannel shirt, cozy kitchen background, cinematic lighting",
         )
         _gen_col, _skip_col = st.columns(2)
         if _gen_col.button("Generate Avatar", type="primary", use_container_width=True):
@@ -1818,7 +1821,9 @@ def first_run_wizard(bot: DadBot):
                 if api.current_avatar_exists():
                     st.image(str(api.avatar_path()), width=240)
             else:
-                st.warning("Could not generate avatar right now – using emoji fallback. You can try again from Preferences.")
+                st.warning(
+                    "Could not generate avatar right now – using emoji fallback. You can try again from Preferences."
+                )
             st.session_state["onboarding_step"] = 4
             st.rerun()
         if _skip_col.button("Skip →", use_container_width=True):
@@ -1901,7 +1906,9 @@ def generate_dad_photo():
             return None
 
 
-def emit_generated_photo_message(bot: DadBot, thread_id: str, message: str = "Here's a quick photo I took for you, buddy. Love you.") -> bool:
+def emit_generated_photo_message(
+    bot: DadBot, thread_id: str, message: str = "Here's a quick photo I took for you, buddy. Love you."
+) -> bool:
     photo = generate_dad_photo()
     if not photo:
         return False
@@ -2110,7 +2117,11 @@ def render_chat_tab(bot: DadBot, active_thread: dict):
             for attachment in pending_attachments:
                 if attachment.get("type") == "image":
                     try:
-                        st.image(base64.b64decode(attachment.get("image_b64", "")), caption=attachment.get("name") or "Uploaded image", use_container_width=True)
+                        st.image(
+                            base64.b64decode(attachment.get("image_b64", "")),
+                            caption=attachment.get("name") or "Uploaded image",
+                            use_container_width=True,
+                        )
                     except Exception:
                         st.caption("[Uploaded image unavailable]")
                 if attachment.get("type") == "document":
@@ -2158,7 +2169,11 @@ def render_chat_tab(bot: DadBot, active_thread: dict):
                     latest_assistant = latest_messages[-1] if latest_messages else {}
                     for att in list(latest_assistant.get("attachments") or assistant_attachments):
                         if att.get("type") == "image":
-                            st.image(base64.b64decode(att.get("data_b64", "")), caption=att.get("note") or "Dad took a quick photo for you", use_container_width=True)
+                            st.image(
+                                base64.b64decode(att.get("data_b64", "")),
+                                caption=att.get("note") or "Dad took a quick photo for you",
+                                use_container_width=True,
+                            )
                     if should_end:
                         api.mark_chat_thread_closed(closed=True)
                     api.sync_active_thread_snapshot()
@@ -2167,7 +2182,10 @@ def render_chat_tab(bot: DadBot, active_thread: dict):
                     if graph_fallback_after_turn.get("active"):
                         mode = str(graph_fallback_after_turn.get("degraded_mode") or "legacy").replace("_", " ")
                         message = str(graph_fallback_after_turn.get("message") or "").strip()
-                        st.warning(message or f"Graph degraded and switched to {mode}. Dad continued with legacy turn processing.")
+                        st.warning(
+                            message
+                            or f"Graph degraded and switched to {mode}. Dad continued with legacy turn processing."
+                        )
                 except Exception as exc:
                     record_runtime_rejection(exc, action="chat_turn")
                     record_turn_timeline_event(
@@ -2301,7 +2319,9 @@ def render_status_tab(bot: DadBot):
             format_func=lambda value: "Soft reset" if value == "soft" else "Full purge",
             key="status-reset-mode",
         )
-        if st.button("Reset session context", use_container_width=True, disabled=not can_purge, key="status-reset-session"):
+        if st.button(
+            "Reset session context", use_container_width=True, disabled=not can_purge, key="status-reset-session"
+        ):
             result = purge_session_context(bot, mode=reset_mode)
             if result.get("mode") == "soft":
                 st.success("Soft reset complete. Cleared active history while preserving one short context summary.")
@@ -2434,7 +2454,9 @@ def render_sidebar(bot: DadBot):
                 f"dadbot-local-services is ready with {int(local_mcp.get('tool_count', 0) or 0)} tools and {state_entries} local state {entry_label}."
             )
         else:
-            st.caption("Install the optional MCP dependency to expose Dad's local reminder, calendar, email, and state tools.")
+            st.caption(
+                "Install the optional MCP dependency to expose Dad's local reminder, calendar, email, and state tools."
+            )
         st.caption(f"Narrative memories distilled: {int(shell.get('narrative_memory_count', 0) or 0)}")
 
     with st.container(border=True):
@@ -2448,9 +2470,7 @@ def render_sidebar(bot: DadBot):
     st.subheader("Threads")
     all_threads = list(api.list_chat_threads() or [])
     open_only = st.checkbox("Show open threads only", value=True, key="sidebar-thread-open-only")
-    visible_threads = [
-        thread for thread in all_threads if (not open_only or not thread.get("closed"))
-    ]
+    visible_threads = [thread for thread in all_threads if (not open_only or not thread.get("closed"))]
     visible_threads = visible_threads or all_threads
     thread_labels = []
     label_to_thread_id = {}
@@ -2480,7 +2500,9 @@ def render_sidebar(bot: DadBot):
         ):
             switch_active_thread(selected_thread_id)
             st.rerun()
-        selected_thread = next((t for t in visible_threads if str(t.get("thread_id") or "") == str(selected_thread_id or "")), {})
+        selected_thread = next(
+            (t for t in visible_threads if str(t.get("thread_id") or "") == str(selected_thread_id or "")), {}
+        )
         st.caption(str(selected_thread.get("last_message") or "Fresh chat"))
     st.subheader("Quick actions")
     col1, col2 = st.columns(2)
@@ -2534,16 +2556,36 @@ def render_mobile_bottom_navigation():
     st.markdown("<div class='dad-mobile-bottom-nav'>", unsafe_allow_html=True)
     active_view = state_manager.active_primary_view()
     nav_cols = st.columns(4)
-    if nav_cols[0].button("💬 Chat", key="bottom-nav-chat", use_container_width=True, type="primary" if active_view == "chat" else "secondary"):
+    if nav_cols[0].button(
+        "💬 Chat",
+        key="bottom-nav-chat",
+        use_container_width=True,
+        type="primary" if active_view == "chat" else "secondary",
+    ):
         state_manager.set_primary_view("chat")
         st.rerun()
-    if nav_cols[1].button("🩺 Status", key="bottom-nav-status", use_container_width=True, type="primary" if active_view == "status" else "secondary"):
+    if nav_cols[1].button(
+        "🩺 Status",
+        key="bottom-nav-status",
+        use_container_width=True,
+        type="primary" if active_view == "status" else "secondary",
+    ):
         state_manager.set_primary_view("status")
         st.rerun()
-    if nav_cols[2].button("🛠️ Workshop", key="bottom-nav-workshop", use_container_width=True, type="primary" if active_view == "workshop" else "secondary"):
+    if nav_cols[2].button(
+        "🛠️ Workshop",
+        key="bottom-nav-workshop",
+        use_container_width=True,
+        type="primary" if active_view == "workshop" else "secondary",
+    ):
         state_manager.set_primary_view("workshop")
         st.rerun()
-    if nav_cols[3].button("🎙️ Voice", key="bottom-nav-voice", use_container_width=True, type="primary" if active_view == "voice" else "secondary"):
+    if nav_cols[3].button(
+        "🎙️ Voice",
+        key="bottom-nav-voice",
+        use_container_width=True,
+        type="primary" if active_view == "voice" else "secondary",
+    ):
         state_manager.set_primary_view("voice")
         st.rerun()
     st.markdown("</div>", unsafe_allow_html=True)

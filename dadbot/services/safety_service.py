@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import logging
 from typing import Any
@@ -67,6 +67,9 @@ class SafetyService:
             try:
                 reply = self.bot.reply_finalization.finalize(reply, mood, user_input)
             except Exception as exc:
-                logger.debug("SafetyService: reply finalization (guarded) failed: %s", exc)
+                logger.debug(
+                    "SafetyService: reply finalization (guarded) failed: %s",
+                    exc,
+                )
 
         return (reply, *candidate[1:])

@@ -148,8 +148,7 @@ class SQLiteSemanticIndex(SemanticIndexBackend):
             return {}
         return self.with_connection(
             lambda connection: {
-                row[0]: row[1]
-                for row in connection.execute("SELECT summary_key, content_hash FROM semantic_memories")
+                row[0]: row[1] for row in connection.execute("SELECT summary_key, content_hash FROM semantic_memories")
             }
         )
 
@@ -248,7 +247,7 @@ class SQLiteSemanticIndex(SemanticIndexBackend):
                 f"""
                 SELECT summary_key, summary, category, mood, updated_at, embedding_json
                 FROM semantic_memories
-                WHERE {' AND '.join(where_clauses)}
+                WHERE {" AND ".join(where_clauses)}
                 ORDER BY updated_at DESC, summary_key ASC
                 LIMIT ?
                 """,
@@ -331,7 +330,9 @@ class SQLiteSemanticIndex(SemanticIndexBackend):
     def count(self):
         if not self.db_path.exists():
             return 0
-        row = self.with_connection(lambda connection: connection.execute("SELECT COUNT(*) FROM semantic_memories").fetchone())
+        row = self.with_connection(
+            lambda connection: connection.execute("SELECT COUNT(*) FROM semantic_memories").fetchone()
+        )
         return int(row[0]) if row else 0
 
     def clear(self):
@@ -421,15 +422,9 @@ class PGVectorSemanticIndex(SemanticIndexBackend):
                     )
                     """
                 )
-                cursor.execute(
-                    f"CREATE INDEX IF NOT EXISTS idx_{self.table}_updated_at ON {self.table}(updated_at)"
-                )
-                cursor.execute(
-                    f"CREATE INDEX IF NOT EXISTS idx_{self.table}_category ON {self.table}(category)"
-                )
-                cursor.execute(
-                    f"CREATE INDEX IF NOT EXISTS idx_{self.table}_mood ON {self.table}(mood)"
-                )
+                cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{self.table}_updated_at ON {self.table}(updated_at)")
+                cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{self.table}_category ON {self.table}(category)")
+                cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{self.table}_mood ON {self.table}(mood)")
                 cursor.execute(
                     f"CREATE INDEX IF NOT EXISTS idx_{self.table}_category_updated_at ON {self.table}(category, updated_at DESC)"
                 )
@@ -640,7 +635,7 @@ class PGVectorSemanticIndex(SemanticIndexBackend):
                     f"""
                     SELECT summary_key, summary, category, mood, updated_at, embedding_json
                     FROM {self.table}
-                    WHERE {' AND '.join(where_clauses)}
+                    WHERE {" AND ".join(where_clauses)}
                     ORDER BY {order_clause}
                     LIMIT %s
                     """,

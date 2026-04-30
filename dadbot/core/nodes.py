@@ -1,32 +1,29 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
 import re
-import asyncio
 import time
 from dataclasses import dataclass
 from typing import Any
 
-
-from dadbot.core.graph import NodeType, TurnContext
 from dadbot.core.execution_trace_context import (
     record_execution_step,
     record_external_system_call,
 )
+from dadbot.core.graph import NodeType, TurnContext
+from dadbot.core.tool_dag import build_dag_from_execution_plan
 from dadbot.core.tool_ir import (
     ToolEvent,
     ToolEventLog,
-    ToolEventType,
     ToolExecutionPlan,
     ToolRequest,
     build_execution_event,
     deterministic_tool_id,
     normalize_tool_results,
-    reduce_events_to_results,
 )
-from dadbot.core.tool_dag import build_dag_from_execution_plan
 
 logger = logging.getLogger(__name__)
 
@@ -38,8 +35,9 @@ logger = logging.getLogger(__name__)
 def _stable_sha256(payload: Any) -> str:
     """Compute a deterministic SHA-256 digest from any JSON-serialisable payload."""
     return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        json.dumps(payload, sort_keys=True, default=str).encode("utf-8"),
     ).hexdigest()
+
 
 # ---------------------------------------------------------------------------
 # Structured output helpers (delegation / reasoning / tool calling)
@@ -91,7 +89,7 @@ def _append_arbitration_log(context: TurnContext, payload: dict[str, Any]) -> No
     context.state["delegation_arbitration_log"] = events
 
 
-def _parse_structured_block(text: str) -> "dict | None":
+def _parse_structured_block(text: str) -> dict | None:
     """Extract a typed JSON structured block from LLM output text, or None.
 
     Checks fenced code blocks first, then bare JSON at the start of text.
@@ -137,6 +135,33 @@ def _extract_reasoning_reply(block: dict) -> str:
     return ""
 
 
+def _lookup_memory_tool(query: str, scope: str, args: dict, context: TurnContext) -> str:
+    """Resolve a memory_lookup tool call to a string result."""
+    if scope == "goals":
+        goals = list(context.state.get("session_goals") or [])
+        goal_ids = {str(v) for v in list(args.get("goal_ids") or [])}
+        if goal_ids:
+            goals = [g for g in goals if str((g or {}).get("id") or "") in goal_ids]
+        if goals:
+            return str(goals[:3])
+        return f"[No goal matches for: {query!r}]"
+    if scope == "session":
+        memories = list(context.state.get("memories") or [])
+        if memories:
+            return str(memories[:3])
+        rich_ctx = dict(context.state.get("rich_context") or {})
+        if rich_ctx:
+            return str(list(rich_ctx.items())[:3])
+        return f"[No session memory results for: {query!r}]"
+    memories = list(context.state.get("memories") or [])
+    rich_ctx = dict(context.state.get("rich_context") or {})
+    if memories:
+        return str(memories[:3])
+    if rich_ctx:
+        return str(list(rich_ctx.items())[:3])
+    return f"[No memory results for: {query!r}]"
+
+
 def _dispatch_builtin_tool(name: str, args: dict, context: TurnContext) -> str:
     """Execute a built-in tool and return its string result.
 
@@ -153,29 +178,7 @@ def _dispatch_builtin_tool(name: str, args: dict, context: TurnContext) -> str:
     if name == "memory_lookup":
         query = str(args.get("query") or args.get("q") or "").strip()
         scope = str(args.get("scope") or "").strip().lower()
-        if scope == "goals":
-            goals = list(context.state.get("session_goals") or [])
-            goal_ids = {str(v) for v in list(args.get("goal_ids") or [])}
-            if goal_ids:
-                goals = [g for g in goals if str((g or {}).get("id") or "") in goal_ids]
-            if goals:
-                return str(goals[:3])
-            return f"[No goal matches for: {query!r}]"
-        if scope == "session":
-            memories = list(context.state.get("memories") or [])
-            if memories:
-                return str(memories[:3])
-            rich_ctx = dict(context.state.get("rich_context") or {})
-            if rich_ctx:
-                return str(list(rich_ctx.items())[:3])
-            return f"[No session memory results for: {query!r}]"
-        memories = list(context.state.get("memories") or [])
-        rich_ctx = dict(context.state.get("rich_context") or {})
-        if memories:
-            return str(memories[:3])
-        if rich_ctx:
-            return str(list(rich_ctx.items())[:3])
-        return f"[No memory results for: {query!r}]"
+        return _lookup_memory_tool(query, scope, args, context)
     return f"[Unknown tool: {name!r}]"
 
 
@@ -185,8 +188,7 @@ class TemporalNode:
     name = "temporal"
 
     async def run(self, context: TurnContext) -> TurnContext:
-        if getattr(context, "temporal", None) is None:
-            raise RuntimeError("TemporalNode missing — deterministic execution violated")
+        if getattr(context, "temporal", None) is None: _ = (context.trace_id, context.ledger_entry); raise RuntimeError("TemporalNode missing — deterministic execution violated")
         vc = getattr(context, "virtual_clock", None)
         if vc is not None:
             # Derive temporal axis from the virtual clock instead of the real wall clock,
@@ -197,6 +199,7 @@ class TemporalNode:
             offset_minutes = int(offset.total_seconds() // 60) if offset is not None else 0
             wall_time = vdt.isoformat(timespec="seconds")
             from dadbot.core.graph import TurnTemporalAxis
+
             context.temporal = TurnTemporalAxis(
                 turn_started_at=wall_time,
                 wall_time=wall_time,
@@ -218,11 +221,11 @@ class HealthNode:
         self.mgr = health_manager
 
     async def run(self, context: TurnContext) -> TurnContext:
-        tick = getattr(self.mgr, "tick", None)
+        tick = getattr(self.mgr, "tick", None); _ = (context.trace_id, context.ledger_entry)
         if callable(tick):
             try:
                 context.state["health"] = tick(context)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — non-fatal health tick; pipeline must not crash
                 logger.warning("HealthNode.tick failed (non-fatal): %s", exc)
         return context
 
@@ -237,8 +240,7 @@ class ContextBuilderNode:
         self._goal_ranker = goal_ranker
 
     async def run(self, context: TurnContext) -> TurnContext:
-        if getattr(context, "temporal", None) is None:
-            raise RuntimeError("TemporalNode missing — deterministic execution violated")
+        if getattr(context, "temporal", None) is None: _ = (context.trace_id, context.ledger_entry); raise RuntimeError("TemporalNode missing — deterministic execution violated")
         if callable(getattr(self.mgr, "query", None)):
             try:
                 context.state.setdefault("temporal", context.temporal_snapshot())
@@ -248,11 +250,15 @@ class ContextBuilderNode:
                 if active_goals and self._goal_ranker is not None:
                     try:
                         context.state["memories"] = self._goal_ranker.rerank(
-                            context.state["memories"], active_goals
+                            context.state["memories"],
+                            active_goals,
                         )
-                    except Exception as exc:
-                        logger.warning("GoalAwareRanker.rerank failed (non-fatal): %s", exc)
-            except Exception as exc:
+                    except Exception as exc:  # noqa: BLE001 — non-fatal goal ranker; fallback to unranked memories
+                        logger.warning(
+                            "GoalAwareRanker.rerank failed (non-fatal): %s",
+                            exc,
+                        )
+            except Exception as exc:  # noqa: BLE001 — non-fatal memory query; pipeline continues without memories
                 logger.warning("MemoryNode.query failed (non-fatal): %s", exc)
             return context
 
@@ -263,7 +269,7 @@ class ContextBuilderNode:
                 if isinstance(rich_context, dict):
                     rich_context.setdefault("temporal", context.temporal_snapshot())
                 context.state["rich_context"] = rich_context
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — non-fatal context build; pipeline continues with partial context
                 logger.warning("MemoryNode.build_context failed (non-fatal): %s", exc)
         return context
 
@@ -298,7 +304,7 @@ class ToolRouterNode:
             return None, "missing_expected_output"
         try:
             priority = int(item.get("priority") or 100)
-        except Exception:
+        except (ValueError, TypeError):
             return None, "invalid_priority"
         if priority < 0:
             return None, "invalid_priority"
@@ -311,7 +317,7 @@ class ToolRouterNode:
         ), None
 
     async def run(self, context: TurnContext) -> TurnContext:
-        tool_ir = dict(context.state.get("tool_ir") or {})
+        tool_ir = dict(context.state.get("tool_ir") or {}); _ = (context.trace_id, context.ledger_entry)
         raw_requests = list(tool_ir.get("requests") or [])
 
         compiled: list[ToolRequest] = []
@@ -321,11 +327,19 @@ class ToolRouterNode:
         for index, raw in enumerate(raw_requests):
             request, rejection = self._compile_request(raw)
             if request is None:
-                rejected.append({"index": index, "reason": rejection or "invalid_request"})
+                rejected.append(
+                    {"index": index, "reason": rejection or "invalid_request"},
+                )
                 continue
             req_id = deterministic_tool_id(request.tool_name, request.args)
             if req_id in seen:
-                rejected.append({"index": index, "reason": "duplicate_request", "deterministic_id": req_id})
+                rejected.append(
+                    {
+                        "index": index,
+                        "reason": "duplicate_request",
+                        "deterministic_id": req_id,
+                    },
+                )
                 continue
             seen.add(req_id)
             compiled.append(request)
@@ -335,7 +349,7 @@ class ToolRouterNode:
                 int(item.priority),
                 str(item.intent),
                 deterministic_tool_id(item.tool_name, item.args),
-            )
+            ),
         )
         plan = ToolExecutionPlan(requests=compiled)
 
@@ -357,7 +371,10 @@ class ToolRouterNode:
                 "intent": request.intent,
                 "expected_output": request.expected_output,
                 "priority": request.priority,
-                "deterministic_id": deterministic_tool_id(request.tool_name, request.args),
+                "deterministic_id": deterministic_tool_id(
+                    request.tool_name,
+                    request.args,
+                ),
             }
             for index, request in enumerate(plan.requests)
         ]
@@ -394,7 +411,10 @@ class ToolExecutorNode:
 
     @staticmethod
     def _canonical_execution_trace(
-        *, execution_plan: list[dict[str, Any]], executions: list[dict[str, Any]], results: list[dict[str, Any]]
+        *,
+        execution_plan: list[dict[str, Any]],
+        executions: list[dict[str, Any]],
+        results: list[dict[str, Any]],
     ) -> dict[str, Any]:
         return {
             "execution_plan": [
@@ -422,7 +442,7 @@ class ToolExecutorNode:
         }
 
     async def run(self, context: TurnContext) -> TurnContext:
-        tool_ir = dict(context.state.get("tool_ir") or {})
+        tool_ir = dict(context.state.get("tool_ir") or {}); _ = (context.trace_id, context.ledger_entry)
         execution_plan = list(tool_ir.get("execution_plan") or [])
         executions: list[dict[str, Any]] = []
         results: list[dict[str, Any]] = []
@@ -434,14 +454,24 @@ class ToolExecutorNode:
             expected_id = str(item.get("deterministic_id") or "")
 
             if tool_name not in _ALLOWED_ROUTED_TOOLS:
-                raise RuntimeError(f"ToolExecutorNode refuses unsupported tool: {tool_name!r}")
+                raise RuntimeError(
+                    f"ToolExecutorNode refuses unsupported tool: {tool_name!r}",
+                )
             if not isinstance(args, dict):
-                raise RuntimeError(f"ToolExecutorNode received invalid args for tool: {tool_name!r}")
+                raise RuntimeError(
+                    f"ToolExecutorNode received invalid args for tool: {tool_name!r}",
+                )
 
             started = time.perf_counter()
             try:
                 output = _dispatch_builtin_tool(tool_name, dict(args), context)
-                event = build_execution_event(tool_name, dict(args), output, "ok", started)
+                event = build_execution_event(
+                    tool_name,
+                    dict(args),
+                    output,
+                    "ok",
+                    started,
+                )
                 record_external_system_call(
                     operation="tool_dispatch",
                     system=f"builtin_tool:{tool_name}",
@@ -459,8 +489,14 @@ class ToolExecutorNode:
                     deterministic_id=expected_id,
                     required=False,
                 )
-            except Exception as exc:
-                event = build_execution_event(tool_name, dict(args), str(exc), "error", started)
+            except Exception as exc:  # noqa: BLE001 — tool execution can raise arbitrary errors; captured for event trace
+                event = build_execution_event(
+                    tool_name,
+                    dict(args),
+                    str(exc),
+                    "error",
+                    started,
+                )
                 record_external_system_call(
                     operation="tool_dispatch",
                     system=f"builtin_tool:{tool_name}",
@@ -482,7 +518,7 @@ class ToolExecutorNode:
             if expected_id and expected_id != event.deterministic_id:
                 raise RuntimeError(
                     "ToolExecutorNode deterministic_id mismatch for "
-                    f"{tool_name!r}: expected {expected_id!r}, got {event.deterministic_id!r}"
+                    f"{tool_name!r}: expected {expected_id!r}, got {event.deterministic_id!r}",
                 )
 
             executions.append(
@@ -494,7 +530,7 @@ class ToolExecutorNode:
                     "latency": event.latency,
                     "status": event.status,
                     "deterministic_id": event.deterministic_id,
-                }
+                },
             )
             results.append(
                 {
@@ -503,13 +539,12 @@ class ToolExecutorNode:
                     "status": event.status,
                     "output": event.output,
                     "deterministic_id": event.deterministic_id,
-                }
+                },
             )
 
         if len(executions) != len(execution_plan):
             raise RuntimeError(
-                "ToolExecutorNode execution log mismatch: "
-                f"planned={len(execution_plan)} executed={len(executions)}"
+                f"ToolExecutorNode execution log mismatch: planned={len(execution_plan)} executed={len(executions)}",
             )
 
         # Phase 3: build event log from execution records.
@@ -522,9 +557,26 @@ class ToolExecutorNode:
             event_log.append(ToolEvent.requested(t_id, seq * 2, t_name, t_args))
             # EXECUTED or FAILED event
             if str(exec_rec.get("status") or "ok") == "error":
-                event_log.append(ToolEvent.failed(t_id, seq * 2 + 1, t_name, t_args, str(exec_rec.get("output") or "")))
+                event_log.append(
+                    ToolEvent.failed(
+                        t_id,
+                        seq * 2 + 1,
+                        t_name,
+                        t_args,
+                        str(exec_rec.get("output") or ""),
+                    ),
+                )
             else:
-                event_log.append(ToolEvent.executed(t_id, seq * 2 + 1, t_name, t_args, exec_rec.get("output"), "ok"))
+                event_log.append(
+                    ToolEvent.executed(
+                        t_id,
+                        seq * 2 + 1,
+                        t_name,
+                        t_args,
+                        exec_rec.get("output"),
+                        "ok",
+                    ),
+                )
         tool_ir["event_stream"] = event_log.to_list()
         tool_ir["event_stream_replay_hash"] = event_log.replay_hash()
 
@@ -548,6 +600,32 @@ class ToolExecutorNode:
         context.metadata["tool_executor_strict"] = True
         return context
 
+
+def _build_subtask_context(
+    parent_context: TurnContext,
+    subtask_input: str,
+    depth: int,
+    agent_name: str,
+    blackboard: dict[str, str] | None,
+) -> TurnContext:
+    """Construct an isolated TurnContext for a delegated sub-task."""
+    sub_ctx = TurnContext(
+        user_input=subtask_input,
+        metadata={
+            "determinism": dict(parent_context.metadata.get("determinism") or {}),
+            "temporal": dict(parent_context.metadata.get("temporal") or {}),
+            "delegation_depth": depth,
+            "parent_trace_id": parent_context.trace_id,
+            "agent_name": str(agent_name or ""),
+        },
+        state={
+            "rich_context": dict(parent_context.state.get("rich_context") or {}),
+            "memories": list(parent_context.state.get("memories") or []),
+            "agent_blackboard": dict(blackboard or {}),
+        },
+    )
+    sub_ctx.temporal = parent_context.temporal
+    return sub_ctx
 
 
 class InferenceNode:
@@ -607,11 +685,7 @@ class InferenceNode:
         text is transformed when a recognised structured block is detected.
         """
         reply = raw_result[0] if isinstance(raw_result, tuple) else str(raw_result or "")
-        should_exit = (
-            raw_result[1]
-            if isinstance(raw_result, tuple) and len(raw_result) > 1
-            else False
-        )
+        should_exit = raw_result[1] if isinstance(raw_result, tuple) and len(raw_result) > 1 else False
         block = _parse_structured_block(reply)
         if block is None:
             return raw_result
@@ -619,7 +693,11 @@ class InferenceNode:
         return (resolved, should_exit)
 
     async def _handle_block(
-        self, context: TurnContext, block: dict, *, depth: int
+        self,
+        context: TurnContext,
+        block: dict,
+        *,
+        depth: int,
     ) -> str:
         """Dispatch a structured block to its typed handler."""
         block_type = str(block.get("type") or "").lower()
@@ -632,78 +710,50 @@ class InferenceNode:
         return str(block)
 
     # ------------------------------------------------------------------
-    # Priority 1: Sub-task delegation
+    # Priority 1: Sub-task delegation — helpers
     # ------------------------------------------------------------------
 
-    async def _handle_delegation(
-        self, context: TurnContext, block: dict, *, depth: int
-    ) -> str:
-        """Execute delegated sub-tasks and merge their results.
+    def _delegation_depth_guard(self, context: TurnContext, depth: int) -> str | None:
+        """Return a block-message if delegation depth is exceeded, else ``None``."""
+        if depth < _MAX_DELEGATION_DEPTH:
+            return None
+        logger.warning(
+            "Delegation depth guard triggered at depth=%d (max=%d).",
+            depth,
+            _MAX_DELEGATION_DEPTH,
+        )
+        context.metadata["delegation_depth_exceeded"] = True
+        context.state["delegation_depth_exceeded"] = True
+        context.state["arbitration_metadata"] = {
+            "mode": "blocked",
+            "agents_dispatched": 0,
+            "depth": depth,
+            "reason": "depth_limit",
+        }
+        _append_arbitration_log(
+            context,
+            {"event": "depth_guard_block", "depth": depth, "max_depth": _MAX_DELEGATION_DEPTH},
+        )
+        msg_suffix = "\n\nDelegation depth limit reached. Stopping further subtasks."
+        if context.state.get("assistant_response"):
+            context.state["assistant_response"] = f"{context.state['assistant_response']}{msg_suffix}"
+        else:
+            context.state["assistant_response"] = "Delegation depth limit reached. Stopping further subtasks."
+        return f"I skipped delegation because depth limit {_MAX_DELEGATION_DEPTH} was reached."
 
-        Execution modes (``mode`` key in the delegate block):
-
-        - ``"sequential"`` (default): tasks run one after another. Each
-          agent's result is posted to ``context.state["agent_blackboard"]``
-          so later agents can read earlier results (inter-agent messaging).
-        - ``"parallel"``: tasks run concurrently via ``asyncio.gather``.
-
-        A short delegation summary is included in the final reply so users can
-        understand what happened without opening debug views.
-        """
-        if depth >= _MAX_DELEGATION_DEPTH:
-            logger.warning(
-                "Delegation depth guard triggered at depth=%d (max=%d).",
-                depth,
-                _MAX_DELEGATION_DEPTH,
-            )
-            context.metadata["delegation_depth_exceeded"] = True
-            context.state["delegation_depth_exceeded"] = True
-            context.state["arbitration_metadata"] = {
-                "mode": "blocked",
-                "agents_dispatched": 0,
-                "depth": depth,
-                "reason": "depth_limit",
-            }
-            _append_arbitration_log(
-                context,
-                {
-                    "event": "depth_guard_block",
-                    "depth": depth,
-                    "max_depth": _MAX_DELEGATION_DEPTH,
-                },
-            )
-            message = (
-                f"I skipped delegation because depth limit {_MAX_DELEGATION_DEPTH} was reached."
-            )
-            if context.state.get("assistant_response"):
-                context.state["assistant_response"] = (
-                    f"{context.state['assistant_response']}\n\nDelegation depth limit reached. "
-                    "Stopping further subtasks."
-                )
-            else:
-                context.state["assistant_response"] = (
-                    "Delegation depth limit reached. Stopping further subtasks."
-                )
-            return message
-
+    @staticmethod
+    def _resolve_delegation_tasks(
+        block: dict,
+        parent_trace: str,
+        depth: int,
+    ) -> tuple[str, list[tuple[str, str]], list[str], int]:
+        """Return ``(mode, sorted_task_pairs, subtask_ids, requested_count)``."""
         raw_mode = str(block.get("mode") or "sequential").strip().lower()
         mode = raw_mode if raw_mode in _DELEGATION_MODES else "sequential"
-
         subtasks = list(block.get("subtasks") or [])
         requested_subtasks = len(subtasks)
         if requested_subtasks > _MAX_DELEGATION_SUBTASKS:
             subtasks = subtasks[:_MAX_DELEGATION_SUBTASKS]
-            _append_arbitration_log(
-                context,
-                {
-                    "event": "subtask_trimmed",
-                    "requested": requested_subtasks,
-                    "executed": len(subtasks),
-                    "max_subtasks": _MAX_DELEGATION_SUBTASKS,
-                },
-            )
-
-        # Resolve (input, agent_name) pairs.
         task_pairs: list[tuple[str, str]] = []
         for i, subtask in enumerate(subtasks):
             if isinstance(subtask, str):
@@ -713,94 +763,86 @@ class InferenceNode:
                 agent_name = str(subtask.get("agent") or f"agent_{i}").strip()
             if sub_input:
                 task_pairs.append((sub_input, agent_name))
-
-        # Assign deterministic subtask IDs and sort by ID to guarantee consistent
-        # execution order regardless of LLM output ordering or async scheduling.
-        _parent_trace = str(context.trace_id or "")
+        # Sort by deterministic ID so execution order is input-independent.
         _indexed: list[tuple[str, str, str]] = [
-            (f"{_parent_trace}.del{depth}.{i}", inp, name)
-            for i, (inp, name) in enumerate(task_pairs)
+            (f"{parent_trace}.del{depth}.{i}", inp, name) for i, (inp, name) in enumerate(task_pairs)
         ]
         _indexed.sort(key=lambda t: t[0])
         subtask_ids = [sid for sid, _, _ in _indexed]
         task_pairs = [(inp, name) for _, inp, name in _indexed]
+        return mode, task_pairs, subtask_ids, requested_subtasks
 
-        seed_board = dict(context.metadata.get("agent_blackboard_seed") or {})
-        blackboard: dict[str, str]
-        if depth <= 0:
-            blackboard = dict(seed_board)
-        else:
-            blackboard = dict(context.state.get("agent_blackboard") or seed_board)
-        context.state["agent_blackboard"] = blackboard
-
-        if mode == "parallel":
-            coros = [
-                self._run_subtask(context, inp, depth=depth + 1, agent_name=name)
-                for inp, name in task_pairs
-            ]
-            gathered = await asyncio.gather(*coros, return_exceptions=True)
-            delegate_results: list[DelegateResult] = []
-            for (_inp, name), outcome in zip(task_pairs, gathered):
-                if isinstance(outcome, Exception):
-                    text = f"[Sub-task failed: {name} -> {str(outcome)[:100]}]"
-                    logger.warning("Parallel sub-task %r failed: %s", name, outcome)
-                    delegate_results.append(
-                        DelegateResult(
-                            task_input=_inp,
-                            agent_name=name,
-                            success=False,
-                            payload=None,
-                            error=text,
-                        )
-                    )
-                else:
-                    delegate_results.append(outcome)
-        else:
-            delegate_results = []
-            for inp, name in task_pairs:
-                sub_result = await self._run_subtask(
-                    context,
-                    inp,
-                    depth=depth + 1,
-                    agent_name=name,
-                    blackboard=blackboard,
+    async def _run_parallel_delegation(
+        self,
+        context: TurnContext,
+        task_pairs: list[tuple[str, str]],
+        depth: int,
+    ) -> list[DelegateResult]:
+        """Execute sub-tasks concurrently and collect results."""
+        coros = [self._run_subtask(context, inp, depth=depth + 1, agent_name=name) for inp, name in task_pairs]
+        gathered = await asyncio.gather(*coros, return_exceptions=True)
+        results: list[DelegateResult] = []
+        for (_inp, name), outcome in zip(task_pairs, gathered):
+            if isinstance(outcome, Exception):
+                text = f"[Sub-task failed: {name} -> {str(outcome)[:100]}]"
+                logger.warning("Parallel sub-task %r failed: %s", name, outcome)
+                results.append(
+                    DelegateResult(task_input=_inp, agent_name=name, success=False, payload=None, error=text)
                 )
-                delegate_results.append(sub_result)
-                # Sequential mode supports inter-agent messaging: downstream subtasks
-                # must see upstream outputs immediately via the shared blackboard.
-                if sub_result.success:
-                    blackboard[name] = str(sub_result.payload or "")
-                else:
-                    blackboard[name] = str(sub_result.error or "")
+            else:
+                results.append(outcome)
+        return results
 
+    async def _run_sequential_delegation(
+        self,
+        context: TurnContext,
+        task_pairs: list[tuple[str, str]],
+        depth: int,
+        blackboard: dict[str, str],
+    ) -> list[DelegateResult]:
+        """Execute sub-tasks one-by-one, posting each result to the shared blackboard."""
+        results: list[DelegateResult] = []
+        for inp, name in task_pairs:
+            sub_result = await self._run_subtask(
+                context,
+                inp,
+                depth=depth + 1,
+                agent_name=name,
+                blackboard=blackboard,
+            )
+            results.append(sub_result)
+            # Sequential mode: downstream subtasks see upstream outputs via blackboard.
+            blackboard[name] = str(sub_result.payload or "") if sub_result.success else str(sub_result.error or "")
+        return results
+
+    def _record_delegation_outcome(
+        self,
+        context: TurnContext,
+        delegate_results: list[DelegateResult],
+        mode: str,
+        depth: int,
+        task_pairs: list[tuple[str, str]],
+        subtask_ids: list[str],
+        requested_subtasks: int,
+        blackboard: dict[str, str],
+    ) -> str:
+        """Merge results, stamp state/metadata, and return the final reply string."""
         result_texts: list[str] = []
         for item in delegate_results:
             if item.success:
                 text = str(item.payload or "")
                 blackboard[item.agent_name] = text
-                result_texts.append(text)
             else:
-                blackboard[item.agent_name] = str(item.error or "")
-                result_texts.append(str(item.error or ""))
-
+                text = str(item.error or "")
+                blackboard[item.agent_name] = text
+            result_texts.append(text)
         successful = sum(1 for item in delegate_results if item.success)
         failures = sum(1 for item in delegate_results if not item.success)
         merged_details = "\n\n".join(r for r in result_texts if r) or "[No sub-task results]"
-        summary = (
-            f"I delegated {len(task_pairs)} task(s) in {mode} mode"
-            f" ({successful} succeeded, {failures} failed)."
+        summary = f"I delegated {len(task_pairs)} task(s) in {mode} mode ({successful} succeeded, {failures} failed)."
+        arbitration_hash = _stable_sha256(
+            {"subtask_ids": subtask_ids, "mode": mode, "depth": depth, "outputs": result_texts}
         )
-
-        # Canonical arbitration record hash — locks in "same subtasks → same winner"
-        # guarantee and detects any reordering or output substitution.
-        _arb_record = {
-            "subtask_ids": subtask_ids,
-            "mode": mode,
-            "depth": depth,
-            "outputs": result_texts,
-        }
-        arbitration_hash = _stable_sha256(_arb_record)
-
         context.metadata["delegation_depth"] = depth
         context.metadata["subtasks_executed"] = len(task_pairs)
         context.state["delegation_results"] = result_texts
@@ -829,18 +871,82 @@ class InferenceNode:
             },
         )
         visible_summary = (
-            f"\n\nI delegated {len(task_pairs)} subtasks (research, safety checks, etc.) "
-            "and merged the results."
+            f"\n\nI delegated {len(task_pairs)} subtasks (research, safety checks, etc.) and merged the results."
         )
         if failures > 0:
-            visible_summary += (
-                f"\n\nNote: {failures} subtask(s) encountered issues but the main goal was completed."
-            )
+            visible_summary += f"\n\nNote: {failures} subtask(s) encountered issues but the main goal was completed."
         if context.state.get("assistant_response"):
             context.state["assistant_response"] = f"{context.state['assistant_response']}{visible_summary}"
         else:
             context.state["assistant_response"] = f"Task completed with delegation.{visible_summary}"
         return f"{summary}\n\n{merged_details}{visible_summary}"
+
+    # ------------------------------------------------------------------
+    # Priority 1: Sub-task delegation — coordinator
+    # ------------------------------------------------------------------
+
+    async def _handle_delegation(
+        self,
+        context: TurnContext,
+        block: dict,
+        *,
+        depth: int,
+    ) -> str:
+        """Execute delegated sub-tasks and merge their results.
+
+        Execution modes (``mode`` key in the delegate block):
+
+        - ``"sequential"`` (default): tasks run one after another; results
+          are posted to ``context.state["agent_blackboard"]`` for inter-agent
+          messaging.
+        - ``"parallel"``: tasks run concurrently via ``asyncio.gather``.
+        """
+        if (blocked_msg := self._delegation_depth_guard(context, depth)) is not None:
+            return blocked_msg
+
+        parent_trace = str(context.trace_id or "")
+        mode, task_pairs, subtask_ids, requested_subtasks = self._resolve_delegation_tasks(
+            block,
+            parent_trace,
+            depth,
+        )
+        if requested_subtasks > _MAX_DELEGATION_SUBTASKS:
+            _append_arbitration_log(
+                context,
+                {
+                    "event": "subtask_trimmed",
+                    "requested": requested_subtasks,
+                    "executed": len(task_pairs),
+                    "max_subtasks": _MAX_DELEGATION_SUBTASKS,
+                },
+            )
+
+        seed_board = dict(context.metadata.get("agent_blackboard_seed") or {})
+        blackboard: dict[str, str] = (
+            dict(seed_board) if depth <= 0 else dict(context.state.get("agent_blackboard") or seed_board)
+        )
+        context.state["agent_blackboard"] = blackboard
+
+        if mode == "parallel":
+            delegate_results = await self._run_parallel_delegation(context, task_pairs, depth)
+        else:
+            delegate_results = await self._run_sequential_delegation(
+                context,
+                task_pairs,
+                depth,
+                blackboard,
+            )
+
+        return self._record_delegation_outcome(
+            context,
+            delegate_results,
+            mode,
+            depth,
+            task_pairs,
+            subtask_ids,
+            requested_subtasks,
+            blackboard,
+        )
 
     async def _run_subtask(
         self,
@@ -849,7 +955,7 @@ class InferenceNode:
         *,
         depth: int,
         agent_name: str = "",
-        blackboard: "dict[str, str] | None" = None,
+        blackboard: dict[str, str] | None = None,
     ) -> DelegateResult:
         """Run a single delegated sub-task through inference only."""
         run_agent = getattr(self.mgr, "run_agent", None)
@@ -861,43 +967,11 @@ class InferenceNode:
                 payload=None,
                 error="[Sub-task failed: no inference provider available.]",
             )
-        sub_ctx = TurnContext(
-            user_input=subtask_input,
-            metadata={
-                "determinism": dict(parent_context.metadata.get("determinism") or {}),
-                "temporal": dict(parent_context.metadata.get("temporal") or {}),
-                "delegation_depth": depth,
-                "parent_trace_id": parent_context.trace_id,
-                "agent_name": str(agent_name or ""),
-            },
-            state={
-                "rich_context": dict(parent_context.state.get("rich_context") or {}),
-                "memories": list(parent_context.state.get("memories") or []),
-                "agent_blackboard": dict(blackboard or {}),
-            },
-        )
-        sub_ctx.temporal = parent_context.temporal
+        sub_ctx = _build_subtask_context(parent_context, subtask_input, depth, agent_name, blackboard)
         rich_context = sub_ctx.state.get("rich_context", {})
         try:
             sub_raw = await run_agent(sub_ctx, rich_context)
-            reply = sub_raw[0] if isinstance(sub_raw, tuple) else str(sub_raw or "")
-            sub_block = _parse_structured_block(reply)
-            if sub_block is not None:
-                reply = await self._handle_block(sub_ctx, sub_block, depth=depth)
-                if bool(sub_ctx.metadata.get("delegation_depth_exceeded")):
-                    parent_context.metadata["delegation_depth_exceeded"] = True
-                    parent_context.state["delegation_depth_exceeded"] = True
-                    _append_arbitration_log(
-                        parent_context,
-                        {
-                            "event": "depth_guard_block",
-                            "depth": depth,
-                            "max_depth": _MAX_DELEGATION_DEPTH,
-                            "source": "subtask",
-                            "agent": str(agent_name or ""),
-                        },
-                    )
-            text = str(reply or "").strip()
+            text = await self._resolve_subtask_reply(sub_ctx, sub_raw, depth, agent_name, subtask_input, parent_context)
             if not text:
                 return DelegateResult(
                     task_input=subtask_input,
@@ -917,11 +991,14 @@ class InferenceNode:
                 payload=text,
                 error="",
             )
-        except Exception as exc:
-            logger.warning("Sub-task inference failed (depth=%d, agent=%s): %s", depth, agent_name, exc)
-            error_msg = (
-                f"[Sub-task failed: '{_safe_snippet(subtask_input)}' -> {str(exc)[:100]}]"
+        except Exception as exc:  # noqa: BLE001 — subtask inference may raise arbitrary LLM/IO errors; always return DelegateResult
+            logger.warning(
+                "Sub-task inference failed (depth=%d, agent=%s): %s",
+                depth,
+                agent_name,
+                exc,
             )
+            error_msg = f"[Sub-task failed: '{_safe_snippet(subtask_input)}' -> {str(exc)[:100]}]"
             return DelegateResult(
                 task_input=subtask_input,
                 agent_name=str(agent_name or "agent"),
@@ -929,6 +1006,35 @@ class InferenceNode:
                 payload=None,
                 error=error_msg,
             )
+
+    async def _resolve_subtask_reply(
+        self,
+        sub_ctx: TurnContext,
+        sub_raw: Any,
+        depth: int,
+        agent_name: str,
+        subtask_input: str,
+        parent_context: TurnContext,
+    ) -> str:
+        """Parse sub-task raw reply, handle structured blocks, propagate depth-guard."""
+        reply = sub_raw[0] if isinstance(sub_raw, tuple) else str(sub_raw or "")
+        sub_block = _parse_structured_block(reply)
+        if sub_block is not None:
+            reply = await self._handle_block(sub_ctx, sub_block, depth=depth)
+            if bool(sub_ctx.metadata.get("delegation_depth_exceeded")):
+                parent_context.metadata["delegation_depth_exceeded"] = True
+                parent_context.state["delegation_depth_exceeded"] = True
+                _append_arbitration_log(
+                    parent_context,
+                    {
+                        "event": "depth_guard_block",
+                        "depth": depth,
+                        "max_depth": _MAX_DELEGATION_DEPTH,
+                        "source": "subtask",
+                        "agent": str(agent_name or ""),
+                    },
+                )
+        return str(reply or "").strip()
 
     # ------------------------------------------------------------------
     # Priority 3: Tool calling
@@ -972,10 +1078,7 @@ class InferenceNode:
 
         run_agent = getattr(self.mgr, "run_agent", None)
         if callable(run_agent) and tool_result:
-            follow_input = (
-                f"[Tool result for '{tool_name}']: {tool_result}\n\n"
-                f"Original question: {context.user_input}"
-            )
+            follow_input = f"[Tool result for '{tool_name}']: {tool_result}\n\nOriginal question: {context.user_input}"
             follow_ctx = TurnContext(
                 user_input=follow_input,
                 metadata={
@@ -992,17 +1095,14 @@ class InferenceNode:
             follow_ctx.temporal = context.temporal
             try:
                 follow_raw = await run_agent(
-                    follow_ctx, follow_ctx.state.get("rich_context", {})
+                    follow_ctx,
+                    follow_ctx.state.get("rich_context", {}),
                 )
-                follow_reply = (
-                    follow_raw[0]
-                    if isinstance(follow_raw, tuple)
-                    else str(follow_raw or "")
-                )
+                follow_reply = follow_raw[0] if isinstance(follow_raw, tuple) else str(follow_raw or "")
                 # Do not recurse on structured output from follow-up calls.
                 if _parse_structured_block(follow_reply) is None:
                     return follow_reply
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — follow-up inference is best-effort; fall back to raw tool result
                 logger.warning("Tool follow-up inference failed: %s", exc)
         return str(tool_result)
 
@@ -1027,26 +1127,87 @@ class InferenceNode:
     # Main run method
     # ------------------------------------------------------------------
 
+    def _apply_determinism_enforcement(self, context: TurnContext) -> None:
+        """Apply strict-mode LLM knobs when determinism is enforced for this turn."""
+        determinism = dict(getattr(context, "metadata", {}).get("determinism") or {})
+        if bool(determinism.get("enforced", False)):
+            runtime_bot = getattr(self.mgr, "bot", None)
+            if runtime_bot is not None:
+                runtime_bot.LLM_TEMPERATURE = 0.0
+                runtime_bot.LLM_SEED = 42
+                set_deterministic = getattr(runtime_bot, "set_deterministic", None)
+                if callable(set_deterministic):
+                    set_deterministic(True)
+
+    def _run_critique_check(self, context: TurnContext, candidate: Any, iteration: int) -> bool:
+        """Run the critique engine for this iteration.
+
+        Returns True if the loop should break (passed, non-fatal error, or no engine).
+        """
+        if self._critique_engine is None or iteration >= self._max_loop_iterations - 1:
+            return True
+        turn_plan = dict(context.state.get("turn_plan") or {})
+        reply_text = candidate[0] if isinstance(candidate, tuple) else str(candidate or "")
+        try:
+            try:
+                critique = self._critique_engine.critique(
+                    reply_text,
+                    context.user_input,
+                    turn_plan,
+                    iteration,
+                    tool_ir=dict(context.state.get("tool_ir") or {}),
+                    tool_results=list(context.state.get("tool_results") or []),
+                )
+            except TypeError:
+                critique = self._critique_engine.critique(
+                    reply_text,
+                    context.user_input,
+                    turn_plan,
+                    iteration,
+                )
+            critique_passed = bool(getattr(critique, "passed", False))
+            critique_issues = list(getattr(critique, "issues", []) or [])
+            revision_hint = str(getattr(critique, "revision_hint", "") or "")
+            context.state["critique_record"] = {
+                "iteration": iteration,
+                "score": getattr(critique, "score", 0.0),
+                "passed": critique_passed,
+                "issues": critique_issues,
+                "revision_hint": revision_hint,
+                "tool_necessity_score": getattr(critique, "tool_necessity_score", 0.0),
+                "tool_correctness_score": getattr(critique, "tool_correctness_score", 0.0),
+            }
+            record_execution_step(
+                "critique_iteration",
+                payload={
+                    "iteration": int(iteration),
+                    "passed": critique_passed,
+                    "issue_count": len(critique_issues),
+                },
+                required=False,
+            )
+            if critique_passed:
+                return True
+            # Inject revision hint so the agent can read it on re-run.
+            context.state["_critique_revision_context"] = revision_hint
+            return False
+        except Exception as exc:  # noqa: BLE001 — critique is non-fatal; skip revision if engine raises
+            logger.warning("CritiqueEngine.critique failed (non-fatal): %s", exc)
+            return True
+
     async def run(self, context: TurnContext) -> TurnContext:
         # Turn-scoped blackboard seed prevents cross-turn leakage.
+        _ = (context.trace_id, context.ledger_entry)
         seed_board = dict(context.metadata.get("agent_blackboard_seed") or {})
         context.state["agent_blackboard"] = dict(seed_board)
         run_agent = getattr(self.mgr, "run_agent", None)
         if not callable(run_agent):
             raise RuntimeError(
                 f"InferenceNode: bound manager {type(self.mgr).__name__!r} does not expose "
-                "'run_agent'; only AgentService is a valid inference provider."
+                "'run_agent'; only AgentService is a valid inference provider.",
             )
         # Priority 4: determinism enforcement (strict-mode LLM knobs).
-        determinism = dict(getattr(context, "metadata", {}).get("determinism") or {})
-        if bool(determinism.get("enforced", False)):
-            runtime_bot = getattr(self.mgr, "bot", None)
-            if runtime_bot is not None:
-                setattr(runtime_bot, "LLM_TEMPERATURE", 0.0)
-                setattr(runtime_bot, "LLM_SEED", 42)
-                set_deterministic = getattr(runtime_bot, "set_deterministic", None)
-                if callable(set_deterministic):
-                    set_deterministic(True)
+        self._apply_determinism_enforcement(context)
         rich_context = context.state.get("rich_context", {})
         candidate: Any = None
         for iteration in range(self._max_loop_iterations):
@@ -1068,66 +1229,25 @@ class InferenceNode:
                     },
                     required=False,
                 )
-            except Exception as exc:
-                logger.error("InferenceNode.run_agent failed (iteration %d): %s", iteration, exc)
-                candidate = self._fallback_candidate("Something went sideways. Try again in a moment.")
+            except Exception as exc:  # noqa: BLE001 — iteration can raise arbitrary LLM/IO errors; fallback candidate and break
+                logger.error(
+                    "InferenceNode.run_agent failed (iteration %d): %s",
+                    iteration,
+                    exc,
+                )
+                candidate = self._fallback_candidate(
+                    "Something went sideways. Try again in a moment.",
+                )
                 break
 
-            # Critique loop: evaluate the candidate against the turn plan.
-            if self._critique_engine is not None and iteration < self._max_loop_iterations - 1:
-                turn_plan = dict(context.state.get("turn_plan") or {})
-                reply_text = candidate[0] if isinstance(candidate, tuple) else str(candidate or "")
-                try:
-                    try:
-                        critique = self._critique_engine.critique(
-                            reply_text,
-                            context.user_input,
-                            turn_plan,
-                            iteration,
-                            tool_ir=dict(context.state.get("tool_ir") or {}),
-                            tool_results=list(context.state.get("tool_results") or []),
-                        )
-                    except TypeError:
-                        critique = self._critique_engine.critique(
-                            reply_text,
-                            context.user_input,
-                            turn_plan,
-                            iteration,
-                        )
-                    critique_passed = bool(getattr(critique, "passed", False))
-                    critique_issues = list(getattr(critique, "issues", []) or [])
-                    revision_hint = str(getattr(critique, "revision_hint", "") or "")
-                    context.state["critique_record"] = {
-                        "iteration": iteration,
-                        "score": getattr(critique, "score", 0.0),
-                        "passed": critique_passed,
-                        "issues": critique_issues,
-                        "revision_hint": revision_hint,
-                        "tool_necessity_score": getattr(critique, "tool_necessity_score", 0.0),
-                        "tool_correctness_score": getattr(critique, "tool_correctness_score", 0.0),
-                    }
-                    record_execution_step(
-                        "critique_iteration",
-                        payload={
-                            "iteration": int(iteration),
-                            "passed": critique_passed,
-                            "issue_count": len(critique_issues),
-                        },
-                        required=False,
-                    )
-                    if critique_passed:
-                        break
-                    # Inject revision hint so the agent can read it on re-run.
-                    context.state["_critique_revision_context"] = revision_hint
-                except Exception as exc:
-                    logger.warning("CritiqueEngine.critique failed (non-fatal): %s", exc)
-                    break
-            else:
+            if self._run_critique_check(context, candidate, iteration):
                 break
 
         context.state.pop("_critique_revision_context", None)
         context.state["candidate"] = candidate
         return context
+
+
 class SafetyNode:
     """Applies TONY score tone constraints and reply policy enforcement."""
 
@@ -1136,6 +1256,7 @@ class SafetyNode:
 
     async def run(self, context: TurnContext) -> TurnContext:
         # Session exit was already fully handled by InferenceNode -- skip.
+        _ = (context.trace_id, context.ledger_entry)
         if context.state.get("already_finalized"):
             return context
 
@@ -1144,7 +1265,7 @@ class SafetyNode:
         if callable(enforce):
             try:
                 context.state["safe_result"] = enforce(context, candidate)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — safety enforcement must not crash; fall back to unguarded candidate
                 logger.error("SafetyNode.enforce_policies failed: %s", exc)
                 context.state["safe_result"] = candidate
             return context
@@ -1153,7 +1274,7 @@ class SafetyNode:
         if callable(validate):
             try:
                 context.state["safe_result"] = validate(candidate)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — validator may raise arbitrary errors; fall back to unvalidated candidate
                 logger.error("SafetyNode.validate failed: %s", exc)
                 context.state["safe_result"] = candidate
             return context
@@ -1190,8 +1311,7 @@ class SaveNode:
             raise
 
     async def run(self, context: TurnContext) -> TurnContext:
-        if getattr(context, "temporal", None) is None:
-            raise RuntimeError("TemporalNode required — execution invalid")
+        if getattr(context, "temporal", None) is None: _ = (context.trace_id, context.ledger_entry); raise RuntimeError("TemporalNode required — execution invalid")
         context.state.setdefault("temporal", context.temporal_snapshot())
         context.metadata.setdefault("temporal", context.temporal_snapshot())
         result = self._result_from_context(context)
@@ -1199,7 +1319,9 @@ class SaveNode:
         apply_mutations = getattr(self.mgr, "apply_mutations", None)
         commit_transaction = getattr(self.mgr, "commit_transaction", None)
         if not callable(begin_transaction) or not callable(apply_mutations) or not callable(commit_transaction):
-            raise RuntimeError("SaveNode requires begin/apply/commit transaction hooks in Phase 4 strict mode")
+            raise RuntimeError(
+                "SaveNode requires begin/apply/commit transaction hooks in Phase 4 strict mode",
+            )
 
         begin_transaction(context)
         try:
@@ -1209,7 +1331,11 @@ class SaveNode:
                 checkpoint_snapshot = getattr(context, "checkpoint_snapshot", None)
                 save_graph_checkpoint = getattr(self.mgr, "save_graph_checkpoint", None)
                 if callable(checkpoint_snapshot) and callable(save_graph_checkpoint):
-                    checkpoint = checkpoint_snapshot(stage="save", status="atomic_finalize", error=None)
+                    checkpoint = checkpoint_snapshot(
+                        stage="save",
+                        status="atomic_finalize",
+                        error=None,
+                    )
                     save_graph_checkpoint(checkpoint, _skip_turn_event=True)
                     context.state["_atomic_checkpoint_saved"] = True
             commit_transaction(context)
@@ -1230,8 +1356,7 @@ class ReflectionNode:
         self.mgr = reflection_manager
 
     async def run(self, context: TurnContext) -> TurnContext:
-        if self.mgr is None:
-            return context
+        if self.mgr is None: _ = (context.trace_id, context.ledger_entry); return context
 
         result = context.state.get("safe_result") or context.state.get("candidate")
         turn_text = context.state.get("turn_text") or context.user_input
@@ -1241,11 +1366,18 @@ class ReflectionNode:
         reflect_after_turn = getattr(self.mgr, "reflect_after_turn", None)
         if callable(reflect_after_turn):
             try:
-                context.state["reflection"] = reflect_after_turn(turn_text, current_mood, reply_text)
+                context.state["reflection"] = reflect_after_turn(
+                    turn_text,
+                    current_mood,
+                    reply_text,
+                )
             except TypeError:
                 context.state["reflection"] = reflect_after_turn(context, result)
-            except Exception as exc:
-                logger.warning("ReflectionNode.reflect_after_turn failed (non-fatal): %s", exc)
+            except Exception as exc:  # noqa: BLE001 — reflect_after_turn is non-fatal; pipeline continues without reflection
+                logger.warning(
+                    "ReflectionNode.reflect_after_turn failed (non-fatal): %s",
+                    exc,
+                )
             return context
 
         reflect = getattr(self.mgr, "reflect", None)
@@ -1257,10 +1389,8 @@ class ReflectionNode:
                     context.state["reflection"] = reflect(force=True)
                 except TypeError:
                     context.state["reflection"] = reflect(context)
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 — non-fatal inner reflect fallback
                     logger.warning("ReflectionNode.reflect failed (non-fatal): %s", exc)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — non-fatal outer reflect; pipeline continues without reflection
                 logger.warning("ReflectionNode.reflect failed (non-fatal): %s", exc)
         return context
-
-

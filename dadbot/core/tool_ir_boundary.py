@@ -9,6 +9,7 @@ Makes Tool IR a fully closed typed system with:
 
 These are enforceable invariants, not just documentation.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -16,13 +17,11 @@ import json
 from typing import Any
 
 from dadbot.core.tool_ir import (
-    ToolEvent,
     ToolEventLog,
     ToolEventType,
     ToolRequest,
     ToolResult,
     deterministic_tool_id,
-    stable_tool_input_hash,
 )
 
 # ---------------------------------------------------------------------------
@@ -41,15 +40,19 @@ _ALLOWED_STATUSES: frozenset[str] = frozenset({"ok", "error", "cached", "skipped
 
 class ToolSchemaError(ValueError):
     """Raised when a Tool IR object fails schema validation at the boundary."""
+
     def __init__(self, field: str, reason: str, value: Any = None) -> None:
         self.field = field
         self.reason = reason
         self.value = value
-        super().__init__(f"ToolSchemaError: field={field!r} reason={reason!r} value={value!r}")
+        super().__init__(
+            f"ToolSchemaError: field={field!r} reason={reason!r} value={value!r}",
+        )
 
 
 class ToolIRBijectionError(ValueError):
     """Raised when the ToolEvent → ToolResult bijection invariant is violated."""
+
     def __init__(self, message: str, orphan_ids: list[str] | None = None) -> None:
         self.orphan_ids = orphan_ids or []
         super().__init__(f"ToolIRBijectionError: {message}")
@@ -73,7 +76,11 @@ def validate_tool_request(raw: dict[str, Any]) -> ToolRequest:
     if not tool_name:
         raise ToolSchemaError("tool_name", "required and non-empty")
     if tool_name not in _ALLOWED_TOOLS:
-        raise ToolSchemaError("tool_name", f"not in allowed set {sorted(_ALLOWED_TOOLS)}", tool_name)
+        raise ToolSchemaError(
+            "tool_name",
+            f"not in allowed set {sorted(_ALLOWED_TOOLS)}",
+            tool_name,
+        )
 
     args = raw.get("args")
     if not isinstance(args, dict):
@@ -83,7 +90,11 @@ def validate_tool_request(raw: dict[str, Any]) -> ToolRequest:
     if not intent:
         raise ToolSchemaError("intent", "required and non-empty")
     if intent not in _ALLOWED_INTENTS:
-        raise ToolSchemaError("intent", f"not in allowed set {sorted(_ALLOWED_INTENTS)}", intent)
+        raise ToolSchemaError(
+            "intent",
+            f"not in allowed set {sorted(_ALLOWED_INTENTS)}",
+            intent,
+        )
 
     expected_output = str(raw.get("expected_output") or "").strip()
     if not expected_output:
@@ -109,7 +120,9 @@ def validate_tool_request(raw: dict[str, Any]) -> ToolRequest:
     )
 
 
-def validate_tool_requests_batch(raws: list[Any]) -> tuple[list[ToolRequest], list[dict[str, Any]]]:
+def validate_tool_requests_batch(
+    raws: list[Any],
+) -> tuple[list[ToolRequest], list[dict[str, Any]]]:
     """Validate a batch of raw dicts.
 
     Returns (valid_requests, rejections) where each rejection has keys
@@ -145,7 +158,11 @@ def validate_tool_result(raw: dict[str, Any]) -> ToolResult:
 
     status = str(raw.get("status") or "ok").strip().lower()
     if status not in _ALLOWED_STATUSES:
-        raise ToolSchemaError("status", f"must be one of {sorted(_ALLOWED_STATUSES)}", status)
+        raise ToolSchemaError(
+            "status",
+            f"must be one of {sorted(_ALLOWED_STATUSES)}",
+            status,
+        )
 
     output = raw.get("output")
 
@@ -153,7 +170,10 @@ def validate_tool_result(raw: dict[str, Any]) -> ToolResult:
     if not det_id:
         # Derive it from tool_name + any args present.
         args = raw.get("args")
-        det_id = deterministic_tool_id(tool_name, dict(args) if isinstance(args, dict) else {})
+        det_id = deterministic_tool_id(
+            tool_name,
+            dict(args) if isinstance(args, dict) else {},
+        )
 
     return ToolResult(
         tool_name=tool_name,
@@ -183,13 +203,13 @@ def assert_bijection(
     """
     # Collect event tool_ids for EXECUTED and FAILED events.
     executed_ids: list[str] = []
-    for event in (event_log.events or []):
+    for event in event_log.events or []:
         if event.event_type in (ToolEventType.EXECUTED, ToolEventType.FAILED):
             executed_ids.append(event.tool_id)
 
     # Collect result tool_ids.
     result_ids: list[str] = []
-    for r in (results or []):
+    for r in results or []:
         if isinstance(r, ToolResult):
             result_ids.append(r.deterministic_id)
         else:
@@ -213,7 +233,7 @@ def assert_bijection(
         )
     if len(executed_ids) != len(result_ids):
         raise ToolIRBijectionError(
-            f"cardinality mismatch: {len(executed_ids)} executed events vs {len(result_ids)} results"
+            f"cardinality mismatch: {len(executed_ids)} executed events vs {len(result_ids)} results",
         )
 
 
@@ -226,12 +246,10 @@ def assert_no_orphan_events(
     Subset of the full bijection check — only validates orphan direction.
     """
     executed_ids = {
-        e.tool_id
-        for e in (event_log.events or [])
-        if e.event_type in (ToolEventType.EXECUTED, ToolEventType.FAILED)
+        e.tool_id for e in (event_log.events or []) if e.event_type in (ToolEventType.EXECUTED, ToolEventType.FAILED)
     }
     result_ids = set()
-    for r in (results or []):
+    for r in results or []:
         if isinstance(r, ToolResult):
             result_ids.add(r.deterministic_id)
         else:
@@ -255,12 +273,10 @@ def build_bijection_proof(
     event_count, result_count.
     """
     executed_ids: list[str] = [
-        e.tool_id
-        for e in (event_log.events or [])
-        if e.event_type in (ToolEventType.EXECUTED, ToolEventType.FAILED)
+        e.tool_id for e in (event_log.events or []) if e.event_type in (ToolEventType.EXECUTED, ToolEventType.FAILED)
     ]
     result_ids: list[str] = []
-    for r in (results or []):
+    for r in results or []:
         if isinstance(r, ToolResult):
             result_ids.append(r.deterministic_id)
         else:
@@ -282,7 +298,10 @@ def build_bijection_proof(
         "event_count": len(executed_ids),
         "result_count": len(result_ids),
         "bijection_hash": hashlib.sha256(
-            json.dumps({"executed": sorted(executed_ids), "results": sorted(result_ids)}, sort_keys=True).encode()
+            json.dumps(
+                {"executed": sorted(executed_ids), "results": sorted(result_ids)},
+                sort_keys=True,
+            ).encode(),
         ).hexdigest()[:16],
     }
 

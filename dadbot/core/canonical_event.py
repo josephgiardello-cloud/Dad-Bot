@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-
 # ---------------------------------------------------------------------------
 # Canonical event boundary — system-wide policy
 # ---------------------------------------------------------------------------
@@ -10,14 +9,16 @@ from typing import Any
 # Fields that uniquely identify an event in the causal chain and determine
 # replay equivalence.  These are the ONLY fields projected into canonical
 # hashes (replay_hash, trace_hash).
-CANONICAL_EVENT_FIELDS: frozenset[str] = frozenset({
-    "type",
-    "session_id",
-    "session_index",
-    "event_id",
-    "parent_event_id",
-    "kernel_step_id",
-})
+CANONICAL_EVENT_FIELDS: frozenset[str] = frozenset(
+    {
+        "type",
+        "session_id",
+        "session_index",
+        "event_id",
+        "parent_event_id",
+        "kernel_step_id",
+    },
+)
 
 # Operational / wall-clock payload fields that MUST NOT appear in canonical
 # hashes.  These values are machine-local timestamps that vary between runs
@@ -26,41 +27,45 @@ CANONICAL_EVENT_FIELDS: frozenset[str] = frozenset({
 # Enforcement:
 #   - canonicalize_event_payload() strips these from any payload dict.
 #   - validate_trace() raises AssertionError if any survive into a trace.
-NON_CANONICAL_PAYLOAD_FIELDS: frozenset[str] = frozenset({
-    "submitted_at",
-    "acquired_at",
-    "expires_at",
-    "last_checked_at",
-    "occurred_at",
-    "created_at",
-    "updated_at",
-    "trace_id",
-    "correlation_id",
-    "job_id",
-    "request_id",
-    "lease_id",
-})
+NON_CANONICAL_PAYLOAD_FIELDS: frozenset[str] = frozenset(
+    {
+        "submitted_at",
+        "acquired_at",
+        "expires_at",
+        "last_checked_at",
+        "occurred_at",
+        "created_at",
+        "updated_at",
+        "trace_id",
+        "correlation_id",
+        "job_id",
+        "request_id",
+        "lease_id",
+    },
+)
 
-FORBIDDEN_TRACE_FIELDS: frozenset[str] = frozenset({
-    "submitted_at",
-    "acquired_at",
-    "expires_at",
-    "last_checked_at",
-})
+FORBIDDEN_TRACE_FIELDS: frozenset[str] = frozenset(
+    {
+        "submitted_at",
+        "acquired_at",
+        "expires_at",
+        "last_checked_at",
+    },
+)
 
 # Event types that are persisted for observability/reporting only and must not
 # participate in replay equivalence hashing.
-NON_REPLAY_EVENT_TYPES: frozenset[str] = frozenset({
-    "CAPABILITY_AUDIT_EVENT",
-})
+NON_REPLAY_EVENT_TYPES: frozenset[str] = frozenset(
+    {
+        "CAPABILITY_AUDIT_EVENT",
+    },
+)
 
 
 def _strip_non_canonical(value: Any) -> Any:
     if isinstance(value, dict):
         return {
-            key: _strip_non_canonical(item)
-            for key, item in value.items()
-            if key not in NON_CANONICAL_PAYLOAD_FIELDS
+            key: _strip_non_canonical(item) for key, item in value.items() if key not in NON_CANONICAL_PAYLOAD_FIELDS
         }
     if isinstance(value, list):
         return [_strip_non_canonical(item) for item in value]
@@ -83,6 +88,7 @@ def canonicalize_event_payload(payload: Any) -> dict[str, Any]:
 
     Returns:
         A new ``dict`` containing only the canonical keys.
+
     """
     if not isinstance(payload, dict):
         return {}
@@ -98,6 +104,7 @@ def validate_trace(trace: list[dict[str, Any]]) -> None:
 
     Usage: hook this into stress tests and turn-graph invariant assertions to
     catch regressions before they reach production.
+
     """
     for i, event in enumerate(trace or []):
         payload = event.get("payload") or {}
@@ -108,5 +115,5 @@ def validate_trace(trace: list[dict[str, Any]]) -> None:
                 raise AssertionError(
                     f"Non-canonical field {field!r} found in event[{i}] payload "
                     f"(type={event.get('type')!r}, "
-                    f"kernel_step_id={event.get('kernel_step_id')!r})"
+                    f"kernel_step_id={event.get('kernel_step_id')!r})",
                 )

@@ -7,6 +7,7 @@ Same seed always produces:
   - Same VirtualClock base epoch
   - Same mutation ordering (when mutations are passed)
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -100,6 +101,7 @@ class TurnFactory:
     def context_snapshot_hash(self, ctx: TurnContext) -> str:
         """Stable hash of the observable context state for replay comparison."""
         import json
+
         key_state = {
             "trace_id": ctx.trace_id,
             "user_input": ctx.user_input,
@@ -107,6 +109,4 @@ class TurnFactory:
             "temporal_wall_date": ctx.temporal.wall_date,
             "phase": ctx.phase.value,
         }
-        return hashlib.sha256(
-            json.dumps(key_state, sort_keys=True).encode()
-        ).hexdigest()[:24]
+        return hashlib.sha256(json.dumps(key_state, sort_keys=True).encode()).hexdigest()[:24]

@@ -1,4 +1,4 @@
-﻿"""Small shared utilities for the dadbot package split."""
+"""Small shared utilities for the dadbot package split."""
 
 from __future__ import annotations
 
@@ -11,12 +11,53 @@ except ImportError:
     orjson = None
 
 
-SIGNIFICANT_TOKEN_STOPWORDS = frozenset({
-    "a", "an", "and", "are", "as", "at", "be", "been", "buddy", "but", "by", "did",
-    "do", "for", "from", "got", "had", "have", "i", "in", "is", "it", "kid", "my",
-    "of", "on", "our", "really", "since", "so", "some", "that", "the", "their", "then",
-    "to", "too", "up", "was", "we", "were", "where", "your",
-})
+SIGNIFICANT_TOKEN_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "been",
+        "buddy",
+        "but",
+        "by",
+        "did",
+        "do",
+        "for",
+        "from",
+        "got",
+        "had",
+        "have",
+        "i",
+        "in",
+        "is",
+        "it",
+        "kid",
+        "my",
+        "of",
+        "on",
+        "our",
+        "really",
+        "since",
+        "so",
+        "some",
+        "that",
+        "the",
+        "their",
+        "then",
+        "to",
+        "too",
+        "up",
+        "was",
+        "we",
+        "were",
+        "where",
+        "your",
+    },
+)
 
 
 def env_truthy(name, default=False):

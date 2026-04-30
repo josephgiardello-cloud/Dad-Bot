@@ -17,6 +17,7 @@ Tests:
   * _RUNTIME_STATE_ATTR_MAP and _INTERNAL_RUNTIME_ATTR_MAP values reference
     real attribute names on the state container interface
 """
+
 from __future__ import annotations
 
 import pytest
@@ -28,11 +29,13 @@ class TestDadBotConfigAttrMapConsistency:
     @pytest.fixture(scope="class")
     def config_instance(self):
         from dadbot.config import DadBotConfig
+
         return DadBotConfig()
 
     @pytest.fixture(scope="class")
     def attr_map(self):
         from dadbot.core.dadbot import DadBot
+
         return DadBot._CONFIG_ATTR_MAP
 
     def test_attr_map_is_non_empty(self, attr_map):
@@ -78,9 +81,7 @@ class TestDadBotConfigAttrMapConsistency:
                 continue  # attr not in map, skip
             val = getattr(config_instance, attr, None)
             if not isinstance(val, expected_type):
-                wrong_types.append(
-                    f"{attr!r}: expected {expected_type}, got {type(val).__name__!r} ({val!r})"
-                )
+                wrong_types.append(f"{attr!r}: expected {expected_type}, got {type(val).__name__!r} ({val!r})")
         assert not wrong_types, "Type mismatches in config attrs:\n" + "\n".join(wrong_types)
 
 
@@ -89,29 +90,34 @@ class TestDadBotConfigInstantiation:
 
     def test_config_instantiates_without_error(self):
         from dadbot.config import DadBotConfig
+
         config = DadBotConfig()
         assert config is not None
 
     def test_tenant_id_is_normalized(self):
         from dadbot.config import DadBotConfig
+
         config = DadBotConfig(tenant_id="My Tenant!")
         assert " " not in config.tenant_id
         assert "!" not in config.tenant_id
 
     def test_active_model_is_non_empty(self):
         from dadbot.config import DadBotConfig
+
         config = DadBotConfig()
         assert isinstance(config.active_model, str)
         assert len(config.active_model) > 0
 
     def test_runtime_config_is_attached(self):
         from dadbot.config import DadBotConfig, DadRuntimeConfig
+
         config = DadBotConfig()
         assert isinstance(config.runtime_config, DadRuntimeConfig)
 
     def test_flattened_runtime_attrs_match_runtime_config(self):
         """Flattened attrs set in __post_init__ must match runtime_config values."""
         from dadbot.config import DadBotConfig
+
         config = DadBotConfig()
         rc = config.runtime_config
         assert config.recent_history_window == rc.recent_history_window
@@ -125,6 +131,7 @@ class TestDadBotConfigNoDriftFromMapKeys:
     def test_no_duplicate_attr_name_points_to_different_values(self):
         """If the same external key appears twice, both must map to the same attr."""
         from dadbot.core.dadbot import DadBot
+
         attr_map = DadBot._CONFIG_ATTR_MAP
         seen: dict[str, str] = {}
         conflicts: list[str] = []
@@ -133,8 +140,7 @@ class TestDadBotConfigNoDriftFromMapKeys:
             canonical_key = key.lower()
             if canonical_key in seen and seen[canonical_key] != attr_name:
                 conflicts.append(
-                    f"Key collision: {key!r} and its lowercase variant map to "
-                    f"{seen[canonical_key]!r} vs {attr_name!r}"
+                    f"Key collision: {key!r} and its lowercase variant map to {seen[canonical_key]!r} vs {attr_name!r}"
                 )
             else:
                 seen[canonical_key] = attr_name
@@ -143,13 +149,17 @@ class TestDadBotConfigNoDriftFromMapKeys:
     def test_path_attrs_return_path_objects(self):
         """Mapped path attributes must return pathlib.Path instances."""
         from pathlib import Path
+
         from dadbot.config import DadBotConfig
-        from dadbot.core.dadbot import DadBot
+
         config = DadBotConfig()
-        path_attr_names = {"profile_path", "memory_path", "semantic_memory_db_path",
-                           "graph_store_db_path", "session_log_dir"}
+        path_attr_names = {
+            "profile_path",
+            "memory_path",
+            "semantic_memory_db_path",
+            "graph_store_db_path",
+            "session_log_dir",
+        }
         for attr in path_attr_names:
             val = getattr(config, attr, None)
-            assert isinstance(val, Path), (
-                f"{attr!r} expected pathlib.Path, got {type(val).__name__!r}"
-            )
+            assert isinstance(val, Path), f"{attr!r} expected pathlib.Path, got {type(val).__name__!r}"

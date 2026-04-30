@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from dadbot.uril.truth_binding import ClaimEvidenceValidator, build_synthetic_state
 from dadbot.ux_overlay import UxOverlayRuntimeAdapter
@@ -50,7 +50,7 @@ def test_enabled_session_shapes_response_and_tracks_state() -> None:
         raw_memory_events=[
             {
                 "text": "Remember this important family planning concern from this week.",
-                "created_at": datetime.now(timezone.utc),
+                "created_at": datetime.now(UTC),
                 "emotional_intensity": 0.7,
             }
         ],
@@ -98,7 +98,7 @@ def test_control_api_edits_curated_memory_store() -> None:
         raw_memory_events=[
             {
                 "text": "Remember this important topic for next time and family planning.",
-                "created_at": datetime.now(timezone.utc),
+                "created_at": datetime.now(UTC),
                 "emotional_intensity": 0.8,
             }
         ],

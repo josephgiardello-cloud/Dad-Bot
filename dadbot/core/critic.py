@@ -14,9 +14,8 @@ Design principles:
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
-
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -29,21 +28,38 @@ PASS_THRESHOLD: float = 0.65
 MAX_LOOP_ITERATIONS: int = 2
 
 # Phrases that indicate a fallback / error response that should always be revised.
-_FALLBACK_PHRASES = frozenset({
-    "something went sideways",
-    "try again in a moment",
-    "unable to generate",
-    "internal error",
-    "i couldn't complete",
-    "[sub-task failed",
-})
+_FALLBACK_PHRASES = frozenset(
+    {
+        "something went sideways",
+        "try again in a moment",
+        "unable to generate",
+        "internal error",
+        "i couldn't complete",
+        "[sub-task failed",
+    },
+)
 
 # Empathetic response signals — required for EMOTIONAL_SHARE strategy.
-_EMPATHY_TOKENS = frozenset({
-    "understand", "hear you", "sounds like", "that must", "it's okay",
-    "it makes sense", "i can see", "feel", "sorry", "difficult", "tough",
-    "must be", "know how", "here for you", "gotcha", "support",
-})
+_EMPATHY_TOKENS = frozenset(
+    {
+        "understand",
+        "hear you",
+        "sounds like",
+        "that must",
+        "it's okay",
+        "it makes sense",
+        "i can see",
+        "feel",
+        "sorry",
+        "difficult",
+        "tough",
+        "must be",
+        "know how",
+        "here for you",
+        "gotcha",
+        "support",
+    },
+)
 
 # Directive/answer signals — expected for DIRECT_ANSWER strategy.
 _ANSWER_HEDGE_MIN_LEN = 15
@@ -53,15 +69,16 @@ _ANSWER_HEDGE_MIN_LEN = 15
 # CritiqueResult value object
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class CritiqueResult:
     """The outcome of one critique cycle."""
 
-    score: float          # 0.0–1.0 quality score
-    passed: bool          # True when score ≥ PASS_THRESHOLD and no hard failures
-    issues: list[str]     # symbolic issue tags (empty on pass)
-    revision_hint: str    # human-readable guidance for the revision pass
-    iteration: int        # which loop iteration this critique covers
+    score: float  # 0.0–1.0 quality score
+    passed: bool  # True when score ≥ PASS_THRESHOLD and no hard failures
+    issues: list[str]  # symbolic issue tags (empty on pass)
+    revision_hint: str  # human-readable guidance for the revision pass
+    iteration: int  # which loop iteration this critique covers
     tool_necessity_score: float = 1.0
     tool_correctness_score: float = 1.0
 
@@ -69,6 +86,7 @@ class CritiqueResult:
 # ---------------------------------------------------------------------------
 # CritiqueEngine
 # ---------------------------------------------------------------------------
+
 
 class CritiqueEngine:
     """Score a candidate reply against a TurnPlan and decide whether to revise.
@@ -90,68 +108,70 @@ class CritiqueEngine:
         self.pass_threshold = pass_threshold
         self.max_iterations = max_iterations
 
-    def critique(
-        self,
-        candidate: str,
-        user_input: str,
-        turn_plan: dict[str, Any],
-        iteration: int,
-        *,
-        tool_ir: dict[str, Any] | None = None,
-        tool_results: list[dict[str, Any]] | None = None,
-    ) -> CritiqueResult:
-        """Evaluate ``candidate`` and return a CritiqueResult."""
-        reply = str(candidate or "").strip()
+    # ------------------------------------------------------------------
+    # critique helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _check_hard_failures(reply: str) -> tuple[list[str], float]:
+        """Return (issues, score_delta) for empty-reply / fallback checks."""
         issues: list[str] = []
-        score = 1.0
-
-        # --- Hard failure checks (penalise heavily) ---
-
+        delta = 0.0
         if len(reply) < 5:
             issues.append("reply_empty")
-            score -= 0.7
-
+            delta -= 0.7
         if any(phrase in reply.lower() for phrase in _FALLBACK_PHRASES):
             issues.append("fallback_detected")
-            score -= 0.5
+            delta -= 0.5
+        return issues, delta
 
-        # --- Strategy-specific checks ---
-
-        strategy = str(turn_plan.get("strategy") or "direct_answer")
-        intent_type = str(turn_plan.get("intent_type") or "statement")
-        complexity = str(turn_plan.get("complexity") or "simple")
-
+    @staticmethod
+    def _check_strategy_signals(
+        reply: str,
+        user_input: str,
+        strategy: str,
+        intent_type: str,
+        complexity: str,
+    ) -> tuple[list[str], float]:
+        """Return (issues, score_delta) for strategy / intent / complexity checks."""
+        issues: list[str] = []
+        delta = 0.0
         if strategy == "empathy_first":
             reply_tokens = set(re.split(r"\W+", reply.lower()))
             if not (reply_tokens & _EMPATHY_TOKENS):
                 issues.append("missing_empathy")
-                score -= 0.25
-
+                delta -= 0.25
         if intent_type == "question":
-            # Check: reply picks up at least one content word from the question.
-            q_tokens = set(
-                t for t in re.split(r"\W+", user_input.lower())
+            q_tokens = {
+                t
+                for t in re.split(r"\W+", user_input.lower())
                 if len(t) > 3 and t not in {"what", "when", "where", "which", "this", "that"}
-            )
+            }
             r_tokens = set(re.split(r"\W+", reply.lower()))
             if q_tokens and not (q_tokens & r_tokens):
                 issues.append("reply_misses_question")
-                score -= 0.2
-
-        # --- Brevity penalty for complex turns ---
-
+                delta -= 0.2
         if complexity in ("moderate", "complex") and len(reply) < _ANSWER_HEDGE_MIN_LEN:
             issues.append("reply_too_brief")
-            score -= 0.15
+            delta -= 0.15
+        return issues, delta
 
-        # --- Tool-awareness checks (Phase 4) ---
+    @staticmethod
+    def _check_tool_alignment(
+        intent_type: str,
+        strategy: str,
+        tool_ir: dict[str, Any] | None,
+        tool_results: list[dict[str, Any]] | None,
+    ) -> tuple[list[str], float, float, float]:
+        """Return (issues, score_delta, tool_necessity_score, tool_correctness_score)."""
+        issues: list[str] = []
+        delta = 0.0
+        tool_necessity_score = 1.0
+        tool_correctness_score = 1.0
 
         planned_tools = list((tool_ir or {}).get("execution_plan") or [])
         executed_tools = list((tool_ir or {}).get("executions") or [])
         observed_results = list(tool_results or [])
-
-        tool_necessity_score = 1.0
-        tool_correctness_score = 1.0
 
         tool_needed = intent_type in {"question", "goal_oriented", "multi_step"} or strategy in {
             "goal_track",
@@ -160,38 +180,31 @@ class CritiqueEngine:
         if tool_needed and not planned_tools:
             issues.append("tool_omission_detected")
             tool_necessity_score -= 0.4
-            score -= 0.2
+            delta -= 0.2
         if (not tool_needed) and planned_tools:
             issues.append("tool_unnecessary_usage")
             tool_necessity_score -= 0.2
-            score -= 0.1
+            delta -= 0.1
 
         if planned_tools:
             if len(executed_tools) != len(planned_tools):
                 issues.append("tool_execution_mismatch")
                 tool_correctness_score -= 0.4
-                score -= 0.2
+                delta -= 0.2
             if len(observed_results) != len(planned_tools):
                 issues.append("tool_result_mismatch")
                 tool_correctness_score -= 0.3
-                score -= 0.15
+                delta -= 0.15
             if any(str(item.get("status") or "").lower() != "ok" for item in observed_results):
                 issues.append("tool_correctness_low")
                 tool_correctness_score -= 0.3
-                score -= 0.15
+                delta -= 0.15
 
-        tool_necessity_score = max(0.0, round(tool_necessity_score, 3))
-        tool_correctness_score = max(0.0, round(tool_correctness_score, 3))
+        return issues, delta, max(0.0, round(tool_necessity_score, 3)), max(0.0, round(tool_correctness_score, 3))
 
-        # --- Final score ---
-
-        score = max(0.0, round(score, 3))
-        hard_failure = any(
-            i in ("reply_empty", "fallback_detected") for i in issues
-        )
-        passed = (score >= self.pass_threshold) and not hard_failure
-
-        # Build a single revision hint string.
+    @staticmethod
+    def _build_revision_hints(issues: list[str], user_input: str) -> str:
+        """Compose a human-readable revision hint from the active issue list."""
         hints: list[str] = []
         if "reply_empty" in issues or "fallback_detected" in issues:
             hints.append("Provide a complete, on-topic reply")
@@ -209,7 +222,43 @@ class CritiqueEngine:
             hints.append("Ensure tool plan, execution, and outputs are aligned")
         if "tool_correctness_low" in issues:
             hints.append("Resolve tool failures before composing the final reply")
-        revision_hint = "; ".join(hints)
+        return "; ".join(hints)
+
+    def critique(
+        self,
+        candidate: str,
+        user_input: str,
+        turn_plan: dict[str, Any],
+        iteration: int,
+        *,
+        tool_ir: dict[str, Any] | None = None,
+        tool_results: list[dict[str, Any]] | None = None,
+    ) -> CritiqueResult:
+        """Evaluate ``candidate`` and return a CritiqueResult."""
+        reply = str(candidate or "").strip()
+
+        hard_issues, hard_delta = self._check_hard_failures(reply)
+        score = 1.0 + hard_delta
+
+        strategy = str(turn_plan.get("strategy") or "direct_answer")
+        intent_type = str(turn_plan.get("intent_type") or "statement")
+        complexity = str(turn_plan.get("complexity") or "simple")
+        strat_issues, strat_delta = self._check_strategy_signals(reply, user_input, strategy, intent_type, complexity)
+        score += strat_delta
+
+        tool_issues, tool_delta, tool_necessity_score, tool_correctness_score = self._check_tool_alignment(
+            intent_type,
+            strategy,
+            tool_ir,
+            tool_results,
+        )
+        score += tool_delta
+
+        issues = hard_issues + strat_issues + tool_issues
+        score = max(0.0, round(score, 3))
+        hard_failure = any(i in ("reply_empty", "fallback_detected") for i in issues)
+        passed = (score >= self.pass_threshold) and not hard_failure
+        revision_hint = self._build_revision_hints(issues, user_input)
 
         return CritiqueResult(
             score=score,

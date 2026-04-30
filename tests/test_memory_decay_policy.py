@@ -11,7 +11,6 @@ from typing import Any
 import pytest
 
 from dadbot.memory.decay_policy import (
-    DecayResult,
     MemoryDecayPolicy,
     _parse_epoch,
     _recency_weight,
@@ -19,10 +18,10 @@ from dadbot.memory.decay_policy import (
     _score_entry,
 )
 
-
 # ---------------------------------------------------------------------------
 # Minimal TurnContext stub (no real runtime needed)
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class _TemporalStub:
@@ -74,6 +73,7 @@ def _entry(
 # ---------------------------------------------------------------------------
 # Unit tests: pure helpers
 # ---------------------------------------------------------------------------
+
 
 class TestParseEpoch:
     def test_iso_datetime(self):
@@ -169,6 +169,7 @@ class TestScoreEntry:
 # MemoryDecayPolicy.apply
 # ---------------------------------------------------------------------------
 
+
 class TestMemoryDecayPolicyApply:
     def test_no_temporal_axis_returns_all_unchanged(self):
         ctx = _TurnContextStub(temporal=None)
@@ -253,6 +254,7 @@ class TestMemoryDecayPolicyApply:
 # Integration: PersistenceService._apply_memory_decay
 # ---------------------------------------------------------------------------
 
+
 class TestPersistenceServiceApplyMemoryDecay:
     """Tests the wiring inside PersistenceService without a full runtime."""
 
@@ -291,8 +293,16 @@ class TestPersistenceServiceApplyMemoryDecay:
 
             def consolidated_memories(self):
                 return [
-                    _entry("keep1", updated_at="2025-12-31T00:00:00", source_count=5, confidence=0.9, importance_score=0.8),
-                    _entry("prune1", updated_at="2019-01-01T00:00:00", source_count=1, confidence=0.05, importance_score=0.0),
+                    _entry(
+                        "keep1", updated_at="2025-12-31T00:00:00", source_count=5, confidence=0.9, importance_score=0.8
+                    ),
+                    _entry(
+                        "prune1",
+                        updated_at="2019-01-01T00:00:00",
+                        source_count=1,
+                        confidence=0.05,
+                        importance_score=0.0,
+                    ),
                 ]
 
             def mutate_memory_store(self, **kwargs):
@@ -318,7 +328,13 @@ class TestPersistenceServiceApplyMemoryDecay:
         class _FakeMemoryManager:
             def consolidated_memories(self):
                 return [
-                    _entry("prune1", updated_at="2019-01-01T00:00:00", source_count=1, confidence=0.05, importance_score=0.0),
+                    _entry(
+                        "prune1",
+                        updated_at="2019-01-01T00:00:00",
+                        source_count=1,
+                        confidence=0.05,
+                        importance_score=0.0,
+                    ),
                 ]
 
             def mutate_memory_store(self, **kwargs):
@@ -344,7 +360,11 @@ class TestPersistenceServiceApplyMemoryDecay:
 
             def consolidated_memories(self):
                 # entry that will score high → no changes
-                return [_entry("good", updated_at="2025-12-31T00:00:00", source_count=5, confidence=0.9, importance_score=0.8)]
+                return [
+                    _entry(
+                        "good", updated_at="2025-12-31T00:00:00", source_count=5, confidence=0.9, importance_score=0.8
+                    )
+                ]
 
             def mutate_memory_store(self, **kwargs):
                 self.mutate_called = True

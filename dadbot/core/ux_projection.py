@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Callable
+from typing import Any
 
 
 class HealthStatus(StrEnum):
@@ -64,7 +65,9 @@ class TurnUxProjector:
             health["status"] = str(HealthStatus.DEGRADED_STRUCTURE)
             state["turn_health_state"] = health
         evidence = dict(state.get("turn_health_evidence") or {})
-        evidence["fidelity_degraded_reason"] = str(reason or "structural_invariant_violation")
+        evidence["fidelity_degraded_reason"] = str(
+            reason or "structural_invariant_violation",
+        )
         evidence["health_status_tier"] = str(HealthStatus.DEGRADED_STRUCTURE)
         state["turn_health_evidence"] = evidence
 
@@ -91,10 +94,12 @@ class TurnUxProjector:
                 inference_ms >= self._degraded_inference_threshold_ms,
                 memory_ops_ms >= self._degraded_memory_threshold_ms,
                 graph_sync_ms >= self._degraded_graph_sync_threshold_ms,
-            ]
+            ],
         )
         fallback_used = bool(state.get("fallback_used", False))
-        degraded_capability = bool(failed or fallback_used or state.get("_capability_degraded", False))
+        degraded_capability = bool(
+            failed or fallback_used or state.get("_capability_degraded", False),
+        )
         degraded_structure = bool(state.get("_structural_degradation", False))
 
         if degraded_structure:
@@ -106,12 +111,16 @@ class TurnUxProjector:
         else:
             status = HealthStatus.OK
 
-        stage_order = [str(getattr(trace, "stage", "") or "") for trace in list(getattr(turn_context, "stage_traces", []) or [])]
+        stage_order = [
+            str(getattr(trace, "stage", "") or "") for trace in list(getattr(turn_context, "stage_traces", []) or [])
+        ]
         fidelity = getattr(turn_context, "fidelity", None)
         if fidelity is not None:
-            fidelity.temporal = "temporal" in stage_order or any(
-                "temporal" in str(s) for s in state.get("_graph_executed_stages") or set()
-            ) or bool(state.get("temporal"))
+            fidelity.temporal = (
+                "temporal" in stage_order
+                or any("temporal" in str(s) for s in state.get("_graph_executed_stages") or set())
+                or bool(state.get("temporal"))
+            )
             fidelity.inference = "inference" in stage_order
             fidelity.reflection = "reflection" in stage_order
             fidelity.save = "save" in stage_order
@@ -144,11 +153,11 @@ class TurnUxProjector:
                 inference_ms >= self._degraded_inference_threshold_ms,
                 memory_ops_ms >= self._degraded_memory_threshold_ms,
                 graph_sync_ms >= self._degraded_graph_sync_threshold_ms,
-            ]
+            ],
         )
         checking_memory = bool(
             memory_ops_ms >= self._degraded_memory_threshold_ms
-            or graph_sync_ms >= self._degraded_graph_sync_threshold_ms
+            or graph_sync_ms >= self._degraded_graph_sync_threshold_ms,
         )
         mood_hint = str(state.get("mood") or "neutral")
         ux_feedback = {

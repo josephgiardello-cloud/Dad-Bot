@@ -6,7 +6,6 @@ from typing import Any, Literal
 
 from dadbot.core.capability_contracts import CAPABILITY_CONTRACTS
 
-
 CapabilityStatus = Literal["pass", "fail", "not_evaluated"]
 CAPABILITY_AUDIT_EVENT_TYPE = "CAPABILITY_AUDIT_EVENT"
 CAPABILITY_AUDIT_VERSION = "v1"
@@ -71,12 +70,17 @@ def build_runtime_capability_audit_report(
             status=(
                 "pass"
                 if normalized_stage_order[:1] == ["temporal"]
-                and all(stage in normalized_stage_order for stage in CAPABILITY_CONTRACTS["temporal_ordering"]["required_stages"])
+                and all(
+                    stage in normalized_stage_order
+                    for stage in CAPABILITY_CONTRACTS["temporal_ordering"]["required_stages"]
+                )
                 else "fail"
             ),
             contract=CAPABILITY_CONTRACTS["temporal_ordering"],
             details={
-                "required_stages": list(CAPABILITY_CONTRACTS["temporal_ordering"]["required_stages"]),
+                "required_stages": list(
+                    CAPABILITY_CONTRACTS["temporal_ordering"]["required_stages"],
+                ),
                 "observed_stage_order": list(normalized_stage_order),
             },
         ),
@@ -129,7 +133,9 @@ def build_runtime_capability_audit_report(
     )
 
 
-def build_capability_coverage_matrix(scenario_reports: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+def build_capability_coverage_matrix(
+    scenario_reports: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
     matrix: dict[str, dict[str, Any]] = {}
     for capability_name, contract in CAPABILITY_CONTRACTS.items():
         evaluated = 0
@@ -137,7 +143,10 @@ def build_capability_coverage_matrix(scenario_reports: list[dict[str, Any]]) -> 
         violations = 0
         for scenario in list(scenario_reports or []):
             checks = list(scenario.get("audit_report", {}).get("checks") or [])
-            match = next((check for check in checks if str(check.get("name") or "") == capability_name), None)
+            match = next(
+                (check for check in checks if str(check.get("name") or "") == capability_name),
+                None,
+            )
             if match is None:
                 continue
             status = str(match.get("status") or "")
@@ -164,9 +173,13 @@ def build_capability_audit_event_payload(
     scenario: str,
 ) -> dict[str, Any]:
     checks = {check.name: check for check in list(report.checks or [])}
-    temporal_ordering_ok = checks.get("temporal_ordering").status == "pass" if checks.get("temporal_ordering") else False
+    temporal_ordering_ok = (
+        checks.get("temporal_ordering").status == "pass" if checks.get("temporal_ordering") else False
+    )
     mutation_safety_ok = checks.get("mutation_safety").status == "pass" if checks.get("mutation_safety") else False
-    save_ok = checks.get("save_node_single_execution").status == "pass" if checks.get("save_node_single_execution") else False
+    save_ok = (
+        checks.get("save_node_single_execution").status == "pass" if checks.get("save_node_single_execution") else False
+    )
 
     return {
         "audit_version": CAPABILITY_AUDIT_VERSION,

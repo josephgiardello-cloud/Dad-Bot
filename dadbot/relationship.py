@@ -1,10 +1,9 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import logging
 from typing import Any
 
 from dadbot.contracts import DadBotContext, SupportsRelationshipRuntime
-
 
 logger = logging.getLogger(__name__)
 
@@ -20,18 +19,31 @@ class RelationshipManager:
         graph = self._memory_graph_snapshot()
         return self.get_relationship_view(graph, turn_context=turn_context)
 
-    def get_relationship_view(self, graph_state: dict, *, turn_context: Any | None = None) -> dict:
+    def get_relationship_view(
+        self,
+        graph_state: dict,
+        *,
+        turn_context: Any | None = None,
+    ) -> dict:
         if not isinstance(graph_state, dict):
             raise RuntimeError("Relationship projection requires graph_state dict")
-        return self._project_state_from_graph_state(graph_state, turn_context=turn_context)
+        return self._project_state_from_graph_state(
+            graph_state,
+            turn_context=turn_context,
+        )
 
     def materialize_projection(self, *, turn_context=None) -> dict:
         temporal = getattr(turn_context, "temporal", None)
         if temporal is None:
             raise RuntimeError("TemporalNode required — execution invalid")
         if not bool(getattr(self.bot, "_graph_commit_active", False)):
-            raise RuntimeError("Relationship projection is SaveNode-only in strict mode")
-        projection = self.get_relationship_view(self._memory_graph_snapshot(), turn_context=turn_context)
+            raise RuntimeError(
+                "Relationship projection is SaveNode-only in strict mode",
+            )
+        projection = self.get_relationship_view(
+            self._memory_graph_snapshot(),
+            turn_context=turn_context,
+        )
         state = getattr(turn_context, "state", None)
         if isinstance(state, dict):
             state["relationship_projection"] = dict(projection)
@@ -47,15 +59,23 @@ class RelationshipManager:
             return {"nodes": [], "edges": []}
         return graph
 
-    def _project_state_from_graph_state(self, graph: dict, *, turn_context: Any | None = None) -> dict:
-        nodes = [dict(item) for item in list(graph.get("nodes") or []) if isinstance(item, dict)]
-        edges = [dict(item) for item in list(graph.get("edges") or []) if isinstance(item, dict)]
+    # ------------------------------------------------------------------
+    # _project_state_from_graph_state helpers
+    # ------------------------------------------------------------------
 
+    @staticmethod
+    def _extract_top_topics(
+        nodes: list[dict],
+    ) -> tuple[list[str], dict[str, int]]:
+        """Return (top_topics, recurring_topics) from weighted node list."""
         weighted_nodes = sorted(
             nodes,
-            key=lambda item: (-float(item.get("weight", 0) or 0), str(item.get("label") or "")),
+            key=lambda item: (
+                -float(item.get("weight", 0) or 0),
+                str(item.get("label") or ""),
+            ),
         )
-        top_topics = []
+        top_topics: list[str] = []
         recurring_topics: dict[str, int] = {}
         for node in weighted_nodes:
             label = str(node.get("label") or "").strip().lower()
@@ -67,23 +87,37 @@ class RelationshipManager:
                 top_topics.append(label)
             if len(top_topics) >= 6:
                 break
+        return top_topics, recurring_topics
 
+    def _compute_trust_openness(
+        self,
+        nodes: list[dict],
+        edges: list[dict],
+    ) -> tuple[int, int]:
+        """Derive trust_level and openness_level from graph node/edge pressure."""
         node_pressure = min(25, len(nodes) * 2)
         edge_pressure = min(20, len(edges) * 2)
         trust_level = self.bot.clamp_score(45 + node_pressure // 2 + edge_pressure // 2)
-        openness_level = self.bot.clamp_score(45 + node_pressure // 2 + max(0, edge_pressure - 4))
+        openness_level = self.bot.clamp_score(
+            45 + node_pressure // 2 + max(0, edge_pressure - 4),
+        )
+        return trust_level, openness_level
 
+    @staticmethod
+    def _classify_emotional_momentum(top_topics: list[str]) -> str:
+        """Return 'heavy', 'warming', or 'steady' based on topic terms."""
         heavy_terms = {"sad", "stress", "stressed", "frustrated", "tired", "burnout", "overwhelmed"}
         warm_terms = {"gratitude", "progress", "wins", "family", "support", "calm", "exercise"}
-        heavy_hits = sum(1 for topic in top_topics if any(term in topic for term in heavy_terms))
-        warm_hits = sum(1 for topic in top_topics if any(term in topic for term in warm_terms))
+        heavy_hits = sum(1 for t in top_topics if any(term in t for term in heavy_terms))
+        warm_hits = sum(1 for t in top_topics if any(term in t for term in warm_terms))
         if heavy_hits > warm_hits and heavy_hits >= 2:
-            emotional_momentum = "heavy"
-        elif warm_hits > heavy_hits:
-            emotional_momentum = "warming"
-        else:
-            emotional_momentum = "steady"
+            return "heavy"
+        if warm_hits > heavy_hits:
+            return "warming"
+        return "steady"
 
+    def _compute_hypotheses(self, emotional_momentum: str) -> list[dict]:
+        """Build, update priors for *emotional_momentum*, normalise, and return sorted hypotheses."""
         profiles = self.bot.relationship_hypothesis_profiles()
         posteriors: dict[str, float] = {
             str(item["name"]): float(item.get("probability", 0.0) or 0.0)
@@ -93,27 +127,44 @@ class RelationshipManager:
         if emotional_momentum == "heavy":
             posteriors["acute_stress"] = posteriors.get("acute_stress", 0.15) + 0.18
             posteriors["guarded_distance"] = posteriors.get("guarded_distance", 0.15) + 0.08
-            posteriors["supportive_baseline"] = max(0.01, posteriors.get("supportive_baseline", 0.4) - 0.12)
+            posteriors["supportive_baseline"] = max(
+                0.01,
+                posteriors.get("supportive_baseline", 0.4) - 0.12,
+            )
         elif emotional_momentum == "warming":
             posteriors["positive_rebound"] = posteriors.get("positive_rebound", 0.25) + 0.2
             posteriors["supportive_baseline"] = posteriors.get("supportive_baseline", 0.4) + 0.08
+        total = sum(max(0.01, v) for v in posteriors.values()) or 1.0
+        hypotheses = [
+            {
+                "name": name,
+                "label": str(profiles.get(name, {}).get("label") or name),
+                "summary": str(profiles.get(name, {}).get("summary") or ""),
+                "probability": round(max(0.01, value) / total, 4),
+            }
+            for name, value in posteriors.items()
+        ]
+        hypotheses.sort(
+            key=lambda item: (-float(item.get("probability", 0.0) or 0.0), str(item.get("name") or "")),
+        )
+        return hypotheses
 
-        total = sum(max(0.01, value) for value in posteriors.values()) or 1.0
-        hypotheses = []
-        for name, value in posteriors.items():
-            profile = profiles.get(name, {"label": name.replace("_", " ").title(), "summary": ""})
-            hypotheses.append(
-                {
-                    "name": name,
-                    "label": str(profile.get("label") or name),
-                    "summary": str(profile.get("summary") or ""),
-                    "probability": round(max(0.01, value) / total, 4),
-                }
-            )
-        hypotheses.sort(key=lambda item: (-float(item.get("probability", 0.0) or 0.0), str(item.get("name") or "")))
+    def _project_state_from_graph_state(
+        self,
+        graph: dict,
+        *,
+        turn_context: Any | None = None,
+    ) -> dict:
+        nodes = [dict(item) for item in list(graph.get("nodes") or []) if isinstance(item, dict)]
+        edges = [dict(item) for item in list(graph.get("edges") or []) if isinstance(item, dict)]
+
+        top_topics, recurring_topics = self._extract_top_topics(nodes)
+        trust_level, openness_level = self._compute_trust_openness(nodes, edges)
+        emotional_momentum = self._classify_emotional_momentum(top_topics)
+        hypotheses = self._compute_hypotheses(emotional_momentum)
 
         projection_updated_at = str(
-            graph.get("updated_at") or (self._turn_timestamp(turn_context) if turn_context is not None else "")
+            graph.get("updated_at") or (self._turn_timestamp(turn_context) if turn_context is not None else ""),
         ).strip()
 
         return {
@@ -132,29 +183,39 @@ class RelationshipManager:
     def _require_turn_temporal(self, turn_context=None):
         temporal = getattr(turn_context, "temporal", None)
         if temporal is None:
-            raise RuntimeError("TemporalNode missing — deterministic execution violated")
+            raise RuntimeError(
+                "TemporalNode missing — deterministic execution violated",
+            )
         wall_time = str(getattr(temporal, "wall_time", "")).strip()
         wall_date = str(getattr(temporal, "wall_date", "")).strip()
         if not wall_time or not wall_date:
-            raise RuntimeError("TemporalNode missing — deterministic execution violated")
+            raise RuntimeError(
+                "TemporalNode missing — deterministic execution violated",
+            )
         return temporal
 
     def _assert_save_commit_boundary(self) -> None:
         if not bool(getattr(self.bot, "_graph_commit_active", False)):
-            raise RuntimeError("Relationship mutation outside SaveNode commit boundary is forbidden in strict mode")
+            raise RuntimeError(
+                "Relationship mutation outside SaveNode commit boundary is forbidden in strict mode",
+            )
 
     def _turn_date(self, turn_context=None) -> str:
         temporal = self._require_turn_temporal(turn_context)
         wall_date = str(getattr(temporal, "wall_date", "")).strip()
         if not wall_date:
-            raise RuntimeError("TemporalNode missing — deterministic execution violated")
+            raise RuntimeError(
+                "TemporalNode missing — deterministic execution violated",
+            )
         return wall_date
 
     def _turn_timestamp(self, turn_context=None) -> str:
         temporal = self._require_turn_temporal(turn_context)
         wall_time = str(getattr(temporal, "wall_time", "")).strip()
         if not wall_time:
-            raise RuntimeError("TemporalNode missing — deterministic execution violated")
+            raise RuntimeError(
+                "TemporalNode missing — deterministic execution violated",
+            )
         return wall_time
 
     def emotional_momentum(self, recent_checkins: list[dict]) -> str:
@@ -169,7 +230,11 @@ class RelationshipManager:
         if latest_mood == "positive":
             return "steady" if heavy_count >= positive_count else "warming"
 
-        if latest_mood in {"sad", "stressed", "frustrated", "tired"} and heavy_count >= 3 and heavy_count > positive_count:
+        if (
+            latest_mood in {"sad", "stressed", "frustrated", "tired"}
+            and heavy_count >= 3
+            and heavy_count > positive_count
+        ):
             return "heavy"
         if positive_count >= 2 and positive_count >= heavy_count:
             return "warming"
@@ -188,7 +253,11 @@ class RelationshipManager:
         ranked = sorted(recurring_topics.items(), key=lambda item: (-item[1], item[0]))
         return [topic for topic, count in ranked[:limit] if count > 0]
 
-    def top_relationship_topics(self, state: dict | None = None, limit: int = 3) -> list[str]:
+    def top_relationship_topics(
+        self,
+        state: dict | None = None,
+        limit: int = 3,
+    ) -> list[str]:
         return self.top_topics(state=state, limit=limit)
 
     @staticmethod
@@ -201,15 +270,28 @@ class RelationshipManager:
             return "steady"
         return "guarded"
 
-    def hypotheses(self, state: dict | None = None, limit: int | None = None) -> list[dict]:
+    def hypotheses(
+        self,
+        state: dict | None = None,
+        limit: int | None = None,
+    ) -> list[dict]:
         snapshot = state or self.current_state()
         hypotheses = [dict(entry) for entry in snapshot.get("hypotheses", []) if isinstance(entry, dict)]
-        hypotheses.sort(key=lambda entry: (-float(entry.get("probability", 0.0) or 0.0), str(entry.get("name", ""))))
+        hypotheses.sort(
+            key=lambda entry: (
+                -float(entry.get("probability", 0.0) or 0.0),
+                str(entry.get("name", "")),
+            ),
+        )
         if limit is None:
             return hypotheses
         return hypotheses[: max(1, int(limit or 1))]
 
-    def relationship_hypotheses(self, state: dict | None = None, limit: int | None = None) -> list[dict]:
+    def relationship_hypotheses(
+        self,
+        state: dict | None = None,
+        limit: int | None = None,
+    ) -> list[dict]:
         return self.hypotheses(state=state, limit=limit)
 
     # ------------------------------------------------------------------
@@ -221,22 +303,58 @@ class RelationshipManager:
         profiles = self.bot.relationship_hypothesis_profiles()
         priors = {entry["name"]: float(entry.get("probability", 0.0) or 0.0) for entry in self.hypotheses(state)}
         if not priors:
-            priors = {entry["name"]: float(entry["probability"]) for entry in self.bot.default_relationship_hypotheses()}
+            priors = {
+                entry["name"]: float(entry["probability"]) for entry in self.bot.default_relationship_hypotheses()
+            }
         return profiles, priors
 
-    def _extract_turn_signals(self, state: dict, user_input: str, current_mood: str) -> dict:
+    def _extract_turn_signals(
+        self,
+        state: dict,
+        user_input: str,
+        current_mood: str,
+    ) -> dict:
         """Extract all observable signals from the current turn for evidence weighting."""
         _VULNERABILITY_MARKERS = {
-            "feel", "feeling", "worried", "anxious", "overwhelmed", "sad", "lonely", "hurt",
-            "struggling", "struggle", "afraid", "scared", "drained", "tired",
+            "feel",
+            "feeling",
+            "worried",
+            "anxious",
+            "overwhelmed",
+            "sad",
+            "lonely",
+            "hurt",
+            "struggling",
+            "struggle",
+            "afraid",
+            "scared",
+            "drained",
+            "tired",
         }
-        _CONNECTION_MARKERS = ["thank you", "thanks", "appreciate", "love you", "needed that", "that helped"]
-        _GUARDED_MARKERS = ["leave me alone", "stop", "whatever", "fine", "forget it", "dont want to talk", "don't want to talk"]
+        _CONNECTION_MARKERS = [
+            "thank you",
+            "thanks",
+            "appreciate",
+            "love you",
+            "needed that",
+            "that helped",
+        ]
+        _GUARDED_MARKERS = [
+            "leave me alone",
+            "stop",
+            "whatever",
+            "fine",
+            "forget it",
+            "dont want to talk",
+            "don't want to talk",
+        ]
         _HEAVY_MOODS = {"sad", "stressed", "frustrated", "tired"}
 
         lowered = str(user_input or "").strip().lower()
         tokens = self.bot.tokenize(user_input)
-        recent_moods = [self.bot.normalize_mood(item.get("mood")) for item in list(state.get("recent_checkins", []))[-6:]]
+        recent_moods = [
+            self.bot.normalize_mood(item.get("mood")) for item in list(state.get("recent_checkins", []))[-6:]
+        ]
         return {
             "lowered": lowered,
             "tokens": tokens,
@@ -252,9 +370,14 @@ class RelationshipManager:
             "is_heavy_momentum": str(state.get("emotional_momentum") or "steady") == "heavy",
         }
 
-    def _build_evidence_weights(self, profiles: dict, signals: dict, state: dict) -> dict:
+    def _build_evidence_weights(
+        self,
+        profiles: dict,
+        signals: dict,
+        state: dict,
+    ) -> dict:
         """Compute per-hypothesis likelihood multipliers from extracted turn signals."""
-        evidence = {name: 1.0 for name in profiles}
+        evidence = dict.fromkeys(profiles, 1.0)
         evidence["supportive_baseline"] *= 1.05
 
         if signals["average_level"] >= 65:
@@ -294,7 +417,12 @@ class RelationshipManager:
 
         return evidence
 
-    def _compute_raw_posteriors(self, profiles: dict, priors: dict, evidence: dict) -> list[dict]:
+    def _compute_raw_posteriors(
+        self,
+        profiles: dict,
+        priors: dict,
+        evidence: dict,
+    ) -> list[dict]:
         """Apply Bayes update with 25/75 smoothing toward the prior."""
         raw_total = sum(max(0.01, priors.get(name, 0.01)) * evidence[name] for name in profiles)
         if raw_total <= 0:
@@ -304,12 +432,14 @@ class RelationshipManager:
             prior = max(0.01, priors.get(name, 0.01))
             posterior = (prior * evidence[name]) / raw_total
             smoothed = prior * 0.25 + posterior * 0.75
-            entries.append({
-                "name": name,
-                "label": profile["label"],
-                "summary": profile["summary"],
-                "probability": smoothed,
-            })
+            entries.append(
+                {
+                    "name": name,
+                    "label": profile["label"],
+                    "summary": profile["summary"],
+                    "probability": smoothed,
+                },
+            )
         return entries
 
     def _normalize_and_rank_posteriors(self, entries: list[dict]) -> list[dict]:
@@ -324,7 +454,12 @@ class RelationshipManager:
     # Orchestrator
     # ------------------------------------------------------------------
 
-    def build_hypothesis_posteriors(self, state: dict, user_input: str, current_mood: str) -> list[dict]:
+    def build_hypothesis_posteriors(
+        self,
+        state: dict,
+        user_input: str,
+        current_mood: str,
+    ) -> list[dict]:
         profiles, priors = self._load_hypothesis_priors(state)
         signals = self._extract_turn_signals(state, user_input, current_mood)
         evidence = self._build_evidence_weights(profiles, signals, state)
@@ -334,7 +469,15 @@ class RelationshipManager:
     def snapshot(self) -> dict:
         state = self.current_state()
         hypotheses = self.hypotheses(state, limit=3)
-        active_hypothesis = hypotheses[0] if hypotheses else {"name": "supportive_baseline", "label": "Supportive Baseline", "probability": 1.0}
+        active_hypothesis = (
+            hypotheses[0]
+            if hypotheses
+            else {
+                "name": "supportive_baseline",
+                "label": "Supportive Baseline",
+                "probability": 1.0,
+            }
+        )
         return {
             "trust_level": state["trust_level"],
             "trust_label": self.level_label(state["trust_level"]),
@@ -342,13 +485,22 @@ class RelationshipManager:
             "openness_label": self.level_label(state["openness_level"]),
             "emotional_momentum": state["emotional_momentum"],
             "active_hypothesis": active_hypothesis.get("name", "supportive_baseline"),
-            "active_hypothesis_label": active_hypothesis.get("label", "Supportive Baseline"),
-            "active_hypothesis_probability": round(float(active_hypothesis.get("probability", 0.0) or 0.0), 3),
+            "active_hypothesis_label": active_hypothesis.get(
+                "label",
+                "Supportive Baseline",
+            ),
+            "active_hypothesis_probability": round(
+                float(active_hypothesis.get("probability", 0.0) or 0.0),
+                3,
+            ),
             "hypotheses": [
                 {
                     "name": entry.get("name", ""),
                     "label": entry.get("label", ""),
-                    "probability": round(float(entry.get("probability", 0.0) or 0.0), 3),
+                    "probability": round(
+                        float(entry.get("probability", 0.0) or 0.0),
+                        3,
+                    ),
                 }
                 for entry in hypotheses
             ],
@@ -360,7 +512,14 @@ class RelationshipManager:
     def relationship_snapshot(self) -> dict:
         return self.snapshot()
 
-    def record_history_point(self, *, trust_level, openness_level, source="turn", turn_context=None) -> dict:
+    def record_history_point(
+        self,
+        *,
+        trust_level,
+        openness_level,
+        source="turn",
+        turn_context=None,
+    ) -> dict:
         recorded_at = (
             self._turn_timestamp(turn_context)
             if turn_context is not None
@@ -385,33 +544,45 @@ class RelationshipManager:
 
         momentum = snapshot["emotional_momentum"]
         if momentum == "heavy":
-            lines.append("- Recent conversations have carried heavier emotions, so lead with presence before solutions.")
+            lines.append(
+                "- Recent conversations have carried heavier emotions, so lead with presence before solutions.",
+            )
         elif momentum == "warming":
-            lines.append("- Tony has shown a bit more positive energy lately, so warmth and light pride can land well.")
+            lines.append(
+                "- Tony has shown a bit more positive energy lately, so warmth and light pride can land well.",
+            )
         else:
             lines.append("- The relationship tone has been steady lately.")
 
         top_topics = snapshot.get("top_topics", [])
         if top_topics:
-            lines.append(f"- Recurring themes lately: {self.bot.natural_list(top_topics)}.")
+            lines.append(
+                f"- Recurring themes lately: {self.bot.natural_list(top_topics)}.",
+            )
 
         if snapshot["openness_level"] >= 65:
-            lines.append("- Tony has been opening up more lately; acknowledge that gently without making it sound clinical.")
+            lines.append(
+                "- Tony has been opening up more lately; acknowledge that gently without making it sound clinical.",
+            )
         elif snapshot["openness_level"] <= 40:
             lines.append("- Give Tony room and keep the tone easy to approach.")
 
         return "\n".join(lines)
 
-    def build_reflection_prompt(self, current_state: dict, recent_messages: list[dict]) -> str:
+    def build_reflection_prompt(
+        self,
+        current_state: dict,
+        recent_messages: list[dict],
+    ) -> str:
         transcript = self.bot.transcript_from_messages(recent_messages)
         summary_section = self.bot.session_summary or "No session summary yet."
         return f"""
 You are reviewing how the relationship between Tony and Dad is evolving during this chat.
 
 Current relationship state:
-- trust_level: {current_state['trust_level']}
-- openness_level: {current_state['openness_level']}
-- emotional_momentum: {current_state['emotional_momentum']}
+- trust_level: {current_state["trust_level"]}
+- openness_level: {current_state["openness_level"]}
+- emotional_momentum: {current_state["emotional_momentum"]}
 
 Rolling session summary:
 {summary_section}
@@ -431,7 +602,11 @@ Rules:
 - Do not overwrite with extreme values.
 """.strip()
 
-    def build_relationship_reflection_prompt(self, current_state: dict, recent_messages: list[dict]) -> str:
+    def build_relationship_reflection_prompt(
+        self,
+        current_state: dict,
+        recent_messages: list[dict],
+    ) -> str:
         return self.build_reflection_prompt(current_state, recent_messages)
 
     def reflect_read_only(self, turn_context=None) -> dict | None:
@@ -450,7 +625,12 @@ Rules:
         state = self.current_state()
         return {**state, "feedback_applied": str(feedback_type or "").strip().lower()}
 
-    def apply_relationship_feedback(self, feedback_type: str, *, turn_context=None) -> dict:
+    def apply_relationship_feedback(
+        self,
+        feedback_type: str,
+        *,
+        turn_context=None,
+    ) -> dict:
         """Deprecated alias for apply_feedback."""
         return self.apply_feedback(feedback_type, turn_context=turn_context)
 

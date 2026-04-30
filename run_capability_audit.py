@@ -4,7 +4,6 @@ import asyncio
 import json
 import sys
 import uuid
-from contextlib import nullcontext
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -17,7 +16,6 @@ if str(ROOT) not in sys.path:
 from dadbot.core.capability_audit_runner import build_capability_coverage_matrix
 from dadbot.core.nodes import SaveNode
 from tests.stress.phase4_certification_gate import build_bot
-
 
 OUTPUT_PATH = ROOT / "session_logs" / "capability_audit_report.json"
 
@@ -33,7 +31,9 @@ def _run_turn(bot: Any, *, session_id: str, user_input: str, metadata: dict[str,
     return result, dict(getattr(bot, "_last_capability_audit_report", {}) or {})
 
 
-def _scenario_report(name: str, *, ok: bool, audit_report: dict[str, Any], error: str = "", extra: dict[str, Any] | None = None) -> dict[str, Any]:
+def _scenario_report(
+    name: str, *, ok: bool, audit_report: dict[str, Any], error: str = "", extra: dict[str, Any] | None = None
+) -> dict[str, Any]:
     return {
         "scenario": name,
         "ok": bool(ok),
@@ -65,7 +65,9 @@ def run_capability_audit() -> dict[str, Any]:
                     "request_id": "cap-normal-req",
                 },
             )
-            scenario_reports.append(_scenario_report("normal_turn", ok=bool(audit_report.get("ok")), audit_report=audit_report))
+            scenario_reports.append(
+                _scenario_report("normal_turn", ok=bool(audit_report.get("ok")), audit_report=audit_report)
+            )
         finally:
             normal_bot.shutdown()
 
@@ -82,7 +84,9 @@ def run_capability_audit() -> dict[str, Any]:
                     "request_id": "cap-adversarial-req",
                 },
             )
-            scenario_reports.append(_scenario_report("adversarial_turn", ok=bool(audit_report.get("ok")), audit_report=audit_report))
+            scenario_reports.append(
+                _scenario_report("adversarial_turn", ok=bool(audit_report.get("ok")), audit_report=audit_report)
+            )
         finally:
             adversarial_bot.shutdown()
 
@@ -99,7 +103,9 @@ def run_capability_audit() -> dict[str, Any]:
                     "request_id": "cap-memory-req",
                 },
             )
-            scenario_reports.append(_scenario_report("memory_heavy_turn", ok=bool(audit_report.get("ok")), audit_report=audit_report))
+            scenario_reports.append(
+                _scenario_report("memory_heavy_turn", ok=bool(audit_report.get("ok")), audit_report=audit_report)
+            )
         finally:
             memory_bot.shutdown()
 

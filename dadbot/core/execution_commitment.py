@@ -8,7 +8,7 @@ from typing import Any
 
 def _stable_sha256(payload: dict[str, Any]) -> str:
     return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        json.dumps(payload, sort_keys=True, default=str).encode("utf-8"),
     ).hexdigest()
 
 
@@ -46,9 +46,13 @@ class ExecutionCommitment:
             "llm_model": str(self.llm_model or ""),
             "state_machine": str(self.state_machine or "PLAN_ACT_OBSERVE_RESPOND"),
             "agent_blackboard_seed": dict(self.agent_blackboard_seed or {}),
-            "agent_blackboard_seed_fingerprint": str(self.agent_blackboard_seed_fingerprint or ""),
+            "agent_blackboard_seed_fingerprint": str(
+                self.agent_blackboard_seed_fingerprint or "",
+            ),
             "agent_blackboard": dict(self.agent_blackboard or {}),
-            "agent_blackboard_fingerprint": str(self.agent_blackboard_fingerprint or ""),
+            "agent_blackboard_fingerprint": str(
+                self.agent_blackboard_fingerprint or "",
+            ),
             "memory_fingerprint": str(self.memory_fingerprint or ""),
             "determinism_manifest_hash": str(self.determinism_manifest_hash or ""),
             "tool_trace_hash": str(self.tool_trace_hash or ""),

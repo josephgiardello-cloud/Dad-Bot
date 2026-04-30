@@ -38,39 +38,41 @@ import json
 import math
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from tests.scoring_engine import CapabilityScore, SubsystemScore
-
 
 # ---------------------------------------------------------------------------
 # Core calibration data structures
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class NormalizationOffset:
     """Additive correction for one subsystem derived from gold deviation."""
+
     subsystem: str
-    offset: float           # additive: calibrated = raw + offset
-    confidence: float       # 0.0–1.0; grows with more calibration runs
-    sample_count: int       # how many observations contributed
-    mean_deviation: float   # mean(gold_ideal - observed)
-    std_deviation: float    # standard deviation of deviations
+    offset: float  # additive: calibrated = raw + offset
+    confidence: float  # 0.0–1.0; grows with more calibration runs
+    sample_count: int  # how many observations contributed
+    mean_deviation: float  # mean(gold_ideal - observed)
+    std_deviation: float  # standard deviation of deviations
 
 
 @dataclass
 class CalibrationResult:
     """Per-scenario calibration analysis."""
+
     scenario_id: str
     category: str
 
     # Raw observed scores
     observed_overall: float
-    observed_planning: Optional[float]
-    observed_tools: Optional[float]
-    observed_memory: Optional[float]
-    observed_ux: Optional[float]
-    observed_robustness: Optional[float]
+    observed_planning: float | None
+    observed_tools: float | None
+    observed_memory: float | None
+    observed_ux: float | None
+    observed_robustness: float | None
 
     # Gold ideal scores
     gold_overall: float
@@ -81,12 +83,12 @@ class CalibrationResult:
     gold_robustness: float
 
     # Deviation analysis
-    overall_deviation: float    # observed - gold_overall
-    within_gold_bounds: bool    # |deviation| <= gold.acceptable_variance
-    subsystem_deviations: Dict[str, float] = field(default_factory=dict)
+    overall_deviation: float  # observed - gold_overall
+    within_gold_bounds: bool  # |deviation| <= gold.acceptable_variance
+    subsystem_deviations: dict[str, float] = field(default_factory=dict)
 
     # Band violations (subsystems outside acceptable floor/ceiling)
-    band_violations: List[str] = field(default_factory=list)
+    band_violations: list[str] = field(default_factory=list)
 
     @property
     def is_calibrated(self) -> bool:
@@ -97,6 +99,7 @@ class CalibrationResult:
 @dataclass
 class CategoryWeightAdjustment:
     """Proposed adjustment to category weights based on observed variance."""
+
     subsystem: str
     current_weight: float
     proposed_weight: float
@@ -109,8 +112,9 @@ class CalibrationState:
 
     Store and reload this between runs to maintain calibration continuity.
     """
-    offsets: Dict[str, NormalizationOffset] = field(default_factory=dict)
-    category_weight_adjustments: List[CategoryWeightAdjustment] = field(default_factory=list)
+
+    offsets: dict[str, NormalizationOffset] = field(default_factory=dict)
+    category_weight_adjustments: list[CategoryWeightAdjustment] = field(default_factory=list)
     calibration_run_count: int = 0
     last_calibrated_scenario_count: int = 0
 
@@ -121,12 +125,9 @@ class CalibrationState:
 
     def is_mature(self) -> bool:
         """Calibration is considered mature after 3+ runs with 10+ scenarios."""
-        return (
-            self.calibration_run_count >= 3
-            and self.last_calibrated_scenario_count >= 10
-        )
+        return self.calibration_run_count >= 3 and self.last_calibrated_scenario_count >= 10
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "offsets": {k: asdict(v) for k, v in self.offsets.items()},
             "category_weight_adjustments": [asdict(a) for a in self.category_weight_adjustments],
@@ -135,15 +136,9 @@ class CalibrationState:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict) -> "CalibrationState":
-        offsets = {
-            k: NormalizationOffset(**v)
-            for k, v in (data.get("offsets") or {}).items()
-        }
-        adjustments = [
-            CategoryWeightAdjustment(**a)
-            for a in (data.get("category_weight_adjustments") or [])
-        ]
+    def from_dict(cls, data: dict) -> CalibrationState:
+        offsets = {k: NormalizationOffset(**v) for k, v in (data.get("offsets") or {}).items()}
+        adjustments = [CategoryWeightAdjustment(**a) for a in (data.get("category_weight_adjustments") or [])]
         return cls(
             offsets=offsets,
             category_weight_adjustments=adjustments,
@@ -155,7 +150,8 @@ class CalibrationState:
 @dataclass
 class CalibrationReport:
     """Full calibration report for one run over all scenarios."""
-    results: List[CalibrationResult]
+
+    results: list[CalibrationResult]
     state: CalibrationState
 
     # Aggregate health metrics
@@ -163,7 +159,7 @@ class CalibrationReport:
     scenarios_out_of_bounds: int
     mean_overall_deviation: float
     std_overall_deviation: float
-    calibration_quality: str    # "excellent" | "good" | "fair" | "poor"
+    calibration_quality: str  # "excellent" | "good" | "fair" | "poor"
 
     @property
     def pass_rate(self) -> float:
@@ -174,7 +170,7 @@ class CalibrationReport:
 
     def summary(self) -> str:
         lines = [
-            f"CALIBRATION REPORT",
+            "CALIBRATION REPORT",
             f"  Scenarios: {len(self.results)}",
             f"  Within gold bounds: {self.scenarios_within_bounds}/{len(self.results)} ({self.pass_rate:.0%})",
             f"  Mean deviation: {self.mean_overall_deviation:+.4f}",
@@ -218,7 +214,7 @@ class CalibrationEngine:
         calibrated = engine.apply(score, report.state)  # apply offsets
     """
 
-    def __init__(self, gold_set: Dict[str, Any], state_path: Optional[Path] = None):
+    def __init__(self, gold_set: dict[str, Any], state_path: Path | None = None):
         self._gold = gold_set
         self._state_path = state_path or Path("evaluation/calibration_state.json")
 
@@ -228,11 +224,11 @@ class CalibrationEngine:
 
     def calibrate(
         self,
-        scores: List[CapabilityScore],
-        previous_state: Optional[CalibrationState] = None,
+        scores: list[CapabilityScore],
+        previous_state: CalibrationState | None = None,
     ) -> CalibrationReport:
         """Compare observed scores to gold, compute offsets, return report."""
-        results: List[CalibrationResult] = []
+        results: list[CalibrationResult] = []
 
         for cs in scores:
             gold = self._gold.get(cs.scenario_name)
@@ -296,7 +292,7 @@ class CalibrationEngine:
         if not state.offsets:
             return score  # no calibration data yet — return as-is
 
-        def _adjust(sub: Optional[SubsystemScore], name: str) -> Optional[SubsystemScore]:
+        def _adjust(sub: SubsystemScore | None, name: str) -> SubsystemScore | None:
             if sub is None:
                 return None
             offset = state.get_offset(name)
@@ -312,10 +308,10 @@ class CalibrationEngine:
                 notes=sub.notes + [f"calibration_offset={offset:+.4f}"],
             )
 
-        adj_planning   = _adjust(score.planning, "planning")
-        adj_tools      = _adjust(score.tools, "tools")
-        adj_memory     = _adjust(score.memory, "memory")
-        adj_ux         = _adjust(score.ux, "ux")
+        adj_planning = _adjust(score.planning, "planning")
+        adj_tools = _adjust(score.tools, "tools")
+        adj_memory = _adjust(score.memory, "memory")
+        adj_ux = _adjust(score.ux, "ux")
         adj_robustness = _adjust(score.robustness, "robustness")
 
         # Recompute weighted overall
@@ -327,13 +323,14 @@ class CalibrationEngine:
             "robustness": adj_robustness,
         }
         overall_offset = state.get_offset("overall")
-        new_overall = max(0.0, min(1.0,
-            sum(
-                subs[cat].score * _BASE_WEIGHTS[cat]
-                for cat in _BASE_WEIGHTS
-                if subs[cat] is not None
-            ) + overall_offset
-        ))
+        new_overall = max(
+            0.0,
+            min(
+                1.0,
+                sum(subs[cat].score * _BASE_WEIGHTS[cat] for cat in _BASE_WEIGHTS if subs[cat] is not None)
+                + overall_offset,
+            ),
+        )
 
         return CapabilityScore(
             scenario_name=score.scenario_name,
@@ -357,7 +354,7 @@ class CalibrationEngine:
         with open(self._state_path, "w", encoding="utf-8") as f:
             json.dump(state.to_dict(), f, indent=2)
 
-    def load_state(self) -> Optional[CalibrationState]:
+    def load_state(self) -> CalibrationState | None:
         if not self._state_path.exists():
             return None
         with open(self._state_path, encoding="utf-8") as f:
@@ -373,19 +370,19 @@ class CalibrationEngine:
 
         # Extract observed subsystem scores
         obs = {
-            "planning":   cs.planning.score if cs.planning else None,
-            "tools":      cs.tools.score if cs.tools else None,
-            "memory":     cs.memory.score if cs.memory else None,
-            "ux":         cs.ux.score if cs.ux else None,
+            "planning": cs.planning.score if cs.planning else None,
+            "tools": cs.tools.score if cs.tools else None,
+            "memory": cs.memory.score if cs.memory else None,
+            "ux": cs.ux.score if cs.ux else None,
             "robustness": cs.robustness.score if cs.robustness else None,
         }
 
         # Extract gold ideals from pseudo-label
         gold_vals = {
-            "planning":   label.planning_expected if label else 0.75,
-            "tools":      label.tools_expected if label else 0.75,
-            "memory":     label.memory_expected if label else 0.75,
-            "ux":         label.ux_expected if label else 0.75,
+            "planning": label.planning_expected if label else 0.75,
+            "tools": label.tools_expected if label else 0.75,
+            "memory": label.memory_expected if label else 0.75,
+            "ux": label.ux_expected if label else 0.75,
             "robustness": label.robustness_expected if label else 0.75,
         }
         gold_overall = label.overall_expected if label else gold.ideal_score
@@ -394,13 +391,13 @@ class CalibrationEngine:
         within_bounds = abs(overall_deviation) <= gold.acceptable_variance
 
         # Per-subsystem deviations
-        sub_devs: Dict[str, float] = {}
+        sub_devs: dict[str, float] = {}
         for sub in _SUBSYSTEMS:
             if obs[sub] is not None:
                 sub_devs[sub] = obs[sub] - gold_vals[sub]
 
         # Band violations
-        violations: List[str] = []
+        violations: list[str] = []
         for sub in _SUBSYSTEMS:
             if obs[sub] is not None:
                 if not gold.within_band(sub, obs[sub]):
@@ -429,9 +426,9 @@ class CalibrationEngine:
 
     def _compute_offsets(
         self,
-        results: List[CalibrationResult],
-        previous_state: Optional[CalibrationState],
-    ) -> Dict[str, NormalizationOffset]:
+        results: list[CalibrationResult],
+        previous_state: CalibrationState | None,
+    ) -> dict[str, NormalizationOffset]:
         """Compute additive normalization offsets per subsystem.
 
         Strategy:
@@ -440,18 +437,14 @@ class CalibrationEngine:
         - Blend with previous offsets if available (exponential moving average, α=0.3)
         - Cap offsets at ±0.25 to prevent score inversion
         """
-        offsets: Dict[str, NormalizationOffset] = {}
+        offsets: dict[str, NormalizationOffset] = {}
         alpha = 0.3  # weight for new observation vs previous
 
         for sub in _SUBSYSTEMS + ["overall"]:
             if sub == "overall":
                 devs = [r.overall_deviation for r in results]
             else:
-                devs = [
-                    r.subsystem_deviations[sub]
-                    for r in results
-                    if sub in r.subsystem_deviations
-                ]
+                devs = [r.subsystem_deviations[sub] for r in results if sub in r.subsystem_deviations]
 
             if not devs:
                 continue
@@ -487,15 +480,15 @@ class CalibrationEngine:
 
     def _compute_weight_adjustments(
         self,
-        results: List[CalibrationResult],
-    ) -> List[CategoryWeightAdjustment]:
+        results: list[CalibrationResult],
+    ) -> list[CategoryWeightAdjustment]:
         """Propose category weight adjustments based on variance.
 
         Logic: high-variance subsystems are less reliable → down-weight
         Low-variance subsystems with high confidence → up-weight
         Adjustments are capped at ±0.05 per cycle.
         """
-        adjustments: List[CategoryWeightAdjustment] = []
+        adjustments: list[CategoryWeightAdjustment] = []
 
         for sub in _SUBSYSTEMS:
             devs = [r.subsystem_deviations.get(sub, 0.0) for r in results]
@@ -511,12 +504,14 @@ class CalibrationEngine:
             else:
                 continue  # no adjustment needed
 
-            adjustments.append(CategoryWeightAdjustment(
-                subsystem=sub,
-                current_weight=current,
-                proposed_weight=max(0.05, min(0.40, current + delta)),
-                reason=reason,
-            ))
+            adjustments.append(
+                CategoryWeightAdjustment(
+                    subsystem=sub,
+                    current_weight=current,
+                    proposed_weight=max(0.05, min(0.40, current + delta)),
+                    reason=reason,
+                )
+            )
 
         return adjustments
 
@@ -534,18 +529,19 @@ class CalibrationEngine:
 # Statistics helpers (no scipy dependency)
 # ---------------------------------------------------------------------------
 
-def _mean(values: List[float]) -> float:
+
+def _mean(values: list[float]) -> float:
     if not values:
         return 0.0
     return sum(values) / len(values)
 
 
-def _variance(values: List[float]) -> float:
+def _variance(values: list[float]) -> float:
     if len(values) < 2:
         return 0.0
     m = _mean(values)
     return sum((v - m) ** 2 for v in values) / (len(values) - 1)
 
 
-def _std(values: List[float]) -> float:
+def _std(values: list[float]) -> float:
     return math.sqrt(_variance(values))

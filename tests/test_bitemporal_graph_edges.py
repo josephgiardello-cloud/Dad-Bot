@@ -10,14 +10,12 @@ Covers:
 
 from __future__ import annotations
 
-import pytest
-
 from dadbot.memory.graph_manager import MemoryGraphManager
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _edge(
     source="s:1",
@@ -52,6 +50,7 @@ def _edge(
 # ---------------------------------------------------------------------------
 # upsert_graph_edge — temporal field population
 # ---------------------------------------------------------------------------
+
 
 class TestUpsertGraphEdgeTemporalFields:
     def test_new_edge_gets_valid_from_from_updated_at(self):
@@ -93,7 +92,9 @@ class TestUpsertGraphEdgeTemporalUpsertPreservation:
     def _make_edge_map_with_two_upserts(self, first_updated, second_updated):
         edge_map: dict = {}
         key = MemoryGraphManager.graph_edge_key("s:1", "t:1", "mentions")
-        kwargs = dict(edge_key=key, source_key="s:1", target_key="t:1", relation_type="mentions", weight=1.0, confidence=0.8)
+        kwargs = dict(
+            edge_key=key, source_key="s:1", target_key="t:1", relation_type="mentions", weight=1.0, confidence=0.8
+        )
         MemoryGraphManager.upsert_graph_edge(edge_map, updated_at=first_updated, **kwargs)
         MemoryGraphManager.upsert_graph_edge(edge_map, updated_at=second_updated, **kwargs)
         return edge_map[key]
@@ -113,16 +114,24 @@ class TestUpsertGraphEdgeTemporalUpsertPreservation:
     def test_valid_until_updated_when_supplied_in_second_upsert(self):
         edge_map: dict = {}
         key = MemoryGraphManager.graph_edge_key("s:1", "t:1", "mentions")
-        kwargs = dict(edge_key=key, source_key="s:1", target_key="t:1", relation_type="mentions", weight=1.0, confidence=0.8)
+        kwargs = dict(
+            edge_key=key, source_key="s:1", target_key="t:1", relation_type="mentions", weight=1.0, confidence=0.8
+        )
         MemoryGraphManager.upsert_graph_edge(edge_map, updated_at="2025-01-01T00:00:00", **kwargs)
-        MemoryGraphManager.upsert_graph_edge(edge_map, updated_at="2025-06-01T00:00:00", valid_until="2025-06-01T00:00:00", **kwargs)
+        MemoryGraphManager.upsert_graph_edge(
+            edge_map, updated_at="2025-06-01T00:00:00", valid_until="2025-06-01T00:00:00", **kwargs
+        )
         assert edge_map[key]["valid_until"] == "2025-06-01T00:00:00"
 
     def test_valid_until_not_cleared_by_none_in_second_upsert(self):
         edge_map: dict = {}
         key = MemoryGraphManager.graph_edge_key("s:1", "t:1", "mentions")
-        kwargs = dict(edge_key=key, source_key="s:1", target_key="t:1", relation_type="mentions", weight=1.0, confidence=0.8)
-        MemoryGraphManager.upsert_graph_edge(edge_map, updated_at="2025-01-01T00:00:00", valid_until="2025-03-01T00:00:00", **kwargs)
+        kwargs = dict(
+            edge_key=key, source_key="s:1", target_key="t:1", relation_type="mentions", weight=1.0, confidence=0.8
+        )
+        MemoryGraphManager.upsert_graph_edge(
+            edge_map, updated_at="2025-01-01T00:00:00", valid_until="2025-03-01T00:00:00", **kwargs
+        )
         MemoryGraphManager.upsert_graph_edge(edge_map, updated_at="2025-06-01T00:00:00", **kwargs)
         # None valid_until in second upsert should NOT clear the existing value
         assert edge_map[key]["valid_until"] == "2025-03-01T00:00:00"
@@ -131,6 +140,7 @@ class TestUpsertGraphEdgeTemporalUpsertPreservation:
 # ---------------------------------------------------------------------------
 # is_edge_valid
 # ---------------------------------------------------------------------------
+
 
 class TestIsEdgeValid:
     def test_no_valid_from_is_always_valid(self):
@@ -168,6 +178,7 @@ class TestIsEdgeValid:
 # invalidate_edge
 # ---------------------------------------------------------------------------
 
+
 class TestInvalidateEdge:
     def test_sets_valid_until(self):
         e = {"valid_from": "2025-01-01T00:00:00", "valid_until": None}
@@ -194,23 +205,32 @@ class TestInvalidateEdge:
 # build_graph_projection validity filtering
 # ---------------------------------------------------------------------------
 
+
 class TestBuildGraphProjectionValidityFilter:
     """Verify that build_graph_projection excludes invalidated edges."""
 
     def _minimal_manager(self, bot_attrs=None):
         """Build a MemoryGraphManager with a stub bot that has no memories."""
+
         class _FakeBot:
             GRAPH_STORE_DB_PATH = ":memory:"
 
             class runtime_config:
                 @staticmethod
-                def graph_context_token_budget(): return 2048
+                def graph_context_token_budget():
+                    return 2048
+
                 @staticmethod
-                def graph_walk_hops(): return 2
+                def graph_walk_hops():
+                    return 2
+
                 @staticmethod
-                def graph_walk_edge_limit(): return 50
+                def graph_walk_edge_limit():
+                    return 50
+
                 @staticmethod
-                def graph_walk_node_limit(): return 50
+                def graph_walk_node_limit():
+                    return 50
 
             def __init__(self):
                 # Minimal attributes needed by GraphPromptCompressor
@@ -218,14 +238,22 @@ class TestBuildGraphProjectionValidityFilter:
                     setattr(self, attr, val)
 
         class _FakeMM:
-            def consolidated_memories(self): return []
-            def session_archive(self): return []
-            def persona_evolution_history(self): return []
-            def life_patterns(self): return []
+            def consolidated_memories(self):
+                return []
+
+            def session_archive(self):
+                return []
+
+            def persona_evolution_history(self):
+                return []
+
+            def life_patterns(self):
+                return []
 
         try:
             bot = _FakeBot()
             from dadbot.memory.graph_manager import MemoryGraphManager as MGM
+
             return MGM.__new__(MGM), _FakeMM()
         except Exception:
             return None, None

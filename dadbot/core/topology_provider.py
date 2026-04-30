@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any, Awaitable, Callable, Protocol, TypedDict
+from collections.abc import Awaitable, Callable
+from typing import Any, Protocol, TypedDict
 
 
 class TurnPipelineState(TypedDict):
@@ -14,7 +15,7 @@ class TurnPipelineState(TypedDict):
 
 NodeExecutorFn = Callable[
     [str, Any, TurnPipelineState],
-    Awaitable[dict],
+    Awaitable[dict[str, Any]],
 ]
 
 

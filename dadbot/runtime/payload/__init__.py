@@ -1,3 +1,3 @@
-﻿from .payload_builder import PayloadBuilder
+from .payload_builder import PayloadBuilder
 
 __all__ = ["PayloadBuilder"]

@@ -186,5 +186,4 @@ class ExecutionLedger:
                     )
             return len(self._events)
 
-
 InMemoryExecutionLedger = ExecutionLedger

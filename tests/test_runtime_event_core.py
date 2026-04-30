@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+
 pytestmark = pytest.mark.unit
 from dadbot.consumers.streamlit import load_thread_projection
-from dadbot.runtime_core import AgentRuntime, ConversationStore, EventBus, RuntimeEventAPI, FileEventJournal, new_event
+from dadbot.runtime_core import AgentRuntime, ConversationStore, EventBus, FileEventJournal, RuntimeEventAPI, new_event
 from dadbot.runtime_core.services import UserMessageResult
 
 
@@ -18,7 +19,9 @@ class FakeServices:
     should_end: bool = False
     memory_writes: list[tuple[str, dict]] | None = None
 
-    def handle_user_message(self, *, thread_id: str, text: str, attachments: list[dict] | None = None) -> UserMessageResult:
+    def handle_user_message(
+        self, *, thread_id: str, text: str, attachments: list[dict] | None = None
+    ) -> UserMessageResult:
         return UserMessageResult(
             reply=self.reply,
             should_end=self.should_end,
@@ -35,7 +38,9 @@ class FakeServices:
 
 @dataclass
 class StructuredPipelineServices(FakeServices):
-    def handle_user_message(self, *, thread_id: str, text: str, attachments: list[dict] | None = None) -> UserMessageResult:
+    def handle_user_message(
+        self, *, thread_id: str, text: str, attachments: list[dict] | None = None
+    ) -> UserMessageResult:
         _ = thread_id, text, attachments
         return UserMessageResult(
             reply=self.reply,

@@ -4,28 +4,27 @@ Each test runs a graph variant then calls InvariantChecker.validate().
 Tests confirm both positive paths (all invariants pass) and negative paths
 (specific invariants raise InvariantViolation with useful messages).
 """
+
 from __future__ import annotations
 
 import pytest
+from harness.deterministic_seeds import ADVERSARIAL, BASELINE, CHECKPOINT
+from harness.graph_runner import GraphRunner
+from harness.invariant_checker import InvariantChecker, InvariantViolation
+from harness.kernel_mock import MockRegistry
+from harness.turn_factory import TurnFactory
 
 from dadbot.core.graph import (
     ContextBuilderNode,
     HealthNode,
     InferenceNode,
-    MutationIntent,
     ReflectionNode,
     SafetyNode,
     SaveNode,
     TemporalNode,
     TurnContext,
     TurnGraph,
-    TurnPhase,
 )
-from harness.deterministic_seeds import BASELINE, ADVERSARIAL, CHECKPOINT
-from harness.graph_runner import GraphRunner
-from harness.invariant_checker import InvariantChecker, InvariantViolation
-from harness.kernel_mock import MockRegistry
-from harness.turn_factory import TurnFactory
 
 
 def _build_canonical_graph(registry: MockRegistry) -> TurnGraph:

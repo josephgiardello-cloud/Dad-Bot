@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import importlib
 import json
@@ -9,7 +9,7 @@ import sys
 import time
 import webbrowser
 from pathlib import Path
-from socket import AF_INET, SOCK_STREAM, SOL_SOCKET, SO_REUSEADDR, socket
+from socket import AF_INET, SO_REUSEADDR, SOCK_STREAM, SOL_SOCKET, socket
 from urllib.request import urlopen
 
 from dadbot.core.execution_boundary import enforce_execution_role
@@ -55,12 +55,12 @@ def launch_streamlit_app(
             required_port = int(configured_port)
         except (TypeError, ValueError) as exc:
             raise RuntimeError(
-                f"DADBOT_STREAMLIT_PORT must be a valid integer port. Got: {configured_port!r}"
+                f"DADBOT_STREAMLIT_PORT must be a valid integer port. Got: {configured_port!r}",
             ) from exc
 
         if required_port != 8501:
             raise RuntimeError(
-                f"Dad Bot is pinned to port 8501. Update or unset DADBOT_STREAMLIT_PORT (current value: {configured_port!r})."
+                f"Dad Bot is pinned to port 8501. Update or unset DADBOT_STREAMLIT_PORT (current value: {configured_port!r}).",
             )
 
         with socket(AF_INET, SOCK_STREAM) as candidate_socket:
@@ -70,7 +70,7 @@ def launch_streamlit_app(
             except OSError as exc:
                 raise RuntimeError(
                     "Dad Bot requires localhost:8501, but that port is already in use. "
-                    "Stop the existing process using 8501 and try again."
+                    "Stop the existing process using 8501 and try again.",
                 ) from exc
 
         return required_port
@@ -92,7 +92,9 @@ def launch_streamlit_app(
     streamlit_app_path = workspace_path / "dadbot" / "ui" / "entrypoint.py"
     stub_created = ensure_streamlit_app_file(streamlit_app_path)
     if stub_created:
-        print(f"The packaged Streamlit entrypoint was missing, so a minimal stub was created at {streamlit_app_path}.")
+        print(
+            f"The packaged Streamlit entrypoint was missing, so a minimal stub was created at {streamlit_app_path}.",
+        )
     chosen_port = required_streamlit_port()
     local_url = f"http://localhost:{chosen_port}"
     command_env = os.environ.copy()
@@ -123,7 +125,11 @@ def launch_streamlit_app(
             try:
                 webbrowser.open(local_url)
             except Exception:
-                logger.warning("Could not open browser automatically for %s", local_url, exc_info=True)
+                logger.warning(
+                    "Could not open browser automatically for %s",
+                    local_url,
+                    exc_info=True,
+                )
         return process.wait()
     except KeyboardInterrupt:
         if process.poll() is None:
@@ -137,7 +143,9 @@ def launch_streamlit_app(
 
 
 def stop_streamlit_app(script_path: str | Path | None = None):
-    workspace = str((Path(script_path) if script_path is not None else Path.cwd() / "Dad.py").resolve().parent)
+    workspace = str(
+        (Path(script_path) if script_path is not None else Path.cwd() / "Dad.py").resolve().parent,
+    )
 
     def port_8501_in_use():
         with socket(AF_INET, SOCK_STREAM) as candidate_socket:
@@ -149,7 +157,7 @@ def stop_streamlit_app(script_path: str | Path | None = None):
             f"$workspace = {workspace!r}; "
             "Get-CimInstance Win32_Process | Where-Object { "
             "$cmd = $_.CommandLine; "
-            "$_.Name -ieq \"python.exe\" -and $cmd -and $cmd -like \"*$workspace*\" -and ($cmd -like \"*streamlit run*\" -or $cmd -like \"*dadbot*ui*entrypoint.py*\") "
+            '$_.Name -ieq "python.exe" -and $cmd -and $cmd -like "*$workspace*" -and ($cmd -like "*streamlit run*" -or $cmd -like "*dadbot*ui*entrypoint.py*") '
             "} | Select-Object ProcessId, Name, CommandLine | ConvertTo-Json -Compress"
         )
         result = subprocess.run(
@@ -172,7 +180,10 @@ def stop_streamlit_app(script_path: str | Path | None = None):
             try:
                 parsed = json.loads(stdout)
             except json.JSONDecodeError as exc:
-                print(f"Could not parse stop-streamlit process list: {exc}", file=sys.stderr)
+                print(
+                    f"Could not parse stop-streamlit process list: {exc}",
+                    file=sys.stderr,
+                )
                 return 1
             targets = parsed if isinstance(parsed, list) else [parsed]
 
@@ -185,7 +196,11 @@ def stop_streamlit_app(script_path: str | Path | None = None):
             return 0
 
         stop_failed = False
-        for target in sorted(targets, key=lambda item: int(item.get("ProcessId", 0)), reverse=True):
+        for target in sorted(
+            targets,
+            key=lambda item: int(item.get("ProcessId", 0)),
+            reverse=True,
+        ):
             process_id = int(target.get("ProcessId", 0))
             name = target.get("Name") or "python.exe"
             kill_result = subprocess.run(
@@ -199,7 +214,10 @@ def stop_streamlit_app(script_path: str | Path | None = None):
             else:
                 stop_failed = True
                 error_text = (kill_result.stderr or kill_result.stdout or "").strip()
-                print(f"STOP_FAILED PID={process_id} NAME={name} ERROR={error_text}", file=sys.stderr)
+                print(
+                    f"STOP_FAILED PID={process_id} NAME={name} ERROR={error_text}",
+                    file=sys.stderr,
+                )
 
         if stop_failed:
             return 1
@@ -219,7 +237,10 @@ def stop_streamlit_app(script_path: str | Path | None = None):
             check=False,
         )
     except FileNotFoundError:
-        print("--stop-streamlit is currently supported on Windows or systems with lsof installed.", file=sys.stderr)
+        print(
+            "--stop-streamlit is currently supported on Windows or systems with lsof installed.",
+            file=sys.stderr,
+        )
         return 1
 
     process_ids = []
@@ -301,7 +322,12 @@ def launch_api_service(args, *, dadbot_cls=None, build_service_state_store):
     worker_manager.start()
     app = create_api_app(orchestrator, worker_manager=worker_manager, config=config)
     try:
-        uvicorn.run(app, host=config.api.host, port=config.api.port, log_level=config.telemetry.log_level.lower())
+        uvicorn.run(
+            app,
+            host=config.api.host,
+            port=config.api.port,
+            log_level=config.telemetry.log_level.lower(),
+        )
     finally:
         worker_manager.shutdown()
     return 0
@@ -357,7 +383,9 @@ def dispatch_runtime_mode(
         return 0
     if args.export_memory:
         bot.memory.export_memory_store(args.export_memory)
-        bot.print_system_message(f"Dad's saved memory was exported to {args.export_memory}.")
+        bot.print_system_message(
+            f"Dad's saved memory was exported to {args.export_memory}.",
+        )
         return 0
     if args.cli:
         if args.disable_service_client:

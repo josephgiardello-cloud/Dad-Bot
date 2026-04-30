@@ -1,4 +1,5 @@
-﻿"""Avatar generation and management via Ollama image models."""
+"""Avatar generation and management via Ollama image models."""
+
 from __future__ import annotations
 
 import base64
@@ -19,7 +20,11 @@ class AvatarManager:
     def current_avatar_exists(self) -> bool:
         return self.avatar_path().exists()
 
-    def generate_avatar(self, custom_prompt: str | None = None, model: str | None = None) -> bool:
+    def generate_avatar(
+        self,
+        custom_prompt: str | None = None,
+        model: str | None = None,
+    ) -> bool:
         """Generate and save a new avatar image via Ollama. Returns True on success."""
         prompt = (custom_prompt or "").strip() or (
             "Photorealistic warm portrait of a friendly 56-year-old father with kind eyes, "
@@ -28,7 +33,13 @@ class AvatarManager:
             "heartwarming atmosphere, high detail, cinematic lighting"
         )
         if not model:
-            for candidate in ["flux", "flux-dev", "flux-schnell", "sdxl", "stable-diffusion"]:
+            for candidate in [
+                "flux",
+                "flux-dev",
+                "flux-schnell",
+                "sdxl",
+                "stable-diffusion",
+            ]:
                 try:
                     ollama.show(candidate)
                     model = candidate

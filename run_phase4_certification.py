@@ -37,12 +37,12 @@ logger = logging.getLogger("phase4_certification")
 def main() -> int:
     from tests.stress.phase4_certification_gate import Phase4CertificationGate, build_bot
 
-    long_horizon_turns   = int(os.environ.get("PHASE4_LONG_HORIZON_TURNS",   "200") or 200)
-    memory_growth_turns  = int(os.environ.get("PHASE4_MEMORY_GROWTH_TURNS",  "200") or 200)
-    replay_turns         = int(os.environ.get("PHASE4_REPLAY_TURNS",         "100") or 100)
-    concurrency_threads  = int(os.environ.get("PHASE4_CONCURRENCY_THREADS",  "20")  or 20)
-    report_path_str      = os.environ.get("PHASE4_REPORT_PATH", "session_logs/phase4_certification_report.json")
-    report_path          = ROOT / report_path_str
+    long_horizon_turns = int(os.environ.get("PHASE4_LONG_HORIZON_TURNS", "200") or 200)
+    memory_growth_turns = int(os.environ.get("PHASE4_MEMORY_GROWTH_TURNS", "200") or 200)
+    replay_turns = int(os.environ.get("PHASE4_REPLAY_TURNS", "100") or 100)
+    concurrency_threads = int(os.environ.get("PHASE4_CONCURRENCY_THREADS", "20") or 20)
+    report_path_str = os.environ.get("PHASE4_REPORT_PATH", "session_logs/phase4_certification_report.json")
+    report_path = ROOT / report_path_str
 
     report_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -91,8 +91,7 @@ def main() -> int:
     module_results = report.get("results", {})
     for mod_name, mod in module_results.items():
         status = "PASS" if mod["passed"] else "FAIL"
-        logger.info("  %-20s %s  %2d/%-2d  %.1fs",
-                    mod_name, status, mod["score"], mod["max_score"], mod["duration_s"])
+        logger.info("  %-20s %s  %2d/%-2d  %.1fs", mod_name, status, mod["score"], mod["max_score"], mod["duration_s"])
 
     if report["failures"]:
         logger.info("")

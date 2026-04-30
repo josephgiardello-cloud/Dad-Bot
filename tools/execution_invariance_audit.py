@@ -163,12 +163,8 @@ def _run_one_orchestrator_turn(*, work_dir: Path, user_input: str, instrumentati
 
             session = bot.turn_orchestrator.session_registry.get_or_create("exec-invariance")
             state = dict(session.get("state") or {})
-            last_det = dict(
-                state.get("last_determinism") or {}
-            )
-            manifest = dict(
-                state.get("last_determinism_manifest") or {}
-            )
+            last_det = dict(state.get("last_determinism") or {})
+            manifest = dict(state.get("last_determinism_manifest") or {})
 
             return {
                 "replay_hash": str(bot.turn_orchestrator.control_plane.ledger.replay_hash() or ""),
@@ -211,8 +207,7 @@ def _trace_fingerprint_stability() -> dict[str, Any]:
                 )
 
                 session_state = dict(
-                    (bot.turn_orchestrator.session_registry.get_or_create("trace-stability") or {}).get("state")
-                    or {}
+                    (bot.turn_orchestrator.session_registry.get_or_create("trace-stability") or {}).get("state") or {}
                 )
                 det = dict(session_state.get("last_determinism") or {})
                 per_turn.append(

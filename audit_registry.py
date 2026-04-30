@@ -3,9 +3,11 @@
 Decouples which checks run from how they run.
 system_audit.py iterates this registry; no check selection logic lives there.
 """
+
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from audit_runners import (
     build_wiring_map,
@@ -20,10 +22,10 @@ from audit_runners import (
     full_module_activation_scan,
 )
 
-
 # ---------------------------------------------------------------------------
 # CheckResult: name + runner callable + how to build the record entry
 # ---------------------------------------------------------------------------
+
 
 class CheckEntry:
     """Binds a check name to its runner and result-to-record translation."""
@@ -94,8 +96,7 @@ def _build_entries(orchestrator: Any) -> list[CheckEntry]:
             "mid_execution_durability",
             lambda: check_mid_execution(orchestrator),
             lambda r: (
-                f"save_graph_checkpoint={r.get('save_graph_checkpoint')}, "
-                f"save_turn_event={r.get('save_turn_event')}"
+                f"save_graph_checkpoint={r.get('save_graph_checkpoint')}, save_turn_event={r.get('save_turn_event')}"
             ),
             True,
         ),

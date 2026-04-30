@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import hashlib
 import json
@@ -9,11 +9,9 @@ from .models import Event
 
 
 class EventJournal(Protocol):
-    def append(self, event: Event) -> None:
-        ...
+    def append(self, event: Event) -> None: ...
 
-    def replay(self) -> list[Event]:
-        ...
+    def replay(self) -> list[Event]: ...
 
 
 class FileEventJournal:
@@ -51,7 +49,9 @@ class FileEventJournal:
                 record = json.loads(line)
                 if str(record.get("previous_hash") or "") != previous_hash:
                     raise RuntimeError("Runtime event journal hash chain is broken")
-                expected_hash = self._hash_payload({key: value for key, value in record.items() if key != "record_hash"})
+                expected_hash = self._hash_payload(
+                    {key: value for key, value in record.items() if key != "record_hash"},
+                )
                 actual_hash = str(record.get("record_hash") or "")
                 if expected_hash != actual_hash:
                     raise RuntimeError("Runtime event journal record hash mismatch")
@@ -63,7 +63,7 @@ class FileEventJournal:
                         thread_id=str(record.get("thread_id") or "default"),
                         timestamp=float(record.get("timestamp") or 0.0),
                         payload=dict(record.get("payload") or {}),
-                    )
+                    ),
                 )
         return events
 
@@ -80,4 +80,8 @@ class FileEventJournal:
 
     @staticmethod
     def _hash_payload(payload: dict) -> str:
-        return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=True, default=str).encode("utf-8")).hexdigest()
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, ensure_ascii=True, default=str).encode(
+                "utf-8",
+            ),
+        ).hexdigest()

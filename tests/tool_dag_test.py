@@ -8,15 +8,18 @@ E — TestSchedulerDeterminism   (Phase 6)
 F — TestSandboxIsolation       (Phase 7)
 G — TestCrossModeDagConsistency (equivalence extension)
 """
+
 from __future__ import annotations
 
-import asyncio
-import copy
 import pytest
 
+from dadbot.core.tool_algebra import (
+    ToolFailure,
+    ToolFailureLog,
+    ToolState,
+)
 from dadbot.core.tool_dag import (
     ToolDAG,
-    ToolEdge,
     ToolNode,
     ToolPlanCompiler,
     ToolPlanIR,
@@ -29,17 +32,8 @@ from dadbot.core.tool_ir import (
     reduce_events_to_results,
     stable_tool_input_hash,
 )
-from dadbot.core.tool_algebra import (
-    FailureSeverity,
-    PropagationPolicy,
-    ToolFailure,
-    ToolFailureLog,
-    ToolFailureType,
-    ToolState,
-)
-from dadbot.core.tool_scheduler import ToolScheduler
 from dadbot.core.tool_sandbox import ToolSandbox, ToolSandboxSnapshot
-
+from dadbot.core.tool_scheduler import ToolScheduler
 
 # ===========================================================================
 # A — TestToolDAGValidity
@@ -47,7 +41,6 @@ from dadbot.core.tool_sandbox import ToolSandbox, ToolSandboxSnapshot
 
 
 class TestToolDAGValidity:
-
     def _make_node(self, seq: int, priority: int = 100, intent: str = "goal_lookup") -> ToolNode:
         return ToolNode.build(
             tool_name="memory_lookup",
@@ -121,23 +114,57 @@ class TestToolDAGValidity:
 
     def test_deterministic_hash_is_reproducible(self):
         plan = [
-            {"tool_name": "memory_lookup", "intent": "goal_lookup", "args": {"key": "a"}, "priority": 100, "sequence": 0},
-            {"tool_name": "memory_lookup", "intent": "session_memory_fetch", "args": {"key": "b"}, "priority": 90, "sequence": 1},
+            {
+                "tool_name": "memory_lookup",
+                "intent": "goal_lookup",
+                "args": {"key": "a"},
+                "priority": 100,
+                "sequence": 0,
+            },
+            {
+                "tool_name": "memory_lookup",
+                "intent": "session_memory_fetch",
+                "args": {"key": "b"},
+                "priority": 90,
+                "sequence": 1,
+            },
         ]
         dag1 = build_dag_from_execution_plan(plan)
         dag2 = build_dag_from_execution_plan(plan)
         assert dag1.deterministic_hash() == dag2.deterministic_hash()
 
     def test_different_plans_produce_different_hashes(self):
-        plan_a = [{"tool_name": "memory_lookup", "intent": "goal_lookup", "args": {"key": "x"}, "priority": 100, "sequence": 0}]
-        plan_b = [{"tool_name": "memory_lookup", "intent": "goal_lookup", "args": {"key": "y"}, "priority": 100, "sequence": 0}]
+        plan_a = [
+            {
+                "tool_name": "memory_lookup",
+                "intent": "goal_lookup",
+                "args": {"key": "x"},
+                "priority": 100,
+                "sequence": 0,
+            }
+        ]
+        plan_b = [
+            {
+                "tool_name": "memory_lookup",
+                "intent": "goal_lookup",
+                "args": {"key": "y"},
+                "priority": 100,
+                "sequence": 0,
+            }
+        ]
         dag_a = build_dag_from_execution_plan(plan_a)
         dag_b = build_dag_from_execution_plan(plan_b)
         assert dag_a.deterministic_hash() != dag_b.deterministic_hash()
 
     def test_execution_order_matches_sequence_for_linear_dag(self):
         plan = [
-            {"tool_name": "memory_lookup", "intent": "goal_lookup", "args": {"key": str(i)}, "priority": 100 - i, "sequence": i}
+            {
+                "tool_name": "memory_lookup",
+                "intent": "goal_lookup",
+                "args": {"key": str(i)},
+                "priority": 100 - i,
+                "sequence": i,
+            }
             for i in range(5)
         ]
         dag = build_dag_from_execution_plan(plan)
@@ -154,7 +181,9 @@ class TestToolDAGValidity:
         assert n1.ordering_key() < n2.ordering_key() or n1.ordering_key() != n2.ordering_key()
 
     def test_to_dict_contains_required_keys(self):
-        plan = [{"tool_name": "memory_lookup", "intent": "goal_lookup", "args": {"k": "v"}, "priority": 100, "sequence": 0}]
+        plan = [
+            {"tool_name": "memory_lookup", "intent": "goal_lookup", "args": {"k": "v"}, "priority": 100, "sequence": 0}
+        ]
         dag = build_dag_from_execution_plan(plan)
         d = dag.to_dict()
         assert "nodes" in d
@@ -171,13 +200,17 @@ class TestToolDAGValidity:
 
 
 class TestToolPlanCompilation:
-
     def _valid_plan(self) -> ToolPlanIR:
         return ToolPlanIR(
             intent_summary="Fetch user goals and session state",
             tool_candidates=[
                 {"tool_name": "memory_lookup", "intent": "goal_lookup", "args": {"key": "goals"}, "priority": 90},
-                {"tool_name": "memory_lookup", "intent": "session_memory_fetch", "args": {"key": "session"}, "priority": 100},
+                {
+                    "tool_name": "memory_lookup",
+                    "intent": "session_memory_fetch",
+                    "args": {"key": "session"},
+                    "priority": 100,
+                },
             ],
             constraints={"max_nodes": 8},
             optimization_mode="sequential",
@@ -302,13 +335,14 @@ class TestToolPlanCompilation:
 
 
 class TestEventStreamReplay:
-
     def _build_sample_log(self) -> ToolEventLog:
         log = ToolEventLog()
         log.append(ToolEvent.requested("tid-0", 0, "memory_lookup", {"key": "goals"}))
         log.append(ToolEvent.executed("tid-0", 1, "memory_lookup", {"key": "goals"}, {"result": "goal_a"}, "ok"))
         log.append(ToolEvent.requested("tid-1", 2, "memory_lookup", {"key": "session"}))
-        log.append(ToolEvent.executed("tid-1", 3, "memory_lookup", {"key": "session"}, {"result": "session_data"}, "ok"))
+        log.append(
+            ToolEvent.executed("tid-1", 3, "memory_lookup", {"key": "session"}, {"result": "session_data"}, "ok")
+        )
         return log
 
     def test_replay_hash_is_stable(self):
@@ -366,6 +400,7 @@ class TestEventStreamReplay:
 
     def test_event_log_to_list_is_serializable(self):
         import json
+
         log = self._build_sample_log()
         raw = log.to_list()
         # Should not raise.
@@ -386,7 +421,6 @@ class TestEventStreamReplay:
 
 
 class TestToolStateAlgebra:
-
     def _state(self, results: list[dict]) -> ToolState:
         return ToolState.from_results(results)
 
@@ -476,10 +510,15 @@ class TestToolStateAlgebra:
 
 
 class TestSchedulerDeterminism:
-
     def _build_linear_dag(self, length: int = 3) -> ToolDAG:
         plan = [
-            {"tool_name": "memory_lookup", "intent": "goal_lookup", "args": {"k": str(i)}, "priority": 100, "sequence": i}
+            {
+                "tool_name": "memory_lookup",
+                "intent": "goal_lookup",
+                "args": {"k": str(i)},
+                "priority": 100,
+                "sequence": i,
+            }
             for i in range(length)
         ]
         return build_dag_from_execution_plan(plan)
@@ -496,7 +535,13 @@ class TestSchedulerDeterminism:
         # Multi-node DAGs with parallel waves should differ.
         plan = [
             {"tool_name": "memory_lookup", "intent": "goal_lookup", "args": {"k": "0"}, "priority": 100, "sequence": 0},
-            {"tool_name": "memory_lookup", "intent": "session_memory_fetch", "args": {"k": "1"}, "priority": 200, "sequence": 1},
+            {
+                "tool_name": "memory_lookup",
+                "intent": "session_memory_fetch",
+                "args": {"k": "1"},
+                "priority": 200,
+                "sequence": 1,
+            },
         ]
         dag = build_dag_from_execution_plan(plan)
         s1 = ToolScheduler(seed=1)
@@ -553,7 +598,6 @@ class TestSchedulerDeterminism:
 
 
 class TestSandboxIsolation:
-
     def test_fresh_sandbox_is_clean(self):
         sb = ToolSandbox()
         assert sb.is_clean()
@@ -671,8 +715,20 @@ class TestCrossModeDagConsistency:
 
     def _canonical_plan(self) -> list[dict]:
         return [
-            {"tool_name": "memory_lookup", "intent": "goal_lookup", "args": {"key": "goals"}, "priority": 90, "sequence": 0},
-            {"tool_name": "memory_lookup", "intent": "session_memory_fetch", "args": {"key": "session"}, "priority": 100, "sequence": 1},
+            {
+                "tool_name": "memory_lookup",
+                "intent": "goal_lookup",
+                "args": {"key": "goals"},
+                "priority": 90,
+                "sequence": 0,
+            },
+            {
+                "tool_name": "memory_lookup",
+                "intent": "session_memory_fetch",
+                "args": {"key": "session"},
+                "priority": 100,
+                "sequence": 1,
+            },
         ]
 
     def test_v2_on_dag_hash_stable_across_reruns(self):
@@ -689,7 +745,6 @@ class TestCrossModeDagConsistency:
 
     def test_dag_serialization_roundtrip_hash_stable(self):
         """DAG hash must survive a to_dict() serialization round-trip."""
-        import json
         plan = self._canonical_plan()
         dag = build_dag_from_execution_plan(plan)
         d = dag.to_dict()

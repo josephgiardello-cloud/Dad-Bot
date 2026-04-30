@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-import dadbot.app_runtime as app_runtime
+from dadbot import app_runtime
 from dadbot.runtime_adapter import runtime_contract_errors
 
 
@@ -250,12 +250,12 @@ def test_initialize_startup_logging_configures_logging(monkeypatch):
 
 
 def test_check_system_resources_warns_when_ram_low(monkeypatch, caplog):
+    import logging
     import sys
     import types
-    import logging
 
     fake_psutil = types.SimpleNamespace(
-        virtual_memory=lambda: types.SimpleNamespace(available=3.2 * 1024 ** 3, total=16 * 1024 ** 3)
+        virtual_memory=lambda: types.SimpleNamespace(available=3.2 * 1024**3, total=16 * 1024**3)
     )
     monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
 
@@ -272,7 +272,7 @@ def test_check_system_resources_raises_when_critically_low_ram(monkeypatch):
     import types
 
     fake_psutil = types.SimpleNamespace(
-        virtual_memory=lambda: types.SimpleNamespace(available=1.5 * 1024 ** 3, total=16 * 1024 ** 3)
+        virtual_memory=lambda: types.SimpleNamespace(available=1.5 * 1024**3, total=16 * 1024**3)
     )
     monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
 

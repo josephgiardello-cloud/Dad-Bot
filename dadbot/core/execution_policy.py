@@ -4,6 +4,7 @@ All policy logic for turn execution lives here. TurnGraph imports from this
 module and uses the policy objects as decision delegates; the graph itself
 contains no policy logic.
 """
+
 from __future__ import annotations
 
 import inspect
@@ -62,10 +63,16 @@ class StagePhaseMappingPolicy:
     classification logic lives here — none in the graph executor.
     """
 
-    _PLAN_STAGES: frozenset[str] = frozenset({"preflight", "health", "memory", "context", "plan", "temporal"})
+    _PLAN_STAGES: frozenset[str] = frozenset(
+        {"preflight", "health", "memory", "context", "plan", "temporal"},
+    )
     _ACT_STAGES: frozenset[str] = frozenset({"inference", "agent", "tool", "act"})
-    _OBSERVE_STAGES: frozenset[str] = frozenset({"safety", "guard", "observe", "moderate", "moderation"})
-    _RESPOND_STAGES: frozenset[str] = frozenset({"save", "respond", "final", "finalize", "persist"})
+    _OBSERVE_STAGES: frozenset[str] = frozenset(
+        {"safety", "guard", "observe", "moderate", "moderation"},
+    )
+    _RESPOND_STAGES: frozenset[str] = frozenset(
+        {"save", "respond", "final", "finalize", "persist"},
+    )
 
     @classmethod
     def phase_name_for_stage(cls, stage: str) -> str:
@@ -115,6 +122,7 @@ class ResumabilityPolicy:
         When True (default), the graph skips stages listed in an active
         resume record.  Set False to disable stage-skipping while still
         writing records (e.g. for audit-only mode).
+
     """
 
     enabled: bool = True
@@ -135,7 +143,12 @@ class ExecutionPolicyEngine:
         }
 
     @staticmethod
-    def _validate_callable_arity(callable_obj: Any, *, attr_name: str, required_arity: int) -> str | None:
+    def _validate_callable_arity(
+        callable_obj: Any,
+        *,
+        attr_name: str,
+        required_arity: int,
+    ) -> str | None:
         try:
             signature = inspect.signature(callable_obj)
         except (TypeError, ValueError):
@@ -151,7 +164,11 @@ class ExecutionPolicyEngine:
         positional_capacity = sum(
             1
             for parameter in parameters
-            if parameter.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+            if parameter.kind
+            in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            )
         )
         if positional_capacity < int(required_arity):
             return (
@@ -160,7 +177,11 @@ class ExecutionPolicyEngine:
             )
         return None
 
-    def set_kernel_rejection_semantics(self, stage: str, semantics: KernelRejectionSemantics) -> None:
+    def set_kernel_rejection_semantics(
+        self,
+        stage: str,
+        semantics: KernelRejectionSemantics,
+    ) -> None:
         key = str(stage or "*").strip().lower() or "*"
         self._kernel_rejection_semantics[key] = semantics
 
@@ -183,7 +204,12 @@ class ExecutionPolicyEngine:
             return TurnFailureSeverity.PARTIAL
         return TurnFailureSeverity.FATAL
 
-    def validate_persistence_service_contract(self, service: Any, *, strict_mode: bool) -> dict[str, Any]:
+    def validate_persistence_service_contract(
+        self,
+        service: Any,
+        *,
+        strict_mode: bool,
+    ) -> dict[str, Any]:
         expected_version = str(self._persistence_contract.version or "")
         if service is None:
             payload: dict[str, Any] = {
@@ -227,9 +253,7 @@ class ExecutionPolicyEngine:
                 signature_issues.append(issue)
 
         backend_version = str(
-            getattr(service, "contract_version", None)
-            or getattr(service, "version", None)
-            or ""
+            getattr(service, "contract_version", None) or getattr(service, "version", None) or "",
         ).strip()
 
         compatible = True
@@ -252,6 +276,6 @@ class ExecutionPolicyEngine:
                 "Persistence service contract violation: "
                 f"missing callables={missing!r}, signature_issues={signature_issues!r}, "
                 f"contract_version={expected_version}, "
-                f"backend_version={backend_version!r}, compatible={compatible}"
+                f"backend_version={backend_version!r}, compatible={compatible}",
             )
         return payload

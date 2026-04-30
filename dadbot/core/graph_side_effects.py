@@ -22,15 +22,16 @@ The graph calls the orchestrator.  The orchestrator decides which adapter or
 projector handles the side effect.  No execution decision logic lives here —
 only routing and delegation.
 """
+
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from dadbot.core.execution_identity import ExecutionIdentity
 from dadbot.core.execution_policy import (
     ExecutionPolicyEngine,
     KernelRejectionSemantics,
-    PersistenceServiceContract,
 )
 from dadbot.core.persistence_event_adapter import GraphPersistenceEventAdapter
 from dadbot.core.ux_projection import TurnUxProjector
@@ -56,6 +57,7 @@ class GraphSideEffectsOrchestrator:
     json_safe:
         The same ``_json_safe`` helper that the graph uses for payload
         serialisation — injected to avoid coupling this module to the graph.
+
     """
 
     def __init__(
@@ -79,20 +81,27 @@ class GraphSideEffectsOrchestrator:
         """Return the rejection semantics for *stage* from the policy engine."""
         return self._policy.rejection_semantics_for_stage(stage)
 
-    def set_kernel_rejection_semantics(self, stage: str, semantics: KernelRejectionSemantics) -> None:
+    def set_kernel_rejection_semantics(
+        self,
+        stage: str,
+        semantics: KernelRejectionSemantics,
+    ) -> None:
         """Override rejection semantics for *stage*."""
         self._policy.set_kernel_rejection_semantics(stage, semantics)
 
     def validate_persistence_service_contract(
-        self, turn_context: Any, service: Any
+        self,
+        turn_context: Any,
+        service: Any,
     ) -> None:
         """Validate the persistence service and stamp the result into context."""
         payload = self._policy.validate_persistence_service_contract(
             service,
             strict_mode=bool(
                 (getattr(turn_context, "metadata", None) or {}).get(
-                    "persistence_contract_strict", False
-                )
+                    "persistence_contract_strict",
+                    False,
+                ),
             ),
         )
         state = getattr(turn_context, "state", None)
@@ -125,7 +134,7 @@ class GraphSideEffectsOrchestrator:
         if service is None:
             return
         determinism_lock = dict(
-            (getattr(turn_context, "metadata", None) or {}).get("determinism") or {}
+            (getattr(turn_context, "metadata", None) or {}).get("determinism") or {},
         )
         checkpoint = checkpoint_snapshot_fn(
             stage=stage,
@@ -133,8 +142,9 @@ class GraphSideEffectsOrchestrator:
             error=error,
             advance_chain=bool(
                 (getattr(turn_context, "metadata", None) or {}).get(
-                    "checkpoint_every_node", False
-                )
+                    "checkpoint_every_node",
+                    False,
+                ),
             ),
         )
         self._persistence.emit_graph_checkpoint(
@@ -163,7 +173,7 @@ class GraphSideEffectsOrchestrator:
         if service is None:
             return
         determinism_lock = dict(
-            (getattr(turn_context, "metadata", None) or {}).get("determinism") or {}
+            (getattr(turn_context, "metadata", None) or {}).get("determinism") or {},
         )
         self._persistence.emit_phase_transition(
             service=service,

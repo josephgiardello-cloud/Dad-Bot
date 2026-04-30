@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-
 CAPABILITY_CONTRACTS: dict[str, dict[str, Any]] = {
     "temporal_ordering": {
         "required_stages": ["temporal", "inference", "save"],
@@ -34,7 +33,4 @@ CAPABILITY_CONTRACTS: dict[str, dict[str, Any]] = {
 
 
 def capability_contracts() -> dict[str, dict[str, Any]]:
-    return {
-        name: dict(contract)
-        for name, contract in CAPABILITY_CONTRACTS.items()
-    }
+    return {name: dict(contract) for name, contract in CAPABILITY_CONTRACTS.items()}

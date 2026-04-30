@@ -1,4 +1,5 @@
 """Mark every test in tests/stress/ with the 'stress' marker automatically."""
+
 from __future__ import annotations
 
 import pytest

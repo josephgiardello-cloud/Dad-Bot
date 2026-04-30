@@ -1,10 +1,12 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import inspect
 from typing import Protocol
 
-from dadbot.core.execution_boundary import canonical_execution_kernel, enforce_execution_role
-
+from dadbot.core.execution_boundary import (
+    canonical_execution_kernel,
+    enforce_execution_role,
+)
 
 EXECUTION_ROLE = "disabled"
 
@@ -22,12 +24,10 @@ class AppRuntimeContract(Protocol):
     """Minimum runtime class contract expected by dadbot.app_runtime."""
 
     @classmethod
-    def initialize_profile_file(cls, profile_path=None, force=False):
-        ...
+    def initialize_profile_file(cls, profile_path=None, force=False): ...
 
     @staticmethod
-    def default_planner_debug_state():
-        ...
+    def default_planner_debug_state(): ...
 
     def __init__(
         self,
@@ -36,23 +36,17 @@ class AppRuntimeContract(Protocol):
         append_signoff: bool = True,
         light_mode: bool = False,
         tenant_id: str = "",
-    ) -> None:
-        ...
+    ) -> None: ...
 
-    def clear_memory_store(self):
-        ...
+    def clear_memory_store(self): ...
 
-    def export_memory_store(self, export_path):
-        ...
+    def export_memory_store(self, export_path): ...
 
-    def print_system_message(self, message):
-        ...
+    def print_system_message(self, message): ...
 
-    def chat_loop(self):
-        ...
+    def chat_loop(self): ...
 
-    def chat_loop_via_service(self, service_client, session_id=None):
-        ...
+    def chat_loop_via_service(self, service_client, session_id=None): ...
 
 
 _REQUIRED_RUNTIME_ATTRIBUTES = (
@@ -84,17 +78,26 @@ _REQUIRED_INIT_PARAMETERS = (
 )
 
 
-def _validate_descriptor(runtime_cls, attr_name: str, expected_descriptor: type) -> list[str]:
+def _validate_descriptor(
+    runtime_cls,
+    attr_name: str,
+    expected_descriptor: type,
+) -> list[str]:
     issues: list[str] = []
     descriptor = inspect.getattr_static(runtime_cls, attr_name, None)
     if not isinstance(descriptor, expected_descriptor):
         issues.append(
-            f"attribute has wrong descriptor: {attr_name} (expected {expected_descriptor.__name__})"
+            f"attribute has wrong descriptor: {attr_name} (expected {expected_descriptor.__name__})",
         )
     return issues
 
 
-def _validate_required_parameters(target, *, attr_name: str, required_params: tuple[str, ...]) -> list[str]:
+def _validate_required_parameters(
+    target,
+    *,
+    attr_name: str,
+    required_params: tuple[str, ...],
+) -> list[str]:
     issues: list[str] = []
     try:
         signature = inspect.signature(target)
@@ -151,7 +154,9 @@ def runtime_contract_errors(runtime_cls) -> list[str]:
 
         expected_descriptor = _REQUIRED_DESCRIPTORS.get(attr_name)
         if expected_descriptor is not None:
-            issues.extend(_validate_descriptor(runtime_cls, attr_name, expected_descriptor))
+            issues.extend(
+                _validate_descriptor(runtime_cls, attr_name, expected_descriptor),
+            )
 
         required_params = _REQUIRED_PARAMETERS.get(attr_name)
         if required_params:
@@ -160,7 +165,7 @@ def runtime_contract_errors(runtime_cls) -> list[str]:
                     attr_value,
                     attr_name=attr_name,
                     required_params=required_params,
-                )
+                ),
             )
 
     issues.extend(_validate_init_signature(runtime_cls))

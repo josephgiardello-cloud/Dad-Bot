@@ -6,13 +6,13 @@ verifies the full pipeline wiring (preflight → planner → inference → save)
 
 from __future__ import annotations
 
-import asyncio
 import time
 import uuid
-from typing import Any
 
 import pytest
 
+from dadbot.core.critic import PASS_THRESHOLD, CritiqueEngine
+from dadbot.core.goal_scorer import GoalAwareRanker
 from dadbot.core.goals import (
     GoalPriority,
     GoalRecord,
@@ -20,6 +20,9 @@ from dadbot.core.goals import (
     GoalStore,
     detect_goal_in_input,
 )
+from dadbot.core.graph import TurnContext
+from dadbot.core.nodes import ToolExecutorNode, ToolRouterNode
+from dadbot.core.orchestrator import DadBotOrchestrator
 from dadbot.core.planner import (
     ComplexityLevel,
     IntentType,
@@ -27,31 +30,30 @@ from dadbot.core.planner import (
     ReplyStrategy,
     TurnPlan,
 )
-from dadbot.core.critic import CritiqueEngine, CritiqueResult, PASS_THRESHOLD
-from dadbot.core.goal_scorer import GoalAwareRanker
-from dadbot.core.graph import TurnContext
-from dadbot.core.nodes import ToolExecutorNode, ToolRouterNode
-from dadbot.core.orchestrator import DadBotOrchestrator
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_context(user_input: str = "hello", **state_kw) -> TurnContext:
     ctx = TurnContext(user_input=user_input, state=dict(state_kw))
     # Minimal temporal stub required by nodes that check for it.
-    ctx.temporal = type("_Temporal", (), {
-        "wall_time": "12:00:00",
-        "wall_date": "2025-01-01",
-        "timezone": "UTC",
-        "utc_offset_minutes": 0,
-        "epoch_seconds": time.time(),
-        "is_virtual": False,
-        "step_index": 0,
-        "base_epoch": time.time(),
-        "step_size_seconds": 1.0,
-    })()
+    ctx.temporal = type(
+        "_Temporal",
+        (),
+        {
+            "wall_time": "12:00:00",
+            "wall_date": "2025-01-01",
+            "timezone": "UTC",
+            "utc_offset_minutes": 0,
+            "epoch_seconds": time.time(),
+            "is_virtual": False,
+            "step_index": 0,
+            "base_epoch": time.time(),
+            "step_size_seconds": 1.0,
+        },
+    )()
     return ctx
 
 
@@ -62,6 +64,7 @@ def _make_goal(description: str = "learn Python", **kw) -> GoalRecord:
 # ---------------------------------------------------------------------------
 # 1. Goal System
 # ---------------------------------------------------------------------------
+
 
 class TestGoalSystem:
     """Verify GoalRecord, GoalStore, and detection helper."""
@@ -173,6 +176,7 @@ class TestGoalSystem:
 # ---------------------------------------------------------------------------
 # 2. PlannerNode
 # ---------------------------------------------------------------------------
+
 
 class TestPlannerNode:
     """Verify intent classification, plan generation, and goal detection."""
@@ -411,6 +415,7 @@ class TestToolRoutingPipeline:
 # 4. CritiqueEngine
 # ---------------------------------------------------------------------------
 
+
 class TestCritiqueEngine:
     """Verify CritiqueEngine pass/fail heuristics and revision hints."""
 
@@ -530,7 +535,10 @@ class TestCritiqueEngine:
             "I want to save money.",
             plan,
             iteration=0,
-            tool_ir={"execution_plan": [{"tool_name": "memory_lookup"}], "executions": [{"tool_name": "memory_lookup"}]},
+            tool_ir={
+                "execution_plan": [{"tool_name": "memory_lookup"}],
+                "executions": [{"tool_name": "memory_lookup"}],
+            },
             tool_results=[{"tool_name": "memory_lookup", "status": "error", "output": "boom"}],
         )
 
@@ -545,14 +553,15 @@ class TestCritiqueEngine:
         result = strict.critique("Short reply.", "What is love?", plan, iteration=0)
         # Score will be ≤ 1.0 but likely < 0.99 due to question mismatch or brevity.
         # We only assert the threshold is consulted.
-        assert result.passed == (result.score >= 0.99 and not any(
-            i in ("reply_empty", "fallback_detected") for i in result.issues
-        ))
+        assert result.passed == (
+            result.score >= 0.99 and not any(i in ("reply_empty", "fallback_detected") for i in result.issues)
+        )
 
 
 # ---------------------------------------------------------------------------
 # 5. GoalAwareRanker
 # ---------------------------------------------------------------------------
+
 
 class TestGoalAwareRanker:
     """Verify goal-aware memory re-ranking promotes relevant entries."""
@@ -564,9 +573,9 @@ class TestGoalAwareRanker:
         """A memory that overlaps with an active goal is ranked first."""
         ranker = GoalAwareRanker()
         memories = [
-            self._mem("I enjoyed the movie last night"),            # unrelated
+            self._mem("I enjoyed the movie last night"),  # unrelated
             self._mem("I have been practicing Python programming"),  # goal-relevant
-            self._mem("We had pizza for dinner"),                    # unrelated
+            self._mem("We had pizza for dinner"),  # unrelated
         ]
         goals = [{"id": "g1", "description": "learn Python programming", "status": "active"}]
 
@@ -650,6 +659,7 @@ class TestGoalAwareRanker:
 # 5. Integration: pipeline wiring
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 def orchestrator(bot) -> DadBotOrchestrator:
     return bot.turn_orchestrator
@@ -724,8 +734,9 @@ class TestCognitionPipelineIntegration:
         session = orchestrator.session_registry.get_or_create(sid)
         goals = session.get("state", {}).get("goals", [])
         assert len(goals) >= 1
-        assert any("financ" in g.get("description", "").lower() for g in goals), \
+        assert any("financ" in g.get("description", "").lower() for g in goals), (
             f"Expected finance-related goal, got: {goals}"
+        )
 
     @pytest.mark.asyncio
     async def test_persisted_goals_loaded_next_turn(self, orchestrator: DadBotOrchestrator):

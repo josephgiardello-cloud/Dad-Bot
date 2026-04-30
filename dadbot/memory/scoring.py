@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 
 class MemoryScorer:
@@ -18,7 +18,9 @@ class MemoryScorer:
         mood = self.bot.normalize_mood(memory.get("mood") or "neutral")
         emotional_intensity = self._mood_intensity(mood)
         relationship_impact = self._relationship_impact()
-        recency = self._recency_score(memory.get("updated_at") or memory.get("created_at"))
+        recency = self._recency_score(
+            memory.get("updated_at") or memory.get("created_at"),
+        )
         impact_score = max(0.0, float(memory.get("impact_score", 1.0) or 1.0))
         impact_scaled = max(0.0, min(1.0, impact_score / 3.0))
         importance_score = max(
@@ -38,14 +40,11 @@ class MemoryScorer:
         mood = self.bot.normalize_mood(entry.get("mood") or "neutral")
         emotional_intensity = self._mood_intensity(mood)
         relationship_impact = self._relationship_impact()
-        recency = self._recency_score(entry.get("updated_at") or entry.get("created_at"))
-        frequency = self._frequency_score(entry.get("source_count", 1))
-        importance = (
-            0.4 * emotional_intensity
-            + 0.3 * relationship_impact
-            + 0.2 * recency
-            + 0.1 * frequency
+        recency = self._recency_score(
+            entry.get("updated_at") or entry.get("created_at"),
         )
+        frequency = self._frequency_score(entry.get("source_count", 1))
+        importance = 0.4 * emotional_intensity + 0.3 * relationship_impact + 0.2 * recency + 0.1 * frequency
         return round(max(0.0, min(1.0, importance)), 3)
 
     # --- Contradiction scoring ---
@@ -55,12 +54,18 @@ class MemoryScorer:
         right_conf = max(0.05, min(1.0, float(right.get("confidence", 0.5) or 0.5)))
         left_decay = self._recency_score(left.get("updated_at"))
         right_decay = self._recency_score(right.get("updated_at"))
-        return round(((left_conf + right_conf) / 2.0) * ((left_decay + right_decay) / 2.0), 3)
+        return round(
+            ((left_conf + right_conf) / 2.0) * ((left_decay + right_decay) / 2.0),
+            3,
+        )
 
     def consolidated_resolution_rank(self, entry: dict) -> float:
         confidence = max(0.05, min(1.0, float(entry.get("confidence", 0.5) or 0.5)))
         recency = self._recency_score(entry.get("updated_at"))
-        importance = max(0.0, min(1.0, float(entry.get("importance_score", 0.0) or 0.0)))
+        importance = max(
+            0.0,
+            min(1.0, float(entry.get("importance_score", 0.0) or 0.0)),
+        )
         return round(0.45 * confidence + 0.35 * recency + 0.2 * importance, 4)
 
     # --- Private helpers ---
@@ -81,7 +86,10 @@ class MemoryScorer:
         state = self.bot.relationship_state() if callable(getattr(self.bot, "relationship_state", None)) else {}
         try:
             trust = max(0.0, min(100.0, float(state.get("trust_level", 50) or 50)))
-            openness = max(0.0, min(100.0, float(state.get("openness_level", 50) or 50)))
+            openness = max(
+                0.0,
+                min(100.0, float(state.get("openness_level", 50) or 50)),
+            )
         except (TypeError, ValueError, AttributeError):
             return 0.5
         return round((trust + openness) / 200.0, 3)

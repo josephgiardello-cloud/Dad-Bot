@@ -1,4 +1,4 @@
-﻿"""Policy engine for runtime decisions (photo generation, TTS, etc.)."""
+"""Policy engine for runtime decisions (photo generation, TTS, etc.)."""
 
 from __future__ import annotations
 
@@ -17,15 +17,13 @@ class PolicyDecisions:
 class PhotoPolicy(Protocol):
     """Protocol for photo generation policy."""
 
-    def should_generate(self, *, mood: str, thread_id: str) -> bool:
-        ...
+    def should_generate(self, *, mood: str, thread_id: str) -> bool: ...
 
 
 class TTSPolicy(Protocol):
     """Protocol for TTS request policy."""
 
-    def should_request(self, *, thread_id: str, reply_text: str) -> bool:
-        ...
+    def should_request(self, *, thread_id: str, reply_text: str) -> bool: ...
 
 
 class DefaultPhotoPolicy:
@@ -56,9 +54,21 @@ class PolicyEngine:
         self.photo_policy = photo_policy or DefaultPhotoPolicy()
         self.tts_policy = tts_policy or DefaultTTSPolicy()
 
-    def evaluate(self, *, mood: str, thread_id: str, reply_text: str) -> PolicyDecisions:
+    def evaluate(
+        self,
+        *,
+        mood: str,
+        thread_id: str,
+        reply_text: str,
+    ) -> PolicyDecisions:
         """Evaluate all policies for a turn and return decisions."""
         return PolicyDecisions(
-            should_generate_photo=self.photo_policy.should_generate(mood=mood, thread_id=thread_id),
-            should_request_tts=self.tts_policy.should_request(thread_id=thread_id, reply_text=reply_text),
+            should_generate_photo=self.photo_policy.should_generate(
+                mood=mood,
+                thread_id=thread_id,
+            ),
+            should_request_tts=self.tts_policy.should_request(
+                thread_id=thread_id,
+                reply_text=reply_text,
+            ),
         )

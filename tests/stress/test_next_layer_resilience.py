@@ -8,6 +8,7 @@ D. Replay under perturbation (timing jitter + safe branch reordering)
 
 Most tests are marked ``slow`` and can be scaled via environment variables.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -19,6 +20,9 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from harness.graph_runner import GraphRunner
+from harness.kernel_mock import MockPersistenceService, MockRegistry
+from harness.turn_factory import TurnFactory
 
 from dadbot.core.graph import (
     ContextBuilderNode,
@@ -31,9 +35,6 @@ from dadbot.core.graph import (
     TemporalNode,
     TurnGraph,
 )
-from harness.graph_runner import GraphRunner
-from harness.kernel_mock import MockPersistenceService, MockRegistry
-from harness.turn_factory import TurnFactory
 
 
 def _goal_intent(priority: int = 100) -> MutationIntent:
@@ -257,7 +258,9 @@ def test_controlled_failure_injection_preserves_recovery_visibility_and_phase_sy
     """C) Inject save partial failures + lag + kernel rejection spikes and verify safety contracts."""
     # Save partial failure + lag
     registry = MockRegistry()
-    registry.persistence = _FlakyPersistence(fail_every=2, lag_ms=float(os.environ.get("DADBOT_PERSISTENCE_LAG_MS", "20")))
+    registry.persistence = _FlakyPersistence(
+        fail_every=2, lag_ms=float(os.environ.get("DADBOT_PERSISTENCE_LAG_MS", "20"))
+    )
     graph = _build_canonical(registry)
     runner = GraphRunner()
 
@@ -327,11 +330,7 @@ def test_replay_under_perturbation_keeps_deterministic_signature():
         run = GraphRunner().run(graph, ctx, registry)
         run.assert_succeeded()
 
-        branch_state = {
-            key: value
-            for key, value in sorted(ctx.state.items())
-            if str(key).startswith("branch_")
-        }
+        branch_state = {key: value for key, value in sorted(ctx.state.items()) if str(key).startswith("branch_")}
         return {
             "trace_id": ctx.trace_id,
             "phase_history": list(ctx.phase_history),
@@ -350,6 +349,4 @@ def test_replay_under_perturbation_keeps_deterministic_signature():
     signature_a = run_signature(seed, reverse_branches=False, jitter_ms=base_jitter)
     signature_b = run_signature(seed, reverse_branches=True, jitter_ms=perturbed_jitter)
 
-    assert signature_a == signature_b, (
-        "Determinism boundary did not hold under timing jitter + safe branch reordering"
-    )
+    assert signature_a == signature_b, "Determinism boundary did not hold under timing jitter + safe branch reordering"

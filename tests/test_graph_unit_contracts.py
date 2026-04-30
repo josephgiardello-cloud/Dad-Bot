@@ -18,13 +18,15 @@ Industry-standard coverage gaps filled:
   - TurnGraph._phase_for_stage keyword mapping
   - TurnGraph.execute execution-token boundary violation
 """
+
 from __future__ import annotations
 
 import asyncio
+
 import pytest
+
 pytestmark = pytest.mark.unit
 from dadbot.core.graph import (
-    FatalTurnError,
     MutationGuard,
     MutationIntent,
     MutationKind,
@@ -37,7 +39,6 @@ from dadbot.core.graph import (
     VirtualClock,
     _json_safe,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -74,6 +75,7 @@ class TestVirtualClock:
 
     def test_to_datetime_is_timezone_aware(self):
         import datetime as dt
+
         vc = VirtualClock(base_epoch=1_700_000_000.0, step_size_seconds=1.0)
         d = vc.to_datetime()
         assert isinstance(d, dt.datetime)
@@ -98,6 +100,7 @@ class TestTurnTemporalAxis:
 
     def test_from_lock_hash_empty_falls_back_to_real_time(self):
         import datetime as dt
+
         today = dt.date.today().isoformat()
         axis = TurnTemporalAxis.from_lock_hash("")
         # Empty hash falls back to from_now() — wall_date must be today
@@ -105,6 +108,7 @@ class TestTurnTemporalAxis:
 
     def test_to_dict_is_json_serialisable(self):
         import json
+
         axis = TurnTemporalAxis.from_lock_hash("deadbeefdeadbeef")
         payload = axis.to_dict()
         serialised = json.dumps(payload)
@@ -464,20 +468,23 @@ class TestMarkStageEnter:
 
 
 class TestPhaseForStage:
-    @pytest.mark.parametrize("stage,expected", [
-        ("health",        TurnPhase.PLAN),
-        ("preflight",     TurnPhase.PLAN),
-        ("memory",        TurnPhase.PLAN),
-        ("context",       TurnPhase.PLAN),
-        ("inference",     TurnPhase.ACT),
-        ("agent",         TurnPhase.ACT),
-        ("tool",          TurnPhase.ACT),
-        ("safety",        TurnPhase.OBSERVE),
-        ("moderation",    TurnPhase.OBSERVE),
-        ("save",          TurnPhase.RESPOND),
-        ("finalize",      TurnPhase.RESPOND),
-        ("persist",       TurnPhase.RESPOND),
-    ])
+    @pytest.mark.parametrize(
+        "stage,expected",
+        [
+            ("health", TurnPhase.PLAN),
+            ("preflight", TurnPhase.PLAN),
+            ("memory", TurnPhase.PLAN),
+            ("context", TurnPhase.PLAN),
+            ("inference", TurnPhase.ACT),
+            ("agent", TurnPhase.ACT),
+            ("tool", TurnPhase.ACT),
+            ("safety", TurnPhase.OBSERVE),
+            ("moderation", TurnPhase.OBSERVE),
+            ("save", TurnPhase.RESPOND),
+            ("finalize", TurnPhase.RESPOND),
+            ("persist", TurnPhase.RESPOND),
+        ],
+    )
     def test_stage_maps_to_expected_phase(self, stage, expected):
         result = TurnGraph._phase_for_stage(stage, TurnPhase.PLAN)
         assert result == expected

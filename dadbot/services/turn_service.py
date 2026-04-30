@@ -1,9 +1,11 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import json
 import logging
 from typing import Any
+
+from pydantic import ValidationError
 
 from dadbot.contracts import (
     AttachmentList,
@@ -13,13 +15,17 @@ from dadbot.contracts import (
     PreparedTurnResult,
     SupportsTurnProcessingRuntime,
 )
-from dadbot.core.graph import LedgerMutationOp, MutationIntent, MutationKind, TurnContext
+from dadbot.core.graph import (
+    LedgerMutationOp,
+    MutationIntent,
+    MutationKind,
+    TurnContext,
+)
 from dadbot.core.tool_sandbox import ToolSandbox
 from dadbot.managers.reply_generation import ReplyGenerationManager
+from dadbot.models import AgenticToolPlan
 from dadbot.services.llm_call_adapter import LLMCallAdapter
 from dadbot.services.turn_state_mutator import TurnStateMutator
-from dadbot.models import AgenticToolPlan
-from pydantic import ValidationError
 
 # Keep the historic logger name so existing tests and log pipelines remain stable
 # while the implementation moves from managers/ to services/.
@@ -65,7 +71,12 @@ class TurnService:
         detail: str = "",
         **metadata,
     ) -> dict[str, object] | None:
-        return self._state_mutator.append_turn_pipeline_step(name, status, detail, **metadata)
+        return self._state_mutator.append_turn_pipeline_step(
+            name,
+            status,
+            detail,
+            **metadata,
+        )
 
     def _complete_turn_pipeline(
         self,
@@ -88,15 +99,22 @@ class TurnService:
     def should_offer_daily_checkin_for_turn(self) -> bool:
         return self.bot.memory.should_do_daily_checkin() and self.bot.session_turn_count() == 0
 
-    def record_user_turn_state(self, stripped_input: str, current_mood: str, turn_context: Any | None = None) -> None:
+    def record_user_turn_state(
+        self,
+        stripped_input: str,
+        current_mood: str,
+        turn_context: Any | None = None,
+    ) -> None:
         should_offer_daily_checkin = self.should_offer_daily_checkin_for_turn()
-        
+
         # If turn_context is provided, use the strict-mode path through mutation queue
         if turn_context is not None:
             mutation_queue = getattr(turn_context, "mutation_queue", None)
             if mutation_queue is None:
                 logger = logging.getLogger(__name__)
-                logger.warning("Strict mode turn_context lacks mutation_queue; using fallback")
+                logger.warning(
+                    "Strict mode turn_context lacks mutation_queue; using fallback",
+                )
                 # Fall through to direct write below
             else:
                 try:
@@ -106,11 +124,13 @@ class TurnService:
                             payload={
                                 "op": LedgerMutationOp.RECORD_TURN_STATE.value,
                                 "mood": str(current_mood or "neutral"),
-                                "should_offer_daily_checkin": bool(should_offer_daily_checkin),
+                                "should_offer_daily_checkin": bool(
+                                    should_offer_daily_checkin,
+                                ),
                             },
                             requires_temporal=False,
                             source="turn_service.record_user_turn_state",
-                        )
+                        ),
                     )
 
                     # Queue mood mutation for SaveNode drain at the turn commit boundary.
@@ -128,16 +148,25 @@ class TurnService:
                     # Gracefully fall through to compatibility path for legacy callers.
                     if "MutationGuard" in str(guard_exc):
                         logger = logging.getLogger(__name__)
-                        logger.debug(f"MutationGuard prevented recording outside SaveNode; using fallback: {guard_exc}")
+                        logger.debug(
+                            f"MutationGuard prevented recording outside SaveNode; using fallback: {guard_exc}",
+                        )
                     else:
                         raise
-        
+
         # Fallback: direct write when turn_context is not available (e.g., in tests)
         # This maintains compatibility with legacy code paths.
         # All direct attribute writes are owned by TurnStateMutator.
-        self._state_mutator.write_mood_fallback(current_mood, should_offer_daily_checkin)
+        self._state_mutator.write_mood_fallback(
+            current_mood,
+            should_offer_daily_checkin,
+        )
 
-    def direct_reply_for_input(self, stripped_input: str, current_mood: str) -> str | None:
+    def direct_reply_for_input(
+        self,
+        stripped_input: str,
+        current_mood: str,
+    ) -> str | None:
         crisis_reply = self.bot.safety_support.direct_reply_for_input(stripped_input)
         if crisis_reply is not None:
             return crisis_reply
@@ -149,10 +178,17 @@ class TurnService:
             self.bot.get_fact_reply(stripped_input),
         ):
             if direct_reply is not None:
-                return self.bot.reply_finalization.finalize(direct_reply, current_mood, stripped_input)
+                return self.bot.reply_finalization.finalize(
+                    direct_reply,
+                    current_mood,
+                    stripped_input,
+                )
         return None
 
-    def _available_agentic_tools(self, settings: dict[str, object]) -> list[dict[str, object]]:
+    def _available_agentic_tools(
+        self,
+        settings: dict[str, object],
+    ) -> list[dict[str, object]]:
         tools = []
         for tool in self.bot.get_available_tools():
             name = str(tool.get("function", {}).get("name") or "").strip()
@@ -202,16 +238,26 @@ Return ONLY valid JSON (no extra text):
                     messages=[
                         {
                             "role": "user",
-                            "content": self._reflection_prompt(original_input, current_query, current_observation),
-                        }
+                            "content": self._reflection_prompt(
+                                original_input,
+                                current_query,
+                                current_observation,
+                            ),
+                        },
                     ],
                     options={"temperature": 0.1},
                     response_format="json",
                     purpose="agentic reflection",
                 )
-                reflection = self.bot.parse_model_json_content(response["message"]["content"])
+                reflection = self.bot.parse_model_json_content(
+                    response["message"]["content"],
+                )
             except Exception as exc:
-                logger.warning("Agentic reflection call failed (attempt %d): %s", attempt + 1, exc)
+                logger.warning(
+                    "Agentic reflection call failed (attempt %d): %s",
+                    attempt + 1,
+                    exc,
+                )
                 break
 
             if not isinstance(reflection, dict):
@@ -289,16 +335,26 @@ Return ONLY valid JSON (no extra text):
                     messages=[
                         {
                             "role": "user",
-                            "content": self._reflection_prompt(original_input, current_query, current_observation),
-                        }
+                            "content": self._reflection_prompt(
+                                original_input,
+                                current_query,
+                                current_observation,
+                            ),
+                        },
                     ],
                     options={"temperature": 0.1},
                     response_format="json",
                     purpose="agentic reflection",
                 )
-                reflection = self.bot.parse_model_json_content(response["message"]["content"])
+                reflection = self.bot.parse_model_json_content(
+                    response["message"]["content"],
+                )
             except Exception as exc:
-                logger.warning("Agentic reflection call failed (attempt %d): %s", attempt + 1, exc)
+                logger.warning(
+                    "Agentic reflection call failed (attempt %d): %s",
+                    attempt + 1,
+                    exc,
+                )
                 break
 
             if not isinstance(reflection, dict):
@@ -357,7 +413,11 @@ Return ONLY valid JSON (no extra text):
         return current_observation
 
     @staticmethod
-    def _planning_prompt(stripped_input: str, current_mood: str, tools: list[dict[str, object]]) -> str:
+    def _planning_prompt(
+        stripped_input: str,
+        current_mood: str,
+        tools: list[dict[str, object]],
+    ) -> str:
         return f"""
 You are Dad helping Tony. Think carefully about his latest message.
 
@@ -467,7 +527,11 @@ Return ONLY valid JSON (no extra text):
                 final_path="planner_tool",
             )
             reply = self._reminder_confirmation_reply(reminder)
-            return self.bot.reply_finalization.finalize(reply, current_mood, stripped_input), None
+            return self.bot.reply_finalization.finalize(
+                reply,
+                current_mood,
+                stripped_input,
+            ), None
         self.bot.update_planner_debug(
             planner_status="fallback",
             planner_reason="Planner selected set_reminder, but Dad couldn't create the reminder cleanly.",
@@ -514,7 +578,11 @@ Return ONLY valid JSON (no extra text):
                 final_path="planner_tool",
             )
             reply = self._reminder_confirmation_reply(reminder)
-            return await self.bot.reply_finalization.finalize_async(reply, current_mood, stripped_input), None
+            return await self.bot.reply_finalization.finalize_async(
+                reply,
+                current_mood,
+                stripped_input,
+            ), None
         self.bot.update_planner_debug(
             planner_status="fallback",
             planner_reason="Planner selected set_reminder, but Dad couldn't create the reminder cleanly.",
@@ -553,7 +621,12 @@ Return ONLY valid JSON (no extra text):
         if result:
             source = f" Source: {result['source_label']}." if result.get("source_label") else ""
             observation = f"{result['heading']}: {result['summary']}{source}"
-            observation = self._reflect_on_web_observation(stripped_input, normalized_query, observation, settings)
+            observation = self._reflect_on_web_observation(
+                stripped_input,
+                normalized_query,
+                observation,
+                settings,
+            )
             self.bot.update_planner_debug(
                 planner_status="used_tool",
                 planner_reason=plan_reason or "Planner selected a web lookup.",
@@ -722,10 +795,12 @@ Return ONLY valid JSON (no extra text):
     _TOOL_BIAS_PERMISSIONS: dict[str, frozenset[str]] = {
         "planner_default": frozenset({"set_reminder", "web_search"}),
         "optional_tools": frozenset({"set_reminder", "web_search"}),
-        "minimal_tools": frozenset({"set_reminder"}),           # acute_stress: no web noise
-        "defer_tools_unless_explicit": frozenset(),             # guarded: block all tools
+        "minimal_tools": frozenset({"set_reminder"}),  # acute_stress: no web noise
+        "defer_tools_unless_explicit": frozenset(),  # guarded: block all tools
     }
-    _DEFAULT_TOOL_BIAS_PERMISSIONS: frozenset[str] = frozenset({"set_reminder", "web_search"})
+    _DEFAULT_TOOL_BIAS_PERMISSIONS: frozenset[str] = frozenset(
+        {"set_reminder", "web_search"},
+    )
 
     @classmethod
     def _permitted_tools_for_bias(cls, tool_bias: str) -> frozenset[str]:
@@ -750,12 +825,18 @@ Return ONLY valid JSON (no extra text):
             )
         if tool_name not in permitted:
             return False, (
-                f"Bayesian policy '{tool_bias}' does not permit tool '{tool_name}'; "
-                f"permitted: {sorted(permitted)}."
+                f"Bayesian policy '{tool_bias}' does not permit tool '{tool_name}'; permitted: {sorted(permitted)}."
             )
-        return True, plan_reason or f"Bayesian policy '{tool_bias}' permits tool '{tool_name}'."
+        return (
+            True,
+            plan_reason or f"Bayesian policy '{tool_bias}' permits tool '{tool_name}'.",
+        )
 
-    def plan_agentic_tools(self, stripped_input: str, current_mood: str) -> tuple[str | None, str | None]:
+    def plan_agentic_tools(
+        self,
+        stripped_input: str,
+        current_mood: str,
+    ) -> tuple[str | None, str | None]:
         settings = self.bot.agentic_tool_settings()
         if not settings["enabled"]:
             self.bot.update_planner_debug(
@@ -776,7 +857,16 @@ Return ONLY valid JSON (no extra text):
 
         try:
             response = self._llm_adapter.call(
-                messages=[{"role": "user", "content": self._planning_prompt(stripped_input, current_mood, tools)}],
+                messages=[
+                    {
+                        "role": "user",
+                        "content": self._planning_prompt(
+                            stripped_input,
+                            current_mood,
+                            tools,
+                        ),
+                    },
+                ],
                 options={"temperature": 0.1},
                 response_format="json",
                 purpose="agentic tool planning",
@@ -805,7 +895,9 @@ Return ONLY valid JSON (no extra text):
 
             # Bayesian gate: the Bayesian policy is the FINAL authority.
             # The planner is advisory; if the policy blocks the tool, skip it.
-            tool_bias = str(self.bot.planner_debug_snapshot().get("bayesian_tool_bias") or "planner_default")
+            tool_bias = str(
+                self.bot.planner_debug_snapshot().get("bayesian_tool_bias") or "planner_default",
+            )
             allowed, gate_reason = self._bayesian_tool_gate(
                 tool_name=str(plan.tool or ""),
                 tool_bias=tool_bias,
@@ -845,7 +937,11 @@ Return ONLY valid JSON (no extra text):
 
         return None, None
 
-    async def plan_agentic_tools_async(self, stripped_input: str, current_mood: str) -> tuple[str | None, str | None]:
+    async def plan_agentic_tools_async(
+        self,
+        stripped_input: str,
+        current_mood: str,
+    ) -> tuple[str | None, str | None]:
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -879,7 +975,16 @@ Return ONLY valid JSON (no extra text):
 
         try:
             response = await self._llm_adapter.call_async(
-                messages=[{"role": "user", "content": self._planning_prompt(stripped_input, current_mood, tools)}],
+                messages=[
+                    {
+                        "role": "user",
+                        "content": self._planning_prompt(
+                            stripped_input,
+                            current_mood,
+                            tools,
+                        ),
+                    },
+                ],
                 options={"temperature": 0.1},
                 response_format="json",
                 purpose="agentic tool planning",
@@ -907,7 +1012,9 @@ Return ONLY valid JSON (no extra text):
                 return None, None
 
             # Bayesian gate: governing authority over tool selection.
-            tool_bias = str(self.bot.planner_debug_snapshot().get("bayesian_tool_bias") or "planner_default")
+            tool_bias = str(
+                self.bot.planner_debug_snapshot().get("bayesian_tool_bias") or "planner_default",
+            )
             allowed, gate_reason = self._bayesian_tool_gate(
                 tool_name=str(plan.tool or ""),
                 tool_bias=tool_bias,
@@ -955,10 +1062,22 @@ Return ONLY valid JSON (no extra text):
     ) -> PreparedTurnResult:
         self._start_turn_pipeline("sync", stripped_input)
         normalized_attachments = self.bot.normalize_chat_attachments(attachments)
-        normalized_attachments = self.bot.enrich_multimodal_attachments(normalized_attachments, user_input=stripped_input)
-        self._append_turn_pipeline_step("normalize_attachments", detail=f"attachments={len(normalized_attachments)}")
-        turn_text = self.bot.compose_user_turn_text(stripped_input, normalized_attachments)
-        self._append_turn_pipeline_step("compose_turn_text", detail="composed user turn text" if turn_text else "empty composed turn")
+        normalized_attachments = self.bot.enrich_multimodal_attachments(
+            normalized_attachments,
+            user_input=stripped_input,
+        )
+        self._append_turn_pipeline_step(
+            "normalize_attachments",
+            detail=f"attachments={len(normalized_attachments)}",
+        )
+        turn_text = self.bot.compose_user_turn_text(
+            stripped_input,
+            normalized_attachments,
+        )
+        self._append_turn_pipeline_step(
+            "compose_turn_text",
+            detail="composed user turn text" if turn_text else "empty composed turn",
+        )
         if not turn_text:
             self._complete_turn_pipeline(final_path="empty_input", reply_source="none")
             return None, None, False, "", normalized_attachments
@@ -966,21 +1085,51 @@ Return ONLY valid JSON (no extra text):
         if self.bot.is_session_exit_command(stripped_input):
             self.bot.persist_conversation()
             self.bot.mark_chat_thread_closed(closed=True)
-            self._append_turn_pipeline_step("session_exit", detail="handled exit command")
-            self._complete_turn_pipeline(final_path="session_exit", reply_source="exit_command", should_end=True)
-            return None, self.bot.reply_finalization.append_signoff("Catch ya later, Tony! Always here if you need me."), True, turn_text, normalized_attachments
+            self._append_turn_pipeline_step(
+                "session_exit",
+                detail="handled exit command",
+            )
+            self._complete_turn_pipeline(
+                final_path="session_exit",
+                reply_source="exit_command",
+                should_end=True,
+            )
+            return (
+                None,
+                self.bot.reply_finalization.append_signoff(
+                    "Catch ya later, Tony! Always here if you need me.",
+                ),
+                True,
+                turn_text,
+                normalized_attachments,
+            )
 
-        mood_history_window = self.bot.runtime_config.window("mood_detection_context", 6)
+        mood_history_window = self.bot.runtime_config.window(
+            "mood_detection_context",
+            6,
+        )
         if self.bot.LIGHT_MODE:
             current_mood = "neutral"
         else:
-            current_mood = self.bot.mood_manager.detect(turn_text, self.bot.prompt_history()[-mood_history_window:])
+            current_mood = self.bot.mood_manager.detect(
+                turn_text,
+                self.bot.prompt_history()[-mood_history_window:],
+            )
         self._update_turn_pipeline(current_mood=current_mood)
-        self._append_turn_pipeline_step("detect_mood", detail=f"current_mood={current_mood}")
+        self._append_turn_pipeline_step(
+            "detect_mood",
+            detail=f"current_mood={current_mood}",
+        )
         self.record_user_turn_state(turn_text, current_mood, turn_context=turn_context)
-        self._append_turn_pipeline_step("record_turn_state", detail="saved mood and relationship state")
+        self._append_turn_pipeline_step(
+            "record_turn_state",
+            detail="saved mood and relationship state",
+        )
         self.bot.begin_planner_debug(stripped_input, current_mood)
-        self._append_turn_pipeline_step("begin_planner_debug", detail="initialized planner debug state")
+        self._append_turn_pipeline_step(
+            "begin_planner_debug",
+            detail="initialized planner debug state",
+        )
 
         if direct_reply := self.direct_reply_for_input(stripped_input, current_mood):
             self.bot.update_planner_debug(
@@ -988,16 +1137,31 @@ Return ONLY valid JSON (no extra text):
                 planner_reason="A direct reply path handled this turn before tool planning.",
                 final_path="direct_reply",
             )
-            self._append_turn_pipeline_step("direct_reply", detail="reply produced before tool planning")
-            self._update_turn_pipeline(final_path="direct_reply", reply_source="direct_reply")
+            self._append_turn_pipeline_step(
+                "direct_reply",
+                detail="reply produced before tool planning",
+            )
+            self._update_turn_pipeline(
+                final_path="direct_reply",
+                reply_source="direct_reply",
+            )
             return current_mood, direct_reply, False, turn_text, normalized_attachments
 
-        auto_reply, tool_observation = self.plan_agentic_tools(stripped_input, current_mood)
+        auto_reply, tool_observation = self.plan_agentic_tools(
+            stripped_input,
+            current_mood,
+        )
         planner_snapshot = self.bot.planner_debug_snapshot()
-        self._append_turn_pipeline_step("plan_tools", detail=f"planner_status={planner_snapshot.get('planner_status', 'idle')}")
+        self._append_turn_pipeline_step(
+            "plan_tools",
+            detail=f"planner_status={planner_snapshot.get('planner_status', 'idle')}",
+        )
         if auto_reply is not None:
             self._update_turn_pipeline(
-                final_path=str(planner_snapshot.get("final_path") or "planner_tool").strip() or "planner_tool",
+                final_path=str(
+                    planner_snapshot.get("final_path") or "planner_tool",
+                ).strip()
+                or "planner_tool",
                 reply_source="planner_tool",
             )
             return current_mood, auto_reply, False, turn_text, normalized_attachments
@@ -1008,19 +1172,31 @@ Return ONLY valid JSON (no extra text):
                 current_mood,
                 normalized_attachments,
             )
-            self._append_turn_pipeline_step("heuristic_tools", detail="evaluated heuristic tool routing")
+            self._append_turn_pipeline_step(
+                "heuristic_tools",
+                detail="evaluated heuristic tool routing",
+            )
         self.bot.set_active_tool_observation(tool_observation)
         if tool_observation:
-            self._append_turn_pipeline_step("tool_observation", detail="captured tool observation for reply generation")
+            self._append_turn_pipeline_step(
+                "tool_observation",
+                detail="captured tool observation for reply generation",
+            )
         if auto_reply is not None:
             planner_snapshot = self.bot.planner_debug_snapshot()
             self._update_turn_pipeline(
-                final_path=str(planner_snapshot.get("final_path") or "heuristic_tool").strip() or "heuristic_tool",
+                final_path=str(
+                    planner_snapshot.get("final_path") or "heuristic_tool",
+                ).strip()
+                or "heuristic_tool",
                 reply_source="heuristic_tool",
             )
             return current_mood, auto_reply, False, turn_text, normalized_attachments
 
-        self._update_turn_pipeline(final_path="model_reply", reply_source="model_generation")
+        self._update_turn_pipeline(
+            final_path="model_reply",
+            reply_source="model_generation",
+        )
         return current_mood, None, False, turn_text, normalized_attachments
 
     async def prepare_user_turn_async(
@@ -1031,10 +1207,22 @@ Return ONLY valid JSON (no extra text):
     ) -> PreparedTurnResult:
         self._start_turn_pipeline("async", stripped_input)
         normalized_attachments = self.bot.normalize_chat_attachments(attachments)
-        normalized_attachments = self.bot.enrich_multimodal_attachments(normalized_attachments, user_input=stripped_input)
-        self._append_turn_pipeline_step("normalize_attachments", detail=f"attachments={len(normalized_attachments)}")
-        turn_text = self.bot.compose_user_turn_text(stripped_input, normalized_attachments)
-        self._append_turn_pipeline_step("compose_turn_text", detail="composed user turn text" if turn_text else "empty composed turn")
+        normalized_attachments = self.bot.enrich_multimodal_attachments(
+            normalized_attachments,
+            user_input=stripped_input,
+        )
+        self._append_turn_pipeline_step(
+            "normalize_attachments",
+            detail=f"attachments={len(normalized_attachments)}",
+        )
+        turn_text = self.bot.compose_user_turn_text(
+            stripped_input,
+            normalized_attachments,
+        )
+        self._append_turn_pipeline_step(
+            "compose_turn_text",
+            detail="composed user turn text" if turn_text else "empty composed turn",
+        )
         if not turn_text:
             self._complete_turn_pipeline(final_path="empty_input", reply_source="none")
             return None, None, False, "", normalized_attachments
@@ -1042,21 +1230,51 @@ Return ONLY valid JSON (no extra text):
         if self.bot.is_session_exit_command(stripped_input):
             self.bot.persist_conversation()
             self.bot.mark_chat_thread_closed(closed=True)
-            self._append_turn_pipeline_step("session_exit", detail="handled exit command")
-            self._complete_turn_pipeline(final_path="session_exit", reply_source="exit_command", should_end=True)
-            return None, self.bot.reply_finalization.append_signoff("Catch ya later, Tony! Always here if you need me."), True, turn_text, normalized_attachments
+            self._append_turn_pipeline_step(
+                "session_exit",
+                detail="handled exit command",
+            )
+            self._complete_turn_pipeline(
+                final_path="session_exit",
+                reply_source="exit_command",
+                should_end=True,
+            )
+            return (
+                None,
+                self.bot.reply_finalization.append_signoff(
+                    "Catch ya later, Tony! Always here if you need me.",
+                ),
+                True,
+                turn_text,
+                normalized_attachments,
+            )
 
-        mood_history_window = self.bot.runtime_config.window("mood_detection_context", 6)
+        mood_history_window = self.bot.runtime_config.window(
+            "mood_detection_context",
+            6,
+        )
         if self.bot.LIGHT_MODE:
             current_mood = "neutral"
         else:
-            current_mood = await self.bot.mood_manager.detect_async(turn_text, self.bot.prompt_history()[-mood_history_window:])
+            current_mood = await self.bot.mood_manager.detect_async(
+                turn_text,
+                self.bot.prompt_history()[-mood_history_window:],
+            )
         self._update_turn_pipeline(current_mood=current_mood)
-        self._append_turn_pipeline_step("detect_mood", detail=f"current_mood={current_mood}")
+        self._append_turn_pipeline_step(
+            "detect_mood",
+            detail=f"current_mood={current_mood}",
+        )
         self.record_user_turn_state(turn_text, current_mood, turn_context=turn_context)
-        self._append_turn_pipeline_step("record_turn_state", detail="saved mood and relationship state")
+        self._append_turn_pipeline_step(
+            "record_turn_state",
+            detail="saved mood and relationship state",
+        )
         self.bot.begin_planner_debug(stripped_input, current_mood)
-        self._append_turn_pipeline_step("begin_planner_debug", detail="initialized planner debug state")
+        self._append_turn_pipeline_step(
+            "begin_planner_debug",
+            detail="initialized planner debug state",
+        )
 
         if direct_reply := self.direct_reply_for_input(stripped_input, current_mood):
             self.bot.update_planner_debug(
@@ -1064,16 +1282,31 @@ Return ONLY valid JSON (no extra text):
                 planner_reason="A direct reply path handled this turn before tool planning.",
                 final_path="direct_reply",
             )
-            self._append_turn_pipeline_step("direct_reply", detail="reply produced before tool planning")
-            self._update_turn_pipeline(final_path="direct_reply", reply_source="direct_reply")
+            self._append_turn_pipeline_step(
+                "direct_reply",
+                detail="reply produced before tool planning",
+            )
+            self._update_turn_pipeline(
+                final_path="direct_reply",
+                reply_source="direct_reply",
+            )
             return current_mood, direct_reply, False, turn_text, normalized_attachments
 
-        auto_reply, tool_observation = await self.plan_agentic_tools_async(stripped_input, current_mood)
+        auto_reply, tool_observation = await self.plan_agentic_tools_async(
+            stripped_input,
+            current_mood,
+        )
         planner_snapshot = self.bot.planner_debug_snapshot()
-        self._append_turn_pipeline_step("plan_tools", detail=f"planner_status={planner_snapshot.get('planner_status', 'idle')}")
+        self._append_turn_pipeline_step(
+            "plan_tools",
+            detail=f"planner_status={planner_snapshot.get('planner_status', 'idle')}",
+        )
         if auto_reply is not None:
             self._update_turn_pipeline(
-                final_path=str(planner_snapshot.get("final_path") or "planner_tool").strip() or "planner_tool",
+                final_path=str(
+                    planner_snapshot.get("final_path") or "planner_tool",
+                ).strip()
+                or "planner_tool",
                 reply_source="planner_tool",
             )
             return current_mood, auto_reply, False, turn_text, normalized_attachments
@@ -1084,19 +1317,31 @@ Return ONLY valid JSON (no extra text):
                 current_mood,
                 normalized_attachments,
             )
-            self._append_turn_pipeline_step("heuristic_tools", detail="evaluated heuristic tool routing")
+            self._append_turn_pipeline_step(
+                "heuristic_tools",
+                detail="evaluated heuristic tool routing",
+            )
         self.bot.set_active_tool_observation(tool_observation)
         if tool_observation:
-            self._append_turn_pipeline_step("tool_observation", detail="captured tool observation for reply generation")
+            self._append_turn_pipeline_step(
+                "tool_observation",
+                detail="captured tool observation for reply generation",
+            )
         if auto_reply is not None:
             planner_snapshot = self.bot.planner_debug_snapshot()
             self._update_turn_pipeline(
-                final_path=str(planner_snapshot.get("final_path") or "heuristic_tool").strip() or "heuristic_tool",
+                final_path=str(
+                    planner_snapshot.get("final_path") or "heuristic_tool",
+                ).strip()
+                or "heuristic_tool",
                 reply_source="heuristic_tool",
             )
             return current_mood, auto_reply, False, turn_text, normalized_attachments
 
-        self._update_turn_pipeline(final_path="model_reply", reply_source="model_generation")
+        self._update_turn_pipeline(
+            final_path="model_reply",
+            reply_source="model_generation",
+        )
         return current_mood, None, False, turn_text, normalized_attachments
 
     def finalize_user_turn(
@@ -1108,12 +1353,17 @@ Return ONLY valid JSON (no extra text):
         turn_context: Any | None = None,
     ) -> FinalizedTurnResult:
         if turn_context is None:
-            raise RuntimeError("Strict mode requires turn_context for finalize_user_turn")
+            raise RuntimeError(
+                "Strict mode requires turn_context for finalize_user_turn",
+            )
         mutation_queue = getattr(turn_context, "mutation_queue", None)
         if mutation_queue is None:
             raise RuntimeError("SaveNode context missing mutation_queue in strict mode")
 
-        self._append_turn_pipeline_step("finalize_turn", detail="persisted conversation turn")
+        self._append_turn_pipeline_step(
+            "finalize_turn",
+            detail="persisted conversation turn",
+        )
 
         user_turn = {"role": "user", "content": stripped_input, "mood": current_mood}
         if attachments:
@@ -1122,10 +1372,13 @@ Return ONLY valid JSON (no extra text):
         mutation_queue.queue(
             MutationIntent(
                 type=MutationKind.LEDGER,
-                payload={"op": LedgerMutationOp.APPEND_HISTORY.value, "entry": user_turn},
+                payload={
+                    "op": LedgerMutationOp.APPEND_HISTORY.value,
+                    "entry": user_turn,
+                },
                 requires_temporal=False,
                 source="turn_service.finalize_user_turn.user_entry",
-            )
+            ),
         )
         mutation_queue.queue(
             MutationIntent(
@@ -1136,7 +1389,7 @@ Return ONLY valid JSON (no extra text):
                 },
                 requires_temporal=False,
                 source="turn_service.finalize_user_turn.assistant_entry",
-            )
+            ),
         )
         mutation_queue.queue(
             MutationIntent(
@@ -1144,7 +1397,7 @@ Return ONLY valid JSON (no extra text):
                 payload={"op": LedgerMutationOp.CLEAR_TURN_CONTEXT.value},
                 requires_temporal=False,
                 source="turn_service.finalize_user_turn.clear_turn_context",
-            )
+            ),
         )
         mutation_queue.queue(
             MutationIntent(
@@ -1152,7 +1405,7 @@ Return ONLY valid JSON (no extra text):
                 payload={"op": LedgerMutationOp.SYNC_THREAD_SNAPSHOT.value},
                 requires_temporal=False,
                 source="turn_service.finalize_user_turn.sync_thread_snapshot",
-            )
+            ),
         )
         mutation_queue.queue(
             MutationIntent(
@@ -1164,7 +1417,7 @@ Return ONLY valid JSON (no extra text):
                 },
                 requires_temporal=False,
                 source="turn_service.finalize_user_turn.schedule_maintenance",
-            )
+            ),
         )
         mutation_queue.queue(
             MutationIntent(
@@ -1172,7 +1425,7 @@ Return ONLY valid JSON (no extra text):
                 payload={"op": LedgerMutationOp.HEALTH_SNAPSHOT.value},
                 requires_temporal=False,
                 source="turn_service.finalize_user_turn.health_snapshot",
-            )
+            ),
         )
         if bool(getattr(turn_context, "metadata", {}).get("audit_mode", False)):
             mutation_queue.queue(
@@ -1184,7 +1437,7 @@ Return ONLY valid JSON (no extra text):
                     },
                     requires_temporal=False,
                     source="turn_service.finalize_user_turn.capability_audit_event",
-                )
+                ),
             )
         return dad_reply, False
 
@@ -1209,18 +1462,23 @@ Return ONLY valid JSON (no extra text):
             cached = getattr(self.bot, "_compat_persistence_service", None)
             if cached is not None:
                 return cached
-            from dadbot.managers.conversation_persistence import ConversationPersistenceManager
+            from dadbot.managers.conversation_persistence import (
+                ConversationPersistenceManager,
+            )
             from dadbot.services.persistence import PersistenceService
 
             persistence_service = PersistenceService(
                 ConversationPersistenceManager(self.bot),
                 turn_service=self,
             )
-            setattr(self.bot, "_compat_persistence_service", persistence_service)
+            self.bot._compat_persistence_service = persistence_service
         return persistence_service
 
     @staticmethod
-    def _compat_turn_context(user_input: str, attachments: AttachmentList | None = None) -> TurnContext:
+    def _compat_turn_context(
+        user_input: str,
+        attachments: AttachmentList | None = None,
+    ) -> TurnContext:
         return TurnContext(user_input=user_input, attachments=attachments)
 
     def _finalize_direct_compat_turn(
@@ -1240,21 +1498,31 @@ Return ONLY valid JSON (no extra text):
         return persistence_service.finalize_turn(context, (dad_reply, False))
 
     def _run_orchestrator_sync(
-        self, user_input: str, attachments: AttachmentList | None
+        self,
+        user_input: str,
+        attachments: AttachmentList | None,
     ) -> FinalizedTurnResult:
         """Run the turn orchestrator synchronously, safe from within a running loop."""
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             loop = None
-        coro = self.bot.turn_orchestrator.handle_turn(user_input, attachments=attachments)
+        coro = self.bot.turn_orchestrator.handle_turn(
+            user_input,
+            attachments=attachments,
+        )
         if loop is not None and loop.is_running():
             import concurrent.futures
+
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                 return pool.submit(asyncio.run, coro).result()
         return asyncio.run(coro)
 
-    def process_user_message(self, user_input: str, attachments: AttachmentList | None = None) -> FinalizedTurnResult:
+    def process_user_message(
+        self,
+        user_input: str,
+        attachments: AttachmentList | None = None,
+    ) -> FinalizedTurnResult:
         stripped_input = user_input.strip()
         if not stripped_input and not attachments:
             return None, False
@@ -1267,15 +1535,22 @@ Return ONLY valid JSON (no extra text):
         if should_end:
             return dad_reply, True
         if dad_reply is None:
-            self._append_turn_pipeline_step("generate_reply", status="running", detail="generating sync reply")
+            self._append_turn_pipeline_step(
+                "generate_reply",
+                status="running",
+                detail="generating sync reply",
+            )
             dad_reply = self.reply_generation.generate_validated_reply(
                 stripped_input,
                 turn_text,
-                current_mood,
+                current_mood or "neutral",
                 normalized_attachments,
                 stream=False,
             )
-            self._append_turn_pipeline_step("generate_reply", detail="generated sync reply")
+            self._append_turn_pipeline_step(
+                "generate_reply",
+                detail="generated sync reply",
+            )
         return self._finalize_direct_compat_turn(
             turn_text,
             current_mood,
@@ -1284,12 +1559,22 @@ Return ONLY valid JSON (no extra text):
             turn_context=turn_context,
         )
 
-    async def process_user_message_async(self, user_input: str, attachments: AttachmentList | None = None) -> FinalizedTurnResult:
+    async def process_user_message_async(
+        self,
+        user_input: str,
+        attachments: AttachmentList | None = None,
+    ) -> FinalizedTurnResult:
         stripped_input = user_input.strip()
         if not stripped_input and not attachments:
             return None, False
         turn_context = self._compat_turn_context(stripped_input, attachments)
-        current_mood, dad_reply, should_end, turn_text, normalized_attachments = await self.prepare_user_turn_async(
+        (
+            current_mood,
+            dad_reply,
+            should_end,
+            turn_text,
+            normalized_attachments,
+        ) = await self.prepare_user_turn_async(
             stripped_input,
             attachments=attachments,
             turn_context=turn_context,
@@ -1297,15 +1582,22 @@ Return ONLY valid JSON (no extra text):
         if should_end:
             return dad_reply, True
         if dad_reply is None:
-            self._append_turn_pipeline_step("generate_reply", status="running", detail="generating async reply")
+            self._append_turn_pipeline_step(
+                "generate_reply",
+                status="running",
+                detail="generating async reply",
+            )
             dad_reply = await self.reply_generation.generate_validated_reply_async(
                 stripped_input,
                 turn_text,
-                current_mood,
+                current_mood or "neutral",
                 normalized_attachments,
                 stream=False,
             )
-            self._append_turn_pipeline_step("generate_reply", detail="generated async reply")
+            self._append_turn_pipeline_step(
+                "generate_reply",
+                detail="generated async reply",
+            )
         return self._finalize_direct_compat_turn(
             turn_text,
             current_mood,
@@ -1333,16 +1625,23 @@ Return ONLY valid JSON (no extra text):
             return dad_reply, True
         if dad_reply is None:
             self._update_turn_pipeline(mode="stream_sync")
-            self._append_turn_pipeline_step("generate_reply", status="running", detail="generating streamed sync reply")
+            self._append_turn_pipeline_step(
+                "generate_reply",
+                status="running",
+                detail="generating streamed sync reply",
+            )
             dad_reply = self.reply_generation.generate_validated_reply(
                 stripped_input,
                 turn_text,
-                current_mood,
+                current_mood or "neutral",
                 normalized_attachments,
                 stream=True,
                 chunk_callback=chunk_callback,
             )
-            self._append_turn_pipeline_step("generate_reply", detail="generated streamed sync reply")
+            self._append_turn_pipeline_step(
+                "generate_reply",
+                detail="generated streamed sync reply",
+            )
         elif callable(chunk_callback) and dad_reply:
             chunk_callback(dad_reply)
         return self._finalize_direct_compat_turn(
@@ -1363,7 +1662,13 @@ Return ONLY valid JSON (no extra text):
         if not stripped_input and not attachments:
             return None, False
         turn_context = self._compat_turn_context(stripped_input, attachments)
-        current_mood, dad_reply, should_end, turn_text, normalized_attachments = await self.prepare_user_turn_async(
+        (
+            current_mood,
+            dad_reply,
+            should_end,
+            turn_text,
+            normalized_attachments,
+        ) = await self.prepare_user_turn_async(
             stripped_input,
             attachments=attachments,
             turn_context=turn_context,
@@ -1372,16 +1677,23 @@ Return ONLY valid JSON (no extra text):
             return dad_reply, True
         if dad_reply is None:
             self._update_turn_pipeline(mode="stream_async")
-            self._append_turn_pipeline_step("generate_reply", status="running", detail="generating streamed async reply")
+            self._append_turn_pipeline_step(
+                "generate_reply",
+                status="running",
+                detail="generating streamed async reply",
+            )
             dad_reply = await self.reply_generation.generate_validated_reply_async(
                 stripped_input,
                 turn_text,
-                current_mood,
+                current_mood or "neutral",
                 normalized_attachments,
                 stream=True,
                 chunk_callback=chunk_callback,
             )
-            self._append_turn_pipeline_step("generate_reply", detail="generated streamed async reply")
+            self._append_turn_pipeline_step(
+                "generate_reply",
+                detail="generated streamed async reply",
+            )
         elif callable(chunk_callback) and dad_reply:
             maybe_coro = chunk_callback(dad_reply)
             if asyncio.iscoroutine(maybe_coro):

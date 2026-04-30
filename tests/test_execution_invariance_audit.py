@@ -39,10 +39,13 @@ def test_envelope_detail_is_canonicalized_sorted_and_environment_stripped() -> N
     assert fields[0]["test"] == "manifest-test"
     assert fields[1]["runtime"] == "lock-runtime"
     assert fields[1]["test"] == "lock-test"
-    assert detail["diagnostic_hash"] == audit._canonical_envelope_detail(
-        dict(reversed(list(runtime_mode.items()))),
-        dict(reversed(list(test_mode.items()))),
-    )["diagnostic_hash"]
+    assert (
+        detail["diagnostic_hash"]
+        == audit._canonical_envelope_detail(
+            dict(reversed(list(runtime_mode.items()))),
+            dict(reversed(list(test_mode.items()))),
+        )["diagnostic_hash"]
+    )
 
 
 def test_envelope_changes_do_not_affect_behavioral_gate() -> None:

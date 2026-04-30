@@ -248,7 +248,10 @@ class SQLiteGraphStore(GraphStoreBackend):
         if not self.db_path.exists():
             return
         try:
-            self.with_connection(lambda connection: connection.executescript("DELETE FROM graph_edges; DELETE FROM graph_nodes;"), write=True)
+            self.with_connection(
+                lambda connection: connection.executescript("DELETE FROM graph_edges; DELETE FROM graph_nodes;"),
+                write=True,
+            )
         except Exception:
             try:
                 self.db_path.unlink()
@@ -320,12 +323,24 @@ class PostgresGraphStore(GraphStoreBackend):
                     )
                     """
                 )
-                cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{self.nodes_table}_type ON {self.nodes_table}(node_type)")
-                cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{self.nodes_table}_source_type ON {self.nodes_table}(source_type)")
-                cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{self.nodes_table}_updated_at ON {self.nodes_table}(updated_at)")
-                cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{self.edges_table}_source ON {self.edges_table}(source_key)")
-                cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{self.edges_table}_target ON {self.edges_table}(target_key)")
-                cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{self.edges_table}_relation_type ON {self.edges_table}(relation_type)")
+                cursor.execute(
+                    f"CREATE INDEX IF NOT EXISTS idx_{self.nodes_table}_type ON {self.nodes_table}(node_type)"
+                )
+                cursor.execute(
+                    f"CREATE INDEX IF NOT EXISTS idx_{self.nodes_table}_source_type ON {self.nodes_table}(source_type)"
+                )
+                cursor.execute(
+                    f"CREATE INDEX IF NOT EXISTS idx_{self.nodes_table}_updated_at ON {self.nodes_table}(updated_at)"
+                )
+                cursor.execute(
+                    f"CREATE INDEX IF NOT EXISTS idx_{self.edges_table}_source ON {self.edges_table}(source_key)"
+                )
+                cursor.execute(
+                    f"CREATE INDEX IF NOT EXISTS idx_{self.edges_table}_target ON {self.edges_table}(target_key)"
+                )
+                cursor.execute(
+                    f"CREATE INDEX IF NOT EXISTS idx_{self.edges_table}_relation_type ON {self.edges_table}(relation_type)"
+                )
 
         self.with_connection(operation)
 

@@ -3,6 +3,7 @@
 Receives result dicts produced by audit_runners; produces human-readable output.
 No execution logic, no state reads, no side effects beyond stdout.
 """
+
 from __future__ import annotations
 
 from typing import Any

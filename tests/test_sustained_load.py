@@ -66,9 +66,13 @@ def test_long_session_stress_harness_tracks_pressure_and_stability():
                         RuntimeError("synthetic fallback event"),
                     )
 
-                bot.submit_background_task(lambda: {"ok": True}, task_kind="post-turn-maintenance", metadata={"turn": turn})
+                bot.submit_background_task(
+                    lambda: {"ok": True}, task_kind="post-turn-maintenance", metadata={"turn": turn}
+                )
                 if turn % 9 == 0:
-                    bot.submit_background_task(lambda: {"ok": True}, task_kind="conversation-persist", metadata={"turn": turn})
+                    bot.submit_background_task(
+                        lambda: {"ok": True}, task_kind="conversation-persist", metadata={"turn": turn}
+                    )
 
                 snapshot = bot.runtime_health_snapshot(log_warnings=False, persist=True)
                 observed_levels.append(str(snapshot.get("level") or "green"))

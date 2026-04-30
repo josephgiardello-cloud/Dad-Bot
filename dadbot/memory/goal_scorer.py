@@ -20,7 +20,6 @@ from __future__ import annotations
 import re
 from typing import Any
 
-
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -33,17 +32,57 @@ _MAX_GOAL_BOOST: float = 0.40
 _TOKEN_BOOST_STEP: float = 0.08
 
 #: Stopwords excluded from overlap computation.
-_STOPWORDS: frozenset[str] = frozenset({
-    "i", "a", "an", "the", "is", "to", "of", "in", "it", "my", "me", "we",
-    "be", "do", "go", "so", "at", "by", "he", "she", "you", "for", "and",
-    "or", "not", "but", "was", "are", "has", "had", "have", "that", "this",
-    "with", "from", "they", "them", "their", "what", "when", "where",
-})
+_STOPWORDS: frozenset[str] = frozenset(
+    {
+        "i",
+        "a",
+        "an",
+        "the",
+        "is",
+        "to",
+        "of",
+        "in",
+        "it",
+        "my",
+        "me",
+        "we",
+        "be",
+        "do",
+        "go",
+        "so",
+        "at",
+        "by",
+        "he",
+        "she",
+        "you",
+        "for",
+        "and",
+        "or",
+        "not",
+        "but",
+        "was",
+        "are",
+        "has",
+        "had",
+        "have",
+        "that",
+        "this",
+        "with",
+        "from",
+        "they",
+        "them",
+        "their",
+        "what",
+        "when",
+        "where",
+    },
+)
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _tokenise(text: str) -> frozenset[str]:
     """Lower-cased word tokens, filtered to length ≥ 3 and not stopwords."""
@@ -54,18 +93,23 @@ def _tokenise(text: str) -> frozenset[str]:
 def _memory_text(mem: Any) -> str:
     """Extract text content from a memory entry (dict or string)."""
     if isinstance(mem, dict):
-        return " ".join(str(v) for v in [
-            mem.get("content"),
-            mem.get("summary"),
-            mem.get("text"),
-            mem.get("note"),
-        ] if v)
+        return " ".join(
+            str(v)
+            for v in [
+                mem.get("content"),
+                mem.get("summary"),
+                mem.get("text"),
+                mem.get("note"),
+            ]
+            if v
+        )
     return str(mem or "")
 
 
 # ---------------------------------------------------------------------------
 # GoalAwareRanker
 # ---------------------------------------------------------------------------
+
 
 class GoalAwareRanker:
     """Re-rank a list of memory entries by relevance to active goals.
@@ -100,6 +144,7 @@ class GoalAwareRanker:
 
         Returns:
             Re-ranked list (new list, original objects unchanged).
+
         """
         if not memories or not active_goals:
             return list(memories)
@@ -107,7 +152,9 @@ class GoalAwareRanker:
         # Build union of goal tokens (all active goals contribute equally).
         goal_tokens: frozenset[str] = frozenset()
         for goal in active_goals:
-            desc = str(goal.get("description", goal) if isinstance(goal, dict) else goal)
+            desc = str(
+                goal.get("description", goal) if isinstance(goal, dict) else goal,
+            )
             goal_tokens = goal_tokens | _tokenise(desc)
 
         if not goal_tokens:
@@ -137,7 +184,9 @@ class GoalAwareRanker:
 
         goal_tokens: frozenset[str] = frozenset()
         for goal in active_goals:
-            desc = str(goal.get("description", goal) if isinstance(goal, dict) else goal)
+            desc = str(
+                goal.get("description", goal) if isinstance(goal, dict) else goal,
+            )
             goal_tokens = goal_tokens | _tokenise(desc)
 
         scores: list[float] = []

@@ -3,18 +3,20 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 
 def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _stable_hash(payload: Any) -> str:
     return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, ensure_ascii=True, default=str).encode("utf-8")
+        json.dumps(payload, sort_keys=True, ensure_ascii=True, default=str).encode(
+            "utf-8",
+        ),
     ).hexdigest()
 
 

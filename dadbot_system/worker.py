@@ -7,7 +7,17 @@ import queue
 import time
 from dataclasses import dataclass
 
-from .contracts import ChatRequest, ChatResponse, DEFAULT_TENANT_ID, EventEnvelope, EventType, ServiceConfig, WorkerResult, WorkerTask, normalize_tenant_id
+from .contracts import (
+    DEFAULT_TENANT_ID,
+    ChatRequest,
+    ChatResponse,
+    EventEnvelope,
+    EventType,
+    ServiceConfig,
+    WorkerResult,
+    WorkerTask,
+    normalize_tenant_id,
+)
 from .telemetry import configure_logging, start_span
 
 logger = logging.getLogger(__name__)
@@ -125,7 +135,14 @@ class DadBotTaskProcessor:
     def process(self, task: WorkerTask) -> WorkerResult:
         if not self._circuit.allow_request():
             error = "Circuit breaker is open for worker requests"
-            return WorkerResult(task_id=task.task_id, session_id=task.session_id, request_id=task.request.request_id, tenant_id=task.tenant_id, status="failed", error=error)
+            return WorkerResult(
+                task_id=task.task_id,
+                session_id=task.session_id,
+                request_id=task.request.request_id,
+                tenant_id=task.tenant_id,
+                status="failed",
+                error=error,
+            )
 
         policy = RetryPolicy(
             max_attempts=max(1, self.config.workers.max_retries + 1),
@@ -135,7 +152,9 @@ class DadBotTaskProcessor:
 
         last_error = ""
         for attempt in range(1, policy.max_attempts + 1):
-            with start_span("worker.process_task", task_id=task.task_id, request_id=task.request.request_id, attempt=attempt):
+            with start_span(
+                "worker.process_task", task_id=task.task_id, request_id=task.request.request_id, attempt=attempt
+            ):
                 try:
                     bot = self._get_bot(task.session_id, task.request.requested_model, tenant_id=task.tenant_id)
                     if task.session_state:
@@ -167,7 +186,7 @@ class DadBotTaskProcessor:
                         session_state=bot.snapshot_session_state(),
                         response=response,
                     )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     last_error = f"Worker timed out after {policy.timeout_seconds:.1f}s"
                 except Exception as exc:
                     last_error = str(exc)
@@ -194,7 +213,12 @@ def worker_process_main(config_payload: dict, request_queue, result_queue, event
 
     if event_queue is not None:
         event_queue.put(
-            EventEnvelope(session_id="system", event_type=EventType.WORKER_STARTED, tenant_id=DEFAULT_TENANT_ID, payload={"worker": worker_name})
+            EventEnvelope(
+                session_id="system",
+                event_type=EventType.WORKER_STARTED,
+                tenant_id=DEFAULT_TENANT_ID,
+                payload={"worker": worker_name},
+            )
         )
 
     while True:
@@ -206,7 +230,12 @@ def worker_process_main(config_payload: dict, request_queue, result_queue, event
 
     if event_queue is not None:
         event_queue.put(
-            EventEnvelope(session_id="system", event_type=EventType.WORKER_STOPPED, tenant_id=DEFAULT_TENANT_ID, payload={"worker": worker_name})
+            EventEnvelope(
+                session_id="system",
+                event_type=EventType.WORKER_STOPPED,
+                tenant_id=DEFAULT_TENANT_ID,
+                payload={"worker": worker_name},
+            )
         )
 
 

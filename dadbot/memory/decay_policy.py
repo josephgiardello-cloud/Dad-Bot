@@ -1,4 +1,4 @@
-﻿"""Deterministic memory decay policy.
+"""Deterministic memory decay policy.
 
 Scores and classifies consolidated memory entries using *only*:
   - TurnTemporalAxis.epoch_seconds  (canonical per-turn time)
@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -40,7 +40,7 @@ def _parse_epoch(ts_str: str | None) -> float | None:
         return None
     for fmt in ("%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
         try:
-            dt = datetime.strptime(str(ts_str), fmt).replace(tzinfo=timezone.utc)
+            dt = datetime.strptime(str(ts_str), fmt).replace(tzinfo=UTC)
             return dt.timestamp()
         except ValueError:
             continue

@@ -1,6 +1,7 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from dadbot.infrastructure.llm import ModelAdapter, OllamaModelAdapter
 
@@ -15,7 +16,10 @@ class RuntimeService:
     def model_is_available(self, models: list[dict[str, Any]], model_name: str) -> bool:
         return OllamaModelAdapter.model_is_available(models, model_name)
 
-    def ensure_ollama_ready(self, status_callback: Callable[[str], Any] | None = None) -> bool:
+    def ensure_ollama_ready(
+        self,
+        status_callback: Callable[[str], Any] | None = None,
+    ) -> bool:
         selected = self.model_adapter.ensure_ready(
             self.bot.model_candidates(),
             status_callback=status_callback,

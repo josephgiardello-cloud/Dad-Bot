@@ -72,12 +72,13 @@ class DadBotOrchestrator:
     def __init__(
         self,
         registry: ServiceRegistry | None = None,
+        *,
+        strict: bool = False,
+        enable_observability: bool = True,
         **kwargs: Any,
     ) -> None:
         config_path = str(kwargs.pop("config_path", "config.yaml"))
         bot = kwargs.pop("bot", None)
-        strict = bool(kwargs.pop("strict", False))
-        enable_observability = bool(kwargs.pop("enable_observability", True))
         checkpointer = kwargs.pop("checkpointer", None)
         self.bot = bot
         self.registry = registry or boot_registry(config_path=config_path, bot=bot)

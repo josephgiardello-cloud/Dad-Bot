@@ -27,34 +27,34 @@ from __future__ import annotations
 
 import hashlib
 import json
-import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
-
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # Data structures
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class VersionManifest:
     """Hashes that uniquely identify the evaluation stack at snapshot time."""
-    scoring_engine_hash: str    # hash of tests/scoring_engine.py
-    trace_schema_hash: str      # hash of tests/trace_schema.py
-    scenario_suite_hash: str    # hash of tests/scenario_suite.py
-    gold_set_hash: str          # hash of evaluation/gold_set.py
-    orchestrator_hash: str      # hash of dadbot/core/orchestrator.py; "mock" if no orchestrator
 
-    def matches(self, other: "VersionManifest") -> bool:
+    scoring_engine_hash: str  # hash of tests/scoring_engine.py
+    trace_schema_hash: str  # hash of tests/trace_schema.py
+    scenario_suite_hash: str  # hash of tests/scenario_suite.py
+    gold_set_hash: str  # hash of evaluation/gold_set.py
+    orchestrator_hash: str  # hash of dadbot/core/orchestrator.py; "mock" if no orchestrator
+
+    def matches(self, other: VersionManifest) -> bool:
         return (
             self.scoring_engine_hash == other.scoring_engine_hash
             and self.trace_schema_hash == other.trace_schema_hash
             and self.scenario_suite_hash == other.scenario_suite_hash
         )
 
-    def to_dict(self) -> Dict[str, str]:
+    def to_dict(self) -> dict[str, str]:
         return {
             "scoring_engine_hash": self.scoring_engine_hash,
             "trace_schema_hash": self.trace_schema_hash,
@@ -64,7 +64,7 @@ class VersionManifest:
         }
 
     @classmethod
-    def from_dict(cls, d: Dict) -> "VersionManifest":
+    def from_dict(cls, d: dict) -> VersionManifest:
         return cls(
             scoring_engine_hash=str(d.get("scoring_engine_hash") or ""),
             trace_schema_hash=str(d.get("trace_schema_hash") or ""),
@@ -77,25 +77,26 @@ class VersionManifest:
 @dataclass
 class BenchmarkSnapshot:
     """Immutable record of one complete benchmark run."""
+
     snapshot_id: str
-    created_at: str                 # ISO-8601 UTC
-    run_label: str                  # human-readable tag
-    execution_mode: str             # "mock" | "orchestrator"
+    created_at: str  # ISO-8601 UTC
+    run_label: str  # human-readable tag
+    execution_mode: str  # "mock" | "orchestrator"
 
     version_manifest: VersionManifest
 
     # Serialized CapabilityScore.to_dict() for each scenario
-    scores: List[Dict[str, Any]] = field(default_factory=list)
+    scores: list[dict[str, Any]] = field(default_factory=list)
 
     # Per-category aggregate scores
-    category_aggregates: Dict[str, float] = field(default_factory=dict)
+    category_aggregates: dict[str, float] = field(default_factory=dict)
 
     # Optional calibration state snapshot
     calibration_applied: bool = False
     calibration_run_count: int = 0
 
     # Metadata blob for extensibility
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
     def scenario_count(self) -> int:
@@ -106,29 +107,23 @@ class BenchmarkSnapshot:
         if not self.scores:
             return 0.0
         passed = sum(
-            1 for s in self.scores
-            if (s.get("scoring") or {}).get("success", False)
-            or s.get("overall", 0.0) >= 0.5
+            1 for s in self.scores if (s.get("scoring") or {}).get("success", False) or s.get("overall", 0.0) >= 0.5
         )
         return passed / len(self.scores)
 
-    def get_score(self, scenario_name: str) -> Optional[Dict[str, Any]]:
+    def get_score(self, scenario_name: str) -> dict[str, Any] | None:
         for s in self.scores:
             if s.get("scenario") == scenario_name:
                 return s
         return None
 
     def overall_average(self) -> float:
-        overalls = [
-            float(s.get("overall") or 0.0)
-            for s in self.scores
-            if s.get("overall") is not None
-        ]
+        overalls = [float(s.get("overall") or 0.0) for s in self.scores if s.get("overall") is not None]
         if not overalls:
             return 0.0
         return sum(overalls) / len(overalls)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "snapshot_id": self.snapshot_id,
             "created_at": self.created_at,
@@ -143,7 +138,7 @@ class BenchmarkSnapshot:
         }
 
     @classmethod
-    def from_dict(cls, d: Dict) -> "BenchmarkSnapshot":
+    def from_dict(cls, d: dict) -> BenchmarkSnapshot:
         return cls(
             snapshot_id=str(d.get("snapshot_id") or ""),
             created_at=str(d.get("created_at") or ""),
@@ -161,6 +156,7 @@ class BenchmarkSnapshot:
 @dataclass
 class SnapshotIndexEntry:
     """Lightweight index entry for fast lookup."""
+
     snapshot_id: str
     created_at: str
     run_label: str
@@ -188,11 +184,7 @@ def _file_hash(rel_path: str) -> str:
 
 def build_version_manifest(execution_mode: str = "mock") -> VersionManifest:
     """Hash all evaluation-stack source files to detect drift."""
-    orchestrator_hash = (
-        _file_hash("dadbot/core/orchestrator.py")
-        if execution_mode == "orchestrator"
-        else "mock"
-    )
+    orchestrator_hash = _file_hash("dadbot/core/orchestrator.py") if execution_mode == "orchestrator" else "mock"
     return VersionManifest(
         scoring_engine_hash=_file_hash("tests/scoring_engine.py"),
         trace_schema_hash=_file_hash("tests/trace_schema.py"),
@@ -206,8 +198,9 @@ def build_version_manifest(execution_mode: str = "mock") -> VersionManifest:
 # Snapshot ID generation
 # ---------------------------------------------------------------------------
 
-def _make_snapshot_id(scores: List[Dict]) -> str:
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+
+def _make_snapshot_id(scores: list[dict]) -> str:
+    ts = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     payload = json.dumps(scores, sort_keys=True, default=str)
     content_hash = hashlib.sha256(payload.encode()).hexdigest()[:8]
     return f"bench-{ts}-{content_hash}"
@@ -217,13 +210,14 @@ def _make_snapshot_id(scores: List[Dict]) -> str:
 # Benchmark Registry
 # ---------------------------------------------------------------------------
 
+
 class BenchmarkRegistry:
     """Stores and retrieves benchmark snapshots from disk.
 
     Thread-safety: single-writer assumed; concurrent reads are fine.
     """
 
-    def __init__(self, snapshots_dir: Optional[Path] = None):
+    def __init__(self, snapshots_dir: Path | None = None):
         self._dir = snapshots_dir or _WORKSPACE_ROOT / "evaluation" / "snapshots"
         self._index_path = self._dir / "index.json"
 
@@ -232,12 +226,12 @@ class BenchmarkRegistry:
 
     def save(
         self,
-        scores: List[Dict[str, Any]],
+        scores: list[dict[str, Any]],
         execution_mode: str = "mock",
         run_label: str = "",
         calibration_applied: bool = False,
         calibration_run_count: int = 0,
-        metadata: Optional[Dict] = None,
+        metadata: dict | None = None,
     ) -> str:
         """Persist a benchmark run. Returns snapshot_id."""
         self._ensure_dir()
@@ -246,20 +240,17 @@ class BenchmarkRegistry:
         manifest = build_version_manifest(execution_mode)
 
         # Aggregate per-category
-        cat_scores: Dict[str, List[float]] = {}
+        cat_scores: dict[str, list[float]] = {}
         for s in scores:
             cat = str(s.get("category") or "")
             sub = s.get("capability_score") or {}
             if cat and sub.get(cat) and sub[cat].get("score") is not None:
                 cat_scores.setdefault(cat, []).append(float(sub[cat]["score"]))
-        category_aggregates = {
-            cat: round(sum(vals) / len(vals), 4)
-            for cat, vals in cat_scores.items()
-        }
+        category_aggregates = {cat: round(sum(vals) / len(vals), 4) for cat, vals in cat_scores.items()}
 
         snapshot = BenchmarkSnapshot(
             snapshot_id=snap_id,
-            created_at=datetime.now(timezone.utc).isoformat(),
+            created_at=datetime.now(UTC).isoformat(),
             run_label=run_label or snap_id,
             execution_mode=execution_mode,
             version_manifest=manifest,
@@ -275,15 +266,17 @@ class BenchmarkRegistry:
             json.dump(snapshot.to_dict(), f, indent=2)
 
         # Update index
-        self._update_index(SnapshotIndexEntry(
-            snapshot_id=snap_id,
-            created_at=snapshot.created_at,
-            run_label=snapshot.run_label,
-            execution_mode=execution_mode,
-            scenario_count=len(scores),
-            overall_average=snapshot.overall_average(),
-            scoring_engine_hash=manifest.scoring_engine_hash,
-        ))
+        self._update_index(
+            SnapshotIndexEntry(
+                snapshot_id=snap_id,
+                created_at=snapshot.created_at,
+                run_label=snapshot.run_label,
+                execution_mode=execution_mode,
+                scenario_count=len(scores),
+                overall_average=snapshot.overall_average(),
+                scoring_engine_hash=manifest.scoring_engine_hash,
+            )
+        )
 
         return snap_id
 
@@ -295,7 +288,7 @@ class BenchmarkRegistry:
         with open(path, encoding="utf-8") as f:
             return BenchmarkSnapshot.from_dict(json.load(f))
 
-    def latest(self, execution_mode: Optional[str] = None) -> Optional[BenchmarkSnapshot]:
+    def latest(self, execution_mode: str | None = None) -> BenchmarkSnapshot | None:
         """Return the most recently saved snapshot."""
         index = self._load_index()
         entries = list(index.values())
@@ -306,30 +299,26 @@ class BenchmarkRegistry:
         entries.sort(key=lambda e: e.get("created_at", ""), reverse=True)
         return self.load(entries[0]["snapshot_id"])
 
-    def list_snapshots(self) -> List[SnapshotIndexEntry]:
+    def list_snapshots(self) -> list[SnapshotIndexEntry]:
         """Return all index entries, newest first."""
         index = self._load_index()
-        entries = [
-            SnapshotIndexEntry(**e) for e in index.values()
-        ]
+        entries = [SnapshotIndexEntry(**e) for e in index.values()]
         entries.sort(key=lambda e: e.created_at, reverse=True)
         return entries
 
-    def version_changed_since(self, snapshot: BenchmarkSnapshot) -> List[str]:
+    def version_changed_since(self, snapshot: BenchmarkSnapshot) -> list[str]:
         """Return list of files whose hash has changed since this snapshot was taken."""
         current = build_version_manifest(snapshot.execution_mode)
         snap_manifest = snapshot.version_manifest
         changed = []
         checks = {
             "tests/scoring_engine.py": (snap_manifest.scoring_engine_hash, current.scoring_engine_hash),
-            "tests/trace_schema.py":   (snap_manifest.trace_schema_hash,   current.trace_schema_hash),
+            "tests/trace_schema.py": (snap_manifest.trace_schema_hash, current.trace_schema_hash),
             "tests/scenario_suite.py": (snap_manifest.scenario_suite_hash, current.scenario_suite_hash),
-            "evaluation/gold_set.py":  (snap_manifest.gold_set_hash,       current.gold_set_hash),
+            "evaluation/gold_set.py": (snap_manifest.gold_set_hash, current.gold_set_hash),
         }
         if snapshot.execution_mode == "orchestrator":
-            checks["dadbot/core/orchestrator.py"] = (
-                snap_manifest.orchestrator_hash, current.orchestrator_hash
-            )
+            checks["dadbot/core/orchestrator.py"] = (snap_manifest.orchestrator_hash, current.orchestrator_hash)
         for file, (old, new) in checks.items():
             if old != new:
                 changed.append(file)
@@ -339,7 +328,7 @@ class BenchmarkRegistry:
     # Internal index management
     # -----------------------------------------------------------------------
 
-    def _load_index(self) -> Dict[str, Dict]:
+    def _load_index(self) -> dict[str, dict]:
         if not self._index_path.exists():
             return {}
         with open(self._index_path, encoding="utf-8") as f:

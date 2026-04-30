@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+
 import pytest
 
 from dadbot.core.graph import FatalTurnError, MutationIntent, MutationQueue, TurnContext, TurnGraph

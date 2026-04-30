@@ -4,6 +4,7 @@ Builds a :class:`~dadbot.core.graph.TurnContext` from an
 :class:`~dadbot.core.control_plane.ExecutionJob`.  No policy logic, no graph
 references, no session state — pure data assembly.
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -43,6 +44,7 @@ class JobBuilder:
         metadata:
             Caller-supplied metadata dict; ``trace_id`` is promoted to the
             context's ``trace_id`` field when present.
+
         """
         md: dict[str, Any] = dict(metadata or {})
         trace_id = str(md.get("trace_id") or "")

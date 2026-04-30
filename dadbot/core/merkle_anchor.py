@@ -10,7 +10,12 @@ def _sha256_bytes(payload: bytes) -> str:
 
 
 def stable_hash(payload: Any) -> str:
-    serialized = json.dumps(payload, sort_keys=True, ensure_ascii=True, default=str).encode("utf-8")
+    serialized = json.dumps(
+        payload,
+        sort_keys=True,
+        ensure_ascii=True,
+        default=str,
+    ).encode("utf-8")
     return _sha256_bytes(serialized)
 
 
@@ -19,7 +24,7 @@ def make_leaf(payload: Any) -> str:
 
 
 def _pair_hash(left: str, right: str) -> str:
-    return _sha256_bytes(f"{left}:{right}".encode("utf-8"))
+    return _sha256_bytes(f"{left}:{right}".encode())
 
 
 def merkle_root(leaves: list[str]) -> str:
@@ -52,10 +57,12 @@ def build_inclusion_proof(leaves: list[str], index: int) -> list[dict[str, str]]
             sibling_hash = level[current_index]
         else:
             sibling_hash = level[sibling_index]
-        proof.append({
-            "position": "left" if sibling_index < current_index else "right",
-            "hash": sibling_hash,
-        })
+        proof.append(
+            {
+                "position": "left" if sibling_index < current_index else "right",
+                "hash": sibling_hash,
+            },
+        )
 
         next_level: list[str] = []
         for i in range(0, len(level), 2):
@@ -69,7 +76,11 @@ def build_inclusion_proof(leaves: list[str], index: int) -> list[dict[str, str]]
     return proof
 
 
-def verify_inclusion_proof(leaf_hash: str, proof: list[dict[str, str]], expected_root: str) -> bool:
+def verify_inclusion_proof(
+    leaf_hash: str,
+    proof: list[dict[str, str]],
+    expected_root: str,
+) -> bool:
     current = str(leaf_hash or "")
     for item in proof:
         sibling = str(item.get("hash") or "")

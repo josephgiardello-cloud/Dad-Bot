@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import shutil
 import subprocess
@@ -11,11 +11,19 @@ except Exception:  # pragma: no cover - optional dependency
     pyttsx3 = None
 
 
-def synthesize_piper_audio(text: str, *, model_path: str, rate: float = 1.0) -> tuple[bytes | None, str]:
+def synthesize_piper_audio(
+    text: str,
+    *,
+    model_path: str,
+    rate: float = 1.0,
+) -> tuple[bytes | None, str]:
     _ = rate
     piper_exe = shutil.which("piper")
     if not piper_exe:
-        return None, "Piper executable not found. Install from https://github.com/rhasspy/piper"
+        return (
+            None,
+            "Piper executable not found. Install from https://github.com/rhasspy/piper",
+        )
     model_path = str(model_path or "").strip()
     if not model_path or not Path(model_path).exists():
         return None, (
@@ -73,7 +81,13 @@ def resolve_tts_voice_id(engine, voice_profile):
     return best_id
 
 
-def synthesize_tts_audio(reply_text, *, voice_profile: str = "warm_dad", rate_delta: int = 0, pacing: int = 50):
+def synthesize_tts_audio(
+    reply_text,
+    *,
+    voice_profile: str = "warm_dad",
+    rate_delta: int = 0,
+    pacing: int = 50,
+):
     if pyttsx3 is None:
         return None, "pyttsx3 is not installed."
     text = str(reply_text or "").strip()
@@ -92,7 +106,10 @@ def synthesize_tts_audio(reply_text, *, voice_profile: str = "warm_dad", rate_de
 
         default_rate = int(engine.getProperty("rate") or 180)
         pace_delta = int((max(0, min(100, int(pacing or 50))) - 50) * 0.6)
-        engine.setProperty("rate", max(120, min(240, default_rate + int(rate_delta or 0) + pace_delta)))
+        engine.setProperty(
+            "rate",
+            max(120, min(240, default_rate + int(rate_delta or 0) + pace_delta)),
+        )
         engine.save_to_file(text, temp_path)
         engine.runAndWait()
 

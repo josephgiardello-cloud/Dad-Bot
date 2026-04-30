@@ -4,6 +4,7 @@ Non-invasive design:
 - Exposes /metrics from existing in-process MetricsSink snapshots.
 - Does not alter kernel or graph execution paths.
 """
+
 from __future__ import annotations
 
 import threading
@@ -35,7 +36,9 @@ def _render_prometheus() -> str:
         lines.append(f"{metric}_count {int(summary.get('count') or 0)}")
         lines.append(f"# TYPE {metric}_mean gauge")
         mean_value = summary.get("mean")
-        lines.append(f"{metric}_mean {0.0 if mean_value is None else float(mean_value)}")
+        lines.append(
+            f"{metric}_mean {0.0 if mean_value is None else float(mean_value)}",
+        )
         lines.append(f"# TYPE {metric}_p99 gauge")
         p99_value = summary.get("p99")
         lines.append(f"{metric}_p99 {0.0 if p99_value is None else float(p99_value)}")
@@ -44,7 +47,7 @@ def _render_prometheus() -> str:
 
 
 class _MetricsHandler(BaseHTTPRequestHandler):
-    def do_GET(self) -> None:  # noqa: N802
+    def do_GET(self) -> None:
         if self.path != "/metrics":
             self.send_response(404)
             self.end_headers()
@@ -57,7 +60,7 @@ class _MetricsHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
-    def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
+    def log_message(self, format: str, *args: Any) -> None:
         return
 
 
@@ -77,7 +80,10 @@ class PrometheusExporter:
         self._server.server_close()
 
 
-def start_prometheus_exporter(host: str = "127.0.0.1", port: int = 9464) -> PrometheusExporter:
+def start_prometheus_exporter(
+    host: str = "127.0.0.1",
+    port: int = 9464,
+) -> PrometheusExporter:
     exporter = PrometheusExporter(host=host, port=port)
     exporter.start()
     return exporter

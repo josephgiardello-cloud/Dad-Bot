@@ -10,9 +10,8 @@ Tests that:
 Running this in CI provides hard enforcement that no new circular
 coupling has been introduced into the architecture.
 """
-from __future__ import annotations
 
-import pytest
+from __future__ import annotations
 
 from dadbot.uril.architecture import (
     FORBIDDEN_IMPORT_EDGES,
@@ -20,10 +19,10 @@ from dadbot.uril.architecture import (
     find_forbidden_cycles,
 )
 
-
 # ---------------------------------------------------------------------------
 # Unit tests for Tarjan SCC implementation
 # ---------------------------------------------------------------------------
+
 
 class TestDetectCyclesAlgorithm:
     """Verify Tarjan SCC correctness on synthetic graphs."""
@@ -56,9 +55,11 @@ class TestDetectCyclesAlgorithm:
 
     def test_disconnected_cycles_detected_separately(self):
         graph = {
-            "a": {"b"}, "b": {"a"},   # cycle 1
-            "c": {"d"}, "d": {"c"},   # cycle 2
-            "e": set(),               # no cycle
+            "a": {"b"},
+            "b": {"a"},  # cycle 1
+            "c": {"d"},
+            "d": {"c"},  # cycle 2
+            "e": set(),  # no cycle
         }
         cycles = detect_cycles(graph)
         assert len(cycles) == 2
@@ -81,7 +82,7 @@ class TestDetectCyclesAlgorithm:
             "b": {"d"},
             "c": {"d"},
             "d": {"e"},
-            "e": {"b"},   # b→d→e→b cycle
+            "e": {"b"},  # b→d→e→b cycle
             "f": set(),
         }
         cycles = detect_cycles(graph)
@@ -92,6 +93,7 @@ class TestDetectCyclesAlgorithm:
 # ---------------------------------------------------------------------------
 # Unit tests for forbidden-edge detection
 # ---------------------------------------------------------------------------
+
 
 class TestFindForbiddenCycles:
     """find_forbidden_cycles must correctly detect forbidden import edges."""
@@ -114,8 +116,7 @@ class TestFindForbiddenCycles:
         forbidden = [("dadbot_system", "dadbot.core.dadbot")]
         violations = find_forbidden_cycles(forbidden, graph=graph)
         assert len(violations) >= 1
-        assert any("dadbot_system" in src and "dadbot.core.dadbot" in dst
-                   for src, dst in violations)
+        assert any("dadbot_system" in src and "dadbot.core.dadbot" in dst for src, dst in violations)
 
     def test_empty_forbidden_list_returns_no_violations(self):
         graph = {"a": {"b"}, "b": {"a"}}
@@ -135,6 +136,7 @@ class TestFindForbiddenCycles:
 # Live architecture enforcement
 # ---------------------------------------------------------------------------
 
+
 class TestLiveArchitectureCycleEnforcement:
     """Hard CI gate: forbidden coupling edges must not exist in the real codebase."""
 
@@ -145,9 +147,8 @@ class TestLiveArchitectureCycleEnforcement:
         coupling was introduced into the architecture.
         """
         violations = find_forbidden_cycles()  # uses defaults (live graph + FORBIDDEN_IMPORT_EDGES)
-        assert violations == [], (
-            f"Forbidden import edges detected in live architecture:\n"
-            + "\n".join(f"  {src} → {dst}" for src, dst in violations)
+        assert violations == [], "Forbidden import edges detected in live architecture:\n" + "\n".join(
+            f"  {src} → {dst}" for src, dst in violations
         )
 
     def test_live_graph_loads_without_error(self):

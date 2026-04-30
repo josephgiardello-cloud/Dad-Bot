@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-
 LEGACY_TERMS = [
     "turn_service",
     "handle_graph_failure",

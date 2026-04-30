@@ -13,6 +13,7 @@ Exit codes:
     0 — no findings (or --strict not set)
     1 — findings present AND --strict flag was passed
 """
+
 from __future__ import annotations
 
 import argparse
@@ -20,10 +21,9 @@ import ast
 import json
 import re
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-
 
 # ---------------------------------------------------------------------------
 # Finding dataclass
@@ -141,7 +141,7 @@ class _DirectDatetimeNowInStageRule:
         def _is_in_execute(self, node: ast.FunctionDef) -> bool:
             return node.name == "execute"
 
-        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: N802
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
             if self._is_in_execute(node):
                 for child in ast.walk(node):
                     if (
@@ -201,11 +201,7 @@ class _RandomImportInCoreRule:
         findings: list[Finding] = []
         for node in ast.walk(tree):
             if isinstance(node, (ast.Import, ast.ImportFrom)):
-                names = (
-                    [a.name for a in node.names]
-                    if isinstance(node, ast.Import)
-                    else ([str(node.module or "")])
-                )
+                names = [a.name for a in node.names] if isinstance(node, ast.Import) else ([str(node.module or "")])
                 if any(n == "random" or n.startswith("random.") for n in names):
                     findings.append(
                         Finding(

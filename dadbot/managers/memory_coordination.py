@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import hashlib
 import json
@@ -30,11 +30,15 @@ class MemoryCoordinator:
     def _require_turn_temporal(self, turn_context=None):
         temporal = getattr(turn_context, "temporal", None)
         if temporal is None:
-            raise RuntimeError("TemporalNode missing — deterministic execution violated")
+            raise RuntimeError(
+                "TemporalNode missing — deterministic execution violated",
+            )
         wall_time = str(getattr(temporal, "wall_time", "")).strip()
         wall_date = str(getattr(temporal, "wall_date", "")).strip()
         if not wall_time or not wall_date:
-            raise RuntimeError("TemporalNode missing — deterministic execution violated")
+            raise RuntimeError(
+                "TemporalNode missing — deterministic execution violated",
+            )
         return temporal
 
     def _assert_save_commit_boundary(self, turn_context=None) -> bool:
@@ -48,14 +52,18 @@ class MemoryCoordinator:
         temporal = self._require_turn_temporal(turn_context)
         wall_time = str(getattr(temporal, "wall_time", "")).strip()
         if not wall_time:
-            raise RuntimeError("TemporalNode missing — deterministic execution violated")
+            raise RuntimeError(
+                "TemporalNode missing — deterministic execution violated",
+            )
         return wall_time
 
     def _turn_wall_date(self, turn_context=None) -> str:
         temporal = self._require_turn_temporal(turn_context)
         wall_date = str(getattr(temporal, "wall_date", "")).strip()
         if not wall_date:
-            raise RuntimeError("TemporalNode missing — deterministic execution violated")
+            raise RuntimeError(
+                "TemporalNode missing — deterministic execution violated",
+            )
         return wall_date
 
     @staticmethod
@@ -83,7 +91,11 @@ Rules:
                 parsed = parsed["memories"]
             else:
                 parsed = [
-                    {"summary": value, "category": key, "mood": self.bot.last_saved_mood()}
+                    {
+                        "summary": value,
+                        "category": key,
+                        "mood": self.bot.last_saved_mood(),
+                    }
                     for key, value in parsed.items()
                 ]
 
@@ -100,7 +112,7 @@ Rules:
                             "summary": self.bot.naturalize_memory_summary(summary),
                             "category": self.bot.infer_memory_category(summary),
                             "mood": self.bot.last_saved_mood(),
-                        }
+                        },
                     )
             elif isinstance(item, dict):
                 summary = self.bot.coerce_memory_summary(item.get("summary", ""))
@@ -109,8 +121,10 @@ Rules:
                         {
                             "summary": self.bot.naturalize_memory_summary(summary),
                             "category": item.get("category") or self.bot.infer_memory_category(summary),
-                            "mood": self.bot.normalize_mood(item.get("mood") or self.bot.last_saved_mood()),
-                        }
+                            "mood": self.bot.normalize_mood(
+                                item.get("mood") or self.bot.last_saved_mood(),
+                            ),
+                        },
                     )
 
         return cleaned[:5]
@@ -132,7 +146,11 @@ Rules:
             )
             content = self.bot.extract_ollama_message_content(response)
         except (RuntimeError, KeyError, TypeError) as exc:
-            self.bot.record_runtime_issue("memory extraction", "skipping new durable memory capture for this pass", exc)
+            self.bot.record_runtime_issue(
+                "memory extraction",
+                "skipping new durable memory capture for this pass",
+                exc,
+            )
             return []
 
         try:
@@ -164,7 +182,7 @@ Rules:
                     "mood": memory_entry.get("mood"),
                     "created_at": today_stamp,
                     "updated_at": today_stamp,
-                }
+                },
             )
             if memory is None:
                 continue
@@ -187,7 +205,11 @@ Rules:
             existing.append(memory)
             normalized_existing[normalized] = memory
 
-        self.apply_memory_reinforcement_signals(history, existing_catalog=existing, turn_context=turn_context)
+        self.apply_memory_reinforcement_signals(
+            history,
+            existing_catalog=existing,
+            turn_context=turn_context,
+        )
 
         self.bot.save_memory_catalog(existing)
 
@@ -211,10 +233,18 @@ Rules:
     # Stage: Contradiction  (delegates to ConflictDetector)               #
     # ------------------------------------------------------------------ #
 
-    def contradiction_signal_reason(self, left_summary: str, right_summary: str) -> str | None:
+    def contradiction_signal_reason(
+        self,
+        left_summary: str,
+        right_summary: str,
+    ) -> str | None:
         return self.conflicts.contradiction_signal_reason(left_summary, right_summary)
 
-    def detect_memory_contradictions(self, memories: list, existing_insights: list | None = None) -> list:
+    def detect_memory_contradictions(
+        self,
+        memories: list,
+        existing_insights: list | None = None,
+    ) -> list:
         return self.conflicts.detect_memory_contradictions(memories, existing_insights)
 
     def consolidated_contradictions(self, limit: int = 8) -> list:
@@ -227,13 +257,23 @@ Rules:
         keep: str = "auto",
         reason: str = "user_review",
     ) -> dict | None:
-        return self.conflicts.resolve_consolidated_contradiction(left_summary, right_summary, keep, reason)
+        return self.conflicts.resolve_consolidated_contradiction(
+            left_summary,
+            right_summary,
+            keep,
+            reason,
+        )
 
     # ------------------------------------------------------------------ #
     # Stage: Reinforcement                                                 #
     # ------------------------------------------------------------------ #
 
-    def apply_memory_reinforcement_signals(self, history, existing_catalog=None, turn_context=None):
+    def apply_memory_reinforcement_signals(
+        self,
+        history,
+        existing_catalog=None,
+        turn_context=None,
+    ):
         catalog = existing_catalog if isinstance(existing_catalog, list) else self.bot.memory_catalog()
         if not catalog:
             return 0
@@ -246,8 +286,14 @@ Rules:
         if not user_messages:
             return 0
 
-        correction_pattern = re.compile(r"\b(?:actually|correction|i meant|i now|used to|not anymore|no,? i)\b", flags=re.IGNORECASE)
-        praise_pattern = re.compile(r"\b(?:good memory|thanks for remembering|you remembered|that's right|exactly right)\b", flags=re.IGNORECASE)
+        correction_pattern = re.compile(
+            r"\b(?:actually|correction|i meant|i now|used to|not anymore|no,? i)\b",
+            flags=re.IGNORECASE,
+        )
+        praise_pattern = re.compile(
+            r"\b(?:good memory|thanks for remembering|you remembered|that's right|exactly right)\b",
+            flags=re.IGNORECASE,
+        )
         reinforced = 0
         today_stamp = self._turn_wall_date(turn_context)
 
@@ -261,7 +307,9 @@ Rules:
                 continue
 
             for memory in catalog:
-                overlap = tokens & self.bot.significant_tokens(memory.get("summary", ""))
+                overlap = tokens & self.bot.significant_tokens(
+                    memory.get("summary", ""),
+                )
                 if len(overlap) < 2:
                     continue
                 base_confidence = float(memory.get("confidence", 0.5) or 0.5)
@@ -298,14 +346,25 @@ Rules:
         consolidated = []
         for entry in self.bot.consolidated_memories():
             candidate = dict(entry)
-            if (
-                self.bot.normalize_memory_text(candidate.get("summary", "")) == normalized_target
-                and not bool(candidate.get("superseded", False))
-            ):
-                importance = max(0.0, min(1.0, float(candidate.get("importance_score", 0.0) or 0.0)))
-                confidence = max(0.05, min(0.98, float(candidate.get("confidence", 0.5) or 0.5)))
-                candidate["importance_score"] = round(max(0.0, min(1.0, importance + 0.08 * direction)), 3)
-                candidate["confidence"] = round(max(0.05, min(0.98, confidence + 0.04 * direction)), 3)
+            if self.bot.normalize_memory_text(
+                candidate.get("summary", ""),
+            ) == normalized_target and not bool(candidate.get("superseded", False)):
+                importance = max(
+                    0.0,
+                    min(1.0, float(candidate.get("importance_score", 0.0) or 0.0)),
+                )
+                confidence = max(
+                    0.05,
+                    min(0.98, float(candidate.get("confidence", 0.5) or 0.5)),
+                )
+                candidate["importance_score"] = round(
+                    max(0.0, min(1.0, importance + 0.08 * direction)),
+                    3,
+                )
+                candidate["confidence"] = round(
+                    max(0.05, min(0.98, confidence + 0.04 * direction)),
+                    3,
+                )
                 candidate["last_reinforced_at"] = now_stamp
                 candidate["updated_at"] = now_stamp
                 updated_entry = candidate
@@ -322,16 +381,19 @@ Rules:
         """Scan recent conversation turns for inline feedback signals (thumbs-up/down
         stored in MEMORY_STORE["relationship_history"]) and apply them to consolidated
         memories whose summary overlaps with the feedback text.
-        Returns the number of memories updated."""
+        Returns the number of memories updated.
+        """
         updated = 0
         feedback_entries = list(
-            (self.bot.MEMORY_STORE.get("relationship_history") or [])[-20:]
+            (self.bot.MEMORY_STORE.get("relationship_history") or [])[-20:],
         )
         if not feedback_entries:
             return 0
 
         for entry in feedback_entries:
-            feedback_text = str(entry.get("message") or entry.get("content") or "").strip()
+            feedback_text = str(
+                entry.get("message") or entry.get("content") or "",
+            ).strip()
             vote_raw = entry.get("vote") or entry.get("feedback_score")
             if not feedback_text or vote_raw is None:
                 continue
@@ -355,7 +417,11 @@ Rules:
                     break
 
             if best_match:
-                result = self.apply_consolidated_feedback(best_match.get("summary", ""), vote, turn_context=turn_context)
+                result = self.apply_consolidated_feedback(
+                    best_match.get("summary", ""),
+                    vote,
+                    turn_context=turn_context,
+                )
                 if result:
                     updated += 1
 
@@ -377,22 +443,30 @@ Rules:
                 kept.append(memory)
                 continue
 
-            days_old = self.bot.days_since_iso_date(memory.get("updated_at") or memory.get("created_at"))
+            days_old = self.bot.days_since_iso_date(
+                memory.get("updated_at") or memory.get("created_at"),
+            )
             if days_old is None:
                 kept.append(memory)
                 continue
 
-            importance = max(0.0, min(1.0, float(memory.get("importance_score", 0.0) or 0.0)))
+            importance = max(
+                0.0,
+                min(1.0, float(memory.get("importance_score", 0.0) or 0.0)),
+            )
             if importance <= 0.0:
                 memory.update(self.scorer.score_memory_entry(memory))
-                importance = max(0.0, min(1.0, float(memory.get("importance_score", 0.0) or 0.0)))
+                importance = max(
+                    0.0,
+                    min(1.0, float(memory.get("importance_score", 0.0) or 0.0)),
+                )
 
             should_forget = False
-            if force and days_old >= 30 and importance < 0.2:
-                should_forget = True
-            elif days_old >= 365 and importance < 0.35:
-                should_forget = True
-            elif days_old >= 180 and importance < 0.18:
+            if (
+                (force and days_old >= 30 and importance < 0.2)
+                or (days_old >= 365 and importance < 0.35)
+                or (days_old >= 180 and importance < 0.18)
+            ):
                 should_forget = True
 
             if should_forget:
@@ -409,7 +483,11 @@ Rules:
         self.bot.save_memory_catalog(kept)
         return {"removed": len(removed), "backup_path": backup_path, "ran": True}
 
-    def select_active_consolidated_memories(self, user_input: str, max_items: int = 3) -> list:
+    def select_active_consolidated_memories(
+        self,
+        user_input: str,
+        max_items: int = 3,
+    ) -> list:
         try:
             effective_max = max(1, int(max_items or 3))
         except (TypeError, ValueError):
@@ -438,17 +516,17 @@ Rules:
         )
         cached_indices = self._active_consolidated_selection_cache.get(cache_key)
         if cached_indices is not None:
-            return [
-                recent_consolidated[index]
-                for index in cached_indices
-                if 0 <= index < len(recent_consolidated)
-            ][:effective_max]
+            return [recent_consolidated[index] for index in cached_indices if 0 <= index < len(recent_consolidated)][
+                :effective_max
+            ]
 
         memory_list = []
         for index, entry in enumerate(recent_consolidated, start=1):
             category = entry.get("category", "general")
             confidence = self.bot.confidence_label(entry.get("confidence", 0.5))
-            memory_list.append(f"{index}. [{category} | conf={confidence}] {entry.get('summary', '')}")
+            memory_list.append(
+                f"{index}. [{category} | conf={confidence}] {entry.get('summary', '')}",
+            )
 
         selector_prompt = f"""
 You are helping Dad decide which long-term insights about Tony are most relevant for this new message.
@@ -496,15 +574,26 @@ If none are strongly relevant, return an empty array [].
                 if len(active) >= effective_max:
                     break
             if len(self._active_consolidated_selection_cache) >= 128:
-                self._active_consolidated_selection_cache.pop(next(iter(self._active_consolidated_selection_cache)))
-            self._active_consolidated_selection_cache[cache_key] = tuple(selected_positions)
+                self._active_consolidated_selection_cache.pop(
+                    next(iter(self._active_consolidated_selection_cache)),
+                )
+            self._active_consolidated_selection_cache[cache_key] = tuple(
+                selected_positions,
+            )
             return active
         except Exception as exc:
-            self.bot.record_runtime_issue("active memory selection", "falling back to top recent consolidated", exc)
+            self.bot.record_runtime_issue(
+                "active memory selection",
+                "falling back to top recent consolidated",
+                exc,
+            )
             return recent_consolidated[-effective_max:]
 
     def build_active_consolidated_context(self, user_input: str) -> str | None:
-        active_memories = self.select_active_consolidated_memories(user_input, max_items=3)
+        active_memories = self.select_active_consolidated_memories(
+            user_input,
+            max_items=3,
+        )
         if not active_memories:
             return None
 
@@ -515,11 +604,11 @@ If none are strongly relevant, return an empty array [].
             importance = float(entry.get("importance_score", 0.0) or 0.0)
             summary = entry.get("summary", "")
             tension = (
-                f" Tension: {'; '.join(entry.get('contradictions', [])[:2])}."
-                if entry.get("contradictions")
-                else ""
+                f" Tension: {'; '.join(entry.get('contradictions', [])[:2])}." if entry.get("contradictions") else ""
             )
-            lines.append(f"- [{category} | conf={confidence} | importance={importance:.2f}]{tension} {summary}")
+            lines.append(
+                f"- [{category} | conf={confidence} | importance={importance:.2f}]{tension} {summary}",
+            )
 
         return (
             "Most relevant long-term insights about Tony right now:\n"
@@ -550,7 +639,9 @@ If none are strongly relevant, return an empty array [].
     def should_run_memory_consolidation(self, force=False, turn_context=None):
         if force:
             return True
-        if str(self.bot.MEMORY_STORE.get("last_consolidated_at") or "").strip() == self._turn_wall_date(turn_context):
+        if str(
+            self.bot.MEMORY_STORE.get("last_consolidated_at") or "",
+        ).strip() == self._turn_wall_date(turn_context):
             return False
         return len(self.bot.memory_catalog()) >= 3
 
@@ -608,20 +699,31 @@ Rules:
         if normalized is None:
             return None
         try:
-            version = max(1, int(entry.get("version", normalized.get("version", 1)) or 1))
+            version = max(
+                1,
+                int(entry.get("version", normalized.get("version", 1)) or 1),
+            )
         except (TypeError, ValueError, AttributeError):
             version = max(1, int(normalized.get("version", 1) or 1))
         try:
-            importance_score = float(entry.get("importance_score", normalized.get("importance_score", 0.0)) or 0.0)
+            importance_score = float(
+                entry.get("importance_score", normalized.get("importance_score", 0.0)) or 0.0,
+            )
         except (TypeError, ValueError, AttributeError):
             importance_score = float(normalized.get("importance_score", 0.0) or 0.0)
         return {
             **normalized,
             "importance_score": max(0.0, min(1.0, importance_score)),
             "version": version,
-            "superseded": bool(entry.get("superseded", normalized.get("superseded", False))),
-            "superseded_by": str(entry.get("superseded_by") or normalized.get("superseded_by") or "").strip(),
-            "superseded_reason": str(entry.get("superseded_reason") or normalized.get("superseded_reason") or "").strip(),
+            "superseded": bool(
+                entry.get("superseded", normalized.get("superseded", False)),
+            ),
+            "superseded_by": str(
+                entry.get("superseded_by") or normalized.get("superseded_by") or "",
+            ).strip(),
+            "superseded_reason": str(
+                entry.get("superseded_reason") or normalized.get("superseded_reason") or "",
+            ).strip(),
             "superseded_at": entry.get("superseded_at") or normalized.get("superseded_at"),
             "last_reinforced_at": entry.get("last_reinforced_at") or normalized.get("last_reinforced_at"),
         }
@@ -635,7 +737,12 @@ Rules:
             entry.get("summary", ""),
         )
 
-    def _invalidate_superseded_graph_edges(self, loser: dict, turn_time: str, turn_context=None) -> int:
+    def _invalidate_superseded_graph_edges(
+        self,
+        loser: dict,
+        turn_time: str,
+        turn_context=None,
+    ) -> int:
         if not self._assert_save_commit_boundary(turn_context):
             return 0
         memory_manager = getattr(self.bot, "memory_manager", None)
@@ -682,7 +789,9 @@ Rules:
             normalized = self._with_consolidated_defaults(entry)
             if normalized is None:
                 continue
-            normalized["importance_score"] = self.scorer.consolidated_importance_score(normalized)
+            normalized["importance_score"] = self.scorer.consolidated_importance_score(
+                normalized,
+            )
             key = self.bot.normalize_memory_text(normalized.get("summary", ""))
             existing = merged.get(key)
             if existing is None:
@@ -690,27 +799,52 @@ Rules:
                 continue
 
             combined_support = []
-            for summary in [*existing.get("supporting_summaries", []), *normalized.get("supporting_summaries", [])]:
+            for summary in [
+                *existing.get("supporting_summaries", []),
+                *normalized.get("supporting_summaries", []),
+            ]:
                 if summary not in combined_support:
                     combined_support.append(summary)
 
             combined_contradictions = []
-            for summary in [*existing.get("contradictions", []), *normalized.get("contradictions", [])]:
+            for summary in [
+                *existing.get("contradictions", []),
+                *normalized.get("contradictions", []),
+            ]:
                 if summary not in combined_contradictions:
                     combined_contradictions.append(summary)
 
-            preferred = normalized if self.consolidated_entry_rank(normalized) >= self.consolidated_entry_rank(existing) else existing
+            preferred = (
+                normalized
+                if self.consolidated_entry_rank(normalized) >= self.consolidated_entry_rank(existing)
+                else existing
+            )
             merged[key] = {
                 **preferred,
-                "source_count": max(existing.get("source_count", 1), normalized.get("source_count", 1)),
-                "confidence": max(existing.get("confidence", 0.0), normalized.get("confidence", 0.0)),
-                "importance_score": max(existing.get("importance_score", 0.0), normalized.get("importance_score", 0.0)),
-                "version": max(existing.get("version", 1), normalized.get("version", 1)),
+                "source_count": max(
+                    existing.get("source_count", 1),
+                    normalized.get("source_count", 1),
+                ),
+                "confidence": max(
+                    existing.get("confidence", 0.0),
+                    normalized.get("confidence", 0.0),
+                ),
+                "importance_score": max(
+                    existing.get("importance_score", 0.0),
+                    normalized.get("importance_score", 0.0),
+                ),
+                "version": max(
+                    existing.get("version", 1),
+                    normalized.get("version", 1),
+                ),
                 "supporting_summaries": combined_support[:4],
                 "contradictions": combined_contradictions[:4],
             }
 
-        merged_values = sorted(merged.values(), key=lambda item: (item.get("updated_at", ""), item.get("summary", "")))
+        merged_values = sorted(
+            merged.values(),
+            key=lambda item: (item.get("updated_at", ""), item.get("summary", "")),
+        )
         now_stamp = self._turn_wall_time(turn_context)
         active_entries = [entry for entry in merged_values if not bool(entry.get("superseded", False))]
 
@@ -720,9 +854,14 @@ Rules:
             for right in active_entries[index + 1 :]:
                 if right.get("superseded"):
                     continue
-                if str(left.get("category") or "general") != str(right.get("category") or "general"):
+                if str(left.get("category") or "general") != str(
+                    right.get("category") or "general",
+                ):
                     continue
-                reason = self.contradiction_signal_reason(left.get("summary", ""), right.get("summary", ""))
+                reason = self.contradiction_signal_reason(
+                    left.get("summary", ""),
+                    right.get("summary", ""),
+                )
                 if not reason:
                     continue
 
@@ -730,8 +869,14 @@ Rules:
                 right_rank = self.consolidated_resolution_rank(right)
                 left_recency = self.scorer._recency_score(left.get("updated_at"))
                 right_recency = self.scorer._recency_score(right.get("updated_at"))
-                left_conf = max(0.05, min(1.0, float(left.get("confidence", 0.5) or 0.5)))
-                right_conf = max(0.05, min(1.0, float(right.get("confidence", 0.5) or 0.5)))
+                left_conf = max(
+                    0.05,
+                    min(1.0, float(left.get("confidence", 0.5) or 0.5)),
+                )
+                right_conf = max(
+                    0.05,
+                    min(1.0, float(right.get("confidence", 0.5) or 0.5)),
+                )
 
                 # Prefer the latest user statement when confidence is not weak.
                 if abs(left_recency - right_recency) >= 0.2:
@@ -743,23 +888,33 @@ Rules:
                         winner, loser = (left, right) if left_rank >= right_rank else (right, left)
                 else:
                     winner, loser = (left, right) if left_rank >= right_rank else (right, left)
-                winner["version"] = max(int(winner.get("version", 1) or 1), int(loser.get("version", 1) or 1) + 1)
+                winner["version"] = max(
+                    int(winner.get("version", 1) or 1),
+                    int(loser.get("version", 1) or 1) + 1,
+                )
                 loser.update(
                     {
                         "superseded": True,
                         "superseded_by": ConflictDetector._entry_identity(winner),
                         "superseded_reason": reason,
                         "superseded_at": now_stamp,
-                    }
+                    },
                 )
-                self._invalidate_superseded_graph_edges(loser, now_stamp, turn_context=turn_context)
+                self._invalidate_superseded_graph_edges(
+                    loser,
+                    now_stamp,
+                    turn_context=turn_context,
+                )
 
         return merged_values[-16:]
 
     def consolidate_memories(self, force=False, turn_context=None):
         if not self._assert_save_commit_boundary(turn_context):
             return self.bot.consolidated_memories()
-        if not self.should_run_memory_consolidation(force=force, turn_context=turn_context):
+        if not self.should_run_memory_consolidation(
+            force=force,
+            turn_context=turn_context,
+        ):
             return self.bot.consolidated_memories()
 
         memories = self.bot.memory_catalog()
@@ -768,14 +923,26 @@ Rules:
 
         try:
             response = self.bot.call_ollama_chat(
-                messages=[{"role": "user", "content": self.build_memory_consolidation_prompt(memories, self.bot.consolidated_memories())}],
+                messages=[
+                    {
+                        "role": "user",
+                        "content": self.build_memory_consolidation_prompt(
+                            memories,
+                            self.bot.consolidated_memories(),
+                        ),
+                    },
+                ],
                 options={"temperature": 0.1},
                 response_format="json",
                 purpose="memory consolidation",
             )
             content = self.bot.extract_ollama_message_content(response)
         except (RuntimeError, KeyError, TypeError) as exc:
-            self.bot.record_runtime_issue("memory consolidation", "keeping the existing consolidated memory view", exc)
+            self.bot.record_runtime_issue(
+                "memory consolidation",
+                "keeping the existing consolidated memory view",
+                exc,
+            )
             return self.bot.consolidated_memories()
 
         try:
@@ -803,7 +970,9 @@ Rules:
                 continue
             topic = self.bot.infer_memory_category(str(message.get("content", "")))
             if topic == "general":
-                topic_matches = self.bot.matching_topics(str(message.get("content", "")))
+                topic_matches = self.bot.matching_topics(
+                    str(message.get("content", "")),
+                )
                 if topic_matches:
                     topic = topic_matches[0]["name"].replace("_", " ")
             if topic and topic != "general":
@@ -814,7 +983,9 @@ Rules:
 
     @staticmethod
     def build_session_archive_fallback(history):
-        user_messages = [str(message.get("content", "")).strip() for message in history if message.get("role") == "user"]
+        user_messages = [
+            str(message.get("content", "")).strip() for message in history if message.get("role") == "user"
+        ]
         snippets = [snippet for snippet in user_messages[-3:] if snippet]
         if not snippets:
             return ""
@@ -833,9 +1004,13 @@ Rules:
                 "created_at": created_at,
                 "summary": summary,
                 "topics": self.session_topics_from_history(history),
-                "dominant_mood": Counter(self.bot.session_moods).most_common(1)[0][0] if self.bot.session_moods else self.bot.last_saved_mood(),
-                "turn_count": len([message for message in history if message.get("role") == "user"]),
-            }
+                "dominant_mood": Counter(self.bot.session_moods).most_common(1)[0][0]
+                if self.bot.session_moods
+                else self.bot.last_saved_mood(),
+                "turn_count": len(
+                    [message for message in history if message.get("role") == "user"],
+                ),
+            },
         )
         if entry is None:
             return None
@@ -866,7 +1041,7 @@ Rules:
         for entry in archive_entries[-6:]:
             topics = ", ".join(entry.get("topics", [])) or "general"
             entry_lines.append(
-                f"- {entry.get('created_at', '')[:10]} | mood={entry.get('dominant_mood', 'neutral')} | topics={topics} | summary={entry.get('summary', '')}"
+                f"- {entry.get('created_at', '')[:10]} | mood={entry.get('dominant_mood', 'neutral')} | topics={topics} | summary={entry.get('summary', '')}",
             )
 
         return f"""
@@ -893,7 +1068,10 @@ Do not invent anything.
         if not force and len(archive) < 2:
             return self.bot.relationship_timeline()
 
-        prompt = self.build_relationship_timeline_prompt(self.bot.relationship_timeline(), archive)
+        prompt = self.build_relationship_timeline_prompt(
+            self.bot.relationship_timeline(),
+            archive,
+        )
         if prompt is None:
             return self.bot.relationship_timeline()
 
@@ -905,7 +1083,11 @@ Do not invent anything.
             )
             timeline = self.bot.extract_ollama_message_content(response).strip()
         except (RuntimeError, KeyError, TypeError) as exc:
-            self.bot.record_runtime_issue("relationship timeline", "keeping the previous relationship digest", exc)
+            self.bot.record_runtime_issue(
+                "relationship timeline",
+                "keeping the previous relationship digest",
+                exc,
+            )
             return self.bot.relationship_timeline()
 
         if timeline:

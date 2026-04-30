@@ -5,19 +5,14 @@ Validates the three architecture guarantees:
 2. True idempotent tool execution — ToolTransaction provides transaction semantics.
 3. Policy-to-execution lock — Bayesian gate is enforced before ACT steps.
 """
+
 import asyncio
+
 import pytest
+
 pytestmark = pytest.mark.unit
 from types import SimpleNamespace
-from dadbot.core.kernel import (
-    TurnKernel,
-    KernelStepResult,
-    KernelViolation,
-    PolicyDecision,
-    bayesian_policy_gate,
-    _ACT_STEP_NAMES,
-)
-from dadbot.core.graph import TurnContext
+
 from dadbot.core.control_plane import (
     ExecutionControlPlane,
     InMemoryExecutionLedger,
@@ -26,12 +21,18 @@ from dadbot.core.control_plane import (
     Scheduler,
     SessionRegistry,
 )
+from dadbot.core.graph import TurnContext
+from dadbot.core.kernel import (
+    PolicyDecision,
+    TurnKernel,
+    bayesian_policy_gate,
+)
 from dadbot.core.tool_sandbox import ToolSandbox, ToolTransaction
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _ctx(user_input: str = "hey dad") -> TurnContext:
     return TurnContext(user_input=user_input)
@@ -48,6 +49,7 @@ def _deny_gate(*_):
 # ---------------------------------------------------------------------------
 # 1. Execution kernel — single state-transition authority
 # ---------------------------------------------------------------------------
+
 
 def test_kernel_execute_step_returns_ok_and_tracks_written_keys():
     kernel = TurnKernel()
@@ -157,11 +159,13 @@ def test_kernel_without_policy_gate_always_allows():
 
 
 def test_kernel_policy_is_checked_per_step():
-    decisions = iter([
-        PolicyDecision(allowed=True, reason="preflight-ok"),
-        PolicyDecision(allowed=False, reason="inference-blocked"),
-        PolicyDecision(allowed=True, reason="safety-ok"),
-    ])
+    decisions = iter(
+        [
+            PolicyDecision(allowed=True, reason="preflight-ok"),
+            PolicyDecision(allowed=False, reason="inference-blocked"),
+            PolicyDecision(allowed=True, reason="safety-ok"),
+        ]
+    )
 
     def _gate(ctx, step):
         return next(decisions)
@@ -172,8 +176,10 @@ def test_kernel_policy_is_checked_per_step():
 
     async def _run():
         for step_name in ("preflight", "inference", "safety"):
+
             async def _step(name=step_name):
                 executed.append(name)
+
             await kernel.execute_step(ctx, step_name, _step)
 
     asyncio.run(_run())
@@ -184,6 +190,7 @@ def test_kernel_policy_is_checked_per_step():
 # ---------------------------------------------------------------------------
 # 2. ToolTransaction — explicit transaction semantics
 # ---------------------------------------------------------------------------
+
 
 def test_tool_transaction_commit_on_success():
     sandbox = ToolSandbox()
@@ -259,10 +266,9 @@ def test_tool_transaction_failed_executor_does_not_commit():
 # 3. Bayesian policy gate — hard Bayesian closure
 # ---------------------------------------------------------------------------
 
+
 def _make_bot(tool_bias: str = "planner_default"):
-    return SimpleNamespace(
-        planner_debug_snapshot=lambda: {"bayesian_tool_bias": tool_bias}
-    )
+    return SimpleNamespace(planner_debug_snapshot=lambda: {"bayesian_tool_bias": tool_bias})
 
 
 def test_bayesian_gate_allows_non_act_steps_unconditionally():
@@ -339,8 +345,9 @@ def test_bayesian_gate_handles_planner_debug_snapshot_exception():
 # 4. TurnGraph kernel integration
 # ---------------------------------------------------------------------------
 
+
 def test_turn_graph_routes_through_kernel():
-    from dadbot.core.graph import TurnGraph, TurnContext
+    from dadbot.core.graph import TurnContext, TurnGraph
     from dadbot.core.nodes import TemporalNode
 
     executed_steps = []
@@ -380,7 +387,7 @@ def test_turn_graph_routes_through_kernel():
 
 
 def test_turn_graph_kernel_rejection_skips_state_mutation():
-    from dadbot.core.graph import TurnGraph, TurnContext
+    from dadbot.core.graph import TurnContext, TurnGraph
     from dadbot.core.nodes import TemporalNode
 
     class _RejectKernel:
@@ -420,6 +427,7 @@ def test_turn_graph_kernel_rejection_skips_state_mutation():
 # ---------------------------------------------------------------------------
 # 5. Unified execution control plane — global coordination boundary
 # ---------------------------------------------------------------------------
+
 
 def test_control_plane_serializes_turns_within_same_session():
     registry = SessionRegistry()

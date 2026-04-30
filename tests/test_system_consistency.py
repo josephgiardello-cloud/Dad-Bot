@@ -14,29 +14,28 @@ Tests cover:
   * Config attribute values round-trip through _CONFIG_ATTR_MAP keys
   * URIL report keys form a stable, expected set
 """
+
 from __future__ import annotations
 
-import hashlib
-import json
 from typing import Any
 
-import pytest
-
-from dadbot.uril.models import RepoSignal, RepoSignalBus, SubsystemHealth
 from dadbot.uril.architecture import build_subsystem_health, subsystem_risk_heatmap
+from dadbot.uril.models import RepoSignal, RepoSignalBus
 from dadbot.uril.report import build_uril_report, delta_compare
 from dadbot.uril.signal_bus import SignalCollectionOptions
-from dadbot.uril.truth_binding import build_synthetic_state, compute_receipt_chain_hash, ClaimEvidenceValidator
-
+from dadbot.uril.truth_binding import ClaimEvidenceValidator, build_synthetic_state, compute_receipt_chain_hash
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
 # ---------------------------------------------------------------------------
 
+
 def _make_clean_signal_bus() -> RepoSignalBus:
     """Minimal fully-correct signal bus for consistency checks."""
     bus = RepoSignalBus()
-    bus.add(RepoSignal("repo", "correctness", 1.0, {"tests": 100, "passed": 100, "failures": 0, "errors": 0, "skipped": 0}))
+    bus.add(
+        RepoSignal("repo", "correctness", 1.0, {"tests": 100, "passed": 100, "failures": 0, "errors": 0, "skipped": 0})
+    )
     bus.add(RepoSignal("phase4", "architecture", 1.0, {}))
     bus.add(RepoSignal("repo", "determinism", 1.0, {}))
     bus.add(RepoSignal("repo", "observability", 0.9, {}))
@@ -45,7 +44,9 @@ def _make_clean_signal_bus() -> RepoSignalBus:
 
 def _make_degraded_signal_bus() -> RepoSignalBus:
     bus = RepoSignalBus()
-    bus.add(RepoSignal("repo", "correctness", 0.5, {"tests": 100, "passed": 50, "failures": 50, "errors": 0, "skipped": 0}))
+    bus.add(
+        RepoSignal("repo", "correctness", 0.5, {"tests": 100, "passed": 50, "failures": 50, "errors": 0, "skipped": 0})
+    )
     bus.add(RepoSignal("phase4", "architecture", 0.4, {}))
     bus.add(RepoSignal("repo", "determinism", 0.6, {}))
     bus.add(RepoSignal("repo", "observability", 0.3, {}))
@@ -55,6 +56,7 @@ def _make_degraded_signal_bus() -> RepoSignalBus:
 # ---------------------------------------------------------------------------
 # Test: signal bus ↔ subsystem health consistency
 # ---------------------------------------------------------------------------
+
 
 class TestSignalBusSubsystemHealthConsistency:
     """Signal bus inputs must produce consistent subsystem health output."""
@@ -66,8 +68,14 @@ class TestSignalBusSubsystemHealthConsistency:
         assert len(rows) == 8
         names = {r.subsystem for r in rows}
         expected = {
-            "dadbot_core", "graph_engine", "kernel", "validator",
-            "persistence", "observability", "mcp_layer", "tool_registry"
+            "dadbot_core",
+            "graph_engine",
+            "kernel",
+            "validator",
+            "persistence",
+            "observability",
+            "mcp_layer",
+            "tool_registry",
         }
         assert names == expected
 
@@ -116,6 +124,7 @@ class TestSignalBusSubsystemHealthConsistency:
 # ---------------------------------------------------------------------------
 # Test: URIL report internal key consistency
 # ---------------------------------------------------------------------------
+
 
 class TestUrilReportInternalConsistency:
     """URIL report structure must be internally self-consistent."""
@@ -177,6 +186,7 @@ class TestUrilReportInternalConsistency:
 # Test: receipt chain ↔ truth binding consistency
 # ---------------------------------------------------------------------------
 
+
 class TestReceiptChainTruthBindingConsistency:
     """Receipt chain must be consistent with truth binding extraction."""
 
@@ -213,6 +223,7 @@ class TestReceiptChainTruthBindingConsistency:
 # ---------------------------------------------------------------------------
 # Test: delta_compare self-consistency
 # ---------------------------------------------------------------------------
+
 
 class TestDeltaCompareConsistency:
     """A snapshot compared with itself must always be within tolerance."""

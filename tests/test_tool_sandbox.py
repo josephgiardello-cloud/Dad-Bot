@@ -1,5 +1,5 @@
 """Tests for ToolSandbox: idempotency, failure isolation, rollback semantics."""
-import pytest
+
 from dadbot.core.tool_sandbox import ToolSandbox
 
 
@@ -54,7 +54,7 @@ def test_tool_sandbox_different_params_are_different_keys():
     )
     record2 = sandbox.execute(
         tool_name="set_reminder",
-        parameters={"title": "Call bank"},   # different params → different key
+        parameters={"title": "Call bank"},  # different params → different key
         executor=_remind,
     )
     assert record2.status == "succeeded"

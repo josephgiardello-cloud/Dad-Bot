@@ -1,5 +1,4 @@
-"""
-SideEffectAdapter — pure emission layer extracted from TurnGraph.
+"""SideEffectAdapter — pure emission layer extracted from TurnGraph.
 
 This module owns ONLY record-and-emit operations.  It has zero decision-making,
 zero branching logic, zero recovery logic, and zero policy enforcement.
@@ -19,9 +18,15 @@ that decision stays in TurnGraph.
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
-from dadbot.core.capability_registry import freeze_capabilities as _freeze, verify_capability_freeze as _verify
+from dadbot.core.capability_registry import (
+    freeze_capabilities as _freeze,
+)
+from dadbot.core.capability_registry import (
+    verify_capability_freeze as _verify,
+)
 
 logger = logging.getLogger(__name__)
 

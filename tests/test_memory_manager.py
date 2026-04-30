@@ -1,14 +1,16 @@
+import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
-import json
 
 
 def test_normalize_memory_entry_naturalizes_summary_and_mood(bot):
-    entry = bot.normalize_memory_entry({
-        "summary": "i'm worried about money lately",
-        "category": None,
-        "mood": "anxious",
-    })
+    entry = bot.normalize_memory_entry(
+        {
+            "summary": "i'm worried about money lately",
+            "category": None,
+            "mood": "anxious",
+        }
+    )
 
     assert entry["summary"] == "Tony is worried about money lately."
     assert entry["category"] == "finance"
@@ -16,20 +18,22 @@ def test_normalize_memory_entry_naturalizes_summary_and_mood(bot):
 
 
 def test_normalize_memory_entry_validates_dates_and_scores_without_changing_surface(bot):
-    entry = bot.normalize_memory_entry({
-        "summary": "i've been saving for emergencies",
-        "category": "finance",
-        "mood": "positive",
-        "created_at": "2026-04-20",
-        "updated_at": "2026-04-21",
-        "confidence": "1.7",
-        "impact_score": "2.5",
-        "importance_score": "0.8",
-        "emotional_intensity": "0.7",
-        "relationship_impact": "0.6",
-        "pinned": True,
-        "contradictions": ["", "missed the budget once"],
-    })
+    entry = bot.normalize_memory_entry(
+        {
+            "summary": "i've been saving for emergencies",
+            "category": "finance",
+            "mood": "positive",
+            "created_at": "2026-04-20",
+            "updated_at": "2026-04-21",
+            "confidence": "1.7",
+            "impact_score": "2.5",
+            "importance_score": "0.8",
+            "emotional_intensity": "0.7",
+            "relationship_impact": "0.6",
+            "pinned": True,
+            "contradictions": ["", "missed the budget once"],
+        }
+    )
 
     assert entry["summary"] == "Tony has been saving for emergencies."
     assert entry["created_at"] == "2026-04-20"
@@ -44,17 +48,19 @@ def test_normalize_memory_entry_validates_dates_and_scores_without_changing_surf
 
 
 def test_normalize_relationship_state_preserves_runtime_vocab_and_date_surface(bot):
-    entry = bot.normalize_relationship_state({
-        "trust_level": 65,
-        "openness_level": 62,
-        "emotional_momentum": "warming",
-        "recurring_topics": {"Work": "3", "": 2},
-        "recent_checkins": [{"date": "2026-04-20", "mood": "happy", "topic": "Work"}],
-        "hypotheses": [{"name": "supportive_baseline", "probability": 1.0}],
-        "last_hypothesis_updated": "2026-04-20",
-        "last_reflection": "He is opening up more.",
-        "last_updated": "2026-04-20",
-    })
+    entry = bot.normalize_relationship_state(
+        {
+            "trust_level": 65,
+            "openness_level": 62,
+            "emotional_momentum": "warming",
+            "recurring_topics": {"Work": "3", "": 2},
+            "recent_checkins": [{"date": "2026-04-20", "mood": "happy", "topic": "Work"}],
+            "hypotheses": [{"name": "supportive_baseline", "probability": 1.0}],
+            "last_hypothesis_updated": "2026-04-20",
+            "last_reflection": "He is opening up more.",
+            "last_updated": "2026-04-20",
+        }
+    )
 
     assert entry["emotional_momentum"] == "warming"
     assert entry["recurring_topics"] == {"work": 3}
@@ -64,18 +70,20 @@ def test_normalize_relationship_state_preserves_runtime_vocab_and_date_surface(b
 
 
 def test_normalize_persona_evolution_entry_validates_runtime_trait_payload(bot):
-    entry = bot.normalize_persona_evolution_entry({
-        "new_trait": "more coach-like",
-        "reason": "Tony responds well to structure",
-        "announcement": "I have gotten a little more coach-like with you.",
-        "session_count": "8",
-        "applied_at": "2026-04-10T20:00:00",
-        "last_reinforced_at": "2026-04-11T20:00:00",
-        "strength": "2.7",
-        "impact_score": "-1.5",
-        "critique_score": "9",
-        "critique_feedback": "specific and grounded",
-    })
+    entry = bot.normalize_persona_evolution_entry(
+        {
+            "new_trait": "more coach-like",
+            "reason": "Tony responds well to structure",
+            "announcement": "I have gotten a little more coach-like with you.",
+            "session_count": "8",
+            "applied_at": "2026-04-10T20:00:00",
+            "last_reinforced_at": "2026-04-11T20:00:00",
+            "strength": "2.7",
+            "impact_score": "-1.5",
+            "critique_score": "9",
+            "critique_feedback": "specific and grounded",
+        }
+    )
 
     assert entry["trait"] == "more coach-like"
     assert entry["session_count"] == 8
@@ -85,12 +93,14 @@ def test_normalize_persona_evolution_entry_validates_runtime_trait_payload(bot):
 
 
 def test_normalize_wisdom_entry_validates_runtime_payload(bot):
-    entry = bot.normalize_wisdom_entry({
-        "summary": "Slow the moment down before work runs you.",
-        "topic": "Work",
-        "trigger": "stress check-in",
-        "created_at": "2026-04-11T20:00:00",
-    })
+    entry = bot.normalize_wisdom_entry(
+        {
+            "summary": "Slow the moment down before work runs you.",
+            "topic": "Work",
+            "trigger": "stress check-in",
+            "created_at": "2026-04-11T20:00:00",
+        }
+    )
 
     assert entry == {
         "summary": "Slow the moment down before work runs you.",
@@ -115,6 +125,7 @@ def test_save_memory_store_normalizes_direct_memory_store_mutations(bot):
     persisted = json.loads(bot.MEMORY_PATH.read_text(encoding="utf-8"))
 
     from datetime import date as _date
+
     assert persisted["memories"][0]["summary"] == "Tony is saving money."
     assert persisted["memories"][0]["created_at"] == _date.today().isoformat()
     assert persisted["memories"][0]["mood"] == "positive"
@@ -147,21 +158,29 @@ def test_mutate_memory_store_persists_valid_json_under_concurrent_writes(bot):
 
 
 def test_normalize_consolidated_memory_entry_limits_lists_and_recomputes_confidence(bot):
-    entry = bot.normalize_consolidated_memory_entry({
-        "summary": "i've been saving money for emergencies",
-        "category": "finance",
-        "source_count": 3,
-        "confidence": None,
-        "supporting_summaries": [
-            "I've been saving money for emergencies",
-            "i have been saving money for emergencies",
-            "I want to save more money",
-            "I have been saving money monthly",
-            "I need to keep budgeting",
-        ],
-        "contradictions": ["Spent impulsively", "Spent impulsively", "Ignored budget", "Missed savings", "Overspent again"],
-        "updated_at": date.today().isoformat(),
-    })
+    entry = bot.normalize_consolidated_memory_entry(
+        {
+            "summary": "i've been saving money for emergencies",
+            "category": "finance",
+            "source_count": 3,
+            "confidence": None,
+            "supporting_summaries": [
+                "I've been saving money for emergencies",
+                "i have been saving money for emergencies",
+                "I want to save more money",
+                "I have been saving money monthly",
+                "I need to keep budgeting",
+            ],
+            "contradictions": [
+                "Spent impulsively",
+                "Spent impulsively",
+                "Ignored budget",
+                "Missed savings",
+                "Overspent again",
+            ],
+            "updated_at": date.today().isoformat(),
+        }
+    )
 
     assert entry["summary"] == "Tony has been saving money for emergencies."
     assert entry["supporting_summaries"] == [
@@ -175,8 +194,12 @@ def test_normalize_consolidated_memory_entry_limits_lists_and_recomputes_confide
 
 
 def test_memory_dedup_key_collapses_finance_and_work_stress_variants(bot):
-    finance_key = bot.memory_dedup_key({"summary": "Tony has been saving more money each month.", "category": "finance"})
-    work_key = bot.memory_dedup_key({"summary": "Tony shared that work has been stressed and overwhelming.", "category": "work"})
+    finance_key = bot.memory_dedup_key(
+        {"summary": "Tony has been saving more money each month.", "category": "finance"}
+    )
+    work_key = bot.memory_dedup_key(
+        {"summary": "Tony shared that work has been stressed and overwhelming.", "category": "work"}
+    )
 
     assert finance_key == ("finance", "money-goals")
     assert work_key == ("work", "work-stress")
@@ -184,25 +207,52 @@ def test_memory_dedup_key_collapses_finance_and_work_stress_variants(bot):
 
 def test_memory_quality_score_penalizes_generic_low_signal_entries(bot):
     generic_score = bot.memory_quality_score({"summary": "Tony shared that personal struggles.", "category": "general"})
-    specific_score = bot.memory_quality_score({"summary": "Tony has been saving money to build an emergency fund.", "category": "finance"})
+    specific_score = bot.memory_quality_score(
+        {"summary": "Tony has been saving money to build an emergency fund.", "category": "finance"}
+    )
 
     assert generic_score < 5
     assert specific_score > generic_score
 
 
 def test_is_high_quality_memory_rejects_low_signal_patterns(bot):
-    assert bot.is_high_quality_memory({"summary": "Tony shared that personal struggles.", "category": "general"}) is False
-    assert bot.is_high_quality_memory({"summary": "Tony has been working on a budget and saving plan.", "category": "finance"}) is True
+    assert (
+        bot.is_high_quality_memory({"summary": "Tony shared that personal struggles.", "category": "general"}) is False
+    )
+    assert (
+        bot.is_high_quality_memory(
+            {"summary": "Tony has been working on a budget and saving plan.", "category": "finance"}
+        )
+        is True
+    )
 
 
 def test_clean_memory_entries_normalizes_filters_and_deduplicates(bot):
-    cleaned = bot.clean_memory_entries([
-        {"summary": "i've been saving more money", "category": "finance", "updated_at": (date.today() - timedelta(days=1)).isoformat()},
-        {"summary": "I have been saving more money for an emergency fund", "category": "finance", "updated_at": date.today().isoformat()},
-        {"summary": "personal struggles", "category": "general", "updated_at": date.today().isoformat()},
-        {"summary": "i'm stressed about work deadlines", "category": "work", "updated_at": date.today().isoformat()},
-        {"summary": "Tony shared that work stress is overwhelming", "category": "work", "updated_at": (date.today() - timedelta(days=2)).isoformat()},
-    ])
+    cleaned = bot.clean_memory_entries(
+        [
+            {
+                "summary": "i've been saving more money",
+                "category": "finance",
+                "updated_at": (date.today() - timedelta(days=1)).isoformat(),
+            },
+            {
+                "summary": "I have been saving more money for an emergency fund",
+                "category": "finance",
+                "updated_at": date.today().isoformat(),
+            },
+            {"summary": "personal struggles", "category": "general", "updated_at": date.today().isoformat()},
+            {
+                "summary": "i'm stressed about work deadlines",
+                "category": "work",
+                "updated_at": date.today().isoformat(),
+            },
+            {
+                "summary": "Tony shared that work stress is overwhelming",
+                "category": "work",
+                "updated_at": (date.today() - timedelta(days=2)).isoformat(),
+            },
+        ]
+    )
 
     summaries = [entry["summary"] for entry in cleaned]
     assert "Tony has been saving more money for an emergency fund." in summaries
@@ -265,7 +315,10 @@ def test_semantic_memory_matches_caps_stale_low_impact_memories(bot):
         "query_mood": "stressed",
         "candidate_limit": 4,
     }
-    bot.memory_manager.semantic_candidate_rows = lambda *args, **kwargs: [{"summary_key": "old"}, {"summary_key": "fresh"}]
+    bot.memory_manager.semantic_candidate_rows = lambda *args, **kwargs: [
+        {"summary_key": "old"},
+        {"summary_key": "fresh"},
+    ]
     bot.memory_manager.score_semantic_rows = lambda *args, **kwargs: [(0.95, old_memory), (0.62, fresh_memory)]
 
     matches = bot.semantic_memory_matches("work deadlines", [old_memory, fresh_memory], limit=1)
@@ -624,7 +677,9 @@ def test_graph_retrieval_compresses_to_token_budget(bot):
     bot.sync_graph_store()
     bot.runtime_config.graph_context_token_budget = 18
     bot.memory_manager._graph_prompt_compressor.max_tokens = 18
-    bot.call_ollama_chat = lambda *args, **kwargs: {"message": {"content": "- compressed graph summary about saving for an emergency fund"}}
+    bot.call_ollama_chat = lambda *args, **kwargs: {
+        "message": {"content": "- compressed graph summary about saving for an emergency fund"}
+    }
 
     result = bot.graph_retrieval_for_input("budget and emergency fund", limit=1)
 

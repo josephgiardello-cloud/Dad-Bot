@@ -24,7 +24,6 @@ import pytest
 from dadbot.core.graph import TurnContext
 from dadbot.core.orchestrator import DadBotOrchestrator
 
-
 # ---------------------------------------------------------------------------
 # Fixed controlled input
 # ---------------------------------------------------------------------------
@@ -40,6 +39,7 @@ _FIXED_GOAL: dict[str, Any] = {
 # ---------------------------------------------------------------------------
 # Orchestrator fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def orch_off(bot) -> DadBotOrchestrator:
@@ -68,6 +68,7 @@ def orch_on(bot) -> DadBotOrchestrator:
 # ---------------------------------------------------------------------------
 # Service stub — applied once via the shared registry
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture(autouse=True)
 def _stub_agent_service(bot, monkeypatch):
@@ -104,6 +105,7 @@ def _stub_agent_service(bot, monkeypatch):
 # Turn runner helpers
 # ---------------------------------------------------------------------------
 
+
 def _seed_session(orch: DadBotOrchestrator, sid: str) -> None:
     """Pre-populate a fresh session with the fixed goal record."""
     session = orch.session_registry.get_or_create(sid)
@@ -122,6 +124,7 @@ async def _run_turn(orch: DadBotOrchestrator, sid: str) -> TurnContext:
 # ---------------------------------------------------------------------------
 # Equivalence test suite
 # ---------------------------------------------------------------------------
+
 
 class TestV2Equivalence:
     """Formal v2 tool system equivalence validation — 3 invariants + stability."""
@@ -145,16 +148,12 @@ class TestV2Equivalence:
         plan_on = dict(ctx_on.state.get("turn_plan") or {})
         intent_off = plan_off.get("intent_type")
         intent_on = plan_on.get("intent_type")
-        assert intent_off == intent_on, (
-            f"Intent class diverged between modes: OFF={intent_off!r} ON={intent_on!r}"
-        )
+        assert intent_off == intent_on, f"Intent class diverged between modes: OFF={intent_off!r} ON={intent_on!r}"
 
         # Both must load the same session goal IDs (equivalent memory state).
         goals_off = sorted(g.get("id") for g in list(ctx_off.state.get("session_goals") or []))
         goals_on = sorted(g.get("id") for g in list(ctx_on.state.get("session_goals") or []))
-        assert goals_off == goals_on, (
-            f"Session goal IDs diverged: OFF={goals_off!r} ON={goals_on!r}"
-        )
+        assert goals_off == goals_on, f"Session goal IDs diverged: OFF={goals_off!r} ON={goals_on!r}"
 
     # ------------------------------------------------------------------
     # (B) Tool-trace enrichment invariant
@@ -172,9 +171,7 @@ class TestV2Equivalence:
         results_off = list(ctx_off.state.get("tool_results") or [])
         assert len(plan_off) == 0, f"v2 OFF must not produce execution_plan, got: {plan_off}"
         assert len(results_off) == 0, f"v2 OFF must not produce tool_results, got: {results_off}"
-        assert not ctx_off.metadata.get("tool_execution_graph_hash"), (
-            "v2 OFF must not stamp tool_execution_graph_hash"
-        )
+        assert not ctx_off.metadata.get("tool_execution_graph_hash"), "v2 OFF must not stamp tool_execution_graph_hash"
 
         # --- v2 ON: execution_plan populated, tool_results populated ---
         ir_on = dict(ctx_on.state.get("tool_ir") or {})
@@ -224,9 +221,7 @@ class TestV2Equivalence:
         # determinism_hash_with_tools (metadata top-level) must also diverge.
         dhwt_off = str(ctx_off.metadata.get("determinism_hash_with_tools") or "")
         dhwt_on = str(ctx_on.metadata.get("determinism_hash_with_tools") or "")
-        assert dhwt_off != dhwt_on, (
-            "determinism_hash_with_tools must diverge between v2 ON and v2 OFF"
-        )
+        assert dhwt_off != dhwt_on, "determinism_hash_with_tools must diverge between v2 ON and v2 OFF"
 
         # tool_system_v2_enabled flag accurately reflected in each context.
         assert ctx_off.metadata.get("tool_system_v2_enabled") is False, (
@@ -278,9 +273,7 @@ class TestV2Equivalence:
         tth_on_1 = str(det_on_1.get("tool_trace_hash") or "")
         tth_on_2 = str(det_on_2.get("tool_trace_hash") or "")
         assert tth_on_1 and tth_on_2, "v2 ON tool_trace_hash must be non-empty in both runs"
-        assert tth_on_1 == tth_on_2, (
-            f"v2 ON tool_trace_hash unstable across runs: run1={tth_on_1!r} run2={tth_on_2!r}"
-        )
+        assert tth_on_1 == tth_on_2, f"v2 ON tool_trace_hash unstable across runs: run1={tth_on_1!r} run2={tth_on_2!r}"
 
         # --- v2 ON: execution plan intent sequence must be stable ---
         def _intents(ctx: TurnContext) -> list[str]:
@@ -306,13 +299,9 @@ class TestV2Equivalence:
         # --- v2 OFF: execution_plan consistently empty across both runs ---
         plan_off_1 = list((ctx_off_1.state.get("tool_ir") or {}).get("execution_plan") or [])
         plan_off_2 = list((ctx_off_2.state.get("tool_ir") or {}).get("execution_plan") or [])
-        assert plan_off_1 == [] == plan_off_2, (
-            "v2 OFF execution_plan must be consistently empty across runs"
-        )
+        assert plan_off_1 == [] == plan_off_2, "v2 OFF execution_plan must be consistently empty across runs"
 
         # --- v2 OFF: tool_results consistently empty across both runs ---
         results_off_1 = list(ctx_off_1.state.get("tool_results") or [])
         results_off_2 = list(ctx_off_2.state.get("tool_results") or [])
-        assert results_off_1 == [] == results_off_2, (
-            "v2 OFF tool_results must be consistently empty across runs"
-        )
+        assert results_off_1 == [] == results_off_2, "v2 OFF tool_results must be consistently empty across runs"

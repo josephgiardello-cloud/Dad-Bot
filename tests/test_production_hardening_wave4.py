@@ -1,17 +1,17 @@
 """Wave 4 production hardening tests — Tier 0/1/2/3 gaps."""
+
 from __future__ import annotations
 
-import asyncio
-import gzip
 import json
 import os
 import tempfile
 import time
-import warnings
 import uuid
+import warnings
 from pathlib import Path
 
 import pytest
+
 pytestmark = pytest.mark.unit
 from dadbot.core.authorization import (
     AuthorizationError,
@@ -24,26 +24,25 @@ from dadbot.core.authorization import (
 )
 from dadbot.core.compaction import ArchiveTier, CompactionPolicy, EventCompactor
 from dadbot.core.durability import (
+    UNIT_BEGIN_TYPE,
+    UNIT_COMMIT_TYPE,
     AtomicWriteUnit,
     CRC32LineCodec,
     FileLockMutex,
-    UNIT_BEGIN_TYPE,
-    UNIT_COMMIT_TYPE,
 )
 from dadbot.core.event_schema import (
     CURRENT_SCHEMA_VERSION,
     EventSchemaMigrator,
-    get_migrator,
     stamp_schema_version,
 )
 from dadbot.core.execution_lease import ExecutionLease, WorkerIdentity
-from dadbot.core.execution_ledger import ExecutionLedger, WriteBoundaryGuard
+from dadbot.core.execution_ledger import ExecutionLedger
 from dadbot.core.fault_injection import (
     ErrorClassification,
     FaultBoundary,
     FaultInjector,
-    RetryPolicy,
     RetryableError,
+    RetryPolicy,
     TerminalError,
     classify_error,
 )
@@ -62,16 +61,17 @@ from dadbot.core.observability import (
     ReplayDebugger,
     StructuredLogger,
 )
-from dadbot.core.snapshot_engine import SnapshotEngine
 from dadbot.core.session_store import SessionStore
-
+from dadbot.core.snapshot_engine import SnapshotEngine
 
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
 
+
 def _write_jobs(ledger: ExecutionLedger, session_id: str = "s1", n: int = 1) -> None:
     from dadbot.core.control_plane import ExecutionJob
+
     writer = LedgerWriter(ledger)
     for _ in range(n):
         job = ExecutionJob(session_id=session_id, user_input="hi")
@@ -86,6 +86,7 @@ def _write_jobs(ledger: ExecutionLedger, session_id: str = "s1", n: int = 1) -> 
 # Tier 0 — Real durability semantics
 # ===========================================================================
 
+
 class TestCRC32LineCodec:
     def test_encode_decode_roundtrip(self):
         event = {"type": "JOB_QUEUED", "seq": 1, "nested": {"x": 2}}
@@ -95,7 +96,7 @@ class TestCRC32LineCodec:
         assert decoded == event
 
     def test_decode_corrupt_crc_returns_none(self):
-        line = "deadbeef {\"type\": \"JOB_QUEUED\"}\n"
+        line = 'deadbeef {"type": "JOB_QUEUED"}\n'
         result = CRC32LineCodec.decode(line)
         assert result is None
 
@@ -187,17 +188,35 @@ class TestSequenceValidator:
 
     def test_load_from_backend_warns_on_sequence_anomaly(self):
         """load_from_backend emits a RuntimeWarning when sequence ordering is broken."""
+
         class OutOfOrderBackend(InMemoryLedgerBackend):
             def load(self):
                 # Return events with out-of-order sequences.
                 return [
-                    {"type": "JOB_QUEUED", "sequence": 3, "session_id": "s1",
-                     "trace_id": "", "timestamp": time.time(), "kernel_step_id": "x",
-                     "event_id": "e1", "parent_event_id": "", "_schema_version": "1.0"},
-                    {"type": "JOB_QUEUED", "sequence": 1, "session_id": "s1",
-                     "trace_id": "", "timestamp": time.time(), "kernel_step_id": "x",
-                     "event_id": "e2", "parent_event_id": "e1", "_schema_version": "1.0"},
+                    {
+                        "type": "JOB_QUEUED",
+                        "sequence": 3,
+                        "session_id": "s1",
+                        "trace_id": "",
+                        "timestamp": time.time(),
+                        "kernel_step_id": "x",
+                        "event_id": "e1",
+                        "parent_event_id": "",
+                        "_schema_version": "1.0",
+                    },
+                    {
+                        "type": "JOB_QUEUED",
+                        "sequence": 1,
+                        "session_id": "s1",
+                        "trace_id": "",
+                        "timestamp": time.time(),
+                        "kernel_step_id": "x",
+                        "event_id": "e2",
+                        "parent_event_id": "e1",
+                        "_schema_version": "1.0",
+                    },
                 ]
+
         ledger = ExecutionLedger(backend=OutOfOrderBackend())
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
@@ -237,11 +256,13 @@ class TestFileLockMutex:
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / f"stale_{uuid.uuid4().hex}.lock"
             # Write a lock file with a dead PID and old timestamp.
-            record = json.dumps({
-                "pid": 99999999,
-                "token": "staletoken",
-                "acquired_at": time.time() - 9999,
-            })
+            record = json.dumps(
+                {
+                    "pid": 99999999,
+                    "token": "staletoken",
+                    "acquired_at": time.time() - 9999,
+                }
+            )
             path.write_text(record)
             lock = FileLockMutex(path, stale_after_seconds=60.0)
             # Should acquire over the stale lock.
@@ -277,12 +298,14 @@ class TestAtomicWriteUnit:
             event_type=UNIT_BEGIN_TYPE,
             session_id="__system__",
             kernel_step_id="atomic_write_unit.begin",
+            trace_id="orphan-unit-id",
             payload={"unit_id": "orphan-unit-id", "ts": time.time()},
         )
         writer.write_event(
             event_type="JOB_QUEUED",
             session_id="s1",
             kernel_step_id="test.enqueue",
+            trace_id="orphan-unit-id",
             payload={"_unit_id": "orphan-unit-id"},
         )
         # No UNIT_COMMIT written.
@@ -307,9 +330,11 @@ class TestAtomicWriteUnit:
         assert not txn.committed
         events = ledger.read()
         filtered = AtomicWriteUnit.filter_committed(events)
-        assert all(e.get("type") not in (UNIT_BEGIN_TYPE, UNIT_COMMIT_TYPE) or
-                   e.get("payload", {}).get("unit_id") != txn.unit_id
-                   for e in filtered)
+        assert all(
+            e.get("type") not in (UNIT_BEGIN_TYPE, UNIT_COMMIT_TYPE)
+            or e.get("payload", {}).get("unit_id") != txn.unit_id
+            for e in filtered
+        )
 
     def test_ledger_replay_filter_integration(self):
         """add_replay_filter(AtomicWriteUnit.filter_committed) is applied on load."""
@@ -325,12 +350,14 @@ class TestAtomicWriteUnit:
                 event_type=UNIT_BEGIN_TYPE,
                 session_id="__system__",
                 kernel_step_id="atomic_write_unit.begin",
+                trace_id="phantom",
                 payload={"unit_id": "phantom", "ts": time.time()},
             )
             writer.write_event(
                 event_type="JOB_QUEUED",
                 session_id="s1",
                 kernel_step_id="test",
+                trace_id="phantom",
                 payload={"_unit_id": "phantom"},
             )
 
@@ -346,6 +373,7 @@ class TestAtomicWriteUnit:
 # ===========================================================================
 # Tier 0 — Transactional atomicity
 # ===========================================================================
+
 
 class TestTransactionalAtomicity:
     def test_transaction_commit_writes_all_events(self):
@@ -371,13 +399,15 @@ class TestTransactionalAtomicity:
         txn.__exit__(RuntimeError, RuntimeError("boom"), None)
 
         filtered = AtomicWriteUnit.filter_committed(ledger.read())
-        assert all(e["type"] not in ("JOB_QUEUED",) for e in filtered
-                   if e.get("payload", {}).get("_unit_id") == txn.unit_id)
+        assert all(
+            e["type"] not in ("JOB_QUEUED",) for e in filtered if e.get("payload", {}).get("_unit_id") == txn.unit_id
+        )
 
 
 # ===========================================================================
 # Tier 1 — Fault injection and retry
 # ===========================================================================
+
 
 class TestFaultInjector:
     def test_arm_and_trigger_once(self):
@@ -501,6 +531,7 @@ class TestFaultBoundary:
 # Tier 1 — Event schema versioning
 # ===========================================================================
 
+
 class TestEventSchemaVersioning:
     def test_stamp_adds_version(self):
         event = {"type": "JOB_QUEUED"}
@@ -516,6 +547,7 @@ class TestEventSchemaVersioning:
         ledger = ExecutionLedger()
         writer = LedgerWriter(ledger)
         from dadbot.core.control_plane import ExecutionJob
+
         job = ExecutionJob(session_id="s1", user_input="hi")
         writer.append_job_submitted(job)
         event = ledger.read()[0]
@@ -559,6 +591,7 @@ class TestEventSchemaVersioning:
 # ===========================================================================
 # Tier 2 — Fencing tokens + WorkerIdentity
 # ===========================================================================
+
 
 class TestFencingTokens:
     def test_fencing_token_increments_on_new_acquisition(self):
@@ -613,9 +646,11 @@ class TestWorkerIdentity:
 # Tier 2 — Observability extensions
 # ===========================================================================
 
+
 class TestCorrelationContext:
     def setup_method(self):
         from dadbot.core.observability import _current_correlation_id
+
         _current_correlation_id.set("")
 
     def test_bind_sets_correlation_id(self):
@@ -634,6 +669,7 @@ class TestCorrelationContext:
         assert cid  # non-empty
         # Reset for next test.
         from dadbot.core.observability import _current_correlation_id
+
         _current_correlation_id.set("")
 
 
@@ -653,6 +689,7 @@ class TestStructuredLogger:
         records: list = []
         logger = StructuredLogger("test", sink=records)
         from dadbot.core.observability import get_tracer
+
         tracer = get_tracer()
         with tracer.span("test.span") as span:
             logger.info("inside span")
@@ -707,7 +744,7 @@ class TestReplayDebugger:
     def test_diff_states_detects_change(self):
         debugger = ReplayDebugger()
         before = {"status": "idle", "count": 0}
-        after  = {"status": "running", "count": 1}
+        after = {"status": "running", "count": 1}
         diff = debugger.diff_states(before, after)
         assert "status" in diff
         assert "count" in diff
@@ -724,9 +761,11 @@ class TestReplayDebugger:
 # Tier 2 — Snapshot versioning / schema evolution
 # ===========================================================================
 
+
 class TestSchemaEvolutionWithReplay:
     def test_migrate_all_events_on_load(self):
         """load_from_backend automatically migrates legacy events via EventSchemaMigrator."""
+
         class LegacyBackend(InMemoryLedgerBackend):
             def load(self):
                 # Return events without _schema_version (legacy).
@@ -752,6 +791,7 @@ class TestSchemaEvolutionWithReplay:
 # ===========================================================================
 # Tier 3 — Consistency mode wrappers
 # ===========================================================================
+
 
 class TestConsistencyModeBackends:
     def test_strong_consistency_backend_passes_through(self):
@@ -817,6 +857,7 @@ class TestConsistencyModeBackends:
 # ===========================================================================
 # Tier 3 — Event compaction and archive tier
 # ===========================================================================
+
 
 class TestCompaction:
     def test_compact_removes_pre_snapshot_events(self):
@@ -896,6 +937,7 @@ class TestCompaction:
 # ===========================================================================
 # Tier 3 — Authorization and tenant isolation
 # ===========================================================================
+
 
 class TestCapabilitySet:
     def test_admin_grants_all(self):
@@ -1005,6 +1047,7 @@ class TestCapabilityToken:
 # sealed_events and add_replay_filter
 # ===========================================================================
 
+
 class TestSealedEventsAndReplayFilters:
     def test_sealed_events_returns_tuple(self):
         ledger = ExecutionLedger()
@@ -1023,18 +1066,18 @@ class TestSealedEventsAndReplayFilters:
 
     def test_replay_filter_applied_on_load(self):
         inner = InMemoryLedgerBackend()
-        inner.append({
-            "type": "FILTERED_OUT",
-            "session_id": "s1",
-            "trace_id": "",
-            "timestamp": time.time(),
-            "kernel_step_id": "x",
-            "event_id": "e1",
-            "parent_event_id": "",
-        })
-        ledger = ExecutionLedger(backend=inner)
-        ledger.add_replay_filter(
-            lambda events: [e for e in events if e.get("type") != "FILTERED_OUT"]
+        inner.append(
+            {
+                "type": "FILTERED_OUT",
+                "session_id": "s1",
+                "trace_id": "",
+                "timestamp": time.time(),
+                "kernel_step_id": "x",
+                "event_id": "e1",
+                "parent_event_id": "",
+            }
         )
+        ledger = ExecutionLedger(backend=inner)
+        ledger.add_replay_filter(lambda events: [e for e in events if e.get("type") != "FILTERED_OUT"])
         ledger.load_from_backend()
         assert len(ledger.read()) == 0

@@ -3,8 +3,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from dadbot.core.graph import TurnContext, TurnGraph
 from dadbot.core.execution_trace_context import ExecutionTraceRecorder, RuntimeTraceViolation, bind_execution_trace
+from dadbot.core.graph import TurnContext, TurnGraph
 from dadbot.core.nodes import TemporalNode
 
 

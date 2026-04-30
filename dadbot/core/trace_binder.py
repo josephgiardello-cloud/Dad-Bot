@@ -3,12 +3,16 @@
 Binds, validates, and releases the execution trace context for a single job
 execution.  No graph imports, no policy logic — pure trace lifecycle management.
 """
+
 from __future__ import annotations
 
-import contextlib
-from typing import Any, Callable, Coroutine, TypeVar
+from collections.abc import Callable, Coroutine
+from typing import Any, TypeVar
 
-from dadbot.core.execution_trace_context import ExecutionTraceRecorder, bind_execution_trace
+from dadbot.core.execution_trace_context import (
+    ExecutionTraceRecorder,
+    bind_execution_trace,
+)
 
 _T = TypeVar("_T")
 
@@ -47,6 +51,7 @@ class TraceBinder:
         ------
         RuntimeError
             If ``trace_id`` is empty.
+
         """
         if not trace_id:
             raise RuntimeError("TraceBinder.run requires a non-empty trace_id")
@@ -56,5 +61,5 @@ class TraceBinder:
             prompt=prompt,
             metadata=metadata,
         )
-        with bind_execution_trace(recorder, required=False):
+        with bind_execution_trace(recorder, required=True):
             return await fn()

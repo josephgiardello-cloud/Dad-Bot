@@ -1,4 +1,4 @@
-﻿"""Thin memory events stub."""
+"""Thin memory events stub."""
 
 from __future__ import annotations
 
@@ -28,8 +28,18 @@ class MemoryEvent:
 class MemoryEventEmitter:
     """Memory event emitter stub."""
 
-    def emit(self, *, event_type: MemoryEventType, payload: dict, agent_id: str = "") -> MemoryEvent:
-        return MemoryEvent(event_type=event_type, payload=dict(payload or {}), agent_id=str(agent_id or ""))
+    def emit(
+        self,
+        *,
+        event_type: MemoryEventType,
+        payload: dict,
+        agent_id: str = "",
+    ) -> MemoryEvent:
+        return MemoryEvent(
+            event_type=event_type,
+            payload=dict(payload or {}),
+            agent_id=str(agent_id or ""),
+        )
 
 
 class MemoryReducer:
@@ -45,7 +55,11 @@ class MemoryReducer:
                 episodic.append(dict(event.payload or {}))
             elif event.event_type == MemoryEventType.POLICY_UPDATE:
                 payload = dict(event.payload or {})
-                for key in ("strategy_weights", "tool_preferences", "structural_patterns"):
+                for key in (
+                    "strategy_weights",
+                    "tool_preferences",
+                    "structural_patterns",
+                ):
                     current = dict(policy_bias.get(key) or {})
                     current.update(dict(payload.get(key) or {}))
                     policy_bias[key] = current

@@ -23,15 +23,12 @@ The test runs at three levels:
 
 All levels are fully offline (no LLM, no network, no filesystem I/O).
 """
+
 from __future__ import annotations
 
-import hashlib
 from typing import Any
 
-import pytest
-
 from dadbot.uril.truth_binding import (
-    BindingViolation,
     ClaimBindingResult,
     ClaimEvidenceValidator,
     ExecutionClaim,
@@ -40,10 +37,10 @@ from dadbot.uril.truth_binding import (
     compute_receipt_chain_hash,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_full_state(
     turn_id: str = "truth-test-001",
@@ -63,6 +60,7 @@ def _make_full_state(
 # ---------------------------------------------------------------------------
 # Level 1: Unit — claim == evidence on consistent state
 # ---------------------------------------------------------------------------
+
 
 class TestTruthBindingUnit:
     """Claim and evidence must agree when state is internally consistent."""
@@ -118,6 +116,7 @@ class TestTruthBindingUnit:
 
     def test_to_dict_is_serialisable(self):
         import json
+
         state = _make_full_state()
         validator = ClaimEvidenceValidator()
         claim = validator.extract_claim_from_state(state, "truth-test-001")
@@ -132,6 +131,7 @@ class TestTruthBindingUnit:
 # ---------------------------------------------------------------------------
 # Level 2: Mutation — deliberate divergence must produce violations
 # ---------------------------------------------------------------------------
+
 
 class TestTruthBindingMutationDetection:
     """Mutating one layer while keeping the other fixed must produce violations.
@@ -273,6 +273,7 @@ class TestTruthBindingMutationDetection:
 # Level 3: Structural — receipt chain integrity
 # ---------------------------------------------------------------------------
 
+
 class TestTruthBindingStructuralIntegrity:
     """Receipt chain must form a tamper-evident binding between claim and evidence."""
 
@@ -319,6 +320,7 @@ class TestTruthBindingStructuralIntegrity:
 
     def test_binding_result_serialises_all_violation_fields(self):
         import json
+
         claim = ExecutionClaim(
             turn_id="t1",
             steps=["x"],
@@ -344,6 +346,7 @@ class TestTruthBindingStructuralIntegrity:
 # ---------------------------------------------------------------------------
 # Level 4: End-to-end scenario — planning task truth binding
 # ---------------------------------------------------------------------------
+
 
 class TestTruthBindingPlanningScenario:
     """Simulate a realistic planning turn and validate truth binding end-to-end.

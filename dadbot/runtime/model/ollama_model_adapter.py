@@ -3,32 +3,34 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import os
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from dadbot.core.egress_policy import enforce_url
 from dadbot.core.execution_boundary import ModelGatewayScope
 from dadbot.core.execution_trace_context import (
+    ensure_execution_trace_root,
     record_execution_step,
     record_external_system_call,
 )
-
 from dadbot.runtime.model.model_call_port import (
     DeterminismContext,
-    ModelConfig,
     ModelCallError,
+    ModelConfig,
     ModelPort,
 )
 
 
 class OllamaModelAdapter(ModelPort):
     """Deterministic model port adapter backed by Ollama via runtime_client.
-    
+
     This adapter wraps existing DadBot infrastructure:
     - self.runtime_client for generation
     - self.model_runtime for tokenization
-    
+
     No logic changes — pure interface boundary enforcement.
     """
 
@@ -39,11 +41,12 @@ class OllamaModelAdapter(ModelPort):
         config: ModelConfig,
     ):
         """Initialize adapter.
-        
+
         Args:
             runtime_client: Existing DadBot.runtime_client manager
             model_runtime: Existing DadBot.model_runtime manager
             config: Model configuration (active model, temperature, etc.)
+
         """
         self.runtime_client = runtime_client
         self.model_runtime = model_runtime
@@ -64,74 +67,90 @@ class OllamaModelAdapter(ModelPort):
     ) -> str:
         """Generate via runtime_client.call_llm()."""
         try:
-            self._enforce_model_egress()
-            input_hash = self._messages_hash(messages)
-            record_execution_step(
-                "model_call",
-                payload={
-                    "mode": "sync",
-                    "provider": "ollama",
-                    "model": str(model or self.config.active_model or ""),
-                    "purpose": str(purpose or "chat"),
-                    "message_count": len(list(messages or [])),
-                    "input_hash": input_hash,
-                    "stream": bool(stream),
-                },
+            with ensure_execution_trace_root(
+                operation="model_call",
+                prompt="[model-port-generate]",
+                metadata={"source": "OllamaModelAdapter.generate", "mode": "sync"},
                 required=True,
-            )
-            with ModelGatewayScope.bind("ModelPort"):
-                raw_output = self.runtime_client.call_llm(
-                    messages,
-                    caller="ModelPort",
-                    model=model,
-                    temperature=temperature,
-                    response_format=response_format,
-                    determinism_context=determinism_context,
-                    stream=stream,
-                    chunk_callback=chunk_callback,
-                    purpose=purpose,
-                    **kwargs,
+            ):
+                self._enforce_model_egress()
+                input_hash = self._messages_hash(messages)
+                record_execution_step(
+                    "model_call",
+                    payload={
+                        "mode": "sync",
+                        "provider": "ollama",
+                        "model": str(model or self.config.active_model or ""),
+                        "purpose": str(purpose or "chat"),
+                        "message_count": len(list(messages or [])),
+                        "input_hash": input_hash,
+                        "stream": bool(stream),
+                    },
+                    required=True,
                 )
-            record_external_system_call(
-                operation="model_generation",
-                system="ollama",
-                request_payload={
-                    "mode": "sync",
-                    "model": str(model or self.config.active_model or ""),
-                    "purpose": str(purpose or "chat"),
-                    "message_count": len(list(messages or [])),
-                    "input_hash": input_hash,
-                },
-                response_payload={"status": "ok"},
-                status="ok",
-                source="model_adapter",
-                required=True,
-            )
-            normalized = self.normalize_output_for_lock(
-                raw_output,
-                determinism_context=determinism_context,
-            )
-            if determinism_context is not None and str(determinism_context.lock_hash or "").strip():
-                self._last_lock_normalized_output_hash = hashlib.sha256(
-                    json.dumps(
-                        {
-                            "lock_hash": str(determinism_context.lock_hash),
-                            "normalized_output": normalized,
-                        },
-                        sort_keys=True,
-                        ensure_ascii=True,
-                    ).encode("utf-8")
-                ).hexdigest()
-            record_execution_step(
-                "model_output",
-                payload={
-                    "mode": "sync",
-                    "output_hash": hashlib.sha256(normalized.encode("utf-8")).hexdigest(),
-                    "output_length": len(normalized),
-                },
-                required=True,
-            )
-            return normalized
+                with ModelGatewayScope.bind("ModelPort"):
+                    call_kwargs = {
+                        "model": model,
+                        "temperature": temperature,
+                        "response_format": response_format,
+                        "determinism_context": determinism_context,
+                        "stream": stream,
+                        "chunk_callback": chunk_callback,
+                        "purpose": purpose,
+                        **kwargs,
+                    }
+                    runtime_call = self.runtime_client.call_llm
+                    try:
+                        parameters = inspect.signature(runtime_call).parameters
+                    except (TypeError, ValueError):
+                        parameters = {}
+                    if "caller" in parameters or any(
+                        param.kind == inspect.Parameter.VAR_KEYWORD for param in parameters.values()
+                    ):
+                        call_kwargs["caller"] = "ModelPort"
+                    raw_output = runtime_call(messages, **call_kwargs)
+                record_external_system_call(
+                    operation="model_generation",
+                    system="ollama",
+                    request_payload={
+                        "mode": "sync",
+                        "model": str(model or self.config.active_model or ""),
+                        "purpose": str(purpose or "chat"),
+                        "message_count": len(list(messages or [])),
+                        "input_hash": input_hash,
+                    },
+                    response_payload={"status": "ok"},
+                    status="ok",
+                    source="model_adapter",
+                    required=True,
+                )
+                normalized = self.normalize_output_for_lock(
+                    self._coerce_text_output(raw_output),
+                    determinism_context=determinism_context,
+                )
+                if determinism_context is not None and str(determinism_context.lock_hash or "").strip():
+                    self._last_lock_normalized_output_hash = hashlib.sha256(
+                        json.dumps(
+                            {
+                                "lock_hash": str(determinism_context.lock_hash),
+                                "normalized_output": normalized,
+                            },
+                            sort_keys=True,
+                            ensure_ascii=True,
+                        ).encode("utf-8"),
+                    ).hexdigest()
+                record_execution_step(
+                    "model_output",
+                    payload={
+                        "mode": "sync",
+                        "output_hash": hashlib.sha256(
+                            normalized.encode("utf-8"),
+                        ).hexdigest(),
+                        "output_length": len(normalized),
+                    },
+                    required=True,
+                )
+                return normalized
         except Exception as exc:
             record_external_system_call(
                 operation="model_generation",
@@ -163,74 +182,93 @@ class OllamaModelAdapter(ModelPort):
     ) -> str:
         """Generate async via runtime_client.call_llm_async()."""
         try:
-            self._enforce_model_egress()
-            input_hash = self._messages_hash(messages)
-            record_execution_step(
-                "model_call",
-                payload={
+            with ensure_execution_trace_root(
+                operation="model_call",
+                prompt="[model-port-generate-async]",
+                metadata={
+                    "source": "OllamaModelAdapter.generate_async",
                     "mode": "async",
-                    "provider": "ollama",
-                    "model": str(model or self.config.active_model or ""),
-                    "purpose": str(purpose or "chat"),
-                    "message_count": len(list(messages or [])),
-                    "input_hash": input_hash,
-                    "stream": bool(stream),
                 },
                 required=True,
-            )
-            with ModelGatewayScope.bind("ModelPort"):
-                raw_output = await self.runtime_client.call_llm_async(
-                    messages,
-                    caller="ModelPort",
-                    model=model,
-                    temperature=temperature,
-                    response_format=response_format,
-                    determinism_context=determinism_context,
-                    stream=stream,
-                    chunk_callback=chunk_callback,
-                    purpose=purpose,
-                    **kwargs,
+            ):
+                self._enforce_model_egress()
+                input_hash = self._messages_hash(messages)
+                record_execution_step(
+                    "model_call",
+                    payload={
+                        "mode": "async",
+                        "provider": "ollama",
+                        "model": str(model or self.config.active_model or ""),
+                        "purpose": str(purpose or "chat"),
+                        "message_count": len(list(messages or [])),
+                        "input_hash": input_hash,
+                        "stream": bool(stream),
+                    },
+                    required=True,
                 )
-            record_external_system_call(
-                operation="model_generation",
-                system="ollama",
-                request_payload={
-                    "mode": "async",
-                    "model": str(model or self.config.active_model or ""),
-                    "purpose": str(purpose or "chat"),
-                    "message_count": len(list(messages or [])),
-                    "input_hash": input_hash,
-                },
-                response_payload={"status": "ok"},
-                status="ok",
-                source="model_adapter",
-                required=True,
-            )
-            normalized = self.normalize_output_for_lock(
-                raw_output,
-                determinism_context=determinism_context,
-            )
-            if determinism_context is not None and str(determinism_context.lock_hash or "").strip():
-                self._last_lock_normalized_output_hash = hashlib.sha256(
-                    json.dumps(
-                        {
-                            "lock_hash": str(determinism_context.lock_hash),
-                            "normalized_output": normalized,
-                        },
-                        sort_keys=True,
-                        ensure_ascii=True,
-                    ).encode("utf-8")
-                ).hexdigest()
-            record_execution_step(
-                "model_output",
-                payload={
-                    "mode": "async",
-                    "output_hash": hashlib.sha256(normalized.encode("utf-8")).hexdigest(),
-                    "output_length": len(normalized),
-                },
-                required=True,
-            )
-            return normalized
+                with ModelGatewayScope.bind("ModelPort"):
+                    call_kwargs = {
+                        "model": model,
+                        "temperature": temperature,
+                        "response_format": response_format,
+                        "determinism_context": determinism_context,
+                        "stream": stream,
+                        "chunk_callback": chunk_callback,
+                        "purpose": purpose,
+                        **kwargs,
+                    }
+                    runtime_call = self.runtime_client.call_llm_async
+                    try:
+                        parameters = inspect.signature(runtime_call).parameters
+                    except (TypeError, ValueError):
+                        parameters = {}
+                    if "caller" in parameters or any(
+                        param.kind == inspect.Parameter.VAR_KEYWORD for param in parameters.values()
+                    ):
+                        call_kwargs["caller"] = "ModelPort"
+                    raw_output = await runtime_call(messages, **call_kwargs)
+                record_external_system_call(
+                    operation="model_generation",
+                    system="ollama",
+                    request_payload={
+                        "mode": "async",
+                        "model": str(model or self.config.active_model or ""),
+                        "purpose": str(purpose or "chat"),
+                        "message_count": len(list(messages or [])),
+                        "input_hash": input_hash,
+                    },
+                    response_payload={"status": "ok"},
+                    status="ok",
+                    source="model_adapter",
+                    required=True,
+                )
+                normalized = self.normalize_output_for_lock(
+                    self._coerce_text_output(raw_output),
+                    determinism_context=determinism_context,
+                )
+                if determinism_context is not None and str(determinism_context.lock_hash or "").strip():
+                    self._last_lock_normalized_output_hash = hashlib.sha256(
+                        json.dumps(
+                            {
+                                "lock_hash": str(determinism_context.lock_hash),
+                                "normalized_output": normalized,
+                            },
+                            sort_keys=True,
+                            ensure_ascii=True,
+                        ).encode("utf-8"),
+                    ).hexdigest()
+                record_execution_step(
+                    "model_output",
+                    payload={
+                        "mode": "async",
+                        "output_hash": hashlib.sha256(
+                            normalized.encode("utf-8"),
+                        ).hexdigest(),
+                        "output_length": len(normalized),
+                    },
+                    required=True,
+                )
+                return normalized
         except Exception as exc:
             record_external_system_call(
                 operation="model_generation",
@@ -248,6 +286,14 @@ class OllamaModelAdapter(ModelPort):
             raise ModelCallError(f"Async generation failed: {exc}") from exc
 
     @staticmethod
+    def _coerce_text_output(raw_output: Any) -> str:
+        if isinstance(raw_output, dict):
+            message = raw_output.get("message")
+            if isinstance(message, dict):
+                return str(message.get("content") or "")
+        return str(raw_output or "")
+
+    @staticmethod
     def _messages_hash(messages: list[dict[str, str]]) -> str:
         normalized = [
             {
@@ -258,7 +304,7 @@ class OllamaModelAdapter(ModelPort):
             if isinstance(item, dict)
         ]
         return hashlib.sha256(
-            json.dumps(normalized, sort_keys=True, ensure_ascii=True).encode("utf-8")
+            json.dumps(normalized, sort_keys=True, ensure_ascii=True).encode("utf-8"),
         ).hexdigest()
 
     def embed(
@@ -284,7 +330,10 @@ class OllamaModelAdapter(ModelPort):
                     "purpose": str(purpose or "semantic_retrieval"),
                     "text_count": len(list(texts or [])),
                 },
-                response_payload={"status": "ok", "vector_count": len(list(values or []))},
+                response_payload={
+                    "status": "ok",
+                    "vector_count": len(list(values or [])),
+                },
                 status="ok",
                 source="model_adapter",
                 required=False,
@@ -323,7 +372,9 @@ class OllamaModelAdapter(ModelPort):
                 pass
 
         # Fallback to character-based heuristic
-        chars_per_token = self.model_runtime.model_chars_per_token_estimate(target_model)
+        chars_per_token = self.model_runtime.model_chars_per_token_estimate(
+            target_model,
+        )
         return max(1, int((len(normalized) + chars_per_token - 1) // chars_per_token))
 
     def initialize_tokenizer(self, model_name: str | None = None) -> None:
@@ -338,12 +389,16 @@ class OllamaModelAdapter(ModelPort):
         provider = str(getattr(self.config, "provider", "ollama") or "ollama").strip().lower()
         if provider not in {"ollama", ""}:
             return
-        endpoint = str(os.environ.get("DADBOT_OLLAMA_BASE_URL", "http://127.0.0.1:11434")).strip()
+        endpoint = str(
+            os.environ.get("DADBOT_OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
+        ).strip()
         allowlist = tuple(getattr(self.config, "egress_allowlist", ()) or ())
         if not allowlist:
             allowlist = tuple(
                 host.strip()
-                for host in str(os.environ.get("DADBOT_EGRESS_ALLOWLIST", "localhost,127.0.0.1")).split(",")
+                for host in str(
+                    os.environ.get("DADBOT_EGRESS_ALLOWLIST", "localhost,127.0.0.1"),
+                ).split(",")
                 if host.strip()
             )
         enforce_url(endpoint, allowlist=allowlist)

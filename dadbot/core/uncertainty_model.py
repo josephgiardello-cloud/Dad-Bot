@@ -26,14 +26,14 @@ modes, fallback chains, and variable-reliability tools.
        - Optimistic fusion (max over dimensions)
        - Bayesian fusion (weighted harmonic mean, default)
 """
+
 from __future__ import annotations
 
 import math
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Optional
-
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # 4.1 — ConfidenceVector
@@ -51,7 +51,9 @@ class ConfidenceVector:
         source_tool:         Which tool produced this result.
         result_status:       Terminal execution status (ok/partial/error/…).
         recorded_at:         Epoch timestamp when this vector was created.
+
     """
+
     reliability_score: float
     freshness_score: float
     completeness_score: float
@@ -64,7 +66,9 @@ class ConfidenceVector:
         for attr in ("reliability_score", "freshness_score", "completeness_score"):
             v = getattr(self, attr)
             if not (0.0 <= v <= 1.0):
-                raise ValueError(f"ConfidenceVector.{attr} must be in [0, 1], got {v!r}")
+                raise ValueError(
+                    f"ConfidenceVector.{attr} must be in [0, 1], got {v!r}",
+                )
 
     @property
     def aggregate(self) -> float:
@@ -106,7 +110,7 @@ class ConfidenceVector:
         historical_reliability: float = 0.9,
         data_age_seconds: float = 0.0,
         freshness_half_life_s: float = 3600.0,
-    ) -> "ConfidenceVector":
+    ) -> ConfidenceVector:
         """Construct a ConfidenceVector from execution metadata.
 
         Args:
@@ -116,11 +120,17 @@ class ConfidenceVector:
             historical_reliability: Long-run reliability fraction for this tool.
             data_age_seconds:       How old the underlying data is in seconds.
             freshness_half_life_s:  Half-life for exponential freshness decay (default 1 hour).
+
         """
         # Reliability: use historical rate; penalize error/timeout/degraded
         status_penalty = {
-            "ok": 1.0, "cached": 0.95, "partial": 0.75,
-            "skipped": 0.6, "degraded": 0.55, "timeout": 0.3, "error": 0.2,
+            "ok": 1.0,
+            "cached": 0.95,
+            "partial": 0.75,
+            "skipped": 0.6,
+            "degraded": 0.55,
+            "timeout": 0.3,
+            "error": 0.2,
         }.get(str(status or "ok").lower(), 0.5)
         reliability = max(0.0, min(1.0, historical_reliability * status_penalty))
 
@@ -129,7 +139,10 @@ class ConfidenceVector:
             freshness = 1.0
         else:
             hl = max(1.0, freshness_half_life_s)
-            freshness = max(0.0, min(1.0, math.exp(-math.log(2) * data_age_seconds / hl)))
+            freshness = max(
+                0.0,
+                min(1.0, math.exp(-math.log(2) * data_age_seconds / hl)),
+            )
 
         # Completeness: direct from partial_confidence, floored for errors
         if str(status or "ok").lower() in {"error", "timeout"}:
@@ -153,28 +166,31 @@ class ConfidenceVector:
 
 class PlannerWeightMode(str, Enum):
     """How the planner should weight a low-confidence tool output."""
-    USE_AS_IS = "use_as_is"          # treat output as fully credible
-    DISCOUNT = "discount"             # reduce the output's weight in planning
+
+    USE_AS_IS = "use_as_is"  # treat output as fully credible
+    DISCOUNT = "discount"  # reduce the output's weight in planning
     FLAG_FOR_REVIEW = "flag_for_review"  # mark for human/critic review
-    EXCLUDE = "exclude"               # exclude from planning entirely
+    EXCLUDE = "exclude"  # exclude from planning entirely
 
 
 @dataclass(frozen=True)
 class PlannerHint:
     """Hint produced for the planner about a tool result's credibility."""
+
     tool_name: str
     confidence_vector: ConfidenceVector
     weight_mode: PlannerWeightMode
-    planning_weight: float           # 0–1; multiply against goal weights
+    planning_weight: float  # 0–1; multiply against goal weights
     reason: str
 
 
 @dataclass(frozen=True)
 class CriticPenalty:
     """Penalty signal for the critic when reasoning on weak-confidence inputs."""
+
     tool_name: str
     confidence_vector: ConfidenceVector
-    penalty_factor: float            # 0–1; applied to critic confidence scores
+    penalty_factor: float  # 0–1; applied to critic confidence scores
     reason: str
 
 
@@ -240,8 +256,7 @@ class UncertaintyPropagator:
             round(self._penalty_floor + (1.0 - self._penalty_floor) * agg, 4),
         )
         reason = (
-            f"Tool '{cv.source_tool}' has aggregate confidence {agg:.3f}; "
-            f"critic penalty factor set to {penalty:.3f}."
+            f"Tool '{cv.source_tool}' has aggregate confidence {agg:.3f}; critic penalty factor set to {penalty:.3f}."
         )
         return CriticPenalty(
             tool_name=cv.source_tool,
@@ -261,14 +276,15 @@ class UncertaintyPropagator:
 
 
 class FusionStrategy(str, Enum):
-    CONSERVATIVE = "conservative"    # min per dimension (pessimistic)
-    OPTIMISTIC = "optimistic"        # max per dimension
-    BAYESIAN = "bayesian"            # weighted harmonic mean (default)
+    CONSERVATIVE = "conservative"  # min per dimension (pessimistic)
+    OPTIMISTIC = "optimistic"  # max per dimension
+    BAYESIAN = "bayesian"  # weighted harmonic mean (default)
 
 
 @dataclass(frozen=True)
 class FusedConfidenceVector:
     """A single ConfidenceVector representing the fusion of multiple inputs."""
+
     reliability_score: float
     freshness_score: float
     completeness_score: float
@@ -307,7 +323,7 @@ class ConfidenceFusion:
     def fuse(
         vectors: list[ConfidenceVector],
         strategy: FusionStrategy = FusionStrategy.BAYESIAN,
-    ) -> Optional[FusedConfidenceVector]:
+    ) -> FusedConfidenceVector | None:
         if not vectors:
             return None
 
@@ -347,13 +363,22 @@ class ConfidenceFusion:
         )
 
     @classmethod
-    def conservative(cls, vectors: list[ConfidenceVector]) -> Optional[FusedConfidenceVector]:
+    def conservative(
+        cls,
+        vectors: list[ConfidenceVector],
+    ) -> FusedConfidenceVector | None:
         return cls.fuse(vectors, FusionStrategy.CONSERVATIVE)
 
     @classmethod
-    def optimistic(cls, vectors: list[ConfidenceVector]) -> Optional[FusedConfidenceVector]:
+    def optimistic(
+        cls,
+        vectors: list[ConfidenceVector],
+    ) -> FusedConfidenceVector | None:
         return cls.fuse(vectors, FusionStrategy.OPTIMISTIC)
 
     @classmethod
-    def bayesian(cls, vectors: list[ConfidenceVector]) -> Optional[FusedConfidenceVector]:
+    def bayesian(
+        cls,
+        vectors: list[ConfidenceVector],
+    ) -> FusedConfidenceVector | None:
         return cls.fuse(vectors, FusionStrategy.BAYESIAN)

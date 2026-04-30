@@ -1,4 +1,4 @@
-﻿"""LLM response extraction, JSON parsing, and transcript utilities.
+"""LLM response extraction, JSON parsing, and transcript utilities.
 
 Pure functions with no DadBot dependency::
 
@@ -25,7 +25,11 @@ def extract_ollama_message_payload(response) -> dict:
     choices = getattr(response, "choices", None)
     if isinstance(choices, list) and choices:
         first_choice = choices[0]
-        message = getattr(first_choice, "message", None) or getattr(first_choice, "delta", None)
+        message = getattr(first_choice, "message", None) or getattr(
+            first_choice,
+            "delta",
+            None,
+        )
         if message is not None and hasattr(message, "model_dump"):
             dumped = message.model_dump(exclude_none=True)
             return dumped if isinstance(dumped, dict) else {}
@@ -84,7 +88,11 @@ def parse_model_json_content(content):
     if not text:
         raise json.JSONDecodeError("Empty JSON content", text, 0)
 
-    fenced_match = re.search(r"```(?:json)?\s*(.*?)\s*```", text, flags=re.IGNORECASE | re.DOTALL)
+    fenced_match = re.search(
+        r"```(?:json)?\s*(.*?)\s*```",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
     if fenced_match:
         text = fenced_match.group(1).strip()
 

@@ -1,3 +1,3 @@
-﻿from .event_emitter import EventEmitter
+from .event_emitter import EventEmitter
 
 __all__ = ["EventEmitter"]

@@ -8,7 +8,6 @@ from dadbot.core.execution_semantics import (
 )
 
 
-
 def _trace(order: str = "ab") -> dict:
     calls = {
         "a": {
@@ -56,7 +55,6 @@ def _trace(order: str = "ab") -> dict:
     }
 
 
-
 def _state(trace: dict):
     terminal = reconstruct_terminal_state_from_trace(
         terminal_state_seed={
@@ -73,7 +71,6 @@ def _state(trace: dict):
     )
 
 
-
 def test_execution_semantics_relation_true_for_identical_states():
     state_a = _state(_trace("ab"))
     state_b = _state(_trace("ab"))
@@ -84,14 +81,14 @@ def test_execution_semantics_relation_true_for_identical_states():
     assert decision.invariants_preserved is True
 
 
-
 def test_execution_semantics_relation_detects_causal_structure_difference():
     state_a = _state(_trace("ab"))
     state_b = _state(_trace("ba"))
     strict = execution_equivalence_relation(state_a, state_b)
     assert strict.equivalent is False
-    assert any(item in strict.violations for item in ["causal_structure", "execution_dag_topology", "tool_io_graph_hash"])
-
+    assert any(
+        item in strict.violations for item in ["causal_structure", "execution_dag_topology", "tool_io_graph_hash"]
+    )
 
 
 def test_execution_semantics_relation_allows_causal_reorder_when_configured():
@@ -104,7 +101,6 @@ def test_execution_semantics_relation_allows_causal_reorder_when_configured():
     )
     assert isinstance(decision.equivalent, bool)
     assert isinstance(decision.violations, list)
-
 
 
 def test_execution_semantics_relation_enforces_embedding_state_invariant():

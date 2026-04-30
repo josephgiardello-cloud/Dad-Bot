@@ -34,25 +34,25 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
 
 from evaluation.baselines import BASELINES, BaselineProfile
-
 
 # ---------------------------------------------------------------------------
 # Data structures
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class SubsystemIndex:
     """Normalized capability index for one subsystem."""
+
     subsystem: str
     raw_score: float
-    percentile: float           # 0–100
+    percentile: float  # 0–100
     z_score: float
-    above_baselines: List[str]  # baseline names this score beats
-    below_baselines: List[str]  # baseline names this score trails
-    baseline_scores: Dict[str, float] = field(default_factory=dict)
+    above_baselines: list[str]  # baseline names this score beats
+    below_baselines: list[str]  # baseline names this score trails
+    baseline_scores: dict[str, float] = field(default_factory=dict)
 
     @property
     def rank_label(self) -> str:
@@ -84,20 +84,21 @@ class CapabilityProfile:
 
     This is the external-facing output of Phase 4F.
     """
+
     scenario_name: str
     category: str
     execution_mode: str
 
-    indices: Dict[str, SubsystemIndex]   # subsystem → index
+    indices: dict[str, SubsystemIndex]  # subsystem → index
     overall_percentile: float
     overall_z_score: float
     overall_raw: float
 
     @property
-    def primary_index(self) -> Optional[SubsystemIndex]:
+    def primary_index(self) -> SubsystemIndex | None:
         return self.indices.get(self.category)
 
-    def to_dict(self) -> Dict:
+    def to_dict(self) -> dict:
         return {
             "scenario": self.scenario_name,
             "category": self.category,
@@ -122,18 +123,19 @@ class CapabilityProfile:
 @dataclass
 class AggregateCapabilityProfile:
     """Normalized profile aggregated across all scenarios in a benchmark run."""
+
     execution_mode: str
     scenario_count: int
 
     # Category-level normalized scores
-    category_indices: Dict[str, SubsystemIndex]  # category → index
+    category_indices: dict[str, SubsystemIndex]  # category → index
 
     # Overall
     overall_percentile: float
     overall_z_score: float
     overall_raw: float
 
-    def to_dict(self) -> Dict:
+    def to_dict(self) -> dict:
         return {
             "scenario_count": self.scenario_count,
             "execution_mode": self.execution_mode,
@@ -167,7 +169,7 @@ class NormalizationEngine:
     The engine is stateless — it reads from the baselines dict passed at init.
     """
 
-    def __init__(self, baselines: Optional[Dict[str, BaselineProfile]] = None):
+    def __init__(self, baselines: dict[str, BaselineProfile] | None = None):
         self._baselines = baselines or BASELINES
 
     def normalize_score(
@@ -179,23 +181,17 @@ class NormalizationEngine:
         execution_mode: str = "mock",
     ) -> SubsystemIndex:
         """Normalize a single raw score against the baseline distribution."""
-        baseline_scores = {
-            name: b.get(subsystem)
-            for name, b in self._baselines.items()
-        }
+        baseline_scores = {name: b.get(subsystem) for name, b in self._baselines.items()}
         return self._compute_index(subsystem, raw, baseline_scores)
 
     def normalize_capability_score(self, cap_score: Any) -> CapabilityProfile:
         """Normalize all subsystems of a CapabilityScore at once."""
-        indices: Dict[str, SubsystemIndex] = {}
+        indices: dict[str, SubsystemIndex] = {}
 
         for sub in _SUBSYSTEMS:
             sub_obj = getattr(cap_score, sub, None)
             raw = sub_obj.score if sub_obj else 0.0
-            baseline_scores = {
-                name: b.get(sub)
-                for name, b in self._baselines.items()
-            }
+            baseline_scores = {name: b.get(sub) for name, b in self._baselines.items()}
             indices[sub] = self._compute_index(sub, raw, baseline_scores)
 
         # Overall
@@ -215,7 +211,7 @@ class NormalizationEngine:
 
     def normalize_all(
         self,
-        cap_scores: List[Any],
+        cap_scores: list[Any],
     ) -> AggregateCapabilityProfile:
         """Aggregate normalization across all scenarios in a benchmark run."""
         if not cap_scores:
@@ -239,22 +235,19 @@ class NormalizationEngine:
         execution_mode = str(getattr(cap_scores[0], "execution_mode", "mock"))
 
         # Aggregate per-subsystem
-        sub_raws: Dict[str, List[float]] = {s: [] for s in _SUBSYSTEMS}
+        sub_raws: dict[str, list[float]] = {s: [] for s in _SUBSYSTEMS}
         for cs in cap_scores:
             for sub in _SUBSYSTEMS:
                 sub_obj = getattr(cs, sub, None)
                 if sub_obj:
                     sub_raws[sub].append(sub_obj.score)
 
-        category_indices: Dict[str, SubsystemIndex] = {}
+        category_indices: dict[str, SubsystemIndex] = {}
         for sub in _SUBSYSTEMS:
             if not sub_raws[sub]:
                 continue
             avg_raw = sum(sub_raws[sub]) / len(sub_raws[sub])
-            baseline_scores = {
-                name: b.get(sub)
-                for name, b in self._baselines.items()
-            }
+            baseline_scores = {name: b.get(sub) for name, b in self._baselines.items()}
             category_indices[sub] = self._compute_index(sub, avg_raw, baseline_scores)
 
         # Overall
@@ -281,7 +274,7 @@ class NormalizationEngine:
         self,
         subsystem: str,
         raw: float,
-        baseline_scores: Dict[str, float],
+        baseline_scores: dict[str, float],
     ) -> SubsystemIndex:
         vals = list(baseline_scores.values())
         above = [name for name, score in baseline_scores.items() if raw > score]
@@ -302,10 +295,11 @@ class NormalizationEngine:
 # Capability Profile Report printer
 # ---------------------------------------------------------------------------
 
+
 def print_capability_profile(
     profile: AggregateCapabilityProfile,
     title: str = "CAPABILITY PROFILE",
-    baselines: Optional[Dict[str, BaselineProfile]] = None,
+    baselines: dict[str, BaselineProfile] | None = None,
 ) -> None:
     """Print a human-readable capability profile with baseline comparison."""
     baselines = baselines or BASELINES
@@ -314,15 +308,17 @@ def print_capability_profile(
 
     print("\n" + "=" * 72)
     print(title)
-    print(f"  Scenarios: {profile.scenario_count}  |  "
-          f"Mode: {profile.execution_mode}  |  "
-          f"Overall: {profile.overall_raw:.2%}  "
-          f"(p{profile.overall_percentile:.0f}  z={profile.overall_z_score:+.2f})")
+    print(
+        f"  Scenarios: {profile.scenario_count}  |  "
+        f"Mode: {profile.execution_mode}  |  "
+        f"Overall: {profile.overall_raw:.2%}  "
+        f"(p{profile.overall_percentile:.0f}  z={profile.overall_z_score:+.2f})"
+    )
     print("=" * 72)
 
     print("\n  CAPABILITY INDEX vs BASELINES:\n")
     print(f"  {'Subsystem':<12}  {'Score':>6}  {'%ile':>5}  {'Rank':<15}  Bar")
-    print(f"  {'-'*12}  {'-'*6}  {'-'*5}  {'-'*15}  {'-'*bar_width}")
+    print(f"  {'-' * 12}  {'-' * 6}  {'-' * 5}  {'-' * 15}  {'-' * bar_width}")
 
     for sub in _SUBSYSTEMS:
         idx = profile.category_indices.get(sub)
@@ -330,17 +326,14 @@ def print_capability_profile(
             continue
         filled = int(idx.percentile / 100 * bar_width)
         bar = "█" * filled + "░" * (bar_width - filled)
-        print(
-            f"  {sub:<12}  {idx.raw_score:>6.3f}  "
-            f"{idx.percentile:>5.1f}  {idx.rank_label:<15}  {bar}"
-        )
+        print(f"  {sub:<12}  {idx.raw_score:>6.3f}  {idx.percentile:>5.1f}  {idx.rank_label:<15}  {bar}")
 
     print("\n  BASELINE COMPARISON:\n")
     print(f"  {'Subsystem':<12}", end="")
     for bname in baselines:
         print(f"  {bname[:12]:>12}", end="")
     print(f"  {'[YOU]':>8}")
-    print(f"  {'-'*12}", end="")
+    print(f"  {'-' * 12}", end="")
     for _ in baselines:
         print(f"  {'':>12}", end="")
     print(f"  {'':>8}")
@@ -370,13 +363,14 @@ def print_capability_profile(
 # Statistics helpers
 # ---------------------------------------------------------------------------
 
-def _mean(values: List[float]) -> float:
+
+def _mean(values: list[float]) -> float:
     if not values:
         return 0.0
     return sum(values) / len(values)
 
 
-def _std(values: List[float]) -> float:
+def _std(values: list[float]) -> float:
     if len(values) < 2:
         return 0.0
     m = _mean(values)
@@ -384,7 +378,7 @@ def _std(values: List[float]) -> float:
     return math.sqrt(variance)
 
 
-def _percentile(score: float, distribution: List[float]) -> float:
+def _percentile(score: float, distribution: list[float]) -> float:
     """Percentile of score in distribution (0–100).
 
     Uses a simple empirical percentile: fraction of distribution < score.
@@ -395,7 +389,7 @@ def _percentile(score: float, distribution: List[float]) -> float:
     return (below / len(distribution)) * 100.0
 
 
-def _z_score(score: float, distribution: List[float]) -> float:
+def _z_score(score: float, distribution: list[float]) -> float:
     """Z-score of score relative to distribution."""
     if not distribution:
         return 0.0

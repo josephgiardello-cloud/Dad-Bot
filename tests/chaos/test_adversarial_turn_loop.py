@@ -11,11 +11,18 @@ After every turn:
 Slow tests are marked with @pytest.mark.slow and excluded from default
 CI runs. Set DADBOT_CHAOS_TURNS=1000+ for extended soak testing.
 """
+
 from __future__ import annotations
 
 import os
 
 import pytest
+from harness.deterministic_seeds import CHAOS_BASE, MUTATION_FUZZ
+from harness.graph_runner import GraphRunner
+from harness.invariant_checker import InvariantChecker
+from harness.kernel_mock import MockRegistry
+from harness.mutation_fuzzer import MutationFuzzer
+from harness.turn_factory import TurnFactory
 
 from dadbot.core.graph import (
     ContextBuilderNode,
@@ -28,13 +35,6 @@ from dadbot.core.graph import (
     TemporalNode,
     TurnGraph,
 )
-from harness.deterministic_seeds import CHAOS_BASE, MUTATION_FUZZ
-from harness.graph_runner import GraphRunner
-from harness.invariant_checker import InvariantChecker
-from harness.kernel_mock import MockRegistry
-from harness.mutation_fuzzer import MutationFuzzer
-from harness.turn_factory import TurnFactory
-
 
 _DEFAULT_TURNS = 50
 _TURNS = int(os.environ.get("DADBOT_CHAOS_TURNS", _DEFAULT_TURNS))
@@ -125,14 +125,11 @@ class TestAdversarialTurnLoop:
 
         # --- Global assertions ---
         assert total_mutations_drained == total_mutations_queued, (
-            f"Mutation loss detected: queued={total_mutations_queued}, "
-            f"drained={total_mutations_drained}"
+            f"Mutation loss detected: queued={total_mutations_queued}, drained={total_mutations_drained}"
         )
         assert phase_violations == 0, f"{phase_violations} phase regression(s) detected"
         assert broken_chains == 0, f"{broken_chains} broken checkpoint chain(s) detected"
-        assert save_deviations == 0, (
-            f"{save_deviations} turn(s) where SaveNode didn't run exactly once"
-        )
+        assert save_deviations == 0, f"{save_deviations} turn(s) where SaveNode didn't run exactly once"
 
     def test_10_turn_quick_chaos(self):
         """Fast subset of the chaos loop for standard CI (10 turns)."""

@@ -1,4 +1,4 @@
-﻿"""InvariantGate â€” runtime enforcement hook.
+"""InvariantGate â€” runtime enforcement hook.
 
 Integrates at three points:
   1. LedgerWriter.write_event()  â€” before every ledger write
@@ -7,6 +7,7 @@ Integrates at three points:
 
 Rule: invariant failures HARD FAIL execution â€” they never log-and-continue.
 """
+
 from __future__ import annotations
 
 import time
@@ -15,12 +16,12 @@ from typing import Any
 
 class InvariantViolationError(RuntimeError):
     """Raised when a runtime invariant is violated.  Never caught silently."""
-    pass
 
 
 # ---------------------------------------------------------------------------
 # Built-in invariant checks
 # ---------------------------------------------------------------------------
+
 
 def _invariant_required_envelope_fields(event: dict[str, Any]) -> str | None:
     required = {"type", "session_id", "kernel_step_id"}
@@ -76,8 +77,10 @@ def _invariant_kernel_lineage_non_empty(event: dict[str, Any]) -> str | None:
 # Job execution invariants
 # ---------------------------------------------------------------------------
 
+
 def _job_invariant_session_not_terminated(
-    session: dict[str, Any], job: Any
+    session: dict[str, Any],
+    job: Any,
 ) -> str | None:
     if str(session.get("status") or "active") == "terminated":
         return (
@@ -93,7 +96,10 @@ def _job_invariant_job_id_non_empty(session: dict[str, Any], job: Any) -> str | 
     return None
 
 
-def _job_invariant_session_id_non_empty(session: dict[str, Any], job: Any) -> str | None:
+def _job_invariant_session_id_non_empty(
+    session: dict[str, Any],
+    job: Any,
+) -> str | None:
     if not str(getattr(job, "session_id", "") or "").strip():
         return "job.session_id must be non-empty before execution"
     return None
@@ -102,6 +108,7 @@ def _job_invariant_session_id_non_empty(session: dict[str, Any], job: Any) -> st
 # ---------------------------------------------------------------------------
 # InvariantGate
 # ---------------------------------------------------------------------------
+
 
 class InvariantGate:
     """Runtime invariant enforcement gate.
@@ -133,7 +140,9 @@ class InvariantGate:
         extra_event_checks: list | None = None,
         extra_job_checks: list | None = None,
     ) -> None:
-        self._event_checks = list(self._DEFAULT_EVENT_CHECKS) + list(extra_event_checks or [])
+        self._event_checks = list(self._DEFAULT_EVENT_CHECKS) + list(
+            extra_event_checks or [],
+        )
         self._job_checks = list(self._DEFAULT_JOB_CHECKS) + list(extra_job_checks or [])
         self._violations_observed: int = 0
 
@@ -147,8 +156,7 @@ class InvariantGate:
         if violations:
             self._violations_observed += 1
             raise InvariantViolationError(
-                f"Ledger write blocked by {len(violations)} invariant violation(s): "
-                + "; ".join(violations)
+                f"Ledger write blocked by {len(violations)} invariant violation(s): " + "; ".join(violations),
             )
 
     def validate_job(self, session: dict[str, Any], job: Any) -> None:
@@ -161,8 +169,7 @@ class InvariantGate:
         if violations:
             self._violations_observed += 1
             raise InvariantViolationError(
-                f"Job execution blocked by {len(violations)} invariant violation(s): "
-                + "; ".join(violations)
+                f"Job execution blocked by {len(violations)} invariant violation(s): " + "; ".join(violations),
             )
 
     @property

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import email.utils
 import json
@@ -13,6 +13,7 @@ from urllib.request import Request, urlopen
 
 from dateutil import parser as dateutil_parser
 from dateutil.relativedelta import relativedelta
+
 from dadbot.core.egress_policy import enforce_url
 
 
@@ -22,7 +23,11 @@ class ToolRegistry:
 
     @staticmethod
     def _parse_toggle_command(stripped, slash, action):
-        match = re.match(rf"^{re.escape(slash)}(?:\s+(on|off|status))?$", stripped, flags=re.IGNORECASE)
+        match = re.match(
+            rf"^{re.escape(slash)}(?:\s+(on|off|status))?$",
+            stripped,
+            flags=re.IGNORECASE,
+        )
         if not match:
             return None
         mode = str(match.group(1) or "status").strip().lower() or "status"
@@ -60,9 +65,15 @@ class ToolRegistry:
                 "args": {"query": str(reject_match.group(1) or "").strip()},
             }
 
-        reminder_match = re.match(r"^(?:remind me to|set a reminder to|set reminder to)\s+(.+)$", stripped, flags=re.IGNORECASE)
+        reminder_match = re.match(
+            r"^(?:remind me to|set a reminder to|set reminder to)\s+(.+)$",
+            stripped,
+            flags=re.IGNORECASE,
+        )
         if reminder_match:
-            title, due_text = self.split_reminder_details(reminder_match.group(1).strip())
+            title, due_text = self.split_reminder_details(
+                reminder_match.group(1).strip(),
+            )
             return {
                 "action": "set_reminder",
                 "args": {"title": title, "due_text": due_text},
@@ -74,7 +85,9 @@ class ToolRegistry:
             flags=re.IGNORECASE,
         )
         if calendar_match:
-            title, due_text = self.split_reminder_details(calendar_match.group(1).strip())
+            title, due_text = self.split_reminder_details(
+                calendar_match.group(1).strip(),
+            )
             return {
                 "action": "create_calendar_event",
                 "args": {"title": title, "due_text": due_text},
@@ -82,7 +95,12 @@ class ToolRegistry:
 
         reminders = self._parse_list_command(
             lowered,
-            ["what reminders do i have", "list my reminders", "show my reminders", "list reminders"],
+            [
+                "what reminders do i have",
+                "list my reminders",
+                "show my reminders",
+                "list reminders",
+            ],
             "list_reminders",
         )
         if reminders is not None:
@@ -110,7 +128,12 @@ class ToolRegistry:
         )
         if email_match:
             tail = email_match.group(1).strip()
-            parts = re.split(r"\s+(?:about|regarding|re:)\s+", tail, maxsplit=1, flags=re.IGNORECASE)
+            parts = re.split(
+                r"\s+(?:about|regarding|re:)\s+",
+                tail,
+                maxsplit=1,
+                flags=re.IGNORECASE,
+            )
             recipient = str(parts[0] or "").strip()
             subject = str(parts[1] or "") if len(parts) > 1 else ""
             return {
@@ -177,8 +200,14 @@ class ToolRegistry:
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "title": {"type": "string", "description": "Short clear title of the reminder"},
-                            "due_text": {"type": "string", "description": "Optional due date/time like 'tomorrow' or 'next Friday'"},
+                            "title": {
+                                "type": "string",
+                                "description": "Short clear title of the reminder",
+                            },
+                            "due_text": {
+                                "type": "string",
+                                "description": "Optional due date/time like 'tomorrow' or 'next Friday'",
+                            },
                         },
                         "required": ["title"],
                     },
@@ -192,7 +221,10 @@ class ToolRegistry:
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "query": {"type": "string", "description": "Clear search query"},
+                            "query": {
+                                "type": "string",
+                                "description": "Clear search query",
+                            },
                         },
                         "required": ["query"],
                     },
@@ -207,7 +239,10 @@ class ToolRegistry:
                         "type": "object",
                         "properties": {
                             "title": {"type": "string", "description": "Event title"},
-                            "due_text": {"type": "string", "description": "Optional date/time text like 'tomorrow 2pm'"},
+                            "due_text": {
+                                "type": "string",
+                                "description": "Optional date/time text like 'tomorrow 2pm'",
+                            },
                         },
                         "required": ["title"],
                     },
@@ -221,9 +256,18 @@ class ToolRegistry:
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "recipient": {"type": "string", "description": "Recipient name or email"},
-                            "subject": {"type": "string", "description": "Email subject"},
-                            "body": {"type": "string", "description": "Optional draft body"},
+                            "recipient": {
+                                "type": "string",
+                                "description": "Recipient name or email",
+                            },
+                            "subject": {
+                                "type": "string",
+                                "description": "Email subject",
+                            },
+                            "body": {
+                                "type": "string",
+                                "description": "Optional draft body",
+                            },
                         },
                         "required": ["recipient"],
                     },
@@ -268,7 +312,12 @@ class ToolRegistry:
     def normalize_lookup_query(user_input):
         query = str(user_input or "").strip().rstrip("?!. ")
         query = re.sub(r"^(?:dad[, ]+)?", "", query, flags=re.IGNORECASE)
-        query = re.sub(r"^(?:can you|could you|would you|please)\s+", "", query, flags=re.IGNORECASE)
+        query = re.sub(
+            r"^(?:can you|could you|would you|please)\s+",
+            "",
+            query,
+            flags=re.IGNORECASE,
+        )
         return query.strip()
 
     @staticmethod
@@ -294,9 +343,18 @@ class ToolRegistry:
             (r"\btomorrow\b", (reference + relativedelta(days=1)).strftime("%Y-%m-%d")),
             (r"\btoday\b", reference.strftime("%Y-%m-%d")),
             (r"\btonight\b", reference.strftime("%Y-%m-%d") + " 8:00 PM"),
-            (r"\bnext week\b", (reference + relativedelta(days=7)).strftime("%Y-%m-%d")),
-            (r"\bnext month\b", (reference + relativedelta(months=1)).strftime("%Y-%m-%d")),
-            (r"\bnext year\b", (reference + relativedelta(years=1)).strftime("%Y-%m-%d")),
+            (
+                r"\bnext week\b",
+                (reference + relativedelta(days=7)).strftime("%Y-%m-%d"),
+            ),
+            (
+                r"\bnext month\b",
+                (reference + relativedelta(months=1)).strftime("%Y-%m-%d"),
+            ),
+            (
+                r"\bnext year\b",
+                (reference + relativedelta(years=1)).strftime("%Y-%m-%d"),
+            ),
         ]
 
         normalized = detail
@@ -312,7 +370,10 @@ class ToolRegistry:
 
         reference = datetime.now().replace(second=0, microsecond=0)
         parser_default = reference.replace(hour=0, minute=0)
-        normalized_text = cls.normalize_relative_reminder_phrase(reminder_text, reference)
+        normalized_text = cls.normalize_relative_reminder_phrase(
+            reminder_text,
+            reference,
+        )
 
         try:
             parsed_due, leftover_tokens = dateutil_parser.parse(
@@ -324,16 +385,20 @@ class ToolRegistry:
             return reminder_text, ""
 
         title = re.sub(r"\s+", " ", "".join(leftover_tokens)).strip(" ,.;:-")
-        title = re.sub(r"\b(?:at|on|by)\b\s*$", "", title, flags=re.IGNORECASE).strip(" ,.;:-")
+        title = re.sub(r"\b(?:at|on|by)\b\s*$", "", title, flags=re.IGNORECASE).strip(
+            " ,.;:-",
+        )
         if not title or title == reminder_text:
             return reminder_text, ""
 
         has_explicit_time = bool(
             re.search(r"\b\d{1,2}(?::\d{2})?\s*(?:am|pm)\b", normalized_text.lower())
             or re.search(r"\b\d{1,2}:\d{2}\b", normalized_text.lower())
-            or re.search(r"\b(noon|midnight|tonight)\b", reminder_text.lower())
+            or re.search(r"\b(noon|midnight|tonight)\b", reminder_text.lower()),
         )
-        due_text = parsed_due.strftime("%Y-%m-%d %I:%M %p" if has_explicit_time else "%Y-%m-%d")
+        due_text = parsed_due.strftime(
+            "%Y-%m-%d %I:%M %p" if has_explicit_time else "%Y-%m-%d",
+        )
         due_text = due_text.replace(" 0", " ")
         return title, due_text
 
@@ -352,16 +417,21 @@ class AgenticHandler:
                 "status": "open",
                 "created_at": timestamp,
                 "updated_at": timestamp,
-            }
+            },
         )
         if normalized is None:
             return None
 
         reminders = [item for item in self.bot.MEMORY_STORE.get("reminders", []) if item.get("status") != "done"]
         for reminder in reminders:
-            if self.bot.normalize_memory_text(reminder.get("title", "")) == self.bot.normalize_memory_text(normalized["title"]):
+            if self.bot.normalize_memory_text(
+                reminder.get("title", ""),
+            ) == self.bot.normalize_memory_text(normalized["title"]):
                 previous_due_at = reminder.get("due_at")
-                reminder["due_text"] = normalized["due_text"] or reminder.get("due_text", "")
+                reminder["due_text"] = normalized["due_text"] or reminder.get(
+                    "due_text",
+                    "",
+                )
                 reminder["due_at"] = normalized.get("due_at") or reminder.get("due_at")
                 reminder["updated_at"] = normalized["updated_at"]
                 if reminder.get("due_at") != previous_due_at:
@@ -405,8 +475,10 @@ class AgenticHandler:
                     "title": title,
                     "due_text": str(entry.get("due_text") or "").strip(),
                     "due_at": str(entry.get("due_at") or "").strip(),
-                    "created_at": str(entry.get("created_at") or datetime.now().isoformat(timespec="seconds")),
-                }
+                    "created_at": str(
+                        entry.get("created_at") or datetime.now().isoformat(timespec="seconds"),
+                    ),
+                },
             )
         return events
 
@@ -420,7 +492,11 @@ class AgenticHandler:
         if not cleaned:
             return ""
         try:
-            parsed = dateutil_parser.parse(cleaned, fuzzy=True, default=datetime.now().replace(second=0, microsecond=0))
+            parsed = dateutil_parser.parse(
+                cleaned,
+                fuzzy=True,
+                default=datetime.now().replace(second=0, microsecond=0),
+            )
             return parsed.isoformat(timespec="seconds")
         except Exception:
             return ""
@@ -444,7 +520,12 @@ class AgenticHandler:
             "created_at": now,
         }
         events.append(created_event)
-        events.sort(key=lambda item: (str(item.get("due_at") or "9999"), str(item.get("title") or "")))
+        events.sort(
+            key=lambda item: (
+                str(item.get("due_at") or "9999"),
+                str(item.get("title") or ""),
+            ),
+        )
         self._save_calendar_events(events[-200:])
         return created_event
 
@@ -452,7 +533,12 @@ class AgenticHandler:
         events = self._load_calendar_events()
         if not events:
             return []
-        events.sort(key=lambda item: (str(item.get("due_at") or "9999"), str(item.get("created_at") or "")))
+        events.sort(
+            key=lambda item: (
+                str(item.get("due_at") or "9999"),
+                str(item.get("created_at") or ""),
+            ),
+        )
         return events[: max(1, int(limit or 1))]
 
     def delete_calendar_event(self, event_id: str) -> bool:
@@ -471,11 +557,7 @@ class AgenticHandler:
         subject_value = str(subject or "").strip() or "Quick note"
         body_value = str(body or "").strip()
         if not body_value:
-            body_value = (
-                f"Hi {to_value},\n\n"
-                "Wanted to send a quick note.\n\n"
-                "Best,\nTony"
-            )
+            body_value = f"Hi {to_value},\n\nWanted to send a quick note.\n\nBest,\nTony"
 
         message = EmailMessage()
         message["To"] = to_value
@@ -484,7 +566,10 @@ class AgenticHandler:
         message["Subject"] = subject_value
         message.set_content(body_value)
 
-        drafts_dir = self.bot.env_path("DADBOT_EMAIL_DRAFT_DIR", self.bot.MEMORY_PATH.with_name("email_drafts"))
+        drafts_dir = self.bot.env_path(
+            "DADBOT_EMAIL_DRAFT_DIR",
+            self.bot.MEMORY_PATH.with_name("email_drafts"),
+        )
         drafts_dir.mkdir(parents=True, exist_ok=True)
         slug = re.sub(r"[^a-z0-9]+", "-", subject_value.lower()).strip("-") or "draft"
         file_name = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{slug[:40]}.eml"
@@ -522,7 +607,9 @@ class AgenticHandler:
             if item.get("Text"):
                 results.append(item)
                 continue
-            results.extend(AgenticHandler.extract_related_topic_results(item.get("Topics", [])))
+            results.extend(
+                AgenticHandler.extract_related_topic_results(item.get("Topics", [])),
+            )
         return results
 
     def lookup_web(self, query):
@@ -533,7 +620,7 @@ class AgenticHandler:
                 "no_redirect": 1,
                 "no_html": 1,
                 "skip_disambig": 1,
-            }
+            },
         )
         url = f"https://api.duckduckgo.com/?{params}"
         try:
@@ -560,12 +647,18 @@ class AgenticHandler:
                     return None
                 time.sleep(0.2 * (attempt + 1))
 
-        abstract = str(payload.get("AbstractText") or payload.get("Answer") or payload.get("Definition") or "").strip()
-        source_url = str(payload.get("AbstractURL") or payload.get("DefinitionURL") or "").strip()
+        abstract = str(
+            payload.get("AbstractText") or payload.get("Answer") or payload.get("Definition") or "",
+        ).strip()
+        source_url = str(
+            payload.get("AbstractURL") or payload.get("DefinitionURL") or "",
+        ).strip()
         heading = str(payload.get("Heading") or query).strip()
 
         if not abstract:
-            related = self.extract_related_topic_results(payload.get("RelatedTopics", []))
+            related = self.extract_related_topic_results(
+                payload.get("RelatedTopics", []),
+            )
             if related:
                 abstract = str(related[0].get("Text") or "").strip()
                 source_url = str(related[0].get("FirstURL") or source_url).strip()
@@ -587,7 +680,12 @@ class AgenticHandler:
             "source_label": source_label,
         }
 
-    def autonomous_tool_result_for_input(self, user_input, current_mood, attachments=None):
+    def autonomous_tool_result_for_input(
+        self,
+        user_input,
+        current_mood,
+        attachments=None,
+    ):
         settings = self.bot.agentic_tool_settings()
         if not settings["enabled"]:
             self.bot.update_planner_debug(
@@ -597,9 +695,14 @@ class AgenticHandler:
             )
             return None, None
 
-        reminder_request = self.tool_registry.infer_agentic_reminder_request(user_input) if settings["auto_reminders"] else None
+        reminder_request = (
+            self.tool_registry.infer_agentic_reminder_request(user_input) if settings["auto_reminders"] else None
+        )
         if reminder_request is not None:
-            reminder = self.bot.add_reminder(reminder_request["title"], reminder_request.get("due_text", ""))
+            reminder = self.bot.add_reminder(
+                reminder_request["title"],
+                reminder_request.get("due_text", ""),
+            )
             if reminder is not None:
                 self.bot.update_planner_debug(
                     fallback_status="used_tool",
@@ -611,10 +714,16 @@ class AgenticHandler:
                     reply = f"I went ahead and turned that into a reminder for you, Tony: {reminder['title']} ({reminder['due_text']})."
                 else:
                     reply = f"I went ahead and turned that into a reminder for you, Tony: {reminder['title']}."
-                return self.bot.reply_finalization.finalize(reply, current_mood, user_input), None
+                return self.bot.reply_finalization.finalize(
+                    reply,
+                    current_mood,
+                    user_input,
+                ), None
 
         if settings["auto_web_lookup"] and self.tool_registry.should_autonomous_web_lookup(user_input):
-            result = self.bot.lookup_web(self.tool_registry.normalize_lookup_query(user_input))
+            result = self.bot.lookup_web(
+                self.tool_registry.normalize_lookup_query(user_input),
+            )
             if result is not None:
                 source = f" Source: {result['source_label']}." if result.get("source_label") else ""
                 observation = f"{result['heading']}: {result['summary']}{source}"
@@ -641,7 +750,10 @@ class AgenticHandler:
     def _handle_reminder_action(self, command):
         action = command.get("action")
         if action == "set_reminder":
-            reminder = self.bot.add_reminder(command.get("title", ""), command.get("due_text", ""))
+            reminder = self.bot.add_reminder(
+                command.get("title", ""),
+                command.get("due_text", ""),
+            )
             if reminder is None:
                 return "I couldn't turn that into a reminder cleanly, buddy."
             if reminder.get("due_text"):
@@ -654,7 +766,10 @@ class AgenticHandler:
     def _handle_calendar_action(self, command):
         action = command.get("action")
         if action == "create_calendar_event":
-            event = self.add_calendar_event(command.get("title", ""), command.get("due_text", ""))
+            event = self.add_calendar_event(
+                command.get("title", ""),
+                command.get("due_text", ""),
+            )
             if event is None:
                 return "I couldn't create that calendar event yet, buddy."
             if event.get("due_text"):
@@ -682,10 +797,7 @@ class AgenticHandler:
         )
         if draft is None:
             return "I couldn't draft that email yet, buddy."
-        return (
-            f"I drafted that email locally, Tony. Subject: {draft['subject']}. "
-            f"Saved at: {draft['path']}"
-        )
+        return f"I drafted that email locally, Tony. Subject: {draft['subject']}. Saved at: {draft['path']}"
 
     def _handle_snapshot_action(self, command):
         action = command.get("action")

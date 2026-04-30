@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import re
 
@@ -50,7 +50,7 @@ class GraphEntityResolver:
             "reinforced_by",
             "responds_to",
             "contradicted_by",
-        }
+        },
     )
 
     def __init__(self, bot) -> None:
@@ -72,7 +72,10 @@ class GraphEntityResolver:
             return "trait", _slug(lowered)
         for canonical, aliases in self.ENTITY_ALIASES.items():
             if lowered == canonical or lowered in aliases or any(alias in lowered for alias in aliases):
-                return self.ENTITY_TYPES.get(canonical, semantic_type or "topic"), canonical
+                return self.ENTITY_TYPES.get(
+                    canonical,
+                    semantic_type or "topic",
+                ), canonical
         return semantic_type or "topic", _slug(lowered)
 
     # --- Relation type resolution ---
@@ -110,14 +113,35 @@ class GraphEntityResolver:
         if source_type == "archive_session" and entity_type == "day":
             return "mentioned_on"
         if entity_type == "goal" or any(
-            token in lowered for token in ["plan", "goal", "saving", "save", "budget", "trying to", "working on"]
+            token in lowered
+            for token in [
+                "plan",
+                "goal",
+                "saving",
+                "save",
+                "budget",
+                "trying to",
+                "working on",
+            ]
         ):
             return "plans_for"
         if entity_type in {"stressor", "person"} and any(
-            token in lowered for token in ["stress", "stressed", "overwhelmed", "anxious", "worried", "heavy", "pressure"]
+            token in lowered
+            for token in [
+                "stress",
+                "stressed",
+                "overwhelmed",
+                "anxious",
+                "worried",
+                "heavy",
+                "pressure",
+            ]
         ):
             return "struggles_with"
-        if source_type == "persona_trait" and entity_type in {"topic", "advice_pattern"}:
+        if source_type == "persona_trait" and entity_type in {
+            "topic",
+            "advice_pattern",
+        }:
             return "responds_to"
         return self.normalize_relation_type(fallback)
 

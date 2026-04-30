@@ -1,5 +1,4 @@
-"""
-StageEntryGate — stage-entry policy evaluation extracted from TurnGraph._execute_stage.
+"""StageEntryGate — stage-entry policy evaluation extracted from TurnGraph._execute_stage.
 
 This module owns the decision logic for whether a pipeline stage is allowed to
 enter execution.  It is pure policy: no I/O, no persistence, no LangGraph
@@ -18,9 +17,9 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from dadbot.core.graph import TurnContext
-    from dadbot.core.execution_recovery import ExecutionRecovery
     from dadbot.core.capability_registry import CapabilityRegistry
+    from dadbot.core.execution_recovery import ExecutionRecovery
+    from dadbot.core.graph import TurnContext
 
 from dadbot.core.capability_registry import EnforcementMode, enforce_node_entry
 
@@ -53,13 +52,15 @@ class StageEntryGate:
     }
 
     # Stages that require temporal to have already run.
-    _REQUIRES_TEMPORAL: frozenset[str] = frozenset({"inference", "safety", "reflection", "save"})
+    _REQUIRES_TEMPORAL: frozenset[str] = frozenset(
+        {"inference", "safety", "reflection", "save"},
+    )
 
     def check_recovery_skip(
         self,
         stage_name: str,
-        context: "TurnContext",
-        recovery: "ExecutionRecovery | None",
+        context: TurnContext,
+        recovery: ExecutionRecovery | None,
     ) -> bool:
         """Return True if the stage should be skipped (already completed in a prior run).
 
@@ -77,8 +78,8 @@ class StageEntryGate:
     def check_capability_skip(
         self,
         stage_name: str,
-        context: "TurnContext",
-        registry: "CapabilityRegistry | None",
+        context: TurnContext,
+        registry: CapabilityRegistry | None,
         policy: Any,
         session_id: str,
     ) -> bool:
@@ -97,7 +98,7 @@ class StageEntryGate:
         )
         return enforcement == EnforcementMode.SKIP
 
-    def enforce_stage_ordering(self, context: "TurnContext", stage_name: str) -> None:
+    def enforce_stage_ordering(self, context: TurnContext, stage_name: str) -> None:
         """Enforce canonical stage ordering and temporal pre-conditions.
 
         Mutates context.state to track executed stages (same contract as the
@@ -112,21 +113,18 @@ class StageEntryGate:
         if stage_name in executed:
             raise RuntimeError(
                 f"TurnGraph execution violation: stage {stage_name!r} executed more than once "
-                f"in trace {context.trace_id!r}"
+                f"in trace {context.trace_id!r}",
             )
 
         last_stage = str(context.state.get("_graph_last_stage") or "").strip()
-        _canonical = (
-            set(self._EXPECTED_NEXT.keys())
-            | {s for vals in self._EXPECTED_NEXT.values() for s in vals}
-        )
+        _canonical = set(self._EXPECTED_NEXT.keys()) | {s for vals in self._EXPECTED_NEXT.values() for s in vals}
         if stage_name in _canonical:
             allowed = self._EXPECTED_NEXT.get(last_stage)
             if allowed is not None and allowed and stage_name not in allowed:
                 raise RuntimeError(
                     "TurnGraph order violation: "
                     f"stage {stage_name!r} cannot execute after {last_stage!r}; "
-                    f"expected one of {sorted(allowed)!r}"
+                    f"expected one of {sorted(allowed)!r}",
                 )
 
         executed.add(stage_name)
@@ -137,5 +135,5 @@ class StageEntryGate:
             if not context.state.get("temporal"):
                 raise RuntimeError(
                     f"TemporalNode not initialized before {stage_name!r} — "
-                    "deterministic execution violated: temporal must be first in pipeline"
+                    "deterministic execution violated: temporal must be first in pipeline",
                 )

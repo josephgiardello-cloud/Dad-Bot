@@ -21,17 +21,17 @@ Design
 Extraction helpers live on ClaimEvidenceValidator so callers can work
 directly from a TurnContext.state dict.
 """
+
 from __future__ import annotations
 
 import hashlib
-import json
 from dataclasses import dataclass, field
 from typing import Any
-
 
 # ---------------------------------------------------------------------------
 # Core data structures
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class ExecutionClaim:
@@ -41,11 +41,12 @@ class ExecutionClaim:
     registry records, or URIL pipeline signals — they are *claims*, not
     verified facts.
     """
+
     turn_id: str
-    steps: list[str]          # claimed execution stages (ordered)
-    tools_used: list[str]     # claimed tool call sequence (ordered)
-    memory_reads: list[str]   # claimed memory access keys (set-semantics)
-    receipt_hash: str         # claimed receipt-chain fingerprint
+    steps: list[str]  # claimed execution stages (ordered)
+    tools_used: list[str]  # claimed tool call sequence (ordered)
+    memory_reads: list[str]  # claimed memory access keys (set-semantics)
+    receipt_hash: str  # claimed receipt-chain fingerprint
 
 
 @dataclass
@@ -57,16 +58,18 @@ class ExecutionEvidence:
       * ``TurnContext.state["tool_ir"]["executions"]`` — tool invocation log
       * ``TurnContext.state["memory_structured"]`` — memory access record
     """
+
     turn_id: str
-    steps: list[str]          # stages recorded in receipt chain (ordered)
-    tool_calls: list[str]     # actual tool invocations (ordered)
+    steps: list[str]  # stages recorded in receipt chain (ordered)
+    tool_calls: list[str]  # actual tool invocations (ordered)
     memory_events: list[str]  # actual memory access keys (set-semantics)
-    receipt_hash: str         # actual receipt-chain fingerprint
+    receipt_hash: str  # actual receipt-chain fingerprint
 
 
 @dataclass
 class BindingViolation:
     """A mismatch between a claimed value and the corresponding evidence."""
+
     field: str
     claimed: Any
     actual: Any
@@ -78,6 +81,7 @@ class BindingViolation:
 @dataclass
 class ClaimBindingResult:
     """Result of a claim-vs-evidence validation pass."""
+
     valid: bool
     violations: list[BindingViolation] = field(default_factory=list)
     claim: ExecutionClaim | None = None
@@ -94,6 +98,7 @@ class ClaimBindingResult:
 # ---------------------------------------------------------------------------
 # Receipt-chain fingerprint
 # ---------------------------------------------------------------------------
+
 
 def compute_receipt_chain_hash(receipts: list[Any]) -> str:
     """Deterministic fingerprint of an ordered receipt chain.
@@ -124,6 +129,7 @@ def compute_receipt_chain_hash(receipts: list[Any]) -> str:
 # ---------------------------------------------------------------------------
 # Validator
 # ---------------------------------------------------------------------------
+
 
 class ClaimEvidenceValidator:
     """Validates ExecutionClaims against ExecutionEvidence.
@@ -159,17 +165,15 @@ class ClaimEvidenceValidator:
 
         if claim.turn_id != evidence.turn_id:
             violations.append(
-                BindingViolation("turn_id", claim.turn_id, evidence.turn_id)
+                BindingViolation("turn_id", claim.turn_id, evidence.turn_id),
             )
 
         if claim.steps != evidence.steps:
-            violations.append(
-                BindingViolation("steps", claim.steps, evidence.steps)
-            )
+            violations.append(BindingViolation("steps", claim.steps, evidence.steps))
 
         if claim.tools_used != evidence.tool_calls:
             violations.append(
-                BindingViolation("tools_used", claim.tools_used, evidence.tool_calls)
+                BindingViolation("tools_used", claim.tools_used, evidence.tool_calls),
             )
 
         if sorted(claim.memory_reads) != sorted(evidence.memory_events):
@@ -178,14 +182,16 @@ class ClaimEvidenceValidator:
                     "memory_reads",
                     sorted(claim.memory_reads),
                     sorted(evidence.memory_events),
-                )
+                ),
             )
 
         if claim.receipt_hash != evidence.receipt_hash:
             violations.append(
                 BindingViolation(
-                    "receipt_hash", claim.receipt_hash, evidence.receipt_hash
-                )
+                    "receipt_hash",
+                    claim.receipt_hash,
+                    evidence.receipt_hash,
+                ),
             )
 
         return ClaimBindingResult(
@@ -216,10 +222,7 @@ class ClaimEvidenceValidator:
         steps: list[str] = list(plan.get("steps") or [])
 
         tool_ir = state.get("tool_ir") or {}
-        tools_used: list[str] = [
-            str(e.get("tool") or e.get("name") or "")
-            for e in (tool_ir.get("executions") or [])
-        ]
+        tools_used: list[str] = [str(e.get("tool") or e.get("name") or "") for e in (tool_ir.get("executions") or [])]
 
         mem_structured = state.get("memory_structured") or {}
         memory_reads: list[str] = [str(k) for k in mem_structured.keys()]
@@ -256,10 +259,7 @@ class ClaimEvidenceValidator:
                 steps.append(str(getattr(r, "stage", "") or ""))
 
         tool_ir = state.get("tool_ir") or {}
-        tool_calls: list[str] = [
-            str(e.get("tool") or e.get("name") or "")
-            for e in (tool_ir.get("executions") or [])
-        ]
+        tool_calls: list[str] = [str(e.get("tool") or e.get("name") or "") for e in (tool_ir.get("executions") or [])]
 
         mem_structured = state.get("memory_structured") or {}
         memory_events: list[str] = [str(k) for k in mem_structured.keys()]
@@ -278,6 +278,7 @@ class ClaimEvidenceValidator:
 # ---------------------------------------------------------------------------
 # Convenience: build a synthetic state for unit testing
 # ---------------------------------------------------------------------------
+
 
 def build_synthetic_state(
     *,
@@ -301,18 +302,16 @@ def build_synthetic_state(
         prev_sig = ""
         for i, stage in enumerate(_stages):
             sig = hashlib.sha256(
-                f"{turn_id}:{stage}:{i}:{prev_sig}".encode()
+                f"{turn_id}:{stage}:{i}:{prev_sig}".encode(),
             ).hexdigest()
             rec: dict[str, Any] = {
                 "turn_id": turn_id,
                 "stage": stage,
                 "sequence": i,
                 "stage_call_id": hashlib.sha256(
-                    f"{turn_id}:{stage}".encode()
+                    f"{turn_id}:{stage}".encode(),
                 ).hexdigest()[:32],
-                "checkpoint_hash": hashlib.sha256(
-                    f"ckpt-{stage}".encode()
-                ).hexdigest()[:16],
+                "checkpoint_hash": hashlib.sha256(f"ckpt-{stage}".encode()).hexdigest()[:16],
                 "prev_receipt_sig": prev_sig,
                 "completed_at": 1000.0 + i,
                 "signature": sig,
@@ -324,9 +323,7 @@ def build_synthetic_state(
 
     return {
         "plan": {"steps": _stages},
-        "tool_ir": {
-            "executions": [{"tool": t, "name": t} for t in _tools]
-        },
+        "tool_ir": {"executions": [{"tool": t, "name": t} for t in _tools]},
         "memory_structured": {k: {} for k in _keys},
         "_execution_receipts": _receipts,
     }

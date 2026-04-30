@@ -10,20 +10,16 @@ N — TestScheduleConfluence    (L4-P4: schedule_confluence)
 O — TestStatelessExecutor     (L4-P5: stateless_executor)
 P — TestEvolutionHooks        (L5: evolution_hooks)
 """
+
 from __future__ import annotations
 
 import pytest
 
-from dadbot.core.tool_dag import ToolDAG, build_dag_from_execution_plan
-from dadbot.core.tool_ir_boundary import (
-    ToolIRBijectionError,
-    ToolSchemaError,
-    assert_bijection,
-    assert_no_orphan_events,
-    build_bijection_proof,
-    validate_tool_request,
-    validate_tool_requests_batch,
-    validate_tool_result,
+from dadbot.core.critic_constraints import (
+    DEFAULT_CONSTRAINTS,
+    ConstraintCritiqueEngine,
+    ConstraintViolation,
+    CritiqueViolationType,
 )
 from dadbot.core.dag_integrity import (
     DagIdentityLock,
@@ -35,31 +31,10 @@ from dadbot.core.dag_integrity import (
     graph_structural_equivalence,
     lock_dag,
 )
-from dadbot.core.critic_constraints import (
-    ConstraintCritiqueEngine,
-    ConstraintViolation,
-    CritiqueViolationType,
-    DEFAULT_CONSTRAINTS,
-)
-from dadbot.core.memory_space import (
-    GoalWeightingFunction,
-    MemoryRankerOperator,
-    MemoryStateVector,
-)
 from dadbot.core.event_authority import (
     EventAuthority,
     UndefinedSystemStateError,
     rebuild_state_from_events,
-)
-from dadbot.core.graph_algebra import ToolGraphAlgebra
-from dadbot.core.schedule_confluence import (
-    ExecutionEquivalenceChecker,
-    ScheduleNormalizer,
-)
-from dadbot.core.stateless_executor import (
-    StatelessExecutor,
-    StatelessExecutionResult,
-    is_bootstrapped,
 )
 from dadbot.core.evolution_hooks import (
     ExecutionTelemetryVector,
@@ -67,7 +42,31 @@ from dadbot.core.evolution_hooks import (
     OptimizationBoundary,
     PolicySeparationLayer,
 )
-
+from dadbot.core.graph_algebra import ToolGraphAlgebra
+from dadbot.core.memory_space import (
+    GoalWeightingFunction,
+    MemoryRankerOperator,
+    MemoryStateVector,
+)
+from dadbot.core.schedule_confluence import (
+    ExecutionEquivalenceChecker,
+    ScheduleNormalizer,
+)
+from dadbot.core.stateless_executor import (
+    StatelessExecutionResult,
+    StatelessExecutor,
+    is_bootstrapped,
+)
+from dadbot.core.tool_dag import ToolDAG, build_dag_from_execution_plan
+from dadbot.core.tool_ir_boundary import (
+    ToolIRBijectionError,
+    ToolSchemaError,
+    assert_bijection,
+    build_bijection_proof,
+    validate_tool_request,
+    validate_tool_requests_batch,
+    validate_tool_result,
+)
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -112,7 +111,6 @@ def _valid_result_raw(tool_name: str = "memory_lookup") -> dict:
 
 
 class TestToolIRClosure:
-
     def test_validate_tool_request_accepts_valid(self):
         req = validate_tool_request(_valid_request_raw())
         assert req.tool_name == "memory_lookup"
@@ -173,15 +171,18 @@ class TestToolIRClosure:
 
     def test_bijection_proof_with_matching_log_and_results(self):
         from dadbot.core.tool_ir import ToolEvent, ToolEventLog
+
         tool_id = "tid_match_1"
         log = ToolEventLog()
-        log.append(ToolEvent.executed(
-            tool_id=tool_id,
-            sequence=0,
-            tool_name="memory_lookup",
-            args={"q": "test"},
-            output="result_value",
-        ))
+        log.append(
+            ToolEvent.executed(
+                tool_id=tool_id,
+                sequence=0,
+                tool_name="memory_lookup",
+                args={"q": "test"},
+                output="result_value",
+            )
+        )
         result = {"tool_name": "memory_lookup", "status": "ok", "deterministic_id": tool_id}
         proof = build_bijection_proof(log, [result])
         assert proof["cardinality_match"] is True
@@ -189,29 +190,35 @@ class TestToolIRClosure:
 
     def test_bijection_proof_detects_orphan_events(self):
         from dadbot.core.tool_ir import ToolEvent, ToolEventLog
+
         tool_id = "orphan_tid"
         log = ToolEventLog()
-        log.append(ToolEvent.executed(
-            tool_id=tool_id,
-            sequence=0,
-            tool_name="memory_lookup",
-            args={},
-            output=None,
-        ))
+        log.append(
+            ToolEvent.executed(
+                tool_id=tool_id,
+                sequence=0,
+                tool_name="memory_lookup",
+                args={},
+                output=None,
+            )
+        )
         proof = build_bijection_proof(log, [])
         assert proof["ok"] is False
         assert len(proof["orphan_events"]) == 1
 
     def test_assert_bijection_raises_on_mismatch(self):
         from dadbot.core.tool_ir import ToolEvent, ToolEventLog
+
         log = ToolEventLog()
-        log.append(ToolEvent.executed(
-            tool_id="tid_no_result",
-            sequence=0,
-            tool_name="memory_lookup",
-            args={},
-            output=None,
-        ))
+        log.append(
+            ToolEvent.executed(
+                tool_id="tid_no_result",
+                sequence=0,
+                tool_name="memory_lookup",
+                args={},
+                output=None,
+            )
+        )
         with pytest.raises(ToolIRBijectionError):
             assert_bijection(log, [])
 
@@ -222,7 +229,6 @@ class TestToolIRClosure:
 
 
 class TestDagIntegrityLock:
-
     def test_identity_lock_from_dag(self):
         dag = _make_dag(3)
         lock = DagIdentityLock.from_dag(dag)
@@ -298,7 +304,6 @@ class TestDagIntegrityLock:
 
 
 class TestCriticConstraints:
-
     def _engine(self):
         return ConstraintCritiqueEngine.default()
 
@@ -374,7 +379,6 @@ class TestCriticConstraints:
 
 
 class TestMemoryStateSpace:
-
     def _memories(self):
         return [
             {"content": "user likes hiking in the mountains"},
@@ -456,7 +460,6 @@ class TestMemoryStateSpace:
 
 
 class TestEventAuthority:
-
     def test_empty_authority_is_not_defined(self):
         auth = EventAuthority()
         assert auth.is_defined() is False
@@ -563,7 +566,6 @@ class TestEventAuthority:
 
 
 class TestGraphAlgebra:
-
     def test_identity_is_empty_dag(self):
         identity = ToolGraphAlgebra.identity()
         assert ToolGraphAlgebra.is_identity(identity)
@@ -625,11 +627,11 @@ class TestGraphAlgebra:
 
 
 class TestScheduleConfluence:
-
     def test_normalizer_produces_same_hash_for_same_dag_different_seeds(self):
         dag = _make_dag(3)
         normalizer = ScheduleNormalizer()
         from dadbot.core.tool_scheduler import ToolScheduler
+
         items_0 = ToolScheduler(seed=0).schedule(dag)
         items_1 = ToolScheduler(seed=42).schedule(dag)
         h0 = normalizer.normalized_hash(items_0)
@@ -660,6 +662,7 @@ class TestScheduleConfluence:
     def test_equivalence_checker_two_schedules_same_dag(self):
         dag = _make_dag(3)
         from dadbot.core.tool_scheduler import ToolScheduler
+
         sched_a = ToolScheduler(seed=0).schedule(dag)
         sched_b = ToolScheduler(seed=7).schedule(dag)
         checker = ExecutionEquivalenceChecker()
@@ -686,7 +689,6 @@ class TestScheduleConfluence:
 
 
 class TestStatelessExecutor:
-
     def _session_events(self):
         return [
             {"type": "SESSION_STATE_UPDATED", "session_id": "s1", "sequence": 0},
@@ -774,7 +776,6 @@ class TestStatelessExecutor:
 
 
 class TestEvolutionHooks:
-
     def test_telemetry_vector_to_feature_vector(self):
         tv = ExecutionTelemetryVector(
             event_count=5,

@@ -67,9 +67,25 @@ def test_turn_graph_emits_before_and_after_checkpoints():
     result = asyncio.run(graph.execute(TurnContext(user_input="hello")))
 
     assert result == ("ok|None", False)
-    assert [item["status"] for item in recorded] == ["before", "after", "edge", "before", "after", "edge", "before", "after"]
+    assert [item["status"] for item in recorded] == [
+        "before",
+        "after",
+        "edge",
+        "before",
+        "after",
+        "edge",
+        "before",
+        "after",
+    ]
     assert [item["stage"] for item in recorded] == [
-        "temporal", "temporal", "temporal\u2192fanout", "fanout", "fanout", "fanout\u2192save", "save", "save"
+        "temporal",
+        "temporal",
+        "temporal\u2192fanout",
+        "fanout",
+        "fanout",
+        "fanout\u2192save",
+        "save",
+        "save",
     ]
     assert recorded[-1]["state"]["safe_result"] == ["ok|None", False]
     assert all(item["trace_id"] == recorded[0]["trace_id"] for item in recorded)

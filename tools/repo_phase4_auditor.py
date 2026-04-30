@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import asyncio
 import ast
+import asyncio
 import json
 import sys
 from pathlib import Path
@@ -160,7 +160,9 @@ def _security_checks() -> dict[str, Any]:
     }
 
 
-def _coverage(structural: dict[str, Any], observability: dict[str, Any], runtime: dict[str, Any], security: dict[str, Any]) -> dict[str, float]:
+def _coverage(
+    structural: dict[str, Any], observability: dict[str, Any], runtime: dict[str, Any], security: dict[str, Any]
+) -> dict[str, float]:
     core = 1.0 if structural.get("ok") and runtime.get("ok") and security.get("ok") else 0.0
     observ = 1.0 if observability.get("ok") else 0.0
     export = 1.0 if observability.get("otel_bridge") and observability.get("prometheus_bridge") else 0.0

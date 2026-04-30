@@ -1,23 +1,20 @@
 """Wave 3 production hardening tests — Steps 1-2 and 4-8."""
+
 from __future__ import annotations
 
 import asyncio
-import json
-import os
 import tempfile
 import time
 from pathlib import Path
 
 import pytest
 
-from dadbot.core.durable_checkpoint import DurableCheckpoint
 from dadbot.core.event_reducer import CanonicalEventReducer
 from dadbot.core.execution_ledger import (
     ExecutionLedger,
     WriteBoundaryGuard,
     WriteBoundaryViolationError,
 )
-from dadbot.core.execution_lease import ExecutionLease
 from dadbot.core.invariant_gate import InvariantGate, InvariantViolationError
 from dadbot.core.ledger_backend import (
     FileWALLedgerBackend,
@@ -25,20 +22,19 @@ from dadbot.core.ledger_backend import (
 )
 from dadbot.core.ledger_writer import LedgerWriter
 from dadbot.core.observability import (
+    EventStreamExporter,
     MetricsSink,
     TracingContext,
-    EventStreamExporter,
     get_metrics,
 )
-from dadbot.core.recovery_manager import RecoveryManager
 from dadbot.core.session_store import SessionStore
 from dadbot.core.snapshot_engine import SnapshotEngine
 from dadbot.core.system_health_checker import SystemHealthChecker
 
-
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_ledger_with_jobs(
     session_id: str = "s1",
@@ -64,6 +60,7 @@ def _make_ledger_with_jobs(
 # ===========================================================================
 # Step 1 — LedgerBackend + FileWALLedgerBackend
 # ===========================================================================
+
 
 class TestInMemoryLedgerBackend:
     def test_append_and_load_roundtrip(self):
@@ -118,6 +115,7 @@ class TestFileWALLedgerBackend:
             # Write a valid line then a corrupt one.
             wal_path.write_text('{"type": "JOB_QUEUED"}\nNOT_JSON\n{"type": "JOB_COMPLETED"}\n')
             import warnings
+
             with warnings.catch_warnings(record=True):
                 backend = FileWALLedgerBackend(wal_path, fsync=False)
                 events = backend.load()
@@ -142,6 +140,7 @@ class TestFileWALLedgerBackend:
 # Step 2 — Write confirmation / committed semantics
 # ===========================================================================
 
+
 class TestCommittedWrites:
     def test_job_queued_is_written_with_committed_true(self):
         """LedgerWriter automatically sets committed=True for critical event types."""
@@ -156,6 +155,7 @@ class TestCommittedWrites:
         ledger = ExecutionLedger(backend=TrackingBackend())
         writer = LedgerWriter(ledger)
         from dadbot.core.control_plane import ExecutionJob
+
         job = ExecutionJob(session_id="s1", user_input="hi")
         writer.append_job_submitted(job)
         writer.append_session_bound("s1", job.job_id)
@@ -178,6 +178,7 @@ class TestCommittedWrites:
         ledger = ExecutionLedger(backend=TrackingBackend())
         writer = LedgerWriter(ledger)
         from dadbot.core.control_plane import ExecutionJob
+
         job = ExecutionJob(session_id="s1", user_input="hi")
         writer.append_job_submitted(job)
         writer.append_session_bound("s1", job.job_id)
@@ -189,67 +190,80 @@ class TestCommittedWrites:
 # Step 4 — InvariantGate runtime enforcement
 # ===========================================================================
 
+
 class TestInvariantGate:
     def test_valid_event_passes(self):
         gate = InvariantGate()
-        gate.validate_event({
-            "type": "JOB_QUEUED",
-            "session_id": "s1",
-            "kernel_step_id": "control_plane.enqueue",
-            "timestamp": time.time(),
-            "payload": {},
-        })  # Must not raise.
+        gate.validate_event(
+            {
+                "type": "JOB_QUEUED",
+                "session_id": "s1",
+                "kernel_step_id": "control_plane.enqueue",
+                "timestamp": time.time(),
+                "payload": {},
+            }
+        )  # Must not raise.
 
     def test_missing_type_raises(self):
         gate = InvariantGate()
         with pytest.raises(InvariantViolationError, match="type"):
-            gate.validate_event({
-                "type": "",
-                "session_id": "s1",
-                "kernel_step_id": "step",
-                "timestamp": time.time(),
-            })
+            gate.validate_event(
+                {
+                    "type": "",
+                    "session_id": "s1",
+                    "kernel_step_id": "step",
+                    "timestamp": time.time(),
+                }
+            )
 
     def test_empty_session_id_raises(self):
         gate = InvariantGate()
         with pytest.raises(InvariantViolationError, match="session_id"):
-            gate.validate_event({
-                "type": "JOB_QUEUED",
-                "session_id": "",
-                "kernel_step_id": "step",
-                "timestamp": time.time(),
-            })
+            gate.validate_event(
+                {
+                    "type": "JOB_QUEUED",
+                    "session_id": "",
+                    "kernel_step_id": "step",
+                    "timestamp": time.time(),
+                }
+            )
 
     def test_future_timestamp_raises(self):
         gate = InvariantGate()
         with pytest.raises(InvariantViolationError, match="future"):
-            gate.validate_event({
-                "type": "JOB_QUEUED",
-                "session_id": "s1",
-                "kernel_step_id": "step",
-                "timestamp": time.time() + 999,
-            })
+            gate.validate_event(
+                {
+                    "type": "JOB_QUEUED",
+                    "session_id": "s1",
+                    "kernel_step_id": "step",
+                    "timestamp": time.time() + 999,
+                }
+            )
 
     def test_payload_non_dict_raises(self):
         gate = InvariantGate()
         with pytest.raises(InvariantViolationError, match="payload"):
-            gate.validate_event({
-                "type": "JOB_QUEUED",
-                "session_id": "s1",
-                "kernel_step_id": "step",
-                "timestamp": time.time(),
-                "payload": "not a dict",
-            })
+            gate.validate_event(
+                {
+                    "type": "JOB_QUEUED",
+                    "session_id": "s1",
+                    "kernel_step_id": "step",
+                    "timestamp": time.time(),
+                    "payload": "not a dict",
+                }
+            )
 
     def test_missing_kernel_step_id_raises(self):
         gate = InvariantGate()
         with pytest.raises(InvariantViolationError, match="kernel_step_id"):
-            gate.validate_event({
-                "type": "JOB_QUEUED",
-                "session_id": "s1",
-                "kernel_step_id": "",
-                "timestamp": time.time(),
-            })
+            gate.validate_event(
+                {
+                    "type": "JOB_QUEUED",
+                    "session_id": "s1",
+                    "kernel_step_id": "",
+                    "timestamp": time.time(),
+                }
+            )
 
     def test_ledger_writer_rejects_invalid_event_type(self):
         """InvariantGate is integrated into LedgerWriter — invalid events are blocked."""
@@ -264,6 +278,7 @@ class TestInvariantGate:
 
     def test_job_invariant_rejects_terminated_session(self):
         from dadbot.core.control_plane import ExecutionJob
+
         gate = InvariantGate()
         job = ExecutionJob(session_id="s1", user_input="hi")
         session = {"status": "terminated", "session_id": "s1"}
@@ -283,6 +298,7 @@ class TestInvariantGate:
 # ===========================================================================
 # Step 5 — ReducerEngine / semantic check
 # ===========================================================================
+
 
 class TestReducerSemanticCheck:
     def test_reducer_produces_correct_state(self):
@@ -344,6 +360,7 @@ class TestReducerSemanticCheck:
 # Step 6 — Structured observability
 # ===========================================================================
 
+
 class TestObservability:
     def test_metrics_increment_and_counter(self):
         metrics = MetricsSink()
@@ -384,6 +401,7 @@ class TestObservability:
 
     def test_event_stream_exporter_captures_records(self):
         import queue
+
         q = queue.Queue()
         exporter = EventStreamExporter(sink=q, enabled=True)
         exporter.export({"event": "job.completed", "job_id": "123"})
@@ -393,6 +411,7 @@ class TestObservability:
 
     def test_exporter_disabled_emits_nothing(self):
         import queue
+
         q = queue.Queue()
         exporter = EventStreamExporter(sink=q, enabled=False)
         exporter.export({"event": "should-not-appear"})
@@ -400,7 +419,6 @@ class TestObservability:
 
     def test_ledger_writer_emits_metrics(self):
         # Use the global metrics sink to verify LedgerWriter populates it.
-        from dadbot.core.observability import get_metrics
         metrics = get_metrics()
         metrics.reset()  # Clear state from other tests.
 
@@ -411,7 +429,6 @@ class TestObservability:
         assert metrics.counter("ledger.committed_writes") >= 2  # JOB_QUEUED + JOB_COMPLETED
 
     def test_scheduler_emits_metrics(self):
-        from dadbot.core.observability import get_metrics
         metrics = get_metrics()
         metrics.reset()
 
@@ -437,28 +454,33 @@ class TestObservability:
 # Step 7 — Strict write boundary
 # ===========================================================================
 
+
 class TestWriteBoundary:
     def test_strict_mode_blocks_direct_write(self):
         ledger = ExecutionLedger(strict_writes=True)
         with pytest.raises(WriteBoundaryViolationError):
-            ledger.write({
-                "type": "JOB_QUEUED",
-                "session_id": "s1",
-                "trace_id": "",
-                "timestamp": time.time(),
-                "kernel_step_id": "test",
-            })
+            ledger.write(
+                {
+                    "type": "JOB_QUEUED",
+                    "session_id": "s1",
+                    "trace_id": "",
+                    "timestamp": time.time(),
+                    "kernel_step_id": "test",
+                }
+            )
 
     def test_write_boundary_guard_allows_write(self):
         ledger = ExecutionLedger(strict_writes=True)
         with WriteBoundaryGuard(ledger):
-            ledger.write({
-                "type": "JOB_QUEUED",
-                "session_id": "s1",
-                "trace_id": "",
-                "timestamp": time.time(),
-                "kernel_step_id": "test",
-            })
+            ledger.write(
+                {
+                    "type": "JOB_QUEUED",
+                    "session_id": "s1",
+                    "trace_id": "",
+                    "timestamp": time.time(),
+                    "kernel_step_id": "test",
+                }
+            )
         assert len(ledger.read()) == 1
 
     def test_write_boundary_guard_revokes_after_exit(self):
@@ -466,38 +488,44 @@ class TestWriteBoundary:
         with WriteBoundaryGuard(ledger):
             pass
         with pytest.raises(WriteBoundaryViolationError):
-            ledger.write({
-                "type": "JOB_QUEUED",
-                "session_id": "s1",
-                "trace_id": "",
-                "timestamp": time.time(),
-                "kernel_step_id": "test",
-            })
+            ledger.write(
+                {
+                    "type": "JOB_QUEUED",
+                    "session_id": "s1",
+                    "trace_id": "",
+                    "timestamp": time.time(),
+                    "kernel_step_id": "test",
+                }
+            )
 
     def test_ledger_writer_passes_strict_mode(self):
         """LedgerWriter uses WriteBoundaryGuard internally — should work with strict mode."""
         ledger = ExecutionLedger(strict_writes=True)
         writer = LedgerWriter(ledger)
         from dadbot.core.control_plane import ExecutionJob
+
         job = ExecutionJob(session_id="s1", user_input="hi")
         writer.append_job_submitted(job)  # Must not raise.
         assert len(ledger.read()) == 1
 
     def test_non_strict_ledger_allows_direct_write(self):
         ledger = ExecutionLedger(strict_writes=False)
-        ledger.write({
-            "type": "JOB_QUEUED",
-            "session_id": "s1",
-            "trace_id": "",
-            "timestamp": time.time(),
-            "kernel_step_id": "test",
-        })  # Must not raise.
+        ledger.write(
+            {
+                "type": "JOB_QUEUED",
+                "session_id": "s1",
+                "trace_id": "",
+                "timestamp": time.time(),
+                "kernel_step_id": "test",
+            }
+        )  # Must not raise.
         assert len(ledger.read()) == 1
 
 
 # ===========================================================================
 # Step 8 — Snapshot + Restore engine
 # ===========================================================================
+
 
 class TestSnapshotEngine:
     def test_take_snapshot_captures_ledger_head(self):
@@ -521,6 +549,7 @@ class TestSnapshotEngine:
         # Add more events after snapshot.
         writer = LedgerWriter(ledger)
         from dadbot.core.control_plane import ExecutionJob
+
         job2 = ExecutionJob(session_id="s1", user_input="second")
         writer.append_job_submitted(job2)
         writer.append_session_bound("s1", job2.job_id)

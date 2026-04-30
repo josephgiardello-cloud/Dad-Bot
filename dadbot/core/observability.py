@@ -1,4 +1,4 @@
-﻿"""Structured observability layer â€” trace IDs, metrics, and event stream export.
+"""Structured observability layer â€” trace IDs, metrics, and event stream export.
 
 Three components:
   TracingContext   â€” thread-local + contextvars trace/span ID propagation.
@@ -14,20 +14,19 @@ Usage:
         metrics.increment("job.completed")
         metrics.observe("job.latency_ms", elapsed_ms)
 """
+
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import queue
 import sys
 import threading
 import time
 from collections import defaultdict
 from contextvars import ContextVar
-from copy import deepcopy
 from enum import IntEnum
-from typing import Any, Iterator
-
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # Trace / Span IDs
@@ -47,7 +46,7 @@ class TraceLevel(IntEnum):
     AUDIT = 4
 
     @classmethod
-    def parse(cls, value: "TraceLevel | str | int | None") -> "TraceLevel":
+    def parse(cls, value: TraceLevel | str | int | None) -> TraceLevel:
         if isinstance(value, cls):
             return value
         if value is None:
@@ -81,13 +80,20 @@ def _should_sample(*, key: str, sample_rate: float) -> bool:
 
 def _new_id(prefix: str = "") -> str:
     import uuid
+
     return (prefix + uuid.uuid4().hex)[:32]
 
 
 class Span:
     """Lightweight span that propagates trace/span IDs via ContextVars."""
 
-    def __init__(self, name: str, *, trace_id: str = "", parent_span_id: str = "") -> None:
+    def __init__(
+        self,
+        name: str,
+        *,
+        trace_id: str = "",
+        parent_span_id: str = "",
+    ) -> None:
         self.name = str(name or "unnamed")
         self.trace_id = str(trace_id or _current_trace_id.get() or _new_id("tr"))
         self.span_id = _new_id("sp")
@@ -97,7 +103,7 @@ class Span:
         self._trace_token = None
         self._span_token = None
 
-    def __enter__(self) -> "Span":
+    def __enter__(self) -> Span:
         self._trace_token = _current_trace_id.set(self.trace_id)
         self._span_token = _current_span_id.set(self.span_id)
         return self
@@ -129,7 +135,13 @@ class Span:
 class _NoOpSpan(Span):
     """Span-compatible object that does not mutate trace context."""
 
-    def __init__(self, name: str, *, trace_id: str = "", parent_span_id: str = "") -> None:
+    def __init__(
+        self,
+        name: str,
+        *,
+        trace_id: str = "",
+        parent_span_id: str = "",
+    ) -> None:
         self.name = str(name or "unnamed")
         self.trace_id = str(trace_id or "")
         self.span_id = ""
@@ -139,7 +151,7 @@ class _NoOpSpan(Span):
         self._trace_token = None
         self._span_token = None
 
-    def __enter__(self) -> "_NoOpSpan":
+    def __enter__(self) -> _NoOpSpan:
         return self
 
     def __exit__(self, *_) -> None:
@@ -149,7 +161,11 @@ class _NoOpSpan(Span):
 class TracingContext:
     """Tracer â€” creates spans and propagates trace IDs."""
 
-    def __init__(self, *, min_level: TraceLevel | str | int = TraceLevel.MINIMAL) -> None:
+    def __init__(
+        self,
+        *,
+        min_level: TraceLevel | str | int = TraceLevel.MINIMAL,
+    ) -> None:
         self._min_level = TraceLevel.parse(min_level)
 
     def set_level(self, level: TraceLevel | str | int) -> None:
@@ -197,6 +213,7 @@ class TracingContext:
 # Metrics sink
 # ---------------------------------------------------------------------------
 
+
 class MetricsSink:
     """In-process metrics collector.
 
@@ -243,10 +260,7 @@ class MetricsSink:
         with self._lock:
             return {
                 "counters": dict(self._counters),
-                "histograms": {
-                    key: self.histogram_summary(key)
-                    for key in self._histograms
-                },
+                "histograms": {key: self.histogram_summary(key) for key in self._histograms},
             }
 
     def reset(self) -> None:
@@ -258,6 +272,7 @@ class MetricsSink:
 # ---------------------------------------------------------------------------
 # Event stream exporter
 # ---------------------------------------------------------------------------
+
 
 class EventStreamExporter:
     """Publishes structured events to stdout JSON (default) or an async queue.
@@ -274,11 +289,11 @@ class EventStreamExporter:
         min_level: TraceLevel | str | int = TraceLevel.MINIMAL,
         sample_rate: float = 1.0,
     ) -> None:
-        """
-        Args:
-            sink: a callable(record: dict) or a queue.Queue.  Defaults to
-                  sys.stdout JSON line writer.
-            enabled: set False to silence all exports (e.g. in tests).
+        """Args:
+        sink: a callable(record: dict) or a queue.Queue.  Defaults to
+              sys.stdout JSON line writer.
+        enabled: set False to silence all exports (e.g. in tests).
+
         """
         self._min_level = TraceLevel.parse(min_level)
         self._sample_rate = max(0.0, min(1.0, float(sample_rate)))
@@ -319,7 +334,7 @@ class EventStreamExporter:
                         str(_current_trace_id.get() or ""),
                         str(_current_span_id.get() or ""),
                         str(time.time_ns()),
-                    ]
+                    ],
                 )
                 if not _should_sample(key=sample_key, sample_rate=self._sample_rate):
                     return
@@ -333,7 +348,7 @@ class EventStreamExporter:
         }
         try:
             self._sink(enriched)
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass  # Exporter must never crash the runtime.
 
     @staticmethod
@@ -397,7 +412,10 @@ def configure_exporter(
 # Correlation context (Tier 2 item 9 â€” end-to-end request correlation)
 # ---------------------------------------------------------------------------
 
-_current_correlation_id: ContextVar[str] = ContextVar("_current_correlation_id", default="")
+_current_correlation_id: ContextVar[str] = ContextVar(
+    "_current_correlation_id",
+    default="",
+)
 
 
 class CorrelationContext:
@@ -413,7 +431,7 @@ class CorrelationContext:
     """
 
     @staticmethod
-    def bind(correlation_id: str = "") -> "_CorrelationScope":
+    def bind(correlation_id: str = "") -> _CorrelationScope:
         cid = str(correlation_id or _new_id("corr"))
         return _CorrelationScope(cid)
 
@@ -436,7 +454,7 @@ class _CorrelationScope:
         self._cid = cid
         self._token = None
 
-    def __enter__(self) -> "str":
+    def __enter__(self) -> str:
         self._token = _current_correlation_id.set(self._cid)
         return self._cid
 
@@ -449,11 +467,12 @@ class _CorrelationScope:
 # Structured logger (Tier 2 item 9 â€” structured logs tied to event IDs)
 # ---------------------------------------------------------------------------
 
+
 class LogLevel(str):
-    DEBUG   = "DEBUG"
-    INFO    = "INFO"
+    DEBUG = "DEBUG"
+    INFO = "INFO"
     WARNING = "WARNING"
-    ERROR   = "ERROR"
+    ERROR = "ERROR"
 
 
 class StructuredLogger:
@@ -478,9 +497,9 @@ class StructuredLogger:
         min_level: str = LogLevel.DEBUG,
         enabled: bool = True,
     ) -> None:
-        self._name    = str(name)
+        self._name = str(name)
         self._enabled = bool(enabled)
-        self._lock    = threading.RLock()
+        self._lock = threading.RLock()
         self._records: list[dict[str, Any]] = []
 
         if sink is None:
@@ -494,10 +513,10 @@ class StructuredLogger:
             self._sink = self._stderr_sink
 
         self._LEVELS = {
-            LogLevel.DEBUG:   0,
-            LogLevel.INFO:    1,
+            LogLevel.DEBUG: 0,
+            LogLevel.INFO: 1,
             LogLevel.WARNING: 2,
-            LogLevel.ERROR:   3,
+            LogLevel.ERROR: 3,
         }
         self._min_level_value = self._LEVELS.get(str(min_level), 0)
 
@@ -507,12 +526,12 @@ class StructuredLogger:
         if self._LEVELS.get(level, 0) < self._min_level_value:
             return {}
         record: dict[str, Any] = {
-            "timestamp":      time.time(),
-            "level":          level,
-            "logger":         self._name,
-            "message":        str(message),
-            "trace_id":       _current_trace_id.get() or "",
-            "span_id":        _current_span_id.get() or "",
+            "timestamp": time.time(),
+            "level": level,
+            "logger": self._name,
+            "message": str(message),
+            "trace_id": _current_trace_id.get() or "",
+            "span_id": _current_span_id.get() or "",
             "correlation_id": _current_correlation_id.get() or "",
         }
         record.update(extra)
@@ -520,7 +539,7 @@ class StructuredLogger:
             self._records.append(record)
         try:
             self._sink(record)
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
         return record
 
@@ -550,13 +569,14 @@ class StructuredLogger:
     def _stderr_sink(record: dict[str, Any]) -> None:
         try:
             sys.stderr.write(json.dumps(record, default=str) + "\n")
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
 
 
 # ---------------------------------------------------------------------------
 # Replay debugger (Tier 2 item 9 â€” step through execution timeline)
 # ---------------------------------------------------------------------------
+
 
 class ReplayDebugger:
     """Step through ledger events and inspect state at each point.
@@ -589,10 +609,7 @@ class ReplayDebugger:
         events: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
         """Return a list of {event, state, seq} steps for a single session."""
-        session_events = [
-            e for e in events
-            if str(e.get("session_id") or "") == str(session_id)
-        ]
+        session_events = [e for e in events if str(e.get("session_id") or "") == str(session_id)]
         return list(self.step_through(session_events))
 
     def diff_states(
@@ -614,7 +631,7 @@ class ReplayDebugger:
         if self._reducer is not None:
             try:
                 return self._reducer.reduce(events)
-            except Exception:
+            except Exception:  # noqa: BLE001
                 pass
         # Fallback: aggregate by session_id.
         state: dict[str, Any] = {"sessions": {}}
@@ -623,7 +640,5 @@ class ReplayDebugger:
             if sid:
                 state["sessions"].setdefault(sid, {})
                 if e.get("type") == "JOB_COMPLETED":
-                    state["sessions"][sid]["last_result"] = (
-                        e.get("payload") or {}
-                    ).get("result")
+                    state["sessions"][sid]["last_result"] = (e.get("payload") or {}).get("result")
         return state

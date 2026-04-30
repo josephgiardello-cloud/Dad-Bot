@@ -1,10 +1,10 @@
-﻿import json
+import json
 import logging
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 logging.disable(logging.CRITICAL)
-from tests.stress.phase4_certification_gate import build_bot, Phase4CertificationGate
+from tests.stress.phase4_certification_gate import Phase4CertificationGate, build_bot
 
 with TemporaryDirectory() as tmp:
     bot = build_bot(Path(tmp))

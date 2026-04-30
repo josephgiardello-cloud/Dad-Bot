@@ -28,14 +28,16 @@ def test_ux_score_requires_structured_ux_trace_in_strict_mode():
     engine = ScoringEngine()
     scenario = _Scenario()
 
-    trace = _trace_with_ux({
-        "intent_shift_detected": False,
-        "clarification_requested": False,
-        "repair_event_emitted": False,
-        "user_confusion_detected": True,
-        "replan_triggered": False,
-        "memory_correction_written": False,
-    })
+    trace = _trace_with_ux(
+        {
+            "intent_shift_detected": False,
+            "clarification_requested": False,
+            "repair_event_emitted": False,
+            "user_confusion_detected": True,
+            "replan_triggered": False,
+            "memory_correction_written": False,
+        }
+    )
     score = engine.score(trace, scenario)
 
     assert score.ux is not None
@@ -46,22 +48,26 @@ def test_ux_repair_signals_raise_ux_score():
     engine = ScoringEngine()
     scenario = _Scenario()
 
-    weak = _trace_with_ux({
-        "intent_shift_detected": False,
-        "clarification_requested": False,
-        "repair_event_emitted": False,
-        "user_confusion_detected": True,
-        "replan_triggered": False,
-        "memory_correction_written": False,
-    })
-    strong = _trace_with_ux({
-        "intent_shift_detected": True,
-        "clarification_requested": True,
-        "repair_event_emitted": True,
-        "user_confusion_detected": False,
-        "replan_triggered": True,
-        "memory_correction_written": True,
-    })
+    weak = _trace_with_ux(
+        {
+            "intent_shift_detected": False,
+            "clarification_requested": False,
+            "repair_event_emitted": False,
+            "user_confusion_detected": True,
+            "replan_triggered": False,
+            "memory_correction_written": False,
+        }
+    )
+    strong = _trace_with_ux(
+        {
+            "intent_shift_detected": True,
+            "clarification_requested": True,
+            "repair_event_emitted": True,
+            "user_confusion_detected": False,
+            "replan_triggered": True,
+            "memory_correction_written": True,
+        }
+    )
 
     weak_score = engine.score(weak, scenario)
     strong_score = engine.score(strong, scenario)

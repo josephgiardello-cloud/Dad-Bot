@@ -1,1 +1,1 @@
-﻿"""Runtime decomposition modules."""
+"""Runtime decomposition modules."""

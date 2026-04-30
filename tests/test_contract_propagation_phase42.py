@@ -2,15 +2,11 @@
 
 from __future__ import annotations
 
-import pytest
-
 from dadbot.core.contract_propagation import (
     ContractNode,
     ContractPropagationMap,
-    ContractValidationResult,
     build_dadbot_contract_map,
 )
-
 
 # ---------------------------------------------------------------------------
 # ContractNode / ContractPropagationMap unit tests
@@ -36,24 +32,30 @@ def test_mark_changed_triggers_downstream():
         return []
 
     cmap = ContractPropagationMap()
-    cmap.register(ContractNode(
-        contract_id="a",
-        version="1.0.0",
-        downstream_consumers=["b"],
-    ))
-    cmap.register(ContractNode(
-        contract_id="b",
-        version="1.0.0",
-        upstream_dependencies=["a"],
-        downstream_consumers=["c"],
-        validator_fn=_val_b,
-    ))
-    cmap.register(ContractNode(
-        contract_id="c",
-        version="1.0.0",
-        upstream_dependencies=["b"],
-        validator_fn=_val_c,
-    ))
+    cmap.register(
+        ContractNode(
+            contract_id="a",
+            version="1.0.0",
+            downstream_consumers=["b"],
+        )
+    )
+    cmap.register(
+        ContractNode(
+            contract_id="b",
+            version="1.0.0",
+            upstream_dependencies=["a"],
+            downstream_consumers=["c"],
+            validator_fn=_val_b,
+        )
+    )
+    cmap.register(
+        ContractNode(
+            contract_id="c",
+            version="1.0.0",
+            upstream_dependencies=["b"],
+            validator_fn=_val_c,
+        )
+    )
 
     results = cmap.mark_changed("a")
     # Should visit a, b, c in BFS order
@@ -64,11 +66,13 @@ def test_mark_changed_triggers_downstream():
 
 def test_mark_changed_returns_violations():
     cmap = ContractPropagationMap()
-    cmap.register(ContractNode(
-        contract_id="broken",
-        version="1.0.0",
-        validator_fn=lambda: ["something is wrong"],
-    ))
+    cmap.register(
+        ContractNode(
+            contract_id="broken",
+            version="1.0.0",
+            validator_fn=lambda: ["something is wrong"],
+        )
+    )
     results = cmap.mark_changed("broken")
     assert len(results) == 1
     assert not results[0].valid
@@ -77,11 +81,13 @@ def test_mark_changed_returns_violations():
 
 def test_mark_changed_valid_result():
     cmap = ContractPropagationMap()
-    cmap.register(ContractNode(
-        contract_id="ok",
-        version="1.0.0",
-        validator_fn=lambda: [],
-    ))
+    cmap.register(
+        ContractNode(
+            contract_id="ok",
+            version="1.0.0",
+            validator_fn=lambda: [],
+        )
+    )
     results = cmap.mark_changed("ok")
     assert results[0].valid
 
@@ -101,6 +107,7 @@ def test_mark_changed_no_cycles_visited_once():
         def _fn() -> list[str]:
             visit_counts[name] += 1
             return []
+
         return _fn
 
     cmap.register(ContractNode(contract_id="a", version="1", downstream_consumers=["b", "c"]))
@@ -116,12 +123,14 @@ def test_revalidate_all_topological_order():
     order_observed: list[str] = []
     cmap = ContractPropagationMap()
     for cid in ["c", "a", "b"]:
-        cmap.register(ContractNode(
-            contract_id=cid,
-            version="1",
-            upstream_dependencies={"b": ["a"], "c": ["b"], "a": []}.get(cid, []),
-            validator_fn=lambda _n=cid: order_observed.append(_n) or [],
-        ))
+        cmap.register(
+            ContractNode(
+                contract_id=cid,
+                version="1",
+                upstream_dependencies={"b": ["a"], "c": ["b"], "a": []}.get(cid, []),
+                validator_fn=lambda _n=cid: order_observed.append(_n) or [],
+            )
+        )
 
     cmap.revalidate_all()
     assert order_observed == ["a", "b", "c"]

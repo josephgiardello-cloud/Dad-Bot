@@ -1,4 +1,4 @@
-﻿"""Crash-safe write semantics and transactional write units.
+"""Crash-safe write semantics and transactional write units.
 
 CRC32LineCodec:
   Encodes/decodes JSONL lines with a CRC-32 integrity checksum so that
@@ -15,6 +15,7 @@ FileLockMutex:
   Embeds a fencing token (PID + UUID) so stale locks from crashed processes
   can be detected and evicted.
 """
+
 from __future__ import annotations
 
 import binascii
@@ -27,12 +28,17 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from threading import RLock
-from typing import Any, Callable
+from typing import Any
 
 # Sentinel event types used by AtomicWriteUnit.
 UNIT_BEGIN_TYPE: str = "__UNIT_BEGIN__"
 UNIT_COMMIT_TYPE: str = "__UNIT_COMMIT__"
-DEBUG_LOCKS: bool = str(os.getenv("DADBOT_DEBUG_LOCKS", "0")).strip().lower() in {"1", "true", "yes", "on"}
+DEBUG_LOCKS: bool = str(os.getenv("DADBOT_DEBUG_LOCKS", "0")).strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 logger = logging.getLogger(__name__)
 
 
@@ -45,6 +51,7 @@ def _debug_lock_event(event: str, *, path: Path) -> None:
 # ---------------------------------------------------------------------------
 # CRC-32 line codec
 # ---------------------------------------------------------------------------
+
 
 class CRC32LineCodec:
     """Encode/decode JSONL lines with CRC-32 checksums for corruption detection.
@@ -98,6 +105,7 @@ class CRC32LineCodec:
 # Process-level file lock (cross-process mutual exclusion)
 # ---------------------------------------------------------------------------
 
+
 class FileLockMutex:
     """Process-level mutual exclusion using an OS-level lock file.
 
@@ -141,11 +149,13 @@ class FileLockMutex:
             self._evict_if_stale()
 
             token = uuid.uuid4().hex
-            record = json.dumps({
-                "pid": os.getpid(),
-                "token": token,
-                "acquired_at": time.time(),
-            })
+            record = json.dumps(
+                {
+                    "pid": os.getpid(),
+                    "token": token,
+                    "acquired_at": time.time(),
+                },
+            )
 
             try:
                 fd = os.open(
@@ -164,8 +174,7 @@ class FileLockMutex:
                 time.sleep(0.05)
 
         raise RuntimeError(
-            f"FileLockMutex: could not acquire lock at {self._path} "
-            f"within {timeout_seconds:.1f}s"
+            f"FileLockMutex: could not acquire lock at {self._path} within {timeout_seconds:.1f}s",
         )
 
     def release(self, token: str) -> bool:
@@ -247,16 +256,22 @@ def _pid_is_alive(pid: int) -> bool:
     """
     if sys.platform == "win32":
         import ctypes
+
         PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
         STILL_ACTIVE = 259
         handle = ctypes.windll.kernel32.OpenProcess(
-            PROCESS_QUERY_LIMITED_INFORMATION, False, pid
+            PROCESS_QUERY_LIMITED_INFORMATION,
+            False,
+            pid,
         )
         if not handle:
             return False
         try:
             exit_code = ctypes.c_ulong(0)
-            if ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            if ctypes.windll.kernel32.GetExitCodeProcess(
+                handle,
+                ctypes.byref(exit_code),
+            ):
                 return exit_code.value == STILL_ACTIVE
             return False
         finally:
@@ -271,6 +286,7 @@ def _pid_is_alive(pid: int) -> bool:
 # ---------------------------------------------------------------------------
 # Atomic write unit â€” transactional multi-step ledger operations
 # ---------------------------------------------------------------------------
+
 
 class AtomicWriteUnit:
     """Transactional write boundary spanning ledger + session + checkpoint.
@@ -301,7 +317,7 @@ class AtomicWriteUnit:
         self._session_store = session_store
         self._checkpoint = checkpoint
 
-    def transaction(self) -> "_Transaction":
+    def transaction(self) -> _Transaction:
         return _Transaction(self._writer, self._session_store, self._checkpoint)
 
     @staticmethod
@@ -350,11 +366,12 @@ class _Transaction:
         self._unit_id = uuid.uuid4().hex
         self._committed = False
 
-    def __enter__(self) -> "_Transaction":
+    def __enter__(self) -> _Transaction:
         self._writer.write_event(
             event_type=UNIT_BEGIN_TYPE,
             session_id="__system__",
             kernel_step_id="atomic_write_unit.begin",
+            trace_id=self._unit_id,
             payload={"unit_id": self._unit_id, "ts": time.time()},
         )
         return self
@@ -365,6 +382,7 @@ class _Transaction:
                 event_type=UNIT_COMMIT_TYPE,
                 session_id="__system__",
                 kernel_step_id="atomic_write_unit.commit",
+                trace_id=self._unit_id,
                 payload={"unit_id": self._unit_id, "ts": time.time()},
             )
             self._committed = True
@@ -375,6 +393,9 @@ class _Transaction:
         """Write an event tagged with this transaction's unit_id."""
         payload = dict(kwargs.pop("payload", None) or {})
         payload["_unit_id"] = self._unit_id
+        # Propagate transaction identity as trace lineage when caller omits it.
+        if "trace_id" not in kwargs:
+            kwargs["trace_id"] = self._unit_id
         return self._writer.write_event(**kwargs, payload=payload)
 
     def apply_session(self, session_id: str, mutation: dict[str, Any]) -> None:

@@ -12,8 +12,9 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Fallback contract primitives (Phase 4.1)
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class FallbackRegistration:
@@ -78,8 +80,8 @@ class FallbackRegistry:
     """
 
     def __init__(self) -> None:
-        self._declarations: Dict[str, FallbackRegistration] = {}
-        self._events: List[FallbackEvent] = []
+        self._declarations: dict[str, FallbackRegistration] = {}
+        self._events: list[FallbackEvent] = []
 
     def register(self, registration: FallbackRegistration) -> None:
         """Declare a permissible fallback."""
@@ -107,6 +109,7 @@ class FallbackRegistry:
         ------
         ContractViolationError  when ``strict=True`` and the fallback is
                                 not declared in the registry.
+
         """
         declaration = self._declarations.get(name)
         declared = declaration is not None
@@ -134,15 +137,17 @@ class FallbackRegistry:
 
         logger.debug(
             "[Phase 4.1] Declared fallback used: name=%s source=%s version=%s",
-            name, source, declaration.version,
+            name,
+            source,
+            declaration.version,
         )
         return declaration.fallback_callable
 
-    def audit(self) -> List[FallbackEvent]:
+    def audit(self) -> list[FallbackEvent]:
         """Return a snapshot of all emitted fallback events."""
         return list(self._events)
 
-    def declared_names(self) -> List[str]:
+    def declared_names(self) -> list[str]:
         """Return names of all registered declarations."""
         return list(self._declarations.keys())
 
@@ -153,7 +158,7 @@ class ContractViolationError(RuntimeError):
 
 class MemoryViewAdapter:
     """Adapter between legacy memory view contracts and modern representations.
-    
+
     Ensures backward compatibility when memory store schema changes while
     keeping tests decoupled from internal representation details.
     """
@@ -161,7 +166,7 @@ class MemoryViewAdapter:
     def __init__(self, bot):
         self.bot = bot
 
-    def legacy_to_modern(self, legacy_memory: Dict[str, Any]) -> Dict[str, Any]:
+    def legacy_to_modern(self, legacy_memory: dict[str, Any]) -> dict[str, Any]:
         """Convert legacy memory format to modern format."""
         if not isinstance(legacy_memory, dict):
             return {}
@@ -173,11 +178,13 @@ class MemoryViewAdapter:
             "mood": legacy_memory.get("mood", "neutral"),
             "created_at": legacy_memory.get("created_at", ""),
             "updated_at": legacy_memory.get("updated_at", ""),
-            "importance_score": float(legacy_memory.get("importance_score", 0.0) or 0.0),
+            "importance_score": float(
+                legacy_memory.get("importance_score", 0.0) or 0.0,
+            ),
         }
         return modern
 
-    def modern_to_legacy(self, modern_memory: Dict[str, Any]) -> Dict[str, Any]:
+    def modern_to_legacy(self, modern_memory: dict[str, Any]) -> dict[str, Any]:
         """Convert modern memory format to legacy format for compatibility."""
         if not isinstance(modern_memory, dict):
             return {}
@@ -193,7 +200,10 @@ class MemoryViewAdapter:
         }
         return legacy
 
-    def ensure_memory_stats_present(self, stats: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    def ensure_memory_stats_present(
+        self,
+        stats: dict[str, Any] | None,
+    ) -> dict[str, Any]:
         """Ensure memory stats dict has all required fields with defaults."""
         if not isinstance(stats, dict):
             stats = {}
@@ -214,55 +224,69 @@ class MemoryViewAdapter:
 
 _CONTEXT_BUILDER_FALLBACK_REGISTRY = FallbackRegistry()
 
-_CONTEXT_BUILDER_FALLBACK_REGISTRY.register(FallbackRegistration(
-    name="build_core_persona_prompt",
-    version="1.0.0",
-    fallback_callable=lambda: "core",
-    contract_description="No-op core persona prompt; safe for test stubs.",
-    substituted_signature="build_core_persona_prompt(self) -> str",
-))
-_CONTEXT_BUILDER_FALLBACK_REGISTRY.register(FallbackRegistration(
-    name="build_dynamic_profile_context",
-    version="1.0.0",
-    fallback_callable=lambda: "profile",
-    contract_description="No-op profile context; safe for test stubs.",
-    substituted_signature="build_dynamic_profile_context(self) -> str",
-))
-_CONTEXT_BUILDER_FALLBACK_REGISTRY.register(FallbackRegistration(
-    name="build_relationship_context",
-    version="1.0.0",
-    fallback_callable=lambda: "relationship",
-    contract_description="No-op relationship context; safe for test stubs.",
-    substituted_signature="build_relationship_context(self) -> str",
-))
-_CONTEXT_BUILDER_FALLBACK_REGISTRY.register(FallbackRegistration(
-    name="build_session_summary_context",
-    version="1.0.0",
-    fallback_callable=lambda: "summary",
-    contract_description="No-op session summary; safe for test stubs.",
-    substituted_signature="build_session_summary_context(self) -> str",
-))
-_CONTEXT_BUILDER_FALLBACK_REGISTRY.register(FallbackRegistration(
-    name="build_memory_context",
-    version="1.0.0",
-    fallback_callable=lambda _user_input: "",
-    contract_description="No-op memory context; safe for test stubs.",
-    substituted_signature="build_memory_context(self, user_input: str) -> str",
-))
-_CONTEXT_BUILDER_FALLBACK_REGISTRY.register(FallbackRegistration(
-    name="build_relevant_context",
-    version="1.0.0",
-    fallback_callable=lambda _user_input: "relevant",
-    contract_description="No-op relevant context; safe for test stubs.",
-    substituted_signature="build_relevant_context(self, user_input: str) -> str",
-))
-_CONTEXT_BUILDER_FALLBACK_REGISTRY.register(FallbackRegistration(
-    name="build_cross_session_context",
-    version="1.0.0",
-    fallback_callable=lambda _user_input: "cross-session",
-    contract_description="No-op cross-session context; safe for test stubs.",
-    substituted_signature="build_cross_session_context(self, user_input: str) -> str",
-))
+_CONTEXT_BUILDER_FALLBACK_REGISTRY.register(
+    FallbackRegistration(
+        name="build_core_persona_prompt",
+        version="1.0.0",
+        fallback_callable=lambda: "core",
+        contract_description="No-op core persona prompt; safe for test stubs.",
+        substituted_signature="build_core_persona_prompt(self) -> str",
+    ),
+)
+_CONTEXT_BUILDER_FALLBACK_REGISTRY.register(
+    FallbackRegistration(
+        name="build_dynamic_profile_context",
+        version="1.0.0",
+        fallback_callable=lambda: "profile",
+        contract_description="No-op profile context; safe for test stubs.",
+        substituted_signature="build_dynamic_profile_context(self) -> str",
+    ),
+)
+_CONTEXT_BUILDER_FALLBACK_REGISTRY.register(
+    FallbackRegistration(
+        name="build_relationship_context",
+        version="1.0.0",
+        fallback_callable=lambda: "relationship",
+        contract_description="No-op relationship context; safe for test stubs.",
+        substituted_signature="build_relationship_context(self) -> str",
+    ),
+)
+_CONTEXT_BUILDER_FALLBACK_REGISTRY.register(
+    FallbackRegistration(
+        name="build_session_summary_context",
+        version="1.0.0",
+        fallback_callable=lambda: "summary",
+        contract_description="No-op session summary; safe for test stubs.",
+        substituted_signature="build_session_summary_context(self) -> str",
+    ),
+)
+_CONTEXT_BUILDER_FALLBACK_REGISTRY.register(
+    FallbackRegistration(
+        name="build_memory_context",
+        version="1.0.0",
+        fallback_callable=lambda _user_input: "",
+        contract_description="No-op memory context; safe for test stubs.",
+        substituted_signature="build_memory_context(self, user_input: str) -> str",
+    ),
+)
+_CONTEXT_BUILDER_FALLBACK_REGISTRY.register(
+    FallbackRegistration(
+        name="build_relevant_context",
+        version="1.0.0",
+        fallback_callable=lambda _user_input: "relevant",
+        contract_description="No-op relevant context; safe for test stubs.",
+        substituted_signature="build_relevant_context(self, user_input: str) -> str",
+    ),
+)
+_CONTEXT_BUILDER_FALLBACK_REGISTRY.register(
+    FallbackRegistration(
+        name="build_cross_session_context",
+        version="1.0.0",
+        fallback_callable=lambda _user_input: "cross-session",
+        contract_description="No-op cross-session context; safe for test stubs.",
+        substituted_signature="build_cross_session_context(self, user_input: str) -> str",
+    ),
+)
 
 
 def _strict_mode() -> bool:
@@ -283,7 +307,7 @@ class ContextSchemaAdapter:
         self.bot = bot
         self._registry = fallback_registry or _CONTEXT_BUILDER_FALLBACK_REGISTRY
 
-    def safe_get_bot_context_builder(self, context_builder: Any) -> Optional[Any]:
+    def safe_get_bot_context_builder(self, context_builder: Any) -> Any | None:
         """Safely retrieve bot from context builder, handling missing attributes."""
         if context_builder is None:
             return None
@@ -291,7 +315,10 @@ class ContextSchemaAdapter:
         bot = getattr(context_builder, "bot", None)
         return bot
 
-    def ensure_context_builder_methods(self, context_builder: Any) -> List[FallbackEvent]:
+    def ensure_context_builder_methods(
+        self,
+        context_builder: Any,
+    ) -> list[FallbackEvent]:
         """Ensure context builder has all required methods via the fallback registry.
 
         Returns the list of ``FallbackEvent`` records for every method that was
@@ -304,6 +331,7 @@ class ContextSchemaAdapter:
             has no declared fallback (should never happen with a fully populated
             registry, but guards against future method additions without a
             corresponding registration).
+
         """
         if context_builder is None:
             return []
@@ -318,7 +346,7 @@ class ContextSchemaAdapter:
             "build_cross_session_context",
         ]
 
-        events: List[FallbackEvent] = []
+        events: list[FallbackEvent] = []
         strict = _strict_mode()
         events_before = len(self._registry.audit())
 
@@ -327,8 +355,7 @@ class ContextSchemaAdapter:
                 substitute = self._registry.use(
                     method_name,
                     source="ContextSchemaAdapter",
-                    reason=f"'{method_name}' absent on context_builder type "
-                           f"'{type(context_builder).__name__}'",
+                    reason=f"'{method_name}' absent on context_builder type '{type(context_builder).__name__}'",
                     strict=strict,
                 )
                 setattr(context_builder, method_name, substitute)
@@ -339,7 +366,10 @@ class ContextSchemaAdapter:
         return events
 
     def safe_build_memory_context(
-        self, context_builder: Any, user_input: str, fallback: str | None = None
+        self,
+        context_builder: Any,
+        user_input: str,
+        fallback: str | None = None,
     ) -> str | None:
         """Safely call build_memory_context with a declared fallback on error.
 
@@ -348,7 +378,10 @@ class ContextSchemaAdapter:
         The ``fallback`` value is returned as before, but the failure is now
         traceable.
         """
-        if context_builder is None or not hasattr(context_builder, "build_memory_context"):
+        if context_builder is None or not hasattr(
+            context_builder,
+            "build_memory_context",
+        ):
             # Attribute absence is the declared "build_memory_context" fallback.
             self._registry.use(
                 "build_memory_context",
@@ -360,12 +393,12 @@ class ContextSchemaAdapter:
 
         try:
             result = context_builder.build_memory_context(str(user_input or ""))
-            return result if result else fallback
-        except Exception as exc:
+            return result or fallback
+        except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "[Phase 4.1] build_memory_context raised; applying declared fallback. "
-                "error=%s context_builder_type=%s",
-                exc, type(context_builder).__name__,
+                "[Phase 4.1] build_memory_context raised; applying declared fallback. error=%s context_builder_type=%s",
+                exc,
+                type(context_builder).__name__,
             )
             self._registry.use(
                 "build_memory_context",
@@ -375,21 +408,21 @@ class ContextSchemaAdapter:
             )
             return fallback
 
-    def fallback_audit(self) -> List[FallbackEvent]:
+    def fallback_audit(self) -> list[FallbackEvent]:
         """Return all fallback events emitted through this adapter's registry."""
         return self._registry.audit()
 
 
 class RelationshipWriteBridge:
     """Bridge between queued and immediate relationship history writes.
-    
+
     Allows test/debug code to force immediate writes while production
     code can batch them if needed.
     """
 
     def __init__(self, bot):
         self.bot = bot
-        self.write_queue: List[Dict[str, Any]] = []
+        self.write_queue: list[dict[str, Any]] = []
         self.immediate_mode = False
 
     def set_immediate_write_mode(self, enabled: bool) -> None:
@@ -403,7 +436,7 @@ class RelationshipWriteBridge:
         openness_level: float,
         source: str = "turn",
         force_immediate: bool = False,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Record a relationship history point with optional queuing."""
         point = {
             "recorded_at": self.bot.runtime_timestamp() if hasattr(self.bot, "runtime_timestamp") else "",
@@ -432,15 +465,21 @@ class RelationshipWriteBridge:
         self.write_queue.clear()
         return count
 
-    def _apply_relationship_write(self, point: Dict[str, Any]) -> None:
+    def _apply_relationship_write(self, point: dict[str, Any]) -> None:
         """Apply a single relationship point to memory store."""
         try:
             history = list(self.bot.memory.relationship_history(limit=180)) if hasattr(self.bot, "memory") else []
             history.append(point)
-            
-            if hasattr(self.bot, "memory") and hasattr(self.bot.memory, "mutate_memory_store"):
-                self.bot.memory.mutate_memory_store(relationship_history=history[-180:], save=True)
-        except Exception as exc:
+
+            if hasattr(self.bot, "memory") and hasattr(
+                self.bot.memory,
+                "mutate_memory_store",
+            ):
+                self.bot.memory.mutate_memory_store(
+                    relationship_history=history[-180:],
+                    save=True,
+                )
+        except Exception as exc:  # noqa: BLE001
             logger.error(f"Failed to write relationship point: {exc}")
 
 
@@ -455,7 +494,7 @@ class ContractAdapterRegistry:
         # strict_fallback=None → defers to _strict_mode() env check
         self._strict_fallback = strict_fallback
 
-    def validate_contracts(self, raise_on_failure: bool = False) -> Dict[str, bool]:
+    def validate_contracts(self, raise_on_failure: bool = False) -> dict[str, bool]:
         """Validate all contracts are properly implemented.
 
         Returns dict of contract_name -> is_valid.
@@ -472,7 +511,7 @@ class ContractAdapterRegistry:
 
         return results
 
-    def audit_fallback_usage(self) -> List[FallbackEvent]:
+    def audit_fallback_usage(self) -> list[FallbackEvent]:
         """Return all fallback events emitted across all adapters in this registry."""
         return self.context_schema.fallback_audit()
 
@@ -482,7 +521,7 @@ class ContractAdapterRegistry:
             test_legacy = {"summary": "test", "category": "general"}
             modern = self.memory_view.legacy_to_modern(test_legacy)
             return bool(modern.get("summary") == "test")
-        except Exception:
+        except Exception:  # noqa: BLE001
             return False
 
     def _validate_context_schema(self) -> bool:
@@ -490,7 +529,7 @@ class ContractAdapterRegistry:
         try:
             # Just verify methods are callable
             return callable(self.context_schema.safe_get_bot_context_builder)
-        except Exception:
+        except Exception:  # noqa: BLE001
             return False
 
     def _validate_relationship_writes(self) -> bool:
@@ -498,5 +537,5 @@ class ContractAdapterRegistry:
         try:
             self.relationship_writes.set_immediate_write_mode(True)
             return self.relationship_writes.immediate_mode is True
-        except Exception:
+        except Exception:  # noqa: BLE001
             return False

@@ -7,12 +7,12 @@ Extracted from DadBot to reduce the god-class surface. Contains:
 - shutdown / proactive-heartbeat loop
 - Ollama error helpers and default_planner_debug_state static utility
 """
+
 from __future__ import annotations
 
 import atexit
 import json
 import os
-import time
 import uuid
 from collections import deque
 from pathlib import Path
@@ -24,9 +24,9 @@ try:
 except ImportError:  # pragma: no cover
     ollama = None  # type: ignore[assignment]
 
+from dadbot.core.facade_compat import DadBotFacadeCompat
 from dadbot.defaults import default_planner_debug_state as _default_planner_debug_state
 from dadbot.utils import env_truthy, json_dump, json_load
-from dadbot.core.facade_compat import DadBotFacadeCompat
 
 
 class DadBotLifecycleState:
@@ -35,6 +35,7 @@ class DadBotLifecycleState:
     States advance monotonically through the boot sequence; SHUTDOWN is
     terminal.  Introspect via ``bot.lifecycle_state``.
     """
+
     UNINITIALIZED: str = "uninitialized"
     CONFIG: str = "config"
     PATHS: str = "paths"
@@ -105,18 +106,14 @@ class DadBotBootMixin:
                 payload = json_load(f)
             if isinstance(payload, dict) and payload:
                 return payload
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
         # Deterministic bootstrap fallback for clean/test environments.
         return json.loads(json.dumps(DadBotBootMixin._EMBEDDED_DEFAULT_PROFILE))
 
     @classmethod
     def initialize_profile_file(cls, profile_path=None, force: bool = False) -> bool:
-        destination = (
-            Path(profile_path)
-            if profile_path is not None
-            else cls.runtime_root_path() / "dad_profile.json"
-        )
+        destination = Path(profile_path) if profile_path is not None else cls.runtime_root_path() / "dad_profile.json"
         if destination.exists() and not force:
             return False
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -150,7 +147,10 @@ class DadBotBootMixin:
     def _resolve_runtime_state_bundle(self) -> dict:
         from dadbot_system.state import AppStateContainer
 
-        bundle = self._resolve_dependency("runtime_state_bundle", self._build_runtime_state_bundle)
+        bundle = self._resolve_dependency(
+            "runtime_state_bundle",
+            self._build_runtime_state_bundle,
+        )
         if isinstance(bundle, AppStateContainer):
             return {
                 "store": None,
@@ -158,10 +158,14 @@ class DadBotBootMixin:
                 "container": bundle,
             }
         if not isinstance(bundle, dict):
-            raise RuntimeError("runtime_state_bundle dependency must be a dict or AppStateContainer")
+            raise RuntimeError(
+                "runtime_state_bundle dependency must be a dict or AppStateContainer",
+            )
         container = bundle.get("container")
         if not isinstance(container, AppStateContainer):
-            raise RuntimeError("runtime_state_bundle must provide an AppStateContainer via 'container'")
+            raise RuntimeError(
+                "runtime_state_bundle must provide an AppStateContainer via 'container'",
+            )
         return {
             "store": bundle.get("store"),
             "event_bus": bundle.get("event_bus"),
@@ -203,14 +207,11 @@ class DadBotBootMixin:
         self._lifecycle_state = DadBotLifecycleState.PATHS
 
     def _initialize_document_store(self, document_store: Any) -> None:
+        from dadbot.app_runtime import build_customer_document_store
         from dadbot_system import NamespacedStateStore
 
-        from dadbot.app_runtime import build_customer_document_store
-
         self._customer_state_store = (
-            document_store
-            if document_store is not None
-            else build_customer_document_store(self._service_config)
+            document_store if document_store is not None else build_customer_document_store(self._service_config)
         )
         self._tenant_document_store = None
         if self._customer_state_store is not None:
@@ -230,9 +231,9 @@ class DadBotBootMixin:
         from dadbot.runtime.mcp import LocalMcpServerController
 
         invariance = importlib.import_module("dadbot.core.invariance_contract")
-        build_boundary_compliance = getattr(invariance, "build_boundary_compliance")
-        get_evaluation_contract = getattr(invariance, "get_evaluation_contract")
-        serialize_boundary_declarations = getattr(invariance, "serialize_boundary_declarations")
+        build_boundary_compliance = invariance.build_boundary_compliance
+        get_evaluation_contract = invariance.get_evaluation_contract
+        serialize_boundary_declarations = invariance.serialize_boundary_declarations
 
         self.bot_context = DadBotContext.from_runtime(self)
         self.context = self.bot_context
@@ -242,13 +243,17 @@ class DadBotBootMixin:
         }
         self.contract_compliance = {
             "evaluation_contract": self.evaluation_contract.model_dump(mode="json"),
-            "boundary_contracts": serialize_boundary_declarations(self._boundary_contracts),
+            "boundary_contracts": serialize_boundary_declarations(
+                self._boundary_contracts,
+            ),
         }
         self.services = DadBotServiceContainer(self)
 
         # Bootstrap managers required before profile/memory hydration.
         self.services.wire_bootstrap()
-        self.services.registry.declare_boundary_compliance(self._boundary_contracts["boot"])
+        self.services.registry.declare_boundary_compliance(
+            self._boundary_contracts["boot"],
+        )
 
         # Placeholder until _hydrate_profile_and_memory wires the real adapter.
         self._model_port: Any | None = None
@@ -263,9 +268,7 @@ class DadBotBootMixin:
 
         self.profile_runtime.load_profile()
         profile_llm = (
-            self.profile_runtime.profile.get("llm", {})
-            if isinstance(self.profile_runtime.profile, dict)
-            else {}
+            self.profile_runtime.profile.get("llm", {}) if isinstance(self.profile_runtime.profile, dict) else {}
         )
         if isinstance(profile_llm, dict):
             self.config.apply_profile_llm_settings(
@@ -275,7 +278,9 @@ class DadBotBootMixin:
         self.memory.load_memory_store()
         self.profile_runtime.refresh_profile_runtime()
         self.services.wire_runtime()
-        self.services.registry.declare_boundary_compliance(self._boundary_contracts["boot"])
+        self.services.registry.declare_boundary_compliance(
+            self._boundary_contracts["boot"],
+        )
         self.service_registry = self.services.registry
 
         # Wire the deterministic model-interaction port now that runtime is ready.
@@ -303,7 +308,10 @@ class DadBotBootMixin:
         self._session_lock = RLock()
         self._graph_refresh_lock = RLock()
         self._turn_execution_lock = RLock()
-        self.background_tasks = BackgroundTaskManager(max_workers=12, thread_name_prefix="dadbot-bg")
+        self.background_tasks = BackgroundTaskManager(
+            max_workers=12,
+            thread_name_prefix="dadbot-bg",
+        )
         self._semantic_index_lock = RLock()
         self._semantic_index_future = None
         self._pending_semantic_index_memories = None
@@ -317,7 +325,9 @@ class DadBotBootMixin:
         self._proactive_heartbeat_interval_seconds = self.config.proactive_heartbeat_interval_seconds
         self._cached_runtime_health_snapshot = None
         self._last_runtime_health_snapshot_monotonic = 0.0
-        self._internal_runtime = DadBotInternalRuntime(context_token_budget=self.CONTEXT_TOKEN_BUDGET)
+        self._internal_runtime = DadBotInternalRuntime(
+            context_token_budget=self.CONTEXT_TOKEN_BUDGET,
+        )
         self._lifecycle_state = DadBotLifecycleState.CACHES
 
     def _initialize_turn_orchestration(self) -> None:
@@ -328,7 +338,10 @@ class DadBotBootMixin:
         self._lifecycle_state = DadBotLifecycleState.ORCHESTRATION
 
     def _start_boot_background_tasks(self) -> None:
-        disable_graph_init_task = env_truthy("DADBOT_DISABLE_GRAPH_INIT_TASK", default=False)
+        disable_graph_init_task = env_truthy(
+            "DADBOT_DISABLE_GRAPH_INIT_TASK",
+            default=False,
+        )
         if self.should_start_background_tasks():
             if not disable_graph_init_task:
                 self.background_tasks.submit(
@@ -352,7 +365,13 @@ class DadBotBootMixin:
     def __init__(
         self,
         model_name: str = "llama3.2",
-        fallback_models: tuple[str, ...] = ("phi4:mini", "qwen3.5:4b", "gemma3:4b", "gemma2:2b", "llama3.2:1b"),
+        fallback_models: tuple[str, ...] = (
+            "phi4:mini",
+            "qwen3.5:4b",
+            "gemma3:4b",
+            "gemma2:2b",
+            "llama3.2:1b",
+        ),
         *,
         append_signoff: bool = True,
         light_mode: bool = False,
@@ -361,7 +380,9 @@ class DadBotBootMixin:
         dependency_registry: Any = None,
     ) -> None:
         self._dependency_registry = dependency_registry
-        self._facade_compat = DadBotFacadeCompat(self.__class__._DEPRECATED_FACADE_ALIASES)
+        self._facade_compat = DadBotFacadeCompat(
+            self.__class__._DEPRECATED_FACADE_ALIASES,
+        )
         self._lifecycle_state = DadBotLifecycleState.UNINITIALIZED
         self._initialize_config(
             model_name=model_name,
@@ -376,7 +397,9 @@ class DadBotBootMixin:
         self._hydrate_profile_and_memory()
         self._initialize_runtime_caches()
         self._initialize_turn_orchestration()
-        self._validate_managers(smoke=env_truthy("DADBOT_VALIDATE_MANAGERS_SMOKE", default=False))
+        self._validate_managers(
+            smoke=env_truthy("DADBOT_VALIDATE_MANAGERS_SMOKE", default=False),
+        )
         atexit.register(self.shutdown)
         self.reset_session_state()
         self._start_boot_background_tasks()
@@ -400,12 +423,12 @@ class DadBotBootMixin:
         state = self.lifecycle_state
         if state == DadBotLifecycleState.SHUTDOWN:
             raise RuntimeError(
-                "DadBot has been shut down and cannot process new requests."
+                "DadBot has been shut down and cannot process new requests.",
             )
         if state != DadBotLifecycleState.READY:
             raise RuntimeError(
                 f"DadBot is not ready yet (current lifecycle state: {state!r}). "
-                "Wait until boot completes before sending messages."
+                "Wait until boot completes before sending messages.",
             )
 
     def should_start_background_tasks(self) -> bool:
@@ -427,10 +450,12 @@ class DadBotBootMixin:
             if callable(save_memory_store):
                 try:
                     save_memory_store()
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001
                     import logging
+
                     logging.getLogger(__name__).info(
-                        "Final memory store flush during shutdown failed: %s", exc
+                        "Final memory store flush during shutdown failed: %s",
+                        exc,
                     )
 
     def _run_proactive_heartbeat_loop(self) -> None:
@@ -440,16 +465,24 @@ class DadBotBootMixin:
         )
         try:
             self.maintenance_scheduler.run_proactive_heartbeat()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             import logging
-            logging.getLogger(__name__).info("Proactive heartbeat startup tick failed: %s", exc)
+
+            logging.getLogger(__name__).info(
+                "Proactive heartbeat startup tick failed: %s",
+                exc,
+            )
 
         while not self.background_tasks.wait_for_shutdown(interval_seconds):
             try:
                 self.maintenance_scheduler.run_proactive_heartbeat()
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 import logging
-                logging.getLogger(__name__).info("Proactive heartbeat tick failed: %s", exc)
+
+                logging.getLogger(__name__).info(
+                    "Proactive heartbeat tick failed: %s",
+                    exc,
+                )
 
     # ------------------------------------------------------------------
     # Ollama and model utilities (static)
@@ -480,7 +513,7 @@ class DadBotBootMixin:
         if error_text:
             details.append(str(error_text)[:120])
         summary = "; ".join(details)
-        return summary if summary else type(exc).__name__
+        return summary or type(exc).__name__
 
     @staticmethod
     def default_planner_debug_state():

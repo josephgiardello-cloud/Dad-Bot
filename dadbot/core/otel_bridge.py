@@ -5,6 +5,7 @@ Design goal: non-invasive adapter layer.
 - Wraps existing observability sinks and forwards data to OTel when available.
 - Falls back gracefully if opentelemetry is not installed.
 """
+
 from __future__ import annotations
 
 import logging
@@ -60,7 +61,7 @@ class OpenTelemetryEventExporter(EventStreamExporter):
             return
         try:
             self._event_emitter.emit(dict(record))
-        except Exception:
+        except Exception:  # noqa: BLE001
             logger.debug("OpenTelemetry event emission failed", exc_info=True)
 
 
@@ -69,10 +70,11 @@ def install_otel_bridge() -> dict[str, Any]:
 
     Returns:
         dict with installation status and reason for diagnostics.
+
     """
     try:
         from opentelemetry import metrics as otel_metrics
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         return {"installed": False, "reason": f"opentelemetry unavailable: {exc}"}
 
     try:
@@ -82,5 +84,5 @@ def install_otel_bridge() -> dict[str, Any]:
         obs._global_metrics = OpenTelemetryMetricsSink(meter=meter)  # type: ignore[attr-defined]
         obs.configure_exporter(enabled=True)
         return {"installed": True, "reason": "ok"}
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         return {"installed": False, "reason": f"install failed: {exc}"}

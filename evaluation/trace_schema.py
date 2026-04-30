@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
 @dataclass
@@ -24,7 +24,7 @@ class UXTrace:
     memory_correction_written: bool
 
     @classmethod
-    def from_state(cls, state: Dict[str, Any]) -> "UXTrace":
+    def from_state(cls, state: dict[str, Any]) -> UXTrace:
         payload = dict(state.get("ux_trace") or state.get("ux_feedback") or {})
         return cls(
             intent_shift_detected=bool(payload.get("intent_shift_detected", False)),
@@ -41,11 +41,11 @@ class PlannerCausalTrace:
     """Planner causality fields required for strict evaluation."""
 
     planner_replan_reason: str = ""
-    intent_delta_vector: List[str] = field(default_factory=list)
-    dependency_graph_diff: List[str] = field(default_factory=list)
+    intent_delta_vector: list[str] = field(default_factory=list)
+    dependency_graph_diff: list[str] = field(default_factory=list)
 
     @classmethod
-    def from_state(cls, state: Dict[str, Any]) -> "PlannerCausalTrace":
+    def from_state(cls, state: dict[str, Any]) -> PlannerCausalTrace:
         payload = dict(state.get("planner_causal_trace") or {})
         return cls(
             planner_replan_reason=str(payload.get("planner_replan_reason") or "").strip(),
@@ -65,7 +65,7 @@ class MemoryCausalTrace:
     overridden: bool = False
 
     @classmethod
-    def from_state(cls, state: Dict[str, Any]) -> "MemoryCausalTrace":
+    def from_state(cls, state: dict[str, Any]) -> MemoryCausalTrace:
         payload = dict(state.get("memory_causal_trace") or {})
         return cls(
             trigger=str(payload.get("trigger") or "").strip(),
@@ -99,7 +99,7 @@ class CrossSubsystemCoherenceScore:
     """Global consistency indicator across subsystem traces."""
 
     score: float
-    penalties: List[str] = field(default_factory=list)
+    penalties: list[str] = field(default_factory=list)
 
     @property
     def coherent(self) -> bool:

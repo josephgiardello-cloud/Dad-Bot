@@ -15,15 +15,14 @@ from typing import Any
 
 import pytest
 
-from dadbot.core.graph import MutationGuard, MutationIntent, MutationKind, TurnContext
+from dadbot.core.graph import MutationGuard, MutationIntent, MutationKind, TurnContext, TurnTemporalAxis
 from dadbot.core.nodes import (
+    _MAX_DELEGATION_SUBTASKS,
     InferenceNode,
     SaveNode,
-    _MAX_DELEGATION_SUBTASKS,
     _dispatch_builtin_tool,
 )
 from dadbot.core.orchestrator import DadBotOrchestrator
-from dadbot.core.graph import TurnTemporalAxis
 
 
 @pytest.fixture
@@ -36,7 +35,7 @@ def _fast_stubs(orchestrator: DadBotOrchestrator, monkeypatch):
     service = orchestrator.registry.get("agent_service")
 
     async def _agent(context: TurnContext, _rich: dict[str, Any]) -> tuple[str, bool]:
-        return (f"ok::{str(context.user_input or '')}", False)
+        return (f"ok::{context.user_input or ''!s}", False)
 
     monkeypatch.setattr(service, "run_agent", _agent)
 
@@ -103,7 +102,7 @@ def test_determinism_delegation_mode_equivalent_output(orchestrator: DadBotOrche
                 ),
                 False,
             )
-        return (f"res::{context.metadata.get('agent_name','')}::{context.user_input}", False)
+        return (f"res::{context.metadata.get('agent_name', '')}::{context.user_input}", False)
 
     monkeypatch.setattr(service, "run_agent", _agent)
 
@@ -139,7 +138,7 @@ def test_deterministic_arbitration_resolution_stable(orchestrator: DadBotOrchest
                 ),
                 False,
             )
-        return (f"done::{context.metadata.get('agent_name','')}", False)
+        return (f"done::{context.metadata.get('agent_name', '')}", False)
 
     monkeypatch.setattr(service, "run_agent", _agent)
 

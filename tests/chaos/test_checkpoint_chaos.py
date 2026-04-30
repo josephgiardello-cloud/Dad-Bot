@@ -1,7 +1,13 @@
 """Chaos — checkpoint tamper detection and partial crash simulation."""
+
 from __future__ import annotations
 
 import pytest
+from harness.deterministic_seeds import CHAOS_BASE, CHECKPOINT
+from harness.graph_runner import GraphRunner
+from harness.invariant_checker import InvariantChecker, InvariantViolation
+from harness.kernel_mock import MockPersistenceService, MockRegistry
+from harness.turn_factory import TurnFactory
 
 from dadbot.core.graph import (
     ContextBuilderNode,
@@ -13,11 +19,6 @@ from dadbot.core.graph import (
     TemporalNode,
     TurnGraph,
 )
-from harness.deterministic_seeds import CHAOS_BASE, CHECKPOINT
-from harness.graph_runner import GraphRunner
-from harness.invariant_checker import InvariantChecker, InvariantViolation
-from harness.kernel_mock import MockRegistry, MockPersistenceService
-from harness.turn_factory import TurnFactory
 
 
 def _build_canonical(registry: MockRegistry) -> TurnGraph:
@@ -57,6 +58,7 @@ class TestCheckpointTamperDetection:
     def test_empty_checkpoint_hash_passes_if_no_checkpoints(self):
         """An empty hash is allowed when no checkpoints were ever emitted."""
         from dadbot.core.graph import TurnContext
+
         ctx = TurnContext(user_input="no checkpoints")
         # No checkpoints recorded, so empty hash should not raise
         InvariantChecker()._check_checkpoint_integrity(ctx)
@@ -100,6 +102,7 @@ class TestPartialCrashSimulation:
         def _patched_get(key, default=None):
             if key == "maintenance_service":
                 from types import SimpleNamespace
+
                 return SimpleNamespace(tick=lambda ctx: {"status": "error", "ticks": 0})
             return original_get(key, default)
 
@@ -119,8 +122,10 @@ class TestPartialCrashSimulation:
         def _patched_get(key, default=None):
             if key == "reflection":
                 from types import SimpleNamespace
+
                 def _reflect_that_throws(*args, **kw):
                     raise RuntimeError("reflection exploded")
+
                 return SimpleNamespace(reflect_after_turn=_reflect_that_throws)
             return original_get(key, default)
 

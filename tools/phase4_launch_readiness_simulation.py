@@ -179,15 +179,12 @@ def graph_invariants(snapshot: dict[str, Any]) -> dict[str, Any]:
     orphan_edges = [
         edge
         for edge in edges
-        if str(edge.get("source_key") or "") not in node_keys
-        or str(edge.get("target_key") or "") not in node_keys
+        if str(edge.get("source_key") or "") not in node_keys or str(edge.get("target_key") or "") not in node_keys
     ]
 
     updated_at = str(snapshot.get("updated_at") or "")
     invalid_visible = [
-        edge
-        for edge in edges
-        if edge.get("valid_until") is not None and str(edge.get("valid_until")) <= updated_at
+        edge for edge in edges if edge.get("valid_until") is not None and str(edge.get("valid_until")) <= updated_at
     ]
 
     temporal_window_inversions = [
@@ -295,8 +292,12 @@ def run_simulation() -> dict[str, Any]:
             graph_snapshots.append(graph_invariants(bot.memory.memory_graph_snapshot()))
 
     orphan_edge_max = max((int(item.get("orphan_edge_count", 0) or 0) for item in graph_snapshots), default=0)
-    invalid_visible_max = max((int(item.get("invalid_visible_edge_count", 0) or 0) for item in graph_snapshots), default=0)
-    temporal_inversion_max = max((int(item.get("temporal_window_inversion_count", 0) or 0) for item in graph_snapshots), default=0)
+    invalid_visible_max = max(
+        (int(item.get("invalid_visible_edge_count", 0) or 0) for item in graph_snapshots), default=0
+    )
+    temporal_inversion_max = max(
+        (int(item.get("temporal_window_inversion_count", 0) or 0) for item in graph_snapshots), default=0
+    )
 
     final_graph = graph_snapshots[-1] if graph_snapshots else {}
     final_status_counts: dict[str, int] = {}
@@ -379,16 +380,14 @@ def run_simulation() -> dict[str, Any]:
             "temporal_correctness": {
                 "passed": temporal_pass,
                 "temporal_window_inversion_max": temporal_inversion_max,
-                "fallback_used_any": any(bool((row.get("turn_health") or {}).get("fallback_used", False)) for row in turn_results),
+                "fallback_used_any": any(
+                    bool((row.get("turn_health") or {}).get("fallback_used", False)) for row in turn_results
+                ),
             },
         },
         "launch_readiness": {
             "eligible": launch_ready,
-            "declaration": (
-                "Launch-ready for real-world interactive testing"
-                if launch_ready
-                else "NOT ELIGIBLE"
-            ),
+            "declaration": ("Launch-ready for real-world interactive testing" if launch_ready else "NOT ELIGIBLE"),
             "definition": "A user can talk to it for a full session without the system breaking its cognitive model.",
         },
     }
@@ -402,7 +401,7 @@ def run_simulation() -> dict[str, Any]:
 
 def main() -> int:
     report = run_simulation()
-    launch_ready = bool(((report.get("launch_readiness") or {}).get("eligible", False)))
+    launch_ready = bool((report.get("launch_readiness") or {}).get("eligible", False))
     print(f"WROTE: {REPORT_PATH.name}")
     print(f"LAUNCH_READY={launch_ready}")
     return 0 if launch_ready else 1

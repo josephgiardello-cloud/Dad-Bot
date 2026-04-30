@@ -1,16 +1,16 @@
-﻿"""Shared UI utility helpers â€” no dependency on dad_streamlit."""
+"""Shared UI utility helpers â€” no dependency on dad_streamlit."""
 
 from __future__ import annotations
 
 import streamlit as st
 
 __all__ = [
-    "maybe_fragment",
     "ambient_fragment",
+    "enabled_label",
     "filter_memory_entries",
+    "maybe_fragment",
     "option_index",
     "titleize_token",
-    "enabled_label",
 ]
 
 
@@ -22,7 +22,7 @@ def maybe_fragment(func):
     return func
 
 
-def ambient_fragment(run_every: int | float = 2):
+def ambient_fragment(run_every: float = 2):
     """Decorator factory that creates a self-refreshing fragment.
 
     ``@ambient_fragment(run_every=2)`` reruns the decorated function every
@@ -30,6 +30,7 @@ def ambient_fragment(run_every: int | float = 2):
     plain ``@maybe_fragment`` if ``st.fragment`` does not accept that kwarg
     (Streamlit < 1.37).
     """
+
     def decorator(func):
         fragment_fn = getattr(st, "fragment", None)
         if callable(fragment_fn):
@@ -39,33 +40,34 @@ def ambient_fragment(run_every: int | float = 2):
                 # Streamlit version doesn't support run_every
                 return fragment_fn(func)
         return func
+
     return decorator
 
 
 @st.cache_data(show_spinner=False, ttl=90)
-def filter_memory_entries(all_memories: list[dict], search: str, category: str) -> list[dict]:
+def filter_memory_entries(
+    all_memories: list[dict],
+    search: str,
+    category: str,
+) -> list[dict]:
     filtered = list(all_memories or [])
     search_text = str(search or "").strip().lower()
     category_text = str(category or "all").strip().lower()
 
     if search_text:
-        filtered = [
-            entry
-            for entry in filtered
-            if search_text in str(entry.get("summary") or "").lower()
-        ]
+        filtered = [entry for entry in filtered if search_text in str(entry.get("summary") or "").lower()]
     if category_text and category_text != "all":
         filtered = [
-            entry
-            for entry in filtered
-            if str(entry.get("category") or "general").strip().lower() == category_text
+            entry for entry in filtered if str(entry.get("category") or "general").strip().lower() == category_text
         ]
 
     filtered.sort(
         key=lambda entry: (
             not bool(entry.get("pinned")),
-            -float(entry.get("importance_score") or entry.get("importance", 0.5) or 0.5),
-        )
+            -float(
+                entry.get("importance_score") or entry.get("importance", 0.5) or 0.5,
+            ),
+        ),
     )
     return filtered
 

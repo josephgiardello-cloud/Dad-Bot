@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-
 SignalCategory = str
 
 
@@ -14,7 +13,7 @@ class RepoSignal:
     score: float
     metadata: dict[str, Any] = field(default_factory=dict)
 
-    def normalized(self) -> "RepoSignal":
+    def normalized(self) -> RepoSignal:
         clamped = max(0.0, min(1.0, float(self.score)))
         return RepoSignal(
             subsystem=self.subsystem,
@@ -57,7 +56,7 @@ class RepoSignalBus:
                     "metadata": s.metadata,
                 }
                 for s in self.signals
-            ]
+            ],
         }
 
 

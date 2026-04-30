@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
@@ -37,27 +37,36 @@ class UIRuntimeAPI:
         normalized_thread_id = str(thread_id or "default").strip() or "default"
         with self._bot._session_lock:
             self._bot.ensure_chat_thread_state(preserve_active_runtime=True)
-            snapshot = self._bot.normalize_thread_snapshot(self._bot.thread_snapshots.get(normalized_thread_id))
+            snapshot = self._bot.normalize_thread_snapshot(
+                self._bot.thread_snapshots.get(normalized_thread_id),
+            )
             snapshot["history"] = [dict(item) for item in list(messages or []) if isinstance(item, dict)]
             self._bot.thread_snapshots[normalized_thread_id] = snapshot
             if normalized_thread_id == self._bot.active_thread_id:
                 self._bot.apply_thread_snapshot_unlocked(snapshot)
             self._bot.sync_active_thread_snapshot()
 
-    def snapshot_thread_messages(self, thread_id: str, *, default_greeting: str = "") -> list[dict]:
+    def snapshot_thread_messages(
+        self,
+        thread_id: str,
+        *,
+        default_greeting: str = "",
+    ) -> list[dict]:
         normalized_thread_id = str(thread_id or "default").strip() or "default"
         with self._bot._session_lock:
             self._bot.ensure_chat_thread_state(preserve_active_runtime=True)
-            snapshot = self._bot.normalize_thread_snapshot(self._bot.thread_snapshots.get(normalized_thread_id))
+            snapshot = self._bot.normalize_thread_snapshot(
+                self._bot.thread_snapshots.get(normalized_thread_id),
+            )
             history = [dict(item) for item in list(snapshot.get("history") or []) if isinstance(item, dict)]
             if not history:
                 history = [
                     {
                         "role": "assistant",
                         "content": self._bot.opening_message(
-                            default_greeting or "That's my boy. I love hearing that, Tony."
+                            default_greeting or "That's my boy. I love hearing that, Tony.",
                         ),
-                    }
+                    },
                 ]
                 snapshot["history"] = history
                 self._bot.thread_snapshots[normalized_thread_id] = snapshot
@@ -70,7 +79,9 @@ class UIRuntimeAPI:
         normalized_thread_id = str(thread_id or "default").strip() or "default"
         with self._bot._session_lock:
             self._bot.ensure_chat_thread_state(preserve_active_runtime=True)
-            snapshot = self._bot.normalize_thread_snapshot(self._bot.thread_snapshots.get(normalized_thread_id))
+            snapshot = self._bot.normalize_thread_snapshot(
+                self._bot.thread_snapshots.get(normalized_thread_id),
+            )
         planner_debug = dict(snapshot.get("planner_debug") or {})
         messages = [dict(item) for item in list(snapshot.get("history") or []) if isinstance(item, dict)]
         thinking = {
@@ -120,14 +131,23 @@ class UIRuntimeAPI:
             "reasoning_steps": reasoning_steps,
         }
 
-    def send_user_message(self, *, thread_id: str, content: str, attachments: list[dict] | None = None) -> dict:
+    def send_user_message(
+        self,
+        *,
+        thread_id: str,
+        content: str,
+        attachments: list[dict] | None = None,
+    ) -> dict:
         normalized_thread_id = str(thread_id or self._bot.active_thread_id or "default")
         if normalized_thread_id != str(self._bot.active_thread_id or ""):
             try:
                 self._bot.switch_chat_thread(normalized_thread_id)
             except Exception:
                 pass
-        reply, should_end = self._bot.process_user_message(str(content or ""), attachments=list(attachments or []))
+        reply, should_end = self._bot.process_user_message(
+            str(content or ""),
+            attachments=list(attachments or []),
+        )
         turn_health = dict(self._bot.turn_health_state() or {})
         ux_feedback = dict(self._bot.turn_ux_feedback() or {})
         multi_agent_trace = self._multi_agent_trace_snapshot()
@@ -151,7 +171,9 @@ class UIRuntimeAPI:
         normalized_thread_id = str(thread_id or self._bot.active_thread_id or "default")
         with self._bot._session_lock:
             self._bot.ensure_chat_thread_state(preserve_active_runtime=True)
-            snapshot = self._bot.normalize_thread_snapshot(self._bot.thread_snapshots.get(normalized_thread_id))
+            snapshot = self._bot.normalize_thread_snapshot(
+                self._bot.thread_snapshots.get(normalized_thread_id),
+            )
             history = [dict(item) for item in list(snapshot.get("history") or []) if isinstance(item, dict)]
             assistant_indexes = [index for index, message in enumerate(history) if message.get("role") == "assistant"]
             if assistant_indexes:
@@ -166,18 +188,26 @@ class UIRuntimeAPI:
                 self._bot.apply_thread_snapshot_unlocked(snapshot)
             self._bot.sync_active_thread_snapshot()
 
-    def emit_assistant_photo_message(self, *, thread_id: str, text: str, attachment: dict) -> None:
+    def emit_assistant_photo_message(
+        self,
+        *,
+        thread_id: str,
+        text: str,
+        attachment: dict,
+    ) -> None:
         normalized_thread_id = str(thread_id or self._bot.active_thread_id or "default")
         with self._bot._session_lock:
             self._bot.ensure_chat_thread_state(preserve_active_runtime=True)
-            snapshot = self._bot.normalize_thread_snapshot(self._bot.thread_snapshots.get(normalized_thread_id))
+            snapshot = self._bot.normalize_thread_snapshot(
+                self._bot.thread_snapshots.get(normalized_thread_id),
+            )
             history = [dict(item) for item in list(snapshot.get("history") or []) if isinstance(item, dict)]
             history.append(
                 {
                     "role": "assistant",
                     "content": str(text or ""),
                     "attachments": [dict(attachment or {})],
-                }
+                },
             )
             snapshot["history"] = history
             self._bot.thread_snapshots[normalized_thread_id] = snapshot
@@ -204,8 +234,18 @@ class StreamlitRuntime:
         self.api = UIRuntimeAPI(bot)
 
     @classmethod
-    def build(cls) -> "StreamlitRuntime":
+    def build(cls) -> StreamlitRuntime:
         return cls(DadBot())
 
-    def send_user_message(self, *, thread_id: str, content: str, attachments: list[dict] | None = None) -> dict:
-        return self.api.send_user_message(thread_id=thread_id, content=content, attachments=attachments)
+    def send_user_message(
+        self,
+        *,
+        thread_id: str,
+        content: str,
+        attachments: list[dict] | None = None,
+    ) -> dict:
+        return self.api.send_user_message(
+            thread_id=thread_id,
+            content=content,
+            attachments=attachments,
+        )

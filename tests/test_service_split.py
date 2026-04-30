@@ -1,11 +1,9 @@
 import asyncio
-from concurrent.futures import Future
-from datetime import date, datetime
-from pathlib import Path
 import re
-from types import SimpleNamespace
-import Dad
+from concurrent.futures import Future
+from pathlib import Path
 
+import Dad
 from Dad import DadBot
 from dadbot.core.execution_boundary import (
     MemoryWriteSurfaceViolation,
@@ -13,9 +11,9 @@ from dadbot.core.execution_boundary import (
     RuntimeExecutionViolation,
 )
 from dadbot.core.observability import CorrelationContext, TracingContext
+from dadbot.ux_overlay.runtime_entrypoint import UxOverlayRuntimeAdapter
 from dadbot_system import InMemoryEventBus, InMemoryStateStore
 from dadbot_system.state import AppStateContainer
-from dadbot.ux_overlay.runtime_entrypoint import UxOverlayRuntimeAdapter
 
 
 def test_dadbot_composes_split_services(bot):
@@ -114,7 +112,13 @@ def test_config_backed_runtime_fields_remain_mutable_via_facade(bot):
 
 
 def test_profile_and_memory_store_are_manager_backed(bot):
-    profile = {"style": {"name": "Dad"}, "family": {}, "education": {}, "chat_routing": {"topic_rules": [], "core_fact_ids": []}, "facts": {}}
+    profile = {
+        "style": {"name": "Dad"},
+        "family": {},
+        "education": {},
+        "chat_routing": {"topic_rules": [], "core_fact_ids": []},
+        "facts": {},
+    }
     memory_store = bot.default_memory_store()
 
     bot.PROFILE = profile
@@ -200,7 +204,11 @@ def test_turn_service_helper_methods_delegate_to_manager(bot, monkeypatch):
         "record_user_turn_state",
         lambda user_input, current_mood, turn_context=None: (user_input, current_mood, turn_context),
     )
-    monkeypatch.setattr(bot.turn_service, "direct_reply_for_input", lambda user_input, current_mood: f"reply::{user_input}::{current_mood}")
+    monkeypatch.setattr(
+        bot.turn_service,
+        "direct_reply_for_input",
+        lambda user_input, current_mood: f"reply::{user_input}::{current_mood}",
+    )
 
     should_offer = bot.should_offer_daily_checkin_for_turn()
     recorded = bot.record_user_turn_state("Just checking in.", "neutral")
@@ -299,8 +307,12 @@ def test_dependency_registry_can_override_runtime_state_bundle(monkeypatch, tmp_
 def test_process_user_message_uses_graph_path_when_enabled(bot, monkeypatch):
     bot._turn_graph_enabled = True
 
-    monkeypatch.setattr(bot, "_run_graph_turn_sync", lambda user_input, attachments=None: (f"graph::{user_input}", False))
-    monkeypatch.setattr(bot.turn_service, "process_user_message", lambda user_input, attachments=None: ("legacy", False))
+    monkeypatch.setattr(
+        bot, "_run_graph_turn_sync", lambda user_input, attachments=None: (f"graph::{user_input}", False)
+    )
+    monkeypatch.setattr(
+        bot.turn_service, "process_user_message", lambda user_input, attachments=None: ("legacy", False)
+    )
 
     reply, should_end = bot.process_user_message("Need a hand.")
 
@@ -353,7 +365,9 @@ def test_process_user_message_stream_uses_graph_path_when_enabled(bot, monkeypat
 
     chunks = []
 
-    monkeypatch.setattr(bot, "process_user_message", lambda user_input, attachments=None: (f"graph::{user_input}", False))
+    monkeypatch.setattr(
+        bot, "process_user_message", lambda user_input, attachments=None: (f"graph::{user_input}", False)
+    )
 
     reply, should_end = bot.process_user_message_stream("Need a hand.", chunk_callback=chunks.append)
 
@@ -531,9 +545,19 @@ def test_turn_processing_freeze_limits_legacy_entrypoints_to_dadbot_facade():
 def test_conversation_persistence_methods_delegate_to_manager(bot, monkeypatch):
     recorded = {"persist": 0, "snapshot": None, "log": None}
 
-    monkeypatch.setattr(bot.conversation_persistence, "persist_conversation", lambda: recorded.__setitem__("persist", recorded["persist"] + 1))
-    monkeypatch.setattr(bot.conversation_persistence, "persist_conversation_snapshot", lambda snapshot: recorded.__setitem__("snapshot", snapshot))
-    monkeypatch.setattr(bot.conversation_persistence, "save_session_log", lambda history: recorded.__setitem__("log", history))
+    monkeypatch.setattr(
+        bot.conversation_persistence,
+        "persist_conversation",
+        lambda: recorded.__setitem__("persist", recorded["persist"] + 1),
+    )
+    monkeypatch.setattr(
+        bot.conversation_persistence,
+        "persist_conversation_snapshot",
+        lambda snapshot: recorded.__setitem__("snapshot", snapshot),
+    )
+    monkeypatch.setattr(
+        bot.conversation_persistence, "save_session_log", lambda history: recorded.__setitem__("log", history)
+    )
 
     bot.persist_conversation()
     bot.persist_conversation_snapshot({"history": [{"role": "user", "content": "hi"}]})
@@ -563,9 +587,13 @@ def test_status_reporting_methods_delegate_to_manager(bot, monkeypatch):
 
 
 def test_runtime_orchestration_methods_delegate_to_manager(bot, monkeypatch):
-    monkeypatch.setattr(bot.runtime_orchestration, "record_background_task", lambda task_id, **kwargs: {"task_id": task_id, **kwargs})
+    monkeypatch.setattr(
+        bot.runtime_orchestration, "record_background_task", lambda task_id, **kwargs: {"task_id": task_id, **kwargs}
+    )
     monkeypatch.setattr(bot.runtime_orchestration, "background_task_snapshot", lambda limit=8: {"tracked": limit})
-    monkeypatch.setattr(bot.runtime_orchestration, "submit_background_task", lambda func, *args, **kwargs: (func, args, kwargs))
+    monkeypatch.setattr(
+        bot.runtime_orchestration, "submit_background_task", lambda func, *args, **kwargs: (func, args, kwargs)
+    )
     monkeypatch.setattr(bot.runtime_orchestration, "persist_conversation_async", lambda: "persist-future")
 
     recorded = bot._record_background_task("task-1", task_kind="demo", status="queued", metadata={"x": 1})
@@ -616,18 +644,44 @@ def test_profile_runtime_methods_delegate_to_manager(bot, monkeypatch):
     monkeypatch.setattr(bot.profile_runtime, "refresh_profile_runtime", lambda: "refreshed")
     monkeypatch.setattr(bot.profile_runtime, "cadence_settings", lambda: {"family_echo_turn_interval": 6})
     monkeypatch.setattr(bot.profile_runtime, "current_persona_preset", lambda: "coach")
-    monkeypatch.setattr(bot.profile_runtime, "opening_message_candidates", lambda: ["Hey buddy"]) 
+    monkeypatch.setattr(bot.profile_runtime, "opening_message_candidates", lambda: ["Hey buddy"])
     monkeypatch.setattr(bot.profile_runtime, "apply_persona_preset", lambda preset_key, save=True: (preset_key, save))
     monkeypatch.setattr(bot.profile_runtime, "update_style_profile", lambda **kwargs: kwargs)
-    monkeypatch.setattr(bot.profile_runtime, "update_cadence_profile", lambda cadence=None, save=True, **overrides: {"cadence": cadence, "save": save, **overrides})
+    monkeypatch.setattr(
+        bot.profile_runtime,
+        "update_cadence_profile",
+        lambda cadence=None, save=True, **overrides: {"cadence": cadence, "save": save, **overrides},
+    )
     monkeypatch.setattr(bot.profile_runtime, "runtime_settings", lambda: {"stream_max_chars": 12000})
-    monkeypatch.setattr(bot.profile_runtime, "update_runtime_profile", lambda settings=None, save=True, **overrides: {"settings": settings, "save": save, **overrides})
-    monkeypatch.setattr(bot.profile_runtime, "update_opening_messages_profile", lambda opening_messages=None, save=True: {"opening_messages": opening_messages, "save": save})
+    monkeypatch.setattr(
+        bot.profile_runtime,
+        "update_runtime_profile",
+        lambda settings=None, save=True, **overrides: {"settings": settings, "save": save, **overrides},
+    )
+    monkeypatch.setattr(
+        bot.profile_runtime,
+        "update_opening_messages_profile",
+        lambda opening_messages=None, save=True: {"opening_messages": opening_messages, "save": save},
+    )
     monkeypatch.setattr(bot.profile_runtime, "agentic_tool_settings", lambda: {"enabled": True})
-    monkeypatch.setattr(bot.profile_runtime, "update_agentic_tool_profile", lambda settings=None, save=True, **overrides: {"settings": settings, "save": save, **overrides})
-    monkeypatch.setattr(bot.profile_runtime, "relationship_calibration_settings", lambda: {"enabled": True, "opening_line": "Straight talk"})
-    monkeypatch.setattr(bot.profile_runtime, "update_relationship_calibration_profile", lambda settings=None, save=True, **overrides: {"settings": settings, "save": save, **overrides})
-    monkeypatch.setattr(bot.profile_runtime, "streamlit_security_settings", lambda: {"require_pin": True, "pin_hint": "digits"})
+    monkeypatch.setattr(
+        bot.profile_runtime,
+        "update_agentic_tool_profile",
+        lambda settings=None, save=True, **overrides: {"settings": settings, "save": save, **overrides},
+    )
+    monkeypatch.setattr(
+        bot.profile_runtime,
+        "relationship_calibration_settings",
+        lambda: {"enabled": True, "opening_line": "Straight talk"},
+    )
+    monkeypatch.setattr(
+        bot.profile_runtime,
+        "update_relationship_calibration_profile",
+        lambda settings=None, save=True, **overrides: {"settings": settings, "save": save, **overrides},
+    )
+    monkeypatch.setattr(
+        bot.profile_runtime, "streamlit_security_settings", lambda: {"require_pin": True, "pin_hint": "digits"}
+    )
     monkeypatch.setattr(bot.profile_runtime, "verify_streamlit_pin", lambda pin_attempt: pin_attempt == "1234")
 
     refreshed = bot.refresh_profile_runtime()
@@ -672,9 +726,17 @@ def test_profile_context_methods_delegate_through_facade(bot, monkeypatch):
     monkeypatch.setattr(bot.profile_context, "template_context", lambda: {"listener_name": "Tony"})
     monkeypatch.setattr(bot.profile_context, "render_template", lambda template: f"rendered::{template}")
     monkeypatch.setattr(bot.profile_context, "get_fact_reply", lambda user_input: f"fact::{user_input}")
-    monkeypatch.setattr(bot.profile_context, "expected_tokens_for_fact_ids", lambda fact_ids: {"dad", "rhode", *fact_ids})
-    monkeypatch.setattr(bot.profile_context, "response_has_expected_anchor", lambda rule, reply: rule.get("name") == "ok" and reply == "reply")
-    monkeypatch.setattr(bot.profile_context, "validate_reply", lambda user_input, reply: f"validated::{user_input}::{reply}")
+    monkeypatch.setattr(
+        bot.profile_context, "expected_tokens_for_fact_ids", lambda fact_ids: {"dad", "rhode", *fact_ids}
+    )
+    monkeypatch.setattr(
+        bot.profile_context,
+        "response_has_expected_anchor",
+        lambda rule, reply: rule.get("name") == "ok" and reply == "reply",
+    )
+    monkeypatch.setattr(
+        bot.profile_context, "validate_reply", lambda user_input, reply: f"validated::{user_input}::{reply}"
+    )
 
     age = bot.age_on_date("ignored")
     formatted = bot.format_long_date("ignored")
@@ -696,12 +758,42 @@ def test_profile_context_methods_delegate_through_facade(bot, monkeypatch):
 
 
 def test_multimodal_methods_delegate_to_manager(bot, monkeypatch):
-    monkeypatch.setattr(bot.multimodal_handler, "normalize_chat_attachments", lambda attachments=None: [{"type": "audio", "transcript": "hello"}] if attachments else [])
-    monkeypatch.setattr(bot.multimodal_handler, "compose_user_turn_text", lambda user_input, attachments=None: f"turn::{user_input}::{len(attachments or [])}")
-    monkeypatch.setattr(bot.multimodal_handler, "build_user_request_message", lambda user_input, attachments=None: {"role": "user", "content": f"msg::{user_input}", "attachments": len(attachments or [])})
-    monkeypatch.setattr(bot.multimodal_handler, "build_image_analysis_prompt", lambda note="", user_input="", attachment=None: f"prompt::{note}::{user_input}::{attachment.get('name') if attachment else ''}")
-    monkeypatch.setattr(bot.multimodal_handler, "describe_image_attachment", lambda attachment, user_input="": f"describe::{attachment.get('name')}::{user_input}")
-    monkeypatch.setattr(bot.multimodal_handler, "enrich_multimodal_attachments", lambda attachments=None, user_input="": [{"type": "image", "analysis": f"analysis::{user_input}"}])
+    monkeypatch.setattr(
+        bot.multimodal_handler,
+        "normalize_chat_attachments",
+        lambda attachments=None: [{"type": "audio", "transcript": "hello"}] if attachments else [],
+    )
+    monkeypatch.setattr(
+        bot.multimodal_handler,
+        "compose_user_turn_text",
+        lambda user_input, attachments=None: f"turn::{user_input}::{len(attachments or [])}",
+    )
+    monkeypatch.setattr(
+        bot.multimodal_handler,
+        "build_user_request_message",
+        lambda user_input, attachments=None: {
+            "role": "user",
+            "content": f"msg::{user_input}",
+            "attachments": len(attachments or []),
+        },
+    )
+    monkeypatch.setattr(
+        bot.multimodal_handler,
+        "build_image_analysis_prompt",
+        lambda note="", user_input="", attachment=None: (
+            f"prompt::{note}::{user_input}::{attachment.get('name') if attachment else ''}"
+        ),
+    )
+    monkeypatch.setattr(
+        bot.multimodal_handler,
+        "describe_image_attachment",
+        lambda attachment, user_input="": f"describe::{attachment.get('name')}::{user_input}",
+    )
+    monkeypatch.setattr(
+        bot.multimodal_handler,
+        "enrich_multimodal_attachments",
+        lambda attachments=None, user_input="": [{"type": "image", "analysis": f"analysis::{user_input}"}],
+    )
 
     normalized_one = bot.normalize_chat_attachment({"type": "audio", "transcript": "hi"})
     normalized_many = bot.normalize_chat_attachments([{"type": "audio", "transcript": "hi"}])
@@ -735,7 +827,9 @@ def test_runtime_client_methods_delegate_to_manager(bot, monkeypatch):
     monkeypatch.setattr(
         bot.runtime_client,
         "call_ollama_chat",
-        lambda messages, caller=None, options=None, response_format=None, purpose="chat": {"message": {"content": purpose}},
+        lambda messages, caller=None, options=None, response_format=None, purpose="chat": {
+            "message": {"content": purpose}
+        },
     )
     monkeypatch.setattr(bot.runtime_client, "call_ollama_chat_async", fake_async_chat)
     monkeypatch.setattr(
@@ -758,11 +852,17 @@ def test_runtime_client_methods_delegate_to_manager(bot, monkeypatch):
     monkeypatch.setattr(bot.runtime_client, "vision_fallback_status", lambda: (True, "llava:7b is available"))
     monkeypatch.setattr(bot.runtime_client, "ensure_ollama_ready", lambda status_callback=None: status_callback is None)
 
-    sync_response = bot.call_ollama_chat([{"role": "user", "content": "Hi"}], options={"temperature": 0.1}, response_format="json", purpose="reply")
+    sync_response = bot.call_ollama_chat(
+        [{"role": "user", "content": "Hi"}], options={"temperature": 0.1}, response_format="json", purpose="reply"
+    )
     async_response = asyncio.run(bot.call_ollama_chat_async([{"role": "user", "content": "Hi"}], purpose="reply"))
-    model_response = bot.call_ollama_chat_with_model("llava:7b", [{"role": "user", "content": "Describe"}], purpose="vision")
+    model_response = bot.call_ollama_chat_with_model(
+        "llava:7b", [{"role": "user", "content": "Describe"}], purpose="vision"
+    )
     stream_response = bot.call_ollama_chat_stream([{"role": "user", "content": "Hi"}], purpose="reply")
-    async_stream_response = asyncio.run(bot.call_ollama_chat_stream_async([{"role": "user", "content": "Hi"}], purpose="reply"))
+    async_stream_response = asyncio.run(
+        bot.call_ollama_chat_stream_async([{"role": "user", "content": "Hi"}], purpose="reply")
+    )
     available = bot.available_model_names()
     vision_model = bot.find_available_vision_model()
     vision_status = bot.vision_fallback_status()
@@ -822,11 +922,19 @@ def test_ux_runtime_entrypoint_blocked_without_experimental_flag(monkeypatch):
 
 
 def test_runtime_storage_methods_delegate_to_manager(bot, monkeypatch):
-    monkeypatch.setattr(bot.runtime_storage, "capture_corrupt_json_snapshot", lambda source_path: f"snapshot::{source_path}")
-    monkeypatch.setattr(bot.runtime_storage, "write_json_atomically", lambda destination, payload, backup=True: {"destination": destination, "payload": payload, "backup": backup})
+    monkeypatch.setattr(
+        bot.runtime_storage, "capture_corrupt_json_snapshot", lambda source_path: f"snapshot::{source_path}"
+    )
+    monkeypatch.setattr(
+        bot.runtime_storage,
+        "write_json_atomically",
+        lambda destination, payload, backup=True: {"destination": destination, "payload": payload, "backup": backup},
+    )
     monkeypatch.setattr(bot.runtime_storage, "load_profile", lambda: {"style": {"name": "Dad"}})
     monkeypatch.setattr(bot.runtime_storage, "save_profile", lambda: "saved-profile")
-    monkeypatch.setattr(bot.runtime_storage, "customer_persistence_status", lambda: {"enabled": True, "backend": "PostgresStateStore"})
+    monkeypatch.setattr(
+        bot.runtime_storage, "customer_persistence_status", lambda: {"enabled": True, "backend": "PostgresStateStore"}
+    )
 
     backup_path = bot.json_backup_path("dad_memory.json")
     corrupt_path = bot.corrupt_json_snapshot_path("dad_memory.json")
@@ -846,8 +954,14 @@ def test_runtime_storage_methods_delegate_to_manager(bot, monkeypatch):
 
 
 def test_session_summary_methods_delegate_to_manager(bot, monkeypatch):
-    monkeypatch.setattr(bot.session_summary_manager, "build_session_summary_prompt", lambda previous_summary, messages: f"prompt::{previous_summary}::{len(messages)}")
-    monkeypatch.setattr(bot.session_summary_manager, "refresh_session_summary", lambda force=False: {"refreshed": True, "force": force})
+    monkeypatch.setattr(
+        bot.session_summary_manager,
+        "build_session_summary_prompt",
+        lambda previous_summary, messages: f"prompt::{previous_summary}::{len(messages)}",
+    )
+    monkeypatch.setattr(
+        bot.session_summary_manager, "refresh_session_summary", lambda force=False: {"refreshed": True, "force": force}
+    )
 
     prompt = bot.build_session_summary_prompt("Earlier summary", [{"role": "user", "content": "Hey"}])
     refreshed = bot.refresh_session_summary(force=True)
@@ -858,16 +972,48 @@ def test_session_summary_methods_delegate_to_manager(bot, monkeypatch):
 
 def test_long_term_signal_methods_delegate_to_manager(bot, monkeypatch):
     monkeypatch.setattr(bot.long_term_signals, "summarize_memory_graph", lambda: "graph::summary")
-    monkeypatch.setattr(bot.long_term_signals, "should_generate_wisdom_insight", lambda user_input, force=False: (user_input, force) == ("input", True))
+    monkeypatch.setattr(
+        bot.long_term_signals,
+        "should_generate_wisdom_insight",
+        lambda user_input, force=False: (user_input, force) == ("input", True),
+    )
     monkeypatch.setattr(bot.long_term_signals, "build_wisdom_prompt", lambda user_input: f"wisdom::{user_input}")
-    monkeypatch.setattr(bot.long_term_signals, "generate_wisdom_insight", lambda user_input, force=False: {"summary": user_input, "force": force})
-    monkeypatch.setattr(bot.long_term_signals, "build_family_echo_prompt", lambda user_input, current_mood: f"family::{user_input}::{current_mood}")
-    monkeypatch.setattr(bot.long_term_signals, "maybe_add_family_echo", lambda reply, user_input, current_mood: f"echo::{reply}::{user_input}::{current_mood}")
-    monkeypatch.setattr(bot.long_term_signals, "add_memory_nodes_to_graph", lambda node_weights, node_types, edge_weights: node_weights.__setitem__("memory", 1))
-    monkeypatch.setattr(bot.long_term_signals, "add_relationship_topics_to_graph", lambda node_weights, node_types: node_types.__setitem__("work", "topic"))
-    monkeypatch.setattr(bot.long_term_signals, "add_archive_nodes_to_graph", lambda node_weights, node_types, edge_weights: edge_weights.__setitem__(("work", "stress"), 2))
-    monkeypatch.setattr(bot.long_term_signals, "mark_memory_graph_dirty", lambda: setattr(bot, "_memory_graph_dirty", True))
-    monkeypatch.setattr(bot.long_term_signals, "refresh_memory_graph", lambda force=False: {"force": force, "updated_at": "now"})
+    monkeypatch.setattr(
+        bot.long_term_signals,
+        "generate_wisdom_insight",
+        lambda user_input, force=False: {"summary": user_input, "force": force},
+    )
+    monkeypatch.setattr(
+        bot.long_term_signals,
+        "build_family_echo_prompt",
+        lambda user_input, current_mood: f"family::{user_input}::{current_mood}",
+    )
+    monkeypatch.setattr(
+        bot.long_term_signals,
+        "maybe_add_family_echo",
+        lambda reply, user_input, current_mood: f"echo::{reply}::{user_input}::{current_mood}",
+    )
+    monkeypatch.setattr(
+        bot.long_term_signals,
+        "add_memory_nodes_to_graph",
+        lambda node_weights, node_types, edge_weights: node_weights.__setitem__("memory", 1),
+    )
+    monkeypatch.setattr(
+        bot.long_term_signals,
+        "add_relationship_topics_to_graph",
+        lambda node_weights, node_types: node_types.__setitem__("work", "topic"),
+    )
+    monkeypatch.setattr(
+        bot.long_term_signals,
+        "add_archive_nodes_to_graph",
+        lambda node_weights, node_types, edge_weights: edge_weights.__setitem__(("work", "stress"), 2),
+    )
+    monkeypatch.setattr(
+        bot.long_term_signals, "mark_memory_graph_dirty", lambda: setattr(bot, "_memory_graph_dirty", True)
+    )
+    monkeypatch.setattr(
+        bot.long_term_signals, "refresh_memory_graph", lambda force=False: {"force": force, "updated_at": "now"}
+    )
 
     node_weights = {}
     node_types = {}
@@ -901,15 +1047,49 @@ def test_long_term_signal_methods_delegate_to_manager(bot, monkeypatch):
 
 
 def test_reply_supervisor_methods_delegate_to_manager(bot, monkeypatch):
-    monkeypatch.setattr(bot.reply_supervisor, "build_reply_critique_prompt", lambda user_input, draft_reply, current_mood: f"critique::{user_input}::{draft_reply}::{current_mood}")
-    monkeypatch.setattr(bot.reply_supervisor, "build_reply_alignment_judge_prompt", lambda user_input, candidate_reply, current_mood: f"align::{candidate_reply}::{current_mood}")
-    monkeypatch.setattr(bot.reply_supervisor, "build_reply_supervisor_prompt", lambda user_input, draft_reply, current_mood: f"prompt::{draft_reply}::{current_mood}")
-    monkeypatch.setattr(bot.reply_supervisor, "apply_reply_supervisor_decision", lambda judgment, candidate_reply, stage="reply_supervisor": {"judgment": judgment, "reply": candidate_reply, "stage": stage})
-    monkeypatch.setattr(bot.reply_supervisor, "run_reply_supervisor", lambda user_input, candidate_reply, current_mood, stage="reply_supervisor": f"run::{stage}::{candidate_reply}")
-    monkeypatch.setattr(bot.reply_supervisor, "build_reply_supervisor_context", lambda current_mood: f"context::{current_mood}")
+    monkeypatch.setattr(
+        bot.reply_supervisor,
+        "build_reply_critique_prompt",
+        lambda user_input, draft_reply, current_mood: f"critique::{user_input}::{draft_reply}::{current_mood}",
+    )
+    monkeypatch.setattr(
+        bot.reply_supervisor,
+        "build_reply_alignment_judge_prompt",
+        lambda user_input, candidate_reply, current_mood: f"align::{candidate_reply}::{current_mood}",
+    )
+    monkeypatch.setattr(
+        bot.reply_supervisor,
+        "build_reply_supervisor_prompt",
+        lambda user_input, draft_reply, current_mood: f"prompt::{draft_reply}::{current_mood}",
+    )
+    monkeypatch.setattr(
+        bot.reply_supervisor,
+        "apply_reply_supervisor_decision",
+        lambda judgment, candidate_reply, stage="reply_supervisor": {
+            "judgment": judgment,
+            "reply": candidate_reply,
+            "stage": stage,
+        },
+    )
+    monkeypatch.setattr(
+        bot.reply_supervisor,
+        "run_reply_supervisor",
+        lambda user_input, candidate_reply, current_mood, stage="reply_supervisor": f"run::{stage}::{candidate_reply}",
+    )
+    monkeypatch.setattr(
+        bot.reply_supervisor, "build_reply_supervisor_context", lambda current_mood: f"context::{current_mood}"
+    )
     monkeypatch.setattr(bot.reply_supervisor, "reply_supervisor_snapshot", lambda: {"enabled": True})
-    monkeypatch.setattr(bot.reply_supervisor, "judge_reply_alignment", lambda user_input, candidate_reply, current_mood: f"judge::{candidate_reply}")
-    monkeypatch.setattr(bot.reply_supervisor, "critique_reply", lambda user_input, draft_reply, current_mood: f"critique-reply::{draft_reply}")
+    monkeypatch.setattr(
+        bot.reply_supervisor,
+        "judge_reply_alignment",
+        lambda user_input, candidate_reply, current_mood: f"judge::{candidate_reply}",
+    )
+    monkeypatch.setattr(
+        bot.reply_supervisor,
+        "critique_reply",
+        lambda user_input, draft_reply, current_mood: f"critique-reply::{draft_reply}",
+    )
 
     critique_prompt = bot.build_reply_critique_prompt("input", "draft", "stressed")
     alignment_prompt = bot.build_reply_alignment_judge_prompt("input", "draft", "stressed")
@@ -934,13 +1114,40 @@ def test_reply_supervisor_methods_delegate_to_manager(bot, monkeypatch):
 
 def test_memory_query_methods_delegate_to_manager(bot, monkeypatch):
     monkeypatch.setattr(bot.memory_query, "memory_context_limit_for_input", lambda user_input: 2)
-    monkeypatch.setattr(bot.memory_query, "retrieve_context", lambda user_input, strategy="hybrid", limit=4: {"user_input": user_input, "strategy": strategy, "limit": limit})
-    monkeypatch.setattr(bot.memory_query, "relevant_archive_entries_for_input", lambda user_input, limit=2: [{"summary": user_input, "limit": limit}])
-    monkeypatch.setattr(bot.memory_query, "relevant_memories_for_input", lambda user_input, limit=3, graph_result=None: [{"summary": user_input, "limit": limit, "graph_result": graph_result}])
+    monkeypatch.setattr(
+        bot.memory_query,
+        "retrieve_context",
+        lambda user_input, strategy="hybrid", limit=4: {"user_input": user_input, "strategy": strategy, "limit": limit},
+    )
+    monkeypatch.setattr(
+        bot.memory_query,
+        "relevant_archive_entries_for_input",
+        lambda user_input, limit=2: [{"summary": user_input, "limit": limit}],
+    )
+    monkeypatch.setattr(
+        bot.memory_query,
+        "relevant_memories_for_input",
+        lambda user_input, limit=3, graph_result=None: [
+            {"summary": user_input, "limit": limit, "graph_result": graph_result}
+        ],
+    )
     monkeypatch.setattr(bot.memory_query, "get_memory_reply", lambda user_input: f"reply::{user_input}")
     monkeypatch.setattr(bot.memory_query, "find_memory_matches", lambda query: [{"summary": query}])
-    monkeypatch.setattr(bot.memory_query, "add_memory", lambda summary, category=None: {"summary": summary, "category": category or "general"})
-    monkeypatch.setattr(bot.memory_query, "update_memory_entry", lambda original_summary, new_summary, category=None, mood=None: {"old": original_summary, "new": new_summary, "category": category, "mood": mood})
+    monkeypatch.setattr(
+        bot.memory_query,
+        "add_memory",
+        lambda summary, category=None: {"summary": summary, "category": category or "general"},
+    )
+    monkeypatch.setattr(
+        bot.memory_query,
+        "update_memory_entry",
+        lambda original_summary, new_summary, category=None, mood=None: {
+            "old": original_summary,
+            "new": new_summary,
+            "category": category,
+            "mood": mood,
+        },
+    )
     monkeypatch.setattr(bot.memory_query, "delete_memory_entry", lambda summary: [{"summary": summary}])
     monkeypatch.setattr(bot.memory_query, "forget_memories", lambda query: [{"summary": query}])
 
@@ -997,7 +1204,9 @@ def test_memory_command_methods_delegate_to_manager(bot, monkeypatch):
 
     parsed = bot.parse_memory_command("remember this call the bank")
     handled = bot.handle_memory_command("remember this call the bank")
-    transcript = bot.build_memory_transcript([{"role": "user", "content": "hello"}, {"role": "assistant", "content": "hi"}])
+    transcript = bot.build_memory_transcript(
+        [{"role": "user", "content": "hello"}, {"role": "assistant", "content": "hi"}]
+    )
 
     assert parsed == {"action": "remember", "summary": "call the bank"}
     assert handled == "handled::remember this call the bank"
@@ -1006,7 +1215,11 @@ def test_memory_command_methods_delegate_to_manager(bot, monkeypatch):
 
 def test_runtime_interface_methods_delegate_to_manager(bot, monkeypatch):
     monkeypatch.setattr(bot.runtime_interface, "chat_loop", lambda: "chat-loop")
-    monkeypatch.setattr(bot.runtime_interface, "chat_loop_via_service", lambda service_client, session_id=None: {"client": service_client, "session_id": session_id})
+    monkeypatch.setattr(
+        bot.runtime_interface,
+        "chat_loop_via_service",
+        lambda service_client, session_id=None: {"client": service_client, "session_id": session_id},
+    )
 
     loop_result = bot.chat_loop()
     service_result = bot.chat_loop_via_service("client", session_id="session-1")
@@ -1016,13 +1229,19 @@ def test_runtime_interface_methods_delegate_to_manager(bot, monkeypatch):
 
 
 def test_model_runtime_methods_delegate_to_manager(bot, monkeypatch):
-    monkeypatch.setattr(bot.model_runtime, "ollama_show_payload", lambda model_name=None: {"model": model_name or "active"})
+    monkeypatch.setattr(
+        bot.model_runtime, "ollama_show_payload", lambda model_name=None: {"model": model_name or "active"}
+    )
     monkeypatch.setattr(bot.model_runtime, "model_context_length", lambda model_name=None: 4096)
     monkeypatch.setattr(bot.model_runtime, "effective_context_token_budget", lambda model_name=None: 3072)
     monkeypatch.setattr(bot.model_runtime, "model_chars_per_token_estimate", lambda model_name=None: 3.25)
     monkeypatch.setattr(bot.model_runtime, "resolve_tiktoken_encoding_name", lambda model_name=None: "o200k_base")
-    monkeypatch.setattr(bot.model_runtime, "initialize_tokenizer", lambda model_name=None: f"init::{model_name or 'active'}")
-    monkeypatch.setattr(bot.model_runtime, "current_tokenizer", lambda model_name=None: f"current::{model_name or 'active'}")
+    monkeypatch.setattr(
+        bot.model_runtime, "initialize_tokenizer", lambda model_name=None: f"init::{model_name or 'active'}"
+    )
+    monkeypatch.setattr(
+        bot.model_runtime, "current_tokenizer", lambda model_name=None: f"current::{model_name or 'active'}"
+    )
     monkeypatch.setattr(bot.model_runtime, "model_candidates", lambda: ["primary", "fallback"])
     monkeypatch.setattr(bot.model_runtime, "dedicated_embedding_model_candidates", lambda: ["embed-a", "embed-b"])
     monkeypatch.setattr(bot.model_runtime, "fallback_embedding_model_candidates", lambda: ["chat-a", "chat-b"])
@@ -1107,7 +1326,9 @@ def test_scheduled_proactive_methods_delegate_to_scheduler(bot, monkeypatch):
 
 
 def test_mood_detection_cache_methods_delegate_to_mood_manager(bot, monkeypatch):
-    monkeypatch.setattr(bot.mood_manager, "get_cached_mood_detection", lambda user_input, recent_history=None: ("cache-key", "stressed"))
+    monkeypatch.setattr(
+        bot.mood_manager, "get_cached_mood_detection", lambda user_input, recent_history=None: ("cache-key", "stressed")
+    )
     monkeypatch.setattr(bot.mood_manager, "remember_mood_detection", lambda cache_key, mood: f"{cache_key}:{mood}")
 
     cached = bot.get_cached_mood_detection("I am overloaded")
@@ -1118,18 +1339,30 @@ def test_mood_detection_cache_methods_delegate_to_mood_manager(bot, monkeypatch)
 
 
 def test_runtime_state_methods_delegate_to_runtime_manager(bot, monkeypatch):
-    monkeypatch.setattr(bot.runtime_state_manager, "create_chat_thread", lambda title="": {"thread_id": "t-1", "title": title})
+    monkeypatch.setattr(
+        bot.runtime_state_manager, "create_chat_thread", lambda title="": {"thread_id": "t-1", "title": title}
+    )
     monkeypatch.setattr(bot.runtime_state_manager, "planner_debug_snapshot", lambda: {"final_path": "planner"})
-    monkeypatch.setattr(bot.runtime_state_manager, "message_token_cost", lambda message: 42 if message.get("content") == "cached" else 7)
+    monkeypatch.setattr(
+        bot.runtime_state_manager, "message_token_cost", lambda message: 42 if message.get("content") == "cached" else 7
+    )
     monkeypatch.setattr(bot.runtime_state_manager, "prompt_history", lambda: [{"role": "user", "content": "kept"}])
     monkeypatch.setattr(bot.runtime_state_manager, "prompt_history_token_budget", lambda system_prompt, user_input: 123)
-    monkeypatch.setattr(bot.runtime_state_manager, "trim_text_to_token_budget", lambda text, token_budget: f"text::{token_budget}::{text}")
+    monkeypatch.setattr(
+        bot.runtime_state_manager,
+        "trim_text_to_token_budget",
+        lambda text, token_budget: f"text::{token_budget}::{text}",
+    )
     monkeypatch.setattr(
         bot.runtime_state_manager,
         "trim_message_to_token_budget",
         lambda message, token_budget: {**message, "content": f"trim::{token_budget}::{message.get('content', '')}"},
     )
-    monkeypatch.setattr(bot.runtime_state_manager, "token_budgeted_prompt_history", lambda system_prompt, user_input: [{"role": "assistant", "content": "budgeted"}])
+    monkeypatch.setattr(
+        bot.runtime_state_manager,
+        "token_budgeted_prompt_history",
+        lambda system_prompt, user_input: [{"role": "assistant", "content": "budgeted"}],
+    )
     monkeypatch.setattr(bot.runtime_state_manager, "session_turn_count", lambda: 9)
 
     thread = bot.create_chat_thread("Project")
@@ -1154,7 +1387,9 @@ def test_runtime_state_methods_delegate_to_runtime_manager(bot, monkeypatch):
 
 
 def test_tool_methods_delegate_to_agentic_services(bot, monkeypatch):
-    monkeypatch.setattr(bot.tool_registry, "get_available_tools", lambda: [{"type": "function", "function": {"name": "stub"}}])
+    monkeypatch.setattr(
+        bot.tool_registry, "get_available_tools", lambda: [{"type": "function", "function": {"name": "stub"}}]
+    )
     monkeypatch.setattr(bot.agentic_handler, "handle_tool_command", lambda user_input: f"tool::{user_input}")
 
     tools = bot.get_available_tools()
@@ -1165,7 +1400,11 @@ def test_tool_methods_delegate_to_agentic_services(bot, monkeypatch):
 
 
 def test_memory_pipeline_methods_delegate_to_memory_coordinator(bot, monkeypatch):
-    monkeypatch.setattr(bot.memory_coordinator, "consolidate_memories", lambda force=False: [{"summary": "steady progress", "force": force}])
+    monkeypatch.setattr(
+        bot.memory_coordinator,
+        "consolidate_memories",
+        lambda force=False: [{"summary": "steady progress", "force": force}],
+    )
     monkeypatch.setattr(bot.memory_coordinator, "update_memory_store", lambda history: len(history))
 
     consolidated = bot.consolidate_memories(force=True)

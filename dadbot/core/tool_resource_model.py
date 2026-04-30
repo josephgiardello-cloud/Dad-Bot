@@ -14,13 +14,14 @@ Design:
     Budget enforcement happens at plan time (before execution), not at failure.
     Exhaustion policies degrade gracefully rather than hard-fail.
 """
+
 from __future__ import annotations
 
 import enum
 import hashlib
 import json
-from dataclasses import dataclass, field
-from typing import Any, TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from dadbot.core.tool_dag import ToolDAG
@@ -33,7 +34,7 @@ if TYPE_CHECKING:
 
 def _sha256(payload: Any) -> str:
     return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        json.dumps(payload, sort_keys=True, default=str).encode("utf-8"),
     ).hexdigest()
 
 
@@ -49,6 +50,7 @@ class BudgetExhaustionPolicy(enum.Enum):
     SKIP:      Skip all tools beyond the budget; reply from what's available.
     COMPRESS:  Run remaining tools with a compressed output budget.
     """
+
     DEGRADE = "degrade"
     SKIP = "skip"
     COMPRESS = "compress"
@@ -78,7 +80,9 @@ class ToolCostEntry:
         tool_name:          Tool identifier.
         cost_units:         Abstract cost (used against TurnBudget.max_cost_units).
         latency_ms_estimate: Estimated execution latency in milliseconds.
+
     """
+
     tool_name: str
     cost_units: float
     latency_ms_estimate: int
@@ -98,7 +102,7 @@ class ToolCostCatalog:
         self._entries: dict[str, ToolCostEntry] = dict(entries or {})
 
     @classmethod
-    def default(cls) -> "ToolCostCatalog":
+    def default(cls) -> ToolCostCatalog:
         entries: dict[str, ToolCostEntry] = {}
         for name, (cost, latency) in _DEFAULT_COSTS.items():
             entries[name] = ToolCostEntry(
@@ -113,7 +117,11 @@ class ToolCostCatalog:
             tool_name,
             self._entries.get(
                 "_unknown_",
-                ToolCostEntry(tool_name=tool_name, cost_units=2.0, latency_ms_estimate=100),
+                ToolCostEntry(
+                    tool_name=tool_name,
+                    cost_units=2.0,
+                    latency_ms_estimate=100,
+                ),
             ),
         )
 
@@ -138,14 +146,16 @@ class TurnBudget:
         max_tools:            Maximum number of tool calls per turn.
         max_latency_ms:       Optional wall-clock time budget.
         exhaustion_policy:    What to do when budget is exhausted.
+
     """
+
     max_cost_units: float
     max_tools: int
     max_latency_ms: int
     exhaustion_policy: BudgetExhaustionPolicy
 
     @classmethod
-    def default(cls) -> "TurnBudget":
+    def default(cls) -> TurnBudget:
         """Standard budget: 5 cost units, 3 tools, 500ms, DEGRADE."""
         return cls(
             max_cost_units=5.0,
@@ -155,7 +165,7 @@ class TurnBudget:
         )
 
     @classmethod
-    def strict(cls) -> "TurnBudget":
+    def strict(cls) -> TurnBudget:
         """Strict budget: 2 cost units, 1 tool, 200ms, SKIP."""
         return cls(
             max_cost_units=2.0,
@@ -191,7 +201,9 @@ class BudgetReport:
         approved_tools:       Tools approved for execution within budget.
         suggested_action:     Recommended action from exhaustion_policy.
         budget_hash:          Deterministic hash of the report (for audit).
+
     """
+
     total_cost_units: float
     total_latency_ms: int
     tool_count: int
@@ -265,9 +277,11 @@ class ResourceModelValidator:
             running_latency = 0
             running_count = 0
             for name, entry in zip(tool_names or [], costs):
-                if (running_cost + entry.cost_units <= budget.max_cost_units
-                        and running_latency + entry.latency_ms_estimate <= budget.max_latency_ms
-                        and running_count < budget.max_tools):
+                if (
+                    running_cost + entry.cost_units <= budget.max_cost_units
+                    and running_latency + entry.latency_ms_estimate <= budget.max_latency_ms
+                    and running_count < budget.max_tools
+                ):
                     approved_tools.append(name)
                     running_cost += entry.cost_units
                     running_latency += entry.latency_ms_estimate
@@ -287,7 +301,10 @@ class ResourceModelValidator:
             if not (within_cost and within_count and within_latency):
                 exhausted_tools = list(tool_names or [])
 
-        if budget.exhaustion_policy in (BudgetExhaustionPolicy.DEGRADE, BudgetExhaustionPolicy.SKIP):
+        if budget.exhaustion_policy in (
+            BudgetExhaustionPolicy.DEGRADE,
+            BudgetExhaustionPolicy.SKIP,
+        ):
             effective_within = (
                 sum(self.catalog.get(t).cost_units for t in approved_tools) <= budget.max_cost_units
                 and len(approved_tools) <= budget.max_tools
@@ -295,17 +312,17 @@ class ResourceModelValidator:
         else:
             effective_within = within_budget
 
-        suggested_action = (
-            "proceed" if not exhausted_tools else budget.exhaustion_policy.value
-        )
+        suggested_action = "proceed" if not exhausted_tools else budget.exhaustion_policy.value
 
-        budget_hash = _sha256({
-            "total_cost_units": total_cost,
-            "total_latency_ms": total_latency,
-            "tool_count": tool_count,
-            "approved_tools": approved_tools,
-            "policy": budget.exhaustion_policy.value,
-        })
+        budget_hash = _sha256(
+            {
+                "total_cost_units": total_cost,
+                "total_latency_ms": total_latency,
+                "tool_count": tool_count,
+                "approved_tools": approved_tools,
+                "policy": budget.exhaustion_policy.value,
+            },
+        )
 
         return BudgetReport(
             total_cost_units=total_cost,
@@ -318,7 +335,7 @@ class ResourceModelValidator:
             budget_hash=budget_hash,
         )
 
-    def validate_dag(self, dag: "ToolDAG", budget: TurnBudget) -> BudgetReport:
+    def validate_dag(self, dag: ToolDAG, budget: TurnBudget) -> BudgetReport:
         """Validate a ToolDAG against the budget."""
         tool_names = [node.tool_name for node in sorted(dag.nodes, key=lambda n: n.sequence)]
         return self.validate_tool_list(tool_names, budget)
@@ -327,8 +344,8 @@ class ResourceModelValidator:
 __all__ = [
     "BudgetExhaustionPolicy",
     "BudgetReport",
+    "ResourceModelValidator",
     "ToolCostCatalog",
     "ToolCostEntry",
     "TurnBudget",
-    "ResourceModelValidator",
 ]

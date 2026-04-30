@@ -5,7 +5,6 @@ from typing import Any
 
 from dadbot.uril.models import BenchmarkProfile, RepoSignalBus, SubsystemHealth
 
-
 TIER_A_OSS = BenchmarkProfile(
     planning=0.62,
     tools=0.65,
@@ -47,7 +46,11 @@ def _health_lookup(rows: list[SubsystemHealth], key: str) -> float:
     return 0.0
 
 
-def _signal_score(bus: RepoSignalBus, subsystem_prefix: str, category: str | None = None) -> float:
+def _signal_score(
+    bus: RepoSignalBus,
+    subsystem_prefix: str,
+    category: str | None = None,
+) -> float:
     matches = []
     for signal in bus.signals:
         if subsystem_prefix and not signal.subsystem.startswith(subsystem_prefix):
@@ -58,48 +61,51 @@ def _signal_score(bus: RepoSignalBus, subsystem_prefix: str, category: str | Non
     return _mean(matches)
 
 
-def build_system_profile(signal_bus: RepoSignalBus, subsystem_health: list[SubsystemHealth]) -> BenchmarkProfile:
+def build_system_profile(
+    signal_bus: RepoSignalBus,
+    subsystem_health: list[SubsystemHealth],
+) -> BenchmarkProfile:
     planning = _mean(
         [
             _signal_score(signal_bus, "benchmark_planning"),
             _health_lookup(subsystem_health, "graph_engine"),
             _health_lookup(subsystem_health, "dadbot_core"),
-        ]
+        ],
     )
     tools = _mean(
         [
             _signal_score(signal_bus, "benchmark_tool"),
             _health_lookup(subsystem_health, "tool_registry"),
             _health_lookup(subsystem_health, "mcp_layer"),
-        ]
+        ],
     )
     memory = _mean(
         [
             _signal_score(signal_bus, "benchmark_memory"),
             _health_lookup(subsystem_health, "persistence"),
             _health_lookup(subsystem_health, "graph_engine"),
-        ]
+        ],
     )
     determinism = _mean(
         [
             signal_bus.mean_for_category("determinism"),
             _health_lookup(subsystem_health, "kernel"),
             _health_lookup(subsystem_health, "validator"),
-        ]
+        ],
     )
     observability = _mean(
         [
             signal_bus.mean_for_category("observability"),
             _health_lookup(subsystem_health, "observability"),
             _health_lookup(subsystem_health, "kernel"),
-        ]
+        ],
     )
     safety = _mean(
         [
             signal_bus.mean_for_category("architecture"),
             _health_lookup(subsystem_health, "validator"),
             _health_lookup(subsystem_health, "dadbot_core"),
-        ]
+        ],
     )
 
     return BenchmarkProfile(
@@ -139,7 +145,5 @@ def benchmark_alignment_report(system: BenchmarkProfile) -> dict[str, Any]:
     return {
         "system_profile": {k: round(v, 3) for k, v in asdict(system).items()},
         "tiers": comparisons,
-        "production_gap_percent": {
-            k: round(v * 100.0, 1) for k, v in prod_dist.items()
-        },
+        "production_gap_percent": {k: round(v * 100.0, 1) for k, v in prod_dist.items()},
     }

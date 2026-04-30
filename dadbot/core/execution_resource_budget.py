@@ -37,14 +37,16 @@ Wire the budget into the runtime adapter or app layer:
 The graph itself is unaware of the budget — resource accounting is a
 cross-cutting concern managed at the **kernel/adapter** boundary.
 """
+
 from __future__ import annotations
 
 import asyncio
 import contextlib
 import logging
 import time
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -53,16 +55,23 @@ logger = logging.getLogger(__name__)
 # Exceptions
 # ---------------------------------------------------------------------------
 
+
 class ConcurrencyBudgetExceeded(RuntimeError):
     """Raised when a new execution cannot be admitted due to concurrency limits."""
 
-    def __init__(self, *, max_concurrent: int, current_inflight: int, trace_id: str = "") -> None:
+    def __init__(
+        self,
+        *,
+        max_concurrent: int,
+        current_inflight: int,
+        trace_id: str = "",
+    ) -> None:
         self.max_concurrent = int(max_concurrent)
         self.current_inflight = int(current_inflight)
         self.trace_id = str(trace_id or "")
         super().__init__(
             f"Concurrency budget exceeded: max_concurrent={max_concurrent}, "
-            f"current_inflight={current_inflight}, trace_id={trace_id!r}"
+            f"current_inflight={current_inflight}, trace_id={trace_id!r}",
         )
 
 
@@ -73,19 +82,25 @@ class BackpressureSignal(RuntimeError):
     propagating the error.
     """
 
-    def __init__(self, *, reason: str, retry_after_ms: float = 0.0, trace_id: str = "") -> None:
+    def __init__(
+        self,
+        *,
+        reason: str,
+        retry_after_ms: float = 0.0,
+        trace_id: str = "",
+    ) -> None:
         self.reason = str(reason or "")
         self.retry_after_ms = float(retry_after_ms or 0.0)
         self.trace_id = str(trace_id or "")
         super().__init__(
-            f"Backpressure: {self.reason} (retry_after_ms={self.retry_after_ms:.0f}, "
-            f"trace_id={self.trace_id!r})"
+            f"Backpressure: {self.reason} (retry_after_ms={self.retry_after_ms:.0f}, trace_id={self.trace_id!r})",
         )
 
 
 # ---------------------------------------------------------------------------
 # Configuration dataclasses
 # ---------------------------------------------------------------------------
+
 
 @dataclass(frozen=True)
 class ConcurrencyBudget:
@@ -102,6 +117,7 @@ class ConcurrencyBudget:
     soft_limit_turns:
         When inflight count reaches this value the backpressure policy emits a
         warning but does not reject.  Must be ≤ ``max_concurrent_turns``.
+
     """
 
     max_concurrent_turns: int = 10
@@ -133,6 +149,7 @@ class BackpressurePolicy:
     retry_after_hint_ms:
         Hint included in ``BackpressureSignal.retry_after_ms`` to tell callers
         how long to back off before retrying.
+
     """
 
     action: str = "reject"
@@ -141,12 +158,15 @@ class BackpressurePolicy:
 
     def __post_init__(self) -> None:
         if self.action not in ("reject", "raise", "wait"):
-            raise ValueError(f"BackpressurePolicy.action must be one of 'reject', 'raise', 'wait'; got {self.action!r}")
+            raise ValueError(
+                f"BackpressurePolicy.action must be one of 'reject', 'raise', 'wait'; got {self.action!r}",
+            )
 
 
 # ---------------------------------------------------------------------------
 # Resource accounting ledger
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class _InflightRecord:
@@ -181,9 +201,7 @@ class ResourceAccounter:
         Returns ``True`` if a slot was acquired, ``False`` if the budget is at
         capacity.
         """
-        acquired = self._semaphore.locked() is False and await asyncio.wait_for(
-            asyncio.shield(self._semaphore.acquire()), timeout=0
-        ) if False else self._semaphore._value > 0  # type: ignore[attr-defined]
+        acquired = self._semaphore._value > 0  # type: ignore[attr-defined]
         if not acquired:
             self._total_rejected += 1
             return False
@@ -209,7 +227,7 @@ class ResourceAccounter:
                     self._semaphore.acquire(),
                     timeout=timeout_ms / 1000.0,
                 )
-            except asyncio.TimeoutError as exc:
+            except TimeoutError as exc:
                 self._total_rejected += 1
                 raise ConcurrencyBudgetExceeded(
                     max_concurrent=self._budget.max_concurrent_turns,
@@ -282,6 +300,7 @@ class ResourceAccounter:
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
+
 
 class ExecutionResourceBudget:
     """Unified resource accounting and concurrency boundary enforcement.

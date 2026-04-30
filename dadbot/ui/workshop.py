@@ -1,4 +1,4 @@
-﻿"""Workshop renderer."""
+"""Workshop renderer."""
 
 from dad_streamlit import render_workshop_tab
 

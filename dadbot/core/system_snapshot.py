@@ -23,16 +23,15 @@ Design principle:
     tool_trace_hash = hash(tool_plan) — LLM-independent, always reproducible.
     envelope_hash = hash(intent + strategy + tool_plan) — the "computation class".
 """
+
 from __future__ import annotations
 
 import hashlib
 import json
-import os
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-
 
 # ---------------------------------------------------------------------------
 # Schema versions (single source of truth)
@@ -112,7 +111,7 @@ def get_git_hash(workspace_root: Path) -> str:
             timeout=5,
         )
         return result.stdout.strip() or "UNKNOWN"
-    except Exception:
+    except Exception:  # noqa: BLE001
         return "UNKNOWN"
 
 
@@ -125,17 +124,21 @@ def get_dependency_lock() -> dict[str, str]:
     """Return a stable hash of installed package metadata."""
     try:
         import importlib.metadata as importlib_metadata
+
         packages: dict[str, str] = {}
-        for dist in sorted(importlib_metadata.distributions(), key=lambda d: d.metadata["Name"].lower()):
+        for dist in sorted(
+            importlib_metadata.distributions(),
+            key=lambda d: d.metadata["Name"].lower(),
+        ):
             name = str(dist.metadata["Name"] or "").strip().lower()
             version = str(dist.metadata["Version"] or "").strip()
             if name:
                 packages[name] = version
         lock_hash = hashlib.sha256(
-            json.dumps(packages, sort_keys=True).encode("utf-8")
+            json.dumps(packages, sort_keys=True).encode("utf-8"),
         ).hexdigest()
         return {"lock_hash": lock_hash, "package_count": str(len(packages))}
-    except Exception:
+    except Exception:  # noqa: BLE001
         return {"lock_hash": "UNKNOWN", "package_count": "0"}
 
 
@@ -146,7 +149,7 @@ def get_dependency_lock() -> dict[str, str]:
 
 def _sha256(payload: Any) -> str:
     return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        json.dumps(payload, sort_keys=True, default=str).encode("utf-8"),
     ).hexdigest()
 
 
@@ -166,6 +169,7 @@ class GoldenBehaviorRecord:
     The envelope_hash is the "determinism seal" — same structural inputs
     always produce the same envelope_hash, independent of text output.
     """
+
     prompt: str
     intent_type: str
     strategy: str
@@ -181,20 +185,24 @@ class GoldenBehaviorRecord:
         intent_type: str,
         strategy: str,
         tool_plan: list[str],
-    ) -> "GoldenBehaviorRecord":
+    ) -> GoldenBehaviorRecord:
         plan_tuple = tuple(tool_plan or [])
         tool_trace_hash = _sha256({"tool_plan": list(plan_tuple)})
-        plan_class_hash = _sha256({
-            "intent_type": intent_type,
-            "strategy": strategy,
-            "tool_count": len(plan_tuple),
-        })
-        envelope_hash = _sha256({
-            "intent_type": intent_type,
-            "strategy": strategy,
-            "tool_trace_hash": tool_trace_hash,
-            "plan_class_hash": plan_class_hash,
-        })
+        plan_class_hash = _sha256(
+            {
+                "intent_type": intent_type,
+                "strategy": strategy,
+                "tool_count": len(plan_tuple),
+            },
+        )
+        envelope_hash = _sha256(
+            {
+                "intent_type": intent_type,
+                "strategy": strategy,
+                "tool_trace_hash": tool_trace_hash,
+                "plan_class_hash": plan_class_hash,
+            },
+        )
         return cls(
             prompt=str(prompt),
             intent_type=str(intent_type),
@@ -205,10 +213,13 @@ class GoldenBehaviorRecord:
             envelope_hash=envelope_hash,
         )
 
-    def replay(self) -> "GoldenBehaviorRecord":
+    def replay(self) -> GoldenBehaviorRecord:
         """Re-derive from stored fields and return. Must be identical."""
         return GoldenBehaviorRecord.build(
-            self.prompt, self.intent_type, self.strategy, list(self.tool_plan)
+            self.prompt,
+            self.intent_type,
+            self.strategy,
+            list(self.tool_plan),
         )
 
     def verify_replay(self) -> bool:
@@ -234,52 +245,134 @@ class GoldenBehaviorRecord:
 _GOLDEN_RECORDS_SPECS: list[tuple[str, str, str, list[str]]] = [
     # (prompt, intent_type, strategy, tool_plan)
     # --- Simple / no-tool turns ---
-    ("Hey, how's it going?",                                                  "casual",        "casual_reply",    []),
-    ("Good morning!",                                                          "casual",        "casual_reply",    []),
-    ("Thanks for the chat yesterday.",                                         "casual",        "casual_reply",    []),
-    ("I love you, dad.",                                                       "emotional",     "empathy_first",   []),
-    ("Goodnight.",                                                             "casual",        "casual_reply",    []),
+    ("Hey, how's it going?", "casual", "casual_reply", []),
+    ("Good morning!", "casual", "casual_reply", []),
+    ("Thanks for the chat yesterday.", "casual", "casual_reply", []),
+    ("I love you, dad.", "emotional", "empathy_first", []),
+    ("Goodnight.", "casual", "casual_reply", []),
     # --- Emotional support ---
-    ("I'm really stressed about work lately.",                                 "emotional",     "empathy_first",   ["memory_lookup"]),
-    ("I had a really hard day today.",                                         "emotional",     "empathy_first",   ["memory_lookup"]),
-    ("I feel like I'm failing at everything.",                                 "emotional",     "empathy_first",   ["memory_lookup"]),
-    ("I'm proud of myself for finishing the project.",                        "emotional",     "empathy_first",   ["memory_lookup"]),
-    ("I've been feeling lonely recently.",                                     "emotional",     "empathy_first",   ["memory_lookup"]),
+    (
+        "I'm really stressed about work lately.",
+        "emotional",
+        "empathy_first",
+        ["memory_lookup"],
+    ),
+    ("I had a really hard day today.", "emotional", "empathy_first", ["memory_lookup"]),
+    (
+        "I feel like I'm failing at everything.",
+        "emotional",
+        "empathy_first",
+        ["memory_lookup"],
+    ),
+    (
+        "I'm proud of myself for finishing the project.",
+        "emotional",
+        "empathy_first",
+        ["memory_lookup"],
+    ),
+    (
+        "I've been feeling lonely recently.",
+        "emotional",
+        "empathy_first",
+        ["memory_lookup"],
+    ),
     # --- Goal-oriented queries ---
-    ("What have I been working on lately?",                                    "question",      "fact_seeking",    ["memory_lookup"]),
-    ("Do you remember what I said about my job last week?",                   "question",      "fact_seeking",    ["memory_lookup"]),
-    ("What are my current goals?",                                             "goal_oriented", "goal_track",      ["memory_lookup"]),
-    ("Am I making progress on my fitness goals?",                             "goal_oriented", "goal_track",      ["memory_lookup"]),
-    ("What topics have we talked about the most?",                            "question",      "fact_seeking",    ["memory_lookup"]),
+    (
+        "What have I been working on lately?",
+        "question",
+        "fact_seeking",
+        ["memory_lookup"],
+    ),
+    (
+        "Do you remember what I said about my job last week?",
+        "question",
+        "fact_seeking",
+        ["memory_lookup"],
+    ),
+    ("What are my current goals?", "goal_oriented", "goal_track", ["memory_lookup"]),
+    (
+        "Am I making progress on my fitness goals?",
+        "goal_oriented",
+        "goal_track",
+        ["memory_lookup"],
+    ),
+    (
+        "What topics have we talked about the most?",
+        "question",
+        "fact_seeking",
+        ["memory_lookup"],
+    ),
     # --- Multi-step / planning ---
-    ("Help me make a plan for next week.",                                     "multi_step",    "task_plan",       ["memory_lookup"]),
-    ("I want to track how often I go to the gym.",                            "multi_step",    "task_plan",       ["memory_lookup"]),
-    ("Help me remember to call mom every Sunday.",                            "multi_step",    "task_plan",       ["memory_lookup"]),
-    ("I'm trying to build a habit of reading 30 minutes a day.",             "goal_oriented", "goal_track",      ["memory_lookup"]),
-    ("Can you help me break down my big project into smaller steps?",         "multi_step",    "task_plan",       ["memory_lookup"]),
+    (
+        "Help me make a plan for next week.",
+        "multi_step",
+        "task_plan",
+        ["memory_lookup"],
+    ),
+    (
+        "I want to track how often I go to the gym.",
+        "multi_step",
+        "task_plan",
+        ["memory_lookup"],
+    ),
+    (
+        "Help me remember to call mom every Sunday.",
+        "multi_step",
+        "task_plan",
+        ["memory_lookup"],
+    ),
+    (
+        "I'm trying to build a habit of reading 30 minutes a day.",
+        "goal_oriented",
+        "goal_track",
+        ["memory_lookup"],
+    ),
+    (
+        "Can you help me break down my big project into smaller steps?",
+        "multi_step",
+        "task_plan",
+        ["memory_lookup"],
+    ),
     # --- Informational / curiosity ---
-    ("What's the weather going to be like today?",                            "question",      "fact_seeking",    []),
-    ("Can you recommend a good book?",                                         "question",      "fact_seeking",    []),
-    ("How do I stay motivated when things get hard?",                         "question",      "fact_seeking",    ["memory_lookup"]),
-    ("What's the best way to deal with stress?",                              "question",      "fact_seeking",    ["memory_lookup"]),
+    ("What's the weather going to be like today?", "question", "fact_seeking", []),
+    ("Can you recommend a good book?", "question", "fact_seeking", []),
+    (
+        "How do I stay motivated when things get hard?",
+        "question",
+        "fact_seeking",
+        ["memory_lookup"],
+    ),
+    (
+        "What's the best way to deal with stress?",
+        "question",
+        "fact_seeking",
+        ["memory_lookup"],
+    ),
     # --- Edge: brief/exit ---
-    ("bye",                                                                    "casual",        "casual_reply",    []),
+    ("bye", "casual", "casual_reply", []),
 ]
 
 
 class GoldenBehaviorSet:
     """Collection of canonical prompt/structure pairs forming the golden set."""
 
-    def __init__(self, records: list[GoldenBehaviorRecord], *, version: str = SNAPSHOT_VERSION) -> None:
+    def __init__(
+        self,
+        records: list[GoldenBehaviorRecord],
+        *,
+        version: str = SNAPSHOT_VERSION,
+    ) -> None:
         self.records = list(records)
         self.version = str(version)
-        self.set_hash = _sha256({
-            "version": self.version,
-            "records": [r.to_dict() for r in self.records],
-        })
+        self.set_hash = _sha256(
+            {
+                "version": self.version,
+                "records": [r.to_dict() for r in self.records],
+            },
+        )
 
     @classmethod
-    def default(cls) -> "GoldenBehaviorSet":
+    def default(cls) -> GoldenBehaviorSet:
         records = [
             GoldenBehaviorRecord.build(prompt, intent_type, strategy, tool_plan)
             for (prompt, intent_type, strategy, tool_plan) in _GOLDEN_RECORDS_SPECS
@@ -297,11 +390,13 @@ class GoldenBehaviorSet:
             passed = record.verify_replay()
             if not passed:
                 all_pass = False
-            results.append({
-                "prompt": record.prompt[:60],
-                "envelope_hash": record.envelope_hash,
-                "replay_passed": passed,
-            })
+            results.append(
+                {
+                    "prompt": record.prompt[:60],
+                    "envelope_hash": record.envelope_hash,
+                    "replay_passed": passed,
+                },
+            )
         return {
             "all_passed": all_pass,
             "total": len(self.records),
@@ -330,6 +425,7 @@ class SystemSnapshotV1:
     The snapshot_hash is computed from all components.
     Same code → same snapshot_hash (reproducible).
     """
+
     snapshot_version: str
     git_hash: str
     file_tree_hash: str
@@ -339,7 +435,7 @@ class SystemSnapshotV1:
     snapshot_hash: str
 
     @classmethod
-    def build(cls, workspace_root: str | Path) -> "SystemSnapshotV1":
+    def build(cls, workspace_root: str | Path) -> SystemSnapshotV1:
         root = Path(workspace_root)
         git_hash = get_git_hash(root)
         file_tree_hash = FileTreeHasher.hash_directory(root / "dadbot")
@@ -348,13 +444,15 @@ class SystemSnapshotV1:
         golden_set = GoldenBehaviorSet.default()
 
         # Snapshot hash covers everything except itself.
-        snapshot_hash = _sha256({
-            "snapshot_version": SNAPSHOT_VERSION,
-            "git_hash": git_hash,
-            "file_tree_hash": file_tree_hash,
-            "schema_registry": schema_registry.to_dict(),
-            "golden_set_hash": golden_set.set_hash,
-        })
+        snapshot_hash = _sha256(
+            {
+                "snapshot_version": SNAPSHOT_VERSION,
+                "git_hash": git_hash,
+                "file_tree_hash": file_tree_hash,
+                "schema_registry": schema_registry.to_dict(),
+                "golden_set_hash": golden_set.set_hash,
+            },
+        )
 
         return cls(
             snapshot_version=SNAPSHOT_VERSION,
@@ -385,21 +483,26 @@ class SystemSnapshotV1:
         )
 
     @classmethod
-    def load(cls, snapshot_path: str | Path) -> "SystemSnapshotV1":
+    def load(cls, snapshot_path: str | Path) -> SystemSnapshotV1:
         """Load a previously-written snapshot for comparison."""
         data = json.loads(Path(snapshot_path).read_text(encoding="utf-8"))
         schema_registry = SchemaRegistry(
-            **{k: v for k, v in data.get("schema_registry", {}).items()
-               if k in SchemaRegistry.__dataclass_fields__}
+            **{k: v for k, v in data.get("schema_registry", {}).items() if k in SchemaRegistry.__dataclass_fields__},
         )
         golden_set_data = data.get("golden_set", {})
         records = [
             GoldenBehaviorRecord.build(
-                r["prompt"], r["intent_type"], r["strategy"], r["tool_plan"]
+                r["prompt"],
+                r["intent_type"],
+                r["strategy"],
+                r["tool_plan"],
             )
             for r in golden_set_data.get("records", [])
         ]
-        golden_set = GoldenBehaviorSet(records, version=golden_set_data.get("version", SNAPSHOT_VERSION))
+        golden_set = GoldenBehaviorSet(
+            records,
+            version=golden_set_data.get("version", SNAPSHOT_VERSION),
+        )
         return cls(
             snapshot_version=data.get("snapshot_version", SNAPSHOT_VERSION),
             git_hash=data.get("git_hash", "UNKNOWN"),
@@ -419,7 +522,7 @@ class SystemSnapshotV1:
 @dataclass
 class ReplayResult:
     snapshot_version: str
-    file_tree_match: bool       # file_tree_hash matches current code
+    file_tree_match: bool  # file_tree_hash matches current code
     golden_replay_passed: bool  # all golden records replay correctly
     golden_total: int
     golden_passed: int
@@ -458,7 +561,7 @@ class SnapshotRestoreValidator:
         if not file_tree_match:
             notes.append(
                 f"File tree hash mismatch: stored={snapshot.file_tree_hash[:16]}... "
-                f"current={current_tree_hash[:16]}..."
+                f"current={current_tree_hash[:16]}...",
             )
 
         # Check golden set replay.
@@ -488,6 +591,10 @@ class SnapshotRestoreValidator:
 
 
 __all__ = [
+    "DAG_SCHEMA_VERSION",
+    "EVENT_LOG_SCHEMA_VERSION",
+    "SNAPSHOT_VERSION",
+    "TOOL_IR_SCHEMA_VERSION",
     "FileTreeHasher",
     "GoldenBehaviorRecord",
     "GoldenBehaviorSet",
@@ -496,8 +603,4 @@ __all__ = [
     "SnapshotRestoreValidator",
     "SystemSnapshotV1",
     "get_git_hash",
-    "SNAPSHOT_VERSION",
-    "TOOL_IR_SCHEMA_VERSION",
-    "DAG_SCHEMA_VERSION",
-    "EVENT_LOG_SCHEMA_VERSION",
 ]

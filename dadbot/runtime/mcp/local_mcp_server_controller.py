@@ -15,27 +15,28 @@ from typing import Any
 
 class LocalMcpServerController:
     """Manages local MCP server process lifecycle.
-    
+
     Responsibilities:
     - Process start/stop with proper file handle management
     - PID file persistence
-    - Log tail reading  
+    - Log tail reading
     - Status introspection
-    
+
     No dependency on graph, execution, or model logic.
     """
 
     def __init__(self, runtime_root_path: Path):
         """Initialize controller.
-        
+
         Args:
             runtime_root_path: Root directory for session logs and PID file
+
         """
         self.runtime_root_path = runtime_root_path
 
     def get_runtime_paths(self) -> dict[str, Path]:
         """Get runtime file paths for MCP server.
-        
+
         Returns dict with keys: 'pid', 'stdout', 'stderr'
         """
         base_dir = self.runtime_root_path / "session_logs"
@@ -48,9 +49,10 @@ class LocalMcpServerController:
 
     def read_pid(self) -> int | None:
         """Read stored PID from file.
-        
+
         Returns:
             Process ID if readable, None otherwise
+
         """
         pid_path = self.get_runtime_paths()["pid"]
         if not pid_path.exists():
@@ -63,12 +65,13 @@ class LocalMcpServerController:
     @staticmethod
     def is_process_running(pid: int | None) -> bool:
         """Check if a process is running.
-        
+
         Args:
             pid: Process ID to check
-        
+
         Returns:
             True if process is running, False otherwise
+
         """
         if pid is None:
             return False
@@ -80,16 +83,21 @@ class LocalMcpServerController:
 
     def get_log_tail(self, *, lines: int = 20) -> dict[str, str]:
         """Get last N lines from stdout and stderr logs.
-        
+
         Args:
             lines: Number of lines to return (default 20)
-        
+
         Returns:
             Dict with 'stdout' and 'stderr' keys containing log text
+
         """
+
         def _tail(path: Path) -> str:
             try:
-                content = path.read_text(encoding="utf-8", errors="replace").splitlines()
+                content = path.read_text(
+                    encoding="utf-8",
+                    errors="replace",
+                ).splitlines()
             except OSError:
                 return ""
             return "\n".join(content[-max(1, int(lines or 1)) :])
@@ -102,12 +110,13 @@ class LocalMcpServerController:
 
     def start_process(self, *, restart: bool = False) -> dict[str, Any]:
         """Start MCP server process.
-        
+
         Args:
             restart: If True, stop existing server before starting
-        
+
         Returns:
             Status dict with process information
+
         """
         if restart:
             self.stop_process()
@@ -118,14 +127,15 @@ class LocalMcpServerController:
             return {"running": True, "pid": pid, "reused": True}
 
         paths = self.get_runtime_paths()
-        
+
         # Platform-specific process creation flags
         creationflags = 0
         if os.name == "nt":
-            creationflags = (
-                getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
-                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
-            )
+            creationflags = getattr(
+                subprocess,
+                "DETACHED_PROCESS",
+                0x00000008,
+            ) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
 
         # Open log files and start process
         stdout_handle = paths["stdout"].open("ab")
@@ -146,7 +156,7 @@ class LocalMcpServerController:
 
         # Persist PID
         paths["pid"].write_text(str(process.pid), encoding="utf-8")
-        
+
         return {
             "running": True,
             "pid": process.pid,
@@ -156,13 +166,13 @@ class LocalMcpServerController:
 
     def stop_process(self) -> None:
         """Stop MCP server process.
-        
+
         Uses taskill on Windows, SIGTERM on Unix.
         Cleans up PID file.
         """
         paths = self.get_runtime_paths()
         pid = self.read_pid()
-        
+
         if pid is not None and self.is_process_running(pid):
             if os.name == "nt":
                 subprocess.run(
@@ -176,7 +186,7 @@ class LocalMcpServerController:
                     os.kill(pid, 15)
                 except OSError:
                     pass
-        
+
         # Clean up PID file
         try:
             paths["pid"].unlink(missing_ok=True)
@@ -185,21 +195,22 @@ class LocalMcpServerController:
 
     def get_status(self) -> dict[str, Any]:
         """Get current server status.
-        
+
         Returns:
             Dict with keys: running, pid, stdout_log_path, stderr_log_path
+
         """
         paths = self.get_runtime_paths()
         pid = self.read_pid()
         running = self.is_process_running(pid)
-        
+
         # Clean stale PID file if process died
         if pid is not None and not running:
             try:
                 paths["pid"].unlink(missing_ok=True)
             except OSError:
                 pass
-        
+
         return {
             "running": running,
             "pid": pid if running else None,

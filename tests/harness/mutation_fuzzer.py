@@ -4,6 +4,7 @@ Produces a mix of valid and invalid mutations with controllable ratios.
 The same seed always produces the same sequence of mutations, enabling
 deterministic adversarial replay.
 """
+
 from __future__ import annotations
 
 import random
@@ -31,11 +32,11 @@ _VALID_OPS: dict[str, list[str]] = {
 
 # Payloads designed to trigger validation failures
 _MALFORMED_PAYLOADS: list[dict[str, Any]] = [
-    {},                                                                 # no temporal at all
-    {"temporal": "not-a-dict"},                                        # wrong type
-    {"temporal": {"wall_time": "", "wall_date": "2026-01-01"}},        # empty wall_time
+    {},  # no temporal at all
+    {"temporal": "not-a-dict"},  # wrong type
+    {"temporal": {"wall_time": "", "wall_date": "2026-01-01"}},  # empty wall_time
     {"temporal": {"wall_time": "2026-01-01T00:00:00", "wall_date": ""}},  # empty wall_date
-    {"temporal": {"wall_date": "2026-01-01"}},                         # missing wall_time key
+    {"temporal": {"wall_date": "2026-01-01"}},  # missing wall_time key
 ]
 
 

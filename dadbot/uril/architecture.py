@@ -7,7 +7,6 @@ from typing import Any
 
 from dadbot.uril.models import RepoSignalBus, SubsystemHealth
 
-
 ROOT = Path(__file__).resolve().parents[2]
 DADBOT_ROOT = ROOT / "dadbot"
 
@@ -85,7 +84,11 @@ def _reachable_count(graph: dict[str, set[str]], start: str) -> int:
     return len(seen)
 
 
-def _metrics_for_module(graph: dict[str, set[str]], rev: dict[str, set[str]], module: str) -> GraphMetrics:
+def _metrics_for_module(
+    graph: dict[str, set[str]],
+    rev: dict[str, set[str]],
+    module: str,
+) -> GraphMetrics:
     n = max(1, len(graph) - 1)
     out_d = len(graph.get(module, set())) / n
     in_d = len(rev.get(module, set())) / n
@@ -99,7 +102,7 @@ def _coverage_ratio(module_hint: str, bus: RepoSignalBus) -> float:
     correctness = bus.by_category("correctness")
     if not correctness:
         return 0.0
-    stem = module_hint.split(".")[-1]
+    stem = module_hint.rsplit(".", maxsplit=1)[-1]
     matches = [s for s in correctness if stem in s.subsystem.replace("/", ".")]
     if not matches:
         repo = [s for s in correctness if s.subsystem == "repo"]
@@ -145,7 +148,7 @@ def build_subsystem_health(signal_bus: RepoSignalBus) -> list[SubsystemHealth]:
                     blast_radius=1.0,
                     test_coverage_ratio=0.0,
                     runtime_criticality=runtime_criticality_map.get(subsystem, 0.5),
-                )
+                ),
             )
             continue
 
@@ -166,7 +169,7 @@ def build_subsystem_health(signal_bus: RepoSignalBus) -> list[SubsystemHealth]:
                 blast_radius=metrics.blast_radius,
                 test_coverage_ratio=coverage,
                 runtime_criticality=criticality,
-            )
+            ),
         )
 
     return health_rows
@@ -194,14 +197,16 @@ def subsystem_risk_heatmap(signal_bus: RepoSignalBus) -> list[dict[str, Any]]:
                 "coupling": round(row.coupling, 3),
                 "centrality": round(row.centrality, 3),
                 "blast_radius": round(row.blast_radius, 3),
-            }
+            },
         )
     heatmap.sort(key=lambda x: x["risk_score"], reverse=True)
     return heatmap
 
+
 # ---------------------------------------------------------------------------
 # Cycle detection — ROI #5
 # ---------------------------------------------------------------------------
+
 
 def _tarjan_scc(graph: dict[str, set[str]]) -> list[list[str]]:
     """Tarjan's strongly connected components — iterative to avoid recursion depth limits."""

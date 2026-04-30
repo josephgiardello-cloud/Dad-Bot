@@ -7,12 +7,14 @@ Four components that decouple API surface from execution engine:
   Scheduler        — async background loop; the actual "platform switch"
   ControlPlane     — orchestrator facade; what the API calls
 """
+
 from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +25,7 @@ KernelExecuteFn = Callable[[dict[str, Any], dict[str, Any]], Awaitable[Any]]
 # ──────────────────────────────────────────────────────────────────────────────
 # (1) SessionRegistry — ownership + isolation boundary
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 class SessionRegistry:
     """Source of truth for runtime session lifecycle.
@@ -70,6 +73,7 @@ class SessionRegistry:
 # (2) ExecutionJob — unit of work
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 @dataclass
 class ExecutionJob:
     """Every turn becomes a job, not a direct call.
@@ -88,6 +92,7 @@ class ExecutionJob:
 # ──────────────────────────────────────────────────────────────────────────────
 # (3) Scheduler — the actual "platform switch"
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 class Scheduler:
     """Async background loop that drains the job queue and calls the kernel.
@@ -110,13 +115,13 @@ class Scheduler:
     async def submit(self, job: ExecutionJob) -> None:
         await self.queue.put(job)
 
-    async def run(self, kernel_execute_fn: KernelExecuteFn) -> None:  # noqa: C901
+    async def run(self, kernel_execute_fn: KernelExecuteFn) -> None:
         self._running = True
         logger.info("Scheduler started")
         while self._running:
             try:
                 job = await asyncio.wait_for(self.queue.get(), timeout=1.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
 
             session = self.registry.get_or_create(job.session_id)
@@ -156,6 +161,7 @@ def _reject(job: ExecutionJob, exc: Exception) -> None:
 # (4) ControlPlane — orchestrator facade
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 class ControlPlane:
     """What the API calls.  Owns Scheduler + SessionRegistry.
 
@@ -193,6 +199,7 @@ class ControlPlane:
 # ──────────────────────────────────────────────────────────────────────────────
 # Factory helper
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 def build_control_plane() -> ControlPlane:
     """Return a ready-to-use ControlPlane backed by a fresh SessionRegistry."""

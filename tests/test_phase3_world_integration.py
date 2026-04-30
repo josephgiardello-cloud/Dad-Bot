@@ -16,7 +16,6 @@ from dadbot.core.execution_trace_context import (
 from dadbot.core.truth_system import TruthSystemViolation, enforce_authoritative_truth_system
 
 
-
 def _trace_context() -> dict:
     return {
         "final_hash": "trace-final-hash-001",
@@ -36,7 +35,6 @@ def _trace_context() -> dict:
             {"operation": "model_output", "payload": {"output_hash": "out-2"}},
         ],
     }
-
 
 
 def _seed(trace_context: dict) -> dict:

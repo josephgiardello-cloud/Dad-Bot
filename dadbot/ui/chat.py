@@ -1,4 +1,4 @@
-﻿"""Chat surface renderers."""
+"""Chat surface renderers."""
 
 from dad_streamlit import render_chat_tab
 

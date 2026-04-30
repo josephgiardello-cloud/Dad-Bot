@@ -10,6 +10,7 @@ Tests that:
 
 The delta_compare function is in dadbot.uril.report.
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -19,10 +20,10 @@ import pytest
 from dadbot.uril.report import build_uril_report, delta_compare
 from dadbot.uril.signal_bus import SignalCollectionOptions
 
-
 # ---------------------------------------------------------------------------
 # Unit tests: delta_compare correctness
 # ---------------------------------------------------------------------------
+
 
 class TestDeltaCompareUnit:
     """Pure unit tests for the delta_compare function."""
@@ -123,6 +124,7 @@ class TestDeltaCompareUnit:
 # Integration tests: live URIL report delta stability
 # ---------------------------------------------------------------------------
 
+
 class TestUrilSnapshotDeltaStability:
     """Two successive URIL reports from identical no-probe options must be
     within tolerance of each other."""
@@ -140,8 +142,7 @@ class TestUrilSnapshotDeltaStability:
         r2 = self._build_report()
         result = delta_compare(r1, r2, tolerance=1.0)  # 1.0 = 1 percentage point
         assert result["within_tolerance"] is True, (
-            f"URIL report is non-deterministic. Drifted keys: {result['drifted_keys']}, "
-            f"max_drift={result['max_drift']}"
+            f"URIL report is non-deterministic. Drifted keys: {result['drifted_keys']}, max_drift={result['max_drift']}"
         )
 
     def test_phase4_completion_is_deterministic(self):
@@ -150,9 +151,7 @@ class TestUrilSnapshotDeltaStability:
         pc1 = r1["phase4_completion"]
         pc2 = r2["phase4_completion"]
         for key in pc1:
-            assert pc1[key] == pc2[key], (
-                f"phase4_completion.{key} is non-deterministic: {pc1[key]} vs {pc2[key]}"
-            )
+            assert pc1[key] == pc2[key], f"phase4_completion.{key} is non-deterministic: {pc1[key]} vs {pc2[key]}"
 
     def test_subsystem_health_scores_are_deterministic(self):
         r1 = self._build_report()
@@ -161,8 +160,7 @@ class TestUrilSnapshotDeltaStability:
         sh2 = r2["subsystem_health"]
         for subsystem in sh1:
             assert sh1[subsystem] == sh2[subsystem], (
-                f"subsystem_health[{subsystem!r}] non-deterministic: "
-                f"{sh1[subsystem]} vs {sh2[subsystem]}"
+                f"subsystem_health[{subsystem!r}] non-deterministic: {sh1[subsystem]} vs {sh2[subsystem]}"
             )
 
     def test_snapshot_compared_to_degraded_version_detects_drift(self):
@@ -171,9 +169,7 @@ class TestUrilSnapshotDeltaStability:
         # Build a clearly degraded version of phase4_completion
         degraded = {
             **report,
-            "phase4_completion": {
-                k: max(0.0, v - 30.0) for k, v in report["phase4_completion"].items()
-            },
+            "phase4_completion": {k: max(0.0, v - 30.0) for k, v in report["phase4_completion"].items()},
         }
         result = delta_compare(report, degraded, tolerance=0.05)
         # Should detect at least some drifted keys

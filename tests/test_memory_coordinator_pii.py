@@ -1,4 +1,5 @@
 """Integration coverage for memory persistence PII scrubbing."""
+
 from __future__ import annotations
 
 from datetime import date, datetime
@@ -22,6 +23,7 @@ class DummyBot:
 
     def days_since_iso_date(self, value):
         from datetime import date, datetime
+
         if not value:
             return None
         try:
@@ -32,9 +34,14 @@ class DummyBot:
 
     def normalize_mood(self, mood):
         _MOOD_MAP = {
-            "happy": "positive", "great": "positive", "good": "positive",
-            "sad": "low", "depressed": "low", "tired": "tired",
-            "anxious": "anxious", "stressed": "anxious",
+            "happy": "positive",
+            "great": "positive",
+            "good": "positive",
+            "sad": "low",
+            "depressed": "low",
+            "tired": "tired",
+            "anxious": "anxious",
+            "stressed": "anxious",
         }
         return _MOOD_MAP.get(str(mood or "").lower().strip(), "neutral")
 

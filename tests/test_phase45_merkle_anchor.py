@@ -26,7 +26,9 @@ def test_persistence_commit_transaction_writes_merkle_anchor_event() -> None:
         def persist_turn_event(self, event):
             events.append(dict(event))
 
-    service = PersistenceService(_PM(), turn_service=SimpleNamespace(bot=SimpleNamespace(config=SimpleNamespace(merkle_anchor_enabled=True))))
+    service = PersistenceService(
+        _PM(), turn_service=SimpleNamespace(bot=SimpleNamespace(config=SimpleNamespace(merkle_anchor_enabled=True)))
+    )
 
     context = SimpleNamespace(
         trace_id="trace-1",

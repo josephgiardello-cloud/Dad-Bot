@@ -11,10 +11,9 @@ from dadbot.core.execution_trace_context import (
 )
 
 
-
 def _stable_sha256(payload: Any) -> str:
     return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        json.dumps(payload, sort_keys=True, default=str).encode("utf-8"),
     ).hexdigest()
 
 
@@ -46,13 +45,17 @@ def reconstruct_terminal_state_from_trace(
         canonical_trace,
         fallback_memory_view=memory_view_override or seed.get("final_memory_view") or {},
     )
-    policy_snapshot = dict(policy_snapshot_override or seed.get("policy_snapshot") or {})
+    policy_snapshot = dict(
+        policy_snapshot_override or seed.get("policy_snapshot") or {},
+    )
 
     claimed_final_trace_hash = str(trace.get("final_hash") or "")
     final_trace_hash = derive_execution_trace_hash(canonical_trace)
-    execution_dag_hash = str((canonical_trace.get("execution_dag") or {}).get("dag_hash") or "")
+    execution_dag_hash = str(
+        (canonical_trace.get("execution_dag") or {}).get("dag_hash") or "",
+    )
     external_system_call_graph_hash = str(
-        (canonical_trace.get("external_system_calls") or {}).get("graph_hash") or ""
+        (canonical_trace.get("external_system_calls") or {}).get("graph_hash") or "",
     )
     model_output_hashes = _model_output_hashes(canonical_trace)
     memory_retrieval_hash = _stable_sha256(list(memory_view.memory_retrieval_set or []))
@@ -71,7 +74,9 @@ def reconstruct_terminal_state_from_trace(
 
     return {
         "schema_version": str(seed.get("schema_version") or "1.0"),
-        "final_output": str(canonical_trace.get("normalized_response") or seed.get("final_output") or ""),
+        "final_output": str(
+            canonical_trace.get("normalized_response") or seed.get("final_output") or "",
+        ),
         "final_memory_view": memory_view.to_dict(),
         "memory_view_state_id": memory_view.state_id,
         "final_trace_hash": final_trace_hash,
@@ -122,7 +127,9 @@ def verify_terminal_state_replay_equivalence(
     if expected_state_id and expected_state_id != replayed_state_id:
         violations.append("memory_view_state_id")
 
-    if enforce_dag_equivalence and expected.get("execution_dag_hash") != replayed.get("execution_dag_hash"):
+    if enforce_dag_equivalence and expected.get("execution_dag_hash") != replayed.get(
+        "execution_dag_hash",
+    ):
         violations.append("execution_dag_hash")
 
     return {

@@ -1,0 +1,44 @@
+{
+  "dadbot\\core\\graph.py": {
+    "loc": 1085,
+    "cc_total": 169,
+    "cc_max": 12,
+    "decision_points": 72
+  },
+  "dadbot\\core\\nodes.py": {
+    "loc": 1216,
+    "cc_total": 384,
+    "cc_max": 20,
+    "decision_points": 130
+  },
+  "dadbot\\memory\\graph_manager.py": {
+    "loc": 1496,
+    "cc_total": 372,
+    "cc_max": 30,
+    "decision_points": 154
+  },
+  "dadbot\\core\\orchestrator.py": {
+    "loc": 330,
+    "cc_total": 94,
+    "cc_max": 15,
+    "decision_points": 25
+  },
+  "dadbot\\core\\graph_mutation.py": {
+    "loc": 286,
+    "cc_total": 101,
+    "cc_max": 17,
+    "decision_points": 48
+  },
+  "dadbot\\core\\graph_context.py": {
+    "loc": 180,
+    "cc_total": 41,
+    "cc_max": 12,
+    "decision_points": 7
+  },
+  "dadbot\\core\\graph_pipeline_nodes.py": {
+    "loc": 118,
+    "cc_total": 55,
+    "cc_max": 13,
+    "decision_points": 11
+  }
+}

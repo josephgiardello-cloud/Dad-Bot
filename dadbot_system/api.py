@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 
-from .contracts import ChatRequest, DEFAULT_TENANT_ID, HealthResponse, ServiceConfig
+from .contracts import DEFAULT_TENANT_ID, ChatRequest, HealthResponse, ServiceConfig
 from .kernel import ControlPlane, build_control_plane
 
 try:
@@ -21,10 +21,14 @@ except ImportError:
         pass
 
 
-def create_api_app(orchestrator, *, worker_manager=None, config: ServiceConfig | None = None, control_plane: ControlPlane | None = None):
+def create_api_app(
+    orchestrator, *, worker_manager=None, config: ServiceConfig | None = None, control_plane: ControlPlane | None = None
+):
     if FastAPI is None or HTTPException is None or CORSMiddleware is None:
         exc = ImportError("FastAPI is not installed")
-        raise RuntimeError("FastAPI is not installed. Install the 'service' dependencies to run the API layer.") from exc
+        raise RuntimeError(
+            "FastAPI is not installed. Install the 'service' dependencies to run the API layer."
+        ) from exc
 
     service_config = config or ServiceConfig()
     _control_plane = control_plane if control_plane is not None else build_control_plane()
@@ -36,20 +40,14 @@ def create_api_app(orchestrator, *, worker_manager=None, config: ServiceConfig |
             request = ChatRequest.from_dict(payload, session_id=_session_id)
             _timeout = float(payload.get("timeout_seconds") or 60.0)
             task = orchestrator.submit_chat(request)
-            task_status, response = await _wait_for_task_completion(
-                task.task_id, timeout_seconds=_timeout
-            )
+            task_status, response = await _wait_for_task_completion(task.task_id, timeout_seconds=_timeout)
             return {
                 "task": task_status,
                 "response": response,
-                "execution_graph": task.execution_graph.to_dict()
-                if task.execution_graph is not None
-                else None,
+                "execution_graph": task.execution_graph.to_dict() if task.execution_graph is not None else None,
             }
 
-        _scheduler_task = asyncio.create_task(
-            _control_plane.scheduler.run(_kernel_execute)
-        )
+        _scheduler_task = asyncio.create_task(_control_plane.scheduler.run(_kernel_execute))
         try:
             yield
         finally:
@@ -124,7 +122,7 @@ def create_api_app(orchestrator, *, worker_manager=None, config: ServiceConfig |
 
         try:
             result = await asyncio.wait_for(result_future, timeout=timeout_seconds)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             raise HTTPException(status_code=504, detail="Timed out waiting for turn completion")
 
         task_status = result.get("task")
@@ -181,7 +179,9 @@ def create_api_app(orchestrator, *, worker_manager=None, config: ServiceConfig |
 
         normalized_event_type = str(event_type or "").strip().lower()
         if normalized_event_type:
-            events = [event for event in events if str(event.get("event_type") or "").strip().lower() == normalized_event_type]
+            events = [
+                event for event in events if str(event.get("event_type") or "").strip().lower() == normalized_event_type
+            ]
 
         normalized_since_event_id = str(since_event_id or "").strip()
         if normalized_since_event_id:
@@ -215,7 +215,9 @@ def create_api_app(orchestrator, *, worker_manager=None, config: ServiceConfig |
             if subscriber is None:
                 while True:
                     await asyncio.sleep(15)
-                    await websocket.send_json({"event_type": "heartbeat", "session_id": session_id, "tenant_id": tenant_id})
+                    await websocket.send_json(
+                        {"event_type": "heartbeat", "session_id": session_id, "tenant_id": tenant_id}
+                    )
 
             while True:
                 event = await asyncio.to_thread(subscriber.get, True, 15.0)

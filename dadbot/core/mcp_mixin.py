@@ -5,6 +5,7 @@ methods: status, log tails, start/stop, PID tracking, and server construction.
 All methods route through self._mcp_controller (LocalMcpServerController)
 which is wired in DadBotBootMixin._initialize_services().
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -22,15 +23,17 @@ class DadBotMcpMixin:
         Routes through: LocalMcpServerController.get_status()
         """
         try:
-            from dadbot_system.local_mcp_server import local_mcp_status as describe_local_mcp
-        except Exception as exc:
+            from dadbot_system.local_mcp_server import (
+                local_mcp_status as describe_local_mcp,
+            )
+        except Exception as exc:  # noqa: BLE001
             return {
                 "available": False,
                 "configured": False,
                 "server_name": "dadbot-local-services",
                 "tool_count": 0,
                 "local_state_entries": len(
-                    dict(self.MEMORY_STORE.get("mcp_local_store") or {})
+                    dict(self.MEMORY_STORE.get("mcp_local_store") or {}),
                 ),
                 "error": str(exc).strip() or exc.__class__.__name__,
                 "running": False,
@@ -75,7 +78,11 @@ class DadBotMcpMixin:
         """
         return self._mcp_controller.get_log_tail(lines=lines)
 
-    def start_local_mcp_server_process(self, *, restart: bool = False) -> dict[str, Any]:
+    def start_local_mcp_server_process(
+        self,
+        *,
+        restart: bool = False,
+    ) -> dict[str, Any]:
         """Start MCP server process.
 
         Routes through: LocalMcpServerController.start_process()
@@ -93,8 +100,10 @@ class DadBotMcpMixin:
 
     def build_local_mcp_server(self):
         from dadbot_system.local_mcp_server import build_server
+
         return build_server(bot=self)
 
     def run_local_mcp_server(self) -> None:
         from dadbot_system.local_mcp_server import main as run_local_mcp_main
+
         run_local_mcp_main(bot=self)

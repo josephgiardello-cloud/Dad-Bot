@@ -26,7 +26,11 @@ class ResponseShapingEngine:
     ) -> ShapedResponse:
         rendered = content.strip()
 
-        if profile.warmth >= 0.7 or interaction.emotional_tone in {"calm", "friendly", "playful"}:
+        if profile.warmth >= 0.7 or interaction.emotional_tone in {
+            "calm",
+            "friendly",
+            "playful",
+        }:
             rendered = f"I hear you. {rendered}"
 
         if profile.curiosity_level >= 0.7:

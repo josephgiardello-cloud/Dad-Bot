@@ -5,12 +5,15 @@ import json
 from pathlib import Path
 from typing import Any
 
-from dadbot.uril.architecture import build_subsystem_health, subsystem_health_map, subsystem_risk_heatmap
+from dadbot.uril.architecture import (
+    build_subsystem_health,
+    subsystem_health_map,
+    subsystem_risk_heatmap,
+)
 from dadbot.uril.benchmark import benchmark_alignment_report, build_system_profile
 from dadbot.uril.models import UrailReport
 from dadbot.uril.oracle import generate_refactor_suggestions
 from dadbot.uril.signal_bus import SignalCollectionOptions, collect_signal_bus
-
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -19,7 +22,11 @@ def _pct(value: float) -> float:
     return round(max(0.0, min(1.0, value)) * 100.0, 1)
 
 
-def _phase4_completion(signal_bus, subsystem_rows, benchmark_alignment: dict[str, Any]) -> dict[str, float]:
+def _phase4_completion(
+    signal_bus,
+    subsystem_rows,
+    benchmark_alignment: dict[str, Any],
+) -> dict[str, float]:
     observability = signal_bus.mean_for_category("observability")
     if observability == 0.0:
         obs_row = [r for r in subsystem_rows if r.subsystem == "observability"]
@@ -30,14 +37,23 @@ def _phase4_completion(signal_bus, subsystem_rows, benchmark_alignment: dict[str
         "architecture": _pct(signal_bus.mean_for_category("architecture")),
         "determinism": _pct(signal_bus.mean_for_category("determinism")),
         "observability": _pct(observability),
-        "benchmark_alignment": _pct(benchmark_alignment["tiers"]["tier_b_production"]["alignment_score"]),
+        "benchmark_alignment": _pct(
+            benchmark_alignment["tiers"]["tier_b_production"]["alignment_score"],
+        ),
     }
 
 
 def _progress_summary(signal_bus) -> dict[str, Any]:
     repo_correctness = [s for s in signal_bus.by_category("correctness") if s.subsystem == "repo"]
     if not repo_correctness:
-        return {"tests": 0, "passed": 0, "failures": 0, "errors": 0, "skipped": 0, "pass_rate": 0.0}
+        return {
+            "tests": 0,
+            "passed": 0,
+            "failures": 0,
+            "errors": 0,
+            "skipped": 0,
+            "pass_rate": 0.0,
+        }
 
     meta = dict(repo_correctness[0].metadata or {})
     tests = int(meta.get("tests", 0) or 0)
@@ -56,12 +72,18 @@ def _progress_summary(signal_bus) -> dict[str, Any]:
     }
 
 
-def _proven_aspects(signal_bus, subsystem_rows, benchmark_alignment: dict[str, Any]) -> list[str]:
+def _proven_aspects(
+    signal_bus,
+    subsystem_rows,
+    benchmark_alignment: dict[str, Any],
+) -> list[str]:
     aspects: list[str] = []
 
     correctness = signal_bus.mean_for_category("correctness")
     if correctness >= 0.98:
-        aspects.append("Full non-cloud correctness gate is effectively production-green")
+        aspects.append(
+            "Full non-cloud correctness gate is effectively production-green",
+        )
 
     determinism = signal_bus.mean_for_category("determinism")
     if determinism >= 0.9:
@@ -69,11 +91,18 @@ def _proven_aspects(signal_bus, subsystem_rows, benchmark_alignment: dict[str, A
 
     phase4_arch = [s for s in signal_bus.by_subsystem("phase4") if s.category == "architecture"]
     if phase4_arch and phase4_arch[0].score >= 0.9:
-        aspects.append("Phase 4 architecture/compliance auditor reports no critical gaps")
+        aspects.append(
+            "Phase 4 architecture/compliance auditor reports no critical gaps",
+        )
 
-    persistence_row = next((r for r in subsystem_rows if r.subsystem == "persistence"), None)
+    persistence_row = next(
+        (r for r in subsystem_rows if r.subsystem == "persistence"),
+        None,
+    )
     if persistence_row and persistence_row.score >= 0.8:
-        aspects.append("Persistence surfaces are stable under current structural health model")
+        aspects.append(
+            "Persistence surfaces are stable under current structural health model",
+        )
 
     prod_alignment = benchmark_alignment["tiers"]["tier_b_production"]["alignment_score"]
     if prod_alignment >= 0.8:
@@ -119,13 +148,35 @@ def build_uril_report(options: SignalCollectionOptions) -> dict[str, Any]:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Unified Repo Intelligence + Certification Layer (URIL)")
+    parser = argparse.ArgumentParser(
+        description="Unified Repo Intelligence + Certification Layer (URIL)",
+    )
     parser.add_argument("--pytest-junit", default="", help="Path to pytest JUnit XML")
-    parser.add_argument("--phase4-auditor-json", default="", help="Path to saved phase4 auditor JSON")
-    parser.add_argument("--filesystem-json", default="", help="Path to saved filesystem checker JSON")
-    parser.add_argument("--stress-json", default="", help="Path to stress certification JSON")
-    parser.add_argument("--benchmark-snapshot-dir", default="", help="Path to evaluation snapshot directory")
-    parser.add_argument("--no-probes", action="store_true", help="Do not run live probe scripts; only read provided files")
+    parser.add_argument(
+        "--phase4-auditor-json",
+        default="",
+        help="Path to saved phase4 auditor JSON",
+    )
+    parser.add_argument(
+        "--filesystem-json",
+        default="",
+        help="Path to saved filesystem checker JSON",
+    )
+    parser.add_argument(
+        "--stress-json",
+        default="",
+        help="Path to stress certification JSON",
+    )
+    parser.add_argument(
+        "--benchmark-snapshot-dir",
+        default="",
+        help="Path to evaluation snapshot directory",
+    )
+    parser.add_argument(
+        "--no-probes",
+        action="store_true",
+        help="Do not run live probe scripts; only read provided files",
+    )
     parser.add_argument("--json-out", default="", help="Write full JSON report to file")
     return parser.parse_args()
 
@@ -160,6 +211,7 @@ def main() -> None:
 # ---------------------------------------------------------------------------
 # Snapshot delta comparator — ROI #6
 # ---------------------------------------------------------------------------
+
 
 def delta_compare(
     old_snapshot: dict[str, Any],

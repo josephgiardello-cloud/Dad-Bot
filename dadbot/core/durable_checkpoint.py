@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import hashlib
 import json
@@ -129,19 +129,21 @@ class DurableCheckpoint:
         violations: list[str] = []
         for index, checkpoint in enumerate(chain):
             expected = self._hash_checkpoint(
-                {key: value for key, value in checkpoint.items() if key != "checkpoint_hash"}
+                {key: value for key, value in checkpoint.items() if key != "checkpoint_hash"},
             )
             if checkpoint.get("checkpoint_hash") != expected:
                 violations.append(
-                    f"Checkpoint {index} hash mismatch: stored={checkpoint.get('checkpoint_hash')!r}"
+                    f"Checkpoint {index} hash mismatch: stored={checkpoint.get('checkpoint_hash')!r}",
                 )
             if index > 0:
                 prev = chain[index - 1]
-                if checkpoint.get("prev_checkpoint_hash") != prev.get("checkpoint_hash"):
+                if checkpoint.get("prev_checkpoint_hash") != prev.get(
+                    "checkpoint_hash",
+                ):
                     violations.append(
                         f"Checkpoint {index} prev_hash broken: "
                         f"expected={prev.get('checkpoint_hash')!r}, "
-                        f"got={checkpoint.get('prev_checkpoint_hash')!r}"
+                        f"got={checkpoint.get('prev_checkpoint_hash')!r}",
                     )
 
         return {

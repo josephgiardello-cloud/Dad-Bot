@@ -7,17 +7,18 @@ PRINCIPLE: Scenarios define truth. Scoring quantifies truth. Benchmarks compare 
 """
 
 from dataclasses import dataclass, field
-from typing import List, Dict, Any
+from typing import Any
 
 
 @dataclass
 class Scenario:
     """Single capability evaluation scenario."""
+
     name: str
     category: str
     input_text: str
-    expected_capabilities: List[str] = field(default_factory=list)
-    success_criteria: Dict[str, Any] = field(default_factory=dict)
+    expected_capabilities: list[str] = field(default_factory=list)
+    success_criteria: dict[str, Any] = field(default_factory=dict)
     description: str = ""
     # Behavioral constraints for scoring engine:
     # expected_tool_use: bool - should tools be invoked?
@@ -29,7 +30,7 @@ class Scenario:
     # max_steps: int - step efficiency upper bound
     # quality_threshold: float - minimum overall score to pass (0.0-1.0)
     # acceptable_failure_paths: list[str] - named acceptable degradation modes
-    behavioral_spec: Dict[str, Any] = field(default_factory=dict)
+    behavioral_spec: dict[str, Any] = field(default_factory=dict)
 
 
 # ============================================================================
@@ -128,10 +129,7 @@ TOOL_SCENARIOS = [
     Scenario(
         name="correct_tool_selection",
         category="tool",
-        input_text=(
-            "What's the current time in Tokyo? "
-            "Also tell me what day of the week it is there."
-        ),
+        input_text=("What's the current time in Tokyo? Also tell me what day of the week it is there."),
         expected_capabilities=[
             "tool_identification",
             "correct_tool_selection",
@@ -484,16 +482,10 @@ ROBUSTNESS_SCENARIOS = [
 # SCENARIO REGISTRY
 # ============================================================================
 
-SCENARIOS: List[Scenario] = (
-    PLANNING_SCENARIOS
-    + TOOL_SCENARIOS
-    + MEMORY_SCENARIOS
-    + UX_SCENARIOS
-    + ROBUSTNESS_SCENARIOS
-)
+SCENARIOS: list[Scenario] = PLANNING_SCENARIOS + TOOL_SCENARIOS + MEMORY_SCENARIOS + UX_SCENARIOS + ROBUSTNESS_SCENARIOS
 
 
-def get_scenarios_by_category(category: str) -> List[Scenario]:
+def get_scenarios_by_category(category: str) -> list[Scenario]:
     """Get all scenarios in a specific category."""
     return [s for s in SCENARIOS if s.category == category]
 

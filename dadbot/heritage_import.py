@@ -1,9 +1,8 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import mailbox
 import tempfile
-from datetime import datetime
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
@@ -58,14 +57,26 @@ def _parse_json_memories(name: str, payload: object, limit: int):
 
     for item in flattened[: max(1, int(limit or 1))]:
         if isinstance(item, dict):
-            summary = _safe_text(item.get("summary") or item.get("text") or item.get("content") or item.get("message"))
+            summary = _safe_text(
+                item.get("summary") or item.get("text") or item.get("content") or item.get("message"),
+            )
             category = _safe_text(item.get("category") or "heritage") or "heritage"
             if summary:
-                entries.append({"summary": _clip(f"Heritage note from {name}: {summary}"), "category": category})
+                entries.append(
+                    {
+                        "summary": _clip(f"Heritage note from {name}: {summary}"),
+                        "category": category,
+                    },
+                )
         elif isinstance(item, str):
             cleaned = _safe_text(item)
             if cleaned:
-                entries.append({"summary": _clip(f"Heritage note from {name}: {cleaned}"), "category": "heritage"})
+                entries.append(
+                    {
+                        "summary": _clip(f"Heritage note from {name}: {cleaned}"),
+                        "category": "heritage",
+                    },
+                )
     return entries
 
 
@@ -74,7 +85,12 @@ def _parse_text_memories(name: str, text: str, limit: int):
     lines = [line.strip() for line in str(text or "").splitlines()]
     chunks = [line for line in lines if line]
     for line in chunks[: max(1, int(limit or 1))]:
-        entries.append({"summary": _clip(f"Heritage journal from {name}: {line}"), "category": "heritage"})
+        entries.append(
+            {
+                "summary": _clip(f"Heritage journal from {name}: {line}"),
+                "category": "heritage",
+            },
+        )
     return entries
 
 
@@ -134,7 +150,12 @@ def _parse_mbox_memories(name: str, content_bytes: bytes, limit: int):
                     details += f" Date: {sent_label}."
                 if snippet:
                     details += f" Note: {_clip(snippet, limit=120)}"
-                entries.append({"summary": _clip(f"{summary}. {details}"), "category": "heritage_email"})
+                entries.append(
+                    {
+                        "summary": _clip(f"{summary}. {details}"),
+                        "category": "heritage_email",
+                    },
+                )
         finally:
             box.close()
     return entries
@@ -144,13 +165,21 @@ def _parse_photo_memory(name: str, content_bytes: bytes):
     if not content_bytes:
         return []
     if Image is None:
-        return [{"summary": _clip(f"Photo added to heritage import: {name}."), "category": "heritage_photo"}]
+        return [
+            {
+                "summary": _clip(f"Photo added to heritage import: {name}."),
+                "category": "heritage_photo",
+            },
+        ]
 
     created = ""
     width = 0
     height = 0
 
-    with tempfile.NamedTemporaryFile(suffix=Path(name).suffix or ".img", delete=True) as handle:
+    with tempfile.NamedTemporaryFile(
+        suffix=Path(name).suffix or ".img",
+        delete=True,
+    ) as handle:
         handle.write(content_bytes)
         handle.flush()
         with Image.open(handle.name) as image:
@@ -173,7 +202,12 @@ def _parse_photo_memory(name: str, content_bytes: bytes):
     return [{"summary": _clip(detail), "category": "heritage_photo"}]
 
 
-def build_heritage_memories(uploaded_files, *, notes: str = "", max_items_per_file: int = 40):
+def build_heritage_memories(
+    uploaded_files,
+    *,
+    notes: str = "",
+    max_items_per_file: int = 40,
+):
     memories = []
     stats = {
         "files": 0,
@@ -195,17 +229,25 @@ def build_heritage_memories(uploaded_files, *, notes: str = "", max_items_per_fi
         try:
             if suffix in {".json"}:
                 payload = json.loads(content.decode("utf-8", errors="replace"))
-                memories.extend(_parse_json_memories(file_name, payload, max_items_per_file))
+                memories.extend(
+                    _parse_json_memories(file_name, payload, max_items_per_file),
+                )
             elif suffix in {".txt", ".md", ".csv", ".log"}:
                 text = content.decode("utf-8", errors="replace")
-                memories.extend(_parse_text_memories(file_name, text, max_items_per_file))
+                memories.extend(
+                    _parse_text_memories(file_name, text, max_items_per_file),
+                )
             elif suffix in {".mbox"}:
-                memories.extend(_parse_mbox_memories(file_name, content, max_items_per_file))
+                memories.extend(
+                    _parse_mbox_memories(file_name, content, max_items_per_file),
+                )
             elif suffix in {".jpg", ".jpeg", ".png", ".webp"}:
                 memories.extend(_parse_photo_memory(file_name, content))
             else:
                 text = content.decode("utf-8", errors="replace")
-                memories.extend(_parse_text_memories(file_name, text, max_items_per_file // 2 or 1))
+                memories.extend(
+                    _parse_text_memories(file_name, text, max_items_per_file // 2 or 1),
+                )
         except Exception:
             stats["failed"] = int(stats.get("failed", 0)) + 1
 
@@ -214,7 +256,7 @@ def build_heritage_memories(uploaded_files, *, notes: str = "", max_items_per_fi
             {
                 "summary": _clip(f"Heritage onboarding note: {extra_notes}"),
                 "category": "heritage",
-            }
+            },
         )
 
     dedup = []

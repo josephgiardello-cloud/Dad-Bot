@@ -22,14 +22,13 @@ Run the whole suite:
 Strict mode (treats warnings as hard failures):
     PHASE4_STRICT=1 pytest tests/phase4 -vv
 """
+
 from __future__ import annotations
 
 import ast
 import importlib
 import os
-import sys
 from pathlib import Path
-from textwrap import dedent
 from types import SimpleNamespace
 from typing import Any
 
@@ -47,19 +46,19 @@ STRICT = os.environ.get("PHASE4_STRICT", "").strip() not in ("", "0", "false", "
 # infra-timing legitimately need wall-clock access).
 _TEMPORAL_LAYER_ALLOW = frozenset(
     {
-        "dadbot/core/graph.py",           # TurnTemporalAxis.from_now(), MutationTransactionRecord
-        "dadbot/core/execution_ledger.py",# ledger timestamp stamps
-        "dadbot/core/authorization.py",   # token expiry math
-        "dadbot/state.py",                # state snapshot updated_at
+        "dadbot/core/graph.py",  # TurnTemporalAxis.from_now(), MutationTransactionRecord
+        "dadbot/core/execution_ledger.py",  # ledger timestamp stamps
+        "dadbot/core/authorization.py",  # token expiry math
+        "dadbot/state.py",  # state snapshot updated_at
         "dadbot/managers/conversation_persistence.py",  # log timestamps
-        "dadbot/core/compat_mixin.py",    # compat helper
-        "dadbot/services/turn_service.py",# pipeline timestamp helper
-        "dadbot/background.py",           # background task timing
-        "dadbot/agentic.py",              # email/calendar helpers (UI layer)
+        "dadbot/core/compat_mixin.py",  # compat helper
+        "dadbot/services/turn_service.py",  # pipeline timestamp helper
+        "dadbot/background.py",  # background task timing
+        "dadbot/agentic.py",  # email/calendar helpers (UI layer)
         "dadbot/infrastructure/storage.py",  # file naming
-        "dadbot/managers/advice_audit.py",   # audit timestamps
-        "dadbot/memory/graph_manager.py",    # memory graph wall_time
-        "dadbot/core/control_plane.py",      # control plane ticket timestamps
+        "dadbot/managers/advice_audit.py",  # audit timestamps
+        "dadbot/memory/graph_manager.py",  # memory graph wall_time
+        "dadbot/core/control_plane.py",  # control plane ticket timestamps
     }
 )
 
@@ -85,7 +84,7 @@ class _ExecuteBodyVisitor(ast.NodeVisitor):
     def __init__(self) -> None:
         self.violations: list[tuple[int, str]] = []
 
-    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: N802
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         if node.name == "execute":
             self._scan_execute_body(node)
         # Do NOT recurse into nested functions/classes so inner execute defs
@@ -94,7 +93,7 @@ class _ExecuteBodyVisitor(ast.NodeVisitor):
 
     visit_AsyncFunctionDef = visit_FunctionDef  # type: ignore[assignment]
 
-    def _scan_execute_body(self, func_node: ast.FunctionDef) -> None:  # noqa: N802
+    def _scan_execute_body(self, func_node: ast.FunctionDef) -> None:
         for child in ast.walk(func_node):
             # datetime.now() → Attribute call on 'datetime' name
             if isinstance(child, ast.Call):
@@ -105,9 +104,7 @@ class _ExecuteBodyVisitor(ast.NodeVisitor):
                     and isinstance(func.value, ast.Name)
                     and func.value.id == "datetime"
                 ):
-                    self.violations.append(
-                        (getattr(child, "lineno", 0), "datetime.now() in execute()")
-                    )
+                    self.violations.append((getattr(child, "lineno", 0), "datetime.now() in execute()"))
                 # random.xxx() calls
                 if (
                     isinstance(func, ast.Attribute)
@@ -115,9 +112,7 @@ class _ExecuteBodyVisitor(ast.NodeVisitor):
                     and isinstance(func.value, ast.Name)
                     and func.value.id == "random"
                 ):
-                    self.violations.append(
-                        (getattr(child, "lineno", 0), f"random.{func.attr}() in execute()")
-                    )
+                    self.violations.append((getattr(child, "lineno", 0), f"random.{func.attr}() in execute()"))
 
 
 def test_no_datetime_now_in_stage_execute_methods():
@@ -140,9 +135,8 @@ def test_no_datetime_now_in_stage_execute_methods():
         for line, msg in visitor.violations:
             violations.append(f"{rel}:{line} — {msg}")
 
-    assert not violations, (
-        "Determinism violation: stage execute() methods must not call datetime.now().\n"
-        + "\n".join(f"  {v}" for v in violations)
+    assert not violations, "Determinism violation: stage execute() methods must not call datetime.now().\n" + "\n".join(
+        f"  {v}" for v in violations
     )
 
 
@@ -178,13 +172,10 @@ def test_no_unseeded_random_imports_in_core():
                     )
                     if any(n == "random" or n.startswith("random.") for n in names):
                         if rel not in EXEMPT_PATTERNS:
-                            violations.append(
-                                f"{rel}:{getattr(node, 'lineno', 0)} — 'import random'"
-                            )
+                            violations.append(f"{rel}:{getattr(node, 'lineno', 0)} — 'import random'")
 
-    assert not violations, (
-        "Determinism violation: core/services must not import 'random'.\n"
-        + "\n".join(f"  {v}" for v in violations)
+    assert not violations, "Determinism violation: core/services must not import 'random'.\n" + "\n".join(
+        f"  {v}" for v in violations
     )
 
 
@@ -305,24 +296,16 @@ def test_default_turn_graph_temporal_is_first_node():
     """TemporalNode must be the first node in the default TurnGraph pipeline."""
     graph_mod = importlib.import_module("dadbot.core.graph")
     graph = graph_mod.TurnGraph()
-    names = [
-        str(getattr(n, "name", type(n).__name__) or type(n).__name__)
-        for n in graph.nodes
-    ]
+    names = [str(getattr(n, "name", type(n).__name__) or type(n).__name__) for n in graph.nodes]
     assert names, "TurnGraph.nodes must not be empty"
-    assert names[0] == "temporal", (
-        f"TurnGraph.nodes[0] must be 'temporal', got {names[0]!r}"
-    )
+    assert names[0] == "temporal", f"TurnGraph.nodes[0] must be 'temporal', got {names[0]!r}"
 
 
 def test_default_turn_graph_save_node_present():
     """SaveNode must appear in the default TurnGraph pipeline."""
     graph_mod = importlib.import_module("dadbot.core.graph")
     graph = graph_mod.TurnGraph()
-    names = [
-        str(getattr(n, "name", type(n).__name__) or type(n).__name__)
-        for n in graph.nodes
-    ]
+    names = [str(getattr(n, "name", type(n).__name__) or type(n).__name__) for n in graph.nodes]
     assert "save" in names, f"TurnGraph default pipeline missing 'save'; got {names!r}"
 
 
@@ -330,10 +313,7 @@ def test_default_turn_graph_temporal_before_mutation_stages():
     """'temporal' must precede 'inference', 'save', and 'reflection'."""
     graph_mod = importlib.import_module("dadbot.core.graph")
     graph = graph_mod.TurnGraph()
-    names = [
-        str(getattr(n, "name", type(n).__name__) or type(n).__name__)
-        for n in graph.nodes
-    ]
+    names = [str(getattr(n, "name", type(n).__name__) or type(n).__name__) for n in graph.nodes]
     temporal_idx = names.index("temporal") if "temporal" in names else -1
     for stage in ("inference", "reflection", "save"):
         if stage in names:
@@ -354,7 +334,6 @@ def test_turn_context_mutation_queue_bound_on_construction():
 
 def test_turn_graph_refuses_duplicate_stage_execution():
     """TurnGraph must raise RuntimeError when a stage is executed twice."""
-    import asyncio
     graph_mod = importlib.import_module("dadbot.core.graph")
 
     executed: list[str] = []
@@ -391,9 +370,7 @@ def test_persistence_service_contract_fields():
 def test_persistence_contract_strict_mode_raises_on_missing_service():
     """validate_persistence_service_contract must raise in strict mode when service is None."""
     policy_mod = importlib.import_module("dadbot.core.execution_policy")
-    engine = policy_mod.ExecutionPolicyEngine(
-        persistence_contract=policy_mod.PersistenceServiceContract()
-    )
+    engine = policy_mod.ExecutionPolicyEngine(persistence_contract=policy_mod.PersistenceServiceContract())
     with pytest.raises(RuntimeError, match="unavailable"):
         engine.validate_persistence_service_contract(None, strict_mode=True)
 
@@ -401,9 +378,7 @@ def test_persistence_contract_strict_mode_raises_on_missing_service():
 def test_persistence_contract_lenient_mode_returns_ok_false_for_missing_service():
     """validate_persistence_service_contract must return ok=False (not raise) in lenient mode."""
     policy_mod = importlib.import_module("dadbot.core.execution_policy")
-    engine = policy_mod.ExecutionPolicyEngine(
-        persistence_contract=policy_mod.PersistenceServiceContract()
-    )
+    engine = policy_mod.ExecutionPolicyEngine(persistence_contract=policy_mod.PersistenceServiceContract())
     result = engine.validate_persistence_service_contract(None, strict_mode=False)
     assert result["ok"] is False
     assert len(result["missing"]) > 0
@@ -412,9 +387,7 @@ def test_persistence_contract_lenient_mode_returns_ok_false_for_missing_service(
 def test_persistence_contract_strict_mode_raises_on_missing_methods():
     """validate_persistence_service_contract must raise in strict mode when required methods absent."""
     policy_mod = importlib.import_module("dadbot.core.execution_policy")
-    engine = policy_mod.ExecutionPolicyEngine(
-        persistence_contract=policy_mod.PersistenceServiceContract()
-    )
+    engine = policy_mod.ExecutionPolicyEngine(persistence_contract=policy_mod.PersistenceServiceContract())
     incomplete_service = SimpleNamespace(save_turn=lambda *a, **k: None)  # missing other methods
     with pytest.raises(RuntimeError, match="contract violation"):
         engine.validate_persistence_service_contract(incomplete_service, strict_mode=True)
@@ -423,9 +396,7 @@ def test_persistence_contract_strict_mode_raises_on_missing_methods():
 def test_persistence_contract_passes_for_full_service():
     """validate_persistence_service_contract must return ok=True for a complete service."""
     policy_mod = importlib.import_module("dadbot.core.execution_policy")
-    engine = policy_mod.ExecutionPolicyEngine(
-        persistence_contract=policy_mod.PersistenceServiceContract()
-    )
+    engine = policy_mod.ExecutionPolicyEngine(persistence_contract=policy_mod.PersistenceServiceContract())
     full_service = SimpleNamespace(
         save_turn=lambda *a, **k: None,
         save_graph_checkpoint=lambda *a, **k: None,
@@ -439,9 +410,7 @@ def test_persistence_contract_passes_for_full_service():
 def test_persistence_contract_strict_mode_raises_on_invalid_method_signature():
     """Strict mode must reject persistence services with invalid required method arity."""
     policy_mod = importlib.import_module("dadbot.core.execution_policy")
-    engine = policy_mod.ExecutionPolicyEngine(
-        persistence_contract=policy_mod.PersistenceServiceContract()
-    )
+    engine = policy_mod.ExecutionPolicyEngine(persistence_contract=policy_mod.PersistenceServiceContract())
     malformed_service = SimpleNamespace(
         save_turn=lambda _context: None,
         save_graph_checkpoint=lambda _checkpoint: None,
@@ -454,9 +423,7 @@ def test_persistence_contract_strict_mode_raises_on_invalid_method_signature():
 def test_persistence_contract_lenient_mode_surfaces_signature_issues():
     """Lenient mode should return signature diagnostics without raising."""
     policy_mod = importlib.import_module("dadbot.core.execution_policy")
-    engine = policy_mod.ExecutionPolicyEngine(
-        persistence_contract=policy_mod.PersistenceServiceContract()
-    )
+    engine = policy_mod.ExecutionPolicyEngine(persistence_contract=policy_mod.PersistenceServiceContract())
     malformed_service = SimpleNamespace(
         save_turn=lambda _context: None,
         save_graph_checkpoint=lambda _checkpoint: None,
@@ -567,8 +534,7 @@ def test_stage_phase_mapping_policy(stage: str, expected_phase: str):
     policy_mod = importlib.import_module("dadbot.core.execution_policy")
     result = policy_mod.StagePhaseMappingPolicy.phase_name_for_stage(stage)
     assert result == expected_phase, (
-        f"StagePhaseMappingPolicy.phase_name_for_stage({stage!r}) returned {result!r}, "
-        f"expected {expected_phase!r}"
+        f"StagePhaseMappingPolicy.phase_name_for_stage({stage!r}) returned {result!r}, expected {expected_phase!r}"
     )
 
 
@@ -576,9 +542,7 @@ def test_stage_phase_mapping_unknown_stage_returns_empty():
     """Unknown stages must return an empty string (not raise)."""
     policy_mod = importlib.import_module("dadbot.core.execution_policy")
     result = policy_mod.StagePhaseMappingPolicy.phase_name_for_stage("completely_unknown_stage")
-    assert result == "", (
-        f"Unknown stages must map to empty string, got {result!r}"
-    )
+    assert result == "", f"Unknown stages must map to empty string, got {result!r}"
 
 
 def test_stage_phase_mapping_audit_map_covers_all_stages():
@@ -599,7 +563,7 @@ def test_stage_phase_mapping_audit_map_covers_all_stages():
 
 _MUTATION_QUEUE_OWNERS = frozenset(
     {
-        "dadbot/core/graph.py",          # owns MutationGuard
+        "dadbot/core/graph.py",  # owns MutationGuard
         "dadbot/services/turn_service.py",  # SaveNode executor — legitimate caller
     }
 )
@@ -620,13 +584,13 @@ def test_mutation_queue_callers_are_approved():
             unapproved.append(rel)
 
     if unapproved:
-        msg = (
-            "Files calling mutation_queue.queue() outside approved callers:\n"
-            + "\n".join(f"  {f}" for f in unapproved)
+        msg = "Files calling mutation_queue.queue() outside approved callers:\n" + "\n".join(
+            f"  {f}" for f in unapproved
         )
         if STRICT:
             pytest.fail(msg)
         else:
             pytest.warns(UserWarning) if False else None  # pragma: no cover
             import warnings
+
             warnings.warn(msg, stacklevel=2)

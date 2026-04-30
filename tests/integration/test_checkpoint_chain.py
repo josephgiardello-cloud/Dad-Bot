@@ -1,7 +1,12 @@
 """Integration — checkpoint hash-chain linkage and stage ordering tests."""
+
 from __future__ import annotations
 
 import pytest
+from harness.deterministic_seeds import ADVERSARIAL, BASELINE, CHECKPOINT
+from harness.graph_runner import GraphRunner
+from harness.kernel_mock import MockRegistry
+from harness.turn_factory import TurnFactory
 
 from dadbot.core.graph import (
     ContextBuilderNode,
@@ -13,10 +18,6 @@ from dadbot.core.graph import (
     TemporalNode,
     TurnGraph,
 )
-from harness.deterministic_seeds import BASELINE, CHECKPOINT, ADVERSARIAL
-from harness.graph_runner import GraphRunner
-from harness.kernel_mock import MockRegistry
-from harness.turn_factory import TurnFactory
 
 
 def _build_canonical(registry: MockRegistry) -> TurnGraph:

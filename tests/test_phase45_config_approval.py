@@ -8,7 +8,9 @@ from dadbot.core.config_approval import ConfigApprovalWorkflow
 
 def test_config_approval_workflow_requires_multiple_approvals(tmp_path: Path) -> None:
     workflow = ConfigApprovalWorkflow(tmp_path / "approvals.json", approvals_required=2)
-    proposal = workflow.propose(key="llm.profile", requested_value={"provider": "ollama", "model": "llama3.2"}, requested_by="alice")
+    proposal = workflow.propose(
+        key="llm.profile", requested_value={"provider": "ollama", "model": "llama3.2"}, requested_by="alice"
+    )
     first = workflow.approve(proposal.proposal_id, "bob")
     assert first is not None
     assert first.status == "pending"

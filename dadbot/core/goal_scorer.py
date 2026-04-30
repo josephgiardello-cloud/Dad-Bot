@@ -9,7 +9,6 @@ from __future__ import annotations
 import re
 from typing import Any
 
-
 _MAX_GOAL_BOOST: float = 0.40
 _TOKEN_BOOST_STEP: float = 0.08
 _STOPWORDS: frozenset[str] = frozenset(
@@ -55,7 +54,7 @@ _STOPWORDS: frozenset[str] = frozenset(
         "what",
         "when",
         "where",
-    }
+    },
 )
 
 
@@ -100,7 +99,9 @@ class GoalAwareRanker:
 
         goal_tokens: frozenset[str] = frozenset()
         for goal in active_goals:
-            desc = str(goal.get("description", goal) if isinstance(goal, dict) else goal)
+            desc = str(
+                goal.get("description", goal) if isinstance(goal, dict) else goal,
+            )
             goal_tokens = goal_tokens | _tokenise(desc)
 
         if not goal_tokens:
@@ -126,7 +127,9 @@ class GoalAwareRanker:
 
         goal_tokens: frozenset[str] = frozenset()
         for goal in active_goals:
-            desc = str(goal.get("description", goal) if isinstance(goal, dict) else goal)
+            desc = str(
+                goal.get("description", goal) if isinstance(goal, dict) else goal,
+            )
             goal_tokens = goal_tokens | _tokenise(desc)
 
         scores: list[float] = []

@@ -1,4 +1,4 @@
-﻿"""Tool execution sandbox for the DadBot agentic pipeline.
+"""Tool execution sandbox for the DadBot agentic pipeline.
 
 Provides three guarantees that were absent from the previous dispatch map:
 
@@ -23,10 +23,10 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from dataclasses import dataclass, field
-from typing import Any, Callable
+from collections.abc import Callable
 from contextlib import contextmanager
-from typing import Iterator
+from dataclasses import dataclass, field
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -44,9 +44,9 @@ def _idempotency_key(tool_name: str, parameters: dict[str, Any]) -> str:
 class ToolExecutionRecord:
     tool_name: str
     idempotency_key: str
-    status: str          # "succeeded" | "failed" | "cached"
-    result: Any          # return value of the executor, or None on failure
-    error: str           # exception message, or "" on success
+    status: str  # "succeeded" | "failed" | "cached"
+    result: Any  # return value of the executor, or None on failure
+    error: str  # exception message, or "" on success
     compensating_action: Callable[[], None] | None = field(default=None, repr=False)
 
 
@@ -112,7 +112,7 @@ class ToolSandbox:
             result = executor()
             status = "succeeded"
             error = ""
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             result = None
             status = "failed"
             error = str(exc) or type(exc).__name__
@@ -153,9 +153,13 @@ class ToolSandbox:
                 record.compensating_action()
                 outcome["rolled_back"] = True
                 logger.info("ToolSandbox: rolled back tool=%r", record.tool_name)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 outcome["error"] = str(exc) or type(exc).__name__
-                logger.warning("ToolSandbox: rollback failed for tool=%r: %s", record.tool_name, exc)
+                logger.warning(
+                    "ToolSandbox: rollback failed for tool=%r: %s",
+                    record.tool_name,
+                    exc,
+                )
             outcomes.append(outcome)
         return outcomes
 
@@ -178,7 +182,7 @@ class ToolSandbox:
             ],
         }
 
-    def isolated_state_snapshot(self, generation: int = 0) -> "ToolSandboxSnapshot":
+    def isolated_state_snapshot(self, generation: int = 0) -> ToolSandboxSnapshot:
         """Capture an immutable ToolSandboxSnapshot for isolation testing.
 
         Two sandboxes executing the same tool sequence must produce equal
@@ -195,8 +199,8 @@ class ToolSandbox:
         self,
         *,
         tool_name: str,
-        parameters: "dict[str, Any] | None" = None,
-    ) -> "Iterator[ToolTransaction]":
+        parameters: dict[str, Any] | None = None,
+    ) -> Iterator[ToolTransaction]:
         """Context manager: explicit transaction semantics for a tool call.
 
         On clean exit the transaction is committed.  On any exception the
@@ -225,14 +229,14 @@ class ToolTransaction:
     def __init__(
         self,
         *,
-        sandbox: "ToolSandbox",
+        sandbox: ToolSandbox,
         tool_name: str,
         parameters: dict,
     ) -> None:
         self._sandbox = sandbox
         self._tool_name = tool_name
         self._parameters = parameters
-        self._record: "ToolExecutionRecord | None" = None
+        self._record: ToolExecutionRecord | None = None
         self._committed: bool = False
         self._rolled_back: bool = False
         # Snapshot record count at begin so rollback only affects THIS transaction.
@@ -243,7 +247,7 @@ class ToolTransaction:
         executor,
         *,
         compensating_action=None,
-    ) -> "ToolExecutionRecord":
+    ) -> ToolExecutionRecord:
         """Execute the tool call through the sandbox."""
         self._record = self._sandbox.execute(
             tool_name=self._tool_name,
@@ -277,7 +281,7 @@ class ToolTransaction:
         if self._rolled_back:
             return []
         self._rolled_back = True
-        txn_records = list(reversed(self._sandbox._records[self._records_at_begin:]))
+        txn_records = list(reversed(self._sandbox._records[self._records_at_begin :]))
         outcomes = []
         for record in txn_records:
             if record.compensating_action is None:
@@ -291,7 +295,7 @@ class ToolTransaction:
             try:
                 record.compensating_action()
                 outcome["rolled_back"] = True
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 outcome["error"] = str(exc) or type(exc).__name__
             outcomes.append(outcome)
         return outcomes
@@ -319,7 +323,7 @@ class ToolSandboxSnapshot:
     generation: int
 
     @classmethod
-    def capture(cls, sandbox: "ToolSandbox", generation: int) -> "ToolSandboxSnapshot":
+    def capture(cls, sandbox: ToolSandbox, generation: int) -> ToolSandboxSnapshot:
         cache_keys = tuple(sorted(sandbox._cache.keys()))
         payload = json.dumps(
             {

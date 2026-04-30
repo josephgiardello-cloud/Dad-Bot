@@ -17,11 +17,11 @@ from __future__ import annotations
 
 import argparse
 import ast
-import os
 import pathlib
 import re
 import subprocess
 import sys
+
 import yaml
 
 # ─── Paths ────────────────────────────────────────────────────────────────────
@@ -35,6 +35,7 @@ BASELINE_CYCLE_FILE = ROOT / "_baseline_cycles.txt"
 GROUP_BRANCH_PATTERN = re.compile(r"refactor/group-(\d+)-")
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
+
 
 def _run(cmd: list[str], *, capture: bool = True) -> tuple[int, str]:
     """Run a subprocess and return (returncode, combined_output)."""
@@ -61,6 +62,7 @@ def _warn(msg: str) -> None:
 
 
 # ─── Check: no parallel refactor group branches ───────────────────────────────
+
 
 def check_no_parallel_groups(active_group: int | None = None) -> bool:
     """Fail if refactor branches from more than one group are open simultaneously."""
@@ -93,6 +95,7 @@ def check_no_parallel_groups(active_group: int | None = None) -> bool:
 
 # ─── Check: group 1 all modules complete ─────────────────────────────────────
 
+
 def check_group1_all_complete() -> bool:
     """Fail unless all 4 Group 1 modules have status=complete in the manifest."""
     if not GROUP1_MANIFEST.exists():
@@ -120,6 +123,7 @@ def check_group1_all_complete() -> bool:
 
 
 # ─── Check: module position gate (pre-module) ────────────────────────────────
+
 
 def check_pre_module_gate(module_name: str) -> bool:
     """Fail if the previous module in Group 1 is not yet complete."""
@@ -165,6 +169,7 @@ def check_pre_module_gate(module_name: str) -> bool:
 
 # ─── Check: import cycles ─────────────────────────────────────────────────────
 
+
 def _collect_import_cycles() -> set[frozenset[str]]:
     """
     Walk every Python file under dadbot/ and dadbot_system/ and detect
@@ -207,7 +212,7 @@ def _collect_import_cycles() -> set[frozenset[str]]:
     cycles: set[frozenset[str]] = set()
     module_names = list(imports.keys())
     for i, mod_a in enumerate(module_names):
-        for mod_b in module_names[i + 1:]:
+        for mod_b in module_names[i + 1 :]:
             # Simplified: check top-level mutual imports
             top_a = mod_a.split(".")[0]
             top_b = mod_b.split(".")[0]
@@ -243,7 +248,9 @@ def check_no_new_cycles() -> bool:
     if baseline_cycles is None:
         # First run: save baseline and pass
         _save_baseline_cycles(current_cycles)
-        _pass(f"Baseline cycle snapshot created with {len(current_cycles)} cycles — future runs will diff against this.")
+        _pass(
+            f"Baseline cycle snapshot created with {len(current_cycles)} cycles — future runs will diff against this."
+        )
         return True
 
     new_cycles = current_cycles - baseline_cycles
@@ -264,6 +271,7 @@ def check_no_new_cycles() -> bool:
 
 
 # ─── Check: DEV lane ─────────────────────────────────────────────────────────
+
 
 def check_dev_lane(baseline_count: int = 216) -> bool:
     """Run DEV lane (unit tests) and fail if any test fails or count drops below baseline."""
@@ -294,6 +302,7 @@ def check_dev_lane(baseline_count: int = 216) -> bool:
 
 # ─── Check: integration lane ─────────────────────────────────────────────────
 
+
 def check_integration_lane() -> bool:
     """Run integration tests and fail if any fail."""
     print("  Running integration lane...")
@@ -317,11 +326,12 @@ def check_integration_lane() -> bool:
 
 # ─── Full hard gate — Group N ─────────────────────────────────────────────────
 
+
 def run_group_gate(group_number: int) -> bool:
     """Evaluate the hard gate before Group N+1 can start."""
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"  HARD GATE — Group {group_number} completion check")
-    print(f"{'='*70}\n")
+    print(f"{'=' * 70}\n")
 
     results: list[bool] = []
 
@@ -346,27 +356,28 @@ def run_group_gate(group_number: int) -> bool:
 
     print()
     if all(results):
-        print(f"{'='*70}")
+        print(f"{'=' * 70}")
         print(f"  GATE PASSED — Group {group_number} complete. Group {group_number + 1} may begin.")
-        print(f"  MANUAL CONFIRMATION REQUIRED: verify no LangGraph boundary work has")
-        print(f"  been started on any open branch before proceeding.")
-        print(f"{'='*70}\n")
+        print("  MANUAL CONFIRMATION REQUIRED: verify no LangGraph boundary work has")
+        print("  been started on any open branch before proceeding.")
+        print(f"{'=' * 70}\n")
         return True
     else:
         failed_count = sum(1 for r in results if not r)
-        print(f"{'='*70}")
+        print(f"{'=' * 70}")
         print(f"  GATE FAILED — {failed_count} check(s) did not pass.")
         print(f"  Group {group_number + 1} is BLOCKED until all conditions are met.")
-        print(f"{'='*70}\n")
+        print(f"{'=' * 70}\n")
         return False
 
 
 # ─── Pre-module check ─────────────────────────────────────────────────────────
 
+
 def run_pre_module(module_name: str) -> bool:
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"  PRE-MODULE CHECK — {module_name}")
-    print(f"{'='*70}\n")
+    print(f"{'=' * 70}\n")
 
     results: list[bool] = []
 
@@ -387,10 +398,11 @@ def run_pre_module(module_name: str) -> bool:
 
 # ─── Post-module check ────────────────────────────────────────────────────────
 
+
 def run_post_module(module_name: str) -> bool:
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"  POST-MODULE CHECK — {module_name}")
-    print(f"{'='*70}\n")
+    print(f"{'=' * 70}\n")
 
     results: list[bool] = []
 
@@ -411,6 +423,7 @@ def run_post_module(module_name: str) -> bool:
 
 # ─── CLI ──────────────────────────────────────────────────────────────────────
 
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="CI enforcement gate for the staged refactor pipeline.",
@@ -422,7 +435,9 @@ def main() -> None:
     parser.add_argument("--group-gate", metavar="N", type=int, help="Run full hard gate for group N")
     parser.add_argument("--cycle-check", action="store_true", help="Import cycle delta check only")
     parser.add_argument("--no-parallel-groups", action="store_true", help="Parallel branch check only")
-    parser.add_argument("--save-baseline", action="store_true", help="Overwrite baseline cycle snapshot with current state")
+    parser.add_argument(
+        "--save-baseline", action="store_true", help="Overwrite baseline cycle snapshot with current state"
+    )
 
     args = parser.parse_args()
 

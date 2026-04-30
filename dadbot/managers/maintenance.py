@@ -1,12 +1,11 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
+import logging
 from collections import defaultdict
 from datetime import datetime, timedelta
-import logging
 from pathlib import Path
 
 from dadbot.notifications import send_local_notification
-
 
 logger = logging.getLogger(__name__)
 
@@ -45,8 +44,13 @@ class MaintenanceScheduler:
         if len(self.bot.conversation_history()) < 4:
             return False
 
-        last_turn = int(self.bot.MEMORY_STORE.get("last_background_synthesis_turn", 0) or 0)
-        interval = max(3, int(getattr(self.bot, "RELATIONSHIP_REFLECTION_INTERVAL", 3) or 3))
+        last_turn = int(
+            self.bot.MEMORY_STORE.get("last_background_synthesis_turn", 0) or 0,
+        )
+        interval = max(
+            3,
+            int(getattr(self.bot, "RELATIONSHIP_REFLECTION_INTERVAL", 3) or 3),
+        )
         return self.bot.session_turn_count() - last_turn >= interval
 
     def run_periodic_durable_synthesis(self, trigger_text="", force=False):
@@ -109,7 +113,9 @@ class MaintenanceScheduler:
         if not self.bot.session_archive() and not self.bot.consolidated_memories():
             return False
         now = self._coerce_reference_time(reference_time)
-        last_run = self._parse_iso_datetime(self.bot.MEMORY_STORE.get("last_memory_compaction_at"))
+        last_run = self._parse_iso_datetime(
+            self.bot.MEMORY_STORE.get("last_memory_compaction_at"),
+        )
         if last_run is None:
             return True
         return now - last_run >= timedelta(hours=24)
@@ -119,7 +125,9 @@ class MaintenanceScheduler:
         if not self.should_run_memory_compaction(force=force, reference_time=now):
             return {
                 "ran": False,
-                "summary": str(self.bot.MEMORY_STORE.get("last_memory_compaction_summary") or ""),
+                "summary": str(
+                    self.bot.MEMORY_STORE.get("last_memory_compaction_summary") or "",
+                ),
                 "updated_at": self.bot.MEMORY_STORE.get("last_memory_compaction_at"),
                 "narrative_count": len(self.bot.narrative_memories()),
             }
@@ -184,26 +192,31 @@ class MaintenanceScheduler:
         }
 
         try:
-            for event in (self.bot.agentic_handler.list_calendar_events(limit=8) or []):
+            for event in self.bot.agentic_handler.list_calendar_events(limit=8) or []:
                 if isinstance(event, dict):
                     signals["calendar_events"].append(dict(event))
         except Exception:
             pass
 
         try:
-            for event in (self.bot.calendar_manager.fetch_upcoming_ical_events(limit=6) or []):
+            for event in self.bot.calendar_manager.fetch_upcoming_ical_events(limit=6) or []:
                 if isinstance(event, dict):
                     signals["ical_events"].append(dict(event))
         except Exception:
             pass
 
         try:
-            drafts_dir = self.bot.env_path("DADBOT_EMAIL_DRAFT_DIR", self.bot.MEMORY_PATH.with_name("email_drafts"))
+            drafts_dir = self.bot.env_path(
+                "DADBOT_EMAIL_DRAFT_DIR",
+                self.bot.MEMORY_PATH.with_name("email_drafts"),
+            )
             if isinstance(drafts_dir, Path) and drafts_dir.exists():
                 for item in drafts_dir.glob("*.eml"):
                     if not item.is_file():
                         continue
-                    signals["draft_modified_times"].append(datetime.fromtimestamp(item.stat().st_mtime))
+                    signals["draft_modified_times"].append(
+                        datetime.fromtimestamp(item.stat().st_mtime),
+                    )
         except Exception:
             pass
 
@@ -230,7 +243,11 @@ class MaintenanceScheduler:
                 continue
             derived["calendar_events"].append(event)
 
-        recent_count = sum(1 for modified_at in list(signals.get("draft_modified_times") or []) if modified_at >= horizon["draft_cutoff"])
+        recent_count = sum(
+            1
+            for modified_at in list(signals.get("draft_modified_times") or [])
+            if modified_at >= horizon["draft_cutoff"]
+        )
         derived["recent_draft_count"] = recent_count
         derived["has_recent_drafts"] = recent_count > 0
 
@@ -260,13 +277,16 @@ class MaintenanceScheduler:
             cues.append({"cue_key": cue_key, "kind": "ical", "message": message})
 
         if bool(derived.get("has_recent_drafts")):
-            cue_key = self._cue_key("email-drafts", derived.get("recent_draft_count") or 0)
+            cue_key = self._cue_key(
+                "email-drafts",
+                derived.get("recent_draft_count") or 0,
+            )
             cues.append(
                 {
                     "cue_key": cue_key,
                     "kind": "email",
                     "message": "I noticed you have a recent email draft hanging out. Want help finishing it in one pass?",
-                }
+                },
             )
 
         return cues
@@ -291,7 +311,9 @@ class MaintenanceScheduler:
         return self._assemble_environmental_context(behavioral)
 
     def _queue_shadow_repair_prompt(self, now):
-        audits = [dict(item) for item in list(self.bot.MEMORY_STORE.get("advice_audits") or []) if isinstance(item, dict)]
+        audits = [
+            dict(item) for item in list(self.bot.MEMORY_STORE.get("advice_audits") or []) if isinstance(item, dict)
+        ]
         if not audits:
             return 0, audits
 
@@ -326,7 +348,9 @@ class MaintenanceScheduler:
             if not topics:
                 topics = ["general"]
             primary_topic = topics[0]
-            created_at = str(entry.get("created_at") or now.isoformat(timespec="seconds"))
+            created_at = str(
+                entry.get("created_at") or now.isoformat(timespec="seconds"),
+            )
             month_key = created_at[:7] if len(created_at) >= 7 else now.strftime("%Y-%m")
             clusters[(primary_topic, month_key)].append(dict(entry))
 
@@ -338,8 +362,14 @@ class MaintenanceScheduler:
             mood_counts = defaultdict(int)
             for mood in moods:
                 mood_counts[mood] += 1
-            dominant_mood = sorted(mood_counts.items(), key=lambda item: (item[1], item[0]), reverse=True)[0][0]
-            summaries = [str(item.get("summary") or "").strip() for item in entries if str(item.get("summary") or "").strip()]
+            dominant_mood = sorted(
+                mood_counts.items(),
+                key=lambda item: (item[1], item[0]),
+                reverse=True,
+            )[0][0]
+            summaries = [
+                str(item.get("summary") or "").strip() for item in entries if str(item.get("summary") or "").strip()
+            ]
             evidence = "; ".join(summaries[:3])
             period_start = str(entries[0].get("created_at") or month_key)
             period_end = str(entries[-1].get("created_at") or month_key)
@@ -358,7 +388,7 @@ class MaintenanceScheduler:
                     "period_start": period_start,
                     "period_end": period_end,
                     "updated_at": now.isoformat(timespec="seconds"),
-                }
+                },
             )
 
         return narratives[-24:]
@@ -440,7 +470,10 @@ class MaintenanceScheduler:
             return False, "disabled"
         if source == "scheduled-pattern" and not settings.get("notify_patterns", True):
             return False, "patterns-disabled"
-        if source == "scheduled-reminder" and not settings.get("notify_reminders", True):
+        if source == "scheduled-reminder" and not settings.get(
+            "notify_reminders",
+            True,
+        ):
             return False, "reminders-disabled"
         if self._within_quiet_hours(
             now,
@@ -456,7 +489,15 @@ class MaintenanceScheduler:
             backend=str(settings.get("backend") or "auto"),
         )
 
-    def _process_due_reminders(self, reminders, now, lead_window, repeat_window, *, force=False):
+    def _process_due_reminders(
+        self,
+        reminders,
+        now,
+        lead_window,
+        repeat_window,
+        *,
+        force=False,
+    ):
         """Process due/upcoming reminders. Mutates reminder dicts in-place. Returns (queued, notif_count)."""
         queued = 0
         notifications_sent = 0
@@ -468,12 +509,18 @@ class MaintenanceScheduler:
                 continue
             if not force and due_at > now + lead_window:
                 continue
-            last_notified_at = self._parse_iso_datetime(reminder.get("last_notified_at"))
+            last_notified_at = self._parse_iso_datetime(
+                reminder.get("last_notified_at"),
+            )
             if not force and last_notified_at is not None and now - last_notified_at < repeat_window:
                 continue
             message = self._build_due_reminder_message(reminder, due_at, now)
             self.bot.queue_proactive_message(message, source="scheduled-reminder")
-            sent, _backend = self.maybe_send_proactive_notification(message, source="scheduled-reminder", now=now)
+            sent, _backend = self.maybe_send_proactive_notification(
+                message,
+                source="scheduled-reminder",
+                now=now,
+            )
             if sent:
                 notifications_sent += 1
             reminder["last_notified_at"] = now.isoformat(timespec="seconds")
@@ -481,7 +528,16 @@ class MaintenanceScheduler:
             queued += 1
         return queued, notifications_sent
 
-    def _process_pattern_nudges(self, patterns, now, weekday_name, pattern_hour, pattern_confidence, *, force=False):
+    def _process_pattern_nudges(
+        self,
+        patterns,
+        now,
+        weekday_name,
+        pattern_hour,
+        pattern_confidence,
+        *,
+        force=False,
+    ):
         """Process scheduled pattern nudges. Mutates pattern dicts in-place. Returns (queued, notif_count)."""
         queued = 0
         notifications_sent = 0
@@ -497,11 +553,16 @@ class MaintenanceScheduler:
                 continue
             if not force and now.hour < pattern_hour:
                 continue
-            last_proactive_at = self._parse_iso_datetime(pattern.get("last_proactive_at"))
+            last_proactive_at = self._parse_iso_datetime(
+                pattern.get("last_proactive_at"),
+            )
             if not force and last_proactive_at is not None and last_proactive_at.date() == now.date():
                 continue
             pattern_message = self.bot.build_pattern_message(pattern)
-            self.bot.queue_proactive_message(pattern_message, source="scheduled-pattern")
+            self.bot.queue_proactive_message(
+                pattern_message,
+                source="scheduled-pattern",
+            )
             sent, _backend = self.maybe_send_proactive_notification(
                 pattern_message,
                 source="scheduled-pattern",
@@ -513,7 +574,7 @@ class MaintenanceScheduler:
             queued += 1
         return queued, notifications_sent
 
-    def _process_environmental_cues(self, cue_history, now, *, force=False):  # noqa: ARG002
+    def _process_environmental_cues(self, cue_history, now, *, force=False):
         """Scan and queue environmental cues. Mutates cue_history in-place. Returns (queued, notif_count)."""
         recent_cue_keys = self._recent_cue_keys(cue_history, now)
         queued = 0
@@ -537,7 +598,7 @@ class MaintenanceScheduler:
                     "kind": str(cue.get("kind") or "environment").strip().lower() or "environment",
                     "message": message,
                     "detected_at": now.isoformat(timespec="seconds"),
-                }
+                },
             )
             recent_cue_keys.add(cue_key)
             queued += 1
@@ -574,27 +635,52 @@ class MaintenanceScheduler:
 
         now = self._coerce_reference_time(reference_time)
         cadence = self.bot.cadence_settings()
-        lead_window = timedelta(minutes=max(5, int(cadence.get("scheduled_reminder_lead_minutes", 45) or 45)))
-        repeat_window = timedelta(hours=max(1, int(cadence.get("scheduled_reminder_repeat_hours", 12) or 12)))
+        lead_window = timedelta(
+            minutes=max(
+                5,
+                int(cadence.get("scheduled_reminder_lead_minutes", 45) or 45),
+            ),
+        )
+        repeat_window = timedelta(
+            hours=max(1, int(cadence.get("scheduled_reminder_repeat_hours", 12) or 12)),
+        )
         pattern_hour = max(0, int(cadence.get("scheduled_pattern_hour", 8) or 8))
-        pattern_confidence = max(1, int(cadence.get("scheduled_pattern_min_confidence", 80) or 80))
+        pattern_confidence = max(
+            1,
+            int(cadence.get("scheduled_pattern_min_confidence", 80) or 80),
+        )
 
         reminders = [dict(item) for item in self.bot.reminder_catalog(include_done=True)]
         patterns = [dict(item) for item in self.bot.life_patterns()]
         cue_history = [
             dict(item)
-            for item in list(self.bot.MEMORY_STORE.get("environmental_cues_history") or [])
+            for item in list(
+                self.bot.MEMORY_STORE.get("environmental_cues_history") or [],
+            )
             if isinstance(item, dict)
         ]
 
         queued_reminders, notif_reminders = self._process_due_reminders(
-            reminders, now, lead_window, repeat_window, force=force
+            reminders,
+            now,
+            lead_window,
+            repeat_window,
+            force=force,
         )
         weekday_name = now.strftime("%A").lower()
         queued_patterns, notif_patterns = self._process_pattern_nudges(
-            patterns, now, weekday_name, pattern_hour, pattern_confidence, force=force
+            patterns,
+            now,
+            weekday_name,
+            pattern_hour,
+            pattern_confidence,
+            force=force,
         )
-        queued_environmental, notif_env = self._process_environmental_cues(cue_history, now, force=force)
+        queued_environmental, notif_env = self._process_environmental_cues(
+            cue_history,
+            now,
+            force=force,
+        )
         queued_shadow_repairs, audits = self._queue_shadow_repair_prompt(now)
         notifications_sent = notif_reminders + notif_patterns + notif_env
 
@@ -617,23 +703,37 @@ class MaintenanceScheduler:
 
     def run_proactive_heartbeat(self, force=False, reference_time=None):
         now = self._coerce_reference_time(reference_time)
-        result = dict(self.run_scheduled_proactive_jobs(force=force, reference_time=now) or {})
+        result = dict(
+            self.run_scheduled_proactive_jobs(force=force, reference_time=now) or {},
+        )
         compaction = self.run_memory_compaction(force=force, reference_time=now)
 
         queued_daily_checkin = 0
         notifications_sent = int(result.get("notifications_sent", 0) or 0)
-        last_daily_checkin_at = self._parse_iso_datetime(self.bot.MEMORY_STORE.get("last_daily_checkin_at"))
+        last_daily_checkin_at = self._parse_iso_datetime(
+            self.bot.MEMORY_STORE.get("last_daily_checkin_at"),
+        )
         already_queued_today = last_daily_checkin_at is not None and last_daily_checkin_at.date() == now.date()
 
-        if not result.get("suppressed") and (force or self.bot.memory.should_do_daily_checkin()) and not already_queued_today:
+        if (
+            not result.get("suppressed")
+            and (force or self.bot.memory.should_do_daily_checkin())
+            and not already_queued_today
+        ):
             message = self.bot.daily_checkin_greeting()
             queued = self.bot.queue_proactive_message(message, source="daily-checkin")
             if queued is not None:
-                sent, _backend = self.maybe_send_proactive_notification(message, source="daily-checkin", now=now)
+                sent, _backend = self.maybe_send_proactive_notification(
+                    message,
+                    source="daily-checkin",
+                    now=now,
+                )
                 if sent:
                     notifications_sent += 1
                 queued_daily_checkin = 1
-            self._queue_or_apply_memory_store_patch(last_daily_checkin_at=now.isoformat(timespec="seconds"))
+            self._queue_or_apply_memory_store_patch(
+                last_daily_checkin_at=now.isoformat(timespec="seconds"),
+            )
 
         result["queued_daily_checkin"] = queued_daily_checkin
         result["queued_total"] = int(result.get("queued_total", 0) or 0) + queued_daily_checkin
@@ -649,17 +749,31 @@ class MaintenanceScheduler:
             None,
         )
         return {
-            "last_background_synthesis_at": self.bot.MEMORY_STORE.get("last_background_synthesis_at"),
-            "last_background_synthesis_turn": int(self.bot.MEMORY_STORE.get("last_background_synthesis_turn", 0) or 0),
-            "last_memory_compaction_at": self.bot.MEMORY_STORE.get("last_memory_compaction_at"),
-            "last_memory_compaction_summary": str(self.bot.MEMORY_STORE.get("last_memory_compaction_summary") or ""),
-            "last_scheduled_proactive_at": self.bot.MEMORY_STORE.get("last_scheduled_proactive_at"),
+            "last_background_synthesis_at": self.bot.MEMORY_STORE.get(
+                "last_background_synthesis_at",
+            ),
+            "last_background_synthesis_turn": int(
+                self.bot.MEMORY_STORE.get("last_background_synthesis_turn", 0) or 0,
+            ),
+            "last_memory_compaction_at": self.bot.MEMORY_STORE.get(
+                "last_memory_compaction_at",
+            ),
+            "last_memory_compaction_summary": str(
+                self.bot.MEMORY_STORE.get("last_memory_compaction_summary") or "",
+            ),
+            "last_scheduled_proactive_at": self.bot.MEMORY_STORE.get(
+                "last_scheduled_proactive_at",
+            ),
             "latest_task": dict(latest_task or {}),
         }
 
     def run_post_turn_maintenance(self, user_input, current_mood):
         if self.bot.LIGHT_MODE:
-            self.bot.current_runtime_health_snapshot(force=True, log_warnings=False, persist=False)
+            self.bot.current_runtime_health_snapshot(
+                force=True,
+                log_warnings=False,
+                persist=False,
+            )
             return {
                 "summary_refreshed": False,
                 "relationship_reflected": False,
@@ -677,7 +791,11 @@ class MaintenanceScheduler:
         if self.bot.should_delay_noncritical_maintenance(health):
             summary_before = str(self.bot.session_summary or "")
             summary_after = self.bot.refresh_session_summary()
-            self.bot.current_runtime_health_snapshot(force=True, log_warnings=False, persist=False)
+            self.bot.current_runtime_health_snapshot(
+                force=True,
+                log_warnings=False,
+                persist=False,
+            )
             return {
                 "summary_refreshed": str(summary_after or "") != summary_before,
                 "scheduled_proactive": False,
@@ -687,7 +805,9 @@ class MaintenanceScheduler:
                 "periodic_synthesis": False,
                 "periodic_archive_delta": 0,
                 "persona_evolved": False,
-                "memory_graph_refreshed": not bool(getattr(self.bot, "_memory_graph_dirty", False)),
+                "memory_graph_refreshed": not bool(
+                    getattr(self.bot, "_memory_graph_dirty", False),
+                ),
                 "delayed_noncritical": True,
                 "health_level": health_level,
             }
@@ -701,11 +821,19 @@ class MaintenanceScheduler:
         compaction = self.run_memory_compaction()
         # Background maintenance is non-semantic in Phase 4 strict mode.
         # Graph projection/sync is SaveNode-owned only.
-        self.bot.current_runtime_health_snapshot(force=True, log_warnings=False, persist=False)
+        self.bot.current_runtime_health_snapshot(
+            force=True,
+            log_warnings=False,
+            persist=False,
+        )
+        # Continuous learning / RLHF — non-critical, runs in background
+        self.bot.schedule_continuous_learning()
         return {
             "summary_refreshed": str(summary_after or "") != summary_before,
             "scheduled_proactive": bool(scheduled_proactive.get("queued_total")),
-            "scheduled_proactive_count": int(scheduled_proactive.get("queued_total", 0) or 0),
+            "scheduled_proactive_count": int(
+                scheduled_proactive.get("queued_total", 0) or 0,
+            ),
             "relationship_reflected": relationship is not None,
             "wisdom_generated": wisdom is not None,
             "periodic_synthesis": bool(synthesis.get("ran")),
@@ -713,11 +841,10 @@ class MaintenanceScheduler:
             "persona_evolved": bool(synthesis.get("persona_evolved")),
             "memory_compaction": bool(compaction.get("ran")),
             "memory_compaction_updated_at": compaction.get("updated_at"),
-            "memory_graph_refreshed": not bool(getattr(self.bot, "_memory_graph_dirty", False)),
+            "memory_graph_refreshed": not bool(
+                getattr(self.bot, "_memory_graph_dirty", False),
+            ),
         }
-
-        # Continuous learning / RLHF â€” non-critical, runs in background
-        self.bot.schedule_continuous_learning()
 
     def schedule_post_turn_maintenance(self, user_input, current_mood):
         if self.bot.LIGHT_MODE:
@@ -730,7 +857,10 @@ class MaintenanceScheduler:
             task_kind="post-turn-maintenance",
             metadata={
                 "current_mood": normalized_mood,
-                "active_hypothesis": self.bot.relationship.snapshot().get("active_hypothesis") or "supportive_baseline",
+                "active_hypothesis": self.bot.relationship.snapshot().get(
+                    "active_hypothesis",
+                )
+                or "supportive_baseline",
                 "history_messages": len(self.bot.conversation_history()),
                 "turn_count": self.bot.session_turn_count(),
             },

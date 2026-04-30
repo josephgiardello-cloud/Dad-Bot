@@ -21,12 +21,13 @@ Use cases:
     - "Are two distinct sessions computing the same thing?"
     - "Has a code change altered the computation class?"
 """
+
 from __future__ import annotations
 
 import hashlib
 import json
 from dataclasses import dataclass
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from dadbot.core.tool_dag import ToolDAG
@@ -39,7 +40,7 @@ if TYPE_CHECKING:
 
 def _sha256(payload: Any) -> str:
     return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        json.dumps(payload, sort_keys=True, default=str).encode("utf-8"),
     ).hexdigest()
 
 
@@ -52,7 +53,7 @@ def _sha256_short(payload: Any) -> str:
 # ---------------------------------------------------------------------------
 
 
-def tool_graph_class(dag: "ToolDAG") -> str:
+def tool_graph_class(dag: ToolDAG) -> str:
     """Compute the equivalence class of a ToolDAG.
 
     The class is determined by:
@@ -70,21 +71,28 @@ def tool_graph_class(dag: "ToolDAG") -> str:
     node_types = sorted((str(n.tool_name), str(n.intent)) for n in nodes)
     edge_types = sorted(str(getattr(e, "edge_type", "sequential")) for e in edges)
 
-    return _sha256_short({
-        "node_types": node_types,
-        "edge_types": edge_types,
-    })
+    return _sha256_short(
+        {
+            "node_types": node_types,
+            "edge_types": edge_types,
+        },
+    )
 
 
-def tool_graph_class_from_names(tool_names: list[str], intents: list[str] | None = None) -> str:
+def tool_graph_class_from_names(
+    tool_names: list[str],
+    intents: list[str] | None = None,
+) -> str:
     """Convenience: compute graph class from tool_names + optional intents."""
     if intents is None:
         intents = [""] * len(tool_names)
     node_types = sorted(zip(tool_names, intents))
-    return _sha256_short({
-        "node_types": [(str(t), str(i)) for t, i in node_types],
-        "edge_types": [],
-    })
+    return _sha256_short(
+        {
+            "node_types": [(str(t), str(i)) for t, i in node_types],
+            "edge_types": [],
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -102,11 +110,13 @@ def plan_class(intent_type: str, strategy: str, tool_count: int) -> str:
 
     Independent of: specific tool names, order of tools, planner text.
     """
-    return _sha256_short({
-        "intent_type": str(intent_type or "").strip().lower(),
-        "strategy": str(strategy or "").strip().lower(),
-        "tool_count": int(tool_count),
-    })
+    return _sha256_short(
+        {
+            "intent_type": str(intent_type or "").strip().lower(),
+            "strategy": str(strategy or "").strip().lower(),
+            "tool_count": int(tool_count),
+        },
+    )
 
 
 def plan_class_from_planner_output(planner_output: dict[str, Any]) -> str:
@@ -131,10 +141,7 @@ def event_structure_class(event_log: list[dict[str, Any]]) -> str:
 
     Independent of: event payloads, when events occurred, session context.
     """
-    type_sequence = [
-        str(e.get("type") or e.get("event_type") or "unknown")
-        for e in (event_log or [])
-    ]
+    type_sequence = [str(e.get("type") or e.get("event_type") or "unknown") for e in (event_log or [])]
     return _sha256_short({"event_type_sequence": type_sequence})
 
 
@@ -152,7 +159,9 @@ class ExecutionEquivalenceClass:
         plan_class:    PlanClass hash.
         event_class:   EventStructureClass hash.
         equivalence_key: Combined hash of all three classes.
+
     """
+
     graph_class: str
     plan_class_str: str
     event_class: str
@@ -164,12 +173,14 @@ class ExecutionEquivalenceClass:
         graph_class: str,
         plan_class_str: str,
         event_class: str,
-    ) -> "ExecutionEquivalenceClass":
-        equivalence_key = _sha256_short({
-            "graph_class": graph_class,
-            "plan_class": plan_class_str,
-            "event_class": event_class,
-        })
+    ) -> ExecutionEquivalenceClass:
+        equivalence_key = _sha256_short(
+            {
+                "graph_class": graph_class,
+                "plan_class": plan_class_str,
+                "event_class": event_class,
+            },
+        )
         return cls(
             graph_class=graph_class,
             plan_class_str=plan_class_str,
@@ -177,7 +188,7 @@ class ExecutionEquivalenceClass:
             equivalence_key=equivalence_key,
         )
 
-    def matches(self, other: "ExecutionEquivalenceClass") -> bool:
+    def matches(self, other: ExecutionEquivalenceClass) -> bool:
         return self.equivalence_key == other.equivalence_key
 
     def to_dict(self) -> dict[str, Any]:
@@ -196,7 +207,7 @@ class ExecutionEquivalenceClass:
 
 def classify_execution(
     planner_output: dict[str, Any],
-    dag: "ToolDAG | None",
+    dag: ToolDAG | None,
     event_log: list[dict[str, Any]],
 ) -> ExecutionEquivalenceClass:
     """Classify a full execution into its equivalence class.
@@ -208,6 +219,7 @@ def classify_execution(
 
     Returns:
         ExecutionEquivalenceClass with a stable equivalence_key.
+
     """
     if dag is not None:
         gc = tool_graph_class(dag)

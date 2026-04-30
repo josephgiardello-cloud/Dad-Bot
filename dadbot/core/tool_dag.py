@@ -17,7 +17,6 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
-
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
@@ -25,7 +24,7 @@ from typing import Any
 
 def _stable_hash(payload: Any) -> str:
     return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        json.dumps(payload, sort_keys=True, default=str).encode("utf-8"),
     ).hexdigest()
 
 
@@ -60,9 +59,12 @@ class ToolNode:
         args: dict[str, Any],
         priority: int,
         sequence: int,
-    ) -> "ToolNode":
+    ) -> ToolNode:
         stable = _stable_hash(
-            {"tool_name": str(tool_name or "").strip().lower(), "args": dict(args or {})}
+            {
+                "tool_name": str(tool_name or "").strip().lower(),
+                "args": dict(args or {}),
+            },
         )
         det_id = stable[:24]
         node_id = f"node-{sequence:04d}-{det_id}"
@@ -115,14 +117,18 @@ class ToolDAG:
     edges: list[ToolEdge] = field(default_factory=list)
 
     # --- node map for fast lookup ---
-    _node_by_id: dict[str, ToolNode] = field(default_factory=dict, repr=False, compare=False)
+    _node_by_id: dict[str, ToolNode] = field(
+        default_factory=dict,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         for n in self.nodes:
             self._node_by_id[n.node_id] = n
 
     @classmethod
-    def from_nodes(cls, nodes: list[ToolNode]) -> "ToolDAG":
+    def from_nodes(cls, nodes: list[ToolNode]) -> ToolDAG:
         dag = cls(nodes=list(nodes))
         return dag
 
@@ -131,7 +137,12 @@ class ToolDAG:
             self.nodes.append(node)
             self._node_by_id[node.node_id] = node
 
-    def add_edge(self, source_id: str, target_id: str, edge_type: str = "sequential") -> None:
+    def add_edge(
+        self,
+        source_id: str,
+        target_id: str,
+        edge_type: str = "sequential",
+    ) -> None:
         """Add an edge, enforcing acyclicity by construction.
 
         Raises ``ValueError`` if source.sequence >= target.sequence or if
@@ -147,7 +158,7 @@ class ToolDAG:
             raise ValueError(
                 f"ToolDAG.add_edge: source.sequence ({src.sequence}) must be strictly less than "
                 f"target.sequence ({tgt.sequence}) to guarantee acyclicity — "
-                f"rejected edge {source_id!r} → {target_id!r}"
+                f"rejected edge {source_id!r} → {target_id!r}",
             )
         edge = ToolEdge(source_id=source_id, target_id=target_id, edge_type=edge_type)
         if edge not in self.edges:
@@ -197,13 +208,14 @@ class ToolDAG:
                 if in_degree[neighbour.node_id] == 0:
                     # Insert in sorted order.
                     import bisect
+
                     keys = [n.ordering_key() for n in queue]
                     idx = bisect.bisect_left(keys, neighbour.ordering_key())
                     queue.insert(idx, neighbour)
         if len(result) != len(self.nodes):
             raise RuntimeError(
                 "ToolDAG.execution_order: cycle detected — topological sort incomplete. "
-                f"Processed {len(result)} of {len(self.nodes)} nodes."
+                f"Processed {len(result)} of {len(self.nodes)} nodes.",
             )
         return result
 
@@ -301,7 +313,7 @@ def build_dag_from_execution_plan(execution_plan: list[dict[str, Any]]) -> ToolD
                 priority=n.priority,
                 sequence=idx,
                 deterministic_id=n.deterministic_id,
-            )
+            ),
         )
 
     dag = ToolDAG.from_nodes(reassigned)
@@ -382,23 +394,27 @@ class ToolPlanCompiler:
                 continue
             if not isinstance(args, dict):
                 continue
-            det_id = _stable_hash(
-                {"tool_name": tool_name, "args": dict(args)}
-            )[:24]
+            det_id = _stable_hash({"tool_name": tool_name, "args": dict(args)})[:24]
             if det_id in seen_ids:
                 continue
             seen_ids.add(det_id)
-            accepted.append({
-                "tool_name": tool_name,
-                "intent": intent,
-                "args": dict(args),
-                "priority": int(cand.get("priority") or 100),
-                "sequence": len(accepted),
-                "deterministic_id": det_id,
-            })
+            accepted.append(
+                {
+                    "tool_name": tool_name,
+                    "intent": intent,
+                    "args": dict(args),
+                    "priority": int(cand.get("priority") or 100),
+                    "sequence": len(accepted),
+                    "deterministic_id": det_id,
+                },
+            )
 
         accepted.sort(
-            key=lambda c: (int(c.get("priority") or 100), str(c.get("intent") or ""), str(c.get("deterministic_id") or ""))
+            key=lambda c: (
+                int(c.get("priority") or 100),
+                str(c.get("intent") or ""),
+                str(c.get("deterministic_id") or ""),
+            ),
         )
         # Re-sequence after sort.
         for idx, c in enumerate(accepted):

@@ -1,16 +1,15 @@
 """Tests for GDPR/CCPA memory command handling."""
+
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
-import pytest
-
 from dadbot.managers.memory_commands import MemoryCommandManager
 
 
 class _MemoryStore:
-    def __init__(self, parent: "DummyBot") -> None:
+    def __init__(self, parent: DummyBot) -> None:
         self._parent = parent
 
     def clear_memory_store(self) -> None:

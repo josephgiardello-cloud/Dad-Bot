@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 
@@ -15,7 +15,7 @@ class ContextBuilder:
     def build_core_persona_prompt(self) -> str:
         behavior_rules = "\n".join(f"- {rule}" for rule in self.bot.profile_runtime.effective_behavior_rules())
         return f"""
-You are '{self.bot.STYLE['name']}'.
+You are '{self.bot.STYLE["name"]}'.
 You are warm, encouraging, informal, supportive, and honest.
 Keep most replies brief and easy to read in a terminal.
 Default to 2-4 sentences unless Tony asks for more detail.
@@ -76,7 +76,11 @@ Keep family relationships, ages, timelines, and education history consistent wit
     def build_wisdom_context(self, user_input: str) -> str | None:
         return self.bot.long_term_signals.build_wisdom_context(user_input)
 
-    def _fit_sections_to_token_budget(self, sections: list[str], budget: int) -> list[str]:
+    def _fit_sections_to_token_budget(
+        self,
+        sections: list[str],
+        budget: int,
+    ) -> list[str]:
         """Drop lower-priority trailing sections until the joined result fits within *budget* tokens.
 
         Sections are ordered highest-priority first. The footer sentence is
@@ -106,7 +110,14 @@ Keep family relationships, ages, timelines, and education history consistent wit
     ) -> None:
         self.bot.record_memory_context_stats(
             tokens=tokens,
-            budget_tokens=max(1, int(self.bot.effective_context_token_budget(self.bot.ACTIVE_MODEL) or self.bot.CONTEXT_TOKEN_BUDGET or 1)),
+            budget_tokens=max(
+                1,
+                int(
+                    self.bot.effective_context_token_budget(self.bot.ACTIVE_MODEL)
+                    or self.bot.CONTEXT_TOKEN_BUDGET
+                    or 1,
+                ),
+            ),
             selected_sections=selected_sections,
             total_sections=total_sections,
             pruned=pruned,
@@ -128,28 +139,44 @@ Keep family relationships, ages, timelines, and education history consistent wit
         if consolidated_context:
             sections.append(consolidated_context)
         if graph_result:
-            graph_text = graph_result.get("compressed_summary") or "\n".join(graph_result.get("summary_lines", []))
-            sections.append("Graph-connected long-term context most relevant right now:\n" + graph_text)
+            graph_text = graph_result.get("compressed_summary") or "\n".join(
+                graph_result.get("summary_lines", []),
+            )
+            sections.append(
+                "Graph-connected long-term context most relevant right now:\n" + graph_text,
+            )
         if archive_entries:
             archive_lines = "\n".join(
                 f"- [{entry.get('created_at', '')[:10]}, mood={entry.get('dominant_mood', 'neutral')}] {entry.get('summary', '')}"
                 for entry in archive_entries
             )
-            sections.append("Recent prior session notes most relevant right now:\n" + archive_lines)
+            sections.append(
+                "Recent prior session notes most relevant right now:\n" + archive_lines,
+            )
         if memories:
             memory_lines = "\n".join(
                 f"- [{memory.get('category', 'general')}, mood={memory.get('mood', 'unknown')}] {memory['summary']}"
                 for memory in memories
             )
-            sections.append("Semantic fallback from older remembered details with Tony:\n" + memory_lines)
+            sections.append(
+                "Semantic fallback from older remembered details with Tony:\n" + memory_lines,
+            )
         return sections
 
-    def _trim_memory_sections_to_budget(self, sections: list[str]) -> tuple[list[str], int, int, int]:
+    def _trim_memory_sections_to_budget(
+        self,
+        sections: list[str],
+    ) -> tuple[list[str], int, int, int]:
         total_sections = len(sections)
         pre_trim_tokens = sum(self.bot.estimate_token_count(section) for section in sections)
         baseline_memory_budget = min(800, max(120, self.bot.CONTEXT_TOKEN_BUDGET // 4))
-        memory_token_budget = self.bot.adaptive_memory_context_budget(baseline_memory_budget)
-        trimmed_sections = self._fit_sections_to_token_budget(sections, memory_token_budget)
+        memory_token_budget = self.bot.adaptive_memory_context_budget(
+            baseline_memory_budget,
+        )
+        trimmed_sections = self._fit_sections_to_token_budget(
+            sections,
+            memory_token_budget,
+        )
         post_trim_tokens = sum(self.bot.estimate_token_count(section) for section in trimmed_sections)
         return trimmed_sections, total_sections, pre_trim_tokens, post_trim_tokens
 
@@ -197,13 +224,32 @@ Keep family relationships, ages, timelines, and education history consistent wit
             return "decisions"
         if any(token in text for token in ["goal", "working on", "trying to", "aim", "target"]):
             return "goals"
-        if any(token in text for token in ["cannot", "can't", "constraint", "limited", "budget", "deadline", "schedule"]):
+        if any(
+            token in text
+            for token in [
+                "cannot",
+                "can't",
+                "constraint",
+                "limited",
+                "budget",
+                "deadline",
+                "schedule",
+            ]
+        ):
             return "constraints"
         return "entities"
 
-    def _build_structured_claims_context(self, user_input: str, *, max_items: int = 8) -> tuple[str | None, list[dict[str, object]]]:
+    def _build_structured_claims_context(
+        self,
+        user_input: str,
+        *,
+        max_items: int = 8,
+    ) -> tuple[str | None, list[dict[str, object]]]:
         claims: list[dict[str, object]] = []
-        for entry in self.bot.select_active_consolidated_memories(user_input, max_items=max_items):
+        for entry in self.bot.select_active_consolidated_memories(
+            user_input,
+            max_items=max_items,
+        ):
             summary = str(entry.get("summary") or "").strip()
             if not summary:
                 continue
@@ -214,7 +260,10 @@ Keep family relationships, ages, timelines, and education history consistent wit
                 "category": category,
                 "mood": str(entry.get("mood") or "neutral"),
                 "confidence": round(float(entry.get("confidence", 0.0) or 0.0), 3),
-                "importance": round(float(entry.get("importance_score", 0.0) or 0.0), 3),
+                "importance": round(
+                    float(entry.get("importance_score", 0.0) or 0.0),
+                    3,
+                ),
                 "updated_at": str(entry.get("updated_at") or ""),
             }
             claims.append(claim)
@@ -225,10 +274,16 @@ Keep family relationships, ages, timelines, and education history consistent wit
         payload = json.dumps(claims[: max(1, int(max_items or 8))], ensure_ascii=True)
         return "Structured memory claims (JSON):\n" + payload, claims
 
-    def build_hierarchical_memory_context(self, user_input: str) -> tuple[str | None, dict[str, object]]:
+    def build_hierarchical_memory_context(
+        self,
+        user_input: str,
+    ) -> tuple[str | None, dict[str, object]]:
         recent_section = self._build_recent_buffer_context(max_turns=12)
         summary_section = self.build_session_summary_context()
-        structured_section, structured_claims = self._build_structured_claims_context(user_input, max_items=8)
+        structured_section, structured_claims = self._build_structured_claims_context(
+            user_input,
+            max_items=8,
+        )
 
         prioritized_sections = [
             ("recent", recent_section),
@@ -246,8 +301,14 @@ Keep family relationships, ages, timelines, and education history consistent wit
                 "selected_layers": [],
             }
 
-        memory_token_budget = min(1400, max(220, int(self.bot.CONTEXT_TOKEN_BUDGET or 6000) // 3))
-        trimmed_sections = self._fit_sections_to_token_budget(sections, memory_token_budget)
+        memory_token_budget = min(
+            1400,
+            max(220, int(self.bot.CONTEXT_TOKEN_BUDGET or 6000) // 3),
+        )
+        trimmed_sections = self._fit_sections_to_token_budget(
+            sections,
+            memory_token_budget,
+        )
 
         selected_layers: list[str] = []
         for layer_name in ("recent", "summary", "structured"):
@@ -256,9 +317,21 @@ Keep family relationships, ages, timelines, and education history consistent wit
                 selected_layers.append(layer_name)
 
         layer_stats = {
-            "recent_tokens": self.bot.estimate_token_count(section_lookup.get("recent") or "") if "recent" in selected_layers else 0,
-            "summary_tokens": self.bot.estimate_token_count(section_lookup.get("summary") or "") if "summary" in selected_layers else 0,
-            "structured_tokens": self.bot.estimate_token_count(section_lookup.get("structured") or "") if "structured" in selected_layers else 0,
+            "recent_tokens": self.bot.estimate_token_count(
+                section_lookup.get("recent") or "",
+            )
+            if "recent" in selected_layers
+            else 0,
+            "summary_tokens": self.bot.estimate_token_count(
+                section_lookup.get("summary") or "",
+            )
+            if "summary" in selected_layers
+            else 0,
+            "structured_tokens": self.bot.estimate_token_count(
+                section_lookup.get("structured") or "",
+            )
+            if "structured" in selected_layers
+            else 0,
             "structured_claims": list(structured_claims),
             "selected_layers": selected_layers,
         }
@@ -266,51 +339,66 @@ Keep family relationships, ages, timelines, and education history consistent wit
         if not trimmed_sections:
             return None, layer_stats
 
-        context_text = "\n\n".join(trimmed_sections + ["Use these only as prior context Tony has already shared."])
+        context_text = "\n\n".join(
+            trimmed_sections + ["Use these only as prior context Tony has already shared."],
+        )
         return context_text, layer_stats
 
     def build_memory_context(self, user_input: str) -> str | None:
         """Build query-aware memory context with graph, archive, consolidated, and semantic sections."""
         user_input_str = str(user_input or "").strip()
-        
+
         sections = []
-        
+
         # 1. Try to get graph and archive results
         graph_result = None
         archive_entries = []
         semantic_memories = []
-        
+
         try:
             graph_result = self.bot.graph_retrieval_for_input(user_input_str, limit=3) if user_input_str else None
         except Exception:
             pass
-        
+
         try:
             if not graph_result and user_input_str:
-                archive_entries = list(self.bot.relevant_archive_entries_for_input(user_input_str, limit=2) or [])
+                archive_entries = list(
+                    self.bot.relevant_archive_entries_for_input(user_input_str, limit=2) or [],
+                )
         except Exception:
             pass
-        
+
         try:
             if user_input_str:
-                semantic_memories = list(self.bot.relevant_memories_for_input(user_input_str, limit=3, graph_result=graph_result) or [])
+                semantic_memories = list(
+                    self.bot.relevant_memories_for_input(
+                        user_input_str,
+                        limit=3,
+                        graph_result=graph_result,
+                    )
+                    or [],
+                )
         except Exception:
             pass
-        
+
         # 2. Get consolidated and deep pattern context
         deep_pattern_context = None
         consolidated_context = None
-        
+
         if user_input_str:
             try:
-                deep_pattern_context = self.bot.long_term_signals.build_deep_pattern_context(user_input_str)
+                deep_pattern_context = self.bot.long_term_signals.build_deep_pattern_context(
+                    user_input_str,
+                )
             except Exception:
                 pass
             try:
-                consolidated_context = self.bot.build_active_consolidated_context(user_input_str)
+                consolidated_context = self.bot.build_active_consolidated_context(
+                    user_input_str,
+                )
             except Exception:
                 pass
-        
+
         # 3. Build all sections using _build_memory_sections
         if deep_pattern_context or consolidated_context or graph_result or archive_entries or semantic_memories:
             sections = self._build_memory_sections(
@@ -320,10 +408,12 @@ Keep family relationships, ages, timelines, and education history consistent wit
                 archive_entries=archive_entries,
                 memories=semantic_memories,
             )
-        
+
         # 4. If no sections from query-aware retrieval, fall back to hierarchical memory
         if not sections and user_input_str:
-            context_text, layer_stats = self.build_hierarchical_memory_context(user_input_str)
+            context_text, layer_stats = self.build_hierarchical_memory_context(
+                user_input_str,
+            )
             if context_text:
                 self.bot._last_hierarchical_memory_stats = dict(layer_stats)
                 self._record_memory_context_stats(
@@ -335,25 +425,27 @@ Keep family relationships, ages, timelines, and education history consistent wit
                 )
                 return context_text
             return None
-        
+
         if not sections:
             return None
-        
+
         # 5. Trim sections to budget
         try:
-            trimmed_sections, total_sections, pre_trim_tokens, post_trim_tokens = self._trim_memory_sections_to_token_budget(sections)
+            trimmed_sections, total_sections, pre_trim_tokens, post_trim_tokens = (
+                self._trim_memory_sections_to_token_budget(sections)
+            )
         except Exception:
             # If trimming fails, just use all sections
             trimmed_sections = sections
             total_sections = len(sections)
             pre_trim_tokens = sum(self.bot.estimate_token_count(s) for s in sections)
             post_trim_tokens = pre_trim_tokens
-        
+
         if not trimmed_sections:
             return None
-        
+
         combined_context = "\n\n".join(trimmed_sections)
-        
+
         self._record_memory_context_stats(
             user_input=user_input_str,
             tokens=post_trim_tokens,
@@ -361,7 +453,7 @@ Keep family relationships, ages, timelines, and education history consistent wit
             total_sections=total_sections,
             pruned=(len(trimmed_sections) < total_sections) or (post_trim_tokens < pre_trim_tokens),
         )
-        
+
         # Store stats for context service
         layer_stats = {
             "recent_tokens": 0,
@@ -371,7 +463,7 @@ Keep family relationships, ages, timelines, and education history consistent wit
             "selected_layers": [],
         }
         self.bot._last_hierarchical_memory_stats = dict(layer_stats)
-        
+
         return combined_context
 
     def _cross_session_traits_section(self) -> str | None:
@@ -395,15 +487,16 @@ Keep family relationships, ages, timelines, and education history consistent wit
         ]
         if not trait_lines:
             return None
-        return "Dad's strongest evolved traits with Tony right now:\n" + "\n".join(trait_lines)
+        return "Dad's strongest evolved traits with Tony right now:\n" + "\n".join(
+            trait_lines,
+        )
 
     def _cross_session_patterns_section(self) -> str | None:
         patterns = self.bot.life_patterns()
         if not patterns:
             return None
         pattern_lines = "\n".join(
-            f"- [{pattern.get('confidence', 0)}%] {pattern.get('summary', '')}"
-            for pattern in patterns[-3:]
+            f"- [{pattern.get('confidence', 0)}%] {pattern.get('summary', '')}" for pattern in patterns[-3:]
         )
         return "Long-term life patterns Dad has noticed:\n" + pattern_lines
 
@@ -421,14 +514,19 @@ Keep family relationships, ages, timelines, and education history consistent wit
         for entry in archive[-3:]:
             topics = ", ".join(entry.get("topics", [])) or "general"
             recent_notes.append(
-                f"- {entry.get('created_at', '')[:10]} | mood={entry.get('dominant_mood', 'neutral')} | topics={topics}: {entry.get('summary', '')}"
+                f"- {entry.get('created_at', '')[:10]} | mood={entry.get('dominant_mood', 'neutral')} | topics={topics}: {entry.get('summary', '')}",
             )
         return "Recent prior session notes:\n" + "\n".join(recent_notes)
 
-    def _cross_session_deep_and_consolidated_sections(self, user_input: str) -> list[str]:
+    def _cross_session_deep_and_consolidated_sections(
+        self,
+        user_input: str,
+    ) -> list[str]:
         if str(user_input or "").strip():
             deep_pattern_context = self.bot.long_term_signals.build_deep_pattern_context(str(user_input))
-            consolidated_context = self.bot.build_active_consolidated_context(str(user_input))
+            consolidated_context = self.bot.build_active_consolidated_context(
+                str(user_input),
+            )
         else:
             deep_pattern_context = None
             consolidated_context = self.bot.build_consolidated_memory_context()
@@ -448,7 +546,9 @@ Keep family relationships, ages, timelines, and education history consistent wit
         try:
             from dadbot.managers.heritage_graph import HeritageGraphManager
 
-            return HeritageGraphManager(self.bot).heritage_context_block(str(user_input))
+            return HeritageGraphManager(self.bot).heritage_context_block(
+                str(user_input),
+            )
         except Exception:
             return None
 
@@ -466,7 +566,10 @@ Keep family relationships, ages, timelines, and education history consistent wit
 
         sections.extend(self._cross_session_deep_and_consolidated_sections(user_input))
         self._append_if_present(sections, self._cross_session_graph_summary_section())
-        self._append_if_present(sections, self._cross_session_heritage_section(user_input))
+        self._append_if_present(
+            sections,
+            self._cross_session_heritage_section(user_input),
+        )
 
         if not sections:
             return None

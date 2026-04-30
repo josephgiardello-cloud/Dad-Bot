@@ -11,11 +11,9 @@ import pytest
 
 from dadbot.core.canonical_event import validate_trace
 from dadbot.core.execution_trace_context import ExecutionTraceRecorder, bind_execution_trace
-
 from dadbot.core.graph import MutationQueue, TurnContext
 from tests.stress.phase4_certification_gate import build_bot
 from tools.phase4_legacy_integrity_scan import run_scan
-
 
 CANONICAL_PIPELINE = ["temporal", "preflight", "planner", "inference", "safety", "reflection", "save"]
 
@@ -38,7 +36,9 @@ def _turn_stage_order(bot: Any) -> list[str]:
     return [str(s).strip().lower() for s in list(evidence.get("stage_order") or [])]
 
 
-def _run_audited_turn(bot: Any, user_input: str, *, trace_id: str, correlation_id: str, request_id: str, session_id: str = "audit-session") -> tuple[Any, dict[str, Any]]:
+def _run_audited_turn(
+    bot: Any, user_input: str, *, trace_id: str, correlation_id: str, request_id: str, session_id: str = "audit-session"
+) -> tuple[Any, dict[str, Any]]:
     result = asyncio.run(
         bot.turn_orchestrator.control_plane.submit_turn(
             session_id=session_id,
@@ -74,8 +74,12 @@ def _save_boundary_snapshot(bot: Any) -> dict[str, Any]:
         "history": json.loads(json.dumps(list(session_state.get("history", []) or []), sort_keys=True, default=str)),
         "last_mood": memory_store.get("last_mood"),
         "last_mood_updated_at": memory_store.get("last_mood_updated_at"),
-        "recent_moods": json.loads(json.dumps(list(memory_store.get("recent_moods", []) or []), sort_keys=True, default=str)),
-        "graph": json.loads(json.dumps(bot.memory_manager.graph_manager.graph_snapshot() or {}, sort_keys=True, default=str)),
+        "recent_moods": json.loads(
+            json.dumps(list(memory_store.get("recent_moods", []) or []), sort_keys=True, default=str)
+        ),
+        "graph": json.loads(
+            json.dumps(bot.memory_manager.graph_manager.graph_snapshot() or {}, sort_keys=True, default=str)
+        ),
         "pipeline_completed": bool((bot.turn_service.turn_pipeline_snapshot() or {}).get("completed_at")),
     }
 
@@ -159,13 +163,19 @@ def _assert_turn_event_integrity(bot: Any, trace_id: str, *, expect_save_after: 
         event for event in events if str(event.get("event_type") or "").strip().lower() == "graph_checkpoint"
     ]
     save_before = [
-        event for event in checkpoint_events if str(event.get("stage") or "") == "save" and str(event.get("status") or "") == "before"
+        event
+        for event in checkpoint_events
+        if str(event.get("stage") or "") == "save" and str(event.get("status") or "") == "before"
     ]
     save_after = [
-        event for event in checkpoint_events if str(event.get("stage") or "") == "save" and str(event.get("status") or "") == "after"
+        event
+        for event in checkpoint_events
+        if str(event.get("stage") or "") == "save" and str(event.get("status") or "") == "after"
     ]
     save_error = [
-        event for event in checkpoint_events if str(event.get("stage") or "") == "save" and str(event.get("status") or "") == "error"
+        event
+        for event in checkpoint_events
+        if str(event.get("stage") or "") == "save" and str(event.get("status") or "") == "error"
     ]
 
     assert len(save_before) >= 1
@@ -225,10 +235,12 @@ def test_full_execution_trace_matches_canonical_pipeline(isolated_bot):
             assert isinstance(reply, str) and reply.strip()
 
             stage_order = _turn_stage_order(bot)
-            trace_records.append({
-                "input": user_input,
-                "stage_order": stage_order,
-            })
+            trace_records.append(
+                {
+                    "input": user_input,
+                    "stage_order": stage_order,
+                }
+            )
 
             assert stage_order, "No stage_order captured; dynamic trace missing"
 
@@ -241,8 +253,7 @@ def test_full_execution_trace_matches_canonical_pipeline(isolated_bot):
             )
 
     assert not unsafe_background_mutations, (
-        "Detected memory mutation writes outside SaveNode commit boundary: "
-        f"{unsafe_background_mutations}"
+        f"Detected memory mutation writes outside SaveNode commit boundary: {unsafe_background_mutations}"
     )
 
     # Keep a compact execution artifact for manual inspection.
@@ -282,17 +293,15 @@ def test_audit_mode_emits_capability_report(isolated_bot):
     ):
         turn_events = bot.list_turn_events("audit-trace-001")
     capability_events = [
-        event for event in turn_events
-        if str(event.get("event_type") or "") == "CAPABILITY_AUDIT_EVENT"
+        event for event in turn_events if str(event.get("event_type") or "") == "CAPABILITY_AUDIT_EVENT"
     ]
     assert capability_events, "Expected CAPABILITY_AUDIT_EVENT in persisted turn events"
     assert capability_events[-1].get("payload", {}).get("timestamp", "__missing__") is None
 
     ledger_events = bot.turn_orchestrator.control_plane.ledger.read()
-    assert any(
-        str(event.get("type") or "") == "CAPABILITY_AUDIT_EVENT"
-        for event in ledger_events
-    ), "Expected CAPABILITY_AUDIT_EVENT in execution ledger"
+    assert any(str(event.get("type") or "") == "CAPABILITY_AUDIT_EVENT" for event in ledger_events), (
+        "Expected CAPABILITY_AUDIT_EVENT in execution ledger"
+    )
 
 
 def test_golden_replay_capability_contracts_hold_for_identical_runs():
@@ -321,7 +330,10 @@ def test_golden_replay_capability_contracts_hold_for_identical_runs():
             assert right_report.get("stage_order") == CANONICAL_PIPELINE
             assert left_report.get("mutation_queue", {}).get("pending") == 0
             assert right_report.get("mutation_queue", {}).get("pending") == 0
-            assert left_bot.turn_orchestrator.control_plane.ledger.replay_hash() == right_bot.turn_orchestrator.control_plane.ledger.replay_hash()
+            assert (
+                left_bot.turn_orchestrator.control_plane.ledger.replay_hash()
+                == right_bot.turn_orchestrator.control_plane.ledger.replay_hash()
+            )
         finally:
             left_bot.shutdown()
             right_bot.shutdown()
@@ -383,14 +395,10 @@ def test_cross_module_consistency_and_merge_report(isolated_bot):
 
     runtime_findings: list[str] = []
     if stage_order != CANONICAL_PIPELINE:
-        runtime_findings.append(
-            f"runtime_stage_order_mismatch expected={CANONICAL_PIPELINE} actual={stage_order}"
-        )
+        runtime_findings.append(f"runtime_stage_order_mismatch expected={CANONICAL_PIPELINE} actual={stage_order}")
 
     if lifecycle_temporal_calls:
-        runtime_findings.append(
-            "lifecycle_temporal_calls_present:" + ",".join(lifecycle_temporal_calls)
-        )
+        runtime_findings.append("lifecycle_temporal_calls_present:" + ",".join(lifecycle_temporal_calls))
 
     merged = {
         "legacy_paths": static_report.get("legacy_paths", []),
@@ -413,7 +421,12 @@ def test_cross_module_consistency_and_merge_report(isolated_bot):
             for finding in runtime_findings
         ]
 
-    if merged["temporal_violations"] or merged["dual_execution_paths"] or merged["unsafe_mutations"] or runtime_findings:
+    if (
+        merged["temporal_violations"]
+        or merged["dual_execution_paths"]
+        or merged["unsafe_mutations"]
+        or runtime_findings
+    ):
         merged["overall_integrity"] = "FAIL"
 
     Path("session_logs").mkdir(exist_ok=True)
@@ -689,7 +702,11 @@ def test_retry_recovery_after_mid_save_boundary_failure_matches_clean_bot(
         failed_bot = build_bot(Path(failed_tmp), reply="Trace path OK.")
         clean_bot = build_bot(Path(clean_tmp), reply="Trace path OK.")
         try:
-            target_obj = failed_bot.relationship_manager if target_attr == "materialize_projection" else failed_bot.memory_manager.graph_manager
+            target_obj = (
+                failed_bot.relationship_manager
+                if target_attr == "materialize_projection"
+                else failed_bot.memory_manager.graph_manager
+            )
             original = getattr(target_obj, target_attr)
             injected = {"fired": False}
 
@@ -855,7 +872,9 @@ def test_restart_boundary_recovery_audit_matches_clean_execution(
                         "reply": clean_reply,
                         "should_end": clean_should_end,
                         "contract": _committed_turn_contract(clean_bot),
-                        "event_summary": _assert_turn_event_integrity(clean_bot, clean_trace_id, expect_save_after=True),
+                        "event_summary": _assert_turn_event_integrity(
+                            clean_bot, clean_trace_id, expect_save_after=True
+                        ),
                     }
                 )
 
@@ -930,9 +949,10 @@ def test_restart_boundary_recovery_audit_matches_clean_execution(
                 assert failed_contract == clean_record["contract"]
                 assert failed_contract["mutation_queue"] == {"pending": 0, "drained": 0, "failed": 0}
                 assert failed_contract["stage_order"] == CANONICAL_PIPELINE
-                assert len(
-                    [entry for entry in failed_contract["save_boundary"]["history"] if entry.get("role") == "user"]
-                ) == turn_number
+                assert (
+                    len([entry for entry in failed_contract["save_boundary"]["history"] if entry.get("role") == "user"])
+                    == turn_number
+                )
 
                 audit_rows.append(
                     {

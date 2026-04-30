@@ -18,7 +18,7 @@ import sqlite3
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 from dadbot.core.persistence.base import (
     AbstractAsyncCheckpointer,
@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 def _stable_sha256(payload: dict[str, Any]) -> str:
     return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        json.dumps(payload, sort_keys=True, default=str).encode("utf-8"),
     ).hexdigest()
 
 
@@ -86,7 +86,7 @@ class SQLiteCheckpointer(AbstractCheckpointer):
                         key TEXT PRIMARY KEY,
                         value TEXT NOT NULL
                     )
-                    """
+                    """,
                 )
                 conn.execute(
                     """
@@ -101,7 +101,7 @@ class SQLiteCheckpointer(AbstractCheckpointer):
                         created_at REAL NOT NULL,
                         UNIQUE(session_id, trace_id)
                     )
-                    """
+                    """,
                 )
                 conn.execute(
                     """
@@ -114,13 +114,13 @@ class SQLiteCheckpointer(AbstractCheckpointer):
                         error TEXT,
                         created_at REAL NOT NULL
                     )
-                    """
+                    """,
                 )
                 conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_checkpoints_session_created ON checkpoints(session_id, created_at DESC)"
+                    "CREATE INDEX IF NOT EXISTS idx_checkpoints_session_created ON checkpoints(session_id, created_at DESC)",
                 )
                 conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_checkpoint_writes_session_created ON checkpoint_writes(session_id, created_at DESC)"
+                    "CREATE INDEX IF NOT EXISTS idx_checkpoint_writes_session_created ON checkpoint_writes(session_id, created_at DESC)",
                 )
                 conn.execute(
                     "INSERT OR REPLACE INTO checkpoint_meta(key, value) VALUES ('schema_version', ?)",
@@ -134,8 +134,8 @@ class SQLiteCheckpointer(AbstractCheckpointer):
         self,
         session_id: str,
         trace_id: str,
-        checkpoint: Dict[str, Any],
-        manifest: Dict[str, Any],
+        checkpoint: dict[str, Any],
+        manifest: dict[str, Any],
     ) -> bool:
         session_id = str(session_id or "").strip()
         trace_id = str(trace_id or "").strip()
@@ -148,7 +148,9 @@ class SQLiteCheckpointer(AbstractCheckpointer):
             raise CheckpointError("checkpoint.checkpoint_hash is required")
 
         manifest_payload = dict(manifest or {})
-        manifest_hash = str(manifest_payload.get("manifest_hash") or _stable_sha256(manifest_payload))
+        manifest_hash = str(
+            manifest_payload.get("manifest_hash") or _stable_sha256(manifest_payload),
+        )
         payload = {
             "checkpoint": dict(checkpoint or {}),
             "manifest": manifest_payload,
@@ -193,14 +195,21 @@ class SQLiteCheckpointer(AbstractCheckpointer):
                 )
                 conn.commit()
         except sqlite3.Error as exc:
-            self._log_write_failure(session_id=session_id, trace_id=trace_id, error=str(exc))
+            self._log_write_failure(
+                session_id=session_id,
+                trace_id=trace_id,
+                error=str(exc),
+            )
             raise CheckpointError(f"Failed to save checkpoint: {exc}") from exc
 
         self._save_counter += 1
         if self.prune_every > 0 and self._save_counter % self.prune_every == 0:
             try:
-                self.prune_old_checkpoints(session_id, keep_count=self.default_keep_count)
-            except Exception as exc:
+                self.prune_old_checkpoints(
+                    session_id,
+                    keep_count=self.default_keep_count,
+                )
+            except Exception as exc:  # noqa: BLE001
                 logger.warning("Checkpoint prune failed (non-fatal): %s", exc)
         return True
 
@@ -215,17 +224,17 @@ class SQLiteCheckpointer(AbstractCheckpointer):
                     (session_id, trace_id, "", "error", str(error or ""), time.time()),
                 )
                 conn.commit()
-        except Exception:
+        except Exception:  # noqa: BLE001
             logger.debug("Checkpoint write failure logging skipped", exc_info=True)
 
     def load_checkpoint(
         self,
         session_id: str,
-        trace_id: Optional[str] = None,
+        trace_id: str | None = None,
         *,
-        current_manifest: Optional[Dict[str, Any]] = None,
+        current_manifest: dict[str, Any] | None = None,
         strict: bool = False,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         session_id = str(session_id or "").strip()
         if not session_id:
             raise CheckpointNotFoundError("session_id is required")
@@ -254,7 +263,7 @@ class SQLiteCheckpointer(AbstractCheckpointer):
                 row = cursor.fetchone()
                 if row is None:
                     raise CheckpointNotFoundError(
-                        f"No checkpoint found for session_id={session_id!r}, trace_id={trace_id!r}"
+                        f"No checkpoint found for session_id={session_id!r}, trace_id={trace_id!r}",
                     )
 
                 payload = json.loads(str(row["payload"] or "{}"))
@@ -280,19 +289,23 @@ class SQLiteCheckpointer(AbstractCheckpointer):
         except Exception as exc:
             raise CheckpointError(f"Checkpoint load failed: {exc}") from exc
 
-    def _verify_checkpoint_row(self, row: sqlite3.Row, checkpoint: dict[str, Any]) -> None:
+    def _verify_checkpoint_row(
+        self,
+        row: sqlite3.Row,
+        checkpoint: dict[str, Any],
+    ) -> None:
         stored_hash = str(row["checkpoint_hash"] or "").strip()
         payload_hash = str(checkpoint.get("checkpoint_hash") or "").strip()
         if stored_hash != payload_hash:
             raise CheckpointIntegrityError(
-                f"Checkpoint hash mismatch: stored={stored_hash!r} payload={payload_hash!r}"
+                f"Checkpoint hash mismatch: stored={stored_hash!r} payload={payload_hash!r}",
             )
 
         stored_prev = str(row["prev_checkpoint_hash"] or "").strip()
         payload_prev = str(checkpoint.get("prev_checkpoint_hash") or "").strip()
         if stored_prev != payload_prev:
             raise CheckpointIntegrityError(
-                f"Prev hash mismatch: stored={stored_prev!r} payload={payload_prev!r}"
+                f"Prev hash mismatch: stored={stored_prev!r} payload={payload_prev!r}",
             )
 
     def _verify_prev_link(self, conn: sqlite3.Connection, row: sqlite3.Row) -> None:
@@ -310,18 +323,18 @@ class SQLiteCheckpointer(AbstractCheckpointer):
         ).fetchone()
         if prior is None:
             raise CheckpointIntegrityError(
-                "Checkpoint hash-chain broken: prev_checkpoint_hash present but no previous checkpoint exists"
+                "Checkpoint hash-chain broken: prev_checkpoint_hash present but no previous checkpoint exists",
             )
         prior_hash = str(prior["checkpoint_hash"] or "").strip()
         if prior_hash != prev_hash:
             raise CheckpointIntegrityError(
-                f"Checkpoint hash-chain broken: expected prev={prior_hash!r}, got={prev_hash!r}"
+                f"Checkpoint hash-chain broken: expected prev={prior_hash!r}, got={prev_hash!r}",
             )
 
     def _verify_manifest(
         self,
         stored_manifest: dict[str, Any],
-        current_manifest: Optional[Dict[str, Any]],
+        current_manifest: dict[str, Any] | None,
         *,
         strict: bool,
     ) -> None:
@@ -398,12 +411,17 @@ class SQLiteCheckpointer(AbstractCheckpointer):
         session_id = str(session_id or "").strip()
         try:
             with contextlib.closing(self._connect()) as conn:
-                cursor = conn.execute("DELETE FROM checkpoints WHERE session_id = ?", (session_id,))
+                cursor = conn.execute(
+                    "DELETE FROM checkpoints WHERE session_id = ?",
+                    (session_id,),
+                )
                 deleted = int(cursor.rowcount or 0)
                 conn.commit()
                 return deleted
         except sqlite3.Error as exc:
-            raise CheckpointError(f"Failed to delete session checkpoints: {exc}") from exc
+            raise CheckpointError(
+                f"Failed to delete session checkpoints: {exc}",
+            ) from exc
 
     def checkpoint_count(self, session_id: str) -> int:
         session_id = str(session_id or "").strip()
@@ -430,7 +448,12 @@ class AsyncSQLiteCheckpointer(AbstractAsyncCheckpointer):
         self._pool_enabled = False
 
     @classmethod
-    def from_path(cls, db_path: str, *, auto_migrate: bool = True) -> "AsyncSQLiteCheckpointer":
+    def from_path(
+        cls,
+        db_path: str,
+        *,
+        auto_migrate: bool = True,
+    ) -> AsyncSQLiteCheckpointer:
         return cls(SQLiteCheckpointer(db_path, auto_migrate=auto_migrate))
 
     async def migrate(self) -> None:
@@ -440,8 +463,8 @@ class AsyncSQLiteCheckpointer(AbstractAsyncCheckpointer):
         self,
         session_id: str,
         trace_id: str,
-        checkpoint: Dict[str, Any],
-        manifest: Dict[str, Any],
+        checkpoint: dict[str, Any],
+        manifest: dict[str, Any],
     ) -> bool:
         return await asyncio.to_thread(
             self._sync.save_checkpoint,
@@ -454,11 +477,11 @@ class AsyncSQLiteCheckpointer(AbstractAsyncCheckpointer):
     async def load_checkpoint(
         self,
         session_id: str,
-        trace_id: Optional[str] = None,
+        trace_id: str | None = None,
         *,
-        current_manifest: Optional[Dict[str, Any]] = None,
+        current_manifest: dict[str, Any] | None = None,
         strict: bool = False,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         return await asyncio.to_thread(
             self._sync.load_checkpoint,
             session_id,

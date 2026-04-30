@@ -3,7 +3,6 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 DADBOT_ROOT = ROOT / "dadbot"
 
@@ -36,11 +35,7 @@ def _module_name(path: Path) -> str:
 
 
 def _iter_runtime_python_files() -> list[Path]:
-    return [
-        p
-        for p in DADBOT_ROOT.rglob("*.py")
-        if "__pycache__" not in p.parts
-    ]
+    return [p for p in DADBOT_ROOT.rglob("*.py") if "__pycache__" not in p.parts]
 
 
 def _imported_modules(path: Path) -> set[str]:
@@ -136,10 +131,7 @@ def test_dependency_direction_registry_must_not_import_core_layer() -> None:
     path = ROOT / "dadbot" / "registry.py"
     imported = sorted(_imported_modules(path))
     violations = [m for m in imported if m == "dadbot.core" or m.startswith("dadbot.core.")]
-    assert violations == [], (
-        "Direction violations (registry -> core). Found imports: "
-        + ", ".join(violations)
-    )
+    assert violations == [], "Direction violations (registry -> core). Found imports: " + ", ".join(violations)
 
 
 def test_entrypoints_route_startup_through_app_runtime_main() -> None:

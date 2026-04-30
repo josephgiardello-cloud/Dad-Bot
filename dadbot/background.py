@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import inspect
@@ -9,7 +9,6 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from threading import Event, RLock
 from typing import Any
-
 
 logger = logging.getLogger(__name__)
 
@@ -29,8 +28,15 @@ class BackgroundTask:
 class BackgroundTaskManager:
     """Thread-pool backed background runner for sync and async callables."""
 
-    def __init__(self, max_workers: int = 8, thread_name_prefix: str = "dadbot-bg") -> None:
-        self.executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix=thread_name_prefix)
+    def __init__(
+        self,
+        max_workers: int = 8,
+        thread_name_prefix: str = "dadbot-bg",
+    ) -> None:
+        self.executor = ThreadPoolExecutor(
+            max_workers=max_workers,
+            thread_name_prefix=thread_name_prefix,
+        )
         self._lock = RLock()
         self._shutdown = False
         self._shutdown_event = Event()
@@ -66,7 +72,13 @@ class BackgroundTaskManager:
         future.add_done_callback(self._cleanup_task)
         return future
 
-    def _run_task(self, task_id: str, func, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+    def _run_task(
+        self,
+        task_id: str,
+        func,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> Any:
         self._update_task_status(task_id, "running")
         try:
             result = func(*args, **kwargs)
@@ -80,7 +92,12 @@ class BackgroundTaskManager:
         self._update_task_status(task_id, "completed")
         return result
 
-    def _update_task_status(self, task_id: str, status: str, error: str | None = None) -> None:
+    def _update_task_status(
+        self,
+        task_id: str,
+        status: str,
+        error: str | None = None,
+    ) -> None:
         with self._lock:
             task = self._tasks.get(task_id)
             if task is None:

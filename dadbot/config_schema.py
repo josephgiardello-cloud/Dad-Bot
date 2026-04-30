@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 from pathlib import Path
@@ -9,14 +9,16 @@ from pydantic import BaseModel, Field
 
 class ConfigSchema(BaseModel):
     model_candidates: list[str] = Field(default_factory=lambda: ["llama3.2"])
-    embedding_model_candidates: list[str] = Field(default_factory=lambda: ["nomic-embed-text"])
+    embedding_model_candidates: list[str] = Field(
+        default_factory=lambda: ["nomic-embed-text"],
+    )
     light_mode: bool = False
     telemetry_level: str = "INFO"
     data_dir: str = "."
     feature_flags: dict[str, bool] = Field(default_factory=dict)
 
     @classmethod
-    def from_file(cls, config_path: str | Path) -> "ConfigSchema":
+    def from_file(cls, config_path: str | Path) -> ConfigSchema:
         path = Path(config_path)
         if not path.exists():
             return cls()
@@ -64,4 +66,4 @@ def _coerce_yaml_scalar(value: str) -> Any:
             return float(value)
         return int(value)
     except ValueError:
-        return value.strip('"\'')
+        return value.strip("\"'")

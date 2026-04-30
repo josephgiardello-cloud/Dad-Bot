@@ -1,6 +1,4 @@
-﻿from __future__ import annotations
-
-from typing import Tuple
+from __future__ import annotations
 
 try:
     from notifypy import Notify  # type: ignore[import-not-found]
@@ -8,7 +6,9 @@ except Exception:  # pragma: no cover - optional dependency
     Notify = None
 
 try:
-    from plyer import notification as plyer_notification  # type: ignore[import-not-found]
+    from plyer import (
+        notification as plyer_notification,  # type: ignore[import-not-found]
+    )
 except Exception:  # pragma: no cover - optional dependency
     plyer_notification = None
 
@@ -20,7 +20,7 @@ def send_local_notification(
     app_name: str = "Dad Bot",
     backend: str = "auto",
     timeout_seconds: int = 8,
-) -> Tuple[bool, str]:
+) -> tuple[bool, str]:
     """Best-effort local desktop notification using optional local backends."""
     normalized_backend = str(backend or "auto").strip().lower() or "auto"
     title_text = str(title or app_name).strip() or app_name

@@ -5,7 +5,11 @@ from typing import Any
 
 
 class InferenceService:
-    async def run_agent(self, context: Any, rich_context: dict[str, Any]) -> Any:  # pragma: no cover - contract only
+    async def run_agent(
+        self,
+        context: Any,
+        rich_context: dict[str, Any],
+    ) -> Any:  # pragma: no cover - contract only
         raise NotImplementedError
 
 
@@ -14,7 +18,12 @@ class HealthService:
         raise NotImplementedError
 
 
-def _check_required_method(instance: Any, method_name: str, *, must_be_async: bool = False) -> list[str]:
+def _check_required_method(
+    instance: Any,
+    method_name: str,
+    *,
+    must_be_async: bool = False,
+) -> list[str]:
     issues: list[str] = []
     method = getattr(instance, method_name, None)
     if not callable(method):
@@ -40,10 +49,19 @@ def validate_pipeline_services(
 
         if contract is InferenceService:
             issues.extend(
-                [f"{service_name}: {msg}" for msg in _check_required_method(instance, "run_agent", must_be_async=True)]
+                [
+                    f"{service_name}: {msg}"
+                    for msg in _check_required_method(
+                        instance,
+                        "run_agent",
+                        must_be_async=True,
+                    )
+                ],
             )
         elif contract is HealthService:
-            issues.extend([f"{service_name}: {msg}" for msg in _check_required_method(instance, "tick")])
+            issues.extend(
+                [f"{service_name}: {msg}" for msg in _check_required_method(instance, "tick")],
+            )
 
     if issues and raise_on_failure:
         raise RuntimeError("contract violation: " + "; ".join(issues))

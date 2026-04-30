@@ -1,9 +1,9 @@
-﻿"""Transitional manager imports during the Dad.py package split."""
+"""Transitional manager imports during the Dad.py package split."""
 
 from .conversation_persistence import ConversationPersistenceManager
 from .long_term import LongTermSignalsManager
-from .memory_commands import MemoryCommandManager
 from .maintenance import MaintenanceScheduler
+from .memory_commands import MemoryCommandManager
 from .memory_coordination import MemoryCoordinator
 from .memory_query import MemoryQueryManager
 from .multimodal import MultimodalManager
@@ -17,29 +17,29 @@ from .runtime_interface import RuntimeInterfaceManager
 from .runtime_model import RuntimeModelManager
 from .runtime_orchestration import RuntimeOrchestrationManager
 from .runtime_storage import RuntimeStorageManager
-from .session_summary import SessionSummaryManager
 from .safety import SafetySupportManager
+from .session_summary import SessionSummaryManager
 from .status_reporting import StatusReportingManager
 
 __all__ = [
     "ConversationPersistenceManager",
     "LongTermSignalsManager",
-    "MemoryCommandManager",
     "MaintenanceScheduler",
+    "MemoryCommandManager",
     "MemoryCoordinator",
     "MemoryQueryManager",
     "MultimodalManager",
     "ProfileRuntimeManager",
     "PromptAssemblyManager",
-    "ReplyGenerationManager",
     "ReplyFinalizationManager",
+    "ReplyGenerationManager",
     "ReplySupervisorManager",
     "RuntimeClientManager",
     "RuntimeInterfaceManager",
     "RuntimeModelManager",
     "RuntimeOrchestrationManager",
     "RuntimeStorageManager",
-    "SessionSummaryManager",
     "SafetySupportManager",
+    "SessionSummaryManager",
     "StatusReportingManager",
 ]

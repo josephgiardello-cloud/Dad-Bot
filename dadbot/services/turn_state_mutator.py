@@ -9,6 +9,7 @@ Does NOT own:
   - Any LLM I/O — that is owned by LLMCallAdapter
   - Business logic — state writes only
 """
+
 from __future__ import annotations
 
 from datetime import datetime
@@ -54,7 +55,7 @@ class TurnStateMutator:
                 "user_input": str(user_input or "").strip(),
                 "started_at": self.pipeline_timestamp(),
                 "steps": [],
-            }
+            },
         )
 
     def update_turn_pipeline(self, **fields) -> dict[str, object] | None:
@@ -83,8 +84,8 @@ class TurnStateMutator:
                     "detail": str(detail or "").strip(),
                     "timestamp": self.pipeline_timestamp(),
                     "metadata": dict(metadata or {}),
-                }
-            ).model_dump(mode="python")
+                },
+            ).model_dump(mode="python"),
         )
         current["steps"] = steps
         return self.store_turn_pipeline(current)
@@ -120,9 +121,12 @@ class TurnStateMutator:
     # Used when turn_context is unavailable or MutationGuard fires
     # ------------------------------------------------------------------
 
-    def write_mood_fallback(self, current_mood: str, should_offer_daily_checkin: bool) -> None:
+    def write_mood_fallback(
+        self,
+        current_mood: str,
+        should_offer_daily_checkin: bool,
+    ) -> None:
         """Write mood state via direct attribute path (legacy compat / fallback only)."""
-        import logging
         queued_mood = str(current_mood or "neutral")
         self._bot._last_recorded_mood = queued_mood
         self._bot._last_should_offer_daily_checkin = bool(should_offer_daily_checkin)

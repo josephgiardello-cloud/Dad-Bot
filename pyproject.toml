@@ -64,3 +64,50 @@ markers = [
     "soak: high-load or long-running stability checks",
     "stress: full-stack integration/stress tests — run with --run-stress",
 ]
+
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+
+[tool.ruff.lint]
+# Select the rule families worth enforcing:
+#   E/W  pycodestyle errors/warnings
+#   F    pyflakes (unused imports, undefined names)
+#   I    isort
+#   N    pep8-naming
+#   UP   pyupgrade
+#   B    flake8-bugbear
+#   C4   flake8-comprehensions
+#   BLE  blind-except (BLE001 — keep: real safety signal)
+#   C90  mccabe complexity
+#   PL   pylint
+#   RUF  ruff-native rules
+select = ["E", "W", "F", "I", "N", "UP", "B", "C4", "BLE", "C9", "PL", "RUF"]
+
+# Rules deliberately suppressed:
+#   ANN*  — type annotations (2,600+ issues; retrofitting is disproportionate)
+#   D*    — docstrings (2,300+ issues; docstring sprint is a separate initiative)
+#   EM*   — exception message style (cosmetic)
+#   TRY003 — raise with long message (cosmetic)
+#   SLF001 — private member access (legitimate in tests)
+#   PLR2004 — magic value comparison (too many legitimate constants)
+#   PLC0415 — import-outside-top-level (pattern used for lazy loading)
+ignore = [
+    "ANN001", "ANN002", "ANN003",
+    "ANN201", "ANN202", "ANN204", "ANN205", "ANN206", "ANN401",
+    "D100", "D101", "D102", "D103", "D104", "D105", "D106", "D107",
+    "D200", "D201", "D202", "D203", "D204", "D205", "D206", "D207",
+    "D208", "D209", "D210", "D211", "D212", "D213", "D300", "D400",
+    "D401", "D402", "D403", "D404", "D405", "D406", "D407", "D408",
+    "D409", "D410", "D411", "D412", "D413", "D414", "D415", "D416",
+    "D417", "D418", "D419",
+    "EM101", "EM102",
+    "TRY003",
+    "PLR2004",
+    "PLC0415",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests legitimately access private members and use magic values
+"tests/**" = ["SLF001", "PLR2004", "BLE001", "PLR0913"]
+"tools/**" = ["SLF001", "PLR2004", "BLE001"]

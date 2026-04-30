@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable
 from urllib.parse import urlparse
 
 
@@ -40,11 +40,26 @@ def evaluate_url(url: str, *, allowlist: Iterable[str] | None = None) -> EgressD
     parsed = urlparse(str(url or "").strip())
     host = str(parsed.hostname or "").strip().lower()
     if not host:
-        return EgressDecision(allowed=False, reason="missing_host", host="", url=str(url or ""))
+        return EgressDecision(
+            allowed=False,
+            reason="missing_host",
+            host="",
+            url=str(url or ""),
+        )
     allowed_hosts = _normalize_hosts(allowlist or default_allowlist())
     if host in allowed_hosts:
-        return EgressDecision(allowed=True, reason="allowlisted", host=host, url=str(url or ""))
-    return EgressDecision(allowed=False, reason="host_not_allowlisted", host=host, url=str(url or ""))
+        return EgressDecision(
+            allowed=True,
+            reason="allowlisted",
+            host=host,
+            url=str(url or ""),
+        )
+    return EgressDecision(
+        allowed=False,
+        reason="host_not_allowlisted",
+        host=host,
+        url=str(url or ""),
+    )
 
 
 def enforce_url(url: str, *, allowlist: Iterable[str] | None = None) -> EgressDecision:
@@ -52,7 +67,7 @@ def enforce_url(url: str, *, allowlist: Iterable[str] | None = None) -> EgressDe
     if decision.allowed or not is_enforced():
         return decision
     raise PermissionError(
-        f"Egress blocked by allowlist policy: host={decision.host!r} reason={decision.reason} url={decision.url!r}"
+        f"Egress blocked by allowlist policy: host={decision.host!r} reason={decision.reason} url={decision.url!r}",
     )
 
 

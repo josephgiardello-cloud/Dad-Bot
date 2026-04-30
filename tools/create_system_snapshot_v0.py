@@ -96,11 +96,7 @@ def _dependency_lock() -> str:
 
 
 def _runtime_config_dump() -> dict[str, Any]:
-    env_vars = {
-        key: value
-        for key, value in os.environ.items()
-        if key.startswith("DADBOT_")
-    }
+    env_vars = {key: value for key, value in os.environ.items() if key.startswith("DADBOT_")}
     return {
         "python_executable": sys.executable,
         "python_version": sys.version,
@@ -121,22 +117,22 @@ async def _capture_runtime_behavior() -> dict[str, Any]:
         async def _deterministic_agent(context, _rich):
             return (f"SNAPSHOT_V0::{str(context.user_input or '').strip()}", False)
 
-        setattr(service, "run_agent", _deterministic_agent)
+        service.run_agent = _deterministic_agent
 
         # Disable non-essential side effects for clean, tool-free baseline traces.
         mc = getattr(bot, "memory_coordinator", None)
         if mc is not None:
-            setattr(mc, "consolidate_memories", lambda **_: None)
-            setattr(mc, "apply_controlled_forgetting", lambda **_: None)
+            mc.consolidate_memories = lambda **_: None
+            mc.apply_controlled_forgetting = lambda **_: None
         rm = getattr(bot, "relationship_manager", None)
         if rm is not None:
-            setattr(rm, "materialize_projection", lambda **_: None)
+            rm.materialize_projection = lambda **_: None
         mm = getattr(bot, "memory_manager", None)
         gm = getattr(mm, "graph_manager", None) if mm is not None else None
         if gm is not None:
-            setattr(gm, "sync_graph_store", lambda **_: None)
+            gm.sync_graph_store = lambda **_: None
         if hasattr(bot, "validate_reply"):
-            setattr(bot, "validate_reply", lambda _u, r: r)
+            bot.validate_reply = lambda _u, r: r
 
         traces: list[dict[str, Any]] = []
         session_id = "system-snapshot-v0"
@@ -158,7 +154,9 @@ async def _capture_runtime_behavior() -> dict[str, Any]:
                         }
                         for trace in list(getattr(context, "stage_traces", []) or [])
                     ],
-                    "execution_stages": sorted(list(context.state.get("_graph_executed_stages") or [])) if context else [],
+                    "execution_stages": sorted(list(context.state.get("_graph_executed_stages") or []))
+                    if context
+                    else [],
                     "determinism": dict(context.metadata.get("determinism") or {}) if context else {},
                     "tool_ir": dict(context.state.get("tool_ir") or {}) if context else {},
                     "tool_results": list(context.state.get("tool_results") or []) if context else [],
@@ -204,9 +202,7 @@ def main() -> int:
     runtime_behavior = asyncio.run(_capture_runtime_behavior())
     _stable_json_dump(SNAPSHOT_DIR / "runtime_behavior_snapshot.json", runtime_behavior)
 
-    (SNAPSHOT_DIR / "SYSTEM_SNAPSHOT_V0_HASH.txt").write_text(
-        SYSTEM_SNAPSHOT_V0_HASH + "\n", encoding="utf-8"
-    )
+    (SNAPSHOT_DIR / "SYSTEM_SNAPSHOT_V0_HASH.txt").write_text(SYSTEM_SNAPSHOT_V0_HASH + "\n", encoding="utf-8")
 
     print(f"Wrote snapshot artifacts to {SNAPSHOT_DIR}")
     return 0

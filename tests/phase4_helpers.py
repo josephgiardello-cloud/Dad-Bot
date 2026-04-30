@@ -1,4 +1,5 @@
 """Shared helpers for Phase 4 certification and baseline tracking."""
+
 from __future__ import annotations
 
 import json
@@ -6,7 +7,7 @@ import os
 import sqlite3
 import tempfile
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -14,7 +15,7 @@ import pytest
 
 def utc_now_iso() -> str:
     """Return a stable UTC timestamp for run metadata."""
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    return datetime.now(UTC).replace(microsecond=0).isoformat()
 
 
 @pytest.fixture
@@ -166,7 +167,9 @@ def render_capability_record_markdown(current: dict, previous: dict | None) -> s
     lines.append("")
     lines.append("## Certification Matrix")
     lines.append("")
-    lines.append("| Section / Subsection | Claimed Feature | Test Coverage | Current Benchmark / Metric | Change from Baseline | Status | Notes |")
+    lines.append(
+        "| Section / Subsection | Claimed Feature | Test Coverage | Current Benchmark / Metric | Change from Baseline | Status | Notes |"
+    )
     lines.append("|---|---|---|---|---|---|---|")
 
     cold = current.get("cold_start", {})
@@ -177,8 +180,9 @@ def render_capability_record_markdown(current: dict, previous: dict | None) -> s
         cold_delta = f"{((float(total_cold) - float(prev_total_cold)) / float(prev_total_cold)) * 100.0:+.1f}%"
 
     lines.append(
-        "| Startup / Cold Start | DadBot cold-start envelope | startup import timing probe | "
-        f"{total_cold:.3f}s total" if isinstance(total_cold, (int, float)) else "| Startup / Cold Start | DadBot cold-start envelope | startup import timing probe | n/a"
+        f"| Startup / Cold Start | DadBot cold-start envelope | startup import timing probe | {total_cold:.3f}s total"
+        if isinstance(total_cold, (int, float))
+        else "| Startup / Cold Start | DadBot cold-start envelope | startup import timing probe | n/a"
     )
     if isinstance(total_cold, (int, float)):
         lines[-1] += f" | {cold_delta} | {'Proven' if total_cold <= 1.8 else 'Partial'} | Target <= 1.8s guard |"

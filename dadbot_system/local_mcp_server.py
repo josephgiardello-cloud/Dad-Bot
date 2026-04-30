@@ -4,7 +4,6 @@ import atexit
 import json
 import os
 import pathlib
-import sys
 from typing import Any
 
 from Dad import DadBot
@@ -160,9 +159,15 @@ def build_server(bot: DadBot | None = None):
     def heritage_cross_link_query(context: str, max_links: int = 3) -> list[dict[str, Any]]:
         """Find semantically cross-linked narrative memories from past life arcs."""
         from dadbot.managers.heritage_graph import HeritageGraphManager
-        return _json_safe(HeritageGraphManager(_get_bot(bot)).cross_link_query(str(context or ""), max_links=max(1, int(max_links or 3))))
+
+        return _json_safe(
+            HeritageGraphManager(_get_bot(bot)).cross_link_query(
+                str(context or ""), max_links=max(1, int(max_links or 3))
+            )
+        )
 
     if hasattr(server, "resource"):
+
         @server.resource("dadbot://memory/narratives")
         def narrative_memory_resource() -> str:
             runtime = _get_bot(bot)
@@ -176,6 +181,7 @@ def build_server(bot: DadBot | None = None):
         @server.resource("dadbot://memory/heritage")
         def heritage_graph_resource() -> str:
             from dadbot.managers.heritage_graph import HeritageGraphManager
+
             runtime = _get_bot(bot)
             # Return cross-links based on last known session topic
             last_archive = list(runtime.session_archive() or [])

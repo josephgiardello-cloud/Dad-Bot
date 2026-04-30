@@ -15,12 +15,12 @@ def generate_refactor_suggestions(
 ) -> list[RefactorSuggestion]:
     suggestions: list[RefactorSuggestion] = []
 
-    high_risk = [
-        row
-        for row in subsystem_health
-        if ((row.coupling + row.centrality + row.blast_radius) / 3.0) >= 0.65
-    ]
-    for row in sorted(high_risk, key=lambda r: (r.coupling + r.centrality + r.blast_radius), reverse=True):
+    high_risk = [row for row in subsystem_health if ((row.coupling + row.centrality + row.blast_radius) / 3.0) >= 0.65]
+    for row in sorted(
+        high_risk,
+        key=lambda r: r.coupling + r.centrality + r.blast_radius,
+        reverse=True,
+    ):
         suggestions.append(
             RefactorSuggestion(
                 target=row.subsystem,
@@ -32,7 +32,7 @@ def generate_refactor_suggestions(
                 ],
                 impact="high",
                 risk="medium",
-            )
+            ),
         )
 
     observability_signals = [s.score for s in signal_bus.by_category("observability")]
@@ -48,7 +48,7 @@ def generate_refactor_suggestions(
                 ],
                 impact="high",
                 risk="low",
-            )
+            ),
         )
 
     correctness_mean = signal_bus.mean_for_category("correctness")
@@ -63,7 +63,7 @@ def generate_refactor_suggestions(
                 ],
                 impact="high",
                 risk="low",
-            )
+            ),
         )
 
     if not suggestions:
@@ -77,7 +77,7 @@ def generate_refactor_suggestions(
                 ],
                 impact="medium",
                 risk="low",
-            )
+            ),
         )
 
     return suggestions

@@ -1,9 +1,7 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Protocol
-
-from .policy import PolicyEngine
 
 
 @dataclass(slots=True)
@@ -18,31 +16,42 @@ class UserMessageResult:
 
 
 class RuntimeServices(Protocol):
-    def handle_user_message(self, *, thread_id: str, text: str, attachments: list[dict] | None = None) -> UserMessageResult:
-        ...
+    def handle_user_message(
+        self,
+        *,
+        thread_id: str,
+        text: str,
+        attachments: list[dict] | None = None,
+    ) -> UserMessageResult: ...
 
-    def write_memory(self, *, thread_id: str, payload: dict) -> None:
-        ...
+    def write_memory(self, *, thread_id: str, payload: dict) -> None: ...
 
 
 class LLMService(Protocol):
-    def generate_reply(self, *, thread_id: str, text: str, attachments: list[dict] | None = None) -> UserMessageResult:
-        ...
+    def generate_reply(
+        self,
+        *,
+        thread_id: str,
+        text: str,
+        attachments: list[dict] | None = None,
+    ) -> UserMessageResult: ...
 
 
 class MemoryService(Protocol):
-    def write(self, *, thread_id: str, payload: dict) -> None:
-        ...
-
-
-
+    def write(self, *, thread_id: str, payload: dict) -> None: ...
 
 
 class DadBotLLMService:
     def __init__(self, bot) -> None:
         self.bot = bot
 
-    def generate_reply(self, *, thread_id: str, text: str, attachments: list[dict] | None = None) -> UserMessageResult:
+    def generate_reply(
+        self,
+        *,
+        thread_id: str,
+        text: str,
+        attachments: list[dict] | None = None,
+    ) -> UserMessageResult:
         reply_value = self.bot.process_user_message(text, attachments=attachments)
         if hasattr(reply_value, "reply"):
             reply = str(reply_value.reply or "")
@@ -87,13 +96,29 @@ class DadBotMemoryService:
 class DadBotRuntimeServices:
     """Composed service facade for the runtime core."""
 
-    def __init__(self, bot, *, llm: LLMService | None = None, memory: MemoryService | None = None) -> None:
+    def __init__(
+        self,
+        bot,
+        *,
+        llm: LLMService | None = None,
+        memory: MemoryService | None = None,
+    ) -> None:
         self.bot = bot
         self.llm: LLMService = llm or DadBotLLMService(bot)
         self.memory: MemoryService = memory or DadBotMemoryService(bot)
 
-    def handle_user_message(self, *, thread_id: str, text: str, attachments: list[dict] | None = None) -> UserMessageResult:
-        return self.llm.generate_reply(thread_id=thread_id, text=text, attachments=attachments)
+    def handle_user_message(
+        self,
+        *,
+        thread_id: str,
+        text: str,
+        attachments: list[dict] | None = None,
+    ) -> UserMessageResult:
+        return self.llm.generate_reply(
+            thread_id=thread_id,
+            text=text,
+            attachments=attachments,
+        )
 
     def write_memory(self, *, thread_id: str, payload: dict) -> None:
         self.memory.write(thread_id=thread_id, payload=payload)

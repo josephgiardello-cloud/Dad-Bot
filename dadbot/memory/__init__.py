@@ -1,4 +1,4 @@
-﻿"""Memory package placeholder for the DadBot split."""
+"""Memory package placeholder for the DadBot split."""
 
 from .manager import MemoryManager
 

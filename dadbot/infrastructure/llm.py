@@ -1,6 +1,7 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
-from typing import Any, Callable, Iterable, Protocol
+from collections.abc import Callable, Iterable
+from typing import Any, Protocol
 
 import ollama
 
@@ -27,9 +28,7 @@ class OllamaModelAdapter:
     def model_is_available(models: Iterable[dict[str, Any]], model_name: str) -> bool:
         """Determines if a model is ready, handling Ollama tag quirks."""
         available_names = {
-            model.get("model") or model.get("name")
-            for model in models
-            if model.get("model") or model.get("name")
+            model.get("model") or model.get("name") for model in models if model.get("model") or model.get("name")
         }
 
         if model_name in available_names:
@@ -53,7 +52,12 @@ class OllamaModelAdapter:
             models = self.list_models()
         except retryable_errors:
             if deliver_status and finalize_reply:
-                deliver_status(finalize_reply("I can't reach Ollama right now. Make sure the Ollama app is open, then try again."), status_callback)
+                deliver_status(
+                    finalize_reply(
+                        "I can't reach Ollama right now. Make sure the Ollama app is open, then try again.",
+                    ),
+                    status_callback,
+                )
             return None
 
         for candidate in model_candidates:
@@ -62,15 +66,26 @@ class OllamaModelAdapter:
 
         for candidate in model_candidates:
             if deliver_status:
-                deliver_status(f"I don't have {candidate} downloaded yet. Give me a minute to get it ready for you.", status_callback)
+                deliver_status(
+                    f"I don't have {candidate} downloaded yet. Give me a minute to get it ready for you.",
+                    status_callback,
+                )
             try:
                 self.pull_model(candidate)
                 if deliver_status and finalize_reply:
-                    deliver_status(finalize_reply(f"{candidate} is ready. Let's talk."), status_callback)
+                    deliver_status(
+                        finalize_reply(f"{candidate} is ready. Let's talk."),
+                        status_callback,
+                    )
                 return candidate
             except retryable_errors:
                 continue
 
         if deliver_status and finalize_reply:
-            deliver_status(finalize_reply("I couldn't download my brain just yet. Make sure Ollama is online, then try again."), status_callback)
+            deliver_status(
+                finalize_reply(
+                    "I couldn't download my brain just yet. Make sure Ollama is online, then try again.",
+                ),
+                status_callback,
+            )
         return None

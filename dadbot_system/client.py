@@ -47,7 +47,9 @@ class ServiceClientConfig:
     worker_count: int = field(default_factory=lambda: max(1, env_int("DADBOT_API_WORKERS", 2)))
     redis_url: str = field(default_factory=lambda: str(os.environ.get("DADBOT_REDIS_URL") or "").strip())
     postgres_dsn: str = field(default_factory=lambda: str(os.environ.get("DADBOT_POSTGRES_DSN") or "").strip())
-    tenant_id: str = field(default_factory=lambda: normalize_tenant_id(os.environ.get("DADBOT_TENANT_ID") or DEFAULT_TENANT_ID))
+    tenant_id: str = field(
+        default_factory=lambda: normalize_tenant_id(os.environ.get("DADBOT_TENANT_ID") or DEFAULT_TENANT_ID)
+    )
     otel_enabled: bool = field(default_factory=lambda: env_flag("DADBOT_OTEL_ENABLED", False))
     python_executable: str = field(default_factory=lambda: sys.executable)
     script_path: str = field(default_factory=lambda: str(repo_root_path() / "Dad.py"))
@@ -88,7 +90,9 @@ class DadServiceClient:
     def stream_url(self, session_id: str, *, tenant_id: str = "") -> str:
         return self.session_event_stream_url(session_id, tenant_id=tenant_id)
 
-    def _request(self, method: str, path: str, payload: dict[str, Any] | None = None, timeout: float = 10.0) -> dict[str, Any]:
+    def _request(
+        self, method: str, path: str, payload: dict[str, Any] | None = None, timeout: float = 10.0
+    ) -> dict[str, Any]:
         body = None
         headers = {"Accept": "application/json"}
         if payload is not None:
@@ -193,7 +197,15 @@ class DadServiceClient:
             raise RuntimeError(f"Dad Bot API did not become healthy: {last_error}")
         raise RuntimeError("Dad Bot API did not become healthy before timeout")
 
-    def submit_chat(self, session_id: str, *, user_input: str, attachments: list[dict[str, Any]] | None = None, requested_model: str = "", tenant_id: str = "") -> dict[str, Any]:
+    def submit_chat(
+        self,
+        session_id: str,
+        *,
+        user_input: str,
+        attachments: list[dict[str, Any]] | None = None,
+        requested_model: str = "",
+        tenant_id: str = "",
+    ) -> dict[str, Any]:
         self.ensure_service_running(preferred_model=requested_model)
         resolved_tenant_id = normalize_tenant_id(tenant_id or self.config.tenant_id)
         payload = {
@@ -204,7 +216,15 @@ class DadServiceClient:
         }
         return self._request("POST", f"/sessions/{session_id}/chat", payload=payload, timeout=15.0)
 
-    def submit_stream(self, session_id: str, *, user_input: str, attachments: list[dict[str, Any]] | None = None, requested_model: str = "", tenant_id: str = "") -> dict[str, Any]:
+    def submit_stream(
+        self,
+        session_id: str,
+        *,
+        user_input: str,
+        attachments: list[dict[str, Any]] | None = None,
+        requested_model: str = "",
+        tenant_id: str = "",
+    ) -> dict[str, Any]:
         self.ensure_service_running(preferred_model=requested_model)
         resolved_tenant_id = normalize_tenant_id(tenant_id or self.config.tenant_id)
         payload = {
@@ -215,7 +235,16 @@ class DadServiceClient:
         }
         return self._request("POST", f"/sessions/{session_id}/stream", payload=payload, timeout=15.0)
 
-    def turn(self, session_id: str, *, user_input: str, attachments: list[dict[str, Any]] | None = None, requested_model: str = "", tenant_id: str = "", timeout_seconds: float = 60.0) -> ServiceChatResult:
+    def turn(
+        self,
+        session_id: str,
+        *,
+        user_input: str,
+        attachments: list[dict[str, Any]] | None = None,
+        requested_model: str = "",
+        tenant_id: str = "",
+        timeout_seconds: float = 60.0,
+    ) -> ServiceChatResult:
         self.ensure_service_running(preferred_model=requested_model)
         resolved_tenant_id = normalize_tenant_id(tenant_id or self.config.tenant_id)
         payload = {
@@ -225,7 +254,9 @@ class DadServiceClient:
             "tenant_id": resolved_tenant_id,
             "timeout_seconds": float(timeout_seconds),
         }
-        result_payload = self._request("POST", f"/sessions/{session_id}/turn", payload=payload, timeout=max(15.0, float(timeout_seconds) + 5.0))
+        result_payload = self._request(
+            "POST", f"/sessions/{session_id}/turn", payload=payload, timeout=max(15.0, float(timeout_seconds) + 5.0)
+        )
 
         task = dict(result_payload.get("task") or {})
         response = dict(result_payload.get("response") or {})
@@ -246,9 +277,16 @@ class DadServiceClient:
 
     def session_events(self, session_id: str, *, tenant_id: str = "") -> list[dict[str, Any]]:
         resolved_tenant_id = normalize_tenant_id(tenant_id or self.config.tenant_id)
-        return self._request("GET", f"/sessions/{session_id}/events?{urlencode({'tenant_id': resolved_tenant_id})}", timeout=15.0)
+        result = self._request(
+            "GET", f"/sessions/{session_id}/events?{urlencode({'tenant_id': resolved_tenant_id})}", timeout=15.0
+        )
+        if isinstance(result, list):
+            return [r for r in result if isinstance(r, dict)]
+        return [result] if isinstance(result, dict) else []
 
-    def replay(self, session_id: str, *, tenant_id: str = "", event_type: str = "", since_event_id: str = "", limit: int = 200) -> dict[str, Any]:
+    def replay(
+        self, session_id: str, *, tenant_id: str = "", event_type: str = "", since_event_id: str = "", limit: int = 200
+    ) -> dict[str, Any]:
         resolved_tenant_id = normalize_tenant_id(tenant_id or self.config.tenant_id)
         query = urlencode(
             {
@@ -287,9 +325,19 @@ class DadServiceClient:
                 raise RuntimeError(str(task.get("error") or "Dad Bot API task failed"))
             time.sleep(self.config.poll_interval_seconds)
 
-        raise TimeoutError(f"Dad Bot API task {task_id} timed out after {self.config.task_timeout_seconds:.1f}s (last status: {last_status})")
+        raise TimeoutError(
+            f"Dad Bot API task {task_id} timed out after {self.config.task_timeout_seconds:.1f}s (last status: {last_status})"
+        )
 
-    def chat(self, session_id: str, *, user_input: str, attachments: list[dict[str, Any]] | None = None, requested_model: str = "", tenant_id: str = "") -> ServiceChatResult:
+    def chat(
+        self,
+        session_id: str,
+        *,
+        user_input: str,
+        attachments: list[dict[str, Any]] | None = None,
+        requested_model: str = "",
+        tenant_id: str = "",
+    ) -> ServiceChatResult:
         task_payload = self.submit_chat(
             session_id,
             user_input=user_input,

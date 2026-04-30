@@ -9,12 +9,28 @@ Coverage:
     S21–S30: Failure propagation (ToolFailure types, severity, propagation policies)
     S31–S40: Conditional dependency edges (HARD/SOFT, predicates, resolution)
 """
-from __future__ import annotations
 
-from typing import Any
+from __future__ import annotations
 
 import pytest
 
+from dadbot.core.tool_algebra import (
+    FailureSeverity,
+    PropagationPolicy,
+    ToolFailure,
+    ToolFailureLog,
+    ToolFailureType,
+)
+from dadbot.core.tool_dependency import (
+    PREDICATE_ALWAYS_TRUE,
+    PREDICATE_HAS_GOALS,
+    PREDICATE_RESULT_NONEMPTY,
+    PREDICATE_STATUS_OK,
+    ConditionalEdge,
+    DependencyResolver,
+    DependencyType,
+    NodeStatus,
+)
 from dadbot.core.tool_idempotency import (
     IdempotencyViolationError,
     ToolIdempotencyRegistry,
@@ -29,24 +45,6 @@ from dadbot.core.tool_resource_model import (
     ToolCostEntry,
     TurnBudget,
 )
-from dadbot.core.tool_algebra import (
-    FailureSeverity,
-    PropagationPolicy,
-    ToolFailure,
-    ToolFailureLog,
-    ToolFailureType,
-)
-from dadbot.core.tool_dependency import (
-    ConditionalEdge,
-    DependencyResolver,
-    DependencyType,
-    NodeStatus,
-    PREDICATE_ALWAYS_TRUE,
-    PREDICATE_RESULT_NONEMPTY,
-    PREDICATE_STATUS_OK,
-    PREDICATE_HAS_GOALS,
-)
-
 
 # ===========================================================================
 # S1–S10: Tool Idempotency
@@ -189,9 +187,7 @@ class TestResourceModel:
             exhaustion_policy=BudgetExhaustionPolicy.DEGRADE,
         )
         validator = ResourceModelValidator(catalog)
-        report = validator.validate_tool_list(
-            ["memory_lookup", "memory_lookup", "memory_lookup"], budget
-        )
+        report = validator.validate_tool_list(["memory_lookup", "memory_lookup", "memory_lookup"], budget)
         assert len(report.approved_tools) == 2
         assert len(report.exhausted_tools) == 1
 
@@ -316,12 +312,14 @@ class TestFailurePropagation:
 class TestToolDependency:
     def _make_resolver(self) -> DependencyResolver:
         resolver = DependencyResolver()
-        resolver.add_edge(ConditionalEdge(
-            source_node_id="node-A",
-            target_node_id="node-B",
-            predicate_key=PREDICATE_STATUS_OK,
-            dependency_type=DependencyType.HARD,
-        ))
+        resolver.add_edge(
+            ConditionalEdge(
+                source_node_id="node-A",
+                target_node_id="node-B",
+                predicate_key=PREDICATE_STATUS_OK,
+                dependency_type=DependencyType.HARD,
+            )
+        )
         return resolver
 
     def test_hard_dep_blocked_when_source_missing(self):
@@ -347,25 +345,29 @@ class TestToolDependency:
 
     def test_soft_dep_degraded_when_source_missing(self):
         resolver = DependencyResolver()
-        resolver.add_edge(ConditionalEdge(
-            source_node_id="node-A",
-            target_node_id="node-B",
-            predicate_key=PREDICATE_STATUS_OK,
-            dependency_type=DependencyType.SOFT,
-            fallback_input={"fallback": True},
-        ))
+        resolver.add_edge(
+            ConditionalEdge(
+                source_node_id="node-A",
+                target_node_id="node-B",
+                predicate_key=PREDICATE_STATUS_OK,
+                dependency_type=DependencyType.SOFT,
+                fallback_input={"fallback": True},
+            )
+        )
         result = resolver.resolve_node("node-B", outputs={})
         assert result.status == NodeStatus.SOFT_DEGRADED
 
     def test_soft_dep_uses_fallback_input(self):
         resolver = DependencyResolver()
-        resolver.add_edge(ConditionalEdge(
-            source_node_id="node-A",
-            target_node_id="node-B",
-            predicate_key=PREDICATE_STATUS_OK,
-            dependency_type=DependencyType.SOFT,
-            fallback_input={"fallback": True},
-        ))
+        resolver.add_edge(
+            ConditionalEdge(
+                source_node_id="node-A",
+                target_node_id="node-B",
+                predicate_key=PREDICATE_STATUS_OK,
+                dependency_type=DependencyType.SOFT,
+                fallback_input={"fallback": True},
+            )
+        )
         result = resolver.resolve_node("node-B", outputs={})
         assert result.effective_input == {"fallback": True}
 
@@ -376,23 +378,27 @@ class TestToolDependency:
 
     def test_predicate_always_true(self):
         resolver = DependencyResolver()
-        resolver.add_edge(ConditionalEdge(
-            source_node_id="node-A",
-            target_node_id="node-B",
-            predicate_key=PREDICATE_ALWAYS_TRUE,
-            dependency_type=DependencyType.HARD,
-        ))
+        resolver.add_edge(
+            ConditionalEdge(
+                source_node_id="node-A",
+                target_node_id="node-B",
+                predicate_key=PREDICATE_ALWAYS_TRUE,
+                dependency_type=DependencyType.HARD,
+            )
+        )
         result = resolver.resolve_node("node-B", outputs={"node-A": None})
         assert result.status == NodeStatus.RUNNABLE
 
     def test_predicate_result_nonempty(self):
         resolver = DependencyResolver()
-        resolver.add_edge(ConditionalEdge(
-            source_node_id="src",
-            target_node_id="tgt",
-            predicate_key=PREDICATE_RESULT_NONEMPTY,
-            dependency_type=DependencyType.HARD,
-        ))
+        resolver.add_edge(
+            ConditionalEdge(
+                source_node_id="src",
+                target_node_id="tgt",
+                predicate_key=PREDICATE_RESULT_NONEMPTY,
+                dependency_type=DependencyType.HARD,
+            )
+        )
         # Non-empty output → RUNNABLE
         result = resolver.resolve_node("tgt", outputs={"src": ["some", "data"]})
         assert result.status == NodeStatus.RUNNABLE

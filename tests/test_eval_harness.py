@@ -17,7 +17,6 @@ emotional_alignment
 from __future__ import annotations
 
 import re
-import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -25,10 +24,10 @@ from unittest.mock import patch
 
 from Dad import DadBot
 
-
 # ---------------------------------------------------------------------------
 # Shared fixture helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_bot(temp_path: Path) -> DadBot:
     bot = DadBot()
@@ -46,8 +45,10 @@ def _make_bot(temp_path: Path) -> DadBot:
 
 def _fake_chat_factory(reply: str):
     """Return a callable that mimics call_ollama_chat and always yields *reply*."""
+
     def _fake_chat(messages, options=None, response_format=None, purpose="chat"):
         return {"message": {"content": reply}}
+
     return _fake_chat
 
 
@@ -87,15 +88,28 @@ def score_faithfulness(reply: str, profile: dict) -> tuple[float, list[str]]:
 # Consistency scorer
 # ---------------------------------------------------------------------------
 
+
 def score_consistency(mood_a: str, mood_b: str) -> float:
     """Return 1.0 if both moods map to the same category, else 0.0."""
     _CANONICAL = {
-        "happy": "positive", "excited": "positive", "proud": "positive", "positive": "positive",
-        "neutral": "neutral", "calm": "neutral", "reflective": "neutral",
-        "stressed": "stressed", "anxious": "stressed", "overwhelmed": "stressed",
-        "sad": "sad", "down": "sad", "lonely": "sad",
-        "frustrated": "frustrated", "angry": "frustrated", "irritated": "frustrated",
-        "tired": "tired", "exhausted": "tired",
+        "happy": "positive",
+        "excited": "positive",
+        "proud": "positive",
+        "positive": "positive",
+        "neutral": "neutral",
+        "calm": "neutral",
+        "reflective": "neutral",
+        "stressed": "stressed",
+        "anxious": "stressed",
+        "overwhelmed": "stressed",
+        "sad": "sad",
+        "down": "sad",
+        "lonely": "sad",
+        "frustrated": "frustrated",
+        "angry": "frustrated",
+        "irritated": "frustrated",
+        "tired": "tired",
+        "exhausted": "tired",
     }
     return 1.0 if _CANONICAL.get(mood_a, mood_a) == _CANONICAL.get(mood_b, mood_b) else 0.0
 
@@ -138,6 +152,7 @@ def score_emotional_alignment(user_input: str, reply: str, detected_mood: str) -
 # ---------------------------------------------------------------------------
 # Test cases
 # ---------------------------------------------------------------------------
+
 
 class TestFaithfulnessEval(unittest.TestCase):
     def setUp(self):

@@ -1,9 +1,11 @@
 """Tests for prompt injection detection in SafetySupportManager."""
+
 from __future__ import annotations
 
 import pytest
+
 pytestmark = pytest.mark.unit
-from dadbot.managers.safety import SafetySupportManager, _INJECTION_PATTERNS, _INJECTION_REPLY
+from dadbot.managers.safety import _INJECTION_REPLY, SafetySupportManager
 
 
 class TestDetectPromptInjection:

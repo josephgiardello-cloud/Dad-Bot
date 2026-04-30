@@ -10,7 +10,15 @@ uvicorn = pytest.importorskip("uvicorn")
 pytest.importorskip("fastapi")
 testclient = pytest.importorskip("fastapi.testclient")
 
-from dadbot_system import DadServiceClient, DadBotOrchestrator, InMemoryEventBus, InMemoryStateStore, ServiceClientConfig, ServiceConfig, create_api_app
+from dadbot_system import (
+    DadBotOrchestrator,
+    DadServiceClient,
+    InMemoryEventBus,
+    InMemoryStateStore,
+    ServiceClientConfig,
+    ServiceConfig,
+    create_api_app,
+)
 from dadbot_system.contracts import ChatResponse, WorkerResult
 
 

@@ -1,10 +1,42 @@
 from datetime import date, datetime
 
 import pytest
+
 pytestmark = pytest.mark.unit
 from pydantic import ValidationError
 
-from dadbot.models import ActiveThreadSnapshot, AgenticToolPlan, BackgroundTaskOverview, BackgroundTaskRecord, ChatThreadState, ConsolidatedMemory, DashboardStatusSnapshot, MemoryEntry, MemoryStore, ModerationSnapshot, OutputModerationDecision, PersonaTrait, PersistenceStatusSnapshot, PlannerDebugState, RelationshipState, RelationshipStatusSnapshot, ReplySupervisorSnapshot, RuntimeStatusSnapshot, SecurityStatusSnapshot, ServiceStatusSnapshot, SessionStatusSnapshot, StatusTraitMetric, SupervisorDecisionState, SupervisorJudgment, ThreadRuntimeSnapshot, ThreadsStatusSnapshot, TurnPipelineSnapshot, TurnPipelineStep, VisionStatusSnapshot, WisdomInsight
+from dadbot.models import (
+    ActiveThreadSnapshot,
+    AgenticToolPlan,
+    BackgroundTaskOverview,
+    BackgroundTaskRecord,
+    ChatThreadState,
+    ConsolidatedMemory,
+    DashboardStatusSnapshot,
+    MemoryEntry,
+    MemoryStore,
+    ModerationSnapshot,
+    OutputModerationDecision,
+    PersistenceStatusSnapshot,
+    PersonaTrait,
+    PlannerDebugState,
+    RelationshipState,
+    RelationshipStatusSnapshot,
+    ReplySupervisorSnapshot,
+    RuntimeStatusSnapshot,
+    SecurityStatusSnapshot,
+    ServiceStatusSnapshot,
+    SessionStatusSnapshot,
+    StatusTraitMetric,
+    SupervisorDecisionState,
+    SupervisorJudgment,
+    ThreadRuntimeSnapshot,
+    ThreadsStatusSnapshot,
+    TurnPipelineSnapshot,
+    TurnPipelineStep,
+    VisionStatusSnapshot,
+    WisdomInsight,
+)
 
 
 def test_memory_entry_defaults_and_json_dump():
@@ -166,12 +198,24 @@ def test_operational_runtime_models_serialize_cleanly():
     )
     supervisor_snapshot = ReplySupervisorSnapshot(
         enabled=True,
-        last_decision=SupervisorDecisionState(stage="alignment_judge", score=8, dad_likeness=8, groundedness=9, emotional_fit=8),
+        last_decision=SupervisorDecisionState(
+            stage="alignment_judge", score=8, dad_likeness=8, groundedness=9, emotional_fit=8
+        ),
     )
     dashboard = DashboardStatusSnapshot(
-        status=RuntimeStatusSnapshot(active_model="llama3.2", tenant_id="default", top_trait_metrics=[StatusTraitMetric(trait="steady", strength=1.2, impact_score=2.0)]),
+        status=RuntimeStatusSnapshot(
+            active_model="llama3.2",
+            tenant_id="default",
+            top_trait_metrics=[StatusTraitMetric(trait="steady", strength=1.2, impact_score=2.0)],
+        ),
         service=ServiceStatusSnapshot(status="ok", reachable=True),
-        persistence=PersistenceStatusSnapshot(enabled=True, primary_store="tenant_document_store", profile_backend="tenant_document_store", memory_backend="tenant_document_store", json_mirror_enabled=True),
+        persistence=PersistenceStatusSnapshot(
+            enabled=True,
+            primary_store="tenant_document_store",
+            profile_backend="tenant_document_store",
+            memory_backend="tenant_document_store",
+            json_mirror_enabled=True,
+        ),
         moderation=ModerationSnapshot(last_decision=moderation),
         background_tasks=BackgroundTaskOverview(recent=[task]),
         security=SecurityStatusSnapshot(require_pin=False, has_pin_hint=False),
@@ -181,7 +225,9 @@ def test_operational_runtime_models_serialize_cleanly():
         relationship=RelationshipStatusSnapshot(),
         supervisor=supervisor_snapshot,
         vision=VisionStatusSnapshot(ready=False, message="fallback"),
-        turn_pipeline=TurnPipelineSnapshot(mode="sync", user_input="hello", steps=[TurnPipelineStep(name="prepare", status="completed")]),
+        turn_pipeline=TurnPipelineSnapshot(
+            mode="sync", user_input="hello", steps=[TurnPipelineStep(name="prepare", status="completed")]
+        ),
     )
 
     assert planner.model_dump(mode="json")["planner_tool"] == "web_search"

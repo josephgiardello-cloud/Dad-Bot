@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 from dadbot.core.observability import (
-    configure_exporter,
     EventStreamExporter,
+    TraceLevel,
+    TracingContext,
+    configure_exporter,
     get_exporter,
     get_tracer,
     set_trace_level,
-    TraceLevel,
-    TracingContext,
 )
 
 

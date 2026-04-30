@@ -1,0 +1,134 @@
+{
+  "completeness_score": 96,
+  "missing_modules": [],
+  "partial_subsystems": [
+    "mutation_engine"
+  ],
+  "fragmented_subsystems": [],
+  "subsystem_detail": {
+    "mutation_engine": {
+      "exists": true,
+      "file_count": 3,
+      "missing_files": [],
+      "missing_symbols": [
+        "MutationKind"
+      ],
+      "coverage_score": 1.0,
+      "cohesion_score": 1.0,
+      "is_fragmented": false,
+      "is_partial": true
+    },
+    "execution_context": {
+      "exists": true,
+      "file_count": 3,
+      "missing_files": [],
+      "missing_symbols": [],
+      "coverage_score": 1.0,
+      "cohesion_score": 1.0,
+      "is_fragmented": false,
+      "is_partial": false
+    },
+    "node_runtime": {
+      "exists": true,
+      "file_count": 3,
+      "missing_files": [],
+      "missing_symbols": [],
+      "coverage_score": 1.0,
+      "cohesion_score": 1.0,
+      "is_fragmented": false,
+      "is_partial": false
+    },
+    "scheduler": {
+      "exists": true,
+      "file_count": 4,
+      "missing_files": [],
+      "missing_symbols": [],
+      "coverage_score": 1.0,
+      "cohesion_score": 0.667,
+      "is_fragmented": false,
+      "is_partial": false
+    },
+    "recovery_manager": {
+      "exists": true,
+      "file_count": 4,
+      "missing_files": [],
+      "missing_symbols": [],
+      "coverage_score": 1.0,
+      "cohesion_score": 1.0,
+      "is_fragmented": false,
+      "is_partial": false
+    },
+    "replay_system": {
+      "exists": true,
+      "file_count": 4,
+      "missing_files": [],
+      "missing_symbols": [],
+      "coverage_score": 1.0,
+      "cohesion_score": 1.0,
+      "is_fragmented": false,
+      "is_partial": false
+    },
+    "ledger_system": {
+      "exists": true,
+      "file_count": 4,
+      "missing_files": [],
+      "missing_symbols": [],
+      "coverage_score": 1.0,
+      "cohesion_score": 1.0,
+      "is_fragmented": false,
+      "is_partial": false
+    },
+    "trace_system": {
+      "exists": true,
+      "file_count": 4,
+      "missing_files": [],
+      "missing_symbols": [],
+      "coverage_score": 1.0,
+      "cohesion_score": 1.0,
+      "is_fragmented": false,
+      "is_partial": false
+    },
+    "capability_system": {
+      "exists": true,
+      "file_count": 3,
+      "missing_files": [],
+      "missing_symbols": [],
+      "coverage_score": 1.0,
+      "cohesion_score": 0.5,
+      "is_fragmented": false,
+      "is_partial": false
+    },
+    "determinism_system": {
+      "exists": true,
+      "file_count": 4,
+      "missing_files": [],
+      "missing_symbols": [],
+      "coverage_score": 1.0,
+      "cohesion_score": 0.667,
+      "is_fragmented": false,
+      "is_partial": false
+    }
+  },
+  "contract_drift": [],
+  "missing_parameters": [],
+  "orphan_expectations": [],
+  "summary": {
+    "total_modules_checked": 30,
+    "missing_modules": 0,
+    "partial_subsystems": 1,
+    "fragmented_subsystems": 0,
+    "interface_drift_count": 0,
+    "param_propagation_violations": 0,
+    "scanned_exec_functions": 30,
+    "orphan_symbols": 0,
+    "not_referenced_orphan_targets": [
+      "LegacyContextBuilder",
+      "OldSaveNode",
+      "CompatExecutionPolicy",
+      "DadBotV1Registry",
+      "LegacyMemoryGraph",
+      "PhaseEngine",
+      "TurnDispatcher"
+    ]
+  }
+}

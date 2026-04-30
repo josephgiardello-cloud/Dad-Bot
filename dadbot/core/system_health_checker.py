@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import hashlib
 import json
@@ -8,7 +8,8 @@ from typing import Any
 
 from dadbot.core.durable_checkpoint import DurableCheckpoint
 from dadbot.core.event_reducer import CanonicalEventReducer
-from dadbot.core.execution_ledger import ExecutionLedger, WriteBoundaryGuard
+from dadbot.core.execution_ledger import ExecutionLedger
+from dadbot.core.ledger_writer_adapter import LedgerWriterAdapter
 from dadbot.core.replay_verifier import ReplayVerifier
 from dadbot.core.session_store import SessionStore
 from dadbot.core.snapshot_engine import SnapshotEngine
@@ -43,24 +44,20 @@ class SystemHealthChecker:
 
     @staticmethod
     def _append_health_witness(ledger: ExecutionLedger, *, component: str) -> None:
-        with WriteBoundaryGuard(ledger):
-            ledger.write(
-                {
-                    "type": "EXECUTION_WITNESS",
-                    "component": str(component or ""),
-                    "session_id": "__health__",
-                    "trace_id": "health-check",
-                    "timestamp": time.time(),
-                    "kernel_step_id": "system_health_checker.execution_activation",
-                    "payload": {"component": str(component or "")},
-                }
-            )
+        writer = LedgerWriterAdapter(ledger)
+        writer.append_runtime_witness(
+            component=str(component or ""),
+            trace_id="health-check",
+            session_id="__health__",
+        )
 
     def check_kernel_only_mutation_enforcement(self) -> dict[str, Any]:
         offenders: list[str] = []
         for path in self.base_path.rglob("dadbot/**/*.py"):
             normalized = path.as_posix()
-            if normalized.endswith("/kernel.py") or normalized.endswith("/system_health_checker.py"):
+            if normalized.endswith("/kernel.py") or normalized.endswith(
+                "/system_health_checker.py",
+            ):
                 continue
             text = path.read_text(encoding="utf-8", errors="ignore")
             if ".state[" in text:
@@ -110,7 +107,10 @@ class SystemHealthChecker:
             "contiguous": bool(contiguous),
         }
 
-    def check_session_causal_partitioning(self, ledger: ExecutionLedger) -> dict[str, Any]:
+    def check_session_causal_partitioning(
+        self,
+        ledger: ExecutionLedger,
+    ) -> dict[str, Any]:
         events = ledger.read()
         errors: list[str] = []
         session_last_index: dict[str, int] = {}
@@ -126,7 +126,7 @@ class SystemHealthChecker:
                 expected = int(session_last_index.get(session_id) or 0) + 1
                 if session_index != expected:
                     errors.append(
-                        f"session {session_id} has non-monotonic index {session_index} (expected {expected})"
+                        f"session {session_id} has non-monotonic index {session_index} (expected {expected})",
                     )
                 session_last_index[session_id] = session_index
 
@@ -136,10 +136,12 @@ class SystemHealthChecker:
             if parent_event_id:
                 parent_session = event_session.get(parent_event_id)
                 if not parent_session:
-                    errors.append(f"event {event_id or '<unknown>'} references unknown parent {parent_event_id}")
+                    errors.append(
+                        f"event {event_id or '<unknown>'} references unknown parent {parent_event_id}",
+                    )
                 elif parent_session != session_id:
                     errors.append(
-                        f"event {event_id or '<unknown>'} leaks across sessions: parent in {parent_session}, child in {session_id}"
+                        f"event {event_id or '<unknown>'} leaks across sessions: parent in {parent_session}, child in {session_id}",
                     )
 
         return {
@@ -147,14 +149,22 @@ class SystemHealthChecker:
             "errors": errors,
         }
 
-    def check_replay_equivalence_boundary(self, ledger: ExecutionLedger) -> dict[str, Any]:
+    def check_replay_equivalence_boundary(
+        self,
+        ledger: ExecutionLedger,
+    ) -> dict[str, Any]:
         events = ledger.read()
-        session_ids = sorted({str(event.get("session_id") or "") for event in events if str(event.get("session_id") or "")})
+        session_ids = sorted(
+            {str(event.get("session_id") or "") for event in events if str(event.get("session_id") or "")},
+        )
         mismatches: list[str] = []
 
         for session_id in session_ids:
             session_events = [event for event in events if str(event.get("session_id") or "") == session_id]
-            replayed = sorted(session_events, key=lambda event: int(event.get("sequence") or 0))
+            replayed = sorted(
+                session_events,
+                key=lambda event: int(event.get("sequence") or 0),
+            )
             report = self._replay_verifier.verify_equivalence(session_events, replayed)
             if not bool(report.get("ok")):
                 mismatches.append(session_id)
@@ -165,12 +175,19 @@ class SystemHealthChecker:
             "checked_sessions": session_ids,
         }
 
-    def check_session_store_consistency(self, *, ledger: ExecutionLedger, session_store: SessionStore) -> dict[str, Any]:
+    def check_session_store_consistency(
+        self,
+        *,
+        ledger: ExecutionLedger,
+        session_store: SessionStore,
+    ) -> dict[str, Any]:
         projected = SessionStore()
         projected.rebuild_from_ledger(ledger.read())
         live_snapshot = session_store.snapshot()
         projected_snapshot = projected.snapshot()
-        same_sessions = live_snapshot.get("sessions") == projected_snapshot.get("sessions")
+        same_sessions = live_snapshot.get("sessions") == projected_snapshot.get(
+            "sessions",
+        )
         return {
             "ok": bool(same_sessions),
             "live_version": int(live_snapshot.get("version") or 0),
@@ -203,7 +220,7 @@ class SystemHealthChecker:
                 if current_replay_hash != str(latest.get("replay_hash") or ""):
                     errors.append(
                         f"Ledger replay hash diverged from checkpoint: "
-                        f"expected={latest['replay_hash']!r} actual={current_replay_hash!r}"
+                        f"expected={latest['replay_hash']!r} actual={current_replay_hash!r}",
                     )
 
         events = ledger.read()
@@ -213,19 +230,20 @@ class SystemHealthChecker:
             snap = projected.snapshot()
             if int(snap.get("version") or 0) <= 0:
                 errors.append(
-                    "Non-empty ledger produced empty session projection â€” replay is broken"
+                    "Non-empty ledger produced empty session projection â€” replay is broken",
                 )
 
         return {
             "ok": len(errors) == 0,
             "errors": errors,
             "ledger_event_count": len(events),
-            "checkpoint_chain_length": (
-                len(checkpoint.history()) if checkpoint is not None else 0
-            ),
+            "checkpoint_chain_length": (len(checkpoint.history()) if checkpoint is not None else 0),
         }
 
-    def check_reducer_semantic_correctness(self, ledger: ExecutionLedger) -> dict[str, Any]:
+    def check_reducer_semantic_correctness(
+        self,
+        ledger: ExecutionLedger,
+    ) -> dict[str, Any]:
         """Step 5 â€” ReducerEngine semantic check.
 
         Validates that applying the ledger events through the canonical reducer
@@ -242,15 +260,17 @@ class SystemHealthChecker:
 
         forward_state = self._reducer.reduce(events)
         sorted_state = self._reducer.reduce(
-            sorted(events, key=lambda e: int(e.get("sequence") or 0))
+            sorted(events, key=lambda e: int(e.get("sequence") or 0)),
         )
 
-        import hashlib, json
+        import hashlib
+        import json
+
         forward_hash = hashlib.sha256(
-            json.dumps(forward_state, sort_keys=True, default=str).encode()
+            json.dumps(forward_state, sort_keys=True, default=str).encode(),
         ).hexdigest()
         sorted_hash = hashlib.sha256(
-            json.dumps(sorted_state, sort_keys=True, default=str).encode()
+            json.dumps(sorted_state, sort_keys=True, default=str).encode(),
         ).hexdigest()
 
         ok = forward_hash == sorted_hash
@@ -279,7 +299,10 @@ class SystemHealthChecker:
             return {"ok": True, "reason": "no snapshots taken yet"}
         return engine.verify_snapshot(latest, ledger=ledger)
 
-    def check_identity_propagation_correctness(self, ledger: ExecutionLedger) -> dict[str, Any]:
+    def check_identity_propagation_correctness(
+        self,
+        ledger: ExecutionLedger,
+    ) -> dict[str, Any]:
         """Validate trace/correlation identity integrity on job lifecycle events.
 
         Guarantees:
@@ -287,9 +310,18 @@ class SystemHealthChecker:
         - each job_id maps to exactly one trace_id and one correlation_id
         - no trace_id/correlation_id collisions across different jobs
         """
-        self._append_health_witness(ledger, component="identity_propagation_correctness")
+        self._append_health_witness(
+            ledger,
+            component="identity_propagation_correctness",
+        )
         events = ledger.read()
-        lifecycle = {"JOB_SUBMITTED", "JOB_QUEUED", "JOB_STARTED", "JOB_COMPLETED", "JOB_FAILED"}
+        lifecycle = {
+            "JOB_SUBMITTED",
+            "JOB_QUEUED",
+            "JOB_STARTED",
+            "JOB_COMPLETED",
+            "JOB_FAILED",
+        }
 
         missing_trace: list[str] = []
         missing_correlation: list[str] = []
@@ -308,11 +340,11 @@ class SystemHealthChecker:
             if not job_id:
                 continue
 
-            trace_id = str(event.get("trace_id") or payload.get("trace_id") or "").strip()
+            trace_id = str(
+                event.get("trace_id") or payload.get("trace_id") or "",
+            ).strip()
             correlation_id = str(
-                event.get("correlation_id")
-                or payload.get("correlation_id")
-                or ""
+                event.get("correlation_id") or payload.get("correlation_id") or "",
             ).strip()
 
             if not trace_id:
@@ -336,12 +368,8 @@ class SystemHealthChecker:
                     missing_correlation.append(job_id)
                 correlation_to_jobs.setdefault(correlation_id, set()).add(job_id)
 
-        trace_collisions = sorted(
-            trace_id for trace_id, jobs in trace_to_jobs.items() if len(jobs) > 1
-        )
-        correlation_collisions = sorted(
-            cid for cid, jobs in correlation_to_jobs.items() if len(jobs) > 1
-        )
+        trace_collisions = sorted(trace_id for trace_id, jobs in trace_to_jobs.items() if len(jobs) > 1)
+        correlation_collisions = sorted(cid for cid, jobs in correlation_to_jobs.items() if len(jobs) > 1)
 
         ok = (
             len(missing_trace) == 0
@@ -361,7 +389,9 @@ class SystemHealthChecker:
     def check_execution_activation(self, ledger: ExecutionLedger) -> dict[str, Any]:
         events = ledger.read()
         executed = {
-            str(event.get("component") or dict(event.get("payload") or {}).get("component") or "").strip()
+            str(
+                event.get("component") or dict(event.get("payload") or {}).get("component") or "",
+            ).strip()
             for event in events
             if str(event.get("type") or "") == "EXECUTION_WITNESS"
         }
@@ -377,7 +407,11 @@ class SystemHealthChecker:
             "executed_components": sorted(executed),
         }
 
-    def check_path_purity_enforcement(self, *, graph: Any | None = None) -> dict[str, Any]:
+    def check_path_purity_enforcement(
+        self,
+        *,
+        graph: Any | None = None,
+    ) -> dict[str, Any]:
         """Verify hard boundary enforcement exists for graph execution path purity."""
         if graph is None:
             return {
@@ -385,7 +419,9 @@ class SystemHealthChecker:
                 "reason": "graph not provided; path purity not checked in this run",
             }
 
-        required_token = str(getattr(graph, "_required_execution_token", "") or "").strip()
+        required_token = str(
+            getattr(graph, "_required_execution_token", "") or "",
+        ).strip()
         return {
             "ok": bool(required_token),
             "required_execution_token_present": bool(required_token),
@@ -394,13 +430,9 @@ class SystemHealthChecker:
     def build_global_invariant_contract(self, checks: dict[str, Any]) -> dict[str, Any]:
         """Build a system-wide invariant contract proof over all check outputs."""
         component_names = [
-            key for key, value in checks.items()
-            if key != "global_invariant_contract" and isinstance(value, dict)
+            key for key, value in checks.items() if key != "global_invariant_contract" and isinstance(value, dict)
         ]
-        failing = [
-            key for key in component_names
-            if not bool(checks.get(key, {}).get("ok"))
-        ]
+        failing = [key for key in component_names if not bool(checks.get(key, {}).get("ok"))]
 
         contract = {
             "version": 1,
@@ -409,7 +441,7 @@ class SystemHealthChecker:
             "ok": len(failing) == 0,
         }
         contract_hash = hashlib.sha256(
-            json.dumps(contract, sort_keys=True, default=str).encode("utf-8")
+            json.dumps(contract, sort_keys=True, default=str).encode("utf-8"),
         ).hexdigest()
         return {
             **contract,
@@ -431,10 +463,16 @@ class SystemHealthChecker:
                 session_store=session_store,
             ),
             "event_ordering": self.check_event_ordering_integrity(ledger),
-            "session_causal_partitioning": self.check_session_causal_partitioning(ledger),
+            "session_causal_partitioning": self.check_session_causal_partitioning(
+                ledger,
+            ),
             "replay_equivalence": self.check_replay_equivalence_boundary(ledger),
-            "reducer_semantic_correctness": self.check_reducer_semantic_correctness(ledger),
-            "identity_propagation_correctness": self.check_identity_propagation_correctness(ledger),
+            "reducer_semantic_correctness": self.check_reducer_semantic_correctness(
+                ledger,
+            ),
+            "identity_propagation_correctness": self.check_identity_propagation_correctness(
+                ledger,
+            ),
             "execution_activation": self.check_execution_activation(ledger),
             "path_purity_enforcement": self.check_path_purity_enforcement(graph=graph),
             "startup_reconciliation": self.check_startup_reconciliation(
@@ -442,6 +480,8 @@ class SystemHealthChecker:
                 session_store=session_store,
             ),
         }
-        checks["global_invariant_contract"] = self.build_global_invariant_contract(checks)
+        checks["global_invariant_contract"] = self.build_global_invariant_contract(
+            checks,
+        )
         checks["ok"] = all(bool(result.get("ok")) for result in checks.values() if isinstance(result, dict))
         return checks

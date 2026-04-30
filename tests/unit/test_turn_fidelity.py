@@ -1,7 +1,9 @@
 """Unit tests for TurnFidelity — full_pipeline property, to_dict."""
+
 from __future__ import annotations
 
 import pytest
+
 pytestmark = pytest.mark.unit
 from dadbot.core.graph import TurnFidelity
 
@@ -26,9 +28,7 @@ class TestTurnFidelityFullPipeline:
     def test_all_false_is_not_full(self):
         assert _fidelity().full_pipeline is False
 
-    @pytest.mark.parametrize("missing", [
-        "temporal", "inference", "reflection", "save"
-    ])
+    @pytest.mark.parametrize("missing", ["temporal", "inference", "reflection", "save"])
     def test_one_missing_stage_breaks_full(self, missing):
         all_flags = dict(temporal=True, inference=True, reflection=True, save=True)
         all_flags[missing] = False
@@ -88,6 +88,7 @@ class TestTurnFidelityHarnessFactory:
     def test_default_fidelity_all_false(self):
         """TurnContext created without running graph has no stage flags set."""
         from harness.turn_factory import TurnFactory
+
         ctx = TurnFactory().build_turn(seed=42)
         assert ctx.fidelity.full_pipeline is False
         assert ctx.fidelity.temporal is False

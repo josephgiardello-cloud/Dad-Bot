@@ -14,6 +14,7 @@ Invariants:
   - NO recovery triggers
   - ALL data sourced from completed execution traces (ledger, metrics, attributes)
 """
+
 from __future__ import annotations
 
 import traceback
@@ -42,6 +43,7 @@ def record(name: str, success: bool, detail: str = "", *, elapsed_s: float | Non
 # Audit orchestration — reads from completed execution state only
 # ---------------------------------------------------------------------------
 
+
 def run_full_audit(orchestrator: Any) -> dict[str, dict[str, Any]]:
     """Run all post-hoc verification checks over the immutable execution trace.
 
@@ -65,6 +67,7 @@ def run_full_audit(orchestrator: Any) -> dict[str, dict[str, Any]]:
 # ---------------------------------------------------------------------------
 # CLI entry — requires an already-exercised orchestrator for meaningful results
 # ---------------------------------------------------------------------------
+
 
 def _main() -> None:
     from dadbot.core.orchestrator import DadBotOrchestrator

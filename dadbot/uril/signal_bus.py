@@ -11,7 +11,6 @@ from typing import Any
 
 from dadbot.uril.models import RepoSignal, RepoSignalBus
 
-
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -53,7 +52,9 @@ def _run_repo_python(args: list[str]) -> dict[str, Any] | None:
     except Exception:
         return None
 
-    payload = _extract_json_payload((completed.stdout or "") + "\n" + (completed.stderr or ""))
+    payload = _extract_json_payload(
+        (completed.stdout or "") + "\n" + (completed.stderr or ""),
+    )
     return payload
 
 
@@ -67,7 +68,7 @@ def _collect_pytest_signals(junit_path: Path | None) -> list[RepoSignal]:
                 category="correctness",
                 score=0.0,
                 metadata={"missing_junit": str(xml_path)},
-            )
+            ),
         ]
 
     root = ET.parse(xml_path).getroot()
@@ -92,7 +93,7 @@ def _collect_pytest_signals(junit_path: Path | None) -> list[RepoSignal]:
                     category="correctness",
                     score=passed / t,
                     metadata={"tests": t, "failures": f, "errors": e, "skipped": s},
-                )
+                ),
             )
 
     passed_total = max(0, tests - failures - errors - skipped)
@@ -112,7 +113,10 @@ def _collect_pytest_signals(junit_path: Path | None) -> list[RepoSignal]:
     return [summary, *per_suite]
 
 
-def _collect_phase4_auditor_signals(path: Path | None, run_probe: bool) -> list[RepoSignal]:
+def _collect_phase4_auditor_signals(
+    path: Path | None,
+    run_probe: bool,
+) -> list[RepoSignal]:
     payload: dict[str, Any] | None = None
     if path and path.exists():
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -133,8 +137,12 @@ def _collect_phase4_auditor_signals(path: Path | None, run_probe: bool) -> list[
             subsystem="phase4",
             category="architecture",
             score=score,
-            metadata={"status": status, "coverage": coverage, "critical_gaps": payload.get("critical_gaps", [])},
-        )
+            metadata={
+                "status": status,
+                "coverage": coverage,
+                "critical_gaps": payload.get("critical_gaps", []),
+            },
+        ),
     ]
 
 
@@ -150,7 +158,9 @@ def _collect_filesystem_signals(path: Path | None, run_probe: bool) -> list[Repo
 
     status = str(payload.get("status") or "FAIL").upper()
     counts = dict(payload.get("counts") or {})
-    missing = int(counts.get("missing_expected_files", 0) or 0) + int(counts.get("missing_expected_tests", 0) or 0)
+    missing = int(counts.get("missing_expected_files", 0) or 0) + int(
+        counts.get("missing_expected_tests", 0) or 0,
+    )
     underoptimized = int(counts.get("underoptimized", 0) or 0)
 
     base = 1.0
@@ -166,8 +176,12 @@ def _collect_filesystem_signals(path: Path | None, run_probe: bool) -> list[Repo
             subsystem="filesystem",
             category="architecture",
             score=base,
-            metadata={"status": status, "counts": counts, "underoptimized": payload.get("underoptimized", [])},
-        )
+            metadata={
+                "status": status,
+                "counts": counts,
+                "underoptimized": payload.get("underoptimized", []),
+            },
+        ),
     ]
 
 
@@ -175,12 +189,26 @@ def _collect_benchmark_signals(snapshot_dir: Path | None) -> list[RepoSignal]:
     folder = snapshot_dir or (ROOT / "evaluation" / "snapshots")
     index_path = folder / "index.json"
     if not index_path.exists():
-        return [RepoSignal("benchmark", "performance", 0.0, {"missing_index": str(index_path)})]
+        return [
+            RepoSignal(
+                "benchmark",
+                "performance",
+                0.0,
+                {"missing_index": str(index_path)},
+            ),
+        ]
 
     try:
         index_payload = json.loads(index_path.read_text(encoding="utf-8"))
     except Exception:
-        return [RepoSignal("benchmark", "performance", 0.0, {"invalid_index": str(index_path)})]
+        return [
+            RepoSignal(
+                "benchmark",
+                "performance",
+                0.0,
+                {"invalid_index": str(index_path)},
+            ),
+        ]
 
     entries = list(index_payload.get("entries") or [])
     if not entries:
@@ -190,7 +218,14 @@ def _collect_benchmark_signals(snapshot_dir: Path | None) -> list[RepoSignal]:
     snapshot_id = str(latest.get("snapshot_id") or "")
     snapshot_file = folder / f"{snapshot_id}.json"
     if not snapshot_file.exists():
-        return [RepoSignal("benchmark", "performance", 0.0, {"missing_snapshot": snapshot_id})]
+        return [
+            RepoSignal(
+                "benchmark",
+                "performance",
+                0.0,
+                {"missing_snapshot": snapshot_id},
+            ),
+        ]
 
     payload = json.loads(snapshot_file.read_text(encoding="utf-8"))
     category_aggregates = dict(payload.get("category_aggregates") or {})
@@ -208,11 +243,13 @@ def _collect_benchmark_signals(snapshot_dir: Path | None) -> list[RepoSignal]:
                 category=normalized_category,
                 score=score,
                 metadata={"snapshot_id": snapshot_id, "raw_category": cat},
-            )
+            ),
         )
 
     if not signals:
-        signals.append(RepoSignal("benchmark", "performance", 0.0, {"no_aggregates": True}))
+        signals.append(
+            RepoSignal("benchmark", "performance", 0.0, {"no_aggregates": True}),
+        )
     return signals
 
 
@@ -223,7 +260,14 @@ def _collect_stress_signals(path: Path | None) -> list[RepoSignal]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
-        return [RepoSignal("stress", "determinism", 0.0, {"invalid": True, "path": str(path)})]
+        return [
+            RepoSignal(
+                "stress",
+                "determinism",
+                0.0,
+                {"invalid": True, "path": str(path)},
+            ),
+        ]
 
     score_raw = float(payload.get("score", 0) or 0)
     normalized = score_raw / 100.0 if score_raw > 1 else score_raw
@@ -237,7 +281,7 @@ def _collect_stress_signals(path: Path | None) -> list[RepoSignal]:
                 "failures": payload.get("failures", []),
                 "risk_flags": payload.get("risk_flags", []),
             },
-        )
+        ),
     ]
 
 
@@ -245,7 +289,9 @@ def collect_signal_bus(options: SignalCollectionOptions) -> RepoSignalBus:
     bus = RepoSignalBus()
     bus.extend(_collect_pytest_signals(options.pytest_junit_path))
     bus.extend(_collect_benchmark_signals(options.benchmark_snapshot_dir))
-    bus.extend(_collect_phase4_auditor_signals(options.phase4_auditor_json, options.run_probes))
+    bus.extend(
+        _collect_phase4_auditor_signals(options.phase4_auditor_json, options.run_probes),
+    )
     bus.extend(_collect_filesystem_signals(options.filesystem_json, options.run_probes))
     bus.extend(_collect_stress_signals(options.stress_json))
     return bus

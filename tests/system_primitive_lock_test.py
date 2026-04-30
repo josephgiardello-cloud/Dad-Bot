@@ -9,22 +9,11 @@ Coverage:
     T21–T30: ExecutionEquivalenceClass (combined hash, is_equivalent, proof)
     T31–T40: Resource model as first-class (system-level resource invariant)
 """
+
 from __future__ import annotations
 
 from typing import Any
 
-import pytest
-
-from dadbot.core.invariant_engine import (
-    DEFAULT_INVARIANTS,
-    ExecutionState,
-    GlobalInvariantEngine,
-    GlobalValidationReport,
-    InvariantCategory,
-    InvariantSeverity,
-    InvariantViolation,
-    SystemInvariant,
-)
 from dadbot.core.execution_equivalence import (
     ExecutionEquivalenceClass,
     classify_execution,
@@ -35,13 +24,20 @@ from dadbot.core.execution_equivalence import (
     plan_class_from_planner_output,
     tool_graph_class_from_names,
 )
+from dadbot.core.invariant_engine import (
+    DEFAULT_INVARIANTS,
+    ExecutionState,
+    GlobalInvariantEngine,
+    InvariantCategory,
+    InvariantSeverity,
+    SystemInvariant,
+)
+from dadbot.core.tool_dag import ToolDAG, ToolNode
 from dadbot.core.tool_resource_model import (
     BudgetExhaustionPolicy,
     ResourceModelValidator,
     TurnBudget,
 )
-from dadbot.core.tool_dag import ToolDAG, ToolNode
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -99,11 +95,13 @@ class TestGlobalInvariantEngine:
 
     def test_missing_intent_type_fails(self):
         engine = GlobalInvariantEngine.default()
-        state = _make_valid_state(planner_output={
-            "intent_type": "",
-            "strategy": "fact_seeking",
-            "tool_plan": [],
-        })
+        state = _make_valid_state(
+            planner_output={
+                "intent_type": "",
+                "strategy": "fact_seeking",
+                "tool_plan": [],
+            }
+        )
         report = engine.validate_all(state)
         assert report.ok is False
         violated_ids = [v.invariant_id for v in report.violations]
@@ -111,20 +109,20 @@ class TestGlobalInvariantEngine:
 
     def test_missing_strategy_fails(self):
         engine = GlobalInvariantEngine.default()
-        state = _make_valid_state(planner_output={
-            "intent_type": "question",
-            "strategy": "",
-            "tool_plan": [],
-        })
+        state = _make_valid_state(
+            planner_output={
+                "intent_type": "question",
+                "strategy": "",
+                "tool_plan": [],
+            }
+        )
         report = engine.validate_all(state)
         violated_ids = [v.invariant_id for v in report.violations]
         assert "planner.strategy_present" in violated_ids
 
     def test_tool_event_missing_type_fails(self):
         engine = GlobalInvariantEngine.default()
-        state = _make_valid_state(
-            tool_events=[{"no_type_here": True, "sequence": 0}]
-        )
+        state = _make_valid_state(tool_events=[{"no_type_here": True, "sequence": 0}])
         report = engine.validate_all(state)
         violated_ids = [v.invariant_id for v in report.violations]
         assert "tool_execution.events_have_type" in violated_ids
@@ -286,10 +284,13 @@ class TestExecutionEquivalenceClass:
     ) -> ExecutionEquivalenceClass:
         gc = tool_graph_class_from_names(tools or ["memory_lookup"])
         pc = plan_class(intent, strategy, len(tools or ["memory_lookup"]))
-        ec = event_structure_class(events or [
-            {"type": "tool_requested"},
-            {"type": "tool_executed"},
-        ])
+        ec = event_structure_class(
+            events
+            or [
+                {"type": "tool_requested"},
+                {"type": "tool_executed"},
+            ]
+        )
         return ExecutionEquivalenceClass.build(gc, pc, ec)
 
     def test_build_creates_class(self):
@@ -369,20 +370,24 @@ class TestResourceModelFirstClass:
         """GlobalInvariantEngine's resource.within_budget invariant fires."""
         engine = GlobalInvariantEngine.default()
         # Budget exceeded → within_budget=False
-        state = _make_valid_state(resource_report={
-            "within_budget": False,
-            "total_cost_units": 99.0,
-        })
+        state = _make_valid_state(
+            resource_report={
+                "within_budget": False,
+                "total_cost_units": 99.0,
+            }
+        )
         report = engine.validate_all(state)
         violated_ids = [v.invariant_id for v in report.violations]
         assert "resource.within_budget" in violated_ids
 
     def test_resource_invariant_passes_within_budget(self):
         engine = GlobalInvariantEngine.default()
-        state = _make_valid_state(resource_report={
-            "within_budget": True,
-            "total_cost_units": 1.0,
-        })
+        state = _make_valid_state(
+            resource_report={
+                "within_budget": True,
+                "total_cost_units": 1.0,
+            }
+        )
         report = engine.validate_all(state)
         violated_ids = [v.invariant_id for v in report.violations]
         assert "resource.within_budget" not in violated_ids
@@ -419,14 +424,9 @@ class TestResourceModelFirstClass:
     def test_resource_violation_is_warning_not_critical(self):
         """Resource budget violation is WARNING severity, not blocking."""
         engine = GlobalInvariantEngine.default()
-        state = _make_valid_state(
-            resource_report={"within_budget": False}
-        )
+        state = _make_valid_state(resource_report={"within_budget": False})
         report = engine.validate_all(state)
-        resource_violations = [
-            v for v in report.violations
-            if v.invariant_id == "resource.within_budget"
-        ]
+        resource_violations = [v for v in report.violations if v.invariant_id == "resource.within_budget"]
         assert len(resource_violations) == 1
         assert resource_violations[0].severity == InvariantSeverity.WARNING
 

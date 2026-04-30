@@ -15,16 +15,14 @@ Tests:
   * Mutated memory → different memory-pattern fingerprint
   * Empty chain   → empty / stable empty fingerprint
 """
+
 from __future__ import annotations
 
 import hashlib
 import json
 
-import pytest
-
 from dadbot.core.execution_receipt import ExecutionReceipt, ReceiptChain, ReceiptSigner
 from dadbot.uril.truth_binding import compute_receipt_chain_hash
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -98,9 +96,7 @@ class TestExecutionTraceFingerprintStability:
 
     def _build_fingerprint(self) -> dict[str, str]:
         receipts = _build_receipt_chain(CANONICAL_STAGES)
-        return _compute_execution_fingerprint(
-            CANONICAL_STAGES, CANONICAL_TOOLS, CANONICAL_MEMORY_KEYS, receipts
-        )
+        return _compute_execution_fingerprint(CANONICAL_STAGES, CANONICAL_TOOLS, CANONICAL_MEMORY_KEYS, receipts)
 
     def test_dag_order_hash_is_stable(self):
         fp1 = self._build_fingerprint()

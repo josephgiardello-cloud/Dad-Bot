@@ -9,12 +9,13 @@ Covers:
  6. ExecutionRecovery: startup discovery, purge helpers.
  7. ResumabilityPolicy: disabled policy suppresses all I/O.
 """
+
 from __future__ import annotations
 
 import json
 import time
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -22,10 +23,10 @@ from dadbot.core.execution_policy import ResumabilityPolicy
 from dadbot.core.execution_recovery import ExecutionRecovery
 from dadbot.core.turn_resume_store import ResumePoint, TurnResumeStore
 
-
 # ---------------------------------------------------------------------------
 # TurnResumeStore unit tests
 # ---------------------------------------------------------------------------
+
 
 class TestTurnResumeStore:
     def test_save_and_load_round_trips(self, tmp_path: Path) -> None:
@@ -158,6 +159,7 @@ class TestTurnResumeStore:
 # ResumePoint unit tests
 # ---------------------------------------------------------------------------
 
+
 class TestResumePoint:
     def test_is_expired_false_when_fresh(self) -> None:
         point = ResumePoint(
@@ -201,6 +203,7 @@ class TestResumePoint:
 # ---------------------------------------------------------------------------
 # ExecutionRecovery unit tests
 # ---------------------------------------------------------------------------
+
 
 def _make_recovery(
     tmp_path: Path,
@@ -385,6 +388,7 @@ class TestExecutionRecovery:
 # ResumabilityPolicy unit tests
 # ---------------------------------------------------------------------------
 
+
 class TestResumabilityPolicy:
     def test_default_values(self) -> None:
         policy = ResumabilityPolicy()
@@ -407,6 +411,7 @@ class TestResumabilityPolicy:
 # ---------------------------------------------------------------------------
 # TurnGraph integration: configure_resume() wires recovery properly
 # ---------------------------------------------------------------------------
+
 
 class TestTurnGraphConfigureResume:
     """Integration-level checks that TurnGraph.configure_resume() sets up recovery."""
@@ -432,6 +437,7 @@ class TestTurnGraphConfigureResume:
 # ---------------------------------------------------------------------------
 # Idempotent node guarantee: re-running a stage does not corrupt state
 # ---------------------------------------------------------------------------
+
 
 class TestIdempotentNodeGuarantee:
     """The idempotency guard must skip already-completed stages cleanly."""

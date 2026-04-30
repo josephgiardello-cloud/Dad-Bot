@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from dadbot.core.execution_boundary import enforce_execution_role
-
-from dadbot.ux_overlay.conversation_continuity import ConversationContinuityEngine
 from dadbot.ux_overlay.control_api import UXControlAPI
+from dadbot.ux_overlay.conversation_continuity import ConversationContinuityEngine
 from dadbot.ux_overlay.interaction_state import InteractionStateEngine
 from dadbot.ux_overlay.memory_curation import MemoryCurator
 from dadbot.ux_overlay.models import (
@@ -18,7 +17,6 @@ from dadbot.ux_overlay.models import (
     ResponseProfile,
 )
 from dadbot.ux_overlay.response_shaper import ResponseShapingEngine, ShapedResponse
-
 
 EXECUTION_ROLE = "experimental"
 
@@ -84,7 +82,10 @@ class UxOverlayRuntimeAdapter:
         raw_memory_events: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Apply UX overlay to one turn and return render + diagnostics."""
-        enforce_execution_role(module="dadbot.ux_overlay.runtime_entrypoint", role=EXECUTION_ROLE)
+        enforce_execution_role(
+            module="dadbot.ux_overlay.runtime_entrypoint",
+            role=EXECUTION_ROLE,
+        )
         state = self.ensure_session(session_id)
 
         if not state.enabled:
@@ -175,5 +176,5 @@ class UxOverlayRuntimeAdapter:
             "modal": state.modal,
             "curated_count": len(state.curated_memories),
             "memory_store_count": len(state.memory_store),
-            "captured_at": datetime.now(timezone.utc).isoformat(),
+            "captured_at": datetime.now(UTC).isoformat(),
         }

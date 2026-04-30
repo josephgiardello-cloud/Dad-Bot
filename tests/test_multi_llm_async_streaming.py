@@ -1,6 +1,5 @@
 import asyncio
 
-import dadbot.core.dadbot as dadbot_module
 import dadbot.managers.runtime_client as runtime_client_module
 
 

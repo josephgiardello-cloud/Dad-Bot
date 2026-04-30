@@ -1,4 +1,4 @@
-﻿"""Snapshot + Restore Engine â€” fast startup via periodic ledger snapshots.
+"""Snapshot + Restore Engine â€” fast startup via periodic ledger snapshots.
 
 Contract:
   - A snapshot records the full reduced state at a given ledger head sequence.
@@ -14,6 +14,7 @@ Usage:
     engine.restore_from_snapshot(snapshot, session_store=fresh_store)
     engine.replay_tail(snapshot, ledger=ledger, session_store=fresh_store)
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -121,10 +122,7 @@ class SnapshotEngine:
         """
         head_sequence = int(snapshot.get("head_sequence") or 0)
         all_events = ledger.read()
-        tail = [
-            event for event in all_events
-            if int(event.get("sequence") or 0) > head_sequence
-        ]
+        tail = [event for event in all_events if int(event.get("sequence") or 0) > head_sequence]
         for event in tail:
             session_store.apply_event(event)
         return {
@@ -146,18 +144,15 @@ class SnapshotEngine:
         """
         head_sequence = int(snapshot.get("head_sequence") or 0)
         all_events = ledger.read()
-        events_at_head = [
-            event for event in all_events
-            if int(event.get("sequence") or 0) <= head_sequence
-        ]
+        events_at_head = [event for event in all_events if int(event.get("sequence") or 0) <= head_sequence]
         current_reduced = self._reducer.reduce(events_at_head)
         stored_reduced = dict(snapshot.get("reduced_state") or {})
 
         current_hash = hashlib.sha256(
-            json.dumps(current_reduced, sort_keys=True, default=str).encode()
+            json.dumps(current_reduced, sort_keys=True, default=str).encode(),
         ).hexdigest()
         stored_hash = hashlib.sha256(
-            json.dumps(stored_reduced, sort_keys=True, default=str).encode()
+            json.dumps(stored_reduced, sort_keys=True, default=str).encode(),
         ).hexdigest()
 
         return {

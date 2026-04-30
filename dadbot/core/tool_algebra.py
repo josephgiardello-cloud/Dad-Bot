@@ -20,7 +20,6 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
-
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
@@ -28,7 +27,7 @@ from typing import Any
 
 def _stable_hash(payload: Any) -> str:
     return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        json.dumps(payload, sort_keys=True, default=str).encode("utf-8"),
     ).hexdigest()
 
 
@@ -55,7 +54,7 @@ class ToolState:
     composite_hash: str
 
     @staticmethod
-    def identity() -> "ToolState":
+    def identity() -> ToolState:
         """The monoid identity element (empty state)."""
         return ToolState(
             results=(),
@@ -64,18 +63,18 @@ class ToolState:
         )
 
     @classmethod
-    def from_results(cls, results: list[dict[str, Any]]) -> "ToolState":
+    def from_results(cls, results: list[dict[str, Any]]) -> ToolState:
         """Construct a ToolState from a list of tool result dicts."""
         frozen = tuple(dict(r) for r in (results or []))
         return cls(
             results=frozen,
             event_count=len(frozen),
             composite_hash=_stable_hash(
-                {"results": [dict(r) for r in frozen], "event_count": len(frozen)}
+                {"results": [dict(r) for r in frozen], "event_count": len(frozen)},
             ),
         )
 
-    def merge(self, other: "ToolState") -> "ToolState":
+    def merge(self, other: ToolState) -> ToolState:
         """Associative merge: combine two ToolStates into one.
 
         Results are concatenated left-then-right and re-sequenced.
@@ -87,16 +86,19 @@ class ToolState:
             results=merged_results,
             event_count=merged_event_count,
             composite_hash=_stable_hash(
-                {"results": [dict(r) for r in merged_results], "event_count": merged_event_count}
+                {
+                    "results": [dict(r) for r in merged_results],
+                    "event_count": merged_event_count,
+                },
             ),
         )
 
-    def __add__(self, other: "ToolState") -> "ToolState":
+    def __add__(self, other: ToolState) -> ToolState:
         """Operator alias for merge: state_a + state_b."""
         return self.merge(other)
 
     @classmethod
-    def compose(cls, states: list["ToolState"]) -> "ToolState":
+    def compose(cls, states: list[ToolState]) -> ToolState:
         """Left-fold over a list of ToolStates using merge.
 
         compose([]) == identity()
@@ -104,7 +106,7 @@ class ToolState:
         compose([s1, s2, s3]) == s1.merge(s2).merge(s3)
         """
         result = cls.identity()
-        for s in (states or []):
+        for s in states or []:
             result = result.merge(s)
         return result
 
@@ -123,27 +125,30 @@ class ToolState:
 
 class ToolFailureType(enum.Enum):
     """Categorical classification of tool failure causes."""
-    VALIDATION = "validation"           # Invalid args / unsupported tool
-    EXECUTION = "execution"             # Runtime error during dispatch
-    TIMEOUT = "timeout"                 # Execution exceeded time budget
-    UNSUPPORTED = "unsupported"         # Tool not in allowed set
+
+    VALIDATION = "validation"  # Invalid args / unsupported tool
+    EXECUTION = "execution"  # Runtime error during dispatch
+    TIMEOUT = "timeout"  # Execution exceeded time budget
+    UNSUPPORTED = "unsupported"  # Tool not in allowed set
     STATE_CORRUPTION = "state_corruption"  # Output violated state integrity
 
 
 class FailureSeverity(enum.Enum):
     """Impact level of a tool failure."""
-    LOW = "low"         # Non-blocking; result omitted gracefully
-    MEDIUM = "medium"   # Partial degradation; inference may proceed
-    HIGH = "high"       # Significant capability loss; should warn
+
+    LOW = "low"  # Non-blocking; result omitted gracefully
+    MEDIUM = "medium"  # Partial degradation; inference may proceed
+    HIGH = "high"  # Significant capability loss; should warn
     CRITICAL = "critical"  # Execution cannot continue safely
 
 
 class PropagationPolicy(enum.Enum):
     """How a failure propagates through the execution graph."""
-    HALT = "halt"           # Stop entire execution graph
-    SKIP = "skip"           # Skip this node; continue graph
-    RETRY = "retry"         # Retry this node (if retries remain)
-    FALLBACK = "fallback"   # Use fallback output and continue
+
+    HALT = "halt"  # Stop entire execution graph
+    SKIP = "skip"  # Skip this node; continue graph
+    RETRY = "retry"  # Retry this node (if retries remain)
+    FALLBACK = "fallback"  # Use fallback output and continue
 
 
 @dataclass(frozen=True)
@@ -165,7 +170,7 @@ class ToolFailure:
     message: str
 
     @classmethod
-    def validation_error(cls, tool_id: str, message: str) -> "ToolFailure":
+    def validation_error(cls, tool_id: str, message: str) -> ToolFailure:
         return cls(
             failure_type=ToolFailureType.VALIDATION,
             severity=FailureSeverity.MEDIUM,
@@ -176,7 +181,13 @@ class ToolFailure:
         )
 
     @classmethod
-    def execution_error(cls, tool_id: str, message: str, *, recoverable: bool = True) -> "ToolFailure":
+    def execution_error(
+        cls,
+        tool_id: str,
+        message: str,
+        *,
+        recoverable: bool = True,
+    ) -> ToolFailure:
         return cls(
             failure_type=ToolFailureType.EXECUTION,
             severity=FailureSeverity.HIGH,
@@ -187,7 +198,7 @@ class ToolFailure:
         )
 
     @classmethod
-    def unsupported_tool(cls, tool_id: str, tool_name: str) -> "ToolFailure":
+    def unsupported_tool(cls, tool_id: str, tool_name: str) -> ToolFailure:
         return cls(
             failure_type=ToolFailureType.UNSUPPORTED,
             severity=FailureSeverity.HIGH,
@@ -225,6 +236,7 @@ class ToolFailure:
 @dataclass
 class ToolFailureLog:
     """Ordered log of ToolFailures encountered during execution."""
+
     failures: list[ToolFailure] = field(default_factory=list)
 
     def append(self, failure: ToolFailure) -> None:

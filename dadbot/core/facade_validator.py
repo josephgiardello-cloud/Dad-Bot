@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 
 def validate_dadbot_facade(bot, *, smoke: bool = False) -> None:
@@ -66,7 +66,11 @@ def validate_dadbot_facade(bot, *, smoke: bool = False) -> None:
             "profile_runtime": ("current_persona_preset", (), {}),
             "memory_manager": ("memory_catalog", (), {}),
             "memory_query": ("recent_memory_topics", (), {"limit": 1}),
-            "memory_commands": ("build_memory_transcript", ([{"role": "user", "content": "hi"}],), {}),
+            "memory_commands": (
+                "build_memory_transcript",
+                ([{"role": "user", "content": "hi"}],),
+                {},
+            ),
             "safety_support": ("moderation_settings", (), {}),
             "profile_context": ("template_context", (), {}),
             "context_builder": ("build_core_persona_prompt", (), {}),
@@ -74,15 +78,27 @@ def validate_dadbot_facade(bot, *, smoke: bool = False) -> None:
             "mood_manager": ("fastpath_detect", ("quick check",), {}),
             "relationship_manager": ("snapshot", (), {}),
             "internal_state_manager": ("snapshot", (), {}),
-            "multimodal_handler": ("build_user_request_message", ("quick check", None), {}),
+            "multimodal_handler": (
+                "build_user_request_message",
+                ("quick check", None),
+                {},
+            ),
             "turn_service": ("should_offer_daily_checkin_for_turn", (), {}),
             "reply_supervisor": ("reply_supervisor_snapshot", (), {}),
-            "reply_finalization": ("should_calibrate_pushback", ("quick check", "neutral"), {}),
+            "reply_finalization": (
+                "should_calibrate_pushback",
+                ("quick check", "neutral"),
+                {},
+            ),
             "runtime_orchestration": ("background_task_snapshot", (), {"limit": 1}),
             "maintenance_scheduler": ("maintenance_snapshot", (), {}),
             "tool_registry": ("get_available_tools", (), {}),
             "agentic_handler": ("format_reminder_list", ([],), {}),
-            "memory_coordinator": ("build_active_consolidated_context", ("quick check",), {}),
+            "memory_coordinator": (
+                "build_active_consolidated_context",
+                ("quick check",),
+                {},
+            ),
             "model_runtime": ("model_candidates", (), {}),
             "session_summary_manager": ("build_session_summary_prompt", (None, []), {}),
         }
@@ -94,7 +110,7 @@ def validate_dadbot_facade(bot, *, smoke: bool = False) -> None:
                 continue
             try:
                 method(*args, **kwargs)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 failures.append(f"{manager_name}.{method_name}: smoke failed ({exc})")
 
     if failures:

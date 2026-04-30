@@ -1,24 +1,27 @@
 """Tests for: DurableCheckpoint, ExecutionLease, and boot_reconcile startup gate."""
+
 from __future__ import annotations
 
 import asyncio
 import time
+
 import pytest
-from dadbot.core.durable_checkpoint import DurableCheckpoint, CheckpointIntegrityError
+
+from dadbot.core.durable_checkpoint import CheckpointIntegrityError, DurableCheckpoint
 from dadbot.core.execution_lease import ExecutionLease, LeaseConflictError
 from dadbot.core.execution_ledger import ExecutionLedger
 from dadbot.core.recovery_manager import RecoveryManager, StartupReconciliationError
 from dadbot.core.session_store import SessionStore
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_ledger_with_complete_job() -> ExecutionLedger:
     """Return a ledger that has a complete job so session projection is non-empty."""
-    from dadbot.core.ledger_writer import LedgerWriter
     from dadbot.core.control_plane import ExecutionJob
+    from dadbot.core.ledger_writer import LedgerWriter
 
     ledger = ExecutionLedger()
     writer = LedgerWriter(ledger)
@@ -34,6 +37,7 @@ def _make_ledger_with_complete_job() -> ExecutionLedger:
 # ===========================================================================
 # DurableCheckpoint
 # ===========================================================================
+
 
 class TestDurableCheckpoint:
     def test_clean_start_passes_without_checkpoints(self):
@@ -114,6 +118,7 @@ class TestDurableCheckpoint:
 # ===========================================================================
 # ExecutionLease
 # ===========================================================================
+
 
 class TestExecutionLease:
     def test_acquire_returns_lease_with_expected_fields(self):
@@ -205,6 +210,7 @@ class TestExecutionLease:
 # boot_reconcile / StartupReconciliation
 # ===========================================================================
 
+
 class TestBootReconcile:
     def test_clean_boot_with_empty_ledger_passes(self):
         ledger = ExecutionLedger()
@@ -266,6 +272,7 @@ class TestBootReconcile:
 # ===========================================================================
 # Lease integration with Scheduler / ExecutionControlPlane
 # ===========================================================================
+
 
 class TestLeaseSchedulerIntegration:
     def test_single_worker_acquires_and_releases_lease_per_job(self):

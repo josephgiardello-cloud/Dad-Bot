@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import tempfile
 from pathlib import Path
@@ -30,7 +30,13 @@ def load_openai_whisper_model(model_name):
     return openai_whisper.load_model(model_name)
 
 
-def transcribe_audio_bytes(audio_bytes, *, backend, model_name: str = "base", language: str = "en"):
+def transcribe_audio_bytes(
+    audio_bytes,
+    *,
+    backend,
+    model_name: str = "base",
+    language: str = "en",
+):
     if not audio_bytes:
         return "", "No audio data received."
 
@@ -42,7 +48,12 @@ def transcribe_audio_bytes(audio_bytes, *, backend, model_name: str = "base", la
 
         if backend == "faster_whisper":
             model = load_faster_whisper_model(model_name)
-            segments, _info = model.transcribe(temp_path, language=language or None, vad_filter=True, beam_size=1)
+            segments, _info = model.transcribe(
+                temp_path,
+                language=language or None,
+                vad_filter=True,
+                beam_size=1,
+            )
             transcript = " ".join((segment.text or "").strip() for segment in segments).strip()
             return transcript, ""
 

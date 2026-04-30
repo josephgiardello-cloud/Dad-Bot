@@ -14,9 +14,9 @@ structure.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from dadbot.core.graph import TurnContext
@@ -26,14 +26,15 @@ if TYPE_CHECKING:
 # Intent taxonomy
 # ---------------------------------------------------------------------------
 
+
 class IntentType(StrEnum):
-    STATEMENT = "statement"          # sharing a fact or observation
-    QUESTION = "question"            # seeking information or clarification
-    REQUEST = "request"              # asking Dad to do or advise something
-    EMOTIONAL_SHARE = "emotional"    # expressing feelings, seeking support
+    STATEMENT = "statement"  # sharing a fact or observation
+    QUESTION = "question"  # seeking information or clarification
+    REQUEST = "request"  # asking Dad to do or advise something
+    EMOTIONAL_SHARE = "emotional"  # expressing feelings, seeking support
     GOAL_ORIENTED = "goal_oriented"  # relates to a long-running objective
-    MULTI_STEP = "multi_step"        # complex task requiring multiple steps
-    CASUAL = "casual"                # small talk, greetings
+    MULTI_STEP = "multi_step"  # complex task requiring multiple steps
+    CASUAL = "casual"  # small talk, greetings
 
 
 class ComplexityLevel(StrEnum):
@@ -43,16 +44,17 @@ class ComplexityLevel(StrEnum):
 
 
 class ReplyStrategy(StrEnum):
-    DIRECT_ANSWER = "direct_answer"       # answer the question concisely
-    EMPATHY_FIRST = "empathy_first"       # acknowledge feelings before advising
-    TASK_PLAN = "task_plan"               # lay out actionable steps
-    GOAL_TRACK = "goal_track"             # connect to active goals, show progress
-    CLARIFY = "clarify"                   # ask for more info before answering
+    DIRECT_ANSWER = "direct_answer"  # answer the question concisely
+    EMPATHY_FIRST = "empathy_first"  # acknowledge feelings before advising
+    TASK_PLAN = "task_plan"  # lay out actionable steps
+    GOAL_TRACK = "goal_track"  # connect to active goals, show progress
+    CLARIFY = "clarify"  # ask for more info before answering
 
 
 # ---------------------------------------------------------------------------
 # TurnPlan value object
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class TurnPlan:
@@ -78,7 +80,7 @@ class TurnPlan:
         }
 
     @classmethod
-    def trivial(cls) -> "TurnPlan":
+    def trivial(cls) -> TurnPlan:
         """Return a minimal plan for turns where classification is not needed."""
         return cls(
             intent_type=IntentType.STATEMENT,
@@ -97,51 +99,110 @@ class TurnPlan:
 _QUESTION_STARTS = re.compile(
     r"^(?:how|what|when|where|why|who|which|can you|could you|do you|"
     r"is there|are there|should i|would you|will you)\b",
-    re.I,
+    re.IGNORECASE,
 )
 _QUESTION_MARK = re.compile(r"\?")
 
-_EMOTIONAL_TOKENS = frozenset({
-    "feel", "feeling", "feelings", "felt", "anxious", "anxiety", "stressed",
-    "stress", "sad", "unhappy", "depressed", "upset", "angry", "frustrated",
-    "scared", "afraid", "worried", "worry", "nervous", "lonely", "hurt",
-    "excited", "happy", "proud", "overwhelmed", "exhausted", "tired",
-    "hopeless", "hopeful", "confused", "lost", "broken", "struggling",
-})
+_EMOTIONAL_TOKENS = frozenset(
+    {
+        "feel",
+        "feeling",
+        "feelings",
+        "felt",
+        "anxious",
+        "anxiety",
+        "stressed",
+        "stress",
+        "sad",
+        "unhappy",
+        "depressed",
+        "upset",
+        "angry",
+        "frustrated",
+        "scared",
+        "afraid",
+        "worried",
+        "worry",
+        "nervous",
+        "lonely",
+        "hurt",
+        "excited",
+        "happy",
+        "proud",
+        "overwhelmed",
+        "exhausted",
+        "tired",
+        "hopeless",
+        "hopeful",
+        "confused",
+        "lost",
+        "broken",
+        "struggling",
+    },
+)
 
 _REQUEST_STARTS = re.compile(
     r"^(?:please|can you|could you|would you|help me|assist me|advise me|"
     r"tell me|show me|remind me|explain|teach me|guide me)\b",
-    re.I,
+    re.IGNORECASE,
 )
 
 _GOAL_MARKERS = re.compile(
     r"(?:i want|i'd like|i wish|my goal|my objective|i aim|i'm trying|"
     r"i need to|i have to|i plan to|i intend to|i hope to|i'm working on)",
-    re.I,
+    re.IGNORECASE,
 )
 
 _MULTI_STEP_MARKERS = re.compile(
     r"(?:first.*then|step by step|multiple|several|few things|"
     r"a few|also|additionally|furthermore|and then|after that)",
-    re.I,
+    re.IGNORECASE,
 )
 
-_CASUAL_TOKENS = frozenset({
-    "hi", "hello", "hey", "howdy", "sup", "yo", "morning", "evening",
-    "night", "bye", "goodbye", "later", "thanks", "thank", "cool",
-    "awesome", "nice", "ok", "okay", "sure", "yep", "nope",
-})
+_CASUAL_TOKENS = frozenset(
+    {
+        "hi",
+        "hello",
+        "hey",
+        "howdy",
+        "sup",
+        "yo",
+        "morning",
+        "evening",
+        "night",
+        "bye",
+        "goodbye",
+        "later",
+        "thanks",
+        "thank",
+        "cool",
+        "awesome",
+        "nice",
+        "ok",
+        "okay",
+        "sure",
+        "yep",
+        "nope",
+    },
+)
 
-_CLARIFY_TOKENS = frozenset({
-    "not sure", "don't know", "unclear", "confused about", "what do you mean",
-    "can you clarify", "i'm not certain",
-})
+_CLARIFY_TOKENS = frozenset(
+    {
+        "not sure",
+        "don't know",
+        "unclear",
+        "confused about",
+        "what do you mean",
+        "can you clarify",
+        "i'm not certain",
+    },
+)
 
 
 # ---------------------------------------------------------------------------
 # PlannerNode
 # ---------------------------------------------------------------------------
+
 
 class PlannerNode:
     """Decomposes user intent into a structured TurnPlan before inference.
@@ -157,7 +218,7 @@ class PlannerNode:
     def __init__(self) -> None:
         pass
 
-    async def run(self, context: "TurnContext") -> "TurnContext":
+    async def run(self, context: TurnContext) -> TurnContext:
         from dadbot.core.goals import detect_goal_in_input
 
         user_input = str(context.user_input or "").strip()
@@ -202,7 +263,12 @@ class PlannerNode:
         context.metadata["intent_type"] = str(intent_type)
         return context
 
-    def _memory_tool_requests(self, *, user_input: str, active_goal_ids: list[str]) -> list[dict[str, Any]]:
+    def _memory_tool_requests(
+        self,
+        *,
+        user_input: str,
+        active_goal_ids: list[str],
+    ) -> list[dict[str, Any]]:
         goal_lookup = {
             "tool_name": "memory_lookup",
             "args": {
@@ -263,7 +329,9 @@ class PlannerNode:
 
     def _estimate_complexity(self, user_input: str, active_goals: list) -> str:
         words = len(user_input.split())
-        has_conjunction = bool(re.search(r"\band\b.*\band\b|\bfirst\b.*\bthen\b", user_input, re.I))
+        has_conjunction = bool(
+            re.search(r"\band\b.*\band\b|\bfirst\b.*\bthen\b", user_input, re.IGNORECASE),
+        )
         has_active_goals = len(active_goals) > 0
 
         if words > 40 or (has_conjunction and words > 20) or has_active_goals:
@@ -273,7 +341,10 @@ class PlannerNode:
         return ComplexityLevel.SIMPLE
 
     def _extract_subgoals(
-        self, user_input: str, intent_type: str, complexity: str
+        self,
+        user_input: str,
+        intent_type: str,
+        complexity: str,
     ) -> list[str]:
         """Break a complex/multi-step input into atomic sub-goals."""
         if complexity == ComplexityLevel.SIMPLE:
@@ -282,7 +353,7 @@ class PlannerNode:
         parts = re.split(
             r"(?:\band\b|\bthen\b|\bnext\b|\balso\b|\badditionally\b|\bafter that\b)",
             user_input,
-            flags=re.I,
+            flags=re.IGNORECASE,
         )
         subgoals = [p.strip().strip(",.;") for p in parts if len(p.strip()) > 8]
         return subgoals[:6]  # cap to prevent noise
@@ -300,7 +371,9 @@ class PlannerNode:
         return ReplyStrategy.DIRECT_ANSWER
 
     def _match_active_goals(
-        self, user_input: str, active_goals: list[dict]
+        self,
+        user_input: str,
+        active_goals: list[dict],
     ) -> list[str]:
         """Return IDs of active goals whose description overlaps with the user input.
 
@@ -309,13 +382,29 @@ class PlannerNode:
         """
         if not active_goals:
             return []
-        _SKIP = {"i", "a", "the", "is", "to", "of", "in", "it", "my", "me", "been", "some", "new"}
+        _SKIP = {
+            "i",
+            "a",
+            "the",
+            "is",
+            "to",
+            "of",
+            "in",
+            "it",
+            "my",
+            "me",
+            "been",
+            "some",
+            "new",
+        }
         text_tokens = set(re.split(r"\W+", user_input.lower())) - _SKIP
         # Build a set of 4-char prefixes from user input tokens (length >= 4).
         text_prefixes = {t[:4] for t in text_tokens if len(t) >= 4}
         matched: list[str] = []
         for goal in active_goals:
-            desc = str(goal.get("description", "") if isinstance(goal, dict) else "").lower()
+            desc = str(
+                goal.get("description", "") if isinstance(goal, dict) else "",
+            ).lower()
             goal_tokens = set(re.split(r"\W+", desc)) - _SKIP
             goal_prefixes = {t[:4] for t in goal_tokens if len(t) >= 4}
             # Match on either exact token overlap OR 4-char prefix overlap.

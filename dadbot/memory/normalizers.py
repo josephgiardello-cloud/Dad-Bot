@@ -1,4 +1,4 @@
-﻿"""Memory normalisation and quality policy sub-component.
+"""Memory normalisation and quality policy sub-component.
 
 Extracted from MemoryManager so that the data-shape / curation concern lives in
 its own focused class.  MemoryManager keeps delegation shims so all existing
@@ -134,11 +134,46 @@ class MemoryNormalizer:
         lowered = summary.lower()
         category_keywords = {
             "work": ["work", "job", "career", "boss", "coworker", "office"],
-            "health": ["exercise", "work out", "workout", "gym", "health", "sleep", "diet", "stress", "anxiety"],
-            "finance": ["money", "saving", "save", "budget", "debt", "spending", "finance", "financial"],
-            "relationships": ["friend", "girlfriend", "boyfriend", "partner", "wife", "marriage", "relationship"],
+            "health": [
+                "exercise",
+                "work out",
+                "workout",
+                "gym",
+                "health",
+                "sleep",
+                "diet",
+                "stress",
+                "anxiety",
+            ],
+            "finance": [
+                "money",
+                "saving",
+                "save",
+                "budget",
+                "debt",
+                "spending",
+                "finance",
+                "financial",
+            ],
+            "relationships": [
+                "friend",
+                "girlfriend",
+                "boyfriend",
+                "partner",
+                "wife",
+                "marriage",
+                "relationship",
+            ],
             "family": ["mom", "dad", "carrie", "tony", "family", "son"],
-            "school": ["school", "college", "class", "teacher", "study", "exam", "homework"],
+            "school": [
+                "school",
+                "college",
+                "class",
+                "teacher",
+                "study",
+                "exam",
+                "homework",
+            ],
             "goals": ["goal", "trying to", "want to", "plan", "hope to", "working on"],
         }
         for category, keywords in category_keywords.items():
@@ -156,7 +191,9 @@ class MemoryNormalizer:
         if not title:
             return None
 
-        created_at = str(reminder.get("created_at") or datetime.now().isoformat(timespec="seconds"))
+        created_at = str(
+            reminder.get("created_at") or datetime.now().isoformat(timespec="seconds"),
+        )
         updated_at = str(reminder.get("updated_at") or created_at)
         status = str(reminder.get("status") or "open").strip().lower()
         if status not in {"open", "done"}:
@@ -168,7 +205,9 @@ class MemoryNormalizer:
         if raw_due_at:
             try:
                 parsed_due_at = dateutil_parser.parse(raw_due_at)
-                due_at = parsed_due_at.replace(second=0, microsecond=0).isoformat(timespec="seconds")
+                due_at = parsed_due_at.replace(second=0, microsecond=0).isoformat(
+                    timespec="seconds",
+                )
             except (ValueError, TypeError, OverflowError):
                 due_at = None
         elif due_text:
@@ -178,9 +217,16 @@ class MemoryNormalizer:
                 else:
                     parsed_due_at = dateutil_parser.parse(
                         due_text,
-                        default=datetime.now().replace(hour=9, minute=0, second=0, microsecond=0),
+                        default=datetime.now().replace(
+                            hour=9,
+                            minute=0,
+                            second=0,
+                            microsecond=0,
+                        ),
                     )
-                    due_at = parsed_due_at.replace(second=0, microsecond=0).isoformat(timespec="seconds")
+                    due_at = parsed_due_at.replace(second=0, microsecond=0).isoformat(
+                        timespec="seconds",
+                    )
             except (ValueError, TypeError, OverflowError):
                 due_at = None
         else:
@@ -190,7 +236,10 @@ class MemoryNormalizer:
         if raw_last_notified_at:
             try:
                 parsed_last_notified_at = dateutil_parser.parse(raw_last_notified_at)
-                last_notified_at = parsed_last_notified_at.replace(second=0, microsecond=0).isoformat(timespec="seconds")
+                last_notified_at = parsed_last_notified_at.replace(
+                    second=0,
+                    microsecond=0,
+                ).isoformat(timespec="seconds")
             except (ValueError, TypeError, OverflowError):
                 last_notified_at = None
         else:
@@ -220,7 +269,9 @@ class MemoryNormalizer:
         if not summary:
             return None
 
-        created_at = str(entry.get("created_at") or datetime.now().isoformat(timespec="seconds"))
+        created_at = str(
+            entry.get("created_at") or datetime.now().isoformat(timespec="seconds"),
+        )
         topics = []
         for topic in entry.get("topics", [])[:5]:
             topic_name = str(topic).strip().lower()
@@ -233,7 +284,9 @@ class MemoryNormalizer:
             turn_count = 0
 
         return {
-            "id": str(entry.get("id") or hashlib.sha1(f"{summary}|{created_at}".encode("utf-8")).hexdigest()[:12]),
+            "id": str(
+                entry.get("id") or hashlib.sha1(f"{summary}|{created_at}".encode()).hexdigest()[:12],
+            ),
             "created_at": created_at,
             "summary": summary,
             "topics": topics,
@@ -280,7 +333,9 @@ class MemoryNormalizer:
             fallback=self._turn_date_fallback(),
         )
         superseded_at = self._normalize_optional_timestamp(entry.get("superseded_at"))
-        last_reinforced_at = self._normalize_optional_timestamp(entry.get("last_reinforced_at"))
+        last_reinforced_at = self._normalize_optional_timestamp(
+            entry.get("last_reinforced_at"),
+        )
         try:
             version = max(1, int(entry.get("version", 1)))
         except (TypeError, ValueError):
@@ -291,7 +346,12 @@ class MemoryNormalizer:
             importance_score = 0.0
         payload = {
             "summary": summary,
-            "category": str(entry.get("category") or self.bot.infer_memory_category(summary)).strip().lower() or "general",
+            "category": str(
+                entry.get("category") or self.bot.infer_memory_category(summary),
+            )
+            .strip()
+            .lower()
+            or "general",
             "source_count": source_count,
             "confidence": self.bot.normalize_confidence(
                 entry.get("confidence"),
@@ -442,7 +502,9 @@ class MemoryNormalizer:
             "mood": self.bot.normalize_mood(entry.get("mood")),
             "day_hint": str(entry.get("day_hint") or "").strip(),
             "confidence": confidence,
-            "last_seen_at": str(entry.get("last_seen_at") or self._turn_timestamp_fallback()),
+            "last_seen_at": str(
+                entry.get("last_seen_at") or self._turn_timestamp_fallback(),
+            ),
             "proactive_message": str(entry.get("proactive_message") or "").strip(),
             "last_proactive_at": str(entry.get("last_proactive_at") or "").strip() or None,
         }
@@ -458,7 +520,9 @@ class MemoryNormalizer:
         return {
             "message": message,
             "source": str(entry.get("source") or "general").strip().lower() or "general",
-            "created_at": str(entry.get("created_at") or self._turn_timestamp_fallback()),
+            "created_at": str(
+                entry.get("created_at") or self._turn_timestamp_fallback(),
+            ),
         }
 
     def normalize_memory_graph(self, graph):
@@ -478,12 +542,14 @@ class MemoryNormalizer:
                 weight = max(1, int(node.get("weight", 1)))
             except (TypeError, ValueError):
                 weight = 1
-            nodes.append({
-                "id": str(node.get("id") or f"{node_type}:{label}"),
-                "label": label,
-                "type": node_type,
-                "weight": weight,
-            })
+            nodes.append(
+                {
+                    "id": str(node.get("id") or f"{node_type}:{label}"),
+                    "label": label,
+                    "type": node_type,
+                    "weight": weight,
+                },
+            )
 
         edges = []
         for edge in graph.get("edges", [])[:24]:
@@ -497,11 +563,13 @@ class MemoryNormalizer:
                 weight = max(1, int(edge.get("weight", 1)))
             except (TypeError, ValueError):
                 weight = 1
-            edges.append({
-                "source": source,
-                "target": target,
-                "weight": weight,
-            })
+            edges.append(
+                {
+                    "source": source,
+                    "target": target,
+                    "weight": weight,
+                },
+            )
 
         return {
             "nodes": nodes,
@@ -527,7 +595,9 @@ class MemoryNormalizer:
             last_updated,
         )
 
-        momentum = str(state.get("emotional_momentum", default_state["emotional_momentum"]))
+        momentum = str(
+            state.get("emotional_momentum", default_state["emotional_momentum"]),
+        )
         emotional_momentum = momentum if momentum in {"steady", "warming", "heavy"} else "steady"
 
         recurring_topics = state.get("recurring_topics", {})
@@ -543,21 +613,25 @@ class MemoryNormalizer:
                     continue
 
         recent_checkins = []
-        for item in self.bot.runtime_config.tail(state.get("recent_checkins", []), "recent_checkins"):
+        for item in self.bot.runtime_config.tail(
+            state.get("recent_checkins", []),
+            "recent_checkins",
+        ):
             if not isinstance(item, dict):
                 continue
-            recent_checkins.append({
-                "date": item.get("date") or self._turn_date_fallback(),
-                "mood": self.bot.normalize_mood(item.get("mood")),
-                "topic": str(item.get("topic") or "general").strip().lower() or "general",
-            })
+            recent_checkins.append(
+                {
+                    "date": item.get("date") or self._turn_date_fallback(),
+                    "mood": self.bot.normalize_mood(item.get("mood")),
+                    "topic": str(item.get("topic") or "general").strip().lower() or "general",
+                },
+            )
         profiles = self.bot.relationship_hypothesis_profiles()
         raw_hypotheses = state.get("hypotheses", [])
         candidate_hypotheses = []
         if isinstance(raw_hypotheses, dict):
             raw_hypotheses = [
-                {"name": name, "probability": probability}
-                for name, probability in raw_hypotheses.items()
+                {"name": name, "probability": probability} for name, probability in raw_hypotheses.items()
             ]
         for item in raw_hypotheses:
             if not isinstance(item, dict):
@@ -575,7 +649,7 @@ class MemoryNormalizer:
                     "label": profiles[name]["label"],
                     "summary": profiles[name]["summary"],
                     "probability": probability,
-                }
+                },
             )
 
         if not candidate_hypotheses:
@@ -583,8 +657,13 @@ class MemoryNormalizer:
 
         total_probability = sum(item.get("probability", 0.0) for item in candidate_hypotheses) or 1.0
         for item in candidate_hypotheses:
-            item["probability"] = round(float(item.get("probability", 0.0)) / total_probability, 4)
-        candidate_hypotheses.sort(key=lambda item: (-item.get("probability", 0.0), item.get("name", "")))
+            item["probability"] = round(
+                float(item.get("probability", 0.0)) / total_probability,
+                4,
+            )
+        candidate_hypotheses.sort(
+            key=lambda item: (-item.get("probability", 0.0), item.get("name", "")),
+        )
         hypotheses = candidate_hypotheses[: len(profiles)]
         active_hypothesis = hypotheses[0]["name"] if hypotheses else default_state["active_hypothesis"]
         last_hypothesis_updated = self._normalize_memory_timestamp(
@@ -652,13 +731,24 @@ class MemoryNormalizer:
             "mood": self.bot.normalize_mood(memory.get("mood")) if "mood" in memory else "neutral",
             "confidence": self._coerce_memory_confidence(memory.get("confidence")),
             "impact_score": self._coerce_impact_score(memory.get("impact_score")),
-            "importance_score": self._coerce_unit_float(memory.get("importance_score", 0.0), default=0.0),
-            "emotional_intensity": self._coerce_unit_float(memory.get("emotional_intensity", 0.25), default=0.25),
-            "relationship_impact": self._coerce_unit_float(memory.get("relationship_impact", 0.5), default=0.5),
+            "importance_score": self._coerce_unit_float(
+                memory.get("importance_score", 0.0),
+                default=0.0,
+            ),
+            "emotional_intensity": self._coerce_unit_float(
+                memory.get("emotional_intensity", 0.25),
+                default=0.25,
+            ),
+            "relationship_impact": self._coerce_unit_float(
+                memory.get("relationship_impact", 0.5),
+                default=0.5,
+            ),
             "pinned": bool(memory.get("pinned", False)),
             "created_at": created_at,
             "updated_at": updated_at,
-            "contradictions": self._normalize_memory_contradictions(memory.get("contradictions")),
+            "contradictions": self._normalize_memory_contradictions(
+                memory.get("contradictions"),
+            ),
         }
         try:
             validated = MemoryEntry.model_validate(payload)
@@ -683,9 +773,15 @@ class MemoryNormalizer:
         if "importance_score" in memory:
             normalized["importance_score"] = round(float(dumped["importance_score"]), 3)
         if "emotional_intensity" in memory:
-            normalized["emotional_intensity"] = round(float(dumped["emotional_intensity"]), 3)
+            normalized["emotional_intensity"] = round(
+                float(dumped["emotional_intensity"]),
+                3,
+            )
         if "relationship_impact" in memory:
-            normalized["relationship_impact"] = round(float(dumped["relationship_impact"]), 3)
+            normalized["relationship_impact"] = round(
+                float(dumped["relationship_impact"]),
+                3,
+            )
         if "pinned" in memory:
             normalized["pinned"] = bool(dumped["pinned"])
         if "contradictions" in memory:
@@ -718,13 +814,24 @@ class MemoryNormalizer:
             "mood": self.bot.normalize_mood(memory.get("mood")),
             "confidence": self._coerce_memory_confidence(memory.get("confidence")),
             "impact_score": self._coerce_impact_score(memory.get("impact_score")),
-            "importance_score": self._coerce_unit_float(memory.get("importance_score", 0.0), default=0.0),
-            "emotional_intensity": self._coerce_unit_float(memory.get("emotional_intensity", 0.25), default=0.25),
-            "relationship_impact": self._coerce_unit_float(memory.get("relationship_impact", 0.5), default=0.5),
+            "importance_score": self._coerce_unit_float(
+                memory.get("importance_score", 0.0),
+                default=0.0,
+            ),
+            "emotional_intensity": self._coerce_unit_float(
+                memory.get("emotional_intensity", 0.25),
+                default=0.25,
+            ),
+            "relationship_impact": self._coerce_unit_float(
+                memory.get("relationship_impact", 0.5),
+                default=0.5,
+            ),
             "pinned": bool(memory.get("pinned", False)),
             "created_at": created_at,
             "updated_at": updated_at,
-            "contradictions": self._normalize_memory_contradictions(memory.get("contradictions")),
+            "contradictions": self._normalize_memory_contradictions(
+                memory.get("contradictions"),
+            ),
         }
         try:
             validated = MemoryEntry.model_validate(payload)
@@ -774,10 +881,30 @@ class MemoryNormalizer:
             score -= 40
 
         generic_tokens = {
-            "thing", "things", "stuff", "issue", "issues", "problem", "problems",
-            "situation", "life", "anything", "everything", "something",
+            "thing",
+            "things",
+            "stuff",
+            "issue",
+            "issues",
+            "problem",
+            "problems",
+            "situation",
+            "life",
+            "anything",
+            "everything",
+            "something",
         }
-        filler_tokens = {"tony", "shared", "that", "has", "been", "is", "was", "feels", "feeling"}
+        filler_tokens = {
+            "tony",
+            "shared",
+            "that",
+            "has",
+            "been",
+            "is",
+            "was",
+            "feels",
+            "feeling",
+        }
         if len(tokens) <= 6 and tokens & generic_tokens:
             score -= 35
 
@@ -785,7 +912,16 @@ class MemoryNormalizer:
         if len(meaningful_tokens) <= 2:
             score -= 25
 
-        strong_keywords = ["work", "exercise", "budget", "saving", "anxious", "overwhelmed", "sad", "stress"]
+        strong_keywords = [
+            "work",
+            "exercise",
+            "budget",
+            "saving",
+            "anxious",
+            "overwhelmed",
+            "sad",
+            "stress",
+        ]
         if any(keyword in summary for keyword in strong_keywords):
             score += 20
         if word_count < 3:
@@ -817,7 +953,11 @@ class MemoryNormalizer:
     def memory_dedup_key(self, memory):
         summary = self.bot.normalize_memory_text(memory.get("summary", ""))
         summary = re.sub(r"^tony shared that ", "", summary)
-        summary = re.sub(r"\b(has been|is|was|wants to|wants|needs to|needs|is trying to)\b", "", summary)
+        summary = re.sub(
+            r"\b(has been|is|was|wants to|wants|needs to|needs|is trying to)\b",
+            "",
+            summary,
+        )
         summary = re.sub(r"\s+", " ", summary).strip(" .")
         category = str(memory.get("category", "general")).strip().lower()
         if "saving" in summary or "budget" in summary or "money" in summary:
@@ -840,7 +980,9 @@ class MemoryNormalizer:
         for memory in cleaned:
             key = self.memory_dedup_key(memory)
             existing = deduped.get(key)
-            if existing is None or self.memory_quality_score(memory) >= self.memory_quality_score(existing):
+            if existing is None or self.memory_quality_score(
+                memory,
+            ) >= self.memory_quality_score(existing):
                 deduped[key] = memory
         return sorted(deduped.values(), key=self.memory_sort_key)
 
@@ -852,17 +994,23 @@ class MemoryNormalizer:
             return default_store
 
         normalized = dict(default_store)
-        normalized["memories"] = [
-            entry
-            for entry in (self.normalize_persisted_memory_entry(item) for item in store.get("memories", []))
-            if entry is not None
-        ] if isinstance(store.get("memories"), list) else []
+        normalized["memories"] = (
+            [
+                entry
+                for entry in (self.normalize_persisted_memory_entry(item) for item in store.get("memories", []))
+                if entry is not None
+            ]
+            if isinstance(store.get("memories"), list)
+            else []
+        )
 
         self._normalize_catalog_list_fields(store, normalized)
         self._normalize_health_fields(store, normalized)
         self._normalize_timestamp_fields(store, normalized, default_store)
         normalized["recent_moods"] = self._normalize_recent_moods(store)
-        normalized["relationship_state"] = self.normalize_relationship_state(store.get("relationship_state"))
+        normalized["relationship_state"] = self.normalize_relationship_state(
+            store.get("relationship_state"),
+        )
         self._normalize_internal_state(store, normalized, default_store)
         normalized["relationship_history"] = self._normalize_relationship_history(store)
         self._normalize_bounded_list_fields(store, normalized)
@@ -876,41 +1024,68 @@ class MemoryNormalizer:
     # -- Private field-group helpers for normalize_memory_store -----------------
 
     def _normalize_catalog_list_fields(self, store: dict, normalized: dict) -> None:
-        normalized["consolidated_memories"] = self.bot.runtime_config.tail([
-            entry
-            for entry in (self.normalize_consolidated_memory_entry(item) for item in store.get("consolidated_memories", []))
-            if entry is not None
-        ], "consolidated_memories")
-        normalized["persona_evolution"] = self.bot.runtime_config.tail([
-            entry
-            for entry in (self.normalize_persona_evolution_entry(item) for item in store.get("persona_evolution", []))
-            if entry is not None
-        ], "persona_evolution")
-        normalized["wisdom_insights"] = self.bot.runtime_config.tail([
-            entry
-            for entry in (self.normalize_wisdom_entry(item) for item in store.get("wisdom_insights", []))
-            if entry is not None
-        ], "wisdom_insights")
-        normalized["life_patterns"] = self.bot.runtime_config.tail([
-            entry
-            for entry in (self.normalize_life_pattern_entry(item) for item in store.get("life_patterns", []))
-            if entry is not None
-        ], "life_patterns")
-        normalized["pending_proactive_messages"] = self.bot.runtime_config.tail([
-            entry
-            for entry in (self.normalize_proactive_message_entry(item) for item in store.get("pending_proactive_messages", []))
-            if entry is not None
-        ], "pending_proactive_messages")
-        normalized["reminders"] = self.bot.runtime_config.tail([
-            reminder
-            for reminder in (self.normalize_reminder_entry(item) for item in store.get("reminders", []))
-            if reminder is not None
-        ], "reminders")
-        normalized["session_archive"] = self.bot.runtime_config.tail([
-            entry
-            for entry in (self.normalize_session_archive_entry(item) for item in store.get("session_archive", []))
-            if entry is not None
-        ], "session_archive")
+        normalized["consolidated_memories"] = self.bot.runtime_config.tail(
+            [
+                entry
+                for entry in (
+                    self.normalize_consolidated_memory_entry(item) for item in store.get("consolidated_memories", [])
+                )
+                if entry is not None
+            ],
+            "consolidated_memories",
+        )
+        normalized["persona_evolution"] = self.bot.runtime_config.tail(
+            [
+                entry
+                for entry in (
+                    self.normalize_persona_evolution_entry(item) for item in store.get("persona_evolution", [])
+                )
+                if entry is not None
+            ],
+            "persona_evolution",
+        )
+        normalized["wisdom_insights"] = self.bot.runtime_config.tail(
+            [
+                entry
+                for entry in (self.normalize_wisdom_entry(item) for item in store.get("wisdom_insights", []))
+                if entry is not None
+            ],
+            "wisdom_insights",
+        )
+        normalized["life_patterns"] = self.bot.runtime_config.tail(
+            [
+                entry
+                for entry in (self.normalize_life_pattern_entry(item) for item in store.get("life_patterns", []))
+                if entry is not None
+            ],
+            "life_patterns",
+        )
+        normalized["pending_proactive_messages"] = self.bot.runtime_config.tail(
+            [
+                entry
+                for entry in (
+                    self.normalize_proactive_message_entry(item) for item in store.get("pending_proactive_messages", [])
+                )
+                if entry is not None
+            ],
+            "pending_proactive_messages",
+        )
+        normalized["reminders"] = self.bot.runtime_config.tail(
+            [
+                reminder
+                for reminder in (self.normalize_reminder_entry(item) for item in store.get("reminders", []))
+                if reminder is not None
+            ],
+            "reminders",
+        )
+        normalized["session_archive"] = self.bot.runtime_config.tail(
+            [
+                entry
+                for entry in (self.normalize_session_archive_entry(item) for item in store.get("session_archive", []))
+                if entry is not None
+            ],
+            "session_archive",
+        )
 
     def _normalize_health_fields(self, store: dict, normalized: dict) -> None:
         normalized["health_history"] = self.bot.runtime_config.tail(
@@ -923,43 +1098,79 @@ class MemoryNormalizer:
         )
         normalized["health_quiet_mode"] = bool(store.get("health_quiet_mode", False))
         runtime_optimization = store.get("runtime_optimization", {})
-        normalized["runtime_optimization"] = dict(runtime_optimization) if isinstance(runtime_optimization, dict) else {}
+        normalized["runtime_optimization"] = (
+            dict(runtime_optimization) if isinstance(runtime_optimization, dict) else {}
+        )
 
-    def _normalize_timestamp_fields(self, store: dict, normalized: dict, default_store: dict) -> None:
-        normalized["last_consolidated_at"] = self._normalize_optional_timestamp(store.get("last_consolidated_at"))
-        normalized["last_pattern_detection_at"] = self._normalize_optional_timestamp(store.get("last_pattern_detection_at"))
+    def _normalize_timestamp_fields(
+        self,
+        store: dict,
+        normalized: dict,
+        default_store: dict,
+    ) -> None:
+        normalized["last_consolidated_at"] = self._normalize_optional_timestamp(
+            store.get("last_consolidated_at"),
+        )
+        normalized["last_pattern_detection_at"] = self._normalize_optional_timestamp(
+            store.get("last_pattern_detection_at"),
+        )
         normalized["last_mood"] = self.bot.normalize_mood(store.get("last_mood"))
         normalized["last_mood_updated_at"] = self._normalize_memory_timestamp(
             store.get("last_mood_updated_at"),
             fallback=default_store["last_mood_updated_at"],
         )
-        normalized["last_background_synthesis_at"] = self._normalize_optional_timestamp(store.get("last_background_synthesis_at"))
+        normalized["last_background_synthesis_at"] = self._normalize_optional_timestamp(
+            store.get("last_background_synthesis_at"),
+        )
         try:
-            normalized["last_background_synthesis_turn"] = max(0, int(store.get("last_background_synthesis_turn", 0)))
+            normalized["last_background_synthesis_turn"] = max(
+                0,
+                int(store.get("last_background_synthesis_turn", 0)),
+            )
         except (TypeError, ValueError):
             normalized["last_background_synthesis_turn"] = 0
-        normalized["last_memory_compaction_at"] = self._normalize_optional_timestamp(store.get("last_memory_compaction_at"))
-        normalized["last_memory_compaction_summary"] = str(store.get("last_memory_compaction_summary") or "").strip()
-        normalized["last_scheduled_proactive_at"] = self._normalize_optional_timestamp(store.get("last_scheduled_proactive_at"))
-        normalized["last_daily_checkin_at"] = self._normalize_optional_timestamp(store.get("last_daily_checkin_at"))
+        normalized["last_memory_compaction_at"] = self._normalize_optional_timestamp(
+            store.get("last_memory_compaction_at"),
+        )
+        normalized["last_memory_compaction_summary"] = str(
+            store.get("last_memory_compaction_summary") or "",
+        ).strip()
+        normalized["last_scheduled_proactive_at"] = self._normalize_optional_timestamp(
+            store.get("last_scheduled_proactive_at"),
+        )
+        normalized["last_daily_checkin_at"] = self._normalize_optional_timestamp(
+            store.get("last_daily_checkin_at"),
+        )
 
     def _normalize_recent_moods(self, store: dict) -> list:
         result = []
         if isinstance(store.get("recent_moods"), list):
             for item in store.get("recent_moods", []):
                 if isinstance(item, dict):
-                    result.append({
-                        "mood": self.bot.normalize_mood(item.get("mood")),
-                        "date": self._normalize_memory_timestamp(item.get("date"), fallback=date.today().isoformat()),
-                    })
+                    result.append(
+                        {
+                            "mood": self.bot.normalize_mood(item.get("mood")),
+                            "date": self._normalize_memory_timestamp(
+                                item.get("date"),
+                                fallback=date.today().isoformat(),
+                            ),
+                        },
+                    )
                 elif isinstance(item, str):
-                    result.append({
-                        "mood": self.bot.normalize_mood(item),
-                        "date": date.today().isoformat(),
-                    })
+                    result.append(
+                        {
+                            "mood": self.bot.normalize_mood(item),
+                            "date": date.today().isoformat(),
+                        },
+                    )
         return result
 
-    def _normalize_internal_state(self, store: dict, normalized: dict, default_store: dict) -> None:
+    def _normalize_internal_state(
+        self,
+        store: dict,
+        normalized: dict,
+        default_store: dict,
+    ) -> None:
         internal_state = store.get("internal_state")
         default_internal_state = default_store.get("internal_state", {})
         if isinstance(default_internal_state, dict):
@@ -980,48 +1191,51 @@ class MemoryNormalizer:
             except (TypeError, ValueError):
                 trust_level = 50
             try:
-                openness_level = max(0, min(100, int(item.get("openness_level", 50) or 50)))
+                openness_level = max(
+                    0,
+                    min(100, int(item.get("openness_level", 50) or 50)),
+                )
             except (TypeError, ValueError):
                 openness_level = 50
             relationship_history.append(
                 {
-                    "recorded_at": self._normalize_memory_timestamp(item.get("recorded_at"), fallback=date.today().isoformat()),
+                    "recorded_at": self._normalize_memory_timestamp(
+                        item.get("recorded_at"),
+                        fallback=date.today().isoformat(),
+                    ),
                     "trust_level": trust_level,
                     "openness_level": openness_level,
                     "source": str(item.get("source") or "turn").strip().lower() or "turn",
-                }
+                },
             )
-        return self.bot.runtime_config.tail(relationship_history, "relationship_history")
+        return self.bot.runtime_config.tail(
+            relationship_history,
+            "relationship_history",
+        )
 
     def _normalize_bounded_list_fields(self, store: dict, normalized: dict) -> None:
         normalized["mcp_local_store"] = dict(store.get("mcp_local_store") or {})
         normalized["narrative_memories"] = [
-            dict(item)
-            for item in list(store.get("narrative_memories") or [])
-            if isinstance(item, dict)
+            dict(item) for item in list(store.get("narrative_memories") or []) if isinstance(item, dict)
         ]
         normalized["heritage_cross_links"] = [
-            dict(item)
-            for item in list(store.get("heritage_cross_links") or [])
-            if isinstance(item, dict)
+            dict(item) for item in list(store.get("heritage_cross_links") or []) if isinstance(item, dict)
         ]
         normalized["advice_audits"] = [
-            dict(item)
-            for item in list(store.get("advice_audits") or [])[-160:]
-            if isinstance(item, dict)
+            dict(item) for item in list(store.get("advice_audits") or [])[-160:] if isinstance(item, dict)
         ]
         normalized["environmental_cues_history"] = [
-            dict(item)
-            for item in list(store.get("environmental_cues_history") or [])[-200:]
-            if isinstance(item, dict)
+            dict(item) for item in list(store.get("environmental_cues_history") or [])[-200:] if isinstance(item, dict)
         ]
         normalized["longitudinal_insights"] = [
-            dict(item)
-            for item in list(store.get("longitudinal_insights") or [])[-40:]
-            if isinstance(item, dict)
+            dict(item) for item in list(store.get("longitudinal_insights") or [])[-40:] if isinstance(item, dict)
         ]
-        normalized["relationship_timeline"] = str(store.get("relationship_timeline") or "").strip()
-        normalized["memory_graph"] = self.normalize_memory_graph(store.get("memory_graph"))
+        normalized["relationship_timeline"] = str(
+            store.get("relationship_timeline") or "",
+        ).strip()
+        normalized["memory_graph"] = self.normalize_memory_graph(
+            store.get("memory_graph"),
+        )
 
 
 __all__ = ["MemoryNormalizer"]

@@ -1,20 +1,17 @@
 """Tests for Phase 4 — Uncertainty Propagation System (uncertainty_model.py)."""
+
 from __future__ import annotations
 
-import math
 import pytest
 
 from dadbot.core.uncertainty_model import (
-    ConfidenceVector,
-    UncertaintyPropagator,
-    PlannerWeightMode,
-    PlannerHint,
-    CriticPenalty,
     ConfidenceFusion,
-    FusedConfidenceVector,
+    ConfidenceVector,
     FusionStrategy,
+    PlannerHint,
+    PlannerWeightMode,
+    UncertaintyPropagator,
 )
-
 
 # ---------------------------------------------------------------------------
 # 4.1 ConfidenceVector
@@ -217,4 +214,4 @@ class TestConfidenceFusion:
         strong = self._cv(0.95, 0.95, 0.95, "good_tool")
         weak = self._cv(0.1, 0.1, 0.1, "bad_tool")
         fused = ConfidenceFusion.conservative([strong, weak])
-        assert fused.reliability_score < 0.2   # dominated by weak
+        assert fused.reliability_score < 0.2  # dominated by weak

@@ -9,7 +9,9 @@ from dadbot.core.boot_mixin import DadBotBootMixin
 def _canonical_profile(payload: dict) -> dict:
     style = payload.get("style") if isinstance(payload.get("style"), dict) else {}
     llm = payload.get("llm") if isinstance(payload.get("llm"), dict) else {}
-    conversation_style = payload.get("conversation_style") if isinstance(payload.get("conversation_style"), dict) else {}
+    conversation_style = (
+        payload.get("conversation_style") if isinstance(payload.get("conversation_style"), dict) else {}
+    )
     preferences = payload.get("preferences") if isinstance(payload.get("preferences"), dict) else {}
 
     tone_value = style.get("tone", conversation_style.get("tone", "supportive"))

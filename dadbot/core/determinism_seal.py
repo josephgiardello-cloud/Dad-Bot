@@ -26,18 +26,19 @@ Pure utility layer — no imports from graph, kernel, or domain.  Called by:
   - ``GraphSideEffectsOrchestrator.emit_checkpoint()`` (optional strict mode)
   - Tests via ``DeterminismSeal.apply()``
 """
+
 from __future__ import annotations
 
 import ast
 import math
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _is_time_like_float(value: float) -> bool:
     """Heuristic: epoch-range floats (> 1_000_000_000) are likely wall-clock."""
@@ -54,6 +55,7 @@ def _round_float(value: float, precision: int) -> float:
 # ---------------------------------------------------------------------------
 # 1. Float normalizer
 # ---------------------------------------------------------------------------
+
 
 class FloatNormalizer:
     """Rounds all floats in a nested data structure to a fixed precision.
@@ -90,6 +92,7 @@ class FloatNormalizer:
 
 _WS_RUN = re.compile(r"[ \t]+")
 _LINE_ENDING = re.compile(r"\r\n|\r")
+
 
 class ToolOutputNormalizer:
     """Normalises text tool outputs to canonical form.
@@ -135,6 +138,7 @@ class ToolOutputNormalizer:
 # 3. Time leakage detection
 # ---------------------------------------------------------------------------
 
+
 class TimeLeakDetector:
     """Detects wall-clock timestamps that escaped VirtualClock.
 
@@ -161,7 +165,11 @@ class TimeLeakDetector:
             self._before[path] = obj
         elif isinstance(obj, dict):
             for k, v in obj.items():
-                self._collect(v, path=f"{path}.{k}" if path else str(k), _depth=_depth + 1)
+                self._collect(
+                    v,
+                    path=f"{path}.{k}" if path else str(k),
+                    _depth=_depth + 1,
+                )
         elif isinstance(obj, (list, tuple)):
             for i, v in enumerate(obj):
                 self._collect(v, path=f"{path}[{i}]", _depth=_depth + 1)
@@ -177,7 +185,11 @@ class TimeLeakDetector:
                 after[path] = obj
             elif isinstance(obj, dict):
                 for k, v in obj.items():
-                    _collect_after(v, path=f"{path}.{k}" if path else str(k), depth=depth + 1)
+                    _collect_after(
+                        v,
+                        path=f"{path}.{k}" if path else str(k),
+                        depth=depth + 1,
+                    )
             elif isinstance(obj, (list, tuple)):
                 for i, v in enumerate(obj):
                     _collect_after(v, path=f"{path}[{i}]", depth=depth + 1)
@@ -196,6 +208,7 @@ class TimeLeakDetector:
 # ---------------------------------------------------------------------------
 # 4. Static randomness seal
 # ---------------------------------------------------------------------------
+
 
 class RandomnessSeal:
     """Static analysis: detect ``import random`` or ``random.*`` in source.
@@ -219,23 +232,18 @@ class RandomnessSeal:
                     if alias.name == "random":
                         violations.append(
                             f"{filename}:{node.lineno}: 'import random' — "
-                            "use VirtualClock or a seeded generator passed through TurnContext"
+                            "use VirtualClock or a seeded generator passed through TurnContext",
                         )
             elif isinstance(node, ast.ImportFrom):
                 if node.module == "random":
                     violations.append(
                         f"{filename}:{node.lineno}: 'from random import ...' — "
-                        "use VirtualClock or a seeded generator passed through TurnContext"
+                        "use VirtualClock or a seeded generator passed through TurnContext",
                     )
             elif isinstance(node, ast.Attribute):
-                if (
-                    isinstance(node.value, ast.Name)
-                    and node.value.id == "random"
-                    and isinstance(node.attr, str)
-                ):
+                if isinstance(node.value, ast.Name) and node.value.id == "random" and isinstance(node.attr, str):
                     violations.append(
-                        f"{filename}:{getattr(node, 'lineno', '?')}: "
-                        f"random.{node.attr}() — unsealed randomness"
+                        f"{filename}:{getattr(node, 'lineno', '?')}: random.{node.attr}() — unsealed randomness",
                     )
         return violations
 
@@ -243,6 +251,7 @@ class RandomnessSeal:
 # ---------------------------------------------------------------------------
 # 5. Unified DeterminismSeal
 # ---------------------------------------------------------------------------
+
 
 @dataclass(frozen=True)
 class DeterminismSealConfig:
@@ -259,6 +268,7 @@ class DeterminismSealConfig:
     detect_time_leaks:
         When True, after each stage the TimeLeakDetector will flag new
         wall-clock timestamps in state.  Violations are logged as warnings.
+
     """
 
     float_precision: int = 6

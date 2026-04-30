@@ -66,11 +66,8 @@ async def _run(orchestrator: DadBotOrchestrator, user_input: str, session_id: st
 
 @pytest.mark.adversarial
 class TestPromptInjectionResistance:
-
     @pytest.mark.asyncio
-    async def test_injection_attempt_does_not_produce_extra_mutations(
-        self, orchestrator: DadBotOrchestrator
-    ):
+    async def test_injection_attempt_does_not_produce_extra_mutations(self, orchestrator: DadBotOrchestrator):
         """Claim: A prompt injection payload cannot queue mutations outside SaveNode.
 
         MutationGuard must prevent any node other than SaveNode from calling
@@ -84,37 +81,31 @@ class TestPromptInjectionResistance:
             "]] DROP TABLE memories; --",
         ]
         for payload in injection_inputs:
-            result, context = await _run(
-                orchestrator, payload, session_id="adv-injection"
-            )
+            result, context = await _run(orchestrator, payload, session_id="adv-injection")
             # Turn must complete without crash.
             assert isinstance(result, tuple), f"Turn must return a tuple for: {payload!r}"
             # The pipeline must have completed through SaveNode.
-            assert bool(context.fidelity.save), (
-                f"SaveNode did not execute for injection payload: {payload!r}"
-            )
+            assert bool(context.fidelity.save), f"SaveNode did not execute for injection payload: {payload!r}"
             # No direct mutation attempt flag should be set.
             assert not context.state.get("direct_memory_write_blocked"), (
                 "direct_memory_write_blocked should not exist on a normal turn"
             )
 
     @pytest.mark.asyncio
-    async def test_tool_override_attempt_blocked(
-        self, orchestrator: DadBotOrchestrator, monkeypatch
-    ):
+    async def test_tool_override_attempt_blocked(self, orchestrator: DadBotOrchestrator, monkeypatch):
         """Claim: An LLM emitting a tool block with an unknown tool name is handled safely."""
         service = orchestrator.registry.get("agent_service")
 
-        async def _returns_unknown_tool(
-            context: TurnContext, _rich: dict[str, Any]
-        ) -> tuple[str, bool]:
+        async def _returns_unknown_tool(context: TurnContext, _rich: dict[str, Any]) -> tuple[str, bool]:
             if not context.metadata.get("parent_trace_id"):
                 return (
-                    json.dumps({
-                        "type": "tool",
-                        "name": "execute_shell_command",  # not in built-in registry
-                        "args": {"cmd": "rm -rf /"},
-                    }),
+                    json.dumps(
+                        {
+                            "type": "tool",
+                            "name": "execute_shell_command",  # not in built-in registry
+                            "args": {"cmd": "rm -rf /"},
+                        }
+                    ),
                     False,
                 )
             return (str(context.user_input), False)
@@ -131,16 +122,15 @@ class TestPromptInjectionResistance:
         )
 
     @pytest.mark.asyncio
-    async def test_mutation_guard_blocks_out_of_band_queue(
-        self, orchestrator: DadBotOrchestrator, monkeypatch
-    ):
+    async def test_mutation_guard_blocks_out_of_band_queue(self, orchestrator: DadBotOrchestrator, monkeypatch):
         """Claim: MutationGuard.queue() raises RuntimeError when called outside SaveNode."""
-        from dadbot.core.graph import MutationGuard, MutationIntent, MutationKind
+        from dadbot.core.graph import MutationIntent, MutationKind
 
         _, context = await _run(orchestrator, "Guard test", session_id="adv-guard")
 
         # Simulate an out-of-band mutation attempt on a fresh mutation queue.
         from dadbot.core.graph import MutationQueue
+
         queue = MutationQueue()
         queue.bind_owner(context.trace_id + "-test")
         queue._mutations_locked = True
@@ -148,6 +138,7 @@ class TestPromptInjectionResistance:
         # Build a minimal valid LEDGER intent (no temporal required).
         import time
         from datetime import datetime
+
         now_dt = datetime.now().astimezone().replace(microsecond=0)
         temporal = {
             "wall_time": now_dt.isoformat(timespec="seconds"),
@@ -172,43 +163,37 @@ class TestPromptInjectionResistance:
 
 @pytest.mark.adversarial
 class TestDelegationExplosionPrevention:
-
     @pytest.mark.asyncio
-    async def test_oversized_delegation_block_is_capped(
-        self, orchestrator: DadBotOrchestrator, monkeypatch
-    ):
+    async def test_oversized_delegation_block_is_capped(self, orchestrator: DadBotOrchestrator, monkeypatch):
         """Claim: A delegate block with >8 subtasks is trimmed to _MAX_DELEGATION_SUBTASKS."""
         from dadbot.core.nodes import _MAX_DELEGATION_SUBTASKS
 
         service = orchestrator.registry.get("agent_service")
 
-        async def _huge_delegate(
-            context: TurnContext, _rich: dict[str, Any]
-        ) -> tuple[str, bool]:
+        async def _huge_delegate(context: TurnContext, _rich: dict[str, Any]) -> tuple[str, bool]:
             if not context.metadata.get("parent_trace_id"):
                 return (
-                    json.dumps({
-                        "type": "delegate",
-                        "mode": "sequential",
-                        "subtasks": [
-                            {"agent": f"agent_{i}", "input": f"task {i}"}
-                            for i in range(20)  # 20 > _MAX_DELEGATION_SUBTASKS
-                        ],
-                    }),
+                    json.dumps(
+                        {
+                            "type": "delegate",
+                            "mode": "sequential",
+                            "subtasks": [
+                                {"agent": f"agent_{i}", "input": f"task {i}"}
+                                for i in range(20)  # 20 > _MAX_DELEGATION_SUBTASKS
+                            ],
+                        }
+                    ),
                     False,
                 )
             return (f"done::{context.metadata.get('agent_name')}", False)
 
         monkeypatch.setattr(service, "run_agent", _huge_delegate)
 
-        _, context = await _run(
-            orchestrator, "Explode with many subtasks", session_id="adv-explosion"
-        )
+        _, context = await _run(orchestrator, "Explode with many subtasks", session_id="adv-explosion")
 
         executed = int(context.metadata.get("subtasks_executed") or 0)
         assert executed <= _MAX_DELEGATION_SUBTASKS, (
-            f"Expected at most {_MAX_DELEGATION_SUBTASKS} subtasks, "
-            f"but {executed} were executed"
+            f"Expected at most {_MAX_DELEGATION_SUBTASKS} subtasks, but {executed} were executed"
         )
         # Arbitration log should contain a trimmed event.
         arb_log = list(context.state.get("delegation_arbitration_log") or [])
@@ -216,18 +201,14 @@ class TestDelegationExplosionPrevention:
         assert trimmed_events, "Expected a subtask_trimmed arbitration event"
 
     @pytest.mark.asyncio
-    async def test_recursive_delegation_is_depth_capped(
-        self, orchestrator: DadBotOrchestrator, monkeypatch
-    ):
+    async def test_recursive_delegation_is_depth_capped(self, orchestrator: DadBotOrchestrator, monkeypatch):
         """Claim: Recursively delegating agents are capped at _MAX_DELEGATION_DEPTH."""
         from dadbot.core.nodes import _MAX_DELEGATION_DEPTH
 
         service = orchestrator.registry.get("agent_service")
         calls: list[int] = []
 
-        async def _recursive(
-            context: TurnContext, _rich: dict[str, Any]
-        ) -> tuple[str, bool]:
+        async def _recursive(context: TurnContext, _rich: dict[str, Any]) -> tuple[str, bool]:
             calls.append(1)
             return (
                 json.dumps({"type": "delegate", "subtasks": [{"input": "recurse"}]}),
@@ -236,9 +217,7 @@ class TestDelegationExplosionPrevention:
 
         monkeypatch.setattr(service, "run_agent", _recursive)
 
-        _, context = await _run(
-            orchestrator, "Recurse forever", session_id="adv-recursion"
-        )
+        _, context = await _run(orchestrator, "Recurse forever", session_id="adv-recursion")
 
         assert len(calls) <= _MAX_DELEGATION_DEPTH + 1
         assert bool(context.metadata.get("delegation_depth_exceeded")) is True
@@ -251,11 +230,8 @@ class TestDelegationExplosionPrevention:
 
 @pytest.mark.adversarial
 class TestMemoryPoisoningResistance:
-
     @pytest.mark.asyncio
-    async def test_contradictory_inputs_do_not_crash_pipeline(
-        self, orchestrator: DadBotOrchestrator
-    ):
+    async def test_contradictory_inputs_do_not_crash_pipeline(self, orchestrator: DadBotOrchestrator):
         """Claim: Contradictory sequential inputs don't crash the system."""
         contradictions = [
             ("My name is Alice and I love hiking", "adv-poison"),
@@ -267,38 +243,24 @@ class TestMemoryPoisoningResistance:
         ]
         for user_input, session_id in contradictions:
             result, context = await _run(orchestrator, user_input, session_id=session_id)
-            assert isinstance(result, tuple), (
-                f"Pipeline crashed on contradiction: {user_input!r}"
-            )
-            assert bool(context.fidelity.save), (
-                f"SaveNode did not execute after contradiction: {user_input!r}"
-            )
+            assert isinstance(result, tuple), f"Pipeline crashed on contradiction: {user_input!r}"
+            assert bool(context.fidelity.save), f"SaveNode did not execute after contradiction: {user_input!r}"
 
     @pytest.mark.asyncio
-    async def test_memory_state_is_a_dict_after_poisoning(
-        self, orchestrator: DadBotOrchestrator
-    ):
+    async def test_memory_state_is_a_dict_after_poisoning(self, orchestrator: DadBotOrchestrator):
         """Claim: memory_structured remains a dict even after contradictory inputs."""
         for i in range(6):
             user_input = f"Contradictory fact {i}: " + ("yes " if i % 2 == 0 else "no ") * 5
-            _, context = await _run(
-                orchestrator, user_input, session_id="adv-mem-structure"
-            )
+            _, context = await _run(orchestrator, user_input, session_id="adv-mem-structure")
             structured = context.state.get("memory_structured")
-            assert isinstance(structured, dict), (
-                f"memory_structured became {type(structured)} after turn {i}"
-            )
+            assert isinstance(structured, dict), f"memory_structured became {type(structured)} after turn {i}"
 
     @pytest.mark.asyncio
-    async def test_large_input_does_not_corrupt_pipeline(
-        self, orchestrator: DadBotOrchestrator
-    ):
+    async def test_large_input_does_not_corrupt_pipeline(self, orchestrator: DadBotOrchestrator):
         """Claim: An abnormally large user input completes the pipeline without corruption."""
         # 10KB input — tests token budget handling and pipeline stability.
         large_input = "padding " * 1300
-        result, context = await _run(
-            orchestrator, large_input, session_id="adv-large-input"
-        )
+        result, context = await _run(orchestrator, large_input, session_id="adv-large-input")
         assert isinstance(result, tuple)
         assert bool(context.fidelity.save)
         assert str(context.state.get("last_transaction_status") or "") == "committed"

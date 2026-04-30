@@ -6,7 +6,6 @@ from dadbot.core.execution_replay_engine import (
 )
 
 
-
 def _trace_context() -> dict:
     return {
         "final_hash": "trace-final-hash-001",
@@ -28,7 +27,6 @@ def _trace_context() -> dict:
     }
 
 
-
 def _seed(trace_context: dict) -> dict:
     return reconstruct_terminal_state_from_trace(
         terminal_state_seed={
@@ -47,7 +45,6 @@ def _seed(trace_context: dict) -> dict:
     )
 
 
-
 def test_phase2_replay_equivalence_passes_for_identical_seed_and_trace():
     trace_context = _trace_context()
     seed = _seed(trace_context)
@@ -60,7 +57,6 @@ def test_phase2_replay_equivalence_passes_for_identical_seed_and_trace():
 
     assert report["equivalent"] is True
     assert report["violations"] == []
-
 
 
 def test_phase2_replay_equivalence_detects_memory_linearization_divergence():
@@ -78,7 +74,6 @@ def test_phase2_replay_equivalence_detects_memory_linearization_divergence():
     assert "memory_retrieval_hash" in report["violations"]
 
 
-
 def test_phase2_replay_equivalence_detects_policy_snapshot_divergence():
     trace_context = _trace_context()
     seed = _seed(trace_context)
@@ -92,7 +87,6 @@ def test_phase2_replay_equivalence_detects_policy_snapshot_divergence():
 
     assert report["equivalent"] is False
     assert "policy_hash" in report["violations"]
-
 
 
 def test_phase2_replay_equivalence_requires_dag_hash_match():

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from copy import deepcopy
 
@@ -54,22 +54,34 @@ class ConversationStore:
             if isinstance(item, dict)
         ]
 
-    def append_user(self, thread_id: str, text: str, *, attachments: list[dict] | None = None) -> None:
+    def append_user(
+        self,
+        thread_id: str,
+        text: str,
+        *,
+        attachments: list[dict] | None = None,
+    ) -> None:
         self.get_thread(thread_id).append(
             {
                 "role": "user",
                 "content": str(text or ""),
                 "attachments": list(attachments or []),
-            }
+            },
         )
 
-    def append_assistant(self, thread_id: str, text: str, *, attachments: list[dict] | None = None) -> None:
+    def append_assistant(
+        self,
+        thread_id: str,
+        text: str,
+        *,
+        attachments: list[dict] | None = None,
+    ) -> None:
         self.get_thread(thread_id).append(
             {
                 "role": "assistant",
                 "content": str(text or ""),
                 "attachments": list(attachments or []),
-            }
+            },
         )
 
     def append_to_last_assistant(self, thread_id: str, *, attachment: dict) -> None:
@@ -229,7 +241,12 @@ class ConversationStore:
         view["schema_policy"] = self.thread_view_schema_policy()
         return view
 
-    def thread_view(self, thread_id: str, *, version: str = THREAD_VIEW_DEFAULT_VERSION) -> dict:
+    def thread_view(
+        self,
+        thread_id: str,
+        *,
+        version: str = THREAD_VIEW_DEFAULT_VERSION,
+    ) -> dict:
         if version == self.THREAD_VIEW_V1:
             return self._thread_view_v1(thread_id)
         if version == self.THREAD_VIEW_V2:

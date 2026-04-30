@@ -57,11 +57,12 @@ Registering custom migrations
 
     get_trace_migrator().register("1.0", "2.0", my_migration)
 """
+
 from __future__ import annotations
 
+from collections.abc import Callable
 from copy import deepcopy
-from typing import Any, Callable
-
+from typing import Any
 
 # Bump this string each time the execution trace contract envelope changes.
 EXECUTION_TRACE_CONTRACT_SCHEMA_VERSION: str = "1.0"
@@ -73,6 +74,7 @@ _LEGACY_VERSION: str = "0.0"
 # ---------------------------------------------------------------------------
 # Stamping helper
 # ---------------------------------------------------------------------------
+
 
 def stamp_trace_contract_version(contract: dict[str, Any]) -> dict[str, Any]:
     """Add ``schema_version`` to *contract* if absent.
@@ -89,6 +91,7 @@ def stamp_trace_contract_version(contract: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Migration engine
 # ---------------------------------------------------------------------------
+
 
 class ExecutionTraceContractMigration:
     """A single schema-version upgrade step for execution trace contracts."""
@@ -138,10 +141,10 @@ class ExecutionTraceContractSchemaMigrator:
         from_version: str,
         to_version: str,
         migrate_fn: Callable[[dict[str, Any]], dict[str, Any]],
-    ) -> "ExecutionTraceContractSchemaMigrator":
+    ) -> ExecutionTraceContractSchemaMigrator:
         """Register a migration step.  Returns self for chaining."""
         self._migrations.append(
-            ExecutionTraceContractMigration(from_version, to_version, migrate_fn)
+            ExecutionTraceContractMigration(from_version, to_version, migrate_fn),
         )
         return self
 
@@ -179,18 +182,13 @@ class ExecutionTraceContractSchemaMigrator:
 
         return contract
 
-    def migrate_all(
-        self, contracts: list[dict[str, Any]]
-    ) -> list[dict[str, Any]]:
+    def migrate_all(self, contracts: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Migrate a list of contracts in-order."""
         return [self.migrate(c) for c in contracts]
 
     def needs_migration(self, contract: dict[str, Any]) -> bool:
         """Return True if *contract* is not at the current schema version."""
-        return (
-            str(contract.get("schema_version") or _LEGACY_VERSION)
-            != EXECUTION_TRACE_CONTRACT_SCHEMA_VERSION
-        )
+        return str(contract.get("schema_version") or _LEGACY_VERSION) != EXECUTION_TRACE_CONTRACT_SCHEMA_VERSION
 
     @property
     def migration_count(self) -> int:

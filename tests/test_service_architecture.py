@@ -1,8 +1,8 @@
+from dadbot.core.dadbot import DadBot
 from dadbot_system.contracts import ChatRequest, ChatResponse, ServiceConfig, WorkerResult, WorkerTask
 from dadbot_system.orchestration import DadBotOrchestrator
 from dadbot_system.state import InMemoryStateStore
 from dadbot_system.worker import DadBotTaskProcessor
-from dadbot.core.dadbot import DadBot
 
 
 class FakeBroker:
@@ -55,7 +55,9 @@ class FakeBot:
             "active_tool_observation_context": None,
             "planner_debug": {},
             "memory_store": {
-                "pending_proactive_messages": [{"message": "Check in tonight.", "source": "life-pattern", "created_at": "2026-04-19T18:00:00"}],
+                "pending_proactive_messages": [
+                    {"message": "Check in tonight.", "source": "life-pattern", "created_at": "2026-04-19T18:00:00"}
+                ],
                 "recent_moods": ["stressed", "positive"],
                 "last_mood": "positive",
             },
@@ -90,7 +92,9 @@ def test_dadbot_session_snapshot_roundtrip_restores_runtime_state(bot):
     bot._pending_daily_checkin_context = True
     bot._active_tool_observation_context = "Fresh web lookup result"
     bot._last_planner_debug = {"planner_status": "used-tool", "planner_parameters": {"query": "weather"}}
-    bot.MEMORY_STORE["pending_proactive_messages"] = [{"message": "Check in tonight.", "source": "life-pattern", "created_at": "2026-04-19T18:00:00"}]
+    bot.MEMORY_STORE["pending_proactive_messages"] = [
+        {"message": "Check in tonight.", "source": "life-pattern", "created_at": "2026-04-19T18:00:00"}
+    ]
     bot.MEMORY_STORE["recent_moods"] = ["stressed", "positive"]
     bot.MEMORY_STORE["last_mood"] = "positive"
 
@@ -200,7 +204,9 @@ def test_orchestrator_tracks_task_status_response_and_events():
                 "history": [{"role": "system", "content": "Dad system prompt"}],
                 "planner_debug": planner_debug_factory(),
                 "memory_store": {
-                    "pending_proactive_messages": [{"message": "Check in tonight.", "source": "life-pattern", "created_at": "2026-04-19T18:00:00"}],
+                    "pending_proactive_messages": [
+                        {"message": "Check in tonight.", "source": "life-pattern", "created_at": "2026-04-19T18:00:00"}
+                    ],
                     "recent_moods": ["stressed"],
                     "last_mood": "stressed",
                 },
@@ -221,7 +227,9 @@ def test_orchestrator_tracks_task_status_response_and_events():
     assert response["reply"] == "Love you, buddy."
     assert task_status["status"] == "completed"
     assert task_status["session_state"]["history"][0]["role"] == "system"
-    assert task_status["session_state"]["memory_store"]["pending_proactive_messages"][0]["message"] == "Check in tonight."
+    assert (
+        task_status["session_state"]["memory_store"]["pending_proactive_messages"][0]["message"] == "Check in tonight."
+    )
     assert any(event["event_type"] == "response.ready" for event in events)
 
 

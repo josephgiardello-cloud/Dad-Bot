@@ -1,4 +1,4 @@
-﻿"""Preferences surface renderer."""
+"""Preferences surface renderer."""
 
 from __future__ import annotations
 
@@ -20,7 +20,11 @@ from dadbot.ui.helpers import (
     render_voice_dependency_help,
     voice_profile_catalog,
 )
-from dadbot.ui.prefs_state import notification_settings, profile_voice_preferences, ui_preferences
+from dadbot.ui.prefs_state import (
+    notification_settings,
+    profile_voice_preferences,
+    ui_preferences,
+)
 from dadbot.ui.utils import option_index
 
 if TYPE_CHECKING:
@@ -32,23 +36,62 @@ DAD_AVATAR_PATH = _STATIC_DIR / "dad_avatar.png"
 __all__ = ["render_preferences_tab"]
 
 
-def _render_persona_section(bot: "DadBot", preset_catalog: dict) -> None:
+def _render_persona_section(bot: DadBot, preset_catalog: dict) -> None:
     with st.container(border=True):
         st.subheader("Persona")
         st.caption("Tune how Dad sounds and what he emphasizes.")
         with st.form("persona-settings"):
             preset_options = list(preset_catalog.keys())
-            selected_preset = st.selectbox("Persona preset", options=preset_options, index=preset_options.index(bot.current_persona_preset()), format_func=lambda key: preset_catalog[key]["label"])
-            dad_name = st.text_input("Dad display name", value=bot.STYLE.get("name", "Dad"))
-            listener_name = st.text_input("Listener name", value=bot.STYLE.get("listener_name", "Tony"))
-            signoff = st.text_input("Signoff", value=bot.STYLE.get("signoff", "Love you, buddy."))
-            behavior_rules = st.text_area("Behavior rules", value="\n".join(bot.STYLE.get("behavior_rules", [])), height=180)
-            opening_messages = st.text_area("Opening message options", value="\n".join(bot.opening_message_candidates()), height=110)
+            selected_preset = st.selectbox(
+                "Persona preset",
+                options=preset_options,
+                index=preset_options.index(bot.current_persona_preset()),
+                format_func=lambda key: preset_catalog[key]["label"],
+            )
+            dad_name = st.text_input(
+                "Dad display name",
+                value=bot.STYLE.get("name", "Dad"),
+            )
+            listener_name = st.text_input(
+                "Listener name",
+                value=bot.STYLE.get("listener_name", "Tony"),
+            )
+            signoff = st.text_input(
+                "Signoff",
+                value=bot.STYLE.get("signoff", "Love you, buddy."),
+            )
+            behavior_rules = st.text_area(
+                "Behavior rules",
+                value="\n".join(bot.STYLE.get("behavior_rules", [])),
+                height=180,
+            )
+            opening_messages = st.text_area(
+                "Opening message options",
+                value="\n".join(bot.opening_message_candidates()),
+                height=110,
+            )
             if st.form_submit_button("Save persona", type="primary"):
-                bot.update_style_profile(name=dad_name, listener_name=listener_name, signoff=signoff, behavior_rules=behavior_rules.splitlines(), persona_preset=selected_preset, save=False)
+                bot.update_style_profile(
+                    name=dad_name,
+                    listener_name=listener_name,
+                    signoff=signoff,
+                    behavior_rules=behavior_rules.splitlines(),
+                    persona_preset=selected_preset,
+                    save=False,
+                )
                 bot.apply_persona_preset(selected_preset, save=False)
-                bot.update_style_profile(name=dad_name, listener_name=listener_name, signoff=signoff, behavior_rules=behavior_rules.splitlines(), persona_preset=selected_preset, save=False)
-                bot.update_opening_messages_profile(opening_messages.splitlines(), save=False)
+                bot.update_style_profile(
+                    name=dad_name,
+                    listener_name=listener_name,
+                    signoff=signoff,
+                    behavior_rules=behavior_rules.splitlines(),
+                    persona_preset=selected_preset,
+                    save=False,
+                )
+                bot.update_opening_messages_profile(
+                    opening_messages.splitlines(),
+                    save=False,
+                )
                 bot.save_profile()
                 st.success("Persona settings saved.")
                 st.rerun()
@@ -57,7 +100,9 @@ def _render_persona_section(bot: "DadBot", preset_catalog: dict) -> None:
 def _render_avatar_studio_section() -> None:
     with st.container(border=True):
         st.subheader("Avatar Studio")
-        st.caption("Generate and save a custom photo of Dad using any Ollama image model. Stored as the persistent sidebar avatar.")
+        st.caption(
+            "Generate and save a custom photo of Dad using any Ollama image model. Stored as the persistent sidebar avatar.",
+        )
         _avatar_prompt = st.text_area(
             "Avatar generation prompt",
             value=(
@@ -72,20 +117,40 @@ def _render_avatar_studio_section() -> None:
         _avatar_col1, _avatar_col2 = st.columns([1, 2])
         with _avatar_col1:
             if DAD_AVATAR_PATH.exists():
-                st.image(str(DAD_AVATAR_PATH), caption="Current avatar", use_container_width=True)
+                st.image(
+                    str(DAD_AVATAR_PATH),
+                    caption="Current avatar",
+                    use_container_width=True,
+                )
             else:
-                st.markdown("<div style='font-size:5rem;text-align:center;'>Ã°Å¸Â§â€</div>", unsafe_allow_html=True)
+                st.markdown(
+                    "<div style='font-size:5rem;text-align:center;'>Ã°Å¸Â§â€</div>",
+                    unsafe_allow_html=True,
+                )
                 st.caption("No avatar yet")
         with _avatar_col2:
             _img_model = None
-            _img_candidates = ["flux", "flux-dev", "flux-schnell", "sdxl", "stable-diffusion"]
+            _img_candidates = [
+                "flux",
+                "flux-dev",
+                "flux-schnell",
+                "sdxl",
+                "stable-diffusion",
+            ]
             _img_model = find_available_image_model(tuple(_img_candidates))
             if _img_model:
                 st.success(f"Image model ready: **{_img_model}**")
             else:
-                st.warning("No Ollama image model found. Pull `flux` or `sdxl` in Ollama to enable generation.")
+                st.warning(
+                    "No Ollama image model found. Pull `flux` or `sdxl` in Ollama to enable generation.",
+                )
                 st.code("ollama pull flux", language="bash")
-            if st.button("Generate new avatar", use_container_width=True, disabled=not _img_model, type="primary"):
+            if st.button(
+                "Generate new avatar",
+                use_container_width=True,
+                disabled=not _img_model,
+                type="primary",
+            ):
                 with st.spinner(f"Generating avatar with {_img_model}..."):
                     try:
                         _resp = ollama.generate(
@@ -96,14 +161,25 @@ def _render_avatar_studio_section() -> None:
                         _imgs = [base64.b64decode(img) for img in _resp.get("images", []) if img]
                         if _imgs:
                             DAD_AVATAR_PATH.write_bytes(_imgs[0])
-                            st.success("Avatar saved! The sidebar will update on next reload.")
-                            st.image(_imgs[0], caption="New avatar", use_container_width=True)
+                            st.success(
+                                "Avatar saved! The sidebar will update on next reload.",
+                            )
+                            st.image(
+                                _imgs[0],
+                                caption="New avatar",
+                                use_container_width=True,
+                            )
                         else:
-                            st.error("Model returned no image. Try a different model or prompt.")
+                            st.error(
+                                "Model returned no image. Try a different model or prompt.",
+                            )
                     except Exception as _exc:
                         st.error(f"Generation failed: {_exc}")
             if DAD_AVATAR_PATH.exists():
-                if st.button("Remove avatar (revert to emoji)", use_container_width=True):
+                if st.button(
+                    "Remove avatar (revert to emoji)",
+                    use_container_width=True,
+                ):
                     try:
                         DAD_AVATAR_PATH.unlink()
                         st.success("Avatar removed.")
@@ -114,25 +190,56 @@ def _render_avatar_studio_section() -> None:
 
 # _render_preferences_form helpers â€“ display/voice column, LLM/audio column, and save handler
 
+
 def _render_col1_display_voice(preferences: dict, voice: dict) -> dict:
     """Render column 1 (display + voice mode) widgets; return collected values."""
-    theme_mode = st.selectbox("Theme", options=["warm", "night"], index=["warm", "night"].index(preferences["theme_mode"]), format_func=lambda value: "Warm Day" if value == "warm" else "Night Shift")
-    auto_mood_theme = st.checkbox("Mood visualizer (auto theme)", value=bool(preferences.get("auto_mood_theme", True)))
+    theme_mode = st.selectbox(
+        "Theme",
+        options=["warm", "night"],
+        index=["warm", "night"].index(preferences["theme_mode"]),
+        format_func=lambda value: "Warm Day" if value == "warm" else "Night Shift",
+    )
+    auto_mood_theme = st.checkbox(
+        "Mood visualizer (auto theme)",
+        value=bool(preferences.get("auto_mood_theme", True)),
+    )
     power_mode = st.selectbox(
         "Power mode",
         options=["turbo", "battery"],
         index=0 if str(preferences.get("power_mode", "turbo")) == "turbo" else 1,
         format_func=lambda value: "Turbo" if value == "turbo" else "Battery",
     )
-    font_scale = st.slider("Font scale", min_value=0.9, max_value=1.3, value=float(preferences["font_scale"]), step=0.05)
-    high_contrast = st.checkbox("High contrast", value=bool(preferences["high_contrast"]))
-    append_signoff = st.checkbox("Append signoff", value=bool(preferences["append_signoff"]))
-    light_mode = st.checkbox("Light runtime mode", value=bool(preferences["light_mode"]))
-    voice_enabled = st.checkbox("Enable voice interaction", value=bool(voice.get("enabled", False)))
+    font_scale = st.slider(
+        "Font scale",
+        min_value=0.9,
+        max_value=1.3,
+        value=float(preferences["font_scale"]),
+        step=0.05,
+    )
+    high_contrast = st.checkbox(
+        "High contrast",
+        value=bool(preferences["high_contrast"]),
+    )
+    append_signoff = st.checkbox(
+        "Append signoff",
+        value=bool(preferences["append_signoff"]),
+    )
+    light_mode = st.checkbox(
+        "Light runtime mode",
+        value=bool(preferences["light_mode"]),
+    )
+    voice_enabled = st.checkbox(
+        "Enable voice interaction",
+        value=bool(voice.get("enabled", False)),
+    )
     voice_mode = st.selectbox(
         "Voice mode",
         options=["push_to_talk", "always_listening", "ambient"],
-        index=option_index(["push_to_talk", "always_listening", "ambient"], str(voice.get("mode") or "push_to_talk"), fallback=0),
+        index=option_index(
+            ["push_to_talk", "always_listening", "ambient"],
+            str(voice.get("mode") or "push_to_talk"),
+            fallback=0,
+        ),
         format_func=lambda value: {
             "push_to_talk": "Push-to-talk",
             "always_listening": "Always-listening",
@@ -170,7 +277,7 @@ def _render_col1_display_voice(preferences: dict, voice: dict) -> dict:
     }
 
 
-def _render_col2_llm_tools_audio(  # noqa: PLR0912
+def _render_col2_llm_tools_audio(
     tools: dict,
     notifications: dict,
     voice: dict,
@@ -182,7 +289,11 @@ def _render_col2_llm_tools_audio(  # noqa: PLR0912
     llm_provider = st.selectbox(
         "LLM provider",
         options=["ollama", "openai", "anthropic", "groq", "google", "xai"],
-        index=option_index(["ollama", "openai", "anthropic", "groq", "google", "xai"], current_llm_provider, fallback=0),
+        index=option_index(
+            ["ollama", "openai", "anthropic", "groq", "google", "xai"],
+            current_llm_provider,
+            fallback=0,
+        ),
         format_func=lambda value: "Ollama (Local)" if value == "ollama" else value.upper(),
     )
     llm_model = st.text_input(
@@ -204,15 +315,24 @@ def _render_col2_llm_tools_audio(  # noqa: PLR0912
         if _required_key and os.environ.get(_required_key):
             st.caption(f"âœ… `{_required_key}` detected.")
         elif _required_key:
-            st.caption(f"âš ï¸ Set `{_required_key}` in your environment before saving.")
+            st.caption(
+                f"âš ï¸ Set `{_required_key}` in your environment before saving.",
+            )
     agentic_enabled = st.checkbox("Agentic tools enabled", value=tools["enabled"])
     auto_reminders = st.checkbox("Auto reminders", value=tools["auto_reminders"])
     auto_web_lookup = st.checkbox("Auto web lookup", value=tools["auto_web_lookup"])
-    notify_enabled = st.checkbox("Desktop proactive notifications", value=bool(notifications.get("enabled", False)))
+    notify_enabled = st.checkbox(
+        "Desktop proactive notifications",
+        value=bool(notifications.get("enabled", False)),
+    )
     notification_backend = st.selectbox(
         "Notification backend",
         options=["auto", "notifypy", "plyer"],
-        index=option_index(["auto", "notifypy", "plyer"], str(notifications.get("backend") or "auto"), fallback=0),
+        index=option_index(
+            ["auto", "notifypy", "plyer"],
+            str(notifications.get("backend") or "auto"),
+            fallback=0,
+        ),
         format_func=lambda value: value.title(),
         disabled=not notify_enabled,
     )
@@ -240,26 +360,56 @@ def _render_col2_llm_tools_audio(  # noqa: PLR0912
         value=int(notifications.get("quiet_hours_end", 7) or 7),
         disabled=not notify_enabled,
     )
-    max_thinking_time_seconds = st.slider("Max thinking time (seconds)", min_value=15, max_value=120, value=int(runtime["max_thinking_time_seconds"]), step=5)
-    stream_max_chars = st.slider("Reply stream budget", min_value=4000, max_value=24000, value=int(runtime["stream_max_chars"]), step=1000)
-    stt_enabled = st.checkbox("Enable local STT", value=bool(voice.get("stt_enabled", True)))
+    max_thinking_time_seconds = st.slider(
+        "Max thinking time (seconds)",
+        min_value=15,
+        max_value=120,
+        value=int(runtime["max_thinking_time_seconds"]),
+        step=5,
+    )
+    stream_max_chars = st.slider(
+        "Reply stream budget",
+        min_value=4000,
+        max_value=24000,
+        value=int(runtime["stream_max_chars"]),
+        step=1000,
+    )
+    stt_enabled = st.checkbox(
+        "Enable local STT",
+        value=bool(voice.get("stt_enabled", True)),
+    )
     stt_backend = st.selectbox(
         "Preferred STT backend",
         options=["auto", "faster_whisper", "openai_whisper"],
-        index=option_index(["auto", "faster_whisper", "openai_whisper"], str(voice.get("stt_backend") or "auto"), fallback=0),
+        index=option_index(
+            ["auto", "faster_whisper", "openai_whisper"],
+            str(voice.get("stt_backend") or "auto"),
+            fallback=0,
+        ),
         format_func=lambda value: value.replace("_", " ").title(),
     )
     stt_model = st.selectbox(
         "STT model",
         options=["tiny", "base", "small"],
-        index=option_index(["tiny", "base", "small"], str(voice.get("stt_model") or "base"), fallback=1),
+        index=option_index(
+            ["tiny", "base", "small"],
+            str(voice.get("stt_model") or "base"),
+            fallback=1,
+        ),
     )
-    tts_enabled = st.checkbox("Enable local TTS", value=bool(voice.get("tts_enabled", True)))
+    tts_enabled = st.checkbox(
+        "Enable local TTS",
+        value=bool(voice.get("tts_enabled", True)),
+    )
     _piper_avail = bool(shutil.which("piper"))
     tts_backend_pref = st.selectbox(
         "TTS backend",
         options=["pyttsx3", "piper"],
-        index=option_index(["pyttsx3", "piper"], str(voice.get("tts_backend") or "pyttsx3"), fallback=0),
+        index=option_index(
+            ["pyttsx3", "piper"],
+            str(voice.get("tts_backend") or "pyttsx3"),
+            fallback=0,
+        ),
         format_func=lambda v: "Piper (neural, high-quality)" if v == "piper" else "pyttsx3 (system voices)",
         disabled=not tts_enabled,
         help="Piper requires the piper executable on PATH and a .onnx model file.",
@@ -268,35 +418,74 @@ def _render_col2_llm_tools_audio(  # noqa: PLR0912
         if _piper_avail:
             st.success("Piper executable detected on PATH.")
         else:
-            st.warning("`piper` not found on PATH. Install from https://github.com/rhasspy/piper/releases")
+            st.warning(
+                "`piper` not found on PATH. Install from https://github.com/rhasspy/piper/releases",
+            )
         tts_piper_model_path = st.text_input(
             "Piper model path (.onnx)",
             value=str(voice.get("tts_piper_model_path") or ""),
             help="Full path to a downloaded Piper .onnx model file. Download from https://rhasspy.github.io/piper-samples/",
             disabled=not tts_enabled,
         )
-        st.caption("Tip: `en_US-lessac-medium.onnx` is a good starting point for an American male voice.")
+        st.caption(
+            "Tip: `en_US-lessac-medium.onnx` is a good starting point for an American male voice.",
+        )
     else:
         tts_piper_model_path = str(voice.get("tts_piper_model_path") or "")
     profile_catalog = voice_profile_catalog()
     tts_voice = st.selectbox(
         "Dad voice profile",
         options=list(profile_catalog.keys()),
-        index=option_index(list(profile_catalog.keys()), str(voice.get("tts_voice") or "warm_dad"), fallback=0),
+        index=option_index(
+            list(profile_catalog.keys()),
+            str(voice.get("tts_voice") or "warm_dad"),
+            fallback=0,
+        ),
         format_func=lambda value: value.replace("_", " ").title(),
     )
     st.caption(profile_catalog.get(tts_voice, ""))
-    tts_autoplay = st.checkbox("Autoplay Dad voice replies", value=bool(voice.get("tts_autoplay", False)), disabled=not tts_enabled)
-    tts_rate = st.slider("Dad voice speed", min_value=-40, max_value=40, value=int(voice.get("tts_rate", 0)), step=5, disabled=not tts_enabled)
-    warmth = st.slider("Warmth", min_value=0, max_value=100, value=int(voice.get("warmth", 70)), step=5)
-    dad_joke_frequency = st.slider("Dad-joke frequency", min_value=0, max_value=100, value=int(voice.get("dad_joke_frequency", 35)), step=5)
-    pacing = st.slider("Voice pacing", min_value=0, max_value=100, value=int(voice.get("pacing", 50)), step=5)
-    st.caption("Performance note: first local STT run may take 10-30 seconds while Whisper model weights load.")
+    tts_autoplay = st.checkbox(
+        "Autoplay Dad voice replies",
+        value=bool(voice.get("tts_autoplay", False)),
+        disabled=not tts_enabled,
+    )
+    tts_rate = st.slider(
+        "Dad voice speed",
+        min_value=-40,
+        max_value=40,
+        value=int(voice.get("tts_rate", 0)),
+        step=5,
+        disabled=not tts_enabled,
+    )
+    warmth = st.slider(
+        "Warmth",
+        min_value=0,
+        max_value=100,
+        value=int(voice.get("warmth", 70)),
+        step=5,
+    )
+    dad_joke_frequency = st.slider(
+        "Dad-joke frequency",
+        min_value=0,
+        max_value=100,
+        value=int(voice.get("dad_joke_frequency", 35)),
+        step=5,
+    )
+    pacing = st.slider(
+        "Voice pacing",
+        min_value=0,
+        max_value=100,
+        value=int(voice.get("pacing", 50)),
+        step=5,
+    )
+    st.caption(
+        "Performance note: first local STT run may take 10-30 seconds while Whisper model weights load.",
+    )
     stt_ready, _stt_backend_active, stt_message = local_stt_backend_status(
         {
             "stt_enabled": bool(stt_enabled),
             "stt_backend": stt_backend,
-        }
+        },
     )
     _tts_ready, _tts_backend_active, tts_message = local_tts_backend_status()
     if not stt_ready:
@@ -334,8 +523,8 @@ def _render_col2_llm_tools_audio(  # noqa: PLR0912
     }
 
 
-def _save_preferences(  # noqa: PLR0914
-    bot: "DadBot",
+def _save_preferences(
+    bot: DadBot,
     preferences: dict,
     voice: dict,
     c1: dict,
@@ -357,7 +546,7 @@ def _save_preferences(  # noqa: PLR0914
             "high_contrast": c1["high_contrast"],
             "append_signoff": c1["append_signoff"],
             "light_mode": c1["light_mode"],
-        }
+        },
     )
     apply_power_mode(bot, c1["power_mode"])
     updated_voice = {
@@ -382,11 +571,15 @@ def _save_preferences(  # noqa: PLR0914
         "muted": bool(voice.get("muted", False)),
         "mic_preference": str(voice.get("mic_preference") or "default"),
         "last_used_device": str(voice.get("last_used_device") or "default"),
-        "auto_listen_allowed": bool(c1["voice_mode"] in {"always_listening", "ambient"}),
+        "auto_listen_allowed": bool(
+            c1["voice_mode"] in {"always_listening", "ambient"},
+        ),
         "last_mode": c1["voice_mode"],
         "interruptions_enabled": bool(voice.get("interruptions_enabled", True)),
         "barge_in_enabled": bool(voice.get("barge_in_enabled", True)),
-        "barge_in_min_audio_bytes": int(voice.get("barge_in_min_audio_bytes", 4000) or 4000),
+        "barge_in_min_audio_bytes": int(
+            voice.get("barge_in_min_audio_bytes", 4000) or 4000,
+        ),
         "allow_tts_cancel": bool(voice.get("allow_tts_cancel", True)),
         "priority_override_enabled": bool(voice.get("priority_override_enabled", True)),
         "known_device_ids": list(voice.get("known_device_ids") or ["default"]),
@@ -400,10 +593,31 @@ def _save_preferences(  # noqa: PLR0914
     }
     bot.LLM_PROVIDER = bot.PROFILE["llm"]["provider"]
     bot.LLM_MODEL = bot.PROFILE["llm"]["model"]
-    bot.update_agentic_tool_profile(enabled=c2["agentic_enabled"], auto_reminders=c2["auto_reminders"], auto_web_lookup=c2["auto_web_lookup"], save=False)
-    bot.update_runtime_profile({"preferred_embedding_models": [item.strip() for item in preferred_models.split(",") if item.strip()], "max_thinking_time_seconds": c2["max_thinking_time_seconds"], "stream_max_chars": c2["stream_max_chars"]}, save=False)
-    bot.update_cadence_profile(family_echo_turn_interval=family_echo_turn_interval, wisdom_turn_interval=wisdom_turn_interval, life_pattern_queue_limit=life_pattern_queue_limit, save=False)
-    bot.update_relationship_calibration_profile(enabled=calibration_enabled, opening_line=opening_line, save=False)
+    bot.update_agentic_tool_profile(
+        enabled=c2["agentic_enabled"],
+        auto_reminders=c2["auto_reminders"],
+        auto_web_lookup=c2["auto_web_lookup"],
+        save=False,
+    )
+    bot.update_runtime_profile(
+        {
+            "preferred_embedding_models": [item.strip() for item in preferred_models.split(",") if item.strip()],
+            "max_thinking_time_seconds": c2["max_thinking_time_seconds"],
+            "stream_max_chars": c2["stream_max_chars"],
+        },
+        save=False,
+    )
+    bot.update_cadence_profile(
+        family_echo_turn_interval=family_echo_turn_interval,
+        wisdom_turn_interval=wisdom_turn_interval,
+        life_pattern_queue_limit=life_pattern_queue_limit,
+        save=False,
+    )
+    bot.update_relationship_calibration_profile(
+        enabled=calibration_enabled,
+        opening_line=opening_line,
+        save=False,
+    )
     bot.PROFILE["notifications"] = {
         "enabled": bool(c2["notify_enabled"]),
         "backend": str(c2["notification_backend"] or "auto").strip().lower() or "auto",
@@ -418,7 +632,7 @@ def _save_preferences(  # noqa: PLR0914
 
 
 def _render_preferences_form(
-    bot: "DadBot",
+    bot: DadBot,
     preferences: dict,
     voice: dict,
     runtime: dict,
@@ -431,29 +645,70 @@ def _render_preferences_form(
 ) -> None:
     with st.container(border=True):
         st.subheader("Preferences")
-        st.caption("Blend session-level UI controls with persistent Dad runtime settings.")
+        st.caption(
+            "Blend session-level UI controls with persistent Dad runtime settings.",
+        )
         with st.form("runtime-settings"):
             col1, col2 = st.columns(2)
             with col1:
                 c1 = _render_col1_display_voice(preferences, voice)
             with col2:
-                c2 = _render_col2_llm_tools_audio(tools, notifications, voice, runtime, current_llm_provider, current_llm_model)
-            preferred_models = st.text_input("Preferred embedding models", value=", ".join(runtime["preferred_embedding_models"]))
-            family_echo_turn_interval = st.slider("Family echo cadence", min_value=1, max_value=12, value=int(cadence["family_echo_turn_interval"]))
-            wisdom_turn_interval = st.slider("Wisdom cadence", min_value=1, max_value=12, value=int(cadence["wisdom_turn_interval"]))
-            life_pattern_queue_limit = st.slider("Proactive queue limit", min_value=1, max_value=6, value=int(cadence["life_pattern_queue_limit"]))
-            calibration_enabled = st.checkbox("Gentle pushback enabled", value=calibration["enabled"])
-            opening_line = st.text_area("Pushback opening line", value=calibration["opening_line"], height=90)
+                c2 = _render_col2_llm_tools_audio(
+                    tools,
+                    notifications,
+                    voice,
+                    runtime,
+                    current_llm_provider,
+                    current_llm_model,
+                )
+            preferred_models = st.text_input(
+                "Preferred embedding models",
+                value=", ".join(runtime["preferred_embedding_models"]),
+            )
+            family_echo_turn_interval = st.slider(
+                "Family echo cadence",
+                min_value=1,
+                max_value=12,
+                value=int(cadence["family_echo_turn_interval"]),
+            )
+            wisdom_turn_interval = st.slider(
+                "Wisdom cadence",
+                min_value=1,
+                max_value=12,
+                value=int(cadence["wisdom_turn_interval"]),
+            )
+            life_pattern_queue_limit = st.slider(
+                "Proactive queue limit",
+                min_value=1,
+                max_value=6,
+                value=int(cadence["life_pattern_queue_limit"]),
+            )
+            calibration_enabled = st.checkbox(
+                "Gentle pushback enabled",
+                value=calibration["enabled"],
+            )
+            opening_line = st.text_area(
+                "Pushback opening line",
+                value=calibration["opening_line"],
+                height=90,
+            )
             if st.form_submit_button("Save preferences", type="primary"):
                 _save_preferences(
-                    bot, preferences, voice, c1, c2,
-                    preferred_models, family_echo_turn_interval,
-                    wisdom_turn_interval, life_pattern_queue_limit,
-                    calibration_enabled, opening_line,
+                    bot,
+                    preferences,
+                    voice,
+                    c1,
+                    c2,
+                    preferred_models,
+                    family_echo_turn_interval,
+                    wisdom_turn_interval,
+                    life_pattern_queue_limit,
+                    calibration_enabled,
+                    opening_line,
                 )
 
 
-def render_preferences_tab(bot: "DadBot") -> None:
+def render_preferences_tab(bot: DadBot) -> None:
     preferences = ui_preferences()
     voice = profile_voice_preferences(bot)
     runtime = bot.runtime_settings()
@@ -462,8 +717,16 @@ def render_preferences_tab(bot: "DadBot") -> None:
     calibration = bot.relationship_calibration_settings()
     notifications = notification_settings(bot)
     llm_profile = bot.PROFILE.get("llm", {}) if isinstance(bot.PROFILE, dict) else {}
-    current_llm_provider = str(llm_profile.get("provider") or getattr(bot, "LLM_PROVIDER", "ollama") or "ollama").strip().lower()
-    current_llm_model = str(llm_profile.get("model") or getattr(bot, "LLM_MODEL", bot.MODEL_NAME) or bot.MODEL_NAME).strip()
+    current_llm_provider = (
+        str(
+            llm_profile.get("provider") or getattr(bot, "LLM_PROVIDER", "ollama") or "ollama",
+        )
+        .strip()
+        .lower()
+    )
+    current_llm_model = str(
+        llm_profile.get("model") or getattr(bot, "LLM_MODEL", bot.MODEL_NAME) or bot.MODEL_NAME,
+    ).strip()
     preset_catalog = bot.persona_preset_catalog()
 
     _render_persona_section(bot, preset_catalog)
@@ -480,5 +743,3 @@ def render_preferences_tab(bot: "DadBot") -> None:
         current_llm_provider,
         current_llm_model,
     )
-
-

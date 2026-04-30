@@ -322,7 +322,9 @@ class FakeReflectionService:
         }
 
 
-def build_graph(runtime: FakeRuntime, persistence: PersistenceService, recording_pm: RecordingPersistenceManager) -> TurnGraph:
+def build_graph(
+    runtime: FakeRuntime, persistence: PersistenceService, recording_pm: RecordingPersistenceManager
+) -> TurnGraph:
     registry = {
         "persistence_service": persistence,
         "health": FakeHealthService(),
@@ -497,7 +499,8 @@ def graph_invariant_checks(graph_payload: dict[str, Any], memory_payload: dict[s
     visible_invalid_edges = [
         edge
         for edge in edges
-        if edge.get("valid_until") is not None and str(edge.get("valid_until")) <= str(graph_payload.get("updated_at") or "")
+        if edge.get("valid_until") is not None
+        and str(edge.get("valid_until")) <= str(graph_payload.get("updated_at") or "")
     ]
 
     temporal_windows_consistent = True

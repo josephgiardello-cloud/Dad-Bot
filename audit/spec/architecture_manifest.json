@@ -1,0 +1,180 @@
+{
+  "_comment": "Architecture manifest for DadBot. Each entry names a module by logical role. Keys map to file glob patterns used by the completeness scanner.",
+
+  "core_modules": {
+    "graph":                     "dadbot/core/graph.py",
+    "orchestrator":              "dadbot/core/orchestrator.py",
+    "control_plane":             "dadbot/core/control_plane.py",
+    "execution_ledger":          "dadbot/core/execution_ledger.py",
+    "ledger_writer":             "dadbot/core/ledger_writer.py",
+    "ledger_reader":             "dadbot/core/ledger_reader.py",
+    "nodes":                     "dadbot/core/nodes.py",
+    "execution_policy":          "dadbot/core/execution_policy.py",
+    "execution_kernel":          "dadbot/core/execution_kernel.py",
+    "execution_recovery":        "dadbot/core/execution_recovery.py",
+    "execution_identity":        "dadbot/core/execution_identity.py",
+    "execution_receipt":         "dadbot/core/execution_receipt.py",
+    "execution_trace_context":   "dadbot/core/execution_trace_context.py",
+    "execution_replay_engine":   "dadbot/core/execution_replay_engine.py",
+    "graph_mutation":            "dadbot/core/graph_mutation.py",
+    "graph_context":             "dadbot/core/graph_context.py",
+    "graph_temporal":            "dadbot/core/graph_temporal.py",
+    "graph_types":               "dadbot/core/graph_types.py",
+    "graph_pipeline_nodes":      "dadbot/core/graph_pipeline_nodes.py",
+    "graph_side_effects":        "dadbot/core/graph_side_effects.py",
+    "side_effect_adapter":       "dadbot/core/side_effect_adapter.py",
+    "topology_provider":         "dadbot/core/topology_provider.py",
+    "memory_manager":            "dadbot/memory/manager.py",
+    "memory_graph_manager":      "dadbot/memory/graph_manager.py",
+    "memory_semantic_manager":   "dadbot/memory/semantic_manager.py",
+    "memory_storage":            "dadbot/memory/storage.py",
+    "turn_service":              "dadbot/services/turn_service.py",
+    "runtime_client":            "dadbot/managers/runtime_client.py",
+    "contracts":                 "dadbot/contracts.py",
+    "registry":                  "dadbot/registry.py"
+  },
+
+  "required_subsystems": {
+    "mutation_engine": {
+      "entrypoint": "dadbot/core/graph_mutation.py",
+      "supporting": [
+        "dadbot/core/graph_types.py",
+        "dadbot/core/transaction_coordinator.py"
+      ],
+      "required_symbols": ["MutationIntent", "MutationQueue", "MutationGuard", "MutationKind"]
+    },
+    "execution_context": {
+      "entrypoint": "dadbot/core/graph_context.py",
+      "supporting": [
+        "dadbot/core/graph_temporal.py",
+        "dadbot/core/graph_types.py"
+      ],
+      "required_symbols": ["TurnContext", "TurnFidelity"]
+    },
+    "node_runtime": {
+      "entrypoint": "dadbot/core/nodes.py",
+      "supporting": [
+        "dadbot/core/graph_pipeline_nodes.py",
+        "dadbot/core/graph_side_effects.py"
+      ],
+      "required_symbols": ["HealthNode", "InferenceNode", "SaveNode", "SafetyNode", "TemporalNode"]
+    },
+    "scheduler": {
+      "entrypoint": "dadbot/core/tool_scheduler.py",
+      "supporting": [
+        "dadbot/core/tool_dag.py",
+        "dadbot/core/tool_ir.py",
+        "dadbot/core/job_builder.py"
+      ],
+      "required_symbols": []
+    },
+    "recovery_manager": {
+      "entrypoint": "dadbot/core/recovery_manager.py",
+      "supporting": [
+        "dadbot/core/execution_recovery.py",
+        "dadbot/core/turn_resume_store.py",
+        "dadbot/core/durable_checkpoint.py"
+      ],
+      "required_symbols": []
+    },
+    "replay_system": {
+      "entrypoint": "dadbot/core/execution_replay_engine.py",
+      "supporting": [
+        "dadbot/core/offline_replay_validator.py",
+        "dadbot/core/replay_verifier.py",
+        "dadbot/core/execution_trace_context.py"
+      ],
+      "required_symbols": ["reconstruct_terminal_state_from_trace"]
+    },
+    "ledger_system": {
+      "entrypoint": "dadbot/core/execution_ledger.py",
+      "supporting": [
+        "dadbot/core/ledger_writer.py",
+        "dadbot/core/ledger_reader.py",
+        "dadbot/core/ledger/enforcement.py"
+      ],
+      "required_symbols": []
+    },
+    "trace_system": {
+      "entrypoint": "dadbot/core/execution_trace_context.py",
+      "supporting": [
+        "dadbot/core/execution_trace_schema.py",
+        "dadbot/core/trace_binder.py",
+        "dadbot/core/canonical_event.py"
+      ],
+      "required_symbols": ["build_execution_trace_context"]
+    },
+    "capability_system": {
+      "entrypoint": "dadbot/core/capability_registry.py",
+      "supporting": [
+        "dadbot/core/capability_audit_runner.py",
+        "dadbot/core/capability_contracts.py"
+      ],
+      "required_symbols": ["CapabilityRegistry"]
+    },
+    "determinism_system": {
+      "entrypoint": "dadbot/core/determinism.py",
+      "supporting": [
+        "dadbot/core/determinism_seal.py",
+        "dadbot/core/execution_equivalence.py",
+        "dadbot/core/execution_equivalence_oracle.py"
+      ],
+      "required_symbols": []
+    }
+  },
+
+  "required_cross_cutting": {
+    "trace_id": {
+      "description": "Every execution-path function should carry trace_id for distributed tracing",
+      "required_in_patterns": ["dadbot/core/graph.py", "dadbot/core/nodes.py", "dadbot/services/turn_service.py"],
+      "scan_as": "parameter_or_attribute"
+    },
+    "kernel_step_id": {
+      "description": "Kernel step identity must propagate through node execution",
+      "required_in_patterns": ["dadbot/core/execution_kernel.py", "dadbot/core/graph.py"],
+      "scan_as": "parameter_or_attribute"
+    },
+    "determinism_manifest": {
+      "description": "Determinism boundary must be established at turn entry and carried through",
+      "required_in_patterns": ["dadbot/core/graph.py", "dadbot/core/graph_context.py"],
+      "scan_as": "parameter_or_attribute"
+    },
+    "ledger_entry": {
+      "description": "Ledger write must occur at every commit boundary",
+      "required_in_patterns": ["dadbot/core/nodes.py", "dadbot/core/ledger_writer.py"],
+      "scan_as": "call_or_import"
+    }
+  },
+
+  "required_interfaces": {
+    "GraphNode": {
+      "file": "dadbot/core/graph_pipeline_nodes.py",
+      "required_methods": ["execute", "name"]
+    },
+    "TopologyProvider": {
+      "file": "dadbot/core/topology_provider.py",
+      "required_methods": ["build"]
+    },
+    "PersistenceBase": {
+      "file": "dadbot/core/persistence/base.py",
+      "required_methods": ["save", "load", "delete"]
+    },
+    "ReceiptSigner": {
+      "file": "dadbot/core/execution_receipt.py",
+      "required_methods": ["sign", "verify"]
+    }
+  },
+
+  "orphan_search_targets": [
+    "InMemoryExecutionLedger",
+    "WorkerIdentity",
+    "TurnKernel",
+    "LegacyContextBuilder",
+    "OldSaveNode",
+    "CompatExecutionPolicy",
+    "DadBotV1Registry",
+    "LegacyMemoryGraph",
+    "PhaseEngine",
+    "TurnDispatcher"
+  ]
+}

@@ -1,12 +1,14 @@
 """Tests for dadbot.pii_scrubber — PII detection and redaction."""
+
 from __future__ import annotations
 
 import pytest
+
 pytestmark = pytest.mark.unit
 from dadbot.pii_scrubber import contains_pii, scrub_memory_entry, scrub_memory_list, scrub_text
 
-
 # ─── scrub_text ───────────────────────────────────────────────────────────────
+
 
 class TestScrubText:
     def test_clean_text_passes_through_unchanged(self):
@@ -64,6 +66,7 @@ class TestScrubText:
 
 # ─── scrub_memory_entry ───────────────────────────────────────────────────────
 
+
 class TestScrubMemoryEntry:
     def test_clean_entry_unchanged(self):
         entry = {"summary": "Tony enjoys cooking pasta.", "category": "hobbies"}
@@ -100,6 +103,7 @@ class TestScrubMemoryEntry:
 
 # ─── scrub_memory_list ────────────────────────────────────────────────────────
 
+
 class TestScrubMemoryList:
     def test_empty_list(self):
         assert scrub_memory_list([]) == []
@@ -120,6 +124,7 @@ class TestScrubMemoryList:
 
 
 # ─── contains_pii ─────────────────────────────────────────────────────────────
+
 
 class TestContainsPii:
     def test_clean_text_false(self):

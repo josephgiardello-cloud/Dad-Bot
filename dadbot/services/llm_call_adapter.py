@@ -3,6 +3,7 @@
 Wraps bot.call_ollama_chat / call_ollama_chat_async.
 Receives payload, returns response dict.  No state mutation.
 """
+
 from __future__ import annotations
 
 from typing import Any

@@ -38,7 +38,13 @@ class UXControlAPI:
         self.response_profile.warmth = max(0.0, min(1.0, float(warmth)))
         return self.response_profile
 
-    def edit_memory(self, memory_id: str, *, summary: str | None = None, emotional_weight: float | None = None) -> dict[str, Any]:
+    def edit_memory(
+        self,
+        memory_id: str,
+        *,
+        summary: str | None = None,
+        emotional_weight: float | None = None,
+    ) -> dict[str, Any]:
         if memory_id not in self.memory_store:
             raise KeyError(memory_id)
         entry = self.memory_store[memory_id]

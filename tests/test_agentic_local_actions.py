@@ -1,6 +1,3 @@
-from pathlib import Path
-
-
 def test_tool_registry_parses_calendar_and_email_commands(bot):
     calendar_command = bot.parse_tool_command("add to calendar project sync tomorrow 2pm")
     email_command = bot.parse_tool_command("draft email to alex@example.com about sprint update")

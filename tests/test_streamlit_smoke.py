@@ -53,6 +53,10 @@ def test_dad_streamlit_app_starts_without_streamlit_exceptions(tmp_path):
         """
     )
 
+    _dadbot_keys = {k for k in os.environ if k.startswith("DADBOT_")}
+    _smoke_env = {k: v for k, v in os.environ.items() if k not in _dadbot_keys}
+    _smoke_env["PYTHONIOENCODING"] = "utf-8"
+
     result = subprocess.run(
         [sys.executable, "-c", smoke_code],
         cwd=sandbox_root,
@@ -60,13 +64,11 @@ def test_dad_streamlit_app_starts_without_streamlit_exceptions(tmp_path):
         text=True,
         encoding="utf-8",
         timeout=30,
-        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+        env=_smoke_env,
     )
 
     assert result.returncode == 0, (
-        "dad_streamlit.py failed smoke startup.\n"
-        f"STDOUT:\n{result.stdout}\n"
-        f"STDERR:\n{result.stderr}"
+        f"dad_streamlit.py failed smoke startup.\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
     )
 
 
@@ -113,6 +115,11 @@ def test_preferences_tab_shows_detected_cloud_llm_api_key_hint(tmp_path):
         """
     )
 
+    _dadbot_keys_pref = {k for k in os.environ if k.startswith("DADBOT_")}
+    _pref_env = {k: v for k, v in os.environ.items() if k not in _dadbot_keys_pref}
+    _pref_env["OPENAI_API_KEY"] = "test-openai-key"
+    _pref_env["PYTHONIOENCODING"] = "utf-8"
+
     result = subprocess.run(
         [sys.executable, "-c", smoke_code],
         cwd=sandbox_root,
@@ -120,17 +127,11 @@ def test_preferences_tab_shows_detected_cloud_llm_api_key_hint(tmp_path):
         text=True,
         encoding="utf-8",
         timeout=30,
-        env={
-            **os.environ,
-            "OPENAI_API_KEY": "test-openai-key",
-            "PYTHONIOENCODING": "utf-8",
-        },
+        env=_pref_env,
     )
 
     assert result.returncode == 0, (
-        "dad_streamlit.py failed LLM preferences hint smoke test.\n"
-        f"STDOUT:\n{result.stdout}\n"
-        f"STDERR:\n{result.stderr}"
+        f"dad_streamlit.py failed LLM preferences hint smoke test.\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
     )
 
 
@@ -229,6 +230,12 @@ def test_sidebar_and_button_surface_accessible(tmp_path):
         """
     )
 
+    # Strip any DADBOT_* env overrides so the subprocess always derives paths
+    # from the sandbox root rather than inheriting leaked test-scoped env vars.
+    _dadbot_keys = {k for k in os.environ if k.startswith("DADBOT_")}
+    sandbox_env = {k: v for k, v in os.environ.items() if k not in _dadbot_keys}
+    sandbox_env["PYTHONIOENCODING"] = "utf-8"
+
     result = subprocess.run(
         [sys.executable, "-c", smoke_code],
         cwd=sandbox_root,
@@ -236,7 +243,7 @@ def test_sidebar_and_button_surface_accessible(tmp_path):
         text=True,
         encoding="utf-8",
         timeout=60,
-        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+        env=sandbox_env,
     )
 
     assert result.returncode == 0, (

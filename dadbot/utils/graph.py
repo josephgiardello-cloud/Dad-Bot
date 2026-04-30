@@ -1,4 +1,4 @@
-﻿"""Memory graph node/edge accumulation helpers.
+"""Memory graph node/edge accumulation helpers.
 
 These are thin re-exports of the canonical implementations in
 :class:`dadbot.managers.long_term.LongTermSignalsManager`.  Import directly
@@ -15,17 +15,34 @@ from importlib import import_module
 
 @lru_cache(maxsize=1)
 def _lts_cls():
-    return getattr(import_module("dadbot.managers.long_term"), "LongTermSignalsManager")
+    return import_module("dadbot.managers.long_term").LongTermSignalsManager
 
 
-def accumulate_memory_graph_node(node_weights, node_types, label, node_type, weight: int = 1):
+def accumulate_memory_graph_node(
+    node_weights,
+    node_types,
+    label,
+    node_type,
+    weight: int = 1,
+):
     """Add or increment a node in the in-progress graph accumulation dicts."""
-    return _lts_cls().accumulate_memory_graph_node(node_weights, node_types, label, node_type, weight=weight)
+    return _lts_cls().accumulate_memory_graph_node(
+        node_weights,
+        node_types,
+        label,
+        node_type,
+        weight=weight,
+    )
 
 
 def accumulate_memory_graph_edge(edge_weights, left, right, weight: int = 1):
     """Add or increment an edge in the in-progress graph accumulation dict."""
-    return _lts_cls().accumulate_memory_graph_edge(edge_weights, left, right, weight=weight)
+    return _lts_cls().accumulate_memory_graph_edge(
+        edge_weights,
+        left,
+        right,
+        weight=weight,
+    )
 
 
 def build_memory_graph_nodes(node_weights, node_types) -> list:

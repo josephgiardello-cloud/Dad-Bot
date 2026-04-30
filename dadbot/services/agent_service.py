@@ -1,10 +1,13 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import logging
 import math
 from typing import Any
 
-from dadbot.core.determinism import DeterminismBoundary, DeterminismMode, DeterminismViolation
+from dadbot.core.determinism import (
+    DeterminismBoundary,
+    DeterminismViolation,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,12 +48,22 @@ class AgentService:
                 "tool_bias": "optional_tools",
             },
         }
-        return dict(mapping.get(str(hypothesis_name or ""), {
-            "policy": "supportive_problem_solving",
-            "tool_bias": "planner_default",
-        }))
+        return dict(
+            mapping.get(
+                str(hypothesis_name or ""),
+                {
+                    "policy": "supportive_problem_solving",
+                    "tool_bias": "planner_default",
+                },
+            ),
+        )
 
-    def _bayesian_execution_state(self, *, turn_text: str, current_mood: str) -> dict[str, Any]:
+    def _bayesian_execution_state(
+        self,
+        *,
+        turn_text: str,
+        current_mood: str,
+    ) -> dict[str, Any]:
         relationship = getattr(self.bot, "relationship_manager", None)
         if relationship is None:
             return {
@@ -61,7 +74,11 @@ class AgentService:
             }
 
         state = relationship.current_state()
-        posterior = relationship.build_hypothesis_posteriors(state, turn_text, current_mood)
+        posterior = relationship.build_hypothesis_posteriors(
+            state,
+            turn_text,
+            current_mood,
+        )
         if not posterior:
             return {
                 "required": True,
@@ -96,7 +113,12 @@ class AgentService:
         }
 
     @staticmethod
-    def _tool_execution_envelope(bot: Any, turn_context: Any, *, reply_source: str) -> dict[str, Any]:
+    def _tool_execution_envelope(
+        bot: Any,
+        turn_context: Any,
+        *,
+        reply_source: str,
+    ) -> dict[str, Any]:
         planner_snapshot = {}
         planner_debug_snapshot = getattr(bot, "planner_debug_snapshot", None)
         if callable(planner_debug_snapshot):
@@ -106,16 +128,14 @@ class AgentService:
                 planner_snapshot = {}
 
         selected_tool = str(
-            planner_snapshot.get("planner_tool")
-            or planner_snapshot.get("fallback_tool")
-            or ""
+            planner_snapshot.get("planner_tool") or planner_snapshot.get("fallback_tool") or "",
         ).strip()
         parameters = dict(planner_snapshot.get("planner_parameters") or {})
         observation = str(
             planner_snapshot.get("planner_observation")
             or planner_snapshot.get("fallback_observation")
             or turn_context.state.get("active_tool_observation")
-            or ""
+            or "",
         ).strip()
 
         return {
@@ -144,21 +164,42 @@ class AgentService:
     ) -> tuple[Any, Any, Any, str, Any] | None:
         service = bot.turn_service
         if service is None:
-            logger.error("AgentService: bot.turn_service is not wired; cannot run inference")
+            logger.error(
+                "AgentService: bot.turn_service is not wired; cannot run inference",
+            )
             return None
         try:
-            return await service.prepare_user_turn_async(stripped, attachments, turn_context=turn_context)
+            return await service.prepare_user_turn_async(
+                stripped,
+                attachments,
+                turn_context=turn_context,
+            )
         except Exception as exc:
             logger.error("AgentService: prepare_user_turn_async failed: %s", exc)
             return None
 
     @staticmethod
-    def _record_turn_preinference_state(turn_context: Any, *, mood: Any, turn_text: str, stripped: str, norm_attachments: Any) -> None:
+    def _record_turn_preinference_state(
+        turn_context: Any,
+        *,
+        mood: Any,
+        turn_text: str,
+        stripped: str,
+        norm_attachments: Any,
+    ) -> None:
         turn_context.state["mood"] = mood or "neutral"
         turn_context.state["turn_text"] = turn_text or stripped
         turn_context.state["norm_attachments"] = norm_attachments
 
-    def _record_bayesian_state(self, bot: Any, turn_context: Any, *, turn_text: str, stripped: str, mood: Any) -> dict[str, Any]:
+    def _record_bayesian_state(
+        self,
+        bot: Any,
+        turn_context: Any,
+        *,
+        turn_text: str,
+        stripped: str,
+        mood: Any,
+    ) -> dict[str, Any]:
         bayesian_state = self._bayesian_execution_state(
             turn_text=turn_text or stripped,
             current_mood=mood or "neutral",
@@ -226,7 +267,11 @@ class AgentService:
         turn_context.metadata["determinism_boundary"] = boundary_snapshot
         return reply
 
-    async def run_agent(self, turn_context: Any, rich_context: dict[str, Any] | None = None):
+    async def run_agent(
+        self,
+        turn_context: Any,
+        rich_context: dict[str, Any] | None = None,
+    ):
         bot = self.bot
         _user_input, attachments, stripped = self._normalize_turn_input(turn_context)
 
@@ -234,9 +279,17 @@ class AgentService:
             turn_context.state["already_finalized"] = True
             return ("", False)
 
-        prepared = await self._prepare_user_turn(bot, stripped, attachments, turn_context)
+        prepared = await self._prepare_user_turn(
+            bot,
+            stripped,
+            attachments,
+            turn_context,
+        )
         if prepared is None:
-            return ("I'm having trouble saving my thoughts right now - let me try again in a moment.", False)
+            return (
+                "I'm having trouble saving my thoughts right now - let me try again in a moment.",
+                False,
+            )
         mood, early_reply, should_end, turn_text, norm_attachments = prepared
 
         self._record_turn_preinference_state(
@@ -246,7 +299,13 @@ class AgentService:
             stripped=stripped,
             norm_attachments=norm_attachments,
         )
-        self._record_bayesian_state(bot, turn_context, turn_text=turn_text, stripped=stripped, mood=mood)
+        self._record_bayesian_state(
+            bot,
+            turn_context,
+            turn_text=turn_text,
+            stripped=stripped,
+            mood=mood,
+        )
         self._record_relationship_snapshot(bot, turn_context)
 
         # Session exit: prepare_user_turn_async already persisted; skip SaveNode work.
