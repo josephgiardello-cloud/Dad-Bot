@@ -50,6 +50,8 @@ from dadbot.core.execution_recovery import ExecutionRecovery
 from dadbot.core.turn_resume_store import TurnResumeStore
 from dadbot.core.execution_trace_schema import stamp_trace_contract_version
 from dadbot.core.graph_side_effects import GraphSideEffectsOrchestrator
+from dadbot.core.execution_policy_service import StageEntryGate
+from dadbot.core.lg_topology import TurnPipelineState, build_turn_pipeline
 from dadbot.core.persistence_event_adapter import GraphPersistenceEventAdapter  # re-export
 from dadbot.core.ux_projection import TurnHealthState, TurnUxProjector  # re-export
 
@@ -568,11 +570,11 @@ class TurnTemporalAxis:
         seed = str(lock_hash or "").strip().lower()
         if not seed:
             return cls.from_now()
-        try:
-            seed_int = int(seed[:16], 16)
-        except ValueError:
-            return cls.from_now()
-
+        # Always derive the integer via sha256 so that any seed string
+        # (including non-hex ones like "phase4-lock-0001") produces a
+        # deterministic temporal axis without silently falling back to the
+        # real wall clock.
+        seed_int = int(hashlib.sha256(seed.encode()).hexdigest()[:16], 16)
         # Base at 2024-01-01T00:00:00+00:00 and keep deterministic offsets.
         base_epoch = 1704067200
         # Keep offset bounded to avoid far-future drift while remaining stable.
@@ -941,6 +943,8 @@ class TurnGraph:
             policy_engine=self._policy_engine,
             json_safe=_json_safe,
         )
+        # Stage-entry policy gate: idempotency, capability, and ordering checks.
+        self._stage_entry_gate = StageEntryGate()
         # Durable execution: crash-safe resume.  None unless configure_resume() is called.
         self._recovery: ExecutionRecovery | None = None
         # Capability security: stage-level enforcement.  None unless configure_capabilities() is called.
@@ -1174,56 +1178,12 @@ class TurnGraph:
 
     @staticmethod
     def _mark_stage_enter(turn_context: TurnContext, stage_name: str) -> None:
-        executed = turn_context.state.setdefault("_graph_executed_stages", set())
-        if not isinstance(executed, set):
-            executed = set(executed) if isinstance(executed, (list, tuple)) else set()
-            turn_context.state["_graph_executed_stages"] = executed
-        if stage_name in executed:
-            raise RuntimeError(
-                f"TurnGraph execution violation: stage {stage_name!r} executed more than once in trace {turn_context.trace_id!r}"
-            )
+        """Backward-compatible shim: delegates to StageEntryGate.enforce_stage_ordering.
 
-        last_stage = str(turn_context.state.get("_graph_last_stage") or "").strip()
-        expected_next = {
-            "": {"preflight", "health", "temporal", "context_builder"},
-            "preflight": {"inference"},
-            "health": {"context_builder"},
-            # temporal is now always sequential-first; it may be followed by the parallel
-            # preflight group or by health/context_builder individually.
-            "temporal": {"preflight", "health", "context_builder"},
-            "context_builder": {"inference"},
-            "inference": {"safety"},
-            "safety": {"reflection"},
-            "reflection": {"save"},
-            "save": set(),
-        }
-        # Only enforce canonical pipeline ordering when the incoming stage is a
-        # known canonical stage.  Custom / test nodes with arbitrary names are
-        # allowed to execute without triggering the ordering gate.
-        _canonical = set(expected_next.keys()) | {s for vals in expected_next.values() for s in vals}
-        if stage_name in _canonical:
-            allowed = expected_next.get(last_stage)
-            if allowed is not None and allowed and stage_name not in allowed:
-                raise RuntimeError(
-                    "TurnGraph order violation: "
-                    f"stage {stage_name!r} cannot execute after {last_stage!r}; expected one of {sorted(allowed)!r}"
-                )
-
-        executed.add(stage_name)
-        turn_context.state["_graph_last_stage"] = stage_name
-        turn_context.state["_active_graph_stage"] = stage_name
-
-        # Hard invariant: TemporalNode must run before any mutation-capable stage.
-        # Allow temporal itself, preflight group members, and health/context to proceed.
-        # Any stage that can write state (inference, safety, reflection, save) must
-        # only execute after temporal has populated turn_context.state["temporal"].
-        _requires_temporal = {"inference", "safety", "reflection", "save"}
-        if stage_name in _requires_temporal:
-            if not turn_context.state.get("temporal"):
-                raise RuntimeError(
-                    f"TemporalNode not initialized before {stage_name!r} — "
-                    "deterministic execution violated: temporal must be first in pipeline"
-                )
+        New code should use TurnGraph._stage_entry_gate.enforce_stage_ordering directly.
+        This staticmethod is retained for test compatibility.
+        """
+        StageEntryGate().enforce_stage_ordering(turn_context, stage_name)
 
     def add_node(self, name: str, node: Any) -> None:
         # Kernel in shadow mode during graph construction.
@@ -1500,34 +1460,20 @@ class TurnGraph:
         async def _execute_stage(stage_name: str, node: Any, stage_context: TurnContext) -> TurnContext:
             started_at = time.perf_counter()
             error_msg: str | None = None
-            # Idempotency guard: skip stages that already completed in a prior
-            # execution attempt (crash-safe recovery path).  Must come BEFORE
-            # _mark_stage_enter which raises on duplicate stage execution.
-            if self._recovery is not None and self._recovery.is_already_completed(stage_name, stage_context):
-                logger.debug(
-                    "Idempotency guard: skipping already-completed stage %r for turn %r",
-                    stage_name,
-                    stage_context.trace_id,
-                )
+            # ── Stage-entry policy gate (delegated to StageEntryGate) ──────────
+            # Idempotency guard: skip stages already completed in a prior run.
+            if self._stage_entry_gate.check_recovery_skip(stage_name, stage_context, self._recovery):
                 executed_stage_names.append(stage_name)
                 return stage_context
-            # Capability enforcement: check that the session holds the capabilities
-            # required by this stage before allowing entry.
-            if self._capability_registry is not None and self._capability_policy is not None:
-                _sid = str(
-                    stage_context.metadata.get("session_id") or self._capability_session_id or ""
-                )
-                _caps = self._capability_policy.caps_for(_sid)
-                _enforcement = enforce_node_entry(
-                    stage_name,
-                    registry=self._capability_registry,
-                    caps=_caps,
-                    session_id=_sid,
-                )
-                if _enforcement == EnforcementMode.SKIP:
-                    executed_stage_names.append(stage_name)
-                    return stage_context
-            self._mark_stage_enter(stage_context, stage_name)
+            # Capability gate: skip if session lacks required capabilities.
+            _sid = str(stage_context.metadata.get("session_id") or self._capability_session_id or "")
+            if self._stage_entry_gate.check_capability_skip(
+                stage_name, stage_context, self._capability_registry, self._capability_policy, _sid
+            ):
+                executed_stage_names.append(stage_name)
+                return stage_context
+            # Ordering + temporal invariants: raises on violation.
+            self._stage_entry_gate.enforce_stage_ordering(stage_context, stage_name)
             self._record_execution_trace(
                 stage_context,
                 event_type="stage_enter",
@@ -1625,7 +1571,60 @@ class TurnGraph:
             # Store all pipeline stage names in turn_context so _execute_stage can find the next stage
             pipeline_stage_names = [name for name, _ in pipeline]
             turn_context.state["_pipeline_stage_names"] = pipeline_stage_names
-            turn_context = await self._execution_kernel.run(turn_context, pipeline, _execute_stage)
+            # ------------------------------------------------------------------
+            # Layer 1 — LangGraph declarative dispatch
+            # The execution loop is now owned by LangGraph's StateGraph.
+            # Policy, mutation, and recovery logic stay in Layer 2 (_execute_stage).
+            # ------------------------------------------------------------------
+
+            # Pre-execute kernel validation (previously inside ExecutionKernel.run)
+            _preflight = self._execution_kernel.validate(
+                stage="pre_execute",
+                operation="execution_kernel.run",
+                context=turn_context,
+            )
+            if not _preflight.ok:
+                logger.warning("[KERNEL SHADOW VIOLATION] %s", _preflight.reason)
+
+            async def _lg_node_executor(
+                stage_name: str, node: Any, state: TurnPipelineState
+            ) -> dict:
+                """Bridge: per-stage kernel validation (Layer 1→2) + stage execution (Layer 2)."""
+                _tc = state["context"]
+                _stage_check = self._execution_kernel.validate(
+                    stage=stage_name,
+                    operation=f"kernel.phase:{stage_name}",
+                    context=_tc,
+                )
+                if not _stage_check.ok:
+                    logger.warning("[KERNEL SHADOW VIOLATION] %s", _stage_check.reason)
+                _tc = await _execute_stage(stage_name, node, _tc)
+                return {
+                    "context": _tc,
+                    "short_circuit": bool(getattr(_tc, "short_circuit", False)),
+                    "abort": False,
+                    "error": None,
+                }
+
+            _lg_pipeline = build_turn_pipeline(pipeline, _lg_node_executor)
+            _lg_state: TurnPipelineState = {
+                "context": turn_context,
+                "short_circuit": False,
+                "abort": False,
+                "error": None,
+            }
+            _final_state = await _lg_pipeline.ainvoke(_lg_state)
+            turn_context = _final_state["context"]
+
+            # Post-execute kernel validation (previously inside ExecutionKernel.run)
+            _post = self._execution_kernel.validate(
+                stage="post_execute",
+                operation="execution_kernel.run.complete",
+                context=turn_context,
+            )
+            if not _post.ok:
+                logger.warning("[KERNEL SHADOW VIOLATION] %s", _post.reason)
+
         except Exception as exc:
             failure_class = self._classify_failure(exc)
             self._record_execution_trace(
