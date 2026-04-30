@@ -1,5 +1,4 @@
-﻿"""
-SemanticIndexManager â€” owns embedding cache, semantic index sync, and semantic memory search.
+"""SemanticIndexManager â€” owns embedding cache, semantic index sync, and semantic memory search.
 Extracted from MemoryManager to thin the god class.
 """
 
@@ -13,15 +12,11 @@ import sqlite3
 from contextlib import closing
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import ollama
 
 from dadbot.utils import json_dumps, json_loads
 from dadbot_system.semantic_index import PGVectorSemanticIndex, SQLiteSemanticIndex
-
-if TYPE_CHECKING:
-    pass
 
 logger = logging.getLogger(__name__)
 
@@ -42,8 +37,15 @@ class SemanticIndexManager:
 
     def _build_semantic_index_backend(self):
         postgres_dsn = str(os.environ.get("DADBOT_POSTGRES_DSN") or "").strip()
-        semantic_table = str(os.environ.get("DADBOT_SEMANTIC_INDEX_TABLE") or "semantic_memories").strip() or "semantic_memories"
-        vector_dimensions = str(os.environ.get("DADBOT_SEMANTIC_VECTOR_DIM") or "").strip()
+        semantic_table = (
+            str(
+                os.environ.get("DADBOT_SEMANTIC_INDEX_TABLE") or "semantic_memories",
+            ).strip()
+            or "semantic_memories"
+        )
+        vector_dimensions = str(
+            os.environ.get("DADBOT_SEMANTIC_VECTOR_DIM") or "",
+        ).strip()
         ann_index = str(os.environ.get("DADBOT_SEMANTIC_ANN_INDEX") or "").strip().lower()
         distance_metric = str(os.environ.get("DADBOT_SEMANTIC_DISTANCE_METRIC") or "cosine").strip().lower() or "cosine"
         hnsw_m = str(os.environ.get("DADBOT_SEMANTIC_HNSW_M") or "16").strip() or "16"
@@ -64,7 +66,10 @@ class SemanticIndexManager:
                 backend.ensure_storage()
                 return backend
             except Exception as exc:
-                logger.warning("PGVector semantic index unavailable, falling back to SQLite: %s", exc)
+                logger.warning(
+                    "PGVector semantic index unavailable, falling back to SQLite: %s",
+                    exc,
+                )
         return SQLiteSemanticIndex(self._bot, self._bot.SEMANTIC_MEMORY_DB_PATH)
 
     def ensure_semantic_memory_db(self):
@@ -76,7 +81,9 @@ class SemanticIndexManager:
     def with_semantic_db(self, operation, write=False):
         if isinstance(self._semantic_index_backend, SQLiteSemanticIndex):
             return self._semantic_index_backend.with_connection(operation, write=write)
-        raise RuntimeError("Direct semantic DB access is only available for the SQLite fallback backend.")
+        raise RuntimeError(
+            "Direct semantic DB access is only available for the SQLite fallback backend.",
+        )
 
     # ------------------------------------------------------------------
     # Embedding cache
@@ -117,7 +124,7 @@ class SemanticIndexManager:
                     updated_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_embedding_cache_model_hash ON embedding_cache(model_name, text_hash);
-                """
+                """,
             ),
             write=True,
         )
@@ -133,15 +140,25 @@ class SemanticIndexManager:
                     lock_hash TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
-                """
+                """,
             ),
             write=True,
         )
 
     def embedding_version_lock(self) -> dict[str, object]:
-        self.ensure_embedding_version_lock_storage()
-        row = self.with_embedding_cache_db(
-            lambda connection: connection.execute(
+        def _get(connection):
+            connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS embedding_version_lock (
+                    namespace TEXT PRIMARY KEY,
+                    model_name TEXT NOT NULL,
+                    vector_size INTEGER NOT NULL,
+                    lock_hash TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                """,
+            )
+            return connection.execute(
                 """
                 SELECT namespace, model_name, vector_size, lock_hash, updated_at
                 FROM embedding_version_lock
@@ -149,7 +166,8 @@ class SemanticIndexManager:
                 """,
                 (self._embedding_lock_namespace,),
             ).fetchone()
-        )
+
+        row = self.with_embedding_cache_db(_get, write=True)
         if not row:
             return {}
         return {
@@ -219,7 +237,9 @@ class SemanticIndexManager:
             "enforced": bool(enforce),
         }
         self._last_embedding_lock_report = dict(report)
-        strict_env = str(os.environ.get("DADBOT_STRICT_EMBEDDING_LOCK", "")).strip().lower() in {"1", "true", "yes"}
+        strict_env = str(
+            os.environ.get("DADBOT_STRICT_EMBEDDING_LOCK", ""),
+        ).strip().lower() in {"1", "true", "yes"}
         if drift_detected and (bool(enforce) or strict_env):
             raise RuntimeError(f"Embedding lock drift detected: {drift_reason}")
         return report
@@ -228,7 +248,9 @@ class SemanticIndexManager:
     def embedding_cache_key(text, model_name):
         normalized_model = str(model_name or "").strip().lower()
         normalized_text = str(text or "")
-        return hashlib.sha256(f"{normalized_model}\x1f{normalized_text}".encode("utf-8")).hexdigest()
+        return hashlib.sha256(
+            f"{normalized_model}\x1f{normalized_text}".encode(),
+        ).hexdigest()
 
     def cached_embeddings_for_texts(self, model_name, texts):
         ordered_unique_texts = [text for text in dict.fromkeys(str(text or "") for text in texts) if text]
@@ -256,7 +278,7 @@ class SemanticIndexManager:
             lambda connection: connection.execute(
                 f"SELECT cache_key, embedding_json FROM embedding_cache WHERE cache_key IN ({placeholders})",
                 pending_keys,
-            ).fetchall()
+            ).fetchall(),
         )
         for cache_key, embedding_json in rows:
             try:
@@ -284,13 +306,15 @@ class SemanticIndexManager:
             if len(self._embedding_cache) >= 1024:
                 self._embedding_cache.pop(next(iter(self._embedding_cache)))
             self._embedding_cache[cache_key] = embedding
-            rows.append((
-                cache_key,
-                str(model_name or "").strip().lower(),
-                hashlib.sha256(str(text).encode("utf-8")).hexdigest(),
-                json_dumps(embedding),
-                updated_at,
-            ))
+            rows.append(
+                (
+                    cache_key,
+                    str(model_name or "").strip().lower(),
+                    hashlib.sha256(str(text).encode("utf-8")).hexdigest(),
+                    json_dumps(embedding),
+                    updated_at,
+                ),
+            )
         if not rows:
             return
         self.ensure_embedding_cache_storage()
@@ -352,7 +376,10 @@ class SemanticIndexManager:
         unique_inputs = list(dict.fromkeys(ordered_inputs))
 
         for candidate in self._bot.embedding_model_candidates():
-            cached_embeddings = self.cached_embeddings_for_texts(candidate, unique_inputs)
+            cached_embeddings = self.cached_embeddings_for_texts(
+                candidate,
+                unique_inputs,
+            )
             missing_inputs = [text for text in unique_inputs if text not in cached_embeddings]
             fresh_embeddings = {}
 
@@ -411,16 +438,31 @@ class SemanticIndexManager:
             return 0
 
     def semantic_memory_status(self):
-        lock_row = self.embedding_version_lock()
+        try:
+            lock_row = self.embedding_version_lock()
+            status_error = ""
+        except Exception as exc:  # noqa: BLE001 - status surface must degrade gracefully in UI smoke/runtime sandboxes
+            logger.warning("Semantic memory status fallback: %s", exc)
+            lock_row = {}
+            status_error = str(exc)
         return {
             "indexed_count": self.semantic_index_row_count(),
             "embedding_model": self._bot.ACTIVE_EMBEDDING_MODEL,
             "backend": self._semantic_index_backend.name,
             "ann_index": getattr(self._semantic_index_backend, "ann_index", None),
-            "vector_dimensions": getattr(self._semantic_index_backend, "vector_dimensions", None),
-            "distance_metric": getattr(self._semantic_index_backend, "distance_metric", None),
+            "vector_dimensions": getattr(
+                self._semantic_index_backend,
+                "vector_dimensions",
+                None,
+            ),
+            "distance_metric": getattr(
+                self._semantic_index_backend,
+                "distance_metric",
+                None,
+            ),
             "embedding_lock": lock_row,
             "embedding_lock_last_report": dict(self._last_embedding_lock_report),
+            "status_error": status_error,
         }
 
     # ------------------------------------------------------------------
@@ -511,7 +553,10 @@ class SemanticIndexManager:
             return
 
         # Use self.embed_texts directly — avoids the round-trip through bot facade
-        embeddings = self.embed_texts([payload_text for _, payload_text, _, _ in pending], purpose="semantic memory indexing")
+        embeddings = self.embed_texts(
+            [payload_text for _, payload_text, _, _ in pending],
+            purpose="semantic memory indexing",
+        )
         if len(embeddings) != len(pending):
             logger.info(
                 "Semantic memory indexing skipped: embedding batch mismatch "
@@ -521,30 +566,31 @@ class SemanticIndexManager:
             )
             return
 
-        self._semantic_index_backend.upsert_rows([
-            {
-                "summary_key": summary_key,
-                "summary": memory.get("summary", ""),
-                "category": memory.get("category", "general"),
-                "mood": self._bot.normalize_mood(memory.get("mood")),
-                "updated_at": memory.get("updated_at", ""),
-                "content_hash": content_hash,
-                "embedding": embedding,
-                "embedding_json": json_dumps(embedding),
-            }
-            for (summary_key, _, content_hash, memory), embedding in zip(pending, embeddings)
-        ])
+        self._semantic_index_backend.upsert_rows(
+            [
+                {
+                    "summary_key": summary_key,
+                    "summary": memory.get("summary", ""),
+                    "category": memory.get("category", "general"),
+                    "mood": self._bot.normalize_mood(memory.get("mood")),
+                    "updated_at": memory.get("updated_at", ""),
+                    "content_hash": content_hash,
+                    "embedding": embedding,
+                    "embedding_json": json_dumps(embedding),
+                }
+                for (summary_key, _, content_hash, memory), embedding in zip(
+                    pending,
+                    embeddings,
+                )
+            ],
+        )
 
     # ------------------------------------------------------------------
     # Lookup / search
     # ------------------------------------------------------------------
 
     def semantic_memory_lookup(self, memories):
-        return {
-            self.semantic_memory_key(memory): memory
-            for memory in memories
-            if self.semantic_memory_key(memory)
-        }
+        return {self.semantic_memory_key(memory): memory for memory in memories if self.semantic_memory_key(memory)}
 
     def semantic_query_context(self, query, limit):
         # Use self.embed_texts directly
@@ -553,10 +599,15 @@ class SemanticIndexManager:
             return None
         return {
             "query_embedding": query_embeddings[0],
-            "query_tokens": list(self._bot.significant_tokens(query))[:self._bot.runtime_config.window("semantic_query_tokens", 6)],
+            "query_tokens": list(self._bot.significant_tokens(query))[
+                : self._bot.runtime_config.window("semantic_query_tokens", 6)
+            ],
             "query_category": self._bot.infer_memory_category(query),
             "query_mood": self._bot.normalize_mood(query),
-            "candidate_limit": max(limit * self._bot.runtime_config.semantic_candidate_multiplier, self._bot.runtime_config.semantic_candidate_minimum),
+            "candidate_limit": max(
+                limit * self._bot.runtime_config.semantic_candidate_multiplier,
+                self._bot.runtime_config.semantic_candidate_minimum,
+            ),
         }
 
     @staticmethod
@@ -564,7 +615,9 @@ class SemanticIndexManager:
         where_clauses = []
         params = []
         if query_tokens:
-            where_clauses.append("(" + " OR ".join("LOWER(summary) LIKE ?" for _ in query_tokens) + ")")
+            where_clauses.append(
+                "(" + " OR ".join("LOWER(summary) LIKE ?" for _ in query_tokens) + ")",
+            )
             params.extend([f"%{token.lower()}%" for token in query_tokens])
         if query_category != "general":
             where_clauses.append("category = ?")
@@ -578,22 +631,34 @@ class SemanticIndexManager:
         return self._semantic_index_backend.fetch_recent(candidate_limit)
 
     def filtered_semantic_rows(self, where_clauses, params, candidate_limit):
-        if not where_clauses or not isinstance(self._semantic_index_backend, SQLiteSemanticIndex):
+        if not where_clauses or not isinstance(
+            self._semantic_index_backend,
+            SQLiteSemanticIndex,
+        ):
             return []
         return self.with_semantic_db(
             lambda connection: connection.execute(
                 f"""
                 SELECT summary_key, summary, category, mood, updated_at, embedding_json
                 FROM semantic_memories
-                WHERE {' OR '.join(where_clauses)}
+                WHERE {" OR ".join(where_clauses)}
                 ORDER BY updated_at DESC
                 LIMIT ?
                 """,
                 [*params, candidate_limit],
-            ).fetchall()
+            ).fetchall(),
         )
 
-    def semantic_candidate_rows(self, where_clauses, params, candidate_limit, query_embedding=None, query_tokens=None, query_category="general", query_mood="neutral"):
+    def semantic_candidate_rows(
+        self,
+        where_clauses,
+        params,
+        candidate_limit,
+        query_embedding=None,
+        query_tokens=None,
+        query_category="general",
+        query_mood="neutral",
+    ):
         if isinstance(self._semantic_index_backend, SQLiteSemanticIndex):
             rows = self.filtered_semantic_rows(where_clauses, params, candidate_limit)
             if rows:
@@ -610,7 +675,11 @@ class SemanticIndexManager:
                 ]
             return self.recent_semantic_rows(candidate_limit)
         return self._semantic_index_backend.fetch_candidates(
-            query_embedding, query_tokens or [], query_category, query_mood, candidate_limit,
+            query_embedding,
+            query_tokens or [],
+            query_category,
+            query_mood,
+            candidate_limit,
         )
 
     def score_semantic_rows(self, rows, current_memories, query_embedding):
@@ -623,7 +692,10 @@ class SemanticIndexManager:
             try:
                 embedding = json_loads(row.get("embedding_json", "[]"))
             except json.JSONDecodeError:
-                logger.warning("Skipping semantic memory row with invalid embedding JSON for key %s", summary_key)
+                logger.warning(
+                    "Skipping semantic memory row with invalid embedding JSON for key %s",
+                    summary_key,
+                )
                 continue
             similarity = self._bot.cosine_similarity(query_embedding, embedding)
             if similarity > 0:
@@ -649,7 +721,9 @@ class SemanticIndexManager:
 
         try:
             rows = self.semantic_candidate_rows(
-                where_clauses, params, query_context["candidate_limit"],
+                where_clauses,
+                params,
+                query_context["candidate_limit"],
                 query_embedding=query_context["query_embedding"],
                 query_tokens=query_context["query_tokens"],
                 query_category=query_context["query_category"],
@@ -662,7 +736,11 @@ class SemanticIndexManager:
         recent_topics = self._bot.recent_memory_topics(limit=4)
         mood_trend = self._bot.current_memory_mood_trend()
         scored = []
-        for similarity, memory in self.score_semantic_rows(rows, current_memories, query_context["query_embedding"]):
+        for similarity, memory in self.score_semantic_rows(
+            rows,
+            current_memories,
+            query_context["query_embedding"],
+        ):
             freshness = self._bot.semantic_memory_freshness_weight(memory)
             alignment = self._bot.memory_alignment_weight(
                 memory,
@@ -675,7 +753,10 @@ class SemanticIndexManager:
             if alignment <= 0:
                 continue
             score = similarity * 5.0 * freshness * alignment
-            impact_bonus = min(1.5, max(0.0, self._bot.memory_impact_score(memory)) * 0.35)
+            impact_bonus = min(
+                1.5,
+                max(0.0, self._bot.memory_impact_score(memory)) * 0.35,
+            )
             if score > 0:
                 score += impact_bonus
             if score > 0.1:
@@ -683,7 +764,11 @@ class SemanticIndexManager:
 
         ranked = sorted(
             scored,
-            key=lambda item: (item[0], item[1].get("updated_at", ""), item[1].get("summary", "")),
+            key=lambda item: (
+                item[0],
+                item[1].get("updated_at", ""),
+                item[1].get("summary", ""),
+            ),
             reverse=True,
         )
         return self._bot.select_diverse_ranked_memories(ranked, limit)

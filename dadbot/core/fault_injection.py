@@ -1,4 +1,4 @@
-﻿"""Fault injection, error classification, and deterministic retry policy.
+"""Fault injection, error classification, and deterministic retry policy.
 
 ErrorClassification:
   Labels every exception as RETRYABLE, TERMINAL, or COMPENSATING so
@@ -15,38 +15,43 @@ RetryPolicy:
 FaultBoundary:
   Context manager that classifies exceptions and invokes per-class handlers.
 """
+
 from __future__ import annotations
 
-import random
+import secrets
 import time
 from collections import defaultdict
+from collections.abc import Callable
 from enum import Enum
 from threading import RLock
-from typing import Any, Callable, Type
-
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # Error classification
 # ---------------------------------------------------------------------------
 
+
 class ErrorClassification(Enum):
-    RETRYABLE    = "retryable"     # transient; safe to retry with backoff
-    TERMINAL     = "terminal"      # permanent; escalate / dead-letter
+    RETRYABLE = "retryable"  # transient; safe to retry with backoff
+    TERMINAL = "terminal"  # permanent; escalate / dead-letter
     COMPENSATING = "compensating"  # partial success; undo required before retry
 
 
 class RetryableError(RuntimeError):
     """Transient error â€” safe to retry."""
+
     classification = ErrorClassification.RETRYABLE
 
 
 class TerminalError(RuntimeError):
     """Permanent error â€” do not retry."""
+
     classification = ErrorClassification.TERMINAL
 
 
 class CompensatingActionRequired(RuntimeError):
     """Partial success â€” compensating action required before any retry."""
+
     classification = ErrorClassification.COMPENSATING
 
 
@@ -54,27 +59,32 @@ class CompensatingActionRequired(RuntimeError):
 # Error classifier registry
 # ---------------------------------------------------------------------------
 
+
 class ErrorClassifier:
     """Maps exception types to ErrorClassification values via isinstance checks."""
 
-    _DEFAULT_MAP: dict[Type[Exception], ErrorClassification] = {
-        RetryableError:              ErrorClassification.RETRYABLE,
-        TerminalError:               ErrorClassification.TERMINAL,
-        CompensatingActionRequired:  ErrorClassification.COMPENSATING,
-        ConnectionError:             ErrorClassification.RETRYABLE,
-        TimeoutError:                ErrorClassification.RETRYABLE,
-        OSError:                     ErrorClassification.RETRYABLE,
-        PermissionError:             ErrorClassification.TERMINAL,
-        ValueError:                  ErrorClassification.TERMINAL,
-        TypeError:                   ErrorClassification.TERMINAL,
-        RuntimeError:                ErrorClassification.TERMINAL,
-        KeyError:                    ErrorClassification.TERMINAL,
+    _DEFAULT_MAP: dict[type[Exception], ErrorClassification] = {
+        RetryableError: ErrorClassification.RETRYABLE,
+        TerminalError: ErrorClassification.TERMINAL,
+        CompensatingActionRequired: ErrorClassification.COMPENSATING,
+        ConnectionError: ErrorClassification.RETRYABLE,
+        TimeoutError: ErrorClassification.RETRYABLE,
+        OSError: ErrorClassification.RETRYABLE,
+        PermissionError: ErrorClassification.TERMINAL,
+        ValueError: ErrorClassification.TERMINAL,
+        TypeError: ErrorClassification.TERMINAL,
+        RuntimeError: ErrorClassification.TERMINAL,
+        KeyError: ErrorClassification.TERMINAL,
     }
 
     def __init__(self) -> None:
-        self._map: dict[Type[Exception], ErrorClassification] = dict(self._DEFAULT_MAP)
+        self._map: dict[type[Exception], ErrorClassification] = dict(self._DEFAULT_MAP)
 
-    def register(self, exc_type: Type[Exception], classification: ErrorClassification) -> None:
+    def register(
+        self,
+        exc_type: type[Exception],
+        classification: ErrorClassification,
+    ) -> None:
         self._map[exc_type] = classification
 
     def classify(self, exc: BaseException) -> ErrorClassification:
@@ -91,13 +101,17 @@ def classify_error(exc: BaseException) -> ErrorClassification:
     return _CLASSIFIER.classify(exc)
 
 
-def register_error_class(exc_type: Type[Exception], classification: ErrorClassification) -> None:
+def register_error_class(
+    exc_type: type[Exception],
+    classification: ErrorClassification,
+) -> None:
     _CLASSIFIER.register(exc_type, classification)
 
 
 # ---------------------------------------------------------------------------
 # RetryPolicy
 # ---------------------------------------------------------------------------
+
 
 class RetryPolicy:
     """Deterministic retry with exponential backoff and error classification."""
@@ -111,11 +125,11 @@ class RetryPolicy:
         backoff_factor: float = 2.0,
         jitter: bool = False,
     ) -> None:
-        self._max_attempts    = max(1, int(max_attempts))
-        self._base_delay      = max(0.0, float(base_delay_seconds))
-        self._max_delay       = max(0.0, float(max_delay_seconds))
-        self._backoff_factor  = max(1.0, float(backoff_factor))
-        self._jitter          = bool(jitter)
+        self._max_attempts = max(1, int(max_attempts))
+        self._base_delay = max(0.0, float(base_delay_seconds))
+        self._max_delay = max(0.0, float(max_delay_seconds))
+        self._backoff_factor = max(1.0, float(backoff_factor))
+        self._jitter = bool(jitter)
 
     def should_retry(self, exc: BaseException, attempt: int) -> bool:
         """Return True if the error should be retried (attempt is 1-based)."""
@@ -128,7 +142,7 @@ class RetryPolicy:
         delay = self._base_delay * (self._backoff_factor ** (attempt - 1))
         delay = min(delay, self._max_delay)
         if self._jitter:
-            delay *= (0.5 + random.random() * 0.5)
+            delay *= 0.5 + (secrets.randbelow(5000) / 10000.0)
         return delay
 
     def execute(
@@ -160,6 +174,7 @@ class RetryPolicy:
 # FaultInjector
 # ---------------------------------------------------------------------------
 
+
 class FaultInjector:
     """Named failure-point registry for chaos-engineering and tests.
 
@@ -178,18 +193,18 @@ class FaultInjector:
     """
 
     def __init__(self) -> None:
-        self._lock           = RLock()
-        self._armed:       dict[str, int]              = defaultdict(int)
-        self._probability: dict[str, float]            = {}
-        self._exc_types:   dict[str, Type[Exception]]  = {}
-        self._triggered:   dict[str, int]              = defaultdict(int)
+        self._lock = RLock()
+        self._armed: dict[str, int] = defaultdict(int)
+        self._probability: dict[str, float] = {}
+        self._exc_types: dict[str, type[Exception]] = {}
+        self._triggered: dict[str, int] = defaultdict(int)
 
     def arm(
         self,
         name: str,
         *,
         count: int = 1,
-        exc_type: Type[Exception] = RetryableError,
+        exc_type: type[Exception] = RetryableError,
     ) -> None:
         with self._lock:
             self._armed[name] += max(1, int(count))
@@ -200,7 +215,7 @@ class FaultInjector:
         name: str,
         *,
         probability: float,
-        exc_type: Type[Exception] = RetryableError,
+        exc_type: type[Exception] = RetryableError,
     ) -> None:
         with self._lock:
             self._probability[name] = max(0.0, min(1.0, float(probability)))
@@ -246,6 +261,7 @@ def get_fault_injector() -> FaultInjector:
 # FaultBoundary context manager
 # ---------------------------------------------------------------------------
 
+
 class FaultBoundary:
     """Classify exceptions and route to appropriate handlers.
 
@@ -263,19 +279,19 @@ class FaultBoundary:
         self,
         name: str = "",
         *,
-        on_retryable:    Callable[[Exception], None] | None = None,
-        on_terminal:     Callable[[Exception], None] | None = None,
+        on_retryable: Callable[[Exception], None] | None = None,
+        on_terminal: Callable[[Exception], None] | None = None,
         on_compensating: Callable[[Exception], None] | None = None,
         injector: FaultInjector | None = None,
     ) -> None:
-        self._name           = name
-        self._on_retryable   = on_retryable
-        self._on_terminal    = on_terminal
+        self._name = name
+        self._on_retryable = on_retryable
+        self._on_terminal = on_terminal
         self._on_compensating = on_compensating
-        self._injector       = injector or _DEFAULT_INJECTOR
+        self._injector = injector or _DEFAULT_INJECTOR
         self.classification: ErrorClassification | None = None
 
-    def __enter__(self) -> "FaultBoundary":
+    def __enter__(self) -> FaultBoundary:
         if self._name:
             self._injector.check(self._name)
         return self
@@ -286,8 +302,8 @@ class FaultBoundary:
         c = classify_error(exc_val)
         self.classification = c
         handler = {
-            ErrorClassification.RETRYABLE:    self._on_retryable,
-            ErrorClassification.TERMINAL:     self._on_terminal,
+            ErrorClassification.RETRYABLE: self._on_retryable,
+            ErrorClassification.TERMINAL: self._on_terminal,
             ErrorClassification.COMPENSATING: self._on_compensating,
         }.get(c)
         if handler is not None:
