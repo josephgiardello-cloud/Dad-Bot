@@ -32,8 +32,8 @@ from dadbot.core.tool_ir import (
     reduce_events_to_results,
     stable_tool_input_hash,
 )
-from dadbot.core.tool_sandbox import ToolSandbox, ToolSandboxSnapshot
 from dadbot.core.tool_scheduler import ToolScheduler
+from dadbot.core.testing.tool_runtime_test_adapter import ToolRuntimeTestAdapter
 
 # ===========================================================================
 # A — TestToolDAGValidity
@@ -599,85 +599,84 @@ class TestSchedulerDeterminism:
 
 class TestSandboxIsolation:
     def test_fresh_sandbox_is_clean(self):
-        sb = ToolSandbox()
-        assert sb.is_clean()
+        runtime = ToolRuntimeTestAdapter()
+        assert runtime.is_clean()
 
     def test_snapshot_before_after_differs(self):
-        sb = ToolSandbox()
-        snap_before = sb.isolated_state_snapshot(generation=0)
-        sb.execute(
+        runtime = ToolRuntimeTestAdapter()
+        snap_before = runtime.isolated_state_snapshot(generation=0)
+        runtime.execute(
             tool_name="memory_lookup",
             parameters={"key": "test"},
             executor=lambda: {"result": "data"},
         )
-        snap_after = sb.isolated_state_snapshot(generation=1)
+        snap_after = runtime.isolated_state_snapshot(generation=1)
         assert snap_before.snapshot_hash != snap_after.snapshot_hash
 
     def test_two_sandboxes_same_operations_produce_same_snapshot_hash(self):
-        def run_ops(sb: ToolSandbox) -> ToolSandboxSnapshot:
-            sb.execute(
+        def run_ops(runtime: ToolRuntimeTestAdapter):
+            runtime.execute(
                 tool_name="memory_lookup",
                 parameters={"key": "goals"},
                 executor=lambda: {"result": "goal_a"},
             )
-            return sb.isolated_state_snapshot(generation=1)
+            return runtime.isolated_state_snapshot(generation=1)
 
-        sb1 = ToolSandbox()
-        sb2 = ToolSandbox()
-        snap1 = run_ops(sb1)
-        snap2 = run_ops(sb2)
+        rt1 = ToolRuntimeTestAdapter()
+        rt2 = ToolRuntimeTestAdapter()
+        snap1 = run_ops(rt1)
+        snap2 = run_ops(rt2)
         assert snap1.snapshot_hash == snap2.snapshot_hash
 
     def test_cross_tool_no_leakage(self):
         """Two sandboxes operating independently should not affect each other."""
-        sb1 = ToolSandbox()
-        sb2 = ToolSandbox()
+        rt1 = ToolRuntimeTestAdapter()
+        rt2 = ToolRuntimeTestAdapter()
 
-        sb1.execute(
+        rt1.execute(
             tool_name="memory_lookup",
             parameters={"key": "tool_a"},
             executor=lambda: {"result": "a"},
         )
-        # sb2 should remain clean.
-        assert sb2.is_clean()
+        assert rt2.is_clean()
 
     def test_rollback_removes_compensating_actions(self):
-        sb = ToolSandbox()
+        runtime = ToolRuntimeTestAdapter()
         rolled_back: list[str] = []
 
         def undo_a():
             rolled_back.append("a")
 
-        sb.execute(
+        runtime.execute(
             tool_name="memory_lookup",
             parameters={"key": "alpha"},
             executor=lambda: "ok",
             compensating_action=undo_a,
         )
-        outcomes = sb.rollback()
+        outcomes = runtime.rollback()
         assert any(o["rolled_back"] for o in outcomes)
         assert "a" in rolled_back
 
     def test_idempotency_key_deduplicates(self):
-        sb = ToolSandbox()
+        runtime = ToolRuntimeTestAdapter()
         call_count = [0]
 
         def executor():
             call_count[0] += 1
             return "result"
 
-        sb.execute(tool_name="memory_lookup", parameters={"key": "dup"}, executor=executor)
-        sb.execute(tool_name="memory_lookup", parameters={"key": "dup"}, executor=executor)
+        runtime.execute(tool_name="memory_lookup", parameters={"key": "dup"}, executor=executor)
+        runtime.execute(tool_name="memory_lookup", parameters={"key": "dup"}, executor=executor)
         # Executor should only be called once due to idempotency.
         assert call_count[0] == 1
 
     def test_failed_execution_does_not_pollute_cache(self):
-        sb = ToolSandbox()
+        runtime = ToolRuntimeTestAdapter()
 
         def bad_executor():
             raise RuntimeError("deliberate failure")
 
-        rec = sb.execute(
+        rec = runtime.execute(
             tool_name="memory_lookup",
             parameters={"key": "fail_key"},
             executor=bad_executor,
@@ -690,12 +689,12 @@ class TestSandboxIsolation:
             counter[0] += 1
             return "recovered"
 
-        sb.execute(tool_name="memory_lookup", parameters={"key": "fail_key"}, executor=good_executor)
+        runtime.execute(tool_name="memory_lookup", parameters={"key": "fail_key"}, executor=good_executor)
         assert counter[0] == 1
 
     def test_snapshot_to_dict_contains_required_keys(self):
-        sb = ToolSandbox()
-        snap = sb.isolated_state_snapshot(generation=0)
+        runtime = ToolRuntimeTestAdapter()
+        snap = runtime.isolated_state_snapshot(generation=0)
         d = snap.to_dict()
         for k in ("records_count", "cache_keys", "snapshot_hash", "generation"):
             assert k in d

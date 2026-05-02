@@ -11,7 +11,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-from dadbot.core.observability import get_metrics
+from dadbot.core.kernel_signals import get_metrics
 
 
 def _normalize_metric_name(name: str) -> str:

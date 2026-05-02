@@ -277,6 +277,14 @@ class ServiceRegistry:
                 turn_service=turn_service,
             ),
         )
+        post_commit_worker = getattr(bot, "_post_commit_worker", None)
+        if post_commit_worker is None:
+            post_commit_worker = _instantiate(
+                "dadbot.services.post_commit_worker:PostCommitWorker",
+                bot,
+            )
+            bot._post_commit_worker = post_commit_worker
+        registry.register("post_commit_worker", post_commit_worker)
         registry.register(
             "context_service",
             _instantiate(
@@ -427,6 +435,13 @@ def wire_runtime_managers(bot: Any) -> None:
         ServiceDescriptor(
             "tone_context",
             lambda: _instantiate("dadbot.tone:ToneContextBuilder", bot.bot_context),
+        ),
+        ServiceDescriptor(
+            "personality_service",
+            lambda: _instantiate(
+                "dadbot.managers.personality_service:PersonalityServiceManager",
+                bot,
+            ),
         ),
         ServiceDescriptor(
             "mood_manager",

@@ -1,42 +1,264 @@
 {
-  "generated_at": "2026-04-30T20:34:03.942678+00:00",
+  "generated_at": "2026-05-02T03:39:17.279975+00:00",
   "bucket_labels": {
     "A": "real_regression",
     "B": "migration_inflation",
     "C": "baseline_invalidation"
   },
   "summary": {
-    "A": 0,
-    "B": 0,
-    "C": 0
+    "A": 20,
+    "B": 2,
+    "C": 10
   },
   "findings": {
-    "A": [],
-    "B": [],
-    "C": []
+    "A": [
+      {
+        "source": "contract_guard",
+        "file": "dadbot/core/execution_binder.py",
+        "detail": "dadbot/core/execution_binder.py:30 run(trace_id)",
+        "reason": "New forbidden primitive signature introduced"
+      },
+      {
+        "source": "contract_guard",
+        "file": "dadbot/core/execution_context.py",
+        "detail": "dadbot/core/execution_context.py:152 __init__(trace_id)",
+        "reason": "New forbidden primitive signature introduced"
+      },
+      {
+        "source": "contract_guard",
+        "file": "dadbot/core/kernel_locks.py",
+        "detail": "dadbot/core/kernel_locks.py:109 canonical_event(trace_id)",
+        "reason": "New forbidden primitive signature introduced"
+      },
+      {
+        "source": "contract_guard",
+        "file": "dadbot/core/kernel_locks.py",
+        "detail": "dadbot/core/kernel_locks.py:134 strict_hash(trace_id)",
+        "reason": "New forbidden primitive signature introduced"
+      },
+      {
+        "source": "contract_guard",
+        "file": "dadbot/core/kernel_signals.py",
+        "detail": "dadbot/core/kernel_signals.py:138 __init__(trace_id)",
+        "reason": "New forbidden primitive signature introduced"
+      },
+      {
+        "source": "contract_guard",
+        "file": "dadbot/core/kernel_signals.py",
+        "detail": "dadbot/core/kernel_signals.py:177 span(trace_id)",
+        "reason": "New forbidden primitive signature introduced"
+      },
+      {
+        "source": "contract_guard",
+        "file": "dadbot/core/kernel_signals.py",
+        "detail": "dadbot/core/kernel_signals.py:202 ensure_trace_id(trace_id)",
+        "reason": "New forbidden primitive signature introduced"
+      },
+      {
+        "source": "contract_guard",
+        "file": "dadbot/core/kernel_signals.py",
+        "detail": "dadbot/core/kernel_signals.py:90 __init__(trace_id)",
+        "reason": "New forbidden primitive signature introduced"
+      },
+      {
+        "source": "contract_guard",
+        "file": "dadbot/core/turn_mixin.py",
+        "detail": "dadbot/core/turn_mixin.py:291 _emit_graph_failure_event(trace_id)",
+        "reason": "New forbidden primitive signature introduced"
+      },
+      {
+        "source": "contract_guard",
+        "file": "dadbot/managers/conversation_persistence.py",
+        "detail": "dadbot/managers/conversation_persistence.py:306 _turn_event_path(trace_id)",
+        "reason": "New forbidden primitive signature introduced"
+      },
+      {
+        "source": "contract_guard",
+        "file": "dadbot/managers/conversation_persistence.py",
+        "detail": "dadbot/managers/conversation_persistence.py:310 _snapshot_path(trace_id)",
+        "reason": "New forbidden primitive signature introduced"
+      },
+      {
+        "source": "contract_guard",
+        "file": "dadbot/managers/conversation_persistence.py",
+        "detail": "dadbot/managers/conversation_persistence.py:314 _compute_next_sequence(trace_id)",
+        "reason": "New forbidden primitive signature introduced"
+      },
+      {
+        "source": "contract_guard",
+        "file": "dadbot/managers/conversation_persistence.py",
+        "detail": "dadbot/managers/conversation_persistence.py:376 list_turn_events(trace_id)",
+        "reason": "New forbidden primitive signature introduced"
+      },
+      {
+        "source": "contract_guard",
+        "file": "dadbot/managers/conversation_persistence.py",
+        "detail": "dadbot/managers/conversation_persistence.py:460 replay_turn_events(trace_id)",
+        "reason": "New forbidden primitive signature introduced"
+      },
+      {
+        "source": "contract_guard",
+        "file": "dadbot/managers/conversation_persistence.py",
+        "detail": "dadbot/managers/conversation_persistence.py:483 validate_replay_determinism(trace_id)",
+        "reason": "New forbidden primitive signature introduced"
+      },
+      {
+        "source": "contract_guard",
+        "file": "dadbot/managers/conversation_persistence.py",
+        "detail": "dadbot/managers/conversation_persistence.py:550 load_latest_graph_checkpoint(trace_id)",
+        "reason": "New forbidden primitive signature introduced"
+      },
+      {
+        "source": "contract_guard",
+        "file": "dadbot/managers/conversation_persistence.py",
+        "detail": "dadbot/managers/conversation_persistence.py:581 resume_graph_checkpoint(trace_id)",
+        "reason": "New forbidden primitive signature introduced"
+      },
+      {
+        "source": "contract_guard",
+        "file": "dadbot/services/persistence.py",
+        "detail": "dadbot/services/persistence.py:1006 validate_replay_determinism(trace_id)",
+        "reason": "New forbidden primitive signature introduced"
+      },
+      {
+        "source": "contract_guard",
+        "file": "dadbot/services/persistence.py",
+        "detail": "dadbot/services/persistence.py:985 list_turn_events(trace_id)",
+        "reason": "New forbidden primitive signature introduced"
+      },
+      {
+        "source": "contract_guard",
+        "file": "dadbot/services/persistence.py",
+        "detail": "dadbot/services/persistence.py:997 replay_turn_events(trace_id)",
+        "reason": "New forbidden primitive signature introduced"
+      }
+    ],
+    "B": [
+      {
+        "source": "complexity_diff_gate",
+        "file": "dadbot/core/graph_mutation.py",
+        "detail": "dadbot/core/graph_mutation.py: LOC 283->295 and CC 98->98",
+        "reason": "Contract migration inflation in known transition hotfile"
+      },
+      {
+        "source": "god_class_audit",
+        "file": "dadbot/core/graph_mutation.py",
+        "detail": "  LOC grew 283\u2192295 (+12) but CC did not decrease (98\u219298)",
+        "reason": "Contract migration inflation in known transition hotfile"
+      }
+    ],
+    "C": [
+      {
+        "source": "complexity_diff_gate",
+        "file": "dadbot/core/graph.py",
+        "detail": "dadbot/core/graph.py: LOC 1089->1273 and CC 171->219",
+        "reason": "Compared against pre-migration complexity baseline"
+      },
+      {
+        "source": "complexity_diff_gate",
+        "file": "dadbot/core/graph.py",
+        "detail": "dadbot/core/graph.py: decision_points 72->80",
+        "reason": "Compared against pre-migration complexity baseline"
+      },
+      {
+        "source": "complexity_diff_gate",
+        "file": "dadbot/core/nodes.py",
+        "detail": "dadbot/core/nodes.py: LOC 1211->1260 and CC 384->392",
+        "reason": "Compared against pre-migration complexity baseline"
+      },
+      {
+        "source": "complexity_diff_gate",
+        "file": "dadbot/core/orchestrator.py",
+        "detail": "dadbot/core/orchestrator.py: LOC 331->396 and CC 94->107",
+        "reason": "Compared against pre-migration complexity baseline"
+      },
+      {
+        "source": "god_class_audit",
+        "file": "dadbot/core/graph.py",
+        "detail": "  LOC grew 1089\u21921273 (+184) but CC did not decrease (171\u2192219)",
+        "reason": "Pre-migration god-class baseline no longer representative"
+      },
+      {
+        "source": "god_class_audit",
+        "file": "dadbot/core/graph.py",
+        "detail": "  decision_points grew 72\u2192100 (+28)",
+        "reason": "Pre-migration god-class baseline no longer representative"
+      },
+      {
+        "source": "god_class_audit",
+        "file": "dadbot/core/nodes.py",
+        "detail": "  LOC grew 1211\u21921260 (+49) but CC did not decrease (384\u2192392)",
+        "reason": "Pre-migration god-class baseline no longer representative"
+      },
+      {
+        "source": "god_class_audit",
+        "file": "dadbot/core/nodes.py",
+        "detail": "  decision_points grew 130\u2192133 (+3)",
+        "reason": "Pre-migration god-class baseline no longer representative"
+      },
+      {
+        "source": "god_class_audit",
+        "file": "dadbot/core/orchestrator.py",
+        "detail": "  LOC grew 331\u2192396 (+65) but CC did not decrease (94\u2192107)",
+        "reason": "Pre-migration god-class baseline no longer representative"
+      },
+      {
+        "source": "god_class_audit",
+        "file": "dadbot/core/orchestrator.py",
+        "detail": "  decision_points grew 25\u219229 (+4)",
+        "reason": "Pre-migration god-class baseline no longer representative"
+      }
+    ]
   },
   "sources": {
     "contract_guard": {
-      "current_count": 54,
+      "current_count": 58,
       "baseline_count": 55,
-      "new_violations": [],
-      "_exit_code": 0
+      "new_violations": [
+        "dadbot/core/execution_binder.py:30 run(trace_id)",
+        "dadbot/core/execution_context.py:152 __init__(trace_id)",
+        "dadbot/core/kernel_locks.py:109 canonical_event(trace_id)",
+        "dadbot/core/kernel_locks.py:134 strict_hash(trace_id)",
+        "dadbot/core/kernel_signals.py:138 __init__(trace_id)",
+        "dadbot/core/kernel_signals.py:177 span(trace_id)",
+        "dadbot/core/kernel_signals.py:202 ensure_trace_id(trace_id)",
+        "dadbot/core/kernel_signals.py:90 __init__(trace_id)",
+        "dadbot/core/turn_mixin.py:291 _emit_graph_failure_event(trace_id)",
+        "dadbot/managers/conversation_persistence.py:306 _turn_event_path(trace_id)",
+        "dadbot/managers/conversation_persistence.py:310 _snapshot_path(trace_id)",
+        "dadbot/managers/conversation_persistence.py:314 _compute_next_sequence(trace_id)",
+        "dadbot/managers/conversation_persistence.py:376 list_turn_events(trace_id)",
+        "dadbot/managers/conversation_persistence.py:460 replay_turn_events(trace_id)",
+        "dadbot/managers/conversation_persistence.py:483 validate_replay_determinism(trace_id)",
+        "dadbot/managers/conversation_persistence.py:550 load_latest_graph_checkpoint(trace_id)",
+        "dadbot/managers/conversation_persistence.py:581 resume_graph_checkpoint(trace_id)",
+        "dadbot/services/persistence.py:1006 validate_replay_determinism(trace_id)",
+        "dadbot/services/persistence.py:985 list_turn_events(trace_id)",
+        "dadbot/services/persistence.py:997 replay_turn_events(trace_id)"
+      ],
+      "_exit_code": 1
     },
     "complexity_diff_gate": {
-      "violations": [],
+      "violations": [
+        "dadbot/core/graph.py: LOC 1089->1273 and CC 171->219",
+        "dadbot/core/graph.py: decision_points 72->80",
+        "dadbot/core/nodes.py: LOC 1211->1260 and CC 384->392",
+        "dadbot/core/orchestrator.py: LOC 331->396 and CC 94->107",
+        "dadbot/core/graph_mutation.py: LOC 283->295 and CC 98->98"
+      ],
       "suppressed": [],
       "current": {
         "dadbot/core/graph.py": {
-          "loc": 1089,
-          "cc_total": 171,
-          "cc_max": 12,
-          "decision_points": 59
+          "loc": 1273,
+          "cc_total": 219,
+          "cc_max": 31,
+          "decision_points": 80
         },
         "dadbot/core/nodes.py": {
-          "loc": 1211,
-          "cc_total": 384,
+          "loc": 1260,
+          "cc_total": 392,
           "cc_max": 20,
-          "decision_points": 117
+          "decision_points": 120
         },
         "dadbot/memory/graph_manager.py": {
           "loc": 1496,
@@ -45,13 +267,13 @@
           "decision_points": 151
         },
         "dadbot/core/orchestrator.py": {
-          "loc": 331,
-          "cc_total": 94,
+          "loc": 396,
+          "cc_total": 107,
           "cc_max": 15,
-          "decision_points": 20
+          "decision_points": 24
         },
         "dadbot/core/graph_mutation.py": {
-          "loc": 283,
+          "loc": 295,
           "cc_total": 98,
           "cc_max": 17,
           "decision_points": 31
@@ -69,33 +291,55 @@
           "decision_points": 8
         }
       },
-      "_exit_code": 0
+      "_exit_code": 1
     },
     "god_class_audit": {
-      "violations": {},
+      "violations": {
+        "dadbot/core/graph.py": [
+          "  LOC grew 1089\u21921273 (+184) but CC did not decrease (171\u2192219)",
+          "  decision_points grew 72\u2192100 (+28)"
+        ],
+        "dadbot/core/nodes.py": [
+          "  LOC grew 1211\u21921260 (+49) but CC did not decrease (384\u2192392)",
+          "  decision_points grew 130\u2192133 (+3)"
+        ],
+        "dadbot/core/orchestrator.py": [
+          "  LOC grew 331\u2192396 (+65) but CC did not decrease (94\u2192107)",
+          "  decision_points grew 25\u219229 (+4)"
+        ],
+        "dadbot/core/graph_mutation.py": [
+          "  LOC grew 283\u2192295 (+12) but CC did not decrease (98\u219298)"
+        ]
+      },
       "suppressed": {},
       "report": [
         {
           "file": "dadbot/core/graph.py",
-          "loc": 1089,
-          "cc_total": 171,
-          "cc_max": 12,
-          "decision_points": 72,
+          "loc": 1273,
+          "cc_total": 219,
+          "cc_max": 31,
+          "decision_points": 100,
           "baseline_loc": 1089,
           "baseline_cc_total": 171,
           "baseline_dp": 72,
-          "violations": []
+          "violations": [
+            "  LOC grew 1089\u21921273 (+184) but CC did not decrease (171\u2192219)",
+            "  decision_points grew 72\u2192100 (+28)"
+          ]
         },
         {
           "file": "dadbot/core/nodes.py",
-          "loc": 1211,
-          "cc_total": 384,
+          "loc": 1260,
+          "cc_total": 392,
           "cc_max": 20,
-          "decision_points": 130,
+          "decision_points": 133,
           "baseline_loc": 1211,
           "baseline_cc_total": 384,
           "baseline_dp": 130,
-          "violations": []
+          "violations": [
+            "  LOC grew 1211\u21921260 (+49) but CC did not decrease (384\u2192392)",
+            "  decision_points grew 130\u2192133 (+3)"
+          ]
         },
         {
           "file": "dadbot/memory/graph_manager.py",
@@ -110,25 +354,30 @@
         },
         {
           "file": "dadbot/core/orchestrator.py",
-          "loc": 331,
-          "cc_total": 94,
+          "loc": 396,
+          "cc_total": 107,
           "cc_max": 15,
-          "decision_points": 25,
+          "decision_points": 29,
           "baseline_loc": 331,
           "baseline_cc_total": 94,
           "baseline_dp": 25,
-          "violations": []
+          "violations": [
+            "  LOC grew 331\u2192396 (+65) but CC did not decrease (94\u2192107)",
+            "  decision_points grew 25\u219229 (+4)"
+          ]
         },
         {
           "file": "dadbot/core/graph_mutation.py",
-          "loc": 283,
+          "loc": 295,
           "cc_total": 98,
           "cc_max": 17,
           "decision_points": 46,
           "baseline_loc": 283,
           "baseline_cc_total": 98,
           "baseline_dp": 46,
-          "violations": []
+          "violations": [
+            "  LOC grew 283\u2192295 (+12) but CC did not decrease (98\u219298)"
+          ]
         },
         {
           "file": "dadbot/core/graph_context.py",
@@ -163,7 +412,7 @@
           "mutation_calls": 9,
           "policy_calls": 20,
           "io_calls": 0,
-          "branch_density": 54,
+          "branch_density": 74,
           "io_imports": 0,
           "violations": [],
           "rationale": "graph.py must stay a dispatcher; mutation/policy/IO must be delegated"
@@ -181,19 +430,19 @@
         {
           "file": "dadbot/core/orchestrator.py",
           "mutation_calls": 2,
-          "policy_calls": 1,
+          "policy_calls": 4,
           "io_calls": 0,
-          "branch_density": 19,
+          "branch_density": 23,
           "io_imports": 0,
           "violations": [],
           "rationale": "orchestrator.py must not accumulate inline policy decisions"
         },
         {
           "file": "dadbot/core/nodes.py",
-          "mutation_calls": 9,
+          "mutation_calls": 11,
           "policy_calls": 8,
           "io_calls": 0,
-          "branch_density": 105,
+          "branch_density": 108,
           "io_imports": 0,
           "violations": [],
           "rationale": "nodes.py must not perform direct persistence IO outside SaveNode boundary"
@@ -232,7 +481,7 @@
       "_exit_code": 0
     },
     "arch_completeness_audit": {
-      "completeness_score": 96,
+      "completeness_score": 90,
       "missing_modules": [],
       "partial_subsystems": [
         "mutation_engine"
@@ -343,7 +592,80 @@
         }
       },
       "contract_drift": [],
-      "missing_parameters": [],
+      "missing_parameters": [
+        {
+          "file": "dadbot/core/nodes.py",
+          "function": "run",
+          "missing_fields": [
+            "ledger_entry"
+          ],
+          "lineno": 194
+        },
+        {
+          "file": "dadbot/core/nodes.py",
+          "function": "run",
+          "missing_fields": [
+            "ledger_entry"
+          ],
+          "lineno": 227
+        },
+        {
+          "file": "dadbot/core/nodes.py",
+          "function": "run",
+          "missing_fields": [
+            "ledger_entry"
+          ],
+          "lineno": 246
+        },
+        {
+          "file": "dadbot/core/nodes.py",
+          "function": "run",
+          "missing_fields": [
+            "ledger_entry"
+          ],
+          "lineno": 323
+        },
+        {
+          "file": "dadbot/core/nodes.py",
+          "function": "run",
+          "missing_fields": [
+            "ledger_entry"
+          ],
+          "lineno": 448
+        },
+        {
+          "file": "dadbot/core/nodes.py",
+          "function": "run",
+          "missing_fields": [
+            "ledger_entry"
+          ],
+          "lineno": 1204
+        },
+        {
+          "file": "dadbot/core/nodes.py",
+          "function": "run",
+          "missing_fields": [
+            "ledger_entry"
+          ],
+          "lineno": 1264
+        },
+        {
+          "file": "dadbot/core/nodes.py",
+          "function": "run",
+          "missing_fields": [
+            "ledger_entry"
+          ],
+          "lineno": 1365
+        },
+        {
+          "file": "dadbot/core/nodes.py",
+          "function": "run",
+          "missing_fields": [
+            "ledger_entry"
+          ],
+          "lineno": 1416
+        }
+      ],
       "orphan_expectations": [],
       "summary": {
         "total_modules_checked": 30,
@@ -351,7 +673,7 @@
         "partial_subsystems": 1,
         "fragmented_subsystems": 0,
         "interface_drift_count": 0,
-        "param_propagation_violations": 0,
+        "param_propagation_violations": 9,
         "scanned_exec_functions": 30,
         "orphan_symbols": 0,
         "not_referenced_orphan_targets": [

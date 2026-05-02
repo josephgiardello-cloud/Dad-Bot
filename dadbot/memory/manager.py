@@ -5,7 +5,7 @@ from datetime import date
 
 from dadbot.contracts import DadBotContext, SupportsDadBotAccess
 from dadbot.core.execution_boundary import MemoryWriteOwnerScope
-from dadbot.core.execution_trace_context import ensure_execution_trace_root
+from dadbot.core.execution_context import ensure_execution_trace_root
 from dadbot.memory.graph_manager import MemoryGraphManager
 from dadbot.memory.lifecycle import MemoryLifecycleManager
 from dadbot.memory.migration import CURRENT_SCHEMA_VERSION

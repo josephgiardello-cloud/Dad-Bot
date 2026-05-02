@@ -786,6 +786,25 @@ class MemoryNormalizer:
             normalized["pinned"] = bool(dumped["pinned"])
         if "contradictions" in memory:
             normalized["contradictions"] = dumped["contradictions"]
+        if "access_count" in memory:
+            try:
+                normalized["access_count"] = max(0, int(memory.get("access_count", 0) or 0))
+            except (TypeError, ValueError):
+                normalized["access_count"] = 0
+        if "high_confidence_hits" in memory:
+            try:
+                normalized["high_confidence_hits"] = max(0, int(memory.get("high_confidence_hits", 0) or 0))
+            except (TypeError, ValueError):
+                normalized["high_confidence_hits"] = 0
+        if "confidence_history" in memory:
+            raw = memory.get("confidence_history") or {}
+            if not isinstance(raw, dict):
+                raw = {}
+            normalized["confidence_history"] = {
+                "high": max(0, int(raw.get("high", 0) or 0)),
+                "medium": max(0, int(raw.get("medium", 0) or 0)),
+                "low": max(0, int(raw.get("low", 0) or 0)),
+            }
         return normalized
 
     def normalize_persisted_memory_entry(self, memory):
@@ -839,7 +858,7 @@ class MemoryNormalizer:
             return None
 
         dumped = validated.model_dump(mode="json")
-        return {
+        normalized = {
             "summary": dumped["summary"],
             "category": dumped["category"],
             "mood": dumped["mood"],
@@ -853,6 +872,23 @@ class MemoryNormalizer:
             "updated_at": updated_at,
             "contradictions": dumped["contradictions"],
         }
+        try:
+            normalized["access_count"] = max(0, int(memory.get("access_count", 0) or 0))
+        except (TypeError, ValueError):
+            normalized["access_count"] = 0
+        try:
+            normalized["high_confidence_hits"] = max(0, int(memory.get("high_confidence_hits", 0) or 0))
+        except (TypeError, ValueError):
+            normalized["high_confidence_hits"] = 0
+        raw = memory.get("confidence_history") or {}
+        if not isinstance(raw, dict):
+            raw = {}
+        normalized["confidence_history"] = {
+            "high": max(0, int(raw.get("high", 0) or 0)),
+            "medium": max(0, int(raw.get("medium", 0) or 0)),
+            "low": max(0, int(raw.get("low", 0) or 0)),
+        }
+        return normalized
 
     # ------------------------------------------------------------------ quality policy
 

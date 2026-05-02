@@ -187,13 +187,12 @@ class TestPhase4AMemoryMutationRaceSimulation:
 
 
 class TestPhase4AReplayDegradation:
-    def test_checkpoint_missing_fields_uses_safe_fallback_reconstruction(self):
-        degraded = ExecutionRecovery.safe_fallback_reconstruction(
-            checkpoint={"state": {"x": 1}},
-            trace_context={"steps": [{"operation": "model_output", "payload": {"output_hash": "x"}}]},
-        )
-        assert degraded["fallback"]["mode"] == "safe_reconstruction"
-        assert degraded["state"]["x"] == 1
+    def test_checkpoint_missing_fields_rejects_fallback_reconstruction(self):
+        with pytest.raises(RuntimeError, match="replay-only"):
+            ExecutionRecovery.safe_fallback_reconstruction(
+                checkpoint={"state": {"x": 1}},
+                trace_context={"steps": [{"operation": "model_output", "payload": {"output_hash": "x"}}]},
+            )
 
     def test_truncated_execution_log_triggers_deterministic_mismatch(self):
         baseline = _baseline_trace()

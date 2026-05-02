@@ -53,7 +53,12 @@ class MaintenanceScheduler:
         )
         return self.bot.session_turn_count() - last_turn >= interval
 
-    def run_periodic_durable_synthesis(self, trigger_text="", force=False):
+    def run_periodic_durable_synthesis(
+        self,
+        trigger_text="",
+        force=False,
+        turn_context=None,
+    ):
         if not self.should_run_periodic_durable_synthesis(force=force):
             return {
                 "ran": False,
@@ -76,11 +81,11 @@ class MaintenanceScheduler:
         archive_before = len(self.bot.session_archive())
         archive_entry = self.bot.archive_session_context(history)
         self.bot.update_memory_store(history)
-        consolidated = self.bot.consolidate_memories()
-        timeline = self.bot.refresh_relationship_timeline()
+        consolidated = self.bot.consolidate_memories(turn_context=turn_context)
+        timeline = self.bot.refresh_relationship_timeline(turn_context=turn_context)
         patterns = self.bot.detect_life_patterns()
         persona_entry = self.bot.evolve_persona()
-        forgetting = self.bot.apply_controlled_forgetting()
+        forgetting = self.bot.apply_controlled_forgetting(turn_context=turn_context)
         # Background maintenance is non-semantic in Phase 4 strict mode.
         # Graph projection/sync is SaveNode-owned only.
 

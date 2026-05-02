@@ -1,0 +1,36 @@
+{
+  "canonical_turn_entrypoint": "dadbot.core.dadbot.DadBot.execute_turn",
+  "frozen_runtime_surface": {
+    "dadbot/core/turn_mixin.py::DadBotTurnMixin": [
+      "execute_turn",
+      "handle_turn_async",
+      "handle_turn_sync",
+      "process_user_message",
+      "process_user_message_async",
+      "process_user_message_stream",
+      "process_user_message_stream_async",
+      "run_turn"
+    ],
+    "dadbot/services/turn_service.py::TurnService": [
+      "process_user_message",
+      "process_user_message_async",
+      "process_user_message_stream",
+      "process_user_message_stream_async"
+    ]
+  },
+  "legacy_facade_entrypoints": [
+    "handle_turn_async",
+    "handle_turn_sync",
+    "process_user_message",
+    "process_user_message_async",
+    "process_user_message_stream",
+    "process_user_message_stream_async",
+    "run_turn"
+  ],
+  "legacy_service_entrypoints": [
+    "TurnService.process_user_message",
+    "TurnService.process_user_message_async",
+    "TurnService.process_user_message_stream",
+    "TurnService.process_user_message_stream_async"
+  ]
+}

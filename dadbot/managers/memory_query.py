@@ -199,6 +199,105 @@ class MemoryQueryManager:
             score += 2
         return score
 
+    def _recent_turn_context(self, *, max_turns=3):
+        history = list(self.bot.conversation_history() or [])
+        if not history:
+            return ""
+        recent = [item for item in history[-max(2, int(max_turns or 3) * 2) :] if isinstance(item, dict)]
+        parts = []
+        for item in recent:
+            role = str(item.get("role") or "").strip().lower()
+            if role not in {"user", "assistant"}:
+                continue
+            content = str(item.get("content") or "").strip()
+            if not content:
+                continue
+            speaker = "Tony" if role == "user" else "Dad"
+            parts.append(f"{speaker}: {content}")
+        return "\n".join(parts)
+
+    def _importance_signal(self, memory):
+        base = self.memory_importance_score(memory)
+        category = str(memory.get("category", "general") or "general").strip().lower()
+        summary = str(memory.get("summary", "") or "").strip().lower()
+
+        boost = 0.0
+        if category in {"identity", "relationship", "relationships", "preferences", "preference"}:
+            boost += 0.25
+        if any(token in summary for token in ["my name", "i am", "wife", "husband", "daughter", "son"]):
+            boost += 0.15
+        if any(token in summary for token in ["prefers", "likes", "favorite", "always", "usually"]):
+            boost += 0.15
+
+        return max(0.0, min(1.0, base + boost))
+
+    def score(self, memory, query_context):
+        """Score one memory for current turn relevance.
+
+        score =
+          (0.6 * semantic_similarity)
+        + (0.25 * importance)
+        + (0.15 * recency)
+        """
+        memory_key = self.bot.semantic_memory_key(memory)
+        semantic_similarity = float((query_context.get("semantic_scores") or {}).get(memory_key, 0.0) or 0.0)
+        if semantic_similarity <= 0.0:
+            query_tokens = set(query_context.get("query_tokens") or [])
+            memory_tokens = self.bot.significant_tokens(str(memory.get("summary") or ""))
+            if query_tokens and memory_tokens:
+                overlap = len(query_tokens & memory_tokens)
+                semantic_similarity = max(semantic_similarity, min(1.0, overlap / max(1, len(query_tokens))))
+        graph_boost_tokens = set(query_context.get("graph_boost_tokens") or [])
+        if graph_boost_tokens and graph_boost_tokens & self.bot.significant_tokens(str(memory.get("summary") or "")):
+            semantic_similarity = min(1.0, semantic_similarity + 0.15)
+        semantic_similarity = max(0.0, min(1.0, semantic_similarity))
+
+        importance = self._importance_signal(memory)
+        recency = self.semantic_memory_freshness_weight(memory)
+
+        return round(
+            (0.6 * semantic_similarity) + (0.25 * importance) + (0.15 * recency),
+            6,
+        )
+
+    @staticmethod
+    def _confidence_bucket(score):
+        if score >= 0.7:
+            return "high"
+        if score >= 0.4:
+            return "medium"
+        return "low"
+
+    def _record_memory_access_signals(self, selected, memories):
+        if not selected:
+            return
+
+        today = date.today().isoformat()
+        changed = False
+        for score, memory in selected:
+            try:
+                memory["access_count"] = max(0, int(memory.get("access_count", 0) or 0)) + 1
+            except (TypeError, ValueError):
+                memory["access_count"] = 1
+
+            history = memory.get("confidence_history")
+            if not isinstance(history, dict):
+                history = {}
+            memory["confidence_history"] = {
+                "high": max(0, int(history.get("high", 0) or 0)),
+                "medium": max(0, int(history.get("medium", 0) or 0)),
+                "low": max(0, int(history.get("low", 0) or 0)),
+            }
+
+            bucket = self._confidence_bucket(float(score or 0.0))
+            memory["confidence_history"][bucket] += 1
+            memory["high_confidence_hits"] = int(memory["confidence_history"].get("high", 0))
+            memory["last_accessed_at"] = today
+            changed = True
+
+        if changed:
+            self.bot.mutate_memory_store(memories=memories)
+
     def relevant_archive_entries_for_input(self, user_input, limit=2):
         query_tokens = self.bot.significant_tokens(user_input)
         query_category = self.bot.infer_memory_category(user_input)
@@ -233,29 +332,29 @@ class MemoryQueryManager:
         )
         return [entry for _, entry in ranked[: max(1, int(limit or 2))]]
 
-    def relevant_memories_for_input(self, user_input, limit=3, graph_result=None):
-        effective_limit = max(
-            1,
-            min(int(limit or 3), self.memory_context_limit_for_input(user_input)),
-        )
+    def relevant_memories_for_input(self, user_input, limit=5, graph_result=None):
+        requested_limit = int(limit or 5)
+        effective_limit = max(1, min(7, requested_limit))
+        if requested_limit >= 3:
+            effective_limit = max(3, effective_limit)
         memories = self.bot.memory_catalog()
-        scored_memories = []
-        combined_scores = {}
+        if not memories:
+            self.bot._last_memory_retrieval_diagnostics = {
+                "retrieved_count": 0,
+                "top_score_gap": 0.0,
+                "has_high_confidence": False,
+            }
+            return []
+
         graph_result = (
             graph_result
             if graph_result is not None
             else self.bot.graph_retrieval_for_input(
                 user_input,
-                limit=min(3, effective_limit),
+                limit=min(3, max(1, effective_limit)),
             )
         )
         graph_boost_tokens = set()
-        query_tokens = self.bot.significant_tokens(user_input)
-        query_category = self.bot.infer_memory_category(user_input)
-        query_mood = self.bot.normalize_mood(user_input)
-        recent_topics = self.recent_memory_topics(limit=4)
-        mood_trend = self.current_memory_mood_trend()
-
         if graph_result:
             for evidence in graph_result.get("supporting_evidence", []):
                 graph_boost_tokens.update(
@@ -267,63 +366,66 @@ class MemoryQueryManager:
                     ),
                 )
 
-        for memory in memories:
-            summary = memory.get("summary", "")
-            if not summary:
-                continue
+        recent_turns = self._recent_turn_context(max_turns=3)
+        personality_state = str(self.bot.last_saved_mood() or "neutral").strip().lower() or "neutral"
+        semantic_query = (
+            f"{str(user_input or '').strip()}\n\n"
+            f"Recent turns:\n{recent_turns}\n\n"
+            f"Personality state: {personality_state}"
+        ).strip()
 
-            base_score = self.memory_relevance_score(
-                user_input,
-                f"{memory.get('category', '')} {summary}",
+        semantic_matches = list(
+            self.bot.semantic_memory_matches(
+                semantic_query,
+                memories,
+                limit=max(effective_limit * 3, 9),
             )
-            freshness = self.memory_freshness_weight(
-                memory.get("updated_at") or memory.get("created_at"),
-            )
-            alignment = self.memory_alignment_weight(
-                memory,
-                query_tokens=query_tokens,
-                query_category=query_category,
-                query_mood=query_mood,
-                recent_topics=recent_topics,
-                mood_trend=mood_trend,
-            )
-            score = base_score * freshness * alignment
-            if graph_boost_tokens and graph_boost_tokens & self.bot.significant_tokens(
-                summary,
-            ):
-                score += 1.4
-            if score > 0:
-                score += min(1.25, max(0.0, self.memory_impact_score(memory)) * 0.25)
-                score += self.memory_importance_score(memory) * 0.8
-                scored_memories.append((float(score), memory))
-
-        for score, memory in scored_memories:
-            combined_scores[self.bot.semantic_memory_key(memory)] = (score, memory)
-
-        semantic_matches = self.bot.semantic_memory_matches(
-            user_input,
-            memories,
-            limit=max(effective_limit * 3, 4),
+            or []
         )
+        max_semantic = max((float(score or 0.0) for score, _memory in semantic_matches), default=0.0)
+        semantic_scores = {}
         for semantic_score, memory in semantic_matches:
-            memory_key = self.bot.semantic_memory_key(memory)
-            existing = combined_scores.get(memory_key)
-            if existing is None:
-                combined_scores[memory_key] = (semantic_score, memory)
-                continue
-            combined_scores[memory_key] = (existing[0] + semantic_score, memory)
+            key = self.bot.semantic_memory_key(memory)
+            if max_semantic > 0:
+                semantic_scores[key] = max(0.0, min(1.0, float(semantic_score) / max_semantic))
+            else:
+                semantic_scores[key] = 0.0
+
+        query_context = {
+            "user_message": str(user_input or ""),
+            "recent_turn_context": recent_turns,
+            "personality_state": personality_state,
+            "semantic_scores": semantic_scores,
+            "query_tokens": self.bot.significant_tokens(f"{str(user_input or '')} {recent_turns}"),
+            "graph_boost_tokens": graph_boost_tokens,
+        }
 
         ranked = sorted(
-            combined_scores.values(),
+            ((self.score(memory, query_context), memory) for memory in memories if str(memory.get("summary") or "").strip()),
             key=lambda item: (
-                item[0],
+                float(item[0]),
                 item[1].get("updated_at", ""),
                 item[1].get("summary", ""),
             ),
             reverse=True,
         )
-        selected = self.select_diverse_ranked_memories(ranked, effective_limit)
-        return [memory for _, memory in selected]
+        min_relevance = 0.18
+        filtered_ranked = [item for item in ranked if float(item[0]) >= min_relevance]
+        if not filtered_ranked and ranked:
+            filtered_ranked = ranked[:1]
+
+        selected = self.select_diverse_ranked_memories(filtered_ranked, effective_limit)
+        selected_scores = [float(score) for score, _ in selected]
+        top_score = selected_scores[0] if selected_scores else 0.0
+        second_score = selected_scores[1] if len(selected_scores) > 1 else 0.0
+        self.bot._last_memory_retrieval_diagnostics = {
+            "retrieved_count": len(selected),
+            "top_score_gap": round(max(0.0, top_score - second_score), 4),
+            "has_high_confidence": bool(top_score >= 0.7),
+            "top_score": round(top_score, 4),
+        }
+        self._record_memory_access_signals(selected, memories)
+        return [memory for _score, memory in selected]
 
     @staticmethod
     def retrieval_strategy_for_input(user_input):

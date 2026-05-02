@@ -4,7 +4,7 @@ import json
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from dadbot.core.execution_trace_context import canonicalize_execution_trace_context
+from dadbot.core.execution_context import canonicalize_execution_trace_context
 
 SemanticMode = Literal["exact", "approximate"]
 

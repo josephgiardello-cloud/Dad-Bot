@@ -1,0 +1,644 @@
+"""Structured observability layer â€” trace IDs, metrics, and event stream export.
+
+Three components:
+  TracingContext   â€” thread-local + contextvars trace/span ID propagation.
+  MetricsSink      â€” in-process counter + histogram; swappable for OTel.
+  EventStreamExporter â€” publishes events to stdout JSON or an async queue.
+
+Usage:
+    from dadbot.core.observability import get_metrics, get_tracer, EventStreamExporter
+
+    tracer = get_tracer()
+    with tracer.span("scheduler.drain_once") as span:
+        metrics = get_metrics()
+        metrics.increment("job.completed")
+        metrics.observe("job.latency_ms", elapsed_ms)
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import queue
+import sys
+import threading
+import time
+from collections import defaultdict
+from contextvars import ContextVar
+from enum import IntEnum
+from typing import Any
+
+# ---------------------------------------------------------------------------
+# Trace / Span IDs
+# ---------------------------------------------------------------------------
+
+_current_trace_id: ContextVar[str] = ContextVar("_current_trace_id", default="")
+_current_span_id: ContextVar[str] = ContextVar("_current_span_id", default="")
+
+
+class TraceLevel(IntEnum):
+    """Observability verbosity and audit criticality levels."""
+
+    OFF = 0
+    MINIMAL = 1
+    DEBUG = 2
+    FULL = 3
+    AUDIT = 4
+
+    @classmethod
+    def parse(cls, value: TraceLevel | str | int | None) -> TraceLevel:
+        if isinstance(value, cls):
+            return value
+        if value is None:
+            return cls.MINIMAL
+        if isinstance(value, int):
+            try:
+                return cls(value)
+            except ValueError:
+                return cls.MINIMAL
+        normalized = str(value).strip().upper()
+        return {
+            "OFF": cls.OFF,
+            "MINIMAL": cls.MINIMAL,
+            "DEBUG": cls.DEBUG,
+            "FULL": cls.FULL,
+            "AUDIT": cls.AUDIT,
+        }.get(normalized, cls.MINIMAL)
+
+
+def _should_sample(*, key: str, sample_rate: float) -> bool:
+    rate = float(sample_rate)
+    if rate >= 1.0:
+        return True
+    if rate <= 0.0:
+        return False
+    digest = hashlib.sha256(str(key).encode("utf-8")).digest()
+    threshold = int(rate * (2**64 - 1))
+    value = int.from_bytes(digest[:8], byteorder="big", signed=False)
+    return value <= threshold
+
+
+def _new_id(prefix: str = "") -> str:
+    import uuid
+
+    return (prefix + uuid.uuid4().hex)[:32]
+
+
+class Span:
+    """Lightweight span that propagates trace/span IDs via ContextVars."""
+
+    def __init__(
+        self,
+        name: str,
+        *,
+        trace_id: str = "",
+        parent_span_id: str = "",
+    ) -> None:
+        self.name = str(name or "unnamed")
+        self.trace_id = str(trace_id or _current_trace_id.get() or _new_id("tr"))
+        self.span_id = _new_id("sp")
+        self.parent_span_id = str(parent_span_id or _current_span_id.get() or "")
+        self.started_at: float = time.time()
+        self.ended_at: float = 0.0
+        self._trace_token = None
+        self._span_token = None
+
+    def __enter__(self) -> Span:
+        self._trace_token = _current_trace_id.set(self.trace_id)
+        self._span_token = _current_span_id.set(self.span_id)
+        return self
+
+    def __exit__(self, *_) -> None:
+        self.ended_at = time.time()
+        if self._trace_token is not None:
+            _current_trace_id.reset(self._trace_token)
+        if self._span_token is not None:
+            _current_span_id.reset(self._span_token)
+
+    @property
+    def duration_ms(self) -> float:
+        end = self.ended_at or time.time()
+        return (end - self.started_at) * 1000.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "trace_id": self.trace_id,
+            "span_id": self.span_id,
+            "parent_span_id": self.parent_span_id,
+            "started_at": self.started_at,
+            "ended_at": self.ended_at,
+            "duration_ms": self.duration_ms,
+        }
+
+
+class _NoOpSpan(Span):
+    """Span-compatible object that does not mutate trace context."""
+
+    def __init__(
+        self,
+        name: str,
+        *,
+        trace_id: str = "",
+        parent_span_id: str = "",
+    ) -> None:
+        self.name = str(name or "unnamed")
+        self.trace_id = str(trace_id or "")
+        self.span_id = ""
+        self.parent_span_id = str(parent_span_id or "")
+        self.started_at = time.time()
+        self.ended_at = self.started_at
+        self._trace_token = None
+        self._span_token = None
+
+    def __enter__(self) -> _NoOpSpan:
+        return self
+
+    def __exit__(self, *_) -> None:
+        self.ended_at = time.time()
+
+
+class TracingContext:
+    """Tracer â€” creates spans and propagates trace IDs."""
+
+    def __init__(
+        self,
+        *,
+        min_level: TraceLevel | str | int = TraceLevel.MINIMAL,
+    ) -> None:
+        self._min_level = TraceLevel.parse(min_level)
+
+    def set_level(self, level: TraceLevel | str | int) -> None:
+        self._min_level = TraceLevel.parse(level)
+
+    def level(self) -> TraceLevel:
+        return self._min_level
+
+    def span(
+        self,
+        name: str,
+        *,
+        trace_id: str = "",
+        level: TraceLevel | str | int = TraceLevel.MINIMAL,
+    ) -> Span:
+        event_level = TraceLevel.parse(level)
+        if event_level == TraceLevel.AUDIT:
+            return Span(name, trace_id=trace_id)
+        if self._min_level == TraceLevel.OFF:
+            return _NoOpSpan(name=name, trace_id=trace_id)
+        if event_level < self._min_level:
+            return _NoOpSpan(name=name, trace_id=trace_id)
+        return Span(name, trace_id=trace_id)
+
+    @staticmethod
+    def current_trace_id() -> str:
+        return _current_trace_id.get() or ""
+
+    @staticmethod
+    def current_span_id() -> str:
+        return _current_span_id.get() or ""
+
+    @staticmethod
+    def ensure_trace_id(trace_id: str = "") -> str:
+        """Return existing trace ID or create and install a new one."""
+        existing = _current_trace_id.get()
+        if existing:
+            return existing
+        new_id = str(trace_id or _new_id("tr"))
+        _current_trace_id.set(new_id)
+        return new_id
+
+
+# ---------------------------------------------------------------------------
+# Metrics sink
+# ---------------------------------------------------------------------------
+
+
+class MetricsSink:
+    """In-process metrics collector.
+
+    Counters: integer totals (e.g. job.completed, job.failed).
+    Histograms: list of float samples (e.g. job.latency_ms).
+
+    Swappable for OpenTelemetry by subclassing and overriding increment/observe.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._counters: dict[str, int] = defaultdict(int)
+        self._histograms: dict[str, list[float]] = defaultdict(list)
+
+    def increment(self, key: str, value: int = 1) -> None:
+        with self._lock:
+            self._counters[str(key or "unknown")] += max(0, int(value))
+
+    def observe(self, key: str, value: float) -> None:
+        with self._lock:
+            self._histograms[str(key or "unknown")].append(float(value))
+
+    def counter(self, key: str) -> int:
+        with self._lock:
+            return self._counters.get(str(key or "unknown"), 0)
+
+    def histogram_summary(self, key: str) -> dict[str, Any]:
+        with self._lock:
+            samples = list(self._histograms.get(str(key or "unknown"), []))
+        if not samples:
+            return {"count": 0, "min": None, "max": None, "mean": None, "p99": None}
+        samples_sorted = sorted(samples)
+        count = len(samples_sorted)
+        p99_index = max(0, int(count * 0.99) - 1)
+        return {
+            "count": count,
+            "min": samples_sorted[0],
+            "max": samples_sorted[-1],
+            "mean": sum(samples_sorted) / count,
+            "p99": samples_sorted[p99_index],
+        }
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "counters": dict(self._counters),
+                "histograms": {key: self.histogram_summary(key) for key in self._histograms},
+            }
+
+    def reset(self) -> None:
+        with self._lock:
+            self._counters.clear()
+            self._histograms.clear()
+
+
+# ---------------------------------------------------------------------------
+# Event stream exporter
+# ---------------------------------------------------------------------------
+
+
+class EventStreamExporter:
+    """Publishes structured events to stdout JSON (default) or an async queue.
+
+    Compatible with OpenTelemetry log exporters â€” each record is a valid
+    JSON object on a single line.
+    """
+
+    def __init__(
+        self,
+        *,
+        sink: Any = None,
+        enabled: bool = True,
+        min_level: TraceLevel | str | int = TraceLevel.MINIMAL,
+        sample_rate: float = 1.0,
+    ) -> None:
+        """Args:
+        sink: a callable(record: dict) or a queue.Queue.  Defaults to
+              sys.stdout JSON line writer.
+        enabled: set False to silence all exports (e.g. in tests).
+
+        """
+        self._min_level = TraceLevel.parse(min_level)
+        self._sample_rate = max(0.0, min(1.0, float(sample_rate)))
+        self._enabled = bool(enabled)
+        if sink is None:
+            self._sink = self._stdout_sink
+        elif isinstance(sink, queue.Queue):
+            self._sink = sink.put_nowait
+        else:
+            self._sink = sink
+
+    def set_level(self, level: TraceLevel | str | int) -> None:
+        self._min_level = TraceLevel.parse(level)
+
+    def set_sample_rate(self, sample_rate: float) -> None:
+        self._sample_rate = max(0.0, min(1.0, float(sample_rate)))
+
+    def export(
+        self,
+        record: dict[str, Any],
+        *,
+        level: TraceLevel | str | int | None = None,
+    ) -> None:
+        if not self._enabled:
+            return
+
+        event_level = TraceLevel.parse(level or record.get("trace_level"))
+        if event_level != TraceLevel.AUDIT:
+            if self._min_level == TraceLevel.OFF:
+                return
+            if event_level < self._min_level:
+                return
+            if event_level in {TraceLevel.DEBUG, TraceLevel.FULL}:
+                sample_key = "|".join(
+                    [
+                        str(record.get("event") or ""),
+                        str(record.get("session_id") or ""),
+                        str(_current_trace_id.get() or ""),
+                        str(_current_span_id.get() or ""),
+                        str(time.time_ns()),
+                    ],
+                )
+                if not _should_sample(key=sample_key, sample_rate=self._sample_rate):
+                    return
+
+        enriched = {
+            "exported_at": time.time(),
+            "trace_id": _current_trace_id.get() or "",
+            "span_id": _current_span_id.get() or "",
+            "trace_level": event_level.name,
+            **record,
+        }
+        try:
+            self._sink(enriched)
+        except Exception:  # noqa: BLE001
+            pass  # Exporter must never crash the runtime.
+
+    @staticmethod
+    def _stdout_sink(record: dict[str, Any]) -> None:
+        line = json.dumps(record, default=str)
+        sys.stdout.write(line + "\n")
+        sys.stdout.flush()
+
+    def enable(self) -> None:
+        self._enabled = True
+
+    def disable(self) -> None:
+        self._enabled = False
+
+
+# ---------------------------------------------------------------------------
+# Global singletons (opt-in â€” callers import and use these)
+# ---------------------------------------------------------------------------
+
+_global_tracer = TracingContext()
+_global_metrics = MetricsSink()
+_global_exporter = EventStreamExporter(enabled=False)  # silent by default
+
+
+def get_tracer() -> TracingContext:
+    return _global_tracer
+
+
+def get_metrics() -> MetricsSink:
+    return _global_metrics
+
+
+def get_exporter() -> EventStreamExporter:
+    return _global_exporter
+
+
+def set_trace_level(level: TraceLevel | str | int) -> None:
+    """Update process-wide tracer/exporter level in one call."""
+    _global_tracer.set_level(level)
+    _global_exporter.set_level(level)
+
+
+def configure_exporter(
+    sink: Any = None,
+    *,
+    enabled: bool = True,
+    min_level: TraceLevel | str | int = TraceLevel.MINIMAL,
+    sample_rate: float = 1.0,
+) -> None:
+    """Replace the global event stream exporter."""
+    global _global_exporter
+    _global_exporter = EventStreamExporter(
+        sink=sink,
+        enabled=enabled,
+        min_level=min_level,
+        sample_rate=sample_rate,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Correlation context (Tier 2 item 9 â€” end-to-end request correlation)
+# ---------------------------------------------------------------------------
+
+_current_correlation_id: ContextVar[str] = ContextVar(
+    "_current_correlation_id",
+    default="",
+)
+
+
+class CorrelationContext:
+    """Propagates a correlation ID across scheduler â†’ ledger â†’ kernel.
+
+    A correlation ID represents a single end-to-end user request, surviving
+    across multiple spans and component boundaries.
+
+    Usage::
+
+        with CorrelationContext.bind("req-abc123"):
+            ledger_writer.write_event(...)   # all writes inherit the correlation ID
+    """
+
+    @staticmethod
+    def bind(correlation_id: str = "") -> _CorrelationScope:
+        cid = str(correlation_id or _new_id("corr"))
+        return _CorrelationScope(cid)
+
+    @staticmethod
+    def current() -> str:
+        return _current_correlation_id.get() or ""
+
+    @staticmethod
+    def ensure() -> str:
+        existing = _current_correlation_id.get()
+        if existing:
+            return existing
+        new_cid = _new_id("corr")
+        _current_correlation_id.set(new_cid)
+        return new_cid
+
+
+class _CorrelationScope:
+    def __init__(self, cid: str) -> None:
+        self._cid = cid
+        self._token = None
+
+    def __enter__(self) -> str:
+        self._token = _current_correlation_id.set(self._cid)
+        return self._cid
+
+    def __exit__(self, *_) -> None:
+        if self._token is not None:
+            _current_correlation_id.reset(self._token)
+
+
+# ---------------------------------------------------------------------------
+# Structured logger (Tier 2 item 9 â€” structured logs tied to event IDs)
+# ---------------------------------------------------------------------------
+
+
+class LogLevel(str):
+    DEBUG = "DEBUG"
+    INFO = "INFO"
+    WARNING = "WARNING"
+    ERROR = "ERROR"
+
+
+class StructuredLogger:
+    """Emits structured JSON log records correlated with event/session/trace IDs.
+
+    Records include: timestamp, level, message, session_id, event_id,
+    trace_id, span_id, correlation_id, and any extra kwargs.
+
+    Compatible with any JSON log aggregator (Loki, Datadog, CloudWatch Logs).
+
+    Usage::
+
+        logger = StructuredLogger("dadbot.scheduler")
+        logger.info("job started", session_id="s1", event_id="evt-42")
+    """
+
+    def __init__(
+        self,
+        name: str = "dadbot",
+        *,
+        sink: Any = None,
+        min_level: str = LogLevel.DEBUG,
+        enabled: bool = True,
+    ) -> None:
+        self._name = str(name)
+        self._enabled = bool(enabled)
+        self._lock = threading.RLock()
+        self._records: list[dict[str, Any]] = []
+
+        if sink is None:
+            self._sink = self._stderr_sink
+        elif isinstance(sink, list):
+            captured = sink
+            self._sink = captured.append
+        elif callable(sink):
+            self._sink = sink
+        else:
+            self._sink = self._stderr_sink
+
+        self._LEVELS = {
+            LogLevel.DEBUG: 0,
+            LogLevel.INFO: 1,
+            LogLevel.WARNING: 2,
+            LogLevel.ERROR: 3,
+        }
+        self._min_level_value = self._LEVELS.get(str(min_level), 0)
+
+    def _emit(self, level: str, message: str, **extra: Any) -> dict[str, Any]:
+        if not self._enabled:
+            return {}
+        if self._LEVELS.get(level, 0) < self._min_level_value:
+            return {}
+        record: dict[str, Any] = {
+            "timestamp": time.time(),
+            "level": level,
+            "logger": self._name,
+            "message": str(message),
+            "trace_id": _current_trace_id.get() or "",
+            "span_id": _current_span_id.get() or "",
+            "correlation_id": _current_correlation_id.get() or "",
+        }
+        record.update(extra)
+        with self._lock:
+            self._records.append(record)
+        try:
+            self._sink(record)
+        except Exception:  # noqa: BLE001
+            pass
+        return record
+
+    def debug(self, message: str, **extra: Any) -> None:
+        self._emit(LogLevel.DEBUG, message, **extra)
+
+    def info(self, message: str, **extra: Any) -> None:
+        self._emit(LogLevel.INFO, message, **extra)
+
+    def warning(self, message: str, **extra: Any) -> None:
+        self._emit(LogLevel.WARNING, message, **extra)
+
+    def error(self, message: str, **extra: Any) -> None:
+        self._emit(LogLevel.ERROR, message, **extra)
+
+    def records(self, *, level: str = "") -> list[dict[str, Any]]:
+        with self._lock:
+            if level:
+                return [r for r in self._records if r.get("level") == level]
+            return list(self._records)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._records.clear()
+
+    @staticmethod
+    def _stderr_sink(record: dict[str, Any]) -> None:
+        try:
+            sys.stderr.write(json.dumps(record, default=str) + "\n")
+        except Exception:  # noqa: BLE001
+            pass
+
+
+# ---------------------------------------------------------------------------
+# Replay debugger (Tier 2 item 9 â€” step through execution timeline)
+# ---------------------------------------------------------------------------
+
+
+class ReplayDebugger:
+    """Step through ledger events and inspect state at each point.
+
+    Usage::
+
+        debugger = ReplayDebugger(reducer)
+        steps = debugger.debug_session("s1", ledger.read())
+        for step in steps:
+            print(step["event"]["type"], step["state"]["sessions"]["s1"])
+    """
+
+    def __init__(self, reducer=None) -> None:
+        self._reducer = reducer
+
+    def step_through(
+        self,
+        events: list[dict[str, Any]],
+    ):
+        """Generator: yield (event, state_snapshot) for each event in order."""
+        accumulated: list[dict[str, Any]] = []
+        for event in events:
+            accumulated.append(event)
+            state = self._reduce(accumulated)
+            yield {"event": dict(event), "state": state, "seq": len(accumulated)}
+
+    def debug_session(
+        self,
+        session_id: str,
+        events: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Return a list of {event, state, seq} steps for a single session."""
+        session_events = [e for e in events if str(e.get("session_id") or "") == str(session_id)]
+        return list(self.step_through(session_events))
+
+    def diff_states(
+        self,
+        before: dict[str, Any],
+        after: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Return a shallow diff of two state dicts."""
+        all_keys = set(before) | set(after)
+        diff: dict[str, Any] = {}
+        for key in all_keys:
+            bv = before.get(key)
+            av = after.get(key)
+            if bv != av:
+                diff[key] = {"before": bv, "after": av}
+        return diff
+
+    def _reduce(self, events: list[dict[str, Any]]) -> dict[str, Any]:
+        if self._reducer is not None:
+            try:
+                return self._reducer.reduce(events)
+            except Exception:  # noqa: BLE001
+                pass
+        # Fallback: aggregate by session_id.
+        state: dict[str, Any] = {"sessions": {}}
+        for e in events:
+            sid = str(e.get("session_id") or "")
+            if sid:
+                state["sessions"].setdefault(sid, {})
+                if e.get("type") == "JOB_COMPLETED":
+                    state["sessions"][sid]["last_result"] = (e.get("payload") or {}).get("result")
+        return state

@@ -12,14 +12,15 @@ logger = logging.getLogger(__name__)
 class MaintenanceService:
     """Service wrapper for maintenance cadence, long-term signals, and proactive engagement.
 
-    ``tick()`` is called at the start of every turn by the HealthNode.  It:
+    ``tick()`` is called at the start of every turn by the HealthNode.  It fires
+    scheduled proactive jobs (due reminders, life-pattern check-ins) so the bot
+    can *initiate* contact rather than only ever react.  Proactive messages are
+    queued via ``bot.queue_proactive_message`` and surfaced to the UI at next
+    startup or via OS notifications when enabled.
 
-    1. Runs periodic durable synthesis (archive, consolidate, evolve persona â€¦)
-       when the cadence threshold is met.
-    2. Triggers scheduled proactive jobs (due reminders, life-pattern check-ins)
-       so the bot can *initiate* contact rather than only ever react.  Proactive
-       messages are queued via ``bot.queue_proactive_message`` and surfaced to the
-       UI at next startup or via OS notifications when enabled.
+    Durable synthesis (archive, consolidate, evolve persona, forgetting) is
+    **post-commit only** — it runs via SaveNode → ``schedule_post_turn_maintenance``
+    → background task.  It must not execute in the execution-path hot path.
     """
 
     def __init__(
@@ -31,16 +32,12 @@ class MaintenanceService:
         self.long_term = long_term
 
     def tick(self, turn_context: Any) -> dict[str, Any]:
-        trigger_text = str(getattr(turn_context, "user_input", "") or "")
-
-        # 1. Periodic durable synthesis (memory archive, consolidation, etc.)
-        synthesis_result = self.maintenance.run_periodic_durable_synthesis(
-            trigger_text=trigger_text,
-        )
-
-        # 2. Proactive engagement: fire any due reminders or life-pattern check-ins.
-        #    run_scheduled_proactive_jobs queues messages via bot.queue_proactive_message
-        #    and optionally sends OS notifications.  Errors are non-fatal.
+        # Proactive engagement: fire any due reminders or life-pattern check-ins.
+        # run_scheduled_proactive_jobs queues messages via bot.queue_proactive_message
+        # and optionally sends OS notifications.  Errors are non-fatal.
+        # NOTE: durable synthesis (archive, consolidate, evolve, forget) is post-commit
+        # only — it runs via SaveNode → schedule_post_turn_maintenance → background task.
+        # It must NOT run inline in the execution path (HealthNode hot path).
         try:
             self.maintenance.run_scheduled_proactive_jobs()
         except Exception as exc:
@@ -48,5 +45,10 @@ class MaintenanceService:
                 "MaintenanceService.tick: proactive jobs failed (non-fatal): %s",
                 exc,
             )
-
-        return synthesis_result
+        return {
+            "ran": False,
+            "archived": False,
+            "consolidated_count": 0,
+            "pattern_count": 0,
+            "persona_evolved": False,
+        }

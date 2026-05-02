@@ -5,6 +5,7 @@ import json
 import logging
 import re
 from collections import Counter
+from datetime import date
 
 from dadbot.memory.conflict_detector import ConflictDetector
 from dadbot.memory.scoring import MemoryScorer
@@ -428,60 +429,142 @@ Rules:
         return updated
 
     def apply_controlled_forgetting(self, force=False, turn_context=None):
-        if not self._assert_save_commit_boundary(turn_context):
-            return {"removed": 0, "backup_path": "", "ran": False}
+        # Previously gated by _assert_save_commit_boundary. The gate is now
+        # structural: this method is only callable from PostCommitWorker
+        # after PersistenceService publishes a post-commit-ready event.
         memories = list(self.bot.memory_catalog())
         if not memories:
             return {"removed": 0, "backup_path": "", "ran": False}
 
         wall_time = self._turn_wall_time(turn_context)
+        turn_wall_date = self._turn_wall_date(turn_context)
+        try:
+            turn_date = date.fromisoformat(str(turn_wall_date)[:10])
+        except ValueError as exc:
+            raise RuntimeError(
+                "TemporalNode wall_date invalid — deterministic execution violated",
+            ) from exc
         backup_stamp = wall_time.replace("-", "").replace(":", "").replace("T", "_")[:15]
+        decay_threshold = 0.15
+        identity_categories = {"identity", "relationship", "relationships"}
+
+        def _confidence_history(entry):
+            raw = entry.get("confidence_history") or {}
+            if not isinstance(raw, dict):
+                raw = {}
+            return {
+                "high": max(0, int(raw.get("high", 0) or 0)),
+                "medium": max(0, int(raw.get("medium", 0) or 0)),
+                "low": max(0, int(raw.get("low", 0) or 0)),
+            }
+
+        def _days_old_from_turn(entry):
+            anchor = str(entry.get("updated_at") or entry.get("created_at") or "").strip()
+            if not anchor:
+                return 0
+            try:
+                entry_date = date.fromisoformat(anchor[:10])
+            except ValueError:
+                return 0
+            return max(0, (turn_date - entry_date).days)
+
+        def _decay_score(entry):
+            days_old = _days_old_from_turn(entry)
+            age_factor = min(1.0, max(0.0, float(days_old or 0.0) / 365.0))
+
+            importance = max(
+                0.0,
+                min(1.0, float(entry.get("importance_score", 0.0) or 0.0)),
+            )
+
+            access_count = max(0, int(entry.get("access_count", 0) or 0))
+            access_frequency = min(1.0, float(access_count) / 10.0)
+
+            history = _confidence_history(entry)
+            high_hits = max(0, int(entry.get("high_confidence_hits", history["high"]) or history["high"]))
+            high_confidence_factor = min(1.0, float(high_hits) / 10.0)
+
+            score = (
+                (0.35 * age_factor)
+                - (0.30 * importance)
+                - (0.20 * access_frequency)
+                - (0.15 * high_confidence_factor)
+            )
+            components = {
+                "age_factor": round(age_factor, 4),
+                "importance_score": round(importance, 4),
+                "access_frequency": round(access_frequency, 4),
+                "high_confidence_factor": round(high_confidence_factor, 4),
+            }
+            return round(score, 4), components
+
         kept = []
-        removed = []
+        archived = []
         for memory in memories:
             if bool(memory.get("pinned", False)):
                 kept.append(memory)
                 continue
 
-            days_old = self.bot.days_since_iso_date(
-                memory.get("updated_at") or memory.get("created_at"),
-            )
-            if days_old is None:
-                kept.append(memory)
-                continue
-
+            # Keep importance current if not already meaningful.
             importance = max(
                 0.0,
                 min(1.0, float(memory.get("importance_score", 0.0) or 0.0)),
             )
             if importance <= 0.0:
                 memory.update(self.scorer.score_memory_entry(memory))
-                importance = max(
-                    0.0,
-                    min(1.0, float(memory.get("importance_score", 0.0) or 0.0)),
-                )
 
-            should_forget = False
-            if (
-                (force and days_old >= 30 and importance < 0.2)
-                or (days_old >= 365 and importance < 0.35)
-                or (days_old >= 180 and importance < 0.18)
-            ):
-                should_forget = True
+            decay_score, components = _decay_score(memory)
+            memory = dict(memory)
+            memory["decay_score"] = decay_score
+            memory["decay_components"] = components
 
-            if should_forget:
-                removed.append(memory)
+            category = str(memory.get("category", "general") or "general").strip().lower()
+            if category in identity_categories:
+                kept.append(memory)
+                continue
+
+            should_archive = bool(decay_score > decay_threshold)
+            if force and decay_score > 0.0:
+                should_archive = True
+
+            if should_archive:
+                archived.append(memory)
             else:
                 kept.append(memory)
 
-        if not removed:
+        if not archived:
             return {"removed": 0, "backup_path": "", "ran": True}
 
         backup_name = f"memory_forgetting_backup_{backup_stamp}.json"
         backup_path = str(self.bot.script_path.with_name(backup_name))
         self.bot.memory.export_memory_store(backup_path)
+
+        archive_entries = list(self.bot.session_archive())
+        for memory in archived:
+            archive_entry = self.bot.normalize_session_archive_entry(
+                {
+                    "summary": str(memory.get("summary") or "").strip(),
+                    "topics": [str(memory.get("category") or "general").strip().lower() or "general"],
+                    "dominant_mood": str(memory.get("mood") or "neutral"),
+                    "turn_count": 1,
+                    "created_at": wall_time,
+                },
+            )
+            if archive_entry is not None:
+                archive_entries.append(archive_entry)
+
+        if archive_entries:
+            self.bot.mutate_memory_store(session_archive=archive_entries[-24:])
+
         self.bot.save_memory_catalog(kept)
-        return {"removed": len(removed), "backup_path": backup_path, "ran": True}
+        return {
+            "removed": len(archived),
+            "archived": len(archived),
+            "retained": len(kept),
+            "threshold": decay_threshold,
+            "backup_path": backup_path,
+            "ran": True,
+        }
 
     def select_active_consolidated_memories(
         self,
@@ -909,8 +992,9 @@ Rules:
         return merged_values[-16:]
 
     def consolidate_memories(self, force=False, turn_context=None):
-        if not self._assert_save_commit_boundary(turn_context):
-            return self.bot.consolidated_memories()
+        # Previously gated by _assert_save_commit_boundary. The gate is now
+        # structural: this method is only callable from PostCommitWorker
+        # after PersistenceService publishes a post-commit-ready event.
         if not self.should_run_memory_consolidation(
             force=force,
             turn_context=turn_context,

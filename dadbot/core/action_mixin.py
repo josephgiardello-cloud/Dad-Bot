@@ -1,8 +1,59 @@
 from __future__ import annotations
 
+from typing import Any, Callable
+
+from dadbot.core.tool_executor import execute_tool as _execute_tool
+
+# Tool names that may be executed via the agentic tool pipeline.
+# This frozenset is the SINGLE authority for tool authorization policy.
+# The service layer MUST NOT define its own tool allowlists.
+_AUTHORIZED_TOOL_NAMES: frozenset[str] = frozenset({"set_reminder", "web_search"})
+_WEB_SEARCH_ONLY_TOOL_NAME = "web_search"
+
 
 class DadBotActionMixin:
     """Convenience actions layered on top of the manager-owned runtime surface."""
+
+    def authorize_tool_execution(self, tool_name: str) -> bool:
+        """Single authority for whether a named tool may be executed.
+
+        All policy decisions about which tools are executable flow through
+        this method.  The service layer MUST NOT maintain its own tool
+        allowlists — this is the only decision point.
+        """
+        return str(tool_name or "").strip() in _AUTHORIZED_TOOL_NAMES
+
+    def authorize_tool_execution_for_bias(self, tool_name: str, tool_bias: str) -> bool:
+        """Bias-aware tool authorization owned by the runtime contract.
+
+        The service layer may ask whether a candidate tool is allowed under the
+        current Bayesian bias, but it must not encode named-tool policy itself.
+        """
+        normalized_tool = str(tool_name or "").strip()
+        normalized_bias = str(tool_bias or "planner_default").strip() or "planner_default"
+        if not self.authorize_tool_execution(normalized_tool):
+            return False
+        if normalized_bias == "defer_tools_unless_explicit":
+            return False
+        if normalized_bias == "minimal_tools":
+            return normalized_tool != _WEB_SEARCH_ONLY_TOOL_NAME
+        return True
+
+    def execute_tool(
+        self,
+        *,
+        tool_name: str,
+        parameters: dict[str, Any] | None = None,
+        executor: Callable[[], Any],
+        compensating_action: Callable[[], None] | None = None,
+    ):
+        """Runtime-owned entrypoint for the canonical tool execution spine."""
+        return _execute_tool(
+            tool_name=tool_name,
+            parameters=parameters,
+            executor=executor,
+            compensating_action=compensating_action,
+        )
 
     def _queue_or_apply_memory_patch(self, **patch):
         normalized_patch = dict(patch or {})

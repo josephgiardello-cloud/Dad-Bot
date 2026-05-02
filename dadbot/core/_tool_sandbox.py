@@ -1,21 +1,7 @@
-"""Tool execution sandbox for the DadBot agentic pipeline.
+"""Tool execution sandbox internals for the DadBot agentic pipeline.
 
-Provides three guarantees that were absent from the previous dispatch map:
-
-1. **Idempotency** â€” each tool invocation is keyed by a stable content-hash of
-   (tool_name, parameters).  If the same key is presented again within the same
-   sandbox instance the cached result is returned without re-executing the tool.
-   This prevents duplicate reminders / double web-lookups caused by retries.
-
-2. **Failure isolation** â€” every executor call is wrapped in a structured try/except.
-   Tool failures never propagate as uncaught exceptions into the turn pipeline;
-   they are recorded as ``ToolExecutionRecord`` entries with ``status="failed"``
-   and the pipeline falls through gracefully.
-
-3. **Rollback semantics** â€” each successful execution registers a compensating
-   action via ``register_compensating_action``.  Calling ``rollback()`` runs every
-   registered compensating action in LIFO order.  Compensating actions are
-   best-effort: individual failures are logged but do not abort the rollback.
+This module is core-private. External callers must use the runtime execution
+spine exposed by ``dadbot.core.tool_executor`` or the runtime contract.
 """
 
 from __future__ import annotations
@@ -23,10 +9,12 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
+
+from dadbot.core.kernel_locks import KernelToolIdempotencyRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -44,37 +32,44 @@ def _idempotency_key(tool_name: str, parameters: dict[str, Any]) -> str:
 class ToolExecutionRecord:
     tool_name: str
     idempotency_key: str
-    status: str  # "succeeded" | "failed" | "cached"
-    result: Any  # return value of the executor, or None on failure
-    error: str  # exception message, or "" on success
+    status: str
+    result: Any
+    error: str
     compensating_action: Callable[[], None] | None = field(default=None, repr=False)
 
 
-class ToolSandbox:
+_SANDBOX_INSTANTIATION_ALLOWLIST: frozenset[str] = frozenset(
+    {
+        "dadbot.core.tool_executor",
+        "dadbot.core.testing.tool_runtime_test_adapter",
+    }
+)
+
+
+class _ToolSandbox:
     """Single-turn execution sandbox for all agentic tool calls.
 
-    Usage
-    -----
-    sandbox = ToolSandbox()
-
-    result, observation = sandbox.execute(
-        tool_name="set_reminder",
-        parameters={"title": "Call dentist", "due_text": "tomorrow"},
-        executor=lambda: bot.add_reminder("Call dentist", "tomorrow"),
-        compensating_action=lambda: bot.delete_reminder(reminder_id),
-    )
-
-    # On any downstream failure:
-    sandbox.rollback()
+    Instantiation is restricted to the allowlist at runtime.  This converts
+    the CI RULE16_TOOL_SANDBOX_ISOLATION convention into a hard runtime guard
+    that fires *before* any forbidden use can proceed.  Attempting to
+    instantiate ``_ToolSandbox`` outside the spine raises ``RuntimeError``
+    immediately.
     """
 
     def __init__(self) -> None:
+        import sys as _sys
+
+        frame = _sys._getframe(1)
+        caller_module = frame.f_globals.get("__name__", "")
+        if caller_module not in _SANDBOX_INSTANTIATION_ALLOWLIST:
+            raise RuntimeError(
+                f"_ToolSandbox may only be instantiated from the kernel execution spine "
+                f"(dadbot.core.tool_executor). "
+                f"Use dadbot.core.tool_executor.execute_tool() instead. "
+                f"Blocked caller: {caller_module!r}",
+            )
         self._cache: dict[str, ToolExecutionRecord] = {}
         self._records: list[ToolExecutionRecord] = []
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
 
     def execute(
         self,
@@ -84,15 +79,26 @@ class ToolSandbox:
         executor: Callable[[], Any],
         compensating_action: Callable[[], None] | None = None,
     ) -> ToolExecutionRecord:
-        """Execute the tool with idempotency, isolation, and rollback registration.
-
-        Returns a ``ToolExecutionRecord``.  The caller is responsible for
-        interpreting ``status`` and ``result``; this method never raises.
-        """
+        """Execute the tool with idempotency, isolation, and rollback registration."""
         params = dict(parameters or {})
-        key = _idempotency_key(str(tool_name or ""), params)
+        key = str(params.get("_idempotency_key") or "").strip()
+        if not key:
+            key = _idempotency_key(str(tool_name or ""), params)
 
-        # Idempotency: return cached result for duplicate requests.
+        shared_cached = KernelToolIdempotencyRegistry.get(key)
+        if isinstance(shared_cached, ToolExecutionRecord):
+            record = ToolExecutionRecord(
+                tool_name=str(tool_name or ""),
+                idempotency_key=key,
+                status="cached",
+                result=shared_cached.result,
+                error="",
+                compensating_action=None,
+            )
+            self._records.append(record)
+            logger.debug("ToolSandbox: global idempotency HIT tool=%r key=%s", tool_name, key)
+            return record
+
         if key in self._cache:
             cached = self._cache[key]
             record = ToolExecutionRecord(
@@ -107,7 +113,6 @@ class ToolSandbox:
             logger.debug("ToolSandbox: idempotency HIT tool=%r key=%s", tool_name, key)
             return record
 
-        # Failure isolation: execute inside a full try/except boundary.
         try:
             result = executor()
             status = "succeeded"
@@ -129,16 +134,14 @@ class ToolSandbox:
 
         if status == "succeeded":
             self._cache[key] = record
+            KernelToolIdempotencyRegistry.put(key, record)
 
         self._records.append(record)
         logger.debug("ToolSandbox: tool=%r key=%s status=%s", tool_name, key, status)
         return record
 
     def rollback(self) -> list[dict[str, Any]]:
-        """Run all compensating actions in LIFO order.
-
-        Returns a list of rollback outcome records.  Never raises.
-        """
+        """Run all compensating actions in LIFO order."""
         outcomes: list[dict[str, Any]] = []
         for record in reversed(self._records):
             if record.compensating_action is None:
@@ -164,7 +167,6 @@ class ToolSandbox:
         return outcomes
 
     def snapshot(self) -> dict[str, Any]:
-        """Return a serialisable summary of the sandbox state."""
         return {
             "executed_count": len(self._records),
             "cached_count": sum(1 for r in self._records if r.status == "cached"),
@@ -183,15 +185,9 @@ class ToolSandbox:
         }
 
     def isolated_state_snapshot(self, generation: int = 0) -> ToolSandboxSnapshot:
-        """Capture an immutable ToolSandboxSnapshot for isolation testing.
-
-        Two sandboxes executing the same tool sequence must produce equal
-        ``snapshot_hash`` values, proving no cross-tool state leakage.
-        """
         return ToolSandboxSnapshot.capture(self, generation)
 
     def is_clean(self) -> bool:
-        """True iff no tools have been executed yet (fresh sandbox)."""
         return len(self._records) == 0
 
     @contextmanager
@@ -200,13 +196,8 @@ class ToolSandbox:
         *,
         tool_name: str,
         parameters: dict[str, Any] | None = None,
-    ) -> Iterator[ToolTransaction]:
-        """Context manager: explicit transaction semantics for a tool call.
-
-        On clean exit the transaction is committed.  On any exception the
-        transaction auto-rolls-back compensating actions registered during it.
-        """
-        txn = ToolTransaction(
+    ) -> Iterator[_ToolTransaction]:
+        txn = _ToolTransaction(
             sandbox=self,
             tool_name=str(tool_name or ""),
             parameters=dict(parameters or {}),
@@ -219,36 +210,30 @@ class ToolSandbox:
             raise
 
 
-class ToolTransaction:
-    """Explicit transaction wrapper for a single ToolSandbox tool call.
-
-    Obtained via ToolSandbox.transaction().  Provides begin/commit/rollback
-    semantics and auto-rollback on exception.
-    """
+class _ToolTransaction:
+    """Explicit transaction wrapper for a single private tool sandbox call."""
 
     def __init__(
         self,
         *,
-        sandbox: ToolSandbox,
+        sandbox: _ToolSandbox,
         tool_name: str,
-        parameters: dict,
+        parameters: dict[str, Any],
     ) -> None:
         self._sandbox = sandbox
         self._tool_name = tool_name
         self._parameters = parameters
         self._record: ToolExecutionRecord | None = None
-        self._committed: bool = False
-        self._rolled_back: bool = False
-        # Snapshot record count at begin so rollback only affects THIS transaction.
-        self._records_at_begin: int = len(sandbox._records)
+        self._committed = False
+        self._rolled_back = False
+        self._records_at_begin = len(sandbox._records)
 
     def execute(
         self,
-        executor,
+        executor: Callable[[], Any],
         *,
-        compensating_action=None,
+        compensating_action: Callable[[], None] | None = None,
     ) -> ToolExecutionRecord:
-        """Execute the tool call through the sandbox."""
         self._record = self._sandbox.execute(
             tool_name=self._tool_name,
             parameters=self._parameters,
@@ -258,7 +243,7 @@ class ToolTransaction:
         return self._record
 
     @property
-    def result(self):
+    def result(self) -> Any:
         return self._record.result if self._record is not None else None
 
     @property
@@ -276,13 +261,12 @@ class ToolTransaction:
     def _mark_committed(self) -> None:
         self._committed = True
 
-    def _auto_rollback(self) -> list:
-        """Roll back compensating actions added during this transaction."""
+    def _auto_rollback(self) -> list[dict[str, Any]]:
         if self._rolled_back:
             return []
         self._rolled_back = True
         txn_records = list(reversed(self._sandbox._records[self._records_at_begin :]))
-        outcomes = []
+        outcomes: list[dict[str, Any]] = []
         for record in txn_records:
             if record.compensating_action is None:
                 continue
@@ -301,29 +285,15 @@ class ToolTransaction:
         return outcomes
 
 
-# ---------------------------------------------------------------------------
-# Phase 7: ToolSandboxSnapshot — isolated state snapshot for cross-tool isolation
-# ---------------------------------------------------------------------------
-
-
 @dataclass(frozen=True)
 class ToolSandboxSnapshot:
-    """Immutable, content-addressed snapshot of a ToolSandbox's execution records.
-
-    Enables:
-    - Cross-tool isolation checks: snapshots taken before/after each tool should
-      only differ by that tool's records.
-    - Rollback comparison: verify that rollback restored the exact prior state.
-    - Determinism validation: same sequence of operations → same snapshot_hash.
-    """
-
     records_count: int
     cache_keys: tuple[str, ...]
     snapshot_hash: str
     generation: int
 
     @classmethod
-    def capture(cls, sandbox: ToolSandbox, generation: int) -> ToolSandboxSnapshot:
+    def capture(cls, sandbox: _ToolSandbox, generation: int) -> ToolSandboxSnapshot:
         cache_keys = tuple(sorted(sandbox._cache.keys()))
         payload = json.dumps(
             {

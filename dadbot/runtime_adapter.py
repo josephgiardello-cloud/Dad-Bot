@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 from typing import Protocol
 
+from dadbot.core.execution_contract import TurnRequest
 from dadbot.core.execution_boundary import (
     canonical_execution_kernel,
     enforce_execution_role,
@@ -47,6 +48,47 @@ class AppRuntimeContract(Protocol):
     def chat_loop(self): ...
 
     def chat_loop_via_service(self, service_client, session_id=None): ...
+
+    def authorize_tool_execution(self, tool_name: str) -> bool:
+        """Single authority for whether a named tool may be executed.
+
+        The service layer MUST NOT maintain its own tool allowlists.  All
+        policy decisions about which tools are executable flow through this
+        method on the runtime contract.
+
+        Default (legacy runtimes that have not yet adopted this method):
+        allow ``set_reminder`` and ``web_search``.
+        """
+        ...
+
+    def authorize_tool_execution_for_bias(self, tool_name: str, tool_bias: str) -> bool:
+        """Bias-aware authority for whether a named tool may execute.
+
+        The service layer MUST NOT define named-tool policy for Bayesian
+        planner bias. It must delegate that decision to the runtime contract.
+        """
+        ...
+
+    def execute_tool(
+        self,
+        *,
+        tool_name: str,
+        parameters: dict | None = None,
+        executor,
+        compensating_action=None,
+    ):
+        """Runtime-owned canonical tool execution spine."""
+        ...
+
+    def execute_turn(
+        self,
+        request: TurnRequest,
+        *,
+        state=None,
+        chunk_callback=None,
+    ):
+        """Runtime-owned canonical turn execution spine."""
+        ...
 
 
 _REQUIRED_RUNTIME_ATTRIBUTES = (

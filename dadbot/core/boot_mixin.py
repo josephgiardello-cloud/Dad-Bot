@@ -298,6 +298,7 @@ class DadBotBootMixin:
 
     def _initialize_runtime_caches(self) -> None:
         from dadbot.background import BackgroundTaskManager
+        from dadbot.core.implicit_state_guard import enforce_implicit_state_guard
         from dadbot.core.internal_runtime import DadBotInternalRuntime
 
         self._model_metadata_cache: dict = {}
@@ -327,6 +328,10 @@ class DadBotBootMixin:
         self._last_runtime_health_snapshot_monotonic = 0.0
         self._internal_runtime = DadBotInternalRuntime(
             context_token_budget=self.CONTEXT_TOKEN_BUDGET,
+        )
+        self._implicit_state_guard_report = enforce_implicit_state_guard(
+            self.runtime_root_path(),
+            strict=env_truthy("DADBOT_STRICT_IMPLICIT_STATE_GUARD", default=False),
         )
         self._lifecycle_state = DadBotLifecycleState.CACHES
 

@@ -14,6 +14,8 @@ DEFAULT_STEPS = [
     ["tools/reconcile_baseline.py", "--write-lock", "--strict-real-regression"],
     ["tools/enforce_no_bypass.py"],
     ["tools/contract_guard.py"],
+    ["tools/turn_surface_freeze.py"],
+    ["tools/turn_coherence_check.py"],
     ["tools/complexity_diff_gate.py"],
     ["tools/complexity_gate.py"],
     ["tools/god_class_audit.py"],

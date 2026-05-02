@@ -258,6 +258,7 @@ def minimal_streamlit_stub_source():
 		import streamlit as st
 
 		from Dad import DadBot
+        from dadbot.core.execution_contract import TurnDelivery, live_turn_request
 
 		st.set_page_config(page_title="Dad Bot", page_icon="ðŸ§”", layout="centered")
 
@@ -280,7 +281,8 @@ def minimal_streamlit_stub_source():
 			with st.chat_message("user"):
 				st.markdown(prompt)
 			with st.chat_message("assistant"):
-				reply, _should_end = bot.process_user_message(prompt)
+                response = bot.execute_turn(live_turn_request(prompt, delivery=TurnDelivery.SYNC))
+                reply, _should_end = response.as_result()
 				reply = reply or bot.reply_finalization.append_signoff("I'm here, buddy.")
 				st.markdown(reply)
 			st.session_state.messages.append({"role": "assistant", "content": reply})

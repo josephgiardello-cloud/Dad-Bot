@@ -5,7 +5,7 @@ import json
 from typing import Any
 
 from dadbot.core.execution_memory_view import ExecutionMemoryView
-from dadbot.core.execution_trace_context import (
+from dadbot.core.execution_context import (
     canonicalize_execution_trace_context,
     derive_execution_trace_hash,
 )

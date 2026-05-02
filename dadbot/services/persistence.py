@@ -13,10 +13,12 @@ from dadbot.core.capability_audit_runner import (
     build_capability_audit_event_payload,
     build_runtime_capability_audit_report,
 )
-from dadbot.core.execution_trace_context import (
+from dadbot.core.execution_context import (
     RuntimeTraceViolation,
     ensure_execution_trace_root,
 )
+from dadbot.core.kernel_locks import KernelEventTotalityLock
+from dadbot.core.kernel_mutation_gate import apply_event, emit_event
 from dadbot.core.graph import (
     FatalTurnError,
     LedgerMutationOp,
@@ -26,6 +28,7 @@ from dadbot.core.graph import (
 )
 from dadbot.core.merkle_anchor import append_leaf_and_anchor
 from dadbot.core.persistence import AbstractCheckpointer
+from dadbot.core.post_commit_events import PostCommitEvent
 from dadbot.managers.conversation_persistence import ConversationPersistenceManager
 
 logger = logging.getLogger(__name__)
@@ -37,7 +40,7 @@ class PersistenceService:
     The ``finalize_turn`` method is the atomic commit point for the SaveNode.
     It delegates to ``TurnService.finalize_user_turn``, which appends
     conversation history, schedules background maintenance, runs internal
-    reflection, takes a health snapshot, and persists the session â€” all in a
+    reflection, takes a health snapshot, and persists the session — all in a
     single call so no partial-state is ever written to disk.
     """
 
@@ -86,9 +89,27 @@ class PersistenceService:
         leaves = self._merkle_session_leaves.setdefault(session_id, [])
         anchor = append_leaf_and_anchor(leaves, payload)
         if isinstance(metadata, dict):
-            metadata["merkle_anchor"] = dict(anchor)
+            metadata_event = emit_event(
+                "MUTATION_EVENT",
+                {"op": "dict_set", "key": "merkle_anchor", "value": dict(anchor)},
+                source="PersistenceService._record_merkle_anchor",
+            )
+            turn_context.metadata = apply_event(
+                metadata_event,
+                metadata,
+                lambda state, evt: {**state, str(evt.payload.get("key") or ""): evt.payload.get("value")},
+            )
         if isinstance(getattr(turn_context, "state", None), dict):
-            turn_context.state["merkle_anchor"] = dict(anchor)
+            state_event = emit_event(
+                "MUTATION_EVENT",
+                {"op": "dict_set", "key": "merkle_anchor", "value": dict(anchor)},
+                source="PersistenceService._record_merkle_anchor",
+            )
+            turn_context.state = apply_event(
+                state_event,
+                turn_context.state,
+                lambda state, evt: {**state, str(evt.payload.get("key") or ""): evt.payload.get("value")},
+            )
         self.save_turn_event(
             {
                 "event_type": "merkle_anchor_commit",
@@ -120,54 +141,16 @@ class PersistenceService:
             )
             return None
 
-    def _apply_memory_decay(self, memory_manager: Any, turn_context: Any) -> None:
-        """Apply deterministic memory decay after consolidation, before graph sync.
+    def _apply_memory_decay(self, memory_manager: Any, ctx: Any) -> Any:
+        """Persistence boundary guard.
 
-        Uses MemoryDecayPolicy â€” no datetime.now(), no external clocks.
-        Non-fatal: any failure is logged and silently skipped.
+        Memory decay and lifecycle evolution are post-commit responsibilities
+        and must run in post-commit worker / maintenance services only.
         """
-        from dadbot.memory.decay_policy import DecayResult, MemoryDecayPolicy
-
-        try:
-            entries = list(memory_manager.consolidated_memories())
-            if not entries:
-                return
-            policy = MemoryDecayPolicy()
-            result: DecayResult = policy.apply(entries, turn_context)
-            if not result.pruned and not result.weakened:
-                return
-
-            pruned_ids = set(result.pruned)
-            weakened_ids = set(result.weakened)
-            updated: list[Any] = []
-            for entry in entries:
-                eid = str(entry.get("id", ""))
-                if eid in pruned_ids:
-                    continue
-                if eid in weakened_ids:
-                    entry = dict(entry)
-                    old = float(entry.get("importance_score", 0.0) or 0.0)
-                    entry["importance_score"] = round(
-                        max(0.0, old * policy.weaken_factor),
-                        4,
-                    )
-                updated.append(entry)
-            memory_manager.mutate_memory_store(consolidated_memories=updated)
-
-            # Surface result to graph state for observability / replay auditing
-            state = getattr(turn_context, "state", None)
-            if isinstance(state, dict):
-                state["memory_decay_result"] = {
-                    "pruned": result.pruned,
-                    "weakened": result.weakened,
-                    "unchanged_count": len(result.unchanged),
-                    "total_score_map": result.total_score_map,
-                }
-        except Exception as exc:
-            logger.warning(
-                "PersistenceService._apply_memory_decay failed (non-fatal): %s",
-                exc,
-            )
+        raise RuntimeError(
+            "PersistenceService._apply_memory_decay is not allowed; "
+            "run decay via post-commit worker or maintenance service"
+        )
 
     def _apply_pending_save_boundary_mutations(
         self,
@@ -203,9 +186,23 @@ class PersistenceService:
             mood = str(item.get("mood") or "neutral")
             memory.save_mood_state(mood)
 
-        state["_pending_mood_updates"] = []
-        state["_pending_relationship_updates"] = []
-        state["_deferred_turn_state_updates"] = []
+        clear_event = emit_event(
+            "MUTATION_EVENT",
+            {
+                "op": "dict_update",
+                "updates": {
+                    "_pending_mood_updates": [],
+                    "_pending_relationship_updates": [],
+                    "_deferred_turn_state_updates": [],
+                },
+            },
+            source="PersistenceService._apply_pending_save_boundary_mutations",
+        )
+        turn_context.state = apply_event(
+            clear_event,
+            state,
+            lambda current, evt: {**current, **dict(evt.payload.get("updates") or {})},
+        )
 
     def _drain_mutation_queue(self, runtime: Any, turn_context: Any) -> None:
         mutation_queue = getattr(turn_context, "mutation_queue", None)
@@ -213,6 +210,13 @@ class PersistenceService:
             return
 
         service = self.turn_service
+
+        def _resolve_event_tap() -> Any:
+            direct = getattr(runtime, "event_tap", None) or getattr(runtime, "_event_tap", None)
+            if direct is not None:
+                return direct
+            services = getattr(runtime, "services", None)
+            return getattr(services, "event_tap", None)
 
         def _dispatch_mutation_intent(intent: Any) -> None:
             if not isinstance(intent, MutationIntent):
@@ -222,27 +226,27 @@ class PersistenceService:
             intent_type = intent.type
             payload = dict(intent.payload or {})
             source = str(intent.source or "")
-
-            if intent_type is MutationKind.MEMORY:
-                op = str(payload.get("op") or "").strip().lower()
-                if op != MemoryMutationOp.SAVE_MOOD_STATE.value:
-                    raise RuntimeError(
-                        f"MutationIntent(type=memory, source={source!r}): unsupported op={op!r}",
-                    )
-                mood = str(payload.get("mood") or "neutral")
-                memory = getattr(runtime, "memory", None)
-                if memory is None:
-                    raise RuntimeError(
-                        f"MutationIntent(type=memory, source={source!r}): runtime.memory unavailable",
-                    )
-                memory.save_mood_state(mood)
-                return
-
-            if intent_type is MutationKind.RELATIONSHIP:
-                raise RuntimeError(
-                    "MutationIntent(type=relationship) rejected: relationship subsystem is projection-only",
-                )
-
+            trace_id = str(getattr(turn_context, "trace_id", "") or "").strip()
+            source_tag = str(getattr(intent, "source", "") or "")
+            witness: dict[str, Any] = {}
+            if trace_id:
+                tap = _resolve_event_tap()
+                emit = getattr(tap, "emit", None)
+                # Enforce strictly only when an event tap is active for this runtime.
+                if callable(emit):
+                    try:
+                        witness = KernelEventTotalityLock.require_event_witness(
+                            run_id=trace_id,
+                            source=source_tag,
+                        )
+                    except RuntimeError as exc:
+                        emit(
+                            "MUTATION_EVENT_TOTALITY_VIOLATION",
+                            run_id=trace_id,
+                            source=source_tag,
+                            error=str(exc),
+                        )
+                        raise
             if intent_type is MutationKind.GRAPH:
                 memory_manager = getattr(runtime, "memory_manager", None)
                 graph_manager = getattr(memory_manager, "graph_manager", None) if memory_manager else None
@@ -352,7 +356,6 @@ class PersistenceService:
                             report,
                             scenario=str(payload.get("scenario") or "runtime_turn"),
                         )
-
                         if hasattr(turn_context, "event_sequence"):
                             turn_context.event_sequence += 1
                             sequence = int(turn_context.event_sequence)
@@ -515,6 +518,30 @@ class PersistenceService:
             },
         )
 
+    def _publish_post_commit_ready(self, runtime: Any, turn_context: Any) -> None:
+        """Publish the post-commit readiness event and return immediately."""
+        event_bus = getattr(runtime, "_runtime_event_bus", None)
+        publish = getattr(event_bus, "publish", None)
+        if not callable(publish):
+            logger.warning(
+                "Post-commit worker unavailable: runtime event bus missing publish(); skipping post-commit event"
+            )
+            return
+
+        metadata = getattr(turn_context, "metadata", None)
+        control_plane = dict(metadata.get("control_plane") or {}) if isinstance(metadata, dict) else {}
+        publish(
+            PostCommitEvent(
+                session_id=str(control_plane.get("session_id") or "default"),
+                trace_id=str(getattr(turn_context, "trace_id", "") or ""),
+                tenant_id=str(
+                    getattr(getattr(runtime, "config", None), "tenant_id", "default")
+                    or "default"
+                ),
+                payload={"turn_context": turn_context},
+            )
+        )
+
     def _commit_post_finalize_side_effects(self, turn_context: Any) -> None:
         """Run strict SaveNode mutation sequence before final ledger commit."""
         service = self.turn_service
@@ -523,10 +550,6 @@ class PersistenceService:
             raise RuntimeError(
                 "SaveNode strict mode requires an attached turn_service runtime",
             )
-
-        memory_coordinator = getattr(runtime, "memory_coordinator", None)
-        if memory_coordinator is None:
-            raise RuntimeError("SaveNode strict mode requires memory_coordinator")
 
         # --- Drain MutationQueue FIRST at the canonical SaveNode commit boundary ---
         # Every mutation queued outside this boundary (deferred from earlier stages or
@@ -545,28 +568,6 @@ class PersistenceService:
         )
         if callable(flush_deferred):
             self._call_nonfatal(flush_deferred, turn_context)
-
-        consolidate_memories = getattr(memory_coordinator, "consolidate_memories", None)
-        if not callable(consolidate_memories):
-            raise RuntimeError(
-                "SaveNode strict mode requires memory_coordinator.consolidate_memories",
-            )
-        memory_ops_started = time.perf_counter()
-        consolidate_memories(turn_context=turn_context)
-
-        apply_controlled_forgetting = getattr(
-            memory_coordinator,
-            "apply_controlled_forgetting",
-            None,
-        )
-        if not callable(apply_controlled_forgetting):
-            raise RuntimeError(
-                "SaveNode strict mode requires memory_coordinator.apply_controlled_forgetting",
-            )
-        apply_controlled_forgetting(turn_context=turn_context)
-        memory_ops_ms = round((time.perf_counter() - memory_ops_started) * 1000, 3)
-        if isinstance(getattr(turn_context, "state", None), dict):
-            turn_context.state["_timing_memory_ops_ms"] = memory_ops_ms
 
         relationship_manager = getattr(runtime, "relationship_manager", None)
         materialize_projection = getattr(
@@ -592,6 +593,14 @@ class PersistenceService:
         graph_sync_ms = round((time.perf_counter() - graph_sync_started) * 1000, 3)
         if isinstance(getattr(turn_context, "state", None), dict):
             turn_context.state["_timing_graph_sync_ms"] = graph_sync_ms
+
+        # Publish post-commit readiness only after the full strict commit
+        # sequence succeeds, so failed commits cannot leak readiness events.
+        memory_ops_started = time.perf_counter()
+        self._publish_post_commit_ready(runtime, turn_context)
+        memory_ops_ms = round((time.perf_counter() - memory_ops_started) * 1000, 3)
+        if isinstance(getattr(turn_context, "state", None), dict):
+            turn_context.state["_timing_memory_ops_ms"] = memory_ops_ms
 
     @staticmethod
     def _capture_transaction_snapshot(
@@ -755,10 +764,9 @@ class PersistenceService:
         mutation_queue = getattr(turn_context, "mutation_queue", None)
         if mutation_queue is not None:
             # Roll back queue runtime bookkeeping so failed-turn contracts are deterministic.
-            mutation_queue._queue = []
-            mutation_queue._drained = []
-            mutation_queue._failed = []
-            mutation_queue._sequence_counter = 0
+            reset_fn = getattr(mutation_queue, "reset_for_rollback", None)
+            if callable(reset_fn):
+                reset_fn()
 
     def final_ledger_commit(
         self,

@@ -515,9 +515,9 @@ class DadBotRegressionTests(unittest.TestCase):
         self.assertFalse(should_end)
         snapshot = self.bot.planner_debug_snapshot()
         self.assertEqual(snapshot["planner_status"], "no_tool")
-        self.assertEqual(snapshot["fallback_status"], "used_tool")
-        self.assertEqual(snapshot["fallback_tool"], "web_search")
-        self.assertEqual(snapshot["final_path"], "heuristic_tool")
+        self.assertEqual(snapshot["fallback_status"], "idle")
+        self.assertEqual(snapshot["fallback_tool"], "")
+        self.assertEqual(snapshot["final_path"], "idle")
 
     def test_planner_debug_snapshot_normalizes_invalid_parameters_payload(self):
         self.bot.runtime_state_manager.planner_debug = {

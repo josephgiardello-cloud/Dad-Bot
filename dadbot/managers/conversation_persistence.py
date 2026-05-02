@@ -11,9 +11,10 @@ from pathlib import Path
 from typing import Any
 
 from dadbot.contracts import DadBotContext, SupportsDadBotAccess
+from dadbot.core.kernel_locks import KernelReplaySequenceLock
 from dadbot.core.execution_recovery import ExecutionRecovery
 from dadbot.core.execution_replay_engine import verify_terminal_state_replay_equivalence
-from dadbot.core.execution_trace_context import (
+from dadbot.core.execution_context import (
     RuntimeTraceViolation,
     active_execution_trace,
     ensure_execution_trace_root,
@@ -460,12 +461,18 @@ class ConversationPersistenceManager:
         self._require_active_trace("replay_turn_events")
         normalized = str(trace_id or "").strip()
         events = self.list_turn_events(trace_id=normalized)
+        strict_sequence_hash, strict_sequence = KernelReplaySequenceLock.strict_hash(
+            trace_id=normalized,
+            events=events,
+        )
         replayed_state, replayed_metadata, phase, determinism = self._fold_events(
             events,
         )
         return {
             "trace_id": normalized,
             "events": events,
+            "strict_sequence_hash": strict_sequence_hash,
+            "strict_sequence": strict_sequence,
             "phase": phase,
             "replayed_state": replayed_state,
             "replayed_metadata": replayed_metadata,
@@ -526,6 +533,8 @@ class ConversationPersistenceManager:
             "observed_lock_hash": observed_hash,
             "expected_lock_hash": expected_hash,
             "matches_expected": matches_expected,
+            "strict_sequence_hash": str(replay.get("strict_sequence_hash") or ""),
+            "strict_sequence_count": len(list(replay.get("strict_sequence") or [])),
             "lock_hashes": list(determinism.get("lock_hashes") or []),
             "execution_identity": dict(determinism.get("execution_identity") or {}),
             "execution_fingerprint": str(

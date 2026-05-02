@@ -22,6 +22,10 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e .[dev,service]
 
+      - name: Kernel Boundary Validator (Hard Fail)
+        run: |
+          python ci/kernel_boundary_check.py
+
       - name: Layer 1 - Core Import Firewall
         run: |
           python -m pytest -q tests/test_core_import_firewall.py

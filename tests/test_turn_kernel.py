@@ -17,17 +17,17 @@ from dadbot.core.control_plane import (
     ExecutionControlPlane,
     InMemoryExecutionLedger,
     LedgerReader,
-    LedgerWriter,
     Scheduler,
     SessionRegistry,
 )
+from dadbot.core.ledger_writer import LedgerWriter
 from dadbot.core.graph import TurnContext
 from dadbot.core.kernel import (
     PolicyDecision,
     TurnKernel,
     bayesian_policy_gate,
 )
-from dadbot.core.tool_sandbox import ToolSandbox, ToolTransaction
+from dadbot.core.testing.tool_runtime_test_adapter import ToolRuntimeTestAdapter
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -193,8 +193,8 @@ def test_kernel_policy_is_checked_per_step():
 
 
 def test_tool_transaction_commit_on_success():
-    sandbox = ToolSandbox()
-    with sandbox.transaction(tool_name="set_reminder", parameters={"title": "Call dentist"}) as txn:
+    runtime = ToolRuntimeTestAdapter()
+    with runtime.transaction(tool_name="set_reminder", parameters={"title": "Call dentist"}) as txn:
         record = txn.execute(executor=lambda: {"id": "r1", "title": "Call dentist"})
 
     assert txn.committed is True
@@ -204,11 +204,11 @@ def test_tool_transaction_commit_on_success():
 
 
 def test_tool_transaction_auto_rollback_on_exception():
-    sandbox = ToolSandbox()
+    runtime = ToolRuntimeTestAdapter()
     rolled_back = []
 
     with pytest.raises(ValueError):
-        with sandbox.transaction(tool_name="set_reminder", parameters={"title": "Boom"}) as txn:
+        with runtime.transaction(tool_name="set_reminder", parameters={"title": "Boom"}) as txn:
             txn.execute(
                 executor=lambda: {"id": "r_boom"},
                 compensating_action=lambda: rolled_back.append("rolled"),
@@ -221,11 +221,11 @@ def test_tool_transaction_auto_rollback_on_exception():
 
 
 def test_tool_transaction_auto_rollback_does_not_affect_earlier_sandbox_records():
-    sandbox = ToolSandbox()
+    runtime = ToolRuntimeTestAdapter()
     compensations = []
 
     # Record outside the transaction
-    sandbox.execute(
+    runtime.execute(
         tool_name="web_search",
         parameters={"query": "news"},
         executor=lambda: {"heading": "News", "summary": "today"},
@@ -233,7 +233,7 @@ def test_tool_transaction_auto_rollback_does_not_affect_earlier_sandbox_records(
     )
 
     with pytest.raises(RuntimeError):
-        with sandbox.transaction(tool_name="set_reminder", parameters={"title": "X"}) as txn:
+        with runtime.transaction(tool_name="set_reminder", parameters={"title": "X"}) as txn:
             txn.execute(
                 executor=lambda: {"id": "rx"},
                 compensating_action=lambda: compensations.append("inner"),
@@ -245,15 +245,15 @@ def test_tool_transaction_auto_rollback_does_not_affect_earlier_sandbox_records(
 
 
 def test_tool_transaction_status_before_execute_is_not_started():
-    sandbox = ToolSandbox()
-    txn = ToolTransaction(sandbox=sandbox, tool_name="set_reminder", parameters={})
+    runtime = ToolRuntimeTestAdapter()
+    txn = runtime.make_transaction(tool_name="set_reminder", parameters={})
     assert txn.status == "not_started"
     assert txn.result is None
 
 
 def test_tool_transaction_failed_executor_does_not_commit():
-    sandbox = ToolSandbox()
-    with sandbox.transaction(tool_name="set_reminder", parameters={"title": "Fail"}) as txn:
+    runtime = ToolRuntimeTestAdapter()
+    with runtime.transaction(tool_name="set_reminder", parameters={"title": "Fail"}) as txn:
         record = txn.execute(executor=lambda: (_ for _ in ()).throw(RuntimeError("db down")))
 
     # Clean exit (no exception was re-raised) because the sandbox isolates failures.

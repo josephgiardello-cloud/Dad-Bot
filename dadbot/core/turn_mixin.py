@@ -10,17 +10,37 @@ Extracted from the DadBot god-class. Owns:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
-from typing import Any
+from collections.abc import Awaitable, Iterable, Mapping
+from typing import Any, cast
+from uuid import uuid4
 
 from dadbot.contracts import AttachmentList, ChunkCallback, FinalizedTurnResult
-from dadbot.core.observability import CorrelationContext, TracingContext
+from dadbot.core.execution_contract import (
+    AgentState,
+    ExecutionMode,
+    TurnDelivery,
+    TurnRequest,
+    TurnResponse,
+    TurnResult,
+    UserInput,
+    live_turn_request,
+)
+from dadbot.core.kernel_locks import KernelReplaySequenceLock
+from dadbot.core.kernel_signals import CorrelationContext, TracingContext
 
 logger = logging.getLogger(__name__)
 
 
 class DadBotTurnMixin:
     """Turn execution and graph failure handling for the DadBot facade."""
+
+    # These attributes are provided by the concrete DadBot facade at runtime.
+    _turn_graph_config_path: str
+    _turn_execution_lock: Any
+    services: Any
+    turn_orchestrator: Any
 
     # ------------------------------------------------------------------
     # Orchestrator resolution
@@ -53,10 +73,27 @@ class DadBotTurnMixin:
         self,
         user_input: str,
         attachments: AttachmentList | None = None,
+        chunk_callback: ChunkCallback | None = None,
     ) -> FinalizedTurnResult:
-        return await self.turn_orchestrator.handle_turn(
-            user_input,
+        orchestrator = self._get_turn_orchestrator()
+        session_id = str(getattr(self, "_execute_turn_session_id", "") or "").strip() or str(
+            getattr(self, "active_thread_id", "") or "default",
+        )
+        submit_turn = getattr(orchestrator, "_submit_turn_via_control_plane", None)
+        if callable(submit_turn):
+            return await cast(
+                Awaitable[FinalizedTurnResult],
+                submit_turn(
+                    user_input,
+                    attachments=attachments,
+                    session_id=session_id,
+                ),
+            )
+        return await orchestrator.control_plane.submit_turn(
+            session_id=session_id,
+            user_input=user_input,
             attachments=attachments,
+            metadata={},
         )
 
     @staticmethod
@@ -75,6 +112,7 @@ class DadBotTurnMixin:
         self,
         user_input: str,
         attachments: AttachmentList | None = None,
+        chunk_callback: ChunkCallback | None = None,
     ) -> FinalizedTurnResult:
         """Run the graph turn synchronously regardless of the calling context.
 
@@ -88,13 +126,136 @@ class DadBotTurnMixin:
             except RuntimeError:
                 loop = None
 
-            coro = self._run_graph_turn_async(user_input, attachments=attachments)
+            coro = self._run_graph_turn_async(
+                user_input,
+                attachments=attachments,
+                chunk_callback=chunk_callback,
+            )
             if loop is not None and loop.is_running():
                 return self._run_coro_in_thread(coro)
             return asyncio.run(coro)
 
+    def _run_turn_request_sync(
+        self,
+        request: TurnRequest,
+        *,
+        state: AgentState | None = None,
+        chunk_callback: ChunkCallback | None = None,
+    ) -> TurnResponse:
+        coro = self._execute_turn_async(
+            request,
+            state=state,
+            chunk_callback=chunk_callback,
+        )
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None and loop.is_running():
+            return self._run_coro_in_thread(coro)
+        return asyncio.run(coro)
+
     def _validate_managers(self, *, smoke: bool = False) -> None:
-        self.services.validate_facade(smoke=smoke)
+        services = getattr(self, "services", None)
+        if services is not None:
+            services.validate_facade(smoke=smoke)
+
+    # ------------------------------------------------------------------
+    # EventTap boundary integration (TURN/NODE/TOOL lifecycle events)
+    # ------------------------------------------------------------------
+
+    def _resolve_event_tap(self):
+        direct = getattr(self, "event_tap", None) or getattr(self, "_event_tap", None)
+        if direct is not None:
+            return direct
+        services = getattr(self, "services", None)
+        if services is not None:
+            return getattr(services, "event_tap", None)
+        return None
+
+    @staticmethod
+    def _safe_event_payload(value: Any, *, limit: int = 240) -> Any:
+        if value is None or isinstance(value, (bool, int, float)):
+            return value
+        if isinstance(value, str):
+            return value[:limit]
+        if isinstance(value, dict):
+            return {
+                str(k)[:80]: DadBotTurnMixin._safe_event_payload(v, limit=limit)
+                for k, v in list(value.items())[:16]
+            }
+        if isinstance(value, (list, tuple, set)):
+            return [DadBotTurnMixin._safe_event_payload(item, limit=limit) for item in list(value)[:16]]
+        return str(value)[:limit]
+
+    def _event_tap_context(self) -> tuple[str, str, str]:
+        session_id = str(getattr(self, "active_thread_id", "") or "").strip() or "default"
+        tenant_id = str(getattr(self, "tenant_id", "") or "").strip() or "default"
+        trace_id = str(TracingContext.current_trace_id() or CorrelationContext.current() or uuid4().hex)
+        return session_id, tenant_id, trace_id
+
+    def _begin_turn_event_run(self) -> str:
+        tap = self._resolve_event_tap()
+        if tap is None or not callable(getattr(tap, "begin_run", None)):
+            return ""
+        session_id, tenant_id, trace_id = self._event_tap_context()
+        run_id = str(getattr(self, "_active_turn_run_id", "") or "").strip()
+        if run_id:
+            return run_id
+        run_id = str(
+            tap.begin_run(
+                session_id=session_id,
+                tenant_id=tenant_id,
+                run_id=trace_id,
+                contract_version="1.0",
+            )
+        )
+        self._active_turn_run_id = run_id
+        return run_id
+
+    def _emit_turn_event(self, event_type: str, **payload: Any) -> None:
+        tap = self._resolve_event_tap()
+        emit = getattr(tap, "emit", None)
+        if not callable(emit):
+            return
+        run_id = str(getattr(self, "_active_turn_run_id", "") or "").strip()
+        if not run_id:
+            run_id = self._begin_turn_event_run()
+        if not run_id:
+            return
+        emit(
+            event_type,
+            run_id=run_id,
+            **{k: self._safe_event_payload(v) for k, v in payload.items()},
+        )
+
+    def _snapshot_kernel_state(self) -> dict[str, Any]:
+        snapshot_fn = getattr(self, "snapshot_session_state", None)
+        if callable(snapshot_fn):
+            try:
+                raw = snapshot_fn()
+                if isinstance(raw, Mapping):
+                    return {str(k): v for k, v in raw.items()}
+                return {}
+            except Exception:  # noqa: BLE001
+                return {}
+        return {}
+
+    def _restore_kernel_state(self, snapshot: dict[str, Any]) -> None:
+        restore_fn = getattr(self, "load_session_state_snapshot", None)
+        if callable(restore_fn):
+            restore_fn(dict(snapshot or {}))
+
+    def _checkpoint_turn_state(self, *, state_hash: str = "") -> None:
+        tap = self._resolve_event_tap()
+        if tap is None:
+            return
+        maybe_checkpoint = getattr(tap, "maybe_checkpoint", None)
+        if callable(maybe_checkpoint):
+            maybe_checkpoint(
+                state_snapshot={"kernel_state": self._snapshot_kernel_state()},
+                state_hash=str(state_hash or ""),
+            )
 
     # ------------------------------------------------------------------
     # Graph failure handling
@@ -238,45 +399,351 @@ class DadBotTurnMixin:
         finalization = getattr(self, "reply_finalization", None)
         append_signoff = getattr(finalization, "append_signoff", None)
         if callable(append_signoff):
-            return append_signoff(text)
+            return str(append_signoff(text))
         compat_finalize = getattr(self, "finalize_reply", None)
         if callable(compat_finalize):
-            return compat_finalize(text)
+            return str(compat_finalize(text))
         return str(text or "")
+
+    @staticmethod
+    def _response_from_result(request: TurnRequest, result: TurnResult) -> TurnResponse:
+        reply, should_end = result
+        return TurnResponse(
+            reply=reply,
+            should_end=bool(should_end),
+            mode=request.mode,
+            delivery=request.delivery,
+        )
+
+    @staticmethod
+    def _delivery_event_mode(delivery: TurnDelivery) -> str:
+        if delivery in {TurnDelivery.ASYNC, TurnDelivery.STREAM_ASYNC}:
+            return "async"
+        return "sync"
+
+    async def _execute_live_turn_async(
+        self,
+        request: TurnRequest,
+        *,
+        chunk_callback: ChunkCallback | None = None,
+    ) -> TurnResponse:
+        user_input = request.input.text
+        attachments = list(request.input.attachments or [])
+        request_session_id = str(request.session_id or "").strip() or str(
+            getattr(self, "active_thread_id", "") or "default",
+        )
+        event_mode = self._delivery_event_mode(request.delivery)
+        previous_session_id = str(getattr(self, "_execute_turn_session_id", "") or "")
+        self._execute_turn_session_id = request_session_id
+        self._begin_turn_event_run()
+        self._emit_turn_event(
+            "TURN_START",
+            mode=event_mode,
+            user_input=user_input,
+            attachment_count=len(attachments),
+        )
+        try:
+            if request.delivery in {TurnDelivery.SYNC, TurnDelivery.STREAM}:
+                result = self._run_graph_turn_sync_compat(
+                    user_input,
+                    attachments,
+                    chunk_callback,
+                )
+            else:
+                result = await self._run_graph_turn_async_compat(
+                    user_input,
+                    attachments,
+                    chunk_callback,
+                )
+            self._emit_turn_event(
+                "TURN_END",
+                mode=event_mode,
+                status="ok",
+                should_end=bool(result[1]),
+            )
+            self._checkpoint_turn_state()
+            return self._response_from_result(request, result)
+        except Exception as exc:  # noqa: BLE001
+            self._emit_turn_event(
+                "TURN_END",
+                mode=event_mode,
+                status="error",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            self._raise_graph_execution_failure(
+                exc,
+                mode=event_mode,
+                user_input=user_input,
+                attachments=attachments,
+            )
+            raise AssertionError("unreachable")
+        finally:
+            self._execute_turn_session_id = previous_session_id
+            self._active_turn_run_id = ""
+
+    async def _execute_turn_async(
+        self,
+        request: TurnRequest,
+        *,
+        state: AgentState | None = None,
+        chunk_callback: ChunkCallback | None = None,
+    ) -> TurnResponse:
+        if request.mode is ExecutionMode.LIVE:
+            return await self._execute_live_turn_async(
+                request,
+                chunk_callback=chunk_callback,
+            )
+
+        if state is None:
+            raise RuntimeError(f"{request.mode.value} mode requires AgentState")
+
+        if request.mode is ExecutionMode.REPLAY:
+            replay_handler = getattr(self, "_run_turn_replay", None)
+            if not callable(replay_handler):
+                raise RuntimeError("Replay mode requires _run_turn_replay handler")
+            result = cast(
+                TurnResult,
+                replay_handler(
+                    request.input,
+                    state,
+                    chunk_callback=chunk_callback,
+                ),
+            )
+            return self._response_from_result(request, result)
+
+        if request.mode is ExecutionMode.RECOVERY:
+            recovery_handler = getattr(self, "_run_turn_recovery", None)
+            if callable(recovery_handler):
+                result = cast(
+                    TurnResult,
+                    recovery_handler(
+                        request.input,
+                        state,
+                        chunk_callback=chunk_callback,
+                    ),
+                )
+            else:
+                result = self._run_turn_recovery_default(
+                    request.input,
+                    state,
+                    chunk_callback=chunk_callback,
+                )
+            return self._response_from_result(request, result)
+
+        raise ValueError(f"Unsupported execution mode: {request.mode}")
+
+    def execute_turn(
+        self,
+        request: TurnRequest,
+        *,
+        state: AgentState | None = None,
+        chunk_callback: ChunkCallback | None = None,
+    ) -> TurnResponse | Awaitable[TurnResponse]:
+        if request.delivery in {TurnDelivery.ASYNC, TurnDelivery.STREAM_ASYNC}:
+            return self._execute_turn_async(
+                request,
+                state=state,
+                chunk_callback=chunk_callback,
+            )
+        return self._run_turn_request_sync(
+            request,
+            state=state,
+            chunk_callback=chunk_callback,
+        )
 
     # ------------------------------------------------------------------
     # Public turn entry-points
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _callable_accepts_chunk_callback(fn: Any) -> bool:
+        try:
+            signature = inspect.signature(fn)
+        except (TypeError, ValueError):
+            return True
+
+        parameters = signature.parameters.values()
+        return any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            or parameter.name == "chunk_callback"
+            for parameter in parameters
+        )
+
+    @classmethod
+    def _invoke_chunk_callback_compat(cls, fn: Any, /, *args: Any, **kwargs: Any):
+        if cls._callable_accepts_chunk_callback(fn):
+            return fn(*args, **kwargs)
+        trimmed_kwargs = {key: value for key, value in kwargs.items() if key != "chunk_callback"}
+        return fn(*args, **trimmed_kwargs)
+
+    def _run_graph_turn_sync_compat(
+        self,
+        user_input: str,
+        attachments: AttachmentList | None,
+        chunk_callback: ChunkCallback | None,
+    ) -> FinalizedTurnResult:
+        return self._invoke_chunk_callback_compat(
+            self._run_graph_turn_sync,
+            user_input,
+            attachments=attachments,
+            chunk_callback=chunk_callback,
+        )
+
+    async def _run_graph_turn_async_compat(
+        self,
+        user_input: str,
+        attachments: AttachmentList | None,
+        chunk_callback: ChunkCallback | None,
+    ) -> FinalizedTurnResult:
+        result = self._invoke_chunk_callback_compat(
+            self._run_graph_turn_async,
+            user_input,
+            attachments=attachments,
+            chunk_callback=chunk_callback,
+        )
+        return await result
+
     def process_user_message(
         self,
         user_input: str,
         attachments: AttachmentList | None = None,
+        chunk_callback: ChunkCallback | None = None,
     ) -> FinalizedTurnResult:
-        try:
-            return self._run_graph_turn_sync(user_input, attachments=attachments)
-        except Exception as exc:  # noqa: BLE001
-            self._raise_graph_execution_failure(
-                exc,
-                mode="sync",
-                user_input=user_input,
-                attachments=attachments,
-            )
+        response = cast(
+            TurnResponse,
+            self.execute_turn(
+                live_turn_request(
+                    user_input,
+                    attachments=list(attachments or []),
+                    delivery=TurnDelivery.SYNC,
+                    session_id=str(getattr(self, "active_thread_id", "") or "default"),
+                ),
+                chunk_callback=chunk_callback,
+            ),
+        )
+        return response.as_result()
+
+    def run_turn(
+        self,
+        input: UserInput,
+        state: AgentState,
+        *,
+        chunk_callback: ChunkCallback | None = None,
+        mode: ExecutionMode = ExecutionMode.LIVE,
+    ) -> TurnResult:
+        """Canonical deterministic turn execution contract.
+
+        LIVE delegates to the graph-backed process_user_message path.
+        REPLAY/RECOVERY require explicit handlers on the facade.
+        """
+        state.recompute_invariance_hash()
+
+        response = cast(
+            TurnResponse,
+            self.execute_turn(
+                TurnRequest(
+                    input=input,
+                    mode=mode,
+                    delivery=TurnDelivery.SYNC,
+                    session_id=str(getattr(self, "active_thread_id", "") or "default"),
+                ),
+                state=state,
+                chunk_callback=chunk_callback,
+            ),
+        )
+        result = response.as_result()
+
+        state.step_id = int(state.step_id) + 1
+        state.current_node = "turn.complete"
+        state.recompute_invariance_hash()
+        self._checkpoint_turn_state(state_hash=state.invariance_hash)
+        return result
+
+    def _run_turn_recovery_default(
+        self,
+        input: UserInput,
+        state: AgentState,
+        *,
+        chunk_callback: ChunkCallback | None = None,
+    ) -> TurnResult:
+        tap = self._resolve_event_tap()
+        if tap is None:
+            raise RuntimeError("Recovery mode requires configured EventTap")
+
+        latest_checkpoint = getattr(tap, "latest_checkpoint", None)
+        events_after_cursor = getattr(tap, "events_after_cursor", None)
+        if not callable(latest_checkpoint) or not callable(events_after_cursor):
+            raise RuntimeError("Recovery mode requires checkpoint-capable EventTap")
+
+        checkpoint = latest_checkpoint()
+        if not isinstance(checkpoint, Mapping):
+            raise RuntimeError("Recovery mode requires a durable checkpoint (replay-only policy)")
+
+        apply_event = getattr(self, "_apply_recovery_event", None)
+        if not callable(apply_event):
+            raise RuntimeError("Recovery mode requires _apply_recovery_event handler")
+
+        replayed = 0
+        snapshot = dict(checkpoint.get("state") or {})
+        self._restore_kernel_state(dict(snapshot.get("kernel_state") or snapshot))
+        if str(checkpoint.get("state_hash") or "").strip():
+            state.invariance_hash = str(checkpoint.get("state_hash"))
+
+        cursor = int(checkpoint.get("event_sequence_id") or 0)
+        self._emit_turn_event("RECOVERY_REPLAY_START", cursor=cursor)
+        raw_events = events_after_cursor(cursor)
+        events_iter = list(raw_events) if isinstance(raw_events, Iterable) else []
+        run_id = str(checkpoint.get("run_id") or "").strip() or str(
+            getattr(self, "_active_turn_run_id", "") or "",
+        ).strip()
+        digest, canonical = KernelReplaySequenceLock.strict_hash(
+            trace_id=run_id,
+            events=[dict(event) for event in events_iter],
+        )
+        for event in events_iter:
+            replayed += 1
+            apply_event(dict(event))
+        self._emit_turn_event(
+            "RECOVERY_REPLAY_END",
+            replayed_events=replayed,
+            strict_sequence_hash=digest,
+            strict_sequence_count=len(canonical),
+        )
+
+        response = cast(
+            TurnResponse,
+            self.execute_turn(
+                live_turn_request(
+                    input.text,
+                    attachments=list(input.attachments or []),
+                    delivery=TurnDelivery.SYNC,
+                    session_id=str(getattr(self, "active_thread_id", "") or "default"),
+                ),
+                chunk_callback=chunk_callback,
+            ),
+        )
+        return response.as_result()
 
     async def process_user_message_async(
         self,
         user_input: str,
         attachments: AttachmentList | None = None,
+        chunk_callback: ChunkCallback | None = None,
     ) -> FinalizedTurnResult:
-        try:
-            return await self._run_graph_turn_async(user_input, attachments=attachments)
-        except Exception as exc:  # noqa: BLE001
-            self._raise_graph_execution_failure(
-                exc,
-                mode="async",
-                user_input=user_input,
-                attachments=attachments,
-            )
+        response = await cast(
+            Awaitable[TurnResponse],
+            self.execute_turn(
+                live_turn_request(
+                    user_input,
+                    attachments=list(attachments or []),
+                    delivery=TurnDelivery.ASYNC,
+                    session_id=str(getattr(self, "active_thread_id", "") or "default"),
+                ),
+                chunk_callback=chunk_callback,
+            ),
+        )
+        return response.as_result()
 
     def process_user_message_stream(
         self,
@@ -284,11 +751,31 @@ class DadBotTurnMixin:
         attachments: AttachmentList | None = None,
         chunk_callback: ChunkCallback | None = None,
     ) -> FinalizedTurnResult:
-        reply, should_end = self.process_user_message(
-            user_input,
-            attachments=attachments,
+        streamed = False
+
+        def _wrapped_chunk_callback(chunk: str) -> None:
+            nonlocal streamed
+            if not chunk:
+                return
+            streamed = True
+            if callable(chunk_callback):
+                chunk_callback(chunk)
+
+        response = cast(
+            TurnResponse,
+            self.execute_turn(
+                live_turn_request(
+                    user_input,
+                    attachments=list(attachments or []),
+                    delivery=TurnDelivery.STREAM,
+                    session_id=str(getattr(self, "active_thread_id", "") or "default"),
+                ),
+                chunk_callback=_wrapped_chunk_callback,
+            ),
         )
-        self._deliver_buffered_stream_chunks(reply, chunk_callback)
+        reply, should_end = response.as_result()
+        if not streamed:
+            self._deliver_buffered_stream_chunks(str(reply or ""), chunk_callback)
         return reply, should_end
 
     async def process_user_message_stream_async(
@@ -297,11 +784,31 @@ class DadBotTurnMixin:
         attachments: AttachmentList | None = None,
         chunk_callback: ChunkCallback | None = None,
     ) -> FinalizedTurnResult:
-        reply, should_end = await self.process_user_message_async(
-            user_input,
-            attachments=attachments,
+        streamed = False
+
+        def _wrapped_chunk_callback(chunk: str) -> None:
+            nonlocal streamed
+            if not chunk:
+                return
+            streamed = True
+            if callable(chunk_callback):
+                chunk_callback(chunk)
+
+        response = await cast(
+            Awaitable[TurnResponse],
+            self.execute_turn(
+                live_turn_request(
+                    user_input,
+                    attachments=list(attachments or []),
+                    delivery=TurnDelivery.STREAM_ASYNC,
+                    session_id=str(getattr(self, "active_thread_id", "") or "default"),
+                ),
+                chunk_callback=_wrapped_chunk_callback,
+            ),
         )
-        self._deliver_buffered_stream_chunks(reply, chunk_callback)
+        reply, should_end = response.as_result()
+        if not streamed:
+            self._deliver_buffered_stream_chunks(str(reply or ""), chunk_callback)
         return reply, should_end
 
     async def handle_turn_async(
@@ -310,10 +817,18 @@ class DadBotTurnMixin:
         attachments: AttachmentList | None = None,
     ) -> FinalizedTurnResult:
         """Canonical async turn entry-point."""
-        return await self.process_user_message_async(
-            user_input,
-            attachments=attachments,
+        response = await cast(
+            Awaitable[TurnResponse],
+            self.execute_turn(
+                live_turn_request(
+                    user_input,
+                    attachments=list(attachments or []),
+                    delivery=TurnDelivery.ASYNC,
+                    session_id=str(getattr(self, "active_thread_id", "") or "default"),
+                ),
+            ),
         )
+        return response.as_result()
 
     def handle_turn_sync(
         self,
@@ -321,4 +836,15 @@ class DadBotTurnMixin:
         attachments: AttachmentList | None = None,
     ) -> FinalizedTurnResult:
         """Canonical sync turn entry-point."""
-        return self.process_user_message(user_input, attachments=attachments)
+        response = cast(
+            TurnResponse,
+            self.execute_turn(
+                live_turn_request(
+                    user_input,
+                    attachments=list(attachments or []),
+                    delivery=TurnDelivery.SYNC,
+                    session_id=str(getattr(self, "active_thread_id", "") or "default"),
+                ),
+            ),
+        )
+        return response.as_result()

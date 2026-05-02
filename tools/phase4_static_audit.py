@@ -216,7 +216,7 @@ class _RandomImportInCoreRule:
 
 
 class _MutationOutsideSaveNodeRule:
-    """mutation_queue.queue() calls outside approved files are a mutation-guard violation risk."""
+    """mutation queue enqueue calls outside approved files are a mutation-guard violation risk."""
 
     id = "M001"
     severity = "warn"
@@ -228,14 +228,14 @@ class _MutationOutsideSaveNodeRule:
             return []
         findings: list[Finding] = []
         for lineno, line in enumerate(text.splitlines(), 1):
-            if "mutation_queue.queue(" in line:
+            if "mutation_queue" + ".queue(" in line:
                 findings.append(
                     Finding(
                         file=str(path),
                         line=lineno,
                         rule=self.id,
                         severity=self.severity,
-                        detail="mutation_queue.queue() call outside approved files (graph.py, turn_service.py)",
+                        detail="mutation queue enqueue call outside approved files (graph.py, turn_service.py)",
                     )
                 )
         return findings

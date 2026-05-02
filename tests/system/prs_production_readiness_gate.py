@@ -16,6 +16,8 @@ import pytest
 import tools.arch_completeness_audit as arch_audit
 import tools.contract_guard as contract_guard
 import tools.enforce_no_bypass as no_bypass
+import tools.turn_coherence_check as turn_coherence_check
+import tools.turn_surface_freeze as turn_surface_freeze
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -23,6 +25,7 @@ CORE_DIR = ROOT / "dadbot" / "core"
 GATE_REL_PATH = "tests/system/prs_production_readiness_gate.py"
 ARCH_MANIFEST = ROOT / "audit" / "spec" / "architecture_manifest.json"
 CONTRACT_GUARD_BASELINE = ROOT / "tools" / "contract_guard_baseline.json"
+TURN_SURFACE_BASELINE = ROOT / "tools" / "turn_surface_freeze_baseline.json"
 SHADOW_MODULE_SUFFIXES = ("_old", "_v2", "_legacy", "_bak", "_copy")
 
 EXPECTED_CORE_MODULES: dict[str, dict[str, Any]] = {
@@ -430,6 +433,16 @@ def _aggregate_bypass_violations() -> list[str]:
     return sorted(aggregated)
 
 
+def _load_turn_surface_drift() -> dict[str, Any]:
+    baseline_payload = json.loads(TURN_SURFACE_BASELINE.read_text(encoding="utf-8"))
+    current = turn_surface_freeze.collect_current_surface(ROOT)
+    return turn_surface_freeze.evaluate_freeze(ROOT, baseline_payload, current)
+
+
+def _load_turn_coherence_report() -> dict[str, Any]:
+    return dict(turn_coherence_check.run_check())
+
+
 def _class_contract_map(path: Path) -> dict[str, dict[str, Any]]:
     tree = _parse(path)
     contract_map: dict[str, dict[str, Any]] = {}
@@ -542,6 +555,8 @@ def run_contract_compliance_check() -> AnalyzerResult:
     propagation = arch_audit.check_param_propagation(manifest)
     new_contract_violations = _load_contract_guard_new_violations()
     bypass_violations = _aggregate_bypass_violations()
+    turn_surface_report = _load_turn_surface_drift()
+    turn_coherence_report = _load_turn_coherence_report()
     graph_node_contract_issues = _check_graph_node_contracts()
     node_annotation_issues = _check_node_run_annotations()
     type_registry_issues = _check_type_registry_integrity()
@@ -552,6 +567,8 @@ def run_contract_compliance_check() -> AnalyzerResult:
             propagation["violation_count"],
             new_contract_violations,
             bypass_violations,
+            not turn_surface_report.get("ok", False),
+            not turn_coherence_report.get("ok", False),
             graph_node_contract_issues,
             node_annotation_issues,
             type_registry_issues,
@@ -563,6 +580,14 @@ def run_contract_compliance_check() -> AnalyzerResult:
             _format_block("Propagation violations", [str(item) for item in propagation["violations"]]),
             _format_block("New forbidden primitive signatures", new_contract_violations),
             _format_block("Bypass violations", bypass_violations),
+            _format_block(
+                "Turn surface freeze drift",
+                ([] if turn_surface_report.get("ok", False) else [json.dumps(turn_surface_report.get("drift", {}), sort_keys=True)]),
+            ),
+            _format_block(
+                "Turn coherence violations",
+                [str(item) for item in turn_coherence_report.get("violations", [])],
+            ),
             _format_block("GraphNode contract issues", graph_node_contract_issues),
             _format_block("Node run annotation issues", node_annotation_issues),
             _format_block("Type registry issues", type_registry_issues),
@@ -577,6 +602,8 @@ def run_contract_compliance_check() -> AnalyzerResult:
             "propagation": propagation,
             "new_contract_violations": new_contract_violations,
             "bypass_violations": bypass_violations,
+            "turn_surface_freeze": turn_surface_report,
+            "turn_coherence": turn_coherence_report,
             "graph_node_contract_issues": graph_node_contract_issues,
             "node_annotation_issues": node_annotation_issues,
             "type_registry_issues": type_registry_issues,

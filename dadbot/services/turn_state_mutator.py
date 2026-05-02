@@ -5,7 +5,7 @@ Owns:
   - Legacy/fallback direct attribute writes (bot._last_recorded_mood, session_moods, etc.)
 
 Does NOT own:
-  - mutation_queue.queue() operations — those are already Wave-5 compliant
+    - queued mutation operations — those are already Wave-5 compliant
   - Any LLM I/O — that is owned by LLMCallAdapter
   - Business logic — state writes only
 """

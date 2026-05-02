@@ -130,9 +130,14 @@ class FakeGraphManager:
     def __init__(self, calls: list[str]) -> None:
         self._calls = calls
 
-    def sync_graph_store(self, turn_context: Any = None) -> None:
+    def sync_graph_projection(self, turn_context: Any = None) -> None:
         _ = turn_context
-        self._calls.append("sync_graph_store")
+        self._calls.append("sync_graph_projection")
+
+    def __getattr__(self, name: str) -> Any:
+        if str(name) == "sync_graph_store":
+            return self.sync_graph_projection
+        raise AttributeError(name)
 
 
 class FakeMemoryManager:

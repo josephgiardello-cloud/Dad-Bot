@@ -136,7 +136,7 @@ class TestPhase3ExecutionEquivalenceOracle:
 
 
 class TestPhase3FailureRecovery:
-    def test_partial_trace_repair_and_safe_fallback(self):
+    def test_partial_trace_repair_and_fallback_is_rejected(self):
         broken_trace = {
             "steps": [
                 {"operation": "model_call", "payload": {"input_hash": "x"}},
@@ -146,12 +146,11 @@ class TestPhase3FailureRecovery:
         }
         repaired = ExecutionRecovery.repair_partial_trace_context(broken_trace)
         assert len(repaired["steps"]) == 2
-        fallback = ExecutionRecovery.safe_fallback_reconstruction(
-            checkpoint={"state": {"k": "v"}, "metadata": {"m": 1}},
-            trace_context=broken_trace,
-        )
-        assert fallback["fallback"]["mode"] == "safe_reconstruction"
-        assert fallback["state"]["k"] == "v"
+        with pytest.raises(RuntimeError, match="replay-only"):
+            ExecutionRecovery.safe_fallback_reconstruction(
+                checkpoint={"state": {"k": "v"}, "metadata": {"m": 1}},
+                trace_context=broken_trace,
+            )
 
 
 class TestPhase3TruthSystem:

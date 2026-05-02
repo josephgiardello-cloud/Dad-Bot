@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import uuid
+from typing import cast
 
 from dadbot.contracts import DadBotContext, SupportsDadBotAccess
+from dadbot.core.execution_contract import TurnDelivery, TurnResponse, live_turn_request
 
 
 class RuntimeInterfaceManager:
@@ -32,7 +34,14 @@ class RuntimeInterfaceManager:
                 if not user_input:
                     continue
 
-                dad_reply, should_end = self.bot.process_user_message(user_input)
+                response = self.bot.execute_turn(
+                    live_turn_request(
+                        user_input,
+                        delivery=TurnDelivery.SYNC,
+                        session_id=str(getattr(self.bot, "active_thread_id", "") or "default"),
+                    ),
+                )
+                dad_reply, should_end = cast(TurnResponse, response).as_result()
                 if dad_reply:
                     self.bot.print_speaker_message("Dad", dad_reply)
 

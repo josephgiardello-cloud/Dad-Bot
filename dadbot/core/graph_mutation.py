@@ -164,6 +164,22 @@ class MutationQueue:
         """Unlock the queue to allow mutations."""
         self._mutations_locked = False
 
+    def reset_for_rollback(self) -> None:
+        """Reset all queue bookkeeping after a transaction rollback.
+
+        Must be called while holding the outer session lock.  Uses .clear()
+        on every list so existing references (e.g. from snapshot dicts) do not
+        hold stale state.  Avoids direct attribute reassignment, which is the
+        classic "works until it doesn't" pattern under concurrent access.
+        """
+        self._queue.clear()
+        self._drained.clear()
+        self._failed.clear()
+        self._transactions.clear()
+        self._sequence_counter = 0
+        # Do NOT reset _owner_trace_id or _mutations_locked — the queue
+        # is still bound to the same turn and lock state after rollback.
+
     def bind_owner(self, owner_id: str) -> None:
         owner = str(owner_id or "").strip()
         if not owner:

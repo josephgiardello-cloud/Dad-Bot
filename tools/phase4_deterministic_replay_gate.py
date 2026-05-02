@@ -112,6 +112,9 @@ class FakeRuntime:
         self._graph_store = FakeGraphStoreBackend()
         self.history: list[dict[str, Any]] = []
         self.reflection_log: list[dict[str, Any]] = []
+        self.memory_coordinator: Any = None  # set by run_batch_once
+        self.memory_manager: Any = None       # set by run_batch_once
+        self.relationship_manager: Any = None  # set by run_batch_once
 
 
 class FakeGraphManager:
@@ -128,7 +131,7 @@ class FakeGraphManager:
             return False
         return True
 
-    def sync_graph_store(self, turn_context: TurnContext | None = None) -> dict[str, Any]:
+    def sync_graph_projection(self, turn_context: TurnContext | None = None) -> dict[str, Any]:
         if turn_context is None:
             raise RuntimeError("turn_context is required in strict mode")
         if not bool(getattr(self.runtime, "_graph_commit_active", False)):
@@ -188,6 +191,11 @@ class FakeGraphManager:
         ]
         self.runtime._graph_store.replace_graph(nodes, visible_edges)
         return self.runtime._graph_store.fetch_graph()
+
+    def __getattr__(self, name: str) -> Any:
+        if str(name) == "sync_graph_store":
+            return self.sync_graph_projection
+        raise AttributeError(name)
 
     def graph_snapshot(self) -> dict[str, Any]:
         return self.runtime._graph_store.fetch_graph()
@@ -375,15 +383,15 @@ def build_turn_context(user_input: str, turn_index: int) -> TurnContext:
 
 
 async def run_batch_once(inputs: list[str]) -> dict[str, Any]:
-    runtime = FakeRuntime()
+    fake_rt = FakeRuntime()
     recording_pm = RecordingPersistenceManager()
-    runtime.memory_coordinator = FakeMemoryCoordinator(runtime)
-    runtime.memory_manager = FakeMemoryManager(runtime)
-    runtime.relationship_manager = FakeRelationshipManager(runtime)
+    fake_rt.memory_coordinator = FakeMemoryCoordinator(fake_rt)
+    fake_rt.memory_manager = FakeMemoryManager(fake_rt)
+    fake_rt.relationship_manager = FakeRelationshipManager(fake_rt)
 
-    turn_service = FakeTurnService(runtime)
+    turn_service = FakeTurnService(fake_rt)
     persistence = PersistenceService(recording_pm, turn_service=turn_service)
-    graph = build_graph(runtime, persistence, recording_pm)
+    graph = build_graph(fake_rt, persistence, recording_pm)
 
     per_turn_stage_order: list[list[str]] = []
     per_turn_stage_counts: list[dict[str, int]] = []
@@ -401,12 +409,12 @@ async def run_batch_once(inputs: list[str]) -> dict[str, Any]:
             }
         )
 
-    graph_snapshot = runtime.memory_manager.graph_manager.graph_snapshot()
+    graph_snapshot = fake_rt.memory_manager.graph_manager.graph_snapshot()
     memory_payload = {
-        "fact_table": {key: value.to_dict() for key, value in sorted(runtime._fact_table.items())},
-        "fact_history": [entry.to_dict() for entry in runtime._fact_history],
-        "history": list(runtime.history),
-        "reflection_log": list(runtime.reflection_log),
+        "fact_table": {key: value.to_dict() for key, value in sorted(fake_rt._fact_table.items())},
+        "fact_history": [entry.to_dict() for entry in fake_rt._fact_history],
+        "history": list(fake_rt.history),
+        "reflection_log": list(fake_rt.reflection_log),
     }
     ledger_payload = {
         "checkpoints": recording_pm.checkpoints,

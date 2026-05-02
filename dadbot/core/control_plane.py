@@ -4,7 +4,7 @@ import asyncio
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol, cast
 from uuid import uuid4
 
 from dadbot.contracts import AttachmentList, FinalizedTurnResult
@@ -13,9 +13,9 @@ from dadbot.core.execution_lease import ExecutionLease, LeaseConflictError
 from dadbot.core.execution_ledger import ExecutionLedger
 from dadbot.core.execution_ledger_memory import InMemoryExecutionLedger
 from dadbot.core.ledger_reader import LedgerReader
-from dadbot.core.ledger_writer import LedgerWriter
 from dadbot.core.ledger_writer_adapter import LedgerWriterAdapter
-from dadbot.core.observability import get_exporter, get_metrics, get_tracer
+from dadbot.core.kernel_mutation_gate import apply_event, emit_event
+from dadbot.core.kernel_signals import get_exporter, get_metrics, get_tracer
 from dadbot.core.recovery_manager import RecoveryManager
 from dadbot.core.session_store import SessionStore
 
@@ -91,6 +91,16 @@ class SessionRegistry:
         return str(session_id or "default") in self._terminated
 
 
+class SchedulerWriter(Protocol):
+    def append_job_queued(self, job: Any) -> dict[str, Any]: ...
+
+    def append_job_started(self, job: Any) -> dict[str, Any]: ...
+
+    def append_job_completed(self, job: Any, result: Any) -> dict[str, Any]: ...
+
+    def append_job_failed(self, job: Any, error: str) -> dict[str, Any]: ...
+
+
 class Scheduler:
     """Single-node async scheduler with lease-aware drain semantics."""
 
@@ -99,7 +109,7 @@ class Scheduler:
         registry: SessionRegistry,
         *,
         reader: LedgerReader,
-        writer: LedgerWriter,
+        writer: SchedulerWriter,
         options: SchedulerOptions | None = None,
         **legacy_options: Any,
     ) -> None:
@@ -369,7 +379,16 @@ class ExecutionControlPlane:
 
         md = dict(metadata or {})
         trace_id = str(md.get("trace_id") or "").strip() or f"tr-{uuid4().hex}"
-        md["trace_id"] = trace_id
+        md_event = emit_event(
+            "MUTATION_EVENT",
+            {"op": "dict_set", "key": "trace_id", "value": trace_id},
+            source="ExecutionControlPlane.submit_turn",
+        )
+        md = apply_event(
+            md_event,
+            md,
+            lambda state, evt: {**state, str(evt.payload.get("key") or ""): evt.payload.get("value")},
+        )
         assert trace_id, "Missing trace_id at control plane entry"
         request_id = str(md.get("request_id") or "")
         inflight_key = (session_key, request_id) if request_id else None
@@ -395,6 +414,9 @@ class ExecutionControlPlane:
         )
         future = await self.scheduler.register(job)
         if inflight_key is not None:
+            # Inflight values are asyncio.Future objects, which are intentionally
+            # not deepcopy/pickle-safe. Keep this map mutation direct so
+            # mutation-gate deep-copy semantics do not serialize Future objects.
             self._inflight_by_request[inflight_key] = future
 
         deadline = time.monotonic() + float(timeout_seconds or 30.0)

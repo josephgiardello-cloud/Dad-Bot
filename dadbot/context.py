@@ -155,11 +155,13 @@ Keep family relationships, ages, timelines, and education history consistent wit
             )
         if memories:
             memory_lines = "\n".join(
-                f"- [{memory.get('category', 'general')}, mood={memory.get('mood', 'unknown')}] {memory['summary']}"
+                f"- [{memory.get('summary', '')}]"
                 for memory in memories
             )
             sections.append(
-                "Semantic fallback from older remembered details with Tony:\n" + memory_lines,
+                "Semantic fallback from older remembered details with Tony:\n"
+                "Relevant context:\n"
+                + memory_lines,
             )
         return sections
 
@@ -373,7 +375,7 @@ Keep family relationships, ages, timelines, and education history consistent wit
                 semantic_memories = list(
                     self.bot.relevant_memories_for_input(
                         user_input_str,
-                        limit=3,
+                        limit=5,
                         graph_result=graph_result,
                     )
                     or [],
@@ -453,6 +455,10 @@ Keep family relationships, ages, timelines, and education history consistent wit
             total_sections=total_sections,
             pruned=(len(trimmed_sections) < total_sections) or (post_trim_tokens < pre_trim_tokens),
         )
+
+        diagnostics = dict(getattr(self.bot, "_last_memory_retrieval_diagnostics", {}) or {})
+        if diagnostics and isinstance(getattr(self.bot, "_last_memory_context_stats", None), dict):
+            self.bot._last_memory_context_stats["retrieval_diagnostics"] = diagnostics
 
         # Store stats for context service
         layer_stats = {

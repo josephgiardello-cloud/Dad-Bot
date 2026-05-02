@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from typing import Any
+
+from dadbot.core.kernel_mutation_gate import apply_event, emit_event
 
 from .contracts import (
     DEFAULT_TENANT_ID,
@@ -17,7 +20,7 @@ from .contracts import (
     normalize_tenant_id,
 )
 from .state import AppStateContainer, InMemoryStateStore, NamespacedStateStore, StateStore
-from .telemetry import start_span
+from .runtime_signals import start_span
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +86,23 @@ class DadBotOrchestrator:
         )
 
     def submit_chat(self, request: ChatRequest) -> WorkerTask:
-        request.tenant_id = normalize_tenant_id(request.tenant_id)
+        tenant_event = emit_event(
+            "MUTATION_EVENT",
+            {
+                "op": "normalize_tenant_id",
+                "value": normalize_tenant_id(request.tenant_id),
+            },
+            source="DadBotOrchestrator.submit_chat",
+        )
+        normalized_tenant = apply_event(
+            tenant_event,
+            {"tenant_id": request.tenant_id},
+            lambda state, evt: {
+                **state,
+                "tenant_id": str(evt.payload.get("value") or state.get("tenant_id") or ""),
+            },
+        )["tenant_id"]
+        request = replace(request, tenant_id=str(normalized_tenant))
         container = self.session(request.session_id, request.tenant_id)
         graph = self.build_execution_graph(request)
 
@@ -152,11 +171,25 @@ class DadBotOrchestrator:
         if result.session_state:
             container.load_snapshot(result.session_state)
 
-        task_payload["status"] = result.status
-        task_payload["error"] = result.error
-        task_payload["completed_at"] = result.completed_at
-        task_payload["tenant_id"] = tenant_id
-        task_payload["session_state"] = dict(result.session_state or {})
+        payload_event = emit_event(
+            "MUTATION_EVENT",
+            {
+                "op": "dict_update",
+                "updates": {
+                    "status": result.status,
+                    "error": result.error,
+                    "completed_at": result.completed_at,
+                    "tenant_id": tenant_id,
+                    "session_state": dict(result.session_state or {}),
+                },
+            },
+            source="DadBotOrchestrator.apply_worker_result",
+        )
+        task_payload = apply_event(
+            payload_event,
+            task_payload,
+            lambda state, evt: {**state, **dict(evt.payload.get("updates") or {})},
+        )
         self.state_store.save_task(result.task_id, task_payload)
 
         if result.response is not None:

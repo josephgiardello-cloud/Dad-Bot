@@ -569,3 +569,18 @@ def _build_execution_dag(
     }
     graph["dag_hash"] = _stable_sha256(graph)
     return graph
+
+
+# ---------------------------------------------------------------------------
+# Compatibility bridge: keep legacy import path wired to single trace authority
+# ---------------------------------------------------------------------------
+
+from dadbot.core.execution_context import (  # noqa: E402
+    ExecutionTraceRecorder as ExecutionTraceRecorder,
+    RuntimeTraceViolation as RuntimeTraceViolation,
+    active_execution_trace as active_execution_trace,
+    bind_execution_trace as bind_execution_trace,
+    ensure_execution_trace_root as ensure_execution_trace_root,
+    record_execution_step as record_execution_step,
+    require_execution_trace as require_execution_trace,
+)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dadbot.contracts import AttachmentList, DadBotContext, SupportsDadBotAccess
+from dadbot.core.turn_coherence import mark_turn_coherence
 
 
 class PromptAssemblyManager:
@@ -37,6 +38,69 @@ class PromptAssemblyManager:
     def __init__(self, bot: DadBotContext | SupportsDadBotAccess):
         self.context = DadBotContext.from_runtime(bot)
         self.bot = self.context.bot
+        self._turn_memory_context: str | None = None
+
+    def _memory_confidence_label(self) -> tuple[str, str]:
+        diagnostics = dict(getattr(self.bot, "_last_memory_retrieval_diagnostics", {}) or {})
+        retrieved_count = int(diagnostics.get("retrieved_count", 0) or 0)
+        top_score = float(diagnostics.get("top_score", 0.0) or 0.0)
+        has_high_confidence = bool(diagnostics.get("has_high_confidence", False))
+
+        if retrieved_count <= 0:
+            return (
+                "LOW",
+                "Memory may be weak for this turn. Do not force memory into the answer unless it clearly fits.",
+            )
+        if has_high_confidence or top_score >= 0.7:
+            return (
+                "HIGH",
+                "At least one memory is highly relevant. Let it influence factual content when answering.",
+            )
+        if top_score >= 0.4:
+            return (
+                "MEDIUM",
+                "Memory is moderately relevant. Use it when it supports the current user request.",
+            )
+        return (
+            "LOW",
+            "Memory confidence is low. Prioritize current user input over older memory.",
+        )
+
+    def begin_turn_memory_context(
+        self,
+        user_input: str,
+        *,
+        user_id: str,
+        session_id: str,
+    ) -> str:
+        """Retrieve memory context once at turn start and cache for prompt assembly."""
+        raw_context = self.bot.context_builder.build_memory_context(str(user_input or ""))
+        confidence_label, confidence_guidance = self._memory_confidence_label()
+        if raw_context:
+            section = (
+                f"Memory context (user={user_id}, session={session_id}):\n"
+                f"Memory confidence: {confidence_label}\n"
+                f"{confidence_guidance}\n\n"
+                f"{raw_context}"
+            )
+        else:
+            section = (
+                f"Memory context (user={user_id}, session={session_id}):\n"
+                f"Memory confidence: LOW\n"
+                "No prior memory context for this turn."
+            )
+        self._turn_memory_context = section
+        mark_turn_coherence(self.bot, "memory_included")
+        return section
+
+    def _resolve_turn_memory_context(self, user_input: str) -> str:
+        if self._turn_memory_context is None:
+            self.begin_turn_memory_context(
+                str(user_input or ""),
+                user_id=str(getattr(self.bot, "TENANT_ID", "default") or "default"),
+                session_id=str(getattr(self.bot, "active_thread_id", "default") or "default"),
+            )
+        return str(self._turn_memory_context or "Memory context:\nNo prior memory context for this turn.")
 
     def base_request_sections(self, current_mood: str) -> list[str | None]:
         return [
@@ -44,7 +108,7 @@ class PromptAssemblyManager:
             self.bot.context_builder.build_dynamic_profile_context(),
             self.bot.context_builder.build_relationship_context(),
             self.bot.build_style_examples(),
-            self.bot.tone_context.build_mood_context(current_mood),
+            self.bot.personality_service.build_personality_context(current_mood),
         ]
 
     def infer_visual_task(
@@ -171,7 +235,7 @@ class PromptAssemblyManager:
             self.bot.context_builder.build_session_summary_context(),
             self.bot.context_builder.build_relevant_context(user_input),
             self.bot.context_builder.build_wisdom_context(user_input),
-            self.bot.context_builder.build_memory_context(user_input),
+            self._resolve_turn_memory_context(user_input),
             self.bot.tone_context.build_escalation_context(
                 current_mood,
                 self.bot.session_moods,

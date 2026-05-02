@@ -146,12 +146,28 @@ class TestTracingPropagation:
 
         _run()
 
-    def test_orchestrator_execute_job_asserts_trace_id(self):
-        """DadBotOrchestrator._execute_job must assert context.trace_id."""
+    def test_orchestrator_execute_job_rejects_missing_trace_id(self, monkeypatch):
+        """DadBotOrchestrator must fail fast if TurnContext.trace_id is missing."""
+        from dadbot.core.control_plane import ExecutionJob
         from dadbot.core.orchestrator import DadBotOrchestrator
 
-        source = inspect.getsource(DadBotOrchestrator._execute_job)
-        assert "context.trace_id" in source, "_execute_job must assert context.trace_id is non-empty"
+        orchestrator = DadBotOrchestrator()
+
+        class _MissingTraceContext:
+            trace_id = ""
+            metadata: dict[str, str] = {}
+            state: dict[str, object] = {}
+
+        monkeypatch.setattr(orchestrator._job_builder, "build", lambda **_: _MissingTraceContext())
+
+        async def _run() -> None:
+            with pytest.raises(RuntimeError, match="trace_id"):
+                await orchestrator._execute_job(
+                    {"state": {}},
+                    ExecutionJob(session_id="trace-test", user_input="hello"),
+                )
+
+        asyncio.run(_run())
 
     def test_orchestrator_strict_param_in_signature(self):
         from dadbot.core.orchestrator import DadBotOrchestrator
@@ -172,13 +188,43 @@ class TestTracingPropagation:
 
 
 class TestControlPlaneWiring:
-    def test_handle_turn_routes_through_control_plane_not_direct_graph(self):
-        """handle_turn must call control_plane.submit_turn, not graph.execute."""
+    def test_handle_turn_routes_through_execute_turn_not_direct_graph(self):
+        """Bot-backed orchestrator entrypoints must defer to execute_turn."""
+        from dadbot.core.execution_contract import TurnDelivery, TurnResponse
         from dadbot.core.orchestrator import DadBotOrchestrator
 
-        source = inspect.getsource(DadBotOrchestrator.handle_turn)
-        assert "control_plane.submit_turn" in source
-        assert "graph.execute" not in source
+        calls: list[str] = []
+
+        class _Bot:
+            async def execute_turn(self, request):
+                calls.append(request.delivery.value)
+                return TurnResponse(
+                    reply="ok",
+                    should_end=False,
+                    delivery=request.delivery,
+                )
+
+        class _OrchestratorLike:
+            bot = _Bot()
+
+            @staticmethod
+            def _can_delegate_to_bot_execute_turn() -> bool:
+                return True
+
+            @staticmethod
+            async def _submit_turn_via_control_plane(*args, **kwargs):
+                raise AssertionError("control plane fallback should not be used")
+
+        async def _run() -> None:
+            result = await DadBotOrchestrator.handle_turn(
+                _OrchestratorLike(),
+                "hello",
+                session_id="wire-test",
+            )
+            assert result == ("ok", False)
+
+        asyncio.run(_run())
+        assert calls == [TurnDelivery.ASYNC.value]
 
     def test_submit_turn_produces_ledger_events(self):
         """Every submit_turn must write at least one event to the ledger."""

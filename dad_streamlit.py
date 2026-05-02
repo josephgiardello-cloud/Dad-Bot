@@ -13,7 +13,7 @@ import tempfile
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import urlencode
 
 import ollama
@@ -890,7 +890,7 @@ def synthesize_tts_audio(reply_text, *, voice_profile="warm_dad", rate_delta=0, 
         if voice_id:
             engine.setProperty("voice", voice_id)
 
-        default_rate = int(engine.getProperty("rate") or 180)
+        default_rate = int(cast(Any, engine.getProperty("rate")) or 180)
         pace_delta = int((max(0, min(100, int(pacing or 50))) - 50) * 0.6)
         engine.setProperty("rate", max(120, min(240, default_rate + int(rate_delta or 0) + pace_delta)))
         engine.save_to_file(text, temp_path)
@@ -1637,7 +1637,7 @@ def render_mobile_tab(bot: DadBot):
             use_container_width=True,
             disabled=not selected_thread_id or selected_thread_id == api.active_thread_id,
         ):
-            switch_active_thread(selected_thread_id)
+            switch_active_thread(str(selected_thread_id))
             st.rerun()
 
     with st.container(border=True):
@@ -1689,7 +1689,7 @@ def optimize_runtime_for_hardware(bot: DadBot):
 
     preferences = ui_preferences()
     preferences["light_mode"] = light_mode
-    apply_ui_preferences(api)
+    apply_ui_preferences(cast("DadBot", api))
     api.update_runtime_profile(
         {
             "stream_max_chars": stream_max_chars,
@@ -2306,7 +2306,7 @@ def render_status_tab(bot: DadBot):
             key="status-power-mode",
         )
         if selected_mode != str(preferences.get("power_mode", "turbo")):
-            message = apply_power_mode(get_chat_event_api(), selected_mode)
+            message = apply_power_mode(cast("DadBot", get_chat_event_api()), selected_mode)
             st.success(message)
             st.rerun()
 
@@ -2498,7 +2498,7 @@ def render_sidebar(bot: DadBot):
             use_container_width=True,
             disabled=not selected_thread_id or selected_thread_id == api.active_thread_id,
         ):
-            switch_active_thread(selected_thread_id)
+            switch_active_thread(str(selected_thread_id))
             st.rerun()
         selected_thread = next(
             (t for t in visible_threads if str(t.get("thread_id") or "") == str(selected_thread_id or "")), {}
@@ -2608,9 +2608,9 @@ def render_workshop_tab(bot: DadBot):
     if section == "Status":
         render_status_tab(bot)
     elif section == "Preferences":
-        render_preferences_tab(api)
+        render_preferences_tab(cast("DadBot", api))
     elif section == "Data":
-        render_data_tab(api)
+        render_data_tab(cast("DadBot", api))
     else:
         render_mobile_tab(bot)
 
@@ -2619,7 +2619,7 @@ def main():
     st.set_page_config(page_title="Dad Bot", page_icon="🧔", layout="centered", initial_sidebar_state="expanded")
     bot = get_runtime().bot
     initialize_session(bot)
-    apply_ui_preferences(get_chat_event_api())
+    apply_ui_preferences(cast("DadBot", get_chat_event_api()))
     update_ui_mood(bot)
     inject_custom_css(ui_preferences())
     inject_pwa_metadata(ui_preferences())

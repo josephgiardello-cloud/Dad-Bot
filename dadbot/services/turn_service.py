@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any
+from typing import Any, cast
 
 from pydantic import ValidationError
 
@@ -21,11 +21,12 @@ from dadbot.core.graph import (
     MutationKind,
     TurnContext,
 )
-from dadbot.core.tool_sandbox import ToolSandbox
+from dadbot.core.tool_executor import execute_tool
 from dadbot.managers.reply_generation import ReplyGenerationManager
 from dadbot.models import AgenticToolPlan
 from dadbot.services.llm_call_adapter import LLMCallAdapter
 from dadbot.services.turn_state_mutator import TurnStateMutator
+from dadbot.core.turn_coherence import mark_turn_coherence, reset_turn_coherence
 
 # Keep the historic logger name so existing tests and log pipelines remain stable
 # while the implementation moves from managers/ to services/.
@@ -42,8 +43,6 @@ class TurnService:
     This replaces the old TurnProcessingManager. The concrete implementation
     now lives under dadbot.services and is exposed through ``turn_service``.
     """
-
-    TOOL_EXECUTOR_NAMES = frozenset({"set_reminder", "web_search"})
 
     def __init__(self, bot: DadBotContext | SupportsTurnProcessingRuntime):
         self.context = DadBotContext.from_runtime(bot)
@@ -417,9 +416,13 @@ Return ONLY valid JSON (no extra text):
         stripped_input: str,
         current_mood: str,
         tools: list[dict[str, object]],
+        shared_context: str,
     ) -> str:
         return f"""
 You are Dad helping Tony. Think carefully about his latest message.
+
+Shared turn context used for response generation:
+{shared_context}
 
 Message: "{stripped_input}"
 
@@ -461,7 +464,7 @@ Return ONLY valid JSON (no extra text):
         tool_name = str(plan.get("tool") or "").strip()
         payload = {
             "needs_tool": bool(plan.get("needs_tool")),
-            "tool": tool_name if tool_name in self.TOOL_EXECUTOR_NAMES else None,
+            "tool": tool_name if self.bot.authorize_tool_execution(tool_name) else None,
             "parameters": dict(plan.get("parameters") or {}) if isinstance(plan.get("parameters"), dict) else {},
             "reason": str(plan.get("reason") or "").strip(),
         }
@@ -489,26 +492,33 @@ Return ONLY valid JSON (no extra text):
         current_mood: str,
         plan_reason: str,
     ) -> tuple[str | None, str | None]:
-        sandbox = ToolSandbox()
         title = str(params.get("title") or stripped_input[:100]).strip()
         due_text = str(params.get("due_text") or "").strip()
+
+        # _result_holder lets the compensating action reference the execution
+        # result without capturing a ToolSandbox instance directly.  It is
+        # populated after execute_tool() returns; the compensating action is
+        # only ever called on an explicit rollback, which never precedes the
+        # execute_tool() call returning.
+        _result_holder: list = []
 
         def _executor():
             return self.bot.add_reminder(title, due_text)
 
         def _compensate():
-            created = sandbox.snapshot()["records"][-1]["result"] if sandbox.snapshot()["records"] else None
+            created = _result_holder[0] if _result_holder else None
             if isinstance(created, dict) and created.get("id"):
                 delete_fn = getattr(self.bot, "delete_reminder", None)
                 if callable(delete_fn):
                     delete_fn(str(created["id"]))
 
-        record = sandbox.execute(
+        record = execute_tool(
             tool_name="set_reminder",
             parameters=dict(params),
             executor=_executor,
             compensating_action=_compensate,
         )
+        _result_holder.append(record.result)
         if record.status == "failed":
             self.bot.update_planner_debug(
                 planner_status="fallback",
@@ -548,14 +558,13 @@ Return ONLY valid JSON (no extra text):
         current_mood: str,
         plan_reason: str,
     ) -> tuple[str | None, str | None]:
-        sandbox = ToolSandbox()
         title = str(params.get("title") or stripped_input[:100]).strip()
         due_text = str(params.get("due_text") or "").strip()
 
         def _executor():
             return self.bot.add_reminder(title, due_text)
 
-        record = sandbox.execute(
+        record = execute_tool(
             tool_name="set_reminder",
             parameters=dict(params),
             executor=_executor,
@@ -599,11 +608,10 @@ Return ONLY valid JSON (no extra text):
         settings: dict[str, object],
         plan_reason: str,
     ) -> tuple[str | None, str | None]:
-        sandbox = ToolSandbox()
         query = str(params.get("query") or stripped_input).strip()
         normalized_query = self.bot.normalize_lookup_query(query)
 
-        record = sandbox.execute(
+        record = execute_tool(
             tool_name="web_search",
             parameters={"query": normalized_query},
             executor=lambda: self.bot.lookup_web(normalized_query),
@@ -652,11 +660,10 @@ Return ONLY valid JSON (no extra text):
         settings: dict[str, object],
         plan_reason: str,
     ) -> tuple[str | None, str | None]:
-        sandbox = ToolSandbox()
         query = str(params.get("query") or stripped_input).strip()
         normalized_query = self.bot.normalize_lookup_query(query)
 
-        record = sandbox.execute(
+        record = execute_tool(
             tool_name="web_search",
             parameters={"query": normalized_query},
             executor=lambda: self.bot.lookup_web(normalized_query),
@@ -790,25 +797,6 @@ Return ONLY valid JSON (no extra text):
             plan_reason=plan_reason,
         )
 
-    # Tool bias â†’ permitted tools mapping.  The Bayesian layer is the SOLE authority
-    # over which tools may be executed; the planner is advisory within that gate.
-    _TOOL_BIAS_PERMISSIONS: dict[str, frozenset[str]] = {
-        "planner_default": frozenset({"set_reminder", "web_search"}),
-        "optional_tools": frozenset({"set_reminder", "web_search"}),
-        "minimal_tools": frozenset({"set_reminder"}),  # acute_stress: no web noise
-        "defer_tools_unless_explicit": frozenset(),  # guarded: block all tools
-    }
-    _DEFAULT_TOOL_BIAS_PERMISSIONS: frozenset[str] = frozenset(
-        {"set_reminder", "web_search"},
-    )
-
-    @classmethod
-    def _permitted_tools_for_bias(cls, tool_bias: str) -> frozenset[str]:
-        return cls._TOOL_BIAS_PERMISSIONS.get(
-            str(tool_bias or "planner_default"),
-            cls._DEFAULT_TOOL_BIAS_PERMISSIONS,
-        )
-
     def _bayesian_tool_gate(
         self,
         *,
@@ -816,26 +804,28 @@ Return ONLY valid JSON (no extra text):
         tool_bias: str,
         plan_reason: str,
     ) -> tuple[bool, str]:
-        """Return (allowed, reason).  The Bayesian policy is the FINAL authority."""
-        permitted = self._permitted_tools_for_bias(tool_bias)
-        if not permitted:
+        """Return (allowed, reason) using runtime-owned Bayesian policy."""
+        normalized_tool_name = str(tool_name or "").strip()
+        normalized_tool_bias = str(tool_bias or "planner_default").strip() or "planner_default"
+        if normalized_tool_bias == "defer_tools_unless_explicit":
             return False, (
-                f"Bayesian policy '{tool_bias}' blocks all tools; "
+                f"Bayesian policy '{normalized_tool_bias}' blocks all tools; "
                 "tool selection overridden by governing Bayesian authority."
             )
-        if tool_name not in permitted:
+        if not self.bot.authorize_tool_execution_for_bias(normalized_tool_name, normalized_tool_bias):
             return False, (
-                f"Bayesian policy '{tool_bias}' does not permit tool '{tool_name}'; permitted: {sorted(permitted)}."
+                f"Bayesian policy '{normalized_tool_bias}' does not permit tool '{normalized_tool_name}'."
             )
         return (
             True,
-            plan_reason or f"Bayesian policy '{tool_bias}' permits tool '{tool_name}'.",
+            plan_reason or f"Bayesian policy '{normalized_tool_bias}' permits tool '{normalized_tool_name}'.",
         )
 
     def plan_agentic_tools(
         self,
         stripped_input: str,
         current_mood: str,
+        attachments: AttachmentList | None = None,
     ) -> tuple[str | None, str | None]:
         settings = self.bot.agentic_tool_settings()
         if not settings["enabled"]:
@@ -856,6 +846,11 @@ Return ONLY valid JSON (no extra text):
             return None, None
 
         try:
+            shared_context = self.bot.prompt_assembly.build_request_system_prompt(
+                stripped_input,
+                current_mood,
+                attachments,
+            )
             response = self._llm_adapter.call(
                 messages=[
                     {
@@ -864,6 +859,7 @@ Return ONLY valid JSON (no extra text):
                             stripped_input,
                             current_mood,
                             tools,
+                            shared_context,
                         ),
                     },
                 ],
@@ -941,6 +937,7 @@ Return ONLY valid JSON (no extra text):
         self,
         stripped_input: str,
         current_mood: str,
+        attachments: AttachmentList | None = None,
     ) -> tuple[str | None, str | None]:
         try:
             loop = asyncio.get_running_loop()
@@ -974,6 +971,11 @@ Return ONLY valid JSON (no extra text):
             return None, None
 
         try:
+            shared_context = self.bot.prompt_assembly.build_request_system_prompt(
+                stripped_input,
+                current_mood,
+                attachments,
+            )
             response = await self._llm_adapter.call_async(
                 messages=[
                     {
@@ -982,6 +984,7 @@ Return ONLY valid JSON (no extra text):
                             stripped_input,
                             current_mood,
                             tools,
+                            shared_context,
                         ),
                     },
                 ],
@@ -1060,6 +1063,7 @@ Return ONLY valid JSON (no extra text):
         attachments: AttachmentList | None = None,
         turn_context: Any | None = None,
     ) -> PreparedTurnResult:
+        reset_turn_coherence(self.bot)
         self._start_turn_pipeline("sync", stripped_input)
         normalized_attachments = self.bot.normalize_chat_attachments(attachments)
         normalized_attachments = self.bot.enrich_multimodal_attachments(
@@ -1130,6 +1134,11 @@ Return ONLY valid JSON (no extra text):
             "begin_planner_debug",
             detail="initialized planner debug state",
         )
+        self.bot.prompt_assembly.begin_turn_memory_context(
+            stripped_input,
+            user_id=str(getattr(self.bot, "TENANT_ID", "default") or "default"),
+            session_id=str(getattr(self.bot, "active_thread_id", "default") or "default"),
+        )
 
         if direct_reply := self.direct_reply_for_input(stripped_input, current_mood):
             self.bot.update_planner_debug(
@@ -1147,9 +1156,11 @@ Return ONLY valid JSON (no extra text):
             )
             return current_mood, direct_reply, False, turn_text, normalized_attachments
 
+        mark_turn_coherence(self.bot, "tool_decision_origin")
         auto_reply, tool_observation = self.plan_agentic_tools(
             stripped_input,
             current_mood,
+            normalized_attachments,
         )
         planner_snapshot = self.bot.planner_debug_snapshot()
         self._append_turn_pipeline_step(
@@ -1166,16 +1177,6 @@ Return ONLY valid JSON (no extra text):
             )
             return current_mood, auto_reply, False, turn_text, normalized_attachments
 
-        if tool_observation is None:
-            auto_reply, tool_observation = self.bot.autonomous_tool_result_for_input(
-                stripped_input,
-                current_mood,
-                normalized_attachments,
-            )
-            self._append_turn_pipeline_step(
-                "heuristic_tools",
-                detail="evaluated heuristic tool routing",
-            )
         self.bot.set_active_tool_observation(tool_observation)
         if tool_observation:
             self._append_turn_pipeline_step(
@@ -1205,6 +1206,7 @@ Return ONLY valid JSON (no extra text):
         attachments: AttachmentList | None = None,
         turn_context: Any | None = None,
     ) -> PreparedTurnResult:
+        reset_turn_coherence(self.bot)
         self._start_turn_pipeline("async", stripped_input)
         normalized_attachments = self.bot.normalize_chat_attachments(attachments)
         normalized_attachments = self.bot.enrich_multimodal_attachments(
@@ -1275,6 +1277,11 @@ Return ONLY valid JSON (no extra text):
             "begin_planner_debug",
             detail="initialized planner debug state",
         )
+        self.bot.prompt_assembly.begin_turn_memory_context(
+            stripped_input,
+            user_id=str(getattr(self.bot, "TENANT_ID", "default") or "default"),
+            session_id=str(getattr(self.bot, "active_thread_id", "default") or "default"),
+        )
 
         if direct_reply := self.direct_reply_for_input(stripped_input, current_mood):
             self.bot.update_planner_debug(
@@ -1292,9 +1299,11 @@ Return ONLY valid JSON (no extra text):
             )
             return current_mood, direct_reply, False, turn_text, normalized_attachments
 
+        mark_turn_coherence(self.bot, "tool_decision_origin")
         auto_reply, tool_observation = await self.plan_agentic_tools_async(
             stripped_input,
             current_mood,
+            normalized_attachments,
         )
         planner_snapshot = self.bot.planner_debug_snapshot()
         self._append_turn_pipeline_step(
@@ -1311,16 +1320,6 @@ Return ONLY valid JSON (no extra text):
             )
             return current_mood, auto_reply, False, turn_text, normalized_attachments
 
-        if tool_observation is None:
-            auto_reply, tool_observation = self.bot.autonomous_tool_result_for_input(
-                stripped_input,
-                current_mood,
-                normalized_attachments,
-            )
-            self._append_turn_pipeline_step(
-                "heuristic_tools",
-                detail="evaluated heuristic tool routing",
-            )
         self.bot.set_active_tool_observation(tool_observation)
         if tool_observation:
             self._append_turn_pipeline_step(
@@ -1465,12 +1464,15 @@ Return ONLY valid JSON (no extra text):
             from dadbot.managers.conversation_persistence import (
                 ConversationPersistenceManager,
             )
+            from dadbot.services.post_commit_worker import PostCommitWorker
             from dadbot.services.persistence import PersistenceService
 
             persistence_service = PersistenceService(
                 ConversationPersistenceManager(self.bot),
                 turn_service=self,
             )
+            if getattr(self.bot, "_post_commit_worker", None) is None:
+                self.bot._post_commit_worker = PostCommitWorker(self.bot)
             self.bot._compat_persistence_service = persistence_service
         return persistence_service
 
@@ -1502,21 +1504,15 @@ Return ONLY valid JSON (no extra text):
         user_input: str,
         attachments: AttachmentList | None,
     ) -> FinalizedTurnResult:
-        """Run the turn orchestrator synchronously, safe from within a running loop."""
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-        coro = self.bot.turn_orchestrator.handle_turn(
-            user_input,
-            attachments=attachments,
+        response = self.bot.execute_turn(
+            live_turn_request(
+                user_input,
+                attachments=list(attachments or []),
+                delivery=TurnDelivery.SYNC,
+                session_id=str(getattr(self.bot, "active_thread_id", "") or "default"),
+            ),
         )
-        if loop is not None and loop.is_running():
-            import concurrent.futures
-
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                return pool.submit(asyncio.run, coro).result()
-        return asyncio.run(coro)
+        return cast(TurnResponse, response).as_result()
 
     def process_user_message(
         self,

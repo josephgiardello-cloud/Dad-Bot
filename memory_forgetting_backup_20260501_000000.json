@@ -1,0 +1,122 @@
+{
+  "schema_version": 1,
+  "memories": [
+    {
+      "summary": "Tony mentioned random small talk about a passing thought.",
+      "category": "general",
+      "mood": "neutral",
+      "confidence": 0.5,
+      "impact_score": 1.0,
+      "importance_score": 0.05,
+      "emotional_intensity": 0.25,
+      "relationship_impact": 0.5,
+      "pinned": false,
+      "created_at": "2024-12-18",
+      "updated_at": "2024-12-18",
+      "contradictions": []
+    }
+  ],
+  "consolidated_memories": [],
+  "persona_evolution": [],
+  "wisdom_insights": [],
+  "life_patterns": [],
+  "pending_proactive_messages": [],
+  "health_history": [
+    {
+      "recorded_at": "2026-05-02T07:11:41",
+      "level": "green",
+      "memory_context_ratio": 0.0,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    }
+  ],
+  "health_quiet_mode": false,
+  "runtime_optimization": {},
+  "last_consolidated_at": null,
+  "last_pattern_detection_at": null,
+  "last_mood": "neutral",
+  "last_mood_updated_at": "2026-05-02",
+  "recent_moods": [],
+  "relationship_state": {
+    "trust_level": 50,
+    "openness_level": 50,
+    "emotional_momentum": "steady",
+    "recurring_topics": {},
+    "recent_checkins": [],
+    "hypotheses": [
+      {
+        "name": "supportive_baseline",
+        "label": "Supportive Baseline",
+        "summary": "Tony is fundamentally trusting and wants steady support, even if a turn is rough.",
+        "probability": 0.52
+      },
+      {
+        "name": "acute_stress",
+        "label": "Acute Stress Spike",
+        "summary": "Tony is reacting to current pressure or overload more than to the relationship itself.",
+        "probability": 0.23
+      },
+      {
+        "name": "guarded_distance",
+        "label": "Guarded Distance",
+        "summary": "Tony may be holding back or testing safety before opening up further.",
+        "probability": 0.15
+      },
+      {
+        "name": "positive_rebound",
+        "label": "Positive Rebound",
+        "summary": "Tony may be emerging from a heavy stretch and reconnecting with relief or momentum.",
+        "probability": 0.1
+      }
+    ],
+    "active_hypothesis": "supportive_baseline",
+    "last_hypothesis_updated": "2026-05-02",
+    "last_reflection": "",
+    "last_updated": "2026-05-02"
+  },
+  "internal_state": {
+    "belief_vector": {
+      "stability": 0.5,
+      "stress_load": 0.3,
+      "connection": 0.5
+    },
+    "goal_vector": {
+      "support": 0.7,
+      "challenge": 0.25,
+      "proactive": 0.35
+    },
+    "tone_targets": {
+      "warmth": 0.7,
+      "directness": 0.45,
+      "playfulness": 0.3
+    },
+    "proactive_recommended": false,
+    "last_reflection": "",
+    "last_reflection_at": null,
+    "recent_reflections": [],
+    "target_history": [],
+    "turn_count": 0,
+    "updated_at": null
+  },
+  "relationship_history": [],
+  "reminders": [],
+  "session_archive": [],
+  "last_background_synthesis_at": null,
+  "last_background_synthesis_turn": 0,
+  "last_memory_compaction_at": null,
+  "last_memory_compaction_summary": "",
+  "last_daily_checkin_at": null,
+  "last_scheduled_proactive_at": null,
+  "relationship_timeline": "",
+  "memory_graph": {
+    "nodes": [],
+    "edges": [],
+    "updated_at": null
+  },
+  "mcp_local_store": {},
+  "narrative_memories": [],
+  "heritage_cross_links": [],
+  "advice_audits": [],
+  "environmental_cues_history": [],
+  "longitudinal_insights": []
+}

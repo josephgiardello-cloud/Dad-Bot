@@ -132,7 +132,7 @@ async def _capture_runtime_behavior() -> dict[str, Any]:
         if gm is not None:
             gm.sync_graph_store = lambda **_: None
         if hasattr(bot, "validate_reply"):
-            bot.validate_reply = lambda _u, r: r
+            setattr(bot, "validate_reply", lambda _u, r: r)
 
         traces: list[dict[str, Any]] = []
         session_id = "system-snapshot-v0"

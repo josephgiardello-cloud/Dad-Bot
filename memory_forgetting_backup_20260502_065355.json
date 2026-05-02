@@ -1,0 +1,410 @@
+{
+  "schema_version": 1,
+  "memories": [
+    {
+      "summary": "Tony shared that tony's daughter is named Emily.",
+      "category": "identity",
+      "mood": "neutral",
+      "confidence": 0.5,
+      "impact_score": 1.0,
+      "importance_score": 0.0,
+      "emotional_intensity": 0.25,
+      "relationship_impact": 0.5,
+      "pinned": false,
+      "created_at": "2022-01-01",
+      "updated_at": "2022-01-01",
+      "contradictions": []
+    },
+    {
+      "summary": "Tony mentioned a passing thought about a random video.",
+      "category": "general",
+      "mood": "neutral",
+      "confidence": 0.5,
+      "impact_score": 1.0,
+      "importance_score": 0.04,
+      "emotional_intensity": 0.25,
+      "relationship_impact": 0.5,
+      "pinned": false,
+      "created_at": "2023-01-01",
+      "updated_at": "2023-01-01",
+      "contradictions": []
+    },
+    {
+      "summary": "Tony prefers direct checklists.",
+      "category": "preferences",
+      "mood": "neutral",
+      "confidence": 0.5,
+      "impact_score": 1.0,
+      "importance_score": 0.85,
+      "emotional_intensity": 0.25,
+      "relationship_impact": 0.5,
+      "pinned": false,
+      "created_at": "2024-01-01",
+      "updated_at": "2024-01-01",
+      "contradictions": []
+    },
+    {
+      "summary": "Tony is building an emergency fund plan.",
+      "category": "finance",
+      "mood": "neutral",
+      "confidence": 0.5,
+      "impact_score": 1.0,
+      "importance_score": 0.72,
+      "emotional_intensity": 0.25,
+      "relationship_impact": 0.5,
+      "pinned": false,
+      "created_at": "2025-06-01",
+      "updated_at": "2025-06-01",
+      "contradictions": []
+    }
+  ],
+  "consolidated_memories": [],
+  "persona_evolution": [],
+  "wisdom_insights": [],
+  "life_patterns": [],
+  "pending_proactive_messages": [],
+  "health_history": [
+    {
+      "recorded_at": "2026-05-02T06:53:55-04:00",
+      "level": "green",
+      "memory_context_ratio": 0.059,
+      "prompt_guard_trim_count": 0,
+      "recent_runtime_issue_count": 0
+    }
+  ],
+  "health_quiet_mode": false,
+  "runtime_optimization": {},
+  "last_consolidated_at": null,
+  "last_pattern_detection_at": null,
+  "last_mood": "neutral",
+  "last_mood_updated_at": "2026-05-02",
+  "recent_moods": [],
+  "relationship_state": {
+    "trust_level": 50,
+    "openness_level": 50,
+    "emotional_momentum": "steady",
+    "recurring_topics": {},
+    "recent_checkins": [],
+    "hypotheses": [
+      {
+        "name": "supportive_baseline",
+        "label": "Supportive Baseline",
+        "summary": "Tony is fundamentally trusting and wants steady support, even if a turn is rough.",
+        "probability": 0.52
+      },
+      {
+        "name": "acute_stress",
+        "label": "Acute Stress Spike",
+        "summary": "Tony is reacting to current pressure or overload more than to the relationship itself.",
+        "probability": 0.23
+      },
+      {
+        "name": "guarded_distance",
+        "label": "Guarded Distance",
+        "summary": "Tony may be holding back or testing safety before opening up further.",
+        "probability": 0.15
+      },
+      {
+        "name": "positive_rebound",
+        "label": "Positive Rebound",
+        "summary": "Tony may be emerging from a heavy stretch and reconnecting with relief or momentum.",
+        "probability": 0.1
+      }
+    ],
+    "active_hypothesis": "supportive_baseline",
+    "last_hypothesis_updated": "2026-05-02",
+    "last_reflection": "",
+    "last_updated": "2026-05-02"
+  },
+  "internal_state": {
+    "belief_vector": {
+      "stability": 0.524,
+      "stress_load": 0.3,
+      "connection": 0.5127999999999999
+    },
+    "goal_vector": {
+      "support": 0.696,
+      "challenge": 0.2806,
+      "proactive": 0.3452
+    },
+    "tone_targets": {
+      "warmth": 0.6956,
+      "directness": 0.461,
+      "playfulness": 0.311
+    },
+    "proactive_recommended": false,
+    "last_reflection": "Mood=neutral, support=0.70, challenge=0.28, stress=0.30, proactive=false",
+    "last_reflection_at": "2026-05-02T06:53:55",
+    "recent_reflections": [
+      "Mood=neutral, support=0.70, challenge=0.28, stress=0.30, proactive=false"
+    ],
+    "target_history": [
+      {
+        "recorded_at": "2026-05-02T06:53:55",
+        "support": 0.696,
+        "challenge": 0.281,
+        "proactive": 0.345
+      }
+    ],
+    "turn_count": 1,
+    "updated_at": "2026-05-02T06:53:55",
+    "last_user_input": "Turn 1: Work has been chaotic and I need a simple plan.",
+    "last_reply_excerpt": "I hear you. Let's take one concrete next step. Love you, buddy."
+  },
+  "relationship_history": [],
+  "reminders": [],
+  "session_archive": [],
+  "last_background_synthesis_at": null,
+  "last_background_synthesis_turn": 0,
+  "last_memory_compaction_at": null,
+  "last_memory_compaction_summary": "",
+  "last_daily_checkin_at": null,
+  "last_scheduled_proactive_at": null,
+  "relationship_timeline": "",
+  "memory_graph": {
+    "nodes": [
+      {
+        "id": "topic:work",
+        "label": "work",
+        "type": "topic",
+        "weight": 8
+      },
+      {
+        "id": "topic:stressed",
+        "label": "stressed",
+        "type": "topic",
+        "weight": 6
+      },
+      {
+        "id": "topic:family",
+        "label": "family",
+        "type": "topic",
+        "weight": 2
+      },
+      {
+        "id": "topic:work_pressure",
+        "label": "work_pressure",
+        "type": "topic",
+        "weight": 2
+      },
+      {
+        "id": "topic:work_deadlines",
+        "label": "work_deadlines",
+        "type": "topic",
+        "weight": 2
+      },
+      {
+        "id": "topic:monday",
+        "label": "monday",
+        "type": "topic",
+        "weight": 2
+      },
+      {
+        "id": "topic:coach_like",
+        "label": "coach_like",
+        "type": "topic",
+        "weight": 2
+      },
+      {
+        "id": "topic:based",
+        "label": "based",
+        "type": "topic",
+        "weight": 2
+      },
+      {
+        "id": "topic:felt",
+        "label": "felt",
+        "type": "topic",
+        "weight": 2
+      },
+      {
+        "id": "topic:recent",
+        "label": "recent",
+        "type": "topic",
+        "weight": 2
+      },
+      {
+        "id": "topic:talks",
+        "label": "talks",
+        "type": "topic",
+        "weight": 2
+      },
+      {
+        "id": "topic:mondays",
+        "label": "mondays",
+        "type": "topic",
+        "weight": 2
+      },
+      {
+        "id": "topic:stress",
+        "label": "stress",
+        "type": "topic",
+        "weight": 2
+      },
+      {
+        "id": "topic:direct",
+        "label": "direct",
+        "type": "topic",
+        "weight": 2
+      },
+      {
+        "id": "topic:responds",
+        "label": "responds",
+        "type": "topic",
+        "weight": 2
+      },
+      {
+        "id": "topic:well",
+        "label": "well",
+        "type": "topic",
+        "weight": 2
+      },
+      {
+        "id": "topic:neutral",
+        "label": "neutral",
+        "type": "topic",
+        "weight": 1
+      },
+      {
+        "id": "category:persona",
+        "label": "persona",
+        "type": "category",
+        "weight": 1
+      }
+    ],
+    "edges": [
+      {
+        "source": "stressed",
+        "target": "work",
+        "weight": 2
+      },
+      {
+        "source": "stressed",
+        "target": "work_pressure",
+        "weight": 2
+      },
+      {
+        "source": "work",
+        "target": "work_pressure",
+        "weight": 2
+      },
+      {
+        "source": "based",
+        "target": "family",
+        "weight": 1
+      },
+      {
+        "source": "based",
+        "target": "recent",
+        "weight": 1
+      },
+      {
+        "source": "based",
+        "target": "stressed",
+        "weight": 1
+      },
+      {
+        "source": "based",
+        "target": "talks",
+        "weight": 1
+      },
+      {
+        "source": "coach_like",
+        "target": "direct",
+        "weight": 1
+      },
+      {
+        "source": "coach_like",
+        "target": "persona",
+        "weight": 1
+      },
+      {
+        "source": "coach_like",
+        "target": "responds",
+        "weight": 1
+      },
+      {
+        "source": "coach_like",
+        "target": "well",
+        "weight": 1
+      },
+      {
+        "source": "direct",
+        "target": "persona",
+        "weight": 1
+      },
+      {
+        "source": "direct",
+        "target": "responds",
+        "weight": 1
+      },
+      {
+        "source": "direct",
+        "target": "well",
+        "weight": 1
+      },
+      {
+        "source": "family",
+        "target": "recent",
+        "weight": 1
+      },
+      {
+        "source": "family",
+        "target": "stressed",
+        "weight": 1
+      },
+      {
+        "source": "family",
+        "target": "talks",
+        "weight": 1
+      },
+      {
+        "source": "felt",
+        "target": "stressed",
+        "weight": 1
+      }
+    ],
+    "updated_at": "2026-04-27T10:00:00"
+  },
+  "mcp_local_store": {},
+  "narrative_memories": [],
+  "heritage_cross_links": [],
+  "advice_audits": [
+    {
+      "recorded_at": "2026-05-02T06:53:55",
+      "goal_alignment_score": 78,
+      "reasoning": "advice aligned with long-term parental stance",
+      "active_hypothesis": "supportive_baseline",
+      "current_mood": "neutral",
+      "hard_tone": false,
+      "needs_repair": false,
+      "user_input_excerpt": "Turn 1: Work has been chaotic and I need a simple plan.",
+      "reply_excerpt": "I hear you. Let's take one concrete next step.",
+      "goal_vector": {
+        "support": 0.7,
+        "challenge": 0.25,
+        "proactive": 0.35
+      },
+      "parental_goals": [
+        {
+          "goal": "Maintain emotional safety while coaching growth",
+          "priority": 3
+        },
+        {
+          "goal": "Encourage persistence over perfection",
+          "priority": 2
+        },
+        {
+          "goal": "Teach ownership without shame",
+          "priority": 2
+        },
+        {
+          "goal": "Stay warm, honest, and present",
+          "priority": 3
+        }
+      ]
+    }
+  ],
+  "environmental_cues_history": [],
+  "longitudinal_insights": []
+}

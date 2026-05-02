@@ -251,162 +251,124 @@ class TestMemoryDecayPolicyApply:
 
 
 # ---------------------------------------------------------------------------
-# Integration: PersistenceService._apply_memory_decay
+# Integration: persistence boundary + post-commit ownership
 # ---------------------------------------------------------------------------
 
 
-class TestPersistenceServiceApplyMemoryDecay:
-    """Tests the wiring inside PersistenceService without a full runtime."""
+class TestPersistenceDecayBoundaryContract:
+    """Contract migration tests: persistence guards, post-commit owns decay."""
 
-    def _make_service(self, entries):
-        """Return a minimal PersistenceService with a stubbed memory_manager."""
+    def test_apply_memory_decay_is_guarded_and_non_executable(self):
+        from dadbot.services.persistence import PersistenceService
+
+        class _FakePM:
+            pass
+
+        svc = PersistenceService(persistence_manager=_FakePM())
+        with pytest.raises(RuntimeError, match="not allowed"):
+            svc._apply_memory_decay(object(), _turn_ctx())
+
+    def test_guard_path_does_not_mutate_memory_state(self):
         from dadbot.services.persistence import PersistenceService
 
         class _FakePM:
             pass
 
         class _FakeMemoryManager:
-            def __init__(self, entries):
-                self._entries = list(entries)
-                self._saved = None
+            def __init__(self):
+                self._entries = [
+                    _entry(
+                        "prune1",
+                        updated_at="2019-01-01T00:00:00",
+                        source_count=1,
+                        confidence=0.05,
+                        importance_score=0.0,
+                    ),
+                ]
+                self.mutate_called = False
+
+            def consolidated_memories(self):
+                return list(self._entries)
+
+            def mutate_memory_store(self, **kwargs):
+                self.mutate_called = True
+
+        mm = _FakeMemoryManager()
+        before = list(mm.consolidated_memories())
+        svc = PersistenceService(persistence_manager=_FakePM())
+        with pytest.raises(RuntimeError, match="not allowed"):
+            svc._apply_memory_decay(mm, _turn_ctx())
+        after = list(mm.consolidated_memories())
+
+        assert not mm.mutate_called
+        assert after == before
+
+    def test_post_commit_pipeline_applies_decay_effect_outside_persistence(self):
+        from dadbot.services.post_commit_worker import _PostCommitCapability
+
+        class _FakeMemoryManager:
+            def __init__(self):
+                self._entries = [
+                    _entry(
+                        "keep1",
+                        updated_at="2025-12-31T00:00:00",
+                        source_count=5,
+                        confidence=0.9,
+                        importance_score=0.8,
+                    ),
+                    _entry(
+                        "prune1",
+                        updated_at="2019-01-01T00:00:00",
+                        source_count=1,
+                        confidence=0.05,
+                        importance_score=0.0,
+                    ),
+                ]
 
             def consolidated_memories(self):
                 return list(self._entries)
 
             def mutate_memory_store(self, **kwargs):
                 if "consolidated_memories" in kwargs:
-                    self._saved = kwargs["consolidated_memories"]
+                    self._entries = list(kwargs["consolidated_memories"])
 
-        svc = PersistenceService(persistence_manager=_FakePM())
-        svc._fake_mm = _FakeMemoryManager(entries)
-        return svc
+        class _FakeMemoryCoordinator:
+            def __init__(self, mm):
+                self.mm = mm
 
-    def test_stale_entries_pruned_from_store(self):
-        from dadbot.services.persistence import PersistenceService
+            def consolidate_memories(self, *, turn_context=None):
+                return None
 
-        class _FakePM:
-            pass
-
-        class _FakeMemoryManager:
-            def __init__(self):
-                self._saved = None
-
-            def consolidated_memories(self):
-                return [
-                    _entry(
-                        "keep1", updated_at="2025-12-31T00:00:00", source_count=5, confidence=0.9, importance_score=0.8
-                    ),
-                    _entry(
-                        "prune1",
-                        updated_at="2019-01-01T00:00:00",
-                        source_count=1,
-                        confidence=0.05,
-                        importance_score=0.0,
-                    ),
-                ]
-
-            def mutate_memory_store(self, **kwargs):
-                if "consolidated_memories" in kwargs:
-                    self._saved = kwargs["consolidated_memories"]
+            def apply_controlled_forgetting(self, *, turn_context=None):
+                entries = list(self.mm.consolidated_memories())
+                result = MemoryDecayPolicy().apply(entries, turn_context)
+                pruned_ids = set(result.pruned)
+                kept = [entry for entry in entries if str(entry.get("id") or "") not in pruned_ids]
+                self.mm.mutate_memory_store(consolidated_memories=kept)
+                return result
 
         mm = _FakeMemoryManager()
-        svc = PersistenceService(persistence_manager=_FakePM())
-        ctx = _turn_ctx()
-        svc._apply_memory_decay(mm, ctx)
-
-        assert mm._saved is not None, "mutate_memory_store should have been called"
-        saved_ids = {e["id"] for e in mm._saved}
-        assert "keep1" in saved_ids
-        assert "prune1" not in saved_ids
-
-    def test_decay_result_written_to_context_state(self):
-        from dadbot.services.persistence import PersistenceService
-
-        class _FakePM:
-            pass
-
-        class _FakeMemoryManager:
-            def consolidated_memories(self):
-                return [
-                    _entry(
-                        "prune1",
-                        updated_at="2019-01-01T00:00:00",
-                        source_count=1,
-                        confidence=0.05,
-                        importance_score=0.0,
-                    ),
-                ]
-
-            def mutate_memory_store(self, **kwargs):
-                pass
+        runtime = type(
+            "_Runtime",
+            (),
+            {"memory_coordinator": _FakeMemoryCoordinator(mm)},
+        )()
+        capability = _PostCommitCapability(runtime)
 
         ctx = _turn_ctx()
-        svc = PersistenceService(persistence_manager=_FakePM())
-        svc._apply_memory_decay(_FakeMemoryManager(), ctx)
+        before = list(mm.consolidated_memories())
+        capability.forget(turn_context=ctx)
+        after = list(mm.consolidated_memories())
 
-        assert "memory_decay_result" in ctx.state
-        dr = ctx.state["memory_decay_result"]
-        assert "prune1" in dr["pruned"]
+        assert before != after
+        assert {entry["id"] for entry in after} == {"keep1"}
 
-    def test_no_mutation_when_no_changes(self):
+    def test_persistence_does_not_own_decay(self):
         from dadbot.services.persistence import PersistenceService
 
         class _FakePM:
             pass
 
-        class _FakeMemoryManager:
-            def __init__(self):
-                self.mutate_called = False
-
-            def consolidated_memories(self):
-                # entry that will score high → no changes
-                return [
-                    _entry(
-                        "good", updated_at="2025-12-31T00:00:00", source_count=5, confidence=0.9, importance_score=0.8
-                    )
-                ]
-
-            def mutate_memory_store(self, **kwargs):
-                self.mutate_called = True
-
-        mm = _FakeMemoryManager()
         svc = PersistenceService(persistence_manager=_FakePM())
-        svc._apply_memory_decay(mm, _turn_ctx())
-        assert not mm.mutate_called
-
-    def test_no_temporal_axis_is_noop(self):
-        from dadbot.services.persistence import PersistenceService
-
-        class _FakePM:
-            pass
-
-        class _FakeMemoryManager:
-            def __init__(self):
-                self.mutate_called = False
-
-            def consolidated_memories(self):
-                return [_entry("x1", updated_at="2019-01-01T00:00:00", confidence=0.0, importance_score=0.0)]
-
-            def mutate_memory_store(self, **kwargs):
-                self.mutate_called = True
-
-        mm = _FakeMemoryManager()
-        ctx = _TurnContextStub(temporal=None)
-        svc = PersistenceService(persistence_manager=_FakePM())
-        svc._apply_memory_decay(mm, ctx)
-        # No temporal axis → no pruning → mutate_memory_store not called
-        assert not mm.mutate_called
-
-    def test_exceptions_are_non_fatal(self):
-        from dadbot.services.persistence import PersistenceService
-
-        class _FakePM:
-            pass
-
-        class _BrokenMemoryManager:
-            def consolidated_memories(self):
-                raise RuntimeError("DB exploded")
-
-        svc = PersistenceService(persistence_manager=_FakePM())
-        # Must not raise
-        svc._apply_memory_decay(_BrokenMemoryManager(), _turn_ctx())
+        with pytest.raises(RuntimeError):
+            svc._apply_memory_decay(object(), _turn_ctx())

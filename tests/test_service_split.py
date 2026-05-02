@@ -197,6 +197,53 @@ def test_prepare_final_reply_async_delegates_to_reply_finalization(bot, monkeypa
     assert reply == "async::You did good, buddy.::positive::I got promoted."
 
 
+def test_begin_turn_memory_context_includes_high_confidence_influence_signal(bot, monkeypatch):
+    monkeypatch.setattr(bot.context_builder, "build_memory_context", lambda _user_input: "Relevant context:\n- Budget progress")
+    bot._last_memory_retrieval_diagnostics = {
+        "retrieved_count": 3,
+        "top_score": 0.82,
+        "has_high_confidence": True,
+    }
+
+    section = bot.prompt_assembly.begin_turn_memory_context("budget update", user_id="u1", session_id="s1")
+
+    assert "Memory confidence: HIGH" in section
+    assert "influence factual content" in section
+
+
+def test_begin_turn_memory_context_includes_low_confidence_guidance_when_weak(bot, monkeypatch):
+    monkeypatch.setattr(bot.context_builder, "build_memory_context", lambda _user_input: "Relevant context:\n- Weak hint")
+    bot._last_memory_retrieval_diagnostics = {
+        "retrieved_count": 1,
+        "top_score": 0.12,
+        "has_high_confidence": False,
+    }
+
+    section = bot.prompt_assembly.begin_turn_memory_context("new topic", user_id="u1", session_id="s1")
+
+    assert "Memory confidence: LOW" in section
+    assert "Prioritize current user input" in section
+
+
+def test_reply_finalization_keeps_memory_facts_while_personality_controls_style(bot, monkeypatch):
+    monkeypatch.setattr(
+        bot.personality_service,
+        "apply_authoritative_voice",
+        lambda reply, current_mood, user_input=None: f"Playful style: {reply}",
+    )
+    monkeypatch.setattr(bot, "moderate_output_reply", lambda user_input, candidate_reply, current_mood: candidate_reply)
+    bot.APPEND_SIGNOFF = False
+
+    final = bot.reply_finalization.finalize(
+        "Tony prefers direct advice about emergency fund contributions.",
+        "positive",
+        "keep it light",
+    )
+
+    assert final.startswith("Playful style:")
+    assert "emergency fund contributions" in final
+
+
 def test_turn_service_helper_methods_delegate_to_manager(bot, monkeypatch):
     monkeypatch.setattr(bot.turn_service, "should_offer_daily_checkin_for_turn", lambda: True)
     monkeypatch.setattr(
@@ -238,8 +285,6 @@ def test_turn_service_uses_reply_generation_manager(bot, monkeypatch):
         lambda stripped_input, current_mood, dad_reply, attachments=None, turn_context=None: (dad_reply, False),
     )
 
-    # Pipeline-level assertion: call turn_service directly (graph is always active at the
-    # bot.process_user_message level and uses AgentService, not reply_generation directly).
     reply, should_end = bot.turn_service.process_user_message("Need a hand.")
 
     assert should_end is False
@@ -366,7 +411,9 @@ def test_process_user_message_stream_uses_graph_path_when_enabled(bot, monkeypat
     chunks = []
 
     monkeypatch.setattr(
-        bot, "process_user_message", lambda user_input, attachments=None: (f"graph::{user_input}", False)
+        bot,
+        "_run_graph_turn_sync",
+        lambda user_input, attachments=None, chunk_callback=None: (f"graph::{user_input}", False),
     )
 
     reply, should_end = bot.process_user_message_stream("Need a hand.", chunk_callback=chunks.append)
@@ -533,13 +580,27 @@ def test_turn_processing_freeze_limits_legacy_entrypoints_to_dadbot_facade():
     runtime_interface = (workspace_root / "dadbot/managers/runtime_interface.py").read_text(encoding="utf-8")
     runtime_services = (workspace_root / "dadbot/runtime_core/services.py").read_text(encoding="utf-8")
     streamlit_runtime = (workspace_root / "dadbot/runtime_core/streamlit_runtime.py").read_text(encoding="utf-8")
+    app_runtime = (workspace_root / "dadbot/app_runtime.py").read_text(encoding="utf-8")
 
-    assert "self.bot.process_user_message(" in runtime_interface
-    assert "self.bot.process_user_message(" in runtime_services
-    assert "self._bot.process_user_message(" in streamlit_runtime
+    assert "self.bot.execute_turn(" in runtime_interface
+    assert "self.bot.execute_turn(" in runtime_services
+    assert "self._bot.execute_turn(" in streamlit_runtime
+    assert "bot.execute_turn(" in app_runtime
     assert "turn_service.process_user_message" not in runtime_interface
     assert "turn_service.process_user_message" not in runtime_services
     assert "turn_service.process_user_message" not in streamlit_runtime
+    assert ".process_user_message(" not in runtime_interface
+    assert ".process_user_message(" not in runtime_services
+    assert ".process_user_message(" not in streamlit_runtime
+
+
+def test_turn_spine_internal_execution_bypass_is_closed():
+    from ci.ast_invariant_check import check_turn_entrypoint_closure
+    from dadbot.core import _contract_freeze
+
+    violations = check_turn_entrypoint_closure()
+    assert violations == []
+    assert _contract_freeze.canonical_turn_entrypoint().endswith(".execute_turn")
 
 
 def test_conversation_persistence_methods_delegate_to_manager(bot, monkeypatch):
@@ -1523,7 +1584,11 @@ def test_runtime_client_tries_fallback_models_async(bot, monkeypatch):
 def test_plan_agentic_tools_closed_loop_falls_back_cleanly(bot, monkeypatch):
     bot.ENABLE_AGENTIC_TOOLS = True
     monkeypatch.setattr(bot, "agentic_tool_settings", lambda: {"enabled": True})
-    monkeypatch.setattr(bot.turn_service, "_planning_prompt", lambda user_input, mood, tools: "planner-prompt")
+    monkeypatch.setattr(
+        bot.turn_service,
+        "_planning_prompt",
+        lambda user_input, mood, tools, shared_context: "planner-prompt",
+    )
     monkeypatch.setattr(bot, "get_available_tools", lambda: [{"type": "function", "function": {"name": "status"}}])
     monkeypatch.setattr(
         bot,

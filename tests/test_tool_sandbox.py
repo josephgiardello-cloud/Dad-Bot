@@ -1,11 +1,11 @@
-"""Tests for ToolSandbox: idempotency, failure isolation, rollback semantics."""
+"""Tests for the tool runtime test adapter: idempotency and rollback semantics."""
 
-from dadbot.core.tool_sandbox import ToolSandbox
+from dadbot.core.testing.tool_runtime_test_adapter import ToolRuntimeTestAdapter
 
 
 def test_tool_sandbox_executes_and_returns_result():
-    sandbox = ToolSandbox()
-    record = sandbox.execute(
+    runtime = ToolRuntimeTestAdapter()
+    record = runtime.execute_tool(
         tool_name="set_reminder",
         parameters={"title": "Call dentist", "due_text": "tomorrow"},
         executor=lambda: {"id": "r1", "title": "Call dentist"},
@@ -16,19 +16,19 @@ def test_tool_sandbox_executes_and_returns_result():
 
 
 def test_tool_sandbox_idempotency_blocks_duplicate_execution():
-    sandbox = ToolSandbox()
+    runtime = ToolRuntimeTestAdapter()
     calls = []
 
     def _remind():
         calls.append(1)
         return {"id": "r1", "title": "Call dentist"}
 
-    sandbox.execute(
+    runtime.execute(
         tool_name="set_reminder",
         parameters={"title": "Call dentist", "due_text": "tomorrow"},
         executor=_remind,
     )
-    record2 = sandbox.execute(
+    record2 = runtime.execute(
         tool_name="set_reminder",
         parameters={"title": "Call dentist", "due_text": "tomorrow"},
         executor=_remind,
@@ -40,19 +40,19 @@ def test_tool_sandbox_idempotency_blocks_duplicate_execution():
 
 
 def test_tool_sandbox_different_params_are_different_keys():
-    sandbox = ToolSandbox()
+    runtime = ToolRuntimeTestAdapter()
     calls = []
 
     def _remind():
         calls.append(1)
         return {"id": f"r{len(calls)}", "title": "Remind"}
 
-    sandbox.execute(
+    runtime.execute(
         tool_name="set_reminder",
         parameters={"title": "Call dentist"},
         executor=_remind,
     )
-    record2 = sandbox.execute(
+    record2 = runtime.execute(
         tool_name="set_reminder",
         parameters={"title": "Call bank"},  # different params → different key
         executor=_remind,
@@ -62,12 +62,12 @@ def test_tool_sandbox_different_params_are_different_keys():
 
 
 def test_tool_sandbox_isolates_executor_failures():
-    sandbox = ToolSandbox()
+    runtime = ToolRuntimeTestAdapter()
 
     def _bad_executor():
         raise RuntimeError("Reminder service is down")
 
-    record = sandbox.execute(
+    record = runtime.execute(
         tool_name="set_reminder",
         parameters={"title": "Explode"},
         executor=_bad_executor,
@@ -78,7 +78,7 @@ def test_tool_sandbox_isolates_executor_failures():
 
 
 def test_tool_sandbox_rollback_runs_compensating_actions_in_lifo_order():
-    sandbox = ToolSandbox()
+    runtime = ToolRuntimeTestAdapter()
     order = []
 
     def _remind_a():
@@ -87,52 +87,52 @@ def test_tool_sandbox_rollback_runs_compensating_actions_in_lifo_order():
     def _remind_b():
         return {"id": "b"}
 
-    sandbox.execute(
+    runtime.execute(
         tool_name="set_reminder",
         parameters={"title": "A"},
         executor=_remind_a,
         compensating_action=lambda: order.append("rollback_a"),
     )
-    sandbox.execute(
+    runtime.execute(
         tool_name="set_reminder",
         parameters={"title": "B"},
         executor=_remind_b,
         compensating_action=lambda: order.append("rollback_b"),
     )
 
-    outcomes = sandbox.rollback()
+    outcomes = runtime.rollback()
     assert [o["rolled_back"] for o in outcomes] == [True, True]
     # LIFO: B was added second, must be rolled back first.
     assert order == ["rollback_b", "rollback_a"]
 
 
 def test_tool_sandbox_rollback_tolerates_compensating_action_failure():
-    sandbox = ToolSandbox()
+    runtime = ToolRuntimeTestAdapter()
 
     def _compensate():
         raise RuntimeError("delete failed")
 
-    sandbox.execute(
+    runtime.execute(
         tool_name="set_reminder",
         parameters={"title": "X"},
         executor=lambda: {"id": "x"},
         compensating_action=_compensate,
     )
 
-    outcomes = sandbox.rollback()
+    outcomes = runtime.rollback()
     assert outcomes[0]["rolled_back"] is False
     assert "delete failed" in outcomes[0]["error"]
 
 
 def test_tool_sandbox_snapshot_reflects_execution_history():
-    sandbox = ToolSandbox()
-    sandbox.execute(
+    runtime = ToolRuntimeTestAdapter()
+    runtime.execute(
         tool_name="web_search",
         parameters={"query": "weather"},
         executor=lambda: {"heading": "Weather", "summary": "Sunny"},
     )
 
-    snap = sandbox.snapshot()
+    snap = runtime.snapshot()
     assert snap["executed_count"] == 1
     assert snap["succeeded_count"] == 1
     assert snap["failed_count"] == 0
@@ -141,7 +141,7 @@ def test_tool_sandbox_snapshot_reflects_execution_history():
 
 
 def test_tool_sandbox_failed_execution_not_cached():
-    sandbox = ToolSandbox()
+    runtime = ToolRuntimeTestAdapter()
     calls = []
 
     def _flaky():
@@ -150,7 +150,7 @@ def test_tool_sandbox_failed_execution_not_cached():
             raise RuntimeError("transient failure")
         return {"id": "ok"}
 
-    record1 = sandbox.execute(
+    record1 = runtime.execute(
         tool_name="set_reminder",
         parameters={"title": "Flaky"},
         executor=_flaky,
@@ -158,7 +158,7 @@ def test_tool_sandbox_failed_execution_not_cached():
     assert record1.status == "failed"
 
     # Second attempt with same params must NOT be a cache hit since first failed.
-    record2 = sandbox.execute(
+    record2 = runtime.execute(
         tool_name="set_reminder",
         parameters={"title": "Flaky"},
         executor=_flaky,

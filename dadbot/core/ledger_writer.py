@@ -5,7 +5,7 @@ from typing import Any
 
 from dadbot.core.execution_ledger import ExecutionLedger, WriteBoundaryGuard
 from dadbot.core.invariant_gate import InvariantGate, InvariantViolationError
-from dadbot.core.observability import get_metrics
+from dadbot.core.kernel_signals import get_metrics
 
 
 class LedgerWriter:

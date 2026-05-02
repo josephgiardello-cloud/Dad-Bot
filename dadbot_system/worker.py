@@ -18,7 +18,7 @@ from .contracts import (
     WorkerTask,
     normalize_tenant_id,
 )
-from .telemetry import configure_logging, start_span
+from .runtime_signals import configure_logging, start_span
 
 logger = logging.getLogger(__name__)
 

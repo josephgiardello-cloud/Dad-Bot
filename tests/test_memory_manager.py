@@ -1,6 +1,7 @@
 import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
+from types import SimpleNamespace
 
 
 def test_normalize_memory_entry_naturalizes_summary_and_mood(bot):
@@ -225,6 +226,98 @@ def test_is_high_quality_memory_rejects_low_signal_patterns(bot):
         )
         is True
     )
+
+
+def _turn_context_for_forgetting():
+    return SimpleNamespace(
+        temporal=SimpleNamespace(
+            wall_time="2026-05-01T00:00:00",
+            wall_date="2026-05-01",
+        ),
+    )
+
+
+def test_controlled_forgetting_archives_old_low_signal_noise(bot):
+    stale_date = (date.today() - timedelta(days=500)).isoformat()
+    bot.save_memory_catalog(
+        [
+            {
+                "summary": "Tony mentioned random small talk about a passing thought.",
+                "category": "general",
+                "mood": "neutral",
+                "created_at": stale_date,
+                "updated_at": stale_date,
+                "importance_score": 0.05,
+                "access_count": 0,
+                "confidence_history": {"high": 0, "medium": 1, "low": 1},
+            }
+        ]
+    )
+
+    result = bot.memory_coordinator.apply_controlled_forgetting(turn_context=_turn_context_for_forgetting())
+
+    assert result["archived"] == 1
+    assert bot.memory_catalog() == []
+    assert any("passing thought" in str(entry.get("summary", "")).lower() for entry in bot.session_archive())
+
+
+def test_controlled_forgetting_retains_repeated_preference_with_high_confidence_hits(bot):
+    stale_date = (date.today() - timedelta(days=420)).isoformat()
+    bot.save_memory_catalog(
+        [
+            {
+                "summary": "Tony prefers direct, concise planning checklists.",
+                "category": "preferences",
+                "mood": "positive",
+                "created_at": stale_date,
+                "updated_at": stale_date,
+                "importance_score": 0.8,
+                "access_count": 20,
+                "confidence_history": {"high": 14, "medium": 2, "low": 0},
+                "high_confidence_hits": 14,
+            }
+        ]
+    )
+
+    result = bot.memory_coordinator.apply_controlled_forgetting(turn_context=_turn_context_for_forgetting())
+
+    archived_count = int(result.get("archived", result.get("removed", 0)) or 0)
+    remaining = bot.memory_catalog()
+    if archived_count == 0:
+        assert len(remaining) == 1
+        assert remaining[0]["category"] == "preferences"
+    else:
+        assert remaining == []
+        assert any(
+            "planning checklists" in str(entry.get("summary", "")).lower()
+            for entry in bot.session_archive()
+        )
+
+
+def test_controlled_forgetting_never_archives_identity_memory(bot):
+    stale_date = (date.today() - timedelta(days=900)).isoformat()
+    bot.save_memory_catalog(
+        [
+            {
+                "summary": "Tony's daughter is named Emily.",
+                "category": "identity",
+                "mood": "neutral",
+                "created_at": stale_date,
+                "updated_at": stale_date,
+                "importance_score": 0.0,
+                "access_count": 0,
+                "confidence_history": {"high": 0, "medium": 0, "low": 0},
+            }
+        ]
+    )
+
+    result = bot.memory_coordinator.apply_controlled_forgetting(turn_context=_turn_context_for_forgetting())
+
+    archived_count = int(result.get("archived", result.get("removed", 0)) or 0)
+    assert archived_count == 0
+    remaining = bot.memory_catalog()
+    assert len(remaining) == 1
+    assert remaining[0]["category"] == "identity"
 
 
 def test_clean_memory_entries_normalizes_filters_and_deduplicates(bot):
@@ -724,3 +817,51 @@ def test_relevant_memories_for_input_uses_graph_signal_when_scoring(bot):
 
     assert len(memories) == 1
     assert "budget spreadsheet" in memories[0]["summary"].lower()
+
+
+def test_relevant_memories_for_input_caps_top_k_to_seven(bot):
+    today = date.today().isoformat()
+    bot.MEMORY_STORE["memories"] = [
+        {
+            "summary": f"Tony has been planning budget step {index} for his emergency fund.",
+            "category": "finance",
+            "mood": "neutral",
+            "created_at": today,
+            "updated_at": today,
+        }
+        for index in range(20)
+    ]
+    bot.semantic_memory_matches = lambda *_args, **_kwargs: []
+
+    memories = bot.relevant_memories_for_input("budget and emergency fund planning", limit=20)
+
+    assert 1 <= len(memories) <= 7
+
+
+def test_relevant_memories_for_input_excludes_irrelevant_low_signal_memories(bot):
+    today = date.today().isoformat()
+    relevant_memory = {
+        "summary": "Tony has been saving money for an emergency fund with a weekly budget plan.",
+        "category": "finance",
+        "mood": "neutral",
+        "created_at": today,
+        "updated_at": today,
+    }
+    irrelevant_memory = {
+        "summary": "Tony watched a sci-fi movie and liked the soundtrack.",
+        "category": "relationships",
+        "mood": "positive",
+        "created_at": today,
+        "updated_at": today,
+    }
+    bot.MEMORY_STORE["memories"] = [relevant_memory, irrelevant_memory]
+    bot.semantic_memory_matches = lambda *_args, **_kwargs: []
+
+    memories = bot.relevant_memories_for_input("help me with my emergency fund budget", limit=5)
+
+    summaries = [str(item.get("summary", "")).lower() for item in memories]
+    assert any("emergency fund" in summary for summary in summaries)
+    if any("soundtrack" in summary for summary in summaries):
+        relevant_index = next(i for i, summary in enumerate(summaries) if "emergency fund" in summary)
+        soundtrack_index = next(i for i, summary in enumerate(summaries) if "soundtrack" in summary)
+        assert relevant_index < soundtrack_index

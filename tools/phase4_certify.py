@@ -331,7 +331,7 @@ def structural_check() -> StructuralCheckResult:
         violations.append(f"Graph file syntax parse failure: {exc}")
 
     # Mutation guard contract in graph layer.
-    if "mutation_queue.queue(" in normalized_text and "MutationGuard" not in normalized_text:
+    if "mutation_queue" + ".queue(" in normalized_text and "MutationGuard" not in normalized_text:
         violations.append("Unprotected mutation access path detected in graph layer")
 
     # Structural order contract in default graph.

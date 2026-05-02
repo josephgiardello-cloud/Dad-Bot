@@ -117,6 +117,7 @@ class DadBot(
         "tool_registry",
         "context_service",
         "tone_context",
+        "personality_service",
         "prompt_assembly",
         "runtime_client",
         "runtime_orchestration",
@@ -211,7 +212,7 @@ class DadBot(
     # Attribute routing
     # ------------------------------------------------------------------
 
-    def __getattr__(self, name: str):
+    def __getattr__(self, name: str) -> Any:
         """Route unknown attribute lookups to registered manager objects.
 
         After __init__ completes, lookups hit the O(1) provider map exposed by

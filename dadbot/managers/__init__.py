@@ -9,6 +9,7 @@ from .memory_query import MemoryQueryManager
 from .multimodal import MultimodalManager
 from .profile_runtime import ProfileRuntimeManager
 from .prompt_assembly import PromptAssemblyManager
+from .personality_service import PersonalityServiceManager
 from .reply_finalization import ReplyFinalizationManager
 from .reply_generation import ReplyGenerationManager
 from .reply_supervisor import ReplySupervisorManager
@@ -31,6 +32,7 @@ __all__ = [
     "MultimodalManager",
     "ProfileRuntimeManager",
     "PromptAssemblyManager",
+    "PersonalityServiceManager",
     "ReplyFinalizationManager",
     "ReplyGenerationManager",
     "ReplySupervisorManager",

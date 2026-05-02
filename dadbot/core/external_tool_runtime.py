@@ -14,13 +14,14 @@ and real-world connector execution:
 
 from __future__ import annotations
 
-import random
 import time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Protocol
+
+from dadbot.core.kernel_locks import KernelToolIdempotencyRegistry
 
 
 class ToolExecutionStatus(str, Enum):
@@ -124,7 +125,8 @@ class RetryPolicy:
         rng: Callable[[], float] | None = None,
     ) -> float:
         """Return delay seconds for attempt number (1-indexed)."""
-        rng_fn = rng or random.random
+        # Deterministic default jitter source for core/runtime safety.
+        rng_fn = rng or (lambda: 0.5)
         exponential_ms = self.base_delay_ms * (self.backoff_factor ** max(0, int(attempt) - 1))
         bounded_ms = min(self.max_delay_ms, exponential_ms)
         jitter = bounded_ms * self.jitter_ratio * rng_fn()
@@ -433,12 +435,33 @@ class ExternalToolRuntime:
         rate_limiter: SlidingWindowRateLimiter | None = None,
         isolation_guard: IsolationGuard | None = None,
         sleeper: Callable[[float], None] | None = None,
+        event_tap: Any | None = None,
     ) -> None:
         self._registry = registry
         self._retry_policy = retry_policy or RetryPolicy()
         self._rate_limiter = rate_limiter
         self._isolation_guard = isolation_guard or IsolationGuard()
         self._sleeper = sleeper or time.sleep
+        self._event_tap = event_tap
+
+    def _emit_tool_event(self, event_type: str, **payload: Any) -> None:
+        emit = getattr(self._event_tap, "emit", None)
+        if not callable(emit):
+            return
+        run_id = str(payload.pop("run_id", "") or "").strip()
+        if not run_id:
+            run_id = str(getattr(self._event_tap, "run_id", "") or "").strip()
+        if not run_id:
+            return
+        safe_payload = {
+            str(k): (
+                v
+                if isinstance(v, (str, int, float, bool, type(None)))
+                else str(v)
+            )
+            for k, v in payload.items()
+        }
+        emit(event_type, run_id=run_id, **safe_payload)
 
     def execute(
         self,
@@ -535,9 +558,45 @@ class ExternalToolRuntime:
         estimate: ResourceEstimate | None,
     ) -> ToolExecutionResult:
         normalized_name = str(tool_name).strip().lower()
+        idempotency_key = str(payload.get("_idempotency_key") or "").strip()
+        if not idempotency_key:
+            idempotency_key = KernelToolIdempotencyRegistry.deterministic_key(
+                tool_name=normalized_name,
+                payload=dict(payload),
+                scope="external_tool_runtime",
+            )
+        cached = KernelToolIdempotencyRegistry.get(idempotency_key)
+        if isinstance(cached, ToolExecutionResult):
+            replay = ToolExecutionResult(
+                tool_name=normalized_name,
+                status=ToolExecutionStatus.SKIPPED,
+                output=cached.output,
+                error="idempotent_replay",
+                attempts=0,
+                latency_ms=0.0,
+                confidence=float(cached.confidence),
+                degraded_reason="kernel_idempotency",
+                fallback_used=bool(cached.fallback_used),
+                metadata=dict(cached.metadata or {}),
+            )
+            replay.metadata["idempotency_key"] = idempotency_key
+            replay.metadata["idempotent_replay"] = True
+            self._emit_tool_event(
+                "TOOL_CALL_END",
+                tool_name=normalized_name,
+                idempotency_key=idempotency_key,
+                status=replay.status.value,
+                error=replay.error,
+            )
+            return replay
+        self._emit_tool_event(
+            "TOOL_CALL_START",
+            tool_name=normalized_name,
+            idempotency_key=idempotency_key,
+        )
 
         if self._rate_limiter is not None and not self._rate_limiter.allow():
-            return ToolExecutionResult(
+            result = ToolExecutionResult(
                 tool_name=normalized_name,
                 status=ToolExecutionStatus.SKIPPED,
                 output=None,
@@ -545,10 +604,19 @@ class ExternalToolRuntime:
                 confidence=0.0,
                 degraded_reason="throttled",
             )
+            result.metadata["idempotency_key"] = idempotency_key
+            self._emit_tool_event(
+                "TOOL_CALL_END",
+                tool_name=normalized_name,
+                idempotency_key=idempotency_key,
+                status=result.status.value,
+                error=result.error,
+            )
+            return result
 
         allowed, reason = self._isolation_guard.validate(normalized_name, estimate)
         if not allowed:
-            return ToolExecutionResult(
+            result = ToolExecutionResult(
                 tool_name=normalized_name,
                 status=ToolExecutionStatus.SKIPPED,
                 output=None,
@@ -556,19 +624,37 @@ class ExternalToolRuntime:
                 confidence=0.0,
                 degraded_reason="isolation_rejected",
             )
+            result.metadata["idempotency_key"] = idempotency_key
+            self._emit_tool_event(
+                "TOOL_CALL_END",
+                tool_name=normalized_name,
+                idempotency_key=idempotency_key,
+                status=result.status.value,
+                error=result.error,
+            )
+            return result
 
         capability_and_handler = self._registry.handler_for(
             normalized_name,
             required_version=required_version,
         )
         if capability_and_handler is None:
-            return ToolExecutionResult(
+            result = ToolExecutionResult(
                 tool_name=normalized_name,
                 status=ToolExecutionStatus.ERROR,
                 output=None,
                 error="tool_not_registered_or_incompatible_version",
                 confidence=0.0,
             )
+            result.metadata["idempotency_key"] = idempotency_key
+            self._emit_tool_event(
+                "TOOL_CALL_END",
+                tool_name=normalized_name,
+                idempotency_key=idempotency_key,
+                status=result.status.value,
+                error=result.error,
+            )
+            return result
 
         capability, handler = capability_and_handler
         start = time.perf_counter()
@@ -590,7 +676,7 @@ class ExternalToolRuntime:
                     if failure_kind == NetworkFailureKind.TIMEOUT
                     else ToolExecutionStatus.ERROR
                 )
-                return ToolExecutionResult(
+                result = ToolExecutionResult(
                     tool_name=normalized_name,
                     status=status,
                     output=None,
@@ -600,6 +686,17 @@ class ExternalToolRuntime:
                     confidence=0.0,
                     metadata={"failure_kind": failure_kind.value},
                 )
+                result.metadata["idempotency_key"] = idempotency_key
+                self._emit_tool_event(
+                    "TOOL_CALL_END",
+                    tool_name=normalized_name,
+                    idempotency_key=idempotency_key,
+                    status=result.status.value,
+                    attempts=int(result.attempts),
+                    latency_ms=float(result.latency_ms),
+                    error=str(result.error or ""),
+                )
+                return result
 
             # Enforce tool capability semantics for partial support.
             if result.status == ToolExecutionStatus.PARTIAL and not capability.supports_partial:
@@ -633,10 +730,26 @@ class ExternalToolRuntime:
             result.attempts = attempt
             result.latency_ms = round(elapsed_ms, 3)
             result.tool_name = normalized_name
+            result.metadata["idempotency_key"] = idempotency_key
+            if result.status in {
+                ToolExecutionStatus.OK,
+                ToolExecutionStatus.PARTIAL,
+                ToolExecutionStatus.DEGRADED,
+            }:
+                KernelToolIdempotencyRegistry.put(idempotency_key, result)
+            self._emit_tool_event(
+                "TOOL_CALL_END",
+                tool_name=normalized_name,
+                idempotency_key=idempotency_key,
+                status=result.status.value,
+                attempts=int(result.attempts),
+                latency_ms=float(result.latency_ms),
+                error=str(result.error or ""),
+            )
             return result
 
         elapsed_ms = (time.perf_counter() - start) * 1000.0
-        return ToolExecutionResult(
+        result = ToolExecutionResult(
             tool_name=normalized_name,
             status=ToolExecutionStatus.TIMEOUT,
             output=None,
@@ -645,6 +758,17 @@ class ExternalToolRuntime:
             latency_ms=round(elapsed_ms, 3),
             confidence=0.0,
         )
+        result.metadata["idempotency_key"] = idempotency_key
+        self._emit_tool_event(
+            "TOOL_CALL_END",
+            tool_name=normalized_name,
+            idempotency_key=idempotency_key,
+            status=result.status.value,
+            attempts=int(result.attempts),
+            latency_ms=float(result.latency_ms),
+            error=str(result.error or ""),
+        )
+        return result
 
 
 def _parse_version(version: str) -> tuple[int, int, int]:

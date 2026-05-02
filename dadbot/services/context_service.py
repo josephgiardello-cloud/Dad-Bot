@@ -7,7 +7,7 @@ import time
 from typing import Any
 
 from dadbot.context import ContextBuilder
-from dadbot.core.execution_trace_context import (
+from dadbot.core.execution_context import (
     ensure_execution_trace_root,
     record_execution_step,
 )

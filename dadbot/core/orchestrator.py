@@ -8,6 +8,7 @@ import logging
 import os
 import platform
 from importlib import metadata as importlib_metadata
+from collections.abc import Awaitable
 from typing import Any, cast
 
 from dadbot.contracts import AttachmentList, FinalizedTurnResult
@@ -16,6 +17,7 @@ from dadbot.core.control_plane import (
     ExecutionJob,
     SessionRegistry,
 )
+from dadbot.core.execution_contract import TurnDelivery, TurnResponse, live_turn_request
 from dadbot.core.graph import TurnGraph
 from dadbot.core.graph_context import TurnContext
 from dadbot.core.interfaces import (
@@ -26,7 +28,7 @@ from dadbot.core.interfaces import (
 from dadbot.core.job_builder import JobBuilder
 from dadbot.core.lg_topology import create_topology_provider
 from dadbot.core.persistence.base import CheckpointNotFoundError
-from dadbot.core.trace_binder import TraceBinder
+from dadbot.core.execution_binder import TraceBinder
 from dadbot.registry import ServiceRegistry, boot_registry
 
 logger = logging.getLogger(__name__)
@@ -321,6 +323,29 @@ class DadBotOrchestrator:
         self._update_session_state_after_turn(session, context, result, manifest)
         return result
 
+    async def _submit_turn_via_control_plane(
+        self,
+        user_input: str,
+        attachments: AttachmentList | None = None,
+        *,
+        session_id: str = "default",
+        timeout_seconds: float | None = None,
+    ) -> FinalizedTurnResult:
+        return await self.control_plane.submit_turn(
+            session_id=session_id,
+            user_input=user_input,
+            attachments=attachments,
+            metadata={},
+            timeout_seconds=timeout_seconds,
+        )
+
+    def _can_delegate_to_bot_execute_turn(self) -> bool:
+        if self.bot is None:
+            return False
+        direct = getattr(self.bot, "_turn_orchestrator", None)
+        via_service = getattr(getattr(self.bot, "services", None), "turn_orchestrator", None)
+        return self is direct or self is via_service
+
     async def handle_turn(
         self,
         user_input: str,
@@ -329,12 +354,26 @@ class DadBotOrchestrator:
         session_id: str = "default",
         timeout_seconds: float | None = None,
     ) -> FinalizedTurnResult:
+        execute_turn = getattr(self.bot, "execute_turn", None)
+        if callable(execute_turn) and self._can_delegate_to_bot_execute_turn():
+            response = await cast(
+                Awaitable[TurnResponse],
+                execute_turn(
+                    live_turn_request(
+                        user_input,
+                        attachments=list(attachments or []),
+                        delivery=TurnDelivery.ASYNC,
+                        session_id=session_id,
+                        timeout_seconds=timeout_seconds,
+                    ),
+                ),
+            )
+            return response.as_result()
         try:
-            return await self.control_plane.submit_turn(
-                session_id=session_id,
-                user_input=user_input,
+            return await self._submit_turn_via_control_plane(
+                user_input,
                 attachments=attachments,
-                metadata={},
+                session_id=session_id,
                 timeout_seconds=timeout_seconds,
             )
         except TimeoutError:
@@ -349,6 +388,20 @@ class DadBotOrchestrator:
         user_input: str,
         attachments: AttachmentList | None = None,
     ) -> FinalizedTurnResult:
+        execute_turn = getattr(self.bot, "execute_turn", None)
+        if callable(execute_turn) and self._can_delegate_to_bot_execute_turn():
+            response = cast(
+                TurnResponse,
+                execute_turn(
+                    live_turn_request(
+                        user_input,
+                        attachments=list(attachments or []),
+                        delivery=TurnDelivery.SYNC,
+                        session_id="default",
+                    ),
+                ),
+            )
+            return response.as_result()
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -364,4 +417,18 @@ class DadBotOrchestrator:
         user_input: str,
         attachments: AttachmentList | None = None,
     ) -> FinalizedTurnResult:
+        execute_turn = getattr(self.bot, "execute_turn", None)
+        if callable(execute_turn) and self._can_delegate_to_bot_execute_turn():
+            response = await cast(
+                Awaitable[TurnResponse],
+                execute_turn(
+                    live_turn_request(
+                        user_input,
+                        attachments=list(attachments or []),
+                        delivery=TurnDelivery.ASYNC,
+                        session_id="default",
+                    ),
+                ),
+            )
+            return response.as_result()
         return await self.handle_turn(user_input, attachments=attachments)

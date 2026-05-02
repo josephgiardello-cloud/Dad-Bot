@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 from dadbot.core.dadbot import DadBot
+from dadbot.core.execution_contract import TurnDelivery, TurnResponse, live_turn_request
 
 
 @dataclass
@@ -144,10 +145,15 @@ class UIRuntimeAPI:
                 self._bot.switch_chat_thread(normalized_thread_id)
             except Exception:
                 pass
-        reply, should_end = self._bot.process_user_message(
-            str(content or ""),
-            attachments=list(attachments or []),
+        response = self._bot.execute_turn(
+            live_turn_request(
+                str(content or ""),
+                attachments=list(attachments or []),
+                delivery=TurnDelivery.SYNC,
+                session_id=normalized_thread_id,
+            ),
         )
+        reply, should_end = cast(TurnResponse, response).as_result()
         turn_health = dict(self._bot.turn_health_state() or {})
         ux_feedback = dict(self._bot.turn_ux_feedback() or {})
         multi_agent_trace = self._multi_agent_trace_snapshot()

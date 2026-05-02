@@ -358,21 +358,7 @@ class ExecutionRecovery:
         checkpoint: dict[str, Any] | None,
         trace_context: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        """Build a minimal safe state when full replay reconstruction is unavailable."""
-        reconciled = ExecutionRecovery.reconcile_checkpoint_with_trace(
-            checkpoint=checkpoint,
-            trace_context=trace_context,
+        """Fallback reconstruction is intentionally disabled (replay-only recovery)."""
+        raise RuntimeError(
+            "Recovery fallback path disabled: replay-only recovery policy is enforced",
         )
-        state = dict(reconciled.get("state") or {})
-        metadata = dict(reconciled.get("metadata") or {})
-        trace = dict(reconciled.get("trace_context") or {})
-        return {
-            "state": state,
-            "metadata": metadata,
-            "trace_context": trace,
-            "fallback": {
-                "mode": "safe_reconstruction",
-                "final_output": str(trace.get("normalized_response") or ""),
-                "step_count": len(list(trace.get("steps") or [])),
-            },
-        }

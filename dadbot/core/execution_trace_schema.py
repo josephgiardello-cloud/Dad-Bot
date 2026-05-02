@@ -84,8 +84,13 @@ def stamp_trace_contract_version(contract: dict[str, Any]) -> dict[str, Any]:
     This function is called by ``TurnGraph._finalize_execution_trace_contract``
     so that every newly written contract carries an explicit schema stamp.
     """
-    contract.setdefault("schema_version", EXECUTION_TRACE_CONTRACT_SCHEMA_VERSION)
-    return contract
+    stamped = deepcopy(dict(contract or {}))
+    if "schema_version" not in stamped:
+        stamped = {
+            **stamped,
+            "schema_version": EXECUTION_TRACE_CONTRACT_SCHEMA_VERSION,
+        }
+    return stamped
 
 
 # ---------------------------------------------------------------------------
@@ -108,8 +113,10 @@ class ExecutionTraceContractMigration:
 
     def apply(self, contract: dict[str, Any]) -> dict[str, Any]:
         result = self._fn(deepcopy(contract))
-        result["schema_version"] = self.to_version
-        return result
+        return {
+            **dict(result or {}),
+            "schema_version": self.to_version,
+        }
 
 
 class ExecutionTraceContractSchemaMigrator:
@@ -175,7 +182,10 @@ class ExecutionTraceContractSchemaMigrator:
             )
             if step is None:
                 # No migration path forward — stamp whatever version we reached.
-                contract["schema_version"] = version
+                contract = {
+                    **dict(contract or {}),
+                    "schema_version": version,
+                }
                 break
             contract = step.apply(contract)
             version = str(contract.get("schema_version") or version)

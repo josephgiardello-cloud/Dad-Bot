@@ -9,9 +9,10 @@ Design goal: non-invasive adapter layer.
 from __future__ import annotations
 
 import logging
+import importlib
 from typing import Any
 
-from dadbot.core.observability import EventStreamExporter, MetricsSink
+from dadbot.core.kernel_signals import EventStreamExporter, MetricsSink
 
 logger = logging.getLogger(__name__)
 
@@ -73,12 +74,12 @@ def install_otel_bridge() -> dict[str, Any]:
 
     """
     try:
-        from opentelemetry import metrics as otel_metrics
+        otel_metrics = importlib.import_module("opentelemetry.metrics")
     except Exception as exc:  # noqa: BLE001
         return {"installed": False, "reason": f"opentelemetry unavailable: {exc}"}
 
     try:
-        import dadbot.core.observability as obs
+        import dadbot.core.kernel_signals as obs
 
         meter = otel_metrics.get_meter("dadbot.core")
         obs._global_metrics = OpenTelemetryMetricsSink(meter=meter)  # type: ignore[attr-defined]

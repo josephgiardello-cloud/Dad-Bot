@@ -19,10 +19,11 @@ from dadbot.core.execution_boundary import (
     MemoryWriteOwnerScope,
     enforce_memory_write_owner,
 )
-from dadbot.core.execution_trace_context import (
+from dadbot.core.execution_context import (
     ensure_execution_trace_root,
     record_execution_step,
 )
+from dadbot.core.kernel_locks import KernelEventTotalityLock
 from dadbot.memory.migration import MemoryMigrationRegistry
 
 logger = logging.getLogger(__name__)
@@ -254,6 +255,12 @@ class MemoryStorageBackend:
             required=True,
         ):
             enforce_memory_write_owner(owner=str(owner or ""))
+            active_run_id = str(getattr(self.bot, "_active_turn_run_id", "") or "").strip()
+            if active_run_id:
+                KernelEventTotalityLock.require_event_witness(
+                    run_id=active_run_id,
+                    source="MemoryStorageBackend.mutate_memory_store",
+                )
             record_execution_step(
                 "memory_write",
                 payload={

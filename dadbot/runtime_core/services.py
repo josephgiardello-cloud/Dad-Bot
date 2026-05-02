@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Protocol, cast
+
+from dadbot.core.execution_contract import TurnDelivery, TurnResponse, live_turn_request
 
 
 @dataclass(slots=True)
@@ -52,16 +54,15 @@ class DadBotLLMService:
         text: str,
         attachments: list[dict] | None = None,
     ) -> UserMessageResult:
-        reply_value = self.bot.process_user_message(text, attachments=attachments)
-        if hasattr(reply_value, "reply"):
-            reply = str(reply_value.reply or "")
-            should_end = bool(getattr(reply_value, "should_end", False))
-        elif isinstance(reply_value, tuple):
-            reply = str(reply_value[0] or "")
-            should_end = bool(reply_value[1]) if len(reply_value) > 1 else False
-        else:
-            reply = str(reply_value or "")
-            should_end = False
+        response = self.bot.execute_turn(
+            live_turn_request(
+                text,
+                attachments=list(attachments or []),
+                delivery=TurnDelivery.SYNC,
+                session_id=str(thread_id or getattr(self.bot, "active_thread_id", "") or "default"),
+            ),
+        )
+        reply, should_end = cast(TurnResponse, response).as_result()
 
         mood = str(self.bot.last_saved_mood() or "neutral")
         pipeline = dict(self.bot.turn_pipeline_snapshot() or {})
@@ -69,7 +70,7 @@ class DadBotLLMService:
         ux_feedback = dict(self.bot.turn_ux_feedback() or {})
         active_rules = list(self.bot.profile_runtime.effective_behavior_rules())
         return UserMessageResult(
-            reply=reply,
+            reply=str(reply or ""),
             should_end=should_end,
             mood=mood,
             pipeline=pipeline,

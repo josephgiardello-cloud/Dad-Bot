@@ -7,20 +7,23 @@ import logging
 import re
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
-from dadbot.core.execution_trace_context import (
+from dadbot.core.coherence_metrics import OutputCoherenceTracker
+from dadbot.core.execution_context import (
     record_execution_step,
     record_external_system_call,
 )
 from dadbot.core.graph_context import TurnContext
 from dadbot.core.graph_types import NodeType
+from dadbot.core.memory_influence import MemoryInfluenceTracker
 from dadbot.core.tool_dag import build_dag_from_execution_plan
 from dadbot.core.tool_ir import (
     ToolEvent,
     ToolEventLog,
     ToolExecutionPlan,
     ToolRequest,
+    ToolResult,
     build_execution_event,
     deterministic_tool_id,
     normalize_tool_results,
@@ -189,7 +192,7 @@ class TemporalNode:
     name = "temporal"
 
     async def run(self, context: TurnContext) -> TurnContext:
-        if getattr(context, "temporal", None) is None: _ = (context.trace_id, context.ledger_entry); raise RuntimeError("TemporalNode missing — deterministic execution violated")
+        if getattr(context, "temporal", None) is None: _ = (context.trace_id, context.kernel_step_id); raise RuntimeError("TemporalNode missing — deterministic execution violated")
         vc = getattr(context, "virtual_clock", None)
         if vc is not None:
             # Derive temporal axis from the virtual clock instead of the real wall clock,
@@ -222,7 +225,7 @@ class HealthNode:
         self.mgr = health_manager
 
     async def run(self, context: TurnContext) -> TurnContext:
-        tick = getattr(self.mgr, "tick", None); _ = (context.trace_id, context.ledger_entry)
+        tick = getattr(self.mgr, "tick", None); _ = (context.trace_id, context.kernel_step_id)
         if callable(tick):
             try:
                 context.state["health"] = tick(context)
@@ -241,7 +244,7 @@ class ContextBuilderNode:
         self._goal_ranker = goal_ranker
 
     async def run(self, context: TurnContext) -> TurnContext:
-        if getattr(context, "temporal", None) is None: _ = (context.trace_id, context.ledger_entry); raise RuntimeError("TemporalNode missing — deterministic execution violated")
+        if getattr(context, "temporal", None) is None: _ = (context.trace_id, context.kernel_step_id); raise RuntimeError("TemporalNode missing — deterministic execution violated")
         if callable(getattr(self.mgr, "query", None)):
             try:
                 context.state.setdefault("temporal", context.temporal_snapshot())
@@ -318,7 +321,7 @@ class ToolRouterNode:
         ), None
 
     async def run(self, context: TurnContext) -> TurnContext:
-        tool_ir = dict(context.state.get("tool_ir") or {}); _ = (context.trace_id, context.ledger_entry)
+        tool_ir = dict(context.state.get("tool_ir") or {}); _ = (context.trace_id, context.kernel_step_id)
         raw_requests = list(tool_ir.get("requests") or [])
 
         compiled: list[ToolRequest] = []
@@ -439,11 +442,11 @@ class ToolExecutorNode:
                 }
                 for item in executions
             ],
-            "results": normalize_tool_results(results),
+            "results": normalize_tool_results(cast(list[ToolResult | dict[str, Any]], results)),
         }
 
     async def run(self, context: TurnContext) -> TurnContext:
-        tool_ir = dict(context.state.get("tool_ir") or {}); _ = (context.trace_id, context.ledger_entry)
+        tool_ir = dict(context.state.get("tool_ir") or {}); _ = (context.trace_id, context.kernel_step_id)
         execution_plan = list(tool_ir.get("execution_plan") or [])
         executions: list[dict[str, Any]] = []
         results: list[dict[str, Any]] = []
@@ -590,7 +593,7 @@ class ToolExecutorNode:
             "hidden_execution_paths": False,
         }
         context.state["tool_ir"] = tool_ir
-        context.state["tool_results"] = normalize_tool_results(results)
+        context.state["tool_results"] = normalize_tool_results(cast(list[ToolResult | dict[str, Any]], results))
 
         canonical_trace = self._canonical_execution_trace(
             execution_plan=execution_plan,
@@ -664,10 +667,6 @@ class InferenceNode:
         self.mgr = llm_manager
         self._critique_engine = critique_engine
         self._max_loop_iterations = max(1, int(max_loop_iterations))
-
-    @staticmethod
-    def _fallback_candidate(message: str) -> tuple[str, bool]:
-        return (str(message or "Unable to generate a reply right now."), False)
 
     # ------------------------------------------------------------------
     # Structured-output dispatch
@@ -784,7 +783,7 @@ class InferenceNode:
         gathered = await asyncio.gather(*coros, return_exceptions=True)
         results: list[DelegateResult] = []
         for (_inp, name), outcome in zip(task_pairs, gathered):
-            if isinstance(outcome, Exception):
+            if isinstance(outcome, BaseException):
                 text = f"[Sub-task failed: {name} -> {str(outcome)[:100]}]"
                 logger.warning("Parallel sub-task %r failed: %s", name, outcome)
                 results.append(
@@ -968,10 +967,11 @@ class InferenceNode:
                 payload=None,
                 error="[Sub-task failed: no inference provider available.]",
             )
+        _run_agent_fn = cast(Any, run_agent)
         sub_ctx = _build_subtask_context(parent_context, subtask_input, depth, agent_name, blackboard)
         rich_context = sub_ctx.state.get("rich_context", {})
         try:
-            sub_raw = await run_agent(sub_ctx, rich_context)
+            sub_raw = await _run_agent_fn(sub_ctx, rich_context)
             text = await self._resolve_subtask_reply(sub_ctx, sub_raw, depth, agent_name, subtask_input, parent_context)
             if not text:
                 return DelegateResult(
@@ -1079,6 +1079,7 @@ class InferenceNode:
 
         run_agent = getattr(self.mgr, "run_agent", None)
         if callable(run_agent) and tool_result:
+            _run_agent_fn = cast(Any, run_agent)
             follow_input = f"[Tool result for '{tool_name}']: {tool_result}\n\nOriginal question: {context.user_input}"
             follow_ctx = TurnContext(
                 user_input=follow_input,
@@ -1095,7 +1096,7 @@ class InferenceNode:
             )
             follow_ctx.temporal = context.temporal
             try:
-                follow_raw = await run_agent(
+                follow_raw = await _run_agent_fn(
                     follow_ctx,
                     follow_ctx.state.get("rich_context", {}),
                 )
@@ -1198,7 +1199,7 @@ class InferenceNode:
 
     async def run(self, context: TurnContext) -> TurnContext:
         # Turn-scoped blackboard seed prevents cross-turn leakage.
-        _ = (context.trace_id, context.ledger_entry)
+        _ = (context.trace_id, context.kernel_step_id)
         seed_board = dict(context.metadata.get("agent_blackboard_seed") or {})
         context.state["agent_blackboard"] = dict(seed_board)
         run_agent = getattr(self.mgr, "run_agent", None)
@@ -1207,6 +1208,7 @@ class InferenceNode:
                 f"InferenceNode: bound manager {type(self.mgr).__name__!r} does not expose "
                 "'run_agent'; only AgentService is a valid inference provider.",
             )
+        _run_agent_fn = cast(Any, run_agent)
         # Priority 4: determinism enforcement (strict-mode LLM knobs).
         self._apply_determinism_enforcement(context)
         rich_context = context.state.get("rich_context", {})
@@ -1218,7 +1220,7 @@ class InferenceNode:
                 required=False,
             )
             try:
-                raw_result = await run_agent(context, rich_context)
+                raw_result = await _run_agent_fn(context, rich_context)
                 # Resolve structured blocks (delegation / reasoning / tool call).
                 candidate = await self._resolve_candidate(context, raw_result, depth=0)
                 reply_text = candidate[0] if isinstance(candidate, tuple) else str(candidate or "")
@@ -1230,16 +1232,15 @@ class InferenceNode:
                     },
                     required=False,
                 )
-            except Exception as exc:  # noqa: BLE001 — iteration can raise arbitrary LLM/IO errors; fallback candidate and break
+            except Exception as exc:  # noqa: BLE001 — iteration can raise arbitrary LLM/IO errors; fallback path is forbidden
                 logger.error(
                     "InferenceNode.run_agent failed (iteration %d): %s",
                     iteration,
                     exc,
                 )
-                candidate = self._fallback_candidate(
-                    "Something went sideways. Try again in a moment.",
-                )
-                break
+                raise RuntimeError(
+                    "Fallback execution path invoked — not allowed"
+                ) from exc
 
             if self._run_critique_check(context, candidate, iteration):
                 break
@@ -1257,7 +1258,7 @@ class SafetyNode:
 
     async def run(self, context: TurnContext) -> TurnContext:
         # Session exit was already fully handled by InferenceNode -- skip.
-        _ = (context.trace_id, context.ledger_entry)
+        _ = (context.trace_id, context.kernel_step_id)
         if context.state.get("already_finalized"):
             return context
 
@@ -1289,12 +1290,18 @@ class SaveNode:
 
     Contract: All durable mutations MUST go through SaveNode. The graph
     guarantees speculative execution until that boundary.
+
+    Post-commit (non-fatal) tracking:
+    - Memory influence: which memories actually influenced the reply
+    - Output coherence: multi-turn personality consistency
     """
 
     node_type = NodeType.COMMIT
 
     def __init__(self, storage_manager: Any):
         self.mgr = storage_manager
+        self._memory_tracker = MemoryInfluenceTracker()
+        self._coherence_tracker = OutputCoherenceTracker(window_size=5)
 
     def _result_from_context(self, context: TurnContext) -> Any:
         return context.state.get("safe_result") or context.state.get("candidate")
@@ -1311,8 +1318,47 @@ class SaveNode:
             logger.error("SaveNode.finalize_turn failed in strict mode: %s", exc)
             raise
 
+    def _track_memory_influence_post_commit(self, context: TurnContext, reply_text: str) -> None:
+        """Non-fatal post-commit tracking of which memories influenced this reply."""
+        try:
+            memories = self._memory_tracker.extract_memories_from_context(context.state)
+            if not memories:
+                return
+
+            tokenize_fn = getattr(self.mgr, "tokenize", None)
+            influence_scores = self._memory_tracker.score_memory_influence(
+                reply_text,
+                memories,
+                tokenize_fn=tokenize_fn,
+            )
+            feedback = self._memory_tracker.log_influence_feedback(
+                turn_id=str(context.trace_id or "unknown"),
+                memory_entries=memories,
+                influence_scores=influence_scores,
+                reply_text=reply_text,
+            )
+            context.state["memory_influence_feedback"] = feedback
+        except Exception as exc:  # noqa: BLE001 — non-fatal tracking
+            logger.debug("Memory influence tracking failed (non-fatal): %s", exc)
+
+    def _track_output_coherence_post_commit(self, context: TurnContext, reply_text: str) -> None:
+        """Non-fatal post-commit tracking of personality coherence."""
+        try:
+            self._coherence_tracker.record_reply(reply_text)
+            drift_report = self._coherence_tracker.detect_personality_drift(threshold=0.75)
+            tone_profile = self._coherence_tracker.summarize_tone_profile()
+
+            context.state["output_coherence"] = {
+                "drift_report": drift_report,
+                "tone_profile": tone_profile,
+            }
+            context.metadata["output_coherence_drifted"] = drift_report.get("drifted", False)
+            context.metadata["output_coherence_score"] = drift_report.get("coherence", 1.0)
+        except Exception as exc:  # noqa: BLE001 — non-fatal tracking
+            logger.debug("Output coherence tracking failed (non-fatal): %s", exc)
+
     async def run(self, context: TurnContext) -> TurnContext:
-        if getattr(context, "temporal", None) is None: _ = (context.trace_id, context.ledger_entry); raise RuntimeError("TemporalNode required — execution invalid")
+        if getattr(context, "temporal", None) is None: _ = (context.trace_id, context.kernel_step_id); raise RuntimeError("TemporalNode required — execution invalid")
         context.state.setdefault("temporal", context.temporal_snapshot())
         context.metadata.setdefault("temporal", context.temporal_snapshot())
         result = self._result_from_context(context)
@@ -1340,6 +1386,12 @@ class SaveNode:
                     save_graph_checkpoint(checkpoint, _skip_turn_event=True)
                     context.state["_atomic_checkpoint_saved"] = True
             commit_transaction(context)
+
+            # Post-commit: non-fatal tracking (memory influence, output coherence)
+            reply_text = result[0] if isinstance(result, tuple) else str(result or "")
+            self._track_memory_influence_post_commit(context, reply_text)
+            self._track_output_coherence_post_commit(context, reply_text)
+
         except Exception:
             rollback_transaction = getattr(self.mgr, "rollback_transaction", None)
             if callable(rollback_transaction):
@@ -1357,7 +1409,7 @@ class ReflectionNode:
         self.mgr = reflection_manager
 
     async def run(self, context: TurnContext) -> TurnContext:
-        if self.mgr is None: _ = (context.trace_id, context.ledger_entry); return context
+        if self.mgr is None: _ = (context.trace_id, context.kernel_step_id); return context
 
         result = context.state.get("safe_result") or context.state.get("candidate")
         turn_text = context.state.get("turn_text") or context.user_input

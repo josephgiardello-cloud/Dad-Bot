@@ -38,7 +38,11 @@ from dadbot.core.execution_receipt import (
     ReceiptSigner,
 )
 from dadbot.core.execution_recovery import ExecutionRecovery
-from dadbot.core.execution_trace_schema import stamp_trace_contract_version
+from dadbot.core.execution_schema import stamp_trace_contract_version
+from dadbot.core.execution_context import (
+    record_execution_step,
+    record_external_system_call,
+)
 from dadbot.core.graph_side_effects import GraphSideEffectsOrchestrator
 from dadbot.core.invariant_registry import InvariantRegistry
 from dadbot.core.persistence_event_adapter import (
@@ -93,6 +97,24 @@ from dadbot.core.graph_pipeline_nodes import (  # re-export pipeline node stubs
 )
 
 logger = logging.getLogger(__name__)
+
+_DECLARED_TRACE_EVENT_TYPES = frozenset(
+    {
+        "turn_start",
+        "turn_failed",
+        "turn_short_circuit",
+        "turn_succeeded",
+        "stage_enter",
+        "stage_skip",
+        "stage_done",
+        "stage_error",
+        "parallel_start",
+        "parallel_done",
+        "kernel_error",
+        "kernel_rejected",
+        "kernel_ok",
+    },
+)
 
 
 class _LinearTopologyGraph:
@@ -324,6 +346,60 @@ class TurnGraph:
 
     def _finalize_execution_trace_contract(self, turn_context: TurnContext) -> None:
         trace = list(turn_context.state.get("execution_trace") or [])
+        if not trace:
+            raise RuntimeError("Execution trace contract incomplete: no execution_trace events recorded")
+
+        pipeline_names = [
+            str(name).strip().lower()
+            for name in list(turn_context.state.get("_pipeline_stage_names") or [])
+            if str(name).strip()
+        ]
+        stage_order = {name: idx for idx, name in enumerate(pipeline_names)}
+
+        expected_sequence = 1
+        entered: set[str] = set()
+        last_stage_index = -1
+        for item in trace:
+            sequence = int(item.get("sequence", 0) or 0)
+            event_type = str(item.get("event_type", "") or "").strip()
+            stage = str(item.get("stage", "") or "").strip().lower()
+            if sequence != expected_sequence:
+                raise RuntimeError(
+                    "Execution trace contract incomplete: non-contiguous sequence "
+                    f"expected={expected_sequence} actual={sequence}",
+                )
+            if not event_type or not stage:
+                raise RuntimeError(
+                    "Execution trace contract incomplete: missing event_type or stage "
+                    f"at sequence={sequence}",
+                )
+            if event_type not in _DECLARED_TRACE_EVENT_TYPES:
+                raise RuntimeError(
+                    "Execution trace closure violation: undeclared event type "
+                    f"event_type={event_type!r} sequence={sequence}",
+                )
+            if event_type in {"stage_enter", "stage_skip", "stage_done", "stage_error"}:
+                if stage not in stage_order:
+                    raise RuntimeError(
+                        "Execution trace closure violation: stage outside declared pipeline "
+                        f"stage={stage!r} sequence={sequence}",
+                    )
+                stage_idx = int(stage_order[stage])
+                if stage_idx < last_stage_index:
+                    raise RuntimeError(
+                        "Execution trace ordering violation: non-deterministic stage order "
+                        f"stage={stage!r} index={stage_idx} previous_index={last_stage_index}",
+                    )
+                last_stage_index = stage_idx
+                if event_type in {"stage_enter", "stage_skip"}:
+                    entered.add(stage)
+                if event_type in {"stage_done", "stage_error"} and stage not in entered:
+                    raise RuntimeError(
+                        "Execution trace closure violation: stage completion without stage entry/skip "
+                        f"stage={stage!r} sequence={sequence}",
+                    )
+            expected_sequence += 1
+
         canonical = {
             "trace_id": str(turn_context.trace_id or ""),
             "events": [
@@ -784,6 +860,12 @@ class TurnGraph:
             self._recovery,
         ):
             executed_stage_names.append(stage_name)
+            self._record_execution_trace(
+                stage_context,
+                event_type="stage_skip",
+                stage=stage_name,
+                detail={"reason": "recovery"},
+            )
             return True
         _sid = str(
             stage_context.metadata.get("session_id") or self._capability_session_id or "",
@@ -796,6 +878,12 @@ class TurnGraph:
             _sid,
         ):
             executed_stage_names.append(stage_name)
+            self._record_execution_trace(
+                stage_context,
+                event_type="stage_skip",
+                stage=stage_name,
+                detail={"reason": "capability"},
+            )
             return True
         self._stage_entry_gate.enforce_stage_ordering(stage_context, stage_name)
         self._record_execution_trace(
@@ -829,6 +917,33 @@ class TurnGraph:
         success, or the string representation of the exception on failure
         (the exception is re-raised after telemetry is recorded).
         """
+        normalized_stage = str(stage_name or "").strip().lower()
+        stage_kind = ""
+        if normalized_stage in {"inference", "llm"}:
+            stage_kind = "llm"
+        elif "tool" in normalized_stage:
+            stage_kind = "tool"
+        elif normalized_stage == "save":
+            stage_kind = "save"
+
+        if stage_kind:
+            record_execution_step(
+                "turngraph.node.start",
+                payload={
+                    "stage": stage_name,
+                    "kind": stage_kind,
+                    "trace_id": str(getattr(stage_context, "trace_id", "") or ""),
+                },
+                required=False,
+            )
+        self._emit_event_tap_boundary(
+            stage_context,
+            "NODE_ENTER",
+            stage=stage_name,
+            trace_id=stage_context.trace_id,
+            event_sequence=stage_context.event_sequence,
+        )
+
         error_msg: str | None = None
         try:
             _guard = (
@@ -866,7 +981,84 @@ class TurnGraph:
                     duration_ms=duration_ms,
                     trace_id=stage_context.trace_id,
                 )
+            if stage_kind:
+                record_execution_step(
+                    "turngraph.node.done",
+                    payload={
+                        "stage": stage_name,
+                        "kind": stage_kind,
+                        "trace_id": str(getattr(stage_context, "trace_id", "") or ""),
+                        "duration_ms": duration_ms,
+                        "status": "error" if error_msg else "ok",
+                    },
+                    required=False,
+                )
+                if stage_kind == "tool":
+                    record_external_system_call(
+                        operation="turngraph_tool_node",
+                        system="tool_gateway",
+                        request_payload={
+                            "stage": stage_name,
+                            "trace_id": str(getattr(stage_context, "trace_id", "") or ""),
+                        },
+                        response_payload={
+                            "duration_ms": duration_ms,
+                            "status": "error" if error_msg else "ok",
+                            "error": str(error_msg or ""),
+                        },
+                        status="error" if error_msg else "ok",
+                        source="TurnGraph._run_stage_execute",
+                        required=False,
+                    )
+            self._emit_event_tap_boundary(
+                stage_context,
+                "NODE_EXIT",
+                stage=stage_name,
+                trace_id=stage_context.trace_id,
+                event_sequence=stage_context.event_sequence,
+                duration_ms=duration_ms,
+                status="error" if error_msg else "ok",
+                error=str(error_msg or ""),
+            )
         return stage_context, error_msg
+
+    def _resolve_event_tap(self):
+        registry = getattr(self, "registry", None)
+        bot = getattr(registry, "bot", None) if registry is not None else None
+        direct = getattr(bot, "event_tap", None) or getattr(bot, "_event_tap", None)
+        if direct is not None:
+            return direct
+        getter = getattr(registry, "get", None)
+        if callable(getter):
+            try:
+                return getter("event_tap", optional=True)
+            except Exception:  # noqa: BLE001
+                return None
+        return None
+
+    def _emit_event_tap_boundary(
+        self,
+        stage_context: TurnContext,
+        event_type: str,
+        **payload: Any,
+    ) -> None:
+        tap = self._resolve_event_tap()
+        emit = getattr(tap, "emit", None)
+        if not callable(emit):
+            return
+        bot = getattr(getattr(self, "registry", None), "bot", None)
+        run_id = str(getattr(bot, "_active_turn_run_id", "") or "")
+        if not run_id:
+            return
+        safe_payload = {
+            str(k): (
+                v
+                if isinstance(v, (str, int, float, bool, type(None)))
+                else str(v)
+            )
+            for k, v in payload.items()
+        }
+        emit(event_type, run_id=run_id, **safe_payload)
 
     def _record_stage_success(
         self,
