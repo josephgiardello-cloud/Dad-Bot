@@ -61,6 +61,31 @@ def _deterministic_event_id(payload: dict[str, Any]) -> str:
     )
 
 
+def _canonical_event_for_hash(event: dict[str, Any]) -> dict[str, Any]:
+    event_type = str(event.get("type") or "")
+    return {
+        "type": event_type,
+        "session_id": str(event.get("session_id") or ""),
+        "session_index": int(event.get("session_index") or 0),
+        "kernel_step_id": str(event.get("kernel_step_id") or ""),
+        "parent_event_id": str(event.get("parent_event_id") or ""),
+        "event_id": str(event.get("event_id") or ""),
+        "payload": _canonical_trace_payload(event_type, event.get("payload")),
+    }
+
+
+def _event_sha256(event: dict[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(_canonical_event_for_hash(event), sort_keys=True, default=str).encode("utf-8"),
+    ).hexdigest()
+
+
+def _chain_hash(prev_chain_hash: str, event_sha256: str) -> str:
+    return hashlib.sha256(
+        f"{str(prev_chain_hash or '')}:{str(event_sha256 or '')}".encode("utf-8"),
+    ).hexdigest()
+
+
 class ExecutionLedger:
     """In-memory append-only execution ledger with replay-hash support."""
 
@@ -123,6 +148,11 @@ class ExecutionLedger:
             payload.setdefault("sequence", len(self._events) + 1)
             payload.setdefault("event_id", _deterministic_event_id(payload))
             stamp_schema_version(payload)
+            event_sha256 = _event_sha256(payload)
+            prev_chain_hash = str(self._events[-1].get("chain_hash") or "") if self._events else ""
+            payload["event_sha256"] = event_sha256
+            payload["prev_chain_hash"] = prev_chain_hash
+            payload["chain_hash"] = _chain_hash(prev_chain_hash, event_sha256)
 
             event_id = str(payload.get("event_id") or "")
             if session_id:
@@ -161,6 +191,44 @@ class ExecutionLedger:
             json.dumps(canonical, sort_keys=True, default=str).encode("utf-8"),
         ).hexdigest()
 
+    def chain_hash(self) -> str:
+        events = self.read()
+        if not events:
+            return ""
+        return str(events[-1].get("chain_hash") or "")
+
+    def verify_replay(self, *, mode: str = "basic") -> dict[str, Any]:
+        events = list(self.read())
+        violations: list[str] = []
+
+        if str(mode or "basic").strip().lower() == "chain":
+            prev = ""
+            for idx, event in enumerate(events):
+                expected_event_sha = _event_sha256(event)
+                expected_prev = prev
+                expected_chain = _chain_hash(expected_prev, expected_event_sha)
+
+                actual_event_sha = str(event.get("event_sha256") or "")
+                actual_prev = str(event.get("prev_chain_hash") or "")
+                actual_chain = str(event.get("chain_hash") or "")
+
+                if actual_event_sha != expected_event_sha:
+                    violations.append(f"event[{idx}].event_sha256_mismatch")
+                if actual_prev != expected_prev:
+                    violations.append(f"event[{idx}].prev_chain_hash_mismatch")
+                if actual_chain != expected_chain:
+                    violations.append(f"event[{idx}].chain_hash_mismatch")
+                prev = expected_chain
+
+        return {
+            "ok": len(violations) == 0,
+            "mode": str(mode or "basic"),
+            "event_count": len(events),
+            "replay_hash": self.replay_hash(),
+            "chain_hash": self.chain_hash(),
+            "violations": violations,
+        }
+
     def load_from_backend(self) -> int:
         with self._lock:
             events = list(get_migrator().migrate_all(list(self._backend.load())))
@@ -176,7 +244,15 @@ class ExecutionLedger:
             self._events = deepcopy(events)
             self._session_heads.clear()
             self._session_indices.clear()
+            prev_chain = ""
             for event in self._events:
+                if not str(event.get("event_id") or ""):
+                    event["event_id"] = _deterministic_event_id(event)
+                event_sha256 = _event_sha256(event)
+                event["event_sha256"] = event_sha256
+                event["prev_chain_hash"] = prev_chain
+                prev_chain = _chain_hash(prev_chain, event_sha256)
+                event["chain_hash"] = prev_chain
                 session_id = str(event.get("session_id") or "")
                 event_id = str(event.get("event_id") or "")
                 if session_id and event_id:

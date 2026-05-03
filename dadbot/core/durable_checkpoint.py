@@ -39,6 +39,7 @@ class DurableCheckpoint:
         """Snapshot current ledger head into a new checkpoint and return it."""
         events = self._ledger.read()
         replay_hash = self._ledger.replay_hash()
+        chain_hash = self._ledger.chain_hash()
         sequence = int(events[-1].get("sequence") or 0) if events else 0
         event_count = len(events)
 
@@ -51,6 +52,7 @@ class DurableCheckpoint:
             "ledger_sequence": sequence,
             "ledger_event_count": event_count,
             "replay_hash": str(replay_hash or ""),
+            "chain_hash": str(chain_hash or ""),
             "prev_checkpoint_hash": str(prev_hash or ""),
         }
         checkpoint["checkpoint_hash"] = self._hash_checkpoint(checkpoint)
@@ -64,7 +66,7 @@ class DurableCheckpoint:
     # Verify
     # ------------------------------------------------------------------
 
-    def assert_resume_at_head(self) -> dict[str, Any]:
+    def assert_resume_at_head(self, *, verification_mode: str = "chain") -> dict[str, Any]:
         """Assert the current ledger head matches the last saved checkpoint.
 
         Raises CheckpointIntegrityError if:
@@ -83,10 +85,13 @@ class DurableCheckpoint:
             last = deepcopy(self._checkpoints[-1])
 
         current_events = self._ledger.read()
-        current_replay_hash = self._ledger.replay_hash()
+        verification = self._ledger.verify_replay(mode=verification_mode)
+        current_replay_hash = str(verification.get("replay_hash") or "")
+        current_chain_hash = str(verification.get("chain_hash") or "")
         current_event_count = len(current_events)
 
         expected_replay_hash = str(last.get("replay_hash") or "")
+        expected_chain_hash = str(last.get("chain_hash") or "")
         expected_event_count = int(last.get("ledger_event_count") or 0)
 
         report = {
@@ -96,8 +101,11 @@ class DurableCheckpoint:
             "checkpoint_created_at": float(last.get("created_at") or 0.0),
             "expected_replay_hash": expected_replay_hash,
             "actual_replay_hash": current_replay_hash,
+            "expected_chain_hash": expected_chain_hash,
+            "actual_chain_hash": current_chain_hash,
             "expected_event_count": expected_event_count,
             "actual_event_count": current_event_count,
+            "verification_mode": str(verification_mode or ""),
             "checkpoint_count": 0,
         }
         with self._lock:
@@ -110,10 +118,24 @@ class DurableCheckpoint:
             )
             raise CheckpointIntegrityError(msg)
 
+        if not bool(verification.get("ok", True)):
+            msg = (
+                "Ledger replay verification failed: "
+                f"mode={verification_mode!r} violations={list(verification.get('violations') or [])!r}"
+            )
+            raise CheckpointIntegrityError(msg)
+
         if current_replay_hash != expected_replay_hash:
             msg = (
                 f"Ledger replay hash mismatch: expected {expected_replay_hash!r}, "
                 f"got {current_replay_hash!r}. Ledger may be corrupted or partially written."
+            )
+            raise CheckpointIntegrityError(msg)
+
+        if expected_chain_hash and current_chain_hash != expected_chain_hash:
+            msg = (
+                f"Ledger chain hash mismatch: expected {expected_chain_hash!r}, "
+                f"got {current_chain_hash!r}. Ledger may be tampered or reordered."
             )
             raise CheckpointIntegrityError(msg)
 

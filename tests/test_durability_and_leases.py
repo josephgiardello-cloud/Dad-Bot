@@ -53,6 +53,7 @@ class TestDurableCheckpoint:
         saved = cp.save(label="post-boot")
         assert saved["checkpoint_hash"]
         assert saved["replay_hash"] == ledger.replay_hash()
+        assert saved["chain_hash"] == ledger.chain_hash()
 
         report = cp.assert_resume_at_head()
         assert report["ok"] is True
@@ -67,6 +68,17 @@ class TestDurableCheckpoint:
             cp._checkpoints[-1]["replay_hash"] = "bad-hash-00000"
 
         with pytest.raises(CheckpointIntegrityError, match="mismatch"):
+            cp.assert_resume_at_head()
+
+    def test_resume_fails_when_chain_hash_diverges(self):
+        ledger = _make_ledger_with_complete_job()
+        cp = DurableCheckpoint(ledger=ledger)
+        cp.save(label="pre-chain-corruption")
+
+        with cp._lock:
+            cp._checkpoints[-1]["chain_hash"] = "bad-chain-00000"
+
+        with pytest.raises(CheckpointIntegrityError, match="chain hash mismatch"):
             cp.assert_resume_at_head()
 
     def test_resume_fails_when_ledger_truncated(self):
