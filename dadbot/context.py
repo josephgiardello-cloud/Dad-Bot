@@ -456,7 +456,13 @@ Keep family relationships, ages, timelines, and education history consistent wit
             pruned=(len(trimmed_sections) < total_sections) or (post_trim_tokens < pre_trim_tokens),
         )
 
-        diagnostics = dict(getattr(self.bot, "_last_memory_retrieval_diagnostics", {}) or {})
+        # Access memory diagnostics through the public accessor on the memory
+        # query manager (Phase 2 boundary enforcement).
+        memory_query_mgr = getattr(self.bot, "memory_query", None)
+        if memory_query_mgr is not None and hasattr(memory_query_mgr, "get_retrieval_diagnostics"):
+            diagnostics = memory_query_mgr.get_retrieval_diagnostics()
+        else:
+            diagnostics = dict(getattr(self.bot, "_last_memory_retrieval_diagnostics", {}) or {})
         if diagnostics and isinstance(getattr(self.bot, "_last_memory_context_stats", None), dict):
             self.bot._last_memory_context_stats["retrieval_diagnostics"] = diagnostics
 

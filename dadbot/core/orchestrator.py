@@ -12,6 +12,7 @@ from collections.abc import Awaitable
 from typing import Any, cast
 
 from dadbot.contracts import AttachmentList, FinalizedTurnResult
+from dadbot.core import shadow_mode as _shadow_mode
 from dadbot.core.control_plane import (
     ExecutionControlPlane,
     ExecutionJob,
@@ -311,7 +312,8 @@ class DadBotOrchestrator:
         self._stamp_determinism_metadata(context, job, manifest)
 
         async def _run() -> FinalizedTurnResult:
-            return await self.graph.execute(context)
+            result = await self.graph.execute(context)
+            return result
 
         result = await self._trace_binder.run(
             trace_id=context.trace_id,
@@ -321,6 +323,33 @@ class DadBotOrchestrator:
         )
         self._last_turn_context = context
         self._update_session_state_after_turn(session, context, result, manifest)
+
+        # Shadow mode — non-blocking observation hook (observation phase only)
+        if _shadow_mode.is_enabled():
+            try:
+                _stage_traces = [
+                    {"stage": t.stage, "duration_ms": t.duration_ms, "error": t.error}
+                    for t in (context.stage_traces or [])
+                ]
+                _latency_ms = float(
+                    (context.metadata or {}).get("turn_latency_ms") or 0.0
+                )
+                _final_output = str(result[0] if isinstance(result, tuple) and result else "")
+                _shadow_snapshot = {
+                    "inputs": {"prompt": str(job.user_input or "")},
+                    "outputs_per_step": _stage_traces,
+                    "final_output": _final_output,
+                }
+                _shadow_mode.shadow_log(
+                    snapshot=_shadow_snapshot,
+                    trace_id=str(context.trace_id or ""),
+                    session_id=str(job.session_id or "default"),
+                    event_count=len(_stage_traces),
+                    latency_ms=_latency_ms,
+                )
+            except Exception:  # noqa: BLE001
+                pass  # shadow mode must never affect the caller
+
         return result
 
     async def _submit_turn_via_control_plane(

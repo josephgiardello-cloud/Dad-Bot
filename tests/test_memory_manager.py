@@ -320,6 +320,131 @@ def test_controlled_forgetting_never_archives_identity_memory(bot):
     assert remaining[0]["category"] == "identity"
 
 
+def test_controlled_forgetting_soft_prunes_under_memory_saturation(bot):
+    stale_date = (date.today() - timedelta(days=240)).isoformat()
+    dense_catalog = []
+    for idx in range(40):
+        dense_catalog.append(
+            {
+                "summary": f"Tony mentioned general low-signal note {idx}.",
+                "category": "general",
+                "mood": "neutral",
+                "created_at": stale_date,
+                "updated_at": stale_date,
+                "importance_score": 0.1,
+                "access_count": 0,
+                "confidence_history": {"high": 0, "medium": 0, "low": 2},
+            }
+        )
+
+    bot.save_memory_catalog(dense_catalog)
+
+    result = bot.memory_coordinator.apply_controlled_forgetting(turn_context=_turn_context_for_forgetting())
+
+    archived_count = int(result.get("archived", result.get("removed", 0)) or 0)
+    assert archived_count > 0
+    assert len(bot.memory_catalog()) < len(dense_catalog)
+
+
+def test_controlled_forgetting_prioritizes_low_signal_conflicting_memory(bot):
+    stale_date = (date.today() - timedelta(days=320)).isoformat()
+    bot.save_memory_catalog(
+        [
+            {
+                "summary": "Tony says he never uses checklists anymore.",
+                "category": "general",
+                "mood": "neutral",
+                "created_at": stale_date,
+                "updated_at": stale_date,
+                "importance_score": 0.2,
+                "access_count": 0,
+                "confidence_history": {"high": 0, "medium": 0, "low": 2},
+                "contradictions": ["Tony prefers direct planning checklists."],
+            }
+        ]
+    )
+
+    result = bot.memory_coordinator.apply_controlled_forgetting(turn_context=_turn_context_for_forgetting())
+
+    archived_count = int(result.get("archived", result.get("removed", 0)) or 0)
+    assert archived_count == 1
+    assert bot.memory_catalog() == []
+
+
+def test_controlled_forgetting_retains_stale_high_importance_memory(bot):
+    stale_date = (date.today() - timedelta(days=700)).isoformat()
+    bot.save_memory_catalog(
+        [
+            {
+                "summary": "Tony is rebuilding his emergency fund after layoffs in the family.",
+                "category": "finance",
+                "mood": "stressed",
+                "created_at": stale_date,
+                "updated_at": stale_date,
+                "importance_score": 0.95,
+                "access_count": 4,
+                "confidence_history": {"high": 6, "medium": 1, "low": 0},
+                "high_confidence_hits": 6,
+            }
+        ]
+    )
+
+    result = bot.memory_coordinator.apply_controlled_forgetting(turn_context=_turn_context_for_forgetting())
+
+    archived_count = int(result.get("archived", result.get("removed", 0)) or 0)
+    assert archived_count == 0
+    remaining = bot.memory_catalog()
+    assert len(remaining) == 1
+    assert "emergency fund" in str(remaining[0].get("summary", "")).lower()
+
+
+def test_controlled_forgetting_stress_profile_reduces_retention_under_density(bot):
+    old_date = (date.today() - timedelta(days=420)).isoformat()
+    recent_date = (date.today() - timedelta(days=14)).isoformat()
+    catalog = []
+
+    # 20 intentionally low-signal noisy memories should be archived.
+    for idx in range(20):
+        catalog.append(
+            {
+                "summary": f"Tony mentioned low-value passing thought {idx}.",
+                "category": "general",
+                "mood": "neutral",
+                "created_at": old_date,
+                "updated_at": old_date,
+                "importance_score": 0.08,
+                "access_count": 0,
+                "confidence_history": {"high": 0, "medium": 0, "low": 2},
+            }
+        )
+
+    # 160 durable memories should mostly remain.
+    for idx in range(160):
+        catalog.append(
+            {
+                "summary": f"Tony keeps a direct planning checklist habit {idx}.",
+                "category": "preferences",
+                "mood": "positive",
+                "created_at": recent_date,
+                "updated_at": recent_date,
+                "importance_score": 0.82,
+                "access_count": 8,
+                "confidence_history": {"high": 10, "medium": 1, "low": 0},
+                "high_confidence_hits": 10,
+            }
+        )
+
+    bot.save_memory_catalog(catalog)
+    result = bot.memory_coordinator.apply_controlled_forgetting(turn_context=_turn_context_for_forgetting())
+
+    retained = int(result.get("retained", len(bot.memory_catalog())) or len(bot.memory_catalog()))
+    archived = int(result.get("archived", result.get("removed", 0)) or 0)
+    retention_ratio = retained / float(len(catalog))
+
+    assert archived > 0
+    assert 0.85 <= retention_ratio <= 0.95
+
+
 def test_clean_memory_entries_normalizes_filters_and_deduplicates(bot):
     cleaned = bot.clean_memory_entries(
         [

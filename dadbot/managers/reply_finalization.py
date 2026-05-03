@@ -11,6 +11,13 @@ class ReplyFinalizationManager:
         self.bot = bot
 
     def append_signoff(self, reply: str) -> str:
+        # Defense: if reply is somehow a Pydantic response object, extract content first
+        if hasattr(reply, "model_dump") and not isinstance(reply, str):
+            try:
+                from dadbot.utils.llm import extract_ollama_message_content
+                reply = extract_ollama_message_content(reply)
+            except Exception:
+                pass
         reply = str(reply or "").strip()
         signoff = str(self.bot.STYLE.get("signoff") or "").strip()
 
@@ -40,6 +47,14 @@ class ReplyFinalizationManager:
         )
 
     def finalize(self, reply, current_mood, user_input=None):
+        # DEBUG: Log what we're receiving
+        # Defense: if reply is somehow a Pydantic response object, extract content first
+        if hasattr(reply, "model_dump") and not isinstance(reply, str):
+            try:
+                from dadbot.utils.llm import extract_ollama_message_content
+                reply = extract_ollama_message_content(reply)
+            except Exception:
+                pass
         mark_turn_coherence(self.bot, "finalizer_called")
         voiced_reply = self.bot.personality_service.apply_authoritative_voice(
             str(reply or ""),
@@ -67,6 +82,13 @@ class ReplyFinalizationManager:
         return self.finalize(reply, current_mood, user_input)
 
     async def finalize_async(self, reply, current_mood, user_input=None):
+        # Defense: if reply is somehow a Pydantic response object, extract content first
+        if hasattr(reply, "model_dump") and not isinstance(reply, str):
+            try:
+                from dadbot.utils.llm import extract_ollama_message_content
+                reply = extract_ollama_message_content(reply)
+            except Exception:
+                pass
         mark_turn_coherence(self.bot, "finalizer_called")
         voiced_reply = self.bot.personality_service.apply_authoritative_voice(
             str(reply or ""),

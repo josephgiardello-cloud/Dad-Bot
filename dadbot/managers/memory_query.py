@@ -427,6 +427,16 @@ class MemoryQueryManager:
         self._record_memory_access_signals(selected, memories)
         return [memory for _score, memory in selected]
 
+    def get_retrieval_diagnostics(self) -> dict:
+        """Return a copy of the diagnostics from the most recent retrieval call.
+
+        This is the single authorised accessor for retrieval diagnostics.
+        Callers (PromptAssemblyManager, context.py) MUST use this method instead
+        of reading ``bot._last_memory_retrieval_diagnostics`` directly, which is
+        a private implementation detail of this class.
+        """
+        return dict(getattr(self.bot, "_last_memory_retrieval_diagnostics", {}) or {})
+
     @staticmethod
     def retrieval_strategy_for_input(user_input):
         text = str(user_input or "").strip().lower()

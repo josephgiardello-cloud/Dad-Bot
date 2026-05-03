@@ -172,3 +172,10 @@ def test_emitted_post_commit_event_can_be_replayed_from_retained_bus_history():
     assert len(memory_coordinator.forgetting_calls) == 1
     assert memory_coordinator.consolidate_calls[0] is turn_context
     assert memory_coordinator.forgetting_calls[0] is turn_context
+    intents = list(turn_context.state.get("memory_write_intents") or [])
+    assert len(intents) >= 4
+    assert any(str(item.get("op") or "") == "consolidate_memories" for item in intents)
+    assert any(str(item.get("op") or "") == "apply_controlled_forgetting" for item in intents)
+    summary = dict(turn_context.state.get("memory_delta_summary") or {})
+    assert str(summary.get("version") or "") == "1.0"
+    assert int(summary.get("intent_count") or 0) == len(intents)

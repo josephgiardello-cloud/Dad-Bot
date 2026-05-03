@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from queue import Empty, Queue
 from threading import Event, Thread
 from typing import Any
@@ -87,13 +88,81 @@ class PostCommitWorker:
                 continue
             self._handle_post_commit_event(event)
 
+    @staticmethod
+    def _append_memory_write_intent(
+        turn_context: Any,
+        *,
+        op: str,
+        status: str,
+        error: str = "",
+    ) -> None:
+        state = getattr(turn_context, "state", None)
+        metadata = getattr(turn_context, "metadata", None)
+        if not isinstance(state, dict):
+            return
+
+        intent = {
+            "op": str(op or ""),
+            "status": str(status or ""),
+            "error": str(error or ""),
+            "trace_id": str(getattr(turn_context, "trace_id", "") or ""),
+            "recorded_at": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        }
+        intents = list(state.get("memory_write_intents") or [])
+        intents.append(intent)
+        state["memory_write_intents"] = intents
+
+        summary = {
+            "version": "1.0",
+            "intent_count": len(intents),
+            "intents": list(intents),
+            "memory_retrieval_set_after_commit": list(state.get("memory_retrieval_set") or []),
+        }
+        state["memory_delta_summary"] = summary
+
+        if isinstance(metadata, dict):
+            metadata["memory_write_intents"] = list(intents)
+            metadata["memory_delta_summary"] = dict(summary)
+
     def _handle_post_commit_event(self, event: PostCommitEvent) -> None:
         turn_context = getattr(event, "payload", {}).get("turn_context")
+        self._append_memory_write_intent(
+            turn_context,
+            op="consolidate_memories",
+            status="started",
+        )
         try:
             self._capability.consolidate(turn_context=turn_context)
+            self._append_memory_write_intent(
+                turn_context,
+                op="consolidate_memories",
+                status="succeeded",
+            )
         except Exception as exc:  # noqa: BLE001
+            self._append_memory_write_intent(
+                turn_context,
+                op="consolidate_memories",
+                status="failed",
+                error=str(exc),
+            )
             logger.warning("Post-commit consolidate_memories failed (non-fatal): %s", exc)
+        self._append_memory_write_intent(
+            turn_context,
+            op="apply_controlled_forgetting",
+            status="started",
+        )
         try:
             self._capability.forget(turn_context=turn_context)
+            self._append_memory_write_intent(
+                turn_context,
+                op="apply_controlled_forgetting",
+                status="succeeded",
+            )
         except Exception as exc:  # noqa: BLE001
+            self._append_memory_write_intent(
+                turn_context,
+                op="apply_controlled_forgetting",
+                status="failed",
+                error=str(exc),
+            )
             logger.warning("Post-commit apply_controlled_forgetting failed (non-fatal): %s", exc)

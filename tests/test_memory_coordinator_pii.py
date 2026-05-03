@@ -86,3 +86,27 @@ def test_update_memory_store_scrubs_pii_before_saving(monkeypatch):
     assert "_pii_scrubbed" in saved
     assert "email" in saved["_pii_scrubbed"]
     assert "phone" in saved["_pii_scrubbed"]
+
+
+def test_update_memory_store_skips_without_turn_context_even_if_commit_active(monkeypatch):
+    bot = DummyBot()
+    bot._graph_commit_active = True
+    coordinator = MemoryCoordinator(bot)
+
+    called = {"extract": 0}
+
+    def fake_extract_session_memories(history):
+        called["extract"] += 1
+        return [
+            {
+                "summary": "This should never be processed without turn context.",
+                "category": "test",
+                "mood": "neutral",
+            }
+        ]
+
+    monkeypatch.setattr(coordinator, "extract_session_memories", fake_extract_session_memories)
+    coordinator.update_memory_store([{"role": "user", "content": "remember this"}], turn_context=None)
+
+    assert called["extract"] == 0
+    assert bot.saved_catalog is None

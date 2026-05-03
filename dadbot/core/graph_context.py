@@ -49,6 +49,15 @@ class TurnFidelity:
         }
 
 
+class TurnContextContractViolation(TypeError):
+    """Raised when TurnContext is constructed with an invalid field type.
+
+    This is the hard construction-time boundary contract: state, metadata, and
+    determinism_manifest must always be dicts.  Any non-dict value passed at
+    construction is a caller contract violation.
+    """
+
+
 @dataclass
 class TurnContext:
     user_input: str
@@ -91,6 +100,20 @@ class TurnContext:
     prev_checkpoint_hash: str = field(default="", init=False)
 
     def __post_init__(self) -> None:
+        # Strict boundary contract: state/metadata/determinism_manifest must be dicts.
+        # Enforce at construction so no TurnContext can ever carry an invalid shape.
+        if not isinstance(self.state, dict):
+            raise TurnContextContractViolation(
+                f"TurnContext.state must be a dict, got {type(self.state).__name__!r}",
+            )
+        if not isinstance(self.metadata, dict):
+            raise TurnContextContractViolation(
+                f"TurnContext.metadata must be a dict, got {type(self.metadata).__name__!r}",
+            )
+        if not isinstance(self.determinism_manifest, dict):
+            raise TurnContextContractViolation(
+                f"TurnContext.determinism_manifest must be a dict, got {type(self.determinism_manifest).__name__!r}",
+            )
         # Mutation queues are turn-scoped. Bind queue ownership to this trace.
         self.mutation_queue.bind_owner(self.trace_id)
 

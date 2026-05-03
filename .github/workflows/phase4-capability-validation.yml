@@ -22,6 +22,11 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e .[dev,service]
 
+      - name: Canonical Snapshot Truth Path Guard
+        run: |
+          python tools/generate_full_system_snapshot.py
+          python tools/verify_latest_snapshot_canonical.py
+
       - name: Kernel Boundary Validator (Hard Fail)
         run: |
           python ci/kernel_boundary_check.py

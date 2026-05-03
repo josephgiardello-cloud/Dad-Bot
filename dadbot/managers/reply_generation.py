@@ -47,7 +47,7 @@ class ReplyGenerationManager:
                 ),
                 purpose="chat response",
             )
-            reply_text = response["message"]["content"]
+            reply_text = self.bot.extract_ollama_message_content(response)
             reviewed_reply = (
                 reply_text if self.bot.LIGHT_MODE else self.bot.critique_reply(stripped_input, reply_text, current_mood)
             )
@@ -88,7 +88,7 @@ class ReplyGenerationManager:
                 ),
                 purpose="chat response",
             )
-            raw_reply = response["message"]["content"]
+            raw_reply = self.bot.extract_ollama_message_content(response)
         reviewed_reply = (
             raw_reply
             if self.bot.LIGHT_MODE

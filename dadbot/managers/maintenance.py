@@ -80,12 +80,29 @@ class MaintenanceScheduler:
 
         archive_before = len(self.bot.session_archive())
         archive_entry = self.bot.archive_session_context(history)
-        self.bot.update_memory_store(history)
-        consolidated = self.bot.consolidate_memories(turn_context=turn_context)
-        timeline = self.bot.refresh_relationship_timeline(turn_context=turn_context)
+        if turn_context is None:
+            logger.debug(
+                "periodic_synthesis_background_path node_id=%s stage=%s execution_path=%s",
+                "background:periodic_synthesis",
+                "background_maintenance",
+                ["archive_session_context", "update_memory_store", "consolidate_memories"],
+            )
+        self.bot.update_memory_store(history, turn_context=turn_context)
+        if turn_context is None:
+            consolidated = []
+            timeline = ""
+            forgetting = {
+                "removed": 0,
+                "backup_path": "",
+                "ran": False,
+                "skipped": "missing_turn_context",
+            }
+        else:
+            consolidated = self.bot.consolidate_memories(turn_context=turn_context)
+            timeline = self.bot.refresh_relationship_timeline(turn_context=turn_context)
+            forgetting = self.bot.apply_controlled_forgetting(turn_context=turn_context)
         patterns = self.bot.detect_life_patterns()
         persona_entry = self.bot.evolve_persona()
-        forgetting = self.bot.apply_controlled_forgetting(turn_context=turn_context)
         # Background maintenance is non-semantic in Phase 4 strict mode.
         # Graph projection/sync is SaveNode-owned only.
 

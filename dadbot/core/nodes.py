@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import enum
 import hashlib
 import json
 import logging
@@ -41,6 +42,30 @@ def _stable_sha256(payload: Any) -> str:
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, default=str).encode("utf-8"),
     ).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Node-level failure mode taxonomy
+# ---------------------------------------------------------------------------
+
+
+class NodeFailureMode(enum.Enum):
+    """Defines how a node responds to an internal failure.
+
+    Every ``except`` block in a node must be annotated with one of these values
+    so that failure behavior is explicit and auditable:
+
+    FAIL_HARD   — re-raises; pipeline aborts.  Use for security/contract
+                  boundaries (e.g. safety enforcement failure).
+    RECOVERABLE — records the error explicitly in ``context.state`` and
+                  continues in a documented degraded mode.
+    RETRYABLE   — eligible for kernel-level retry before escalating to
+                  FAIL_HARD.  Currently advisory; reserved for future use.
+    """
+
+    FAIL_HARD = "fail_hard"
+    RECOVERABLE = "recoverable"
+    RETRYABLE = "retryable"
 
 
 # ---------------------------------------------------------------------------
@@ -257,13 +282,24 @@ class ContextBuilderNode:
                             context.state["memories"],
                             active_goals,
                         )
-                    except Exception as exc:  # noqa: BLE001 — non-fatal goal ranker; fallback to unranked memories
-                        logger.warning(
-                            "GoalAwareRanker.rerank failed (non-fatal): %s",
-                            exc,
-                        )
-            except Exception as exc:  # noqa: BLE001 — non-fatal memory query; pipeline continues without memories
-                logger.warning("MemoryNode.query failed (non-fatal): %s", exc)
+                    except Exception as exc:  # NodeFailureMode.RECOVERABLE — goal ranker is advisory;
+                        # continue with unranked memories and record explicitly.
+                        logger.warning("GoalAwareRanker.rerank failed: %s", exc)
+                        context.state["goal_ranker_failure"] = {
+                            "error": str(exc),
+                            "failure_mode": NodeFailureMode.RECOVERABLE.value,
+                            "resolution": "unranked_memories_used",
+                        }
+            except Exception as exc:  # NodeFailureMode.RECOVERABLE — memory query failure is non-fatal;
+                # pipeline continues with empty memories.  Recorded explicitly so
+                # downstream nodes can check state["context_builder_failure"].
+                logger.warning("MemoryNode.query failed: %s", exc)
+                context.state["context_builder_failure"] = {
+                    "stage": "memory_query",
+                    "error": str(exc),
+                    "failure_mode": NodeFailureMode.RECOVERABLE.value,
+                    "resolution": "empty_memories",
+                }
             return context
 
         build_context = getattr(self.mgr, "build_context", None)
@@ -273,8 +309,15 @@ class ContextBuilderNode:
                 if isinstance(rich_context, dict):
                     rich_context.setdefault("temporal", context.temporal_snapshot())
                 context.state["rich_context"] = rich_context
-            except Exception as exc:  # noqa: BLE001 — non-fatal context build; pipeline continues with partial context
-                logger.warning("MemoryNode.build_context failed (non-fatal): %s", exc)
+            except Exception as exc:  # NodeFailureMode.RECOVERABLE — context build failure is non-fatal;
+                # pipeline continues with partial context.  Recorded explicitly.
+                logger.warning("MemoryNode.build_context failed: %s", exc)
+                context.state["context_builder_failure"] = {
+                    "stage": "build_context",
+                    "error": str(exc),
+                    "failure_mode": NodeFailureMode.RECOVERABLE.value,
+                    "resolution": "partial_context",
+                }
         return context
 
 
@@ -632,96 +675,111 @@ def _build_subtask_context(
     return sub_ctx
 
 
-class InferenceNode:
-    """Pure cognition loop executor - runs AgentService.run_agent as the sole inference path.
+# ---------------------------------------------------------------------------
+# Phase 3 decomposition: InferenceNode internal helper classes
+# ---------------------------------------------------------------------------
 
-    Phase 4 extensions (all contained inside this node; no pipeline shape change):
 
-    - **Sub-task delegation** (Priority 1): LLM emits
-      ``{"type": "delegate", "subtasks": [...]}``.  Each sub-task is executed
-      synchronously via ``run_agent`` at most ``_MAX_DELEGATION_DEPTH`` levels deep.
-      Results are merged and committed through the existing SaveNode.
-    - **Structured reasoning** (Priority 2): LLM emits
-      ``{"type": "reasoning", "steps": [...], "conclusion": "..."}`` or
-      ``{"type": "plan", ...}``.  The conclusion is extracted as the reply;
-      step list is saved to ``context.state["reasoning_steps"]``.
-    - **Tool calling** (Priority 3): LLM emits
-      ``{"type": "tool", "name": "...", "args": {...}}``.  Dispatched to the
-      built-in tool registry; result fed back for a follow-up inference call.
-    - **Depth guard** (Priority 4): delegation depth is tracked and capped at
-      ``_MAX_DELEGATION_DEPTH``; ``delegation_depth_exceeded`` is stamped in
-      metadata when the guard fires.
+class _InferenceToolDispatcher:
+    """Owns inline tool-call execution for InferenceNode.
 
-    No fallback generation path exists.  If the bound manager does not expose
-    ``run_agent``, the node raises ``RuntimeError`` at run-time rather than
-    silently routing through a legacy path.
+    Responsibility boundary: execute exactly ONE builtin tool per structured
+    ``{"type": "tool", ...}`` block emitted by the LLM, then optionally issue
+    a follow-up inference call so the LLM can narrate the result.
+
+    This class MUST NOT make routing decisions or manage the critique loop.
     """
 
-    def __init__(
-        self,
-        llm_manager: Any,
-        *,
-        critique_engine: Any = None,
-        max_loop_iterations: int = 2,
-    ) -> None:
-        self.mgr = llm_manager
-        self._critique_engine = critique_engine
-        self._max_loop_iterations = max(1, int(max_loop_iterations))
+    def __init__(self, mgr: Any) -> None:
+        self.mgr = mgr
 
-    # ------------------------------------------------------------------
-    # Structured-output dispatch
-    # ------------------------------------------------------------------
+    async def handle_tool_call(self, context: TurnContext, block: dict) -> str:
+        """Execute a built-in tool and optionally follow up with inference."""
+        tool_name = str(block.get("name") or "").strip().lower()
+        tool_args = dict(block.get("args") or {})
+        try:
+            tool_result = _dispatch_builtin_tool(tool_name, tool_args, context)
+            record_external_system_call(
+                operation="inference_tool_call",
+                system=f"builtin_tool:{tool_name}",
+                request_payload={"args": dict(tool_args)},
+                response_payload={"output": tool_result, "status": "ok"},
+                status="ok",
+                source="inference_node",
+                required=False,
+            )
+        except Exception as exc:
+            record_external_system_call(
+                operation="inference_tool_call",
+                system=f"builtin_tool:{tool_name}",
+                request_payload={"args": dict(tool_args)},
+                response_payload={"status": "error", "error": str(exc)},
+                status="error",
+                source="inference_node",
+                required=False,
+            )
+            raise
+        context.state["tool_result"] = tool_result
+        context.state["tool_called"] = tool_name
+        context.metadata["tool_called"] = tool_name
+        context.metadata["tool_call_executed"] = True
 
-    async def _resolve_candidate(
-        self,
-        context: TurnContext,
-        raw_result: Any,
-        *,
-        depth: int = 0,
-    ) -> Any:
-        """Resolve raw ``run_agent`` output, expanding any structured block inline.
+        run_agent = getattr(self.mgr, "run_agent", None)
+        if callable(run_agent) and tool_result:
+            _run_agent_fn = cast(Any, run_agent)
+            follow_input = f"[Tool result for '{tool_name}']: {tool_result}\n\nOriginal question: {context.user_input}"
+            follow_ctx = TurnContext(
+                user_input=follow_input,
+                metadata={
+                    "determinism": dict(context.metadata.get("determinism") or {}),
+                    "temporal": dict(context.metadata.get("temporal") or {}),
+                    "parent_trace_id": context.trace_id,
+                    "tool_follow_up": True,
+                },
+                state={
+                    "rich_context": dict(context.state.get("rich_context") or {}),
+                    "tool_result": tool_result,
+                },
+            )
+            follow_ctx.temporal = context.temporal
+            try:
+                follow_raw = await _run_agent_fn(
+                    follow_ctx,
+                    follow_ctx.state.get("rich_context", {}),
+                )
+                follow_reply = follow_raw[0] if isinstance(follow_raw, tuple) else str(follow_raw or "")
+                if _parse_structured_block(follow_reply) is None:
+                    return follow_reply
+            except Exception as exc:  # NodeFailureMode.RECOVERABLE — follow-up inference is non-critical;
+                # the raw tool result is a valid response.  Record explicitly.
+                logger.warning("Tool follow-up inference failed: %s", exc)
+                context.state["tool_follow_up_failure"] = {
+                    "tool": tool_name,
+                    "error": str(exc),
+                    "failure_mode": NodeFailureMode.RECOVERABLE.value,
+                    "resolution": "raw_tool_result_returned",
+                }
+        return str(tool_result)
 
-        Returns the same ``(reply, should_exit)`` tuple shape; only the reply
-        text is transformed when a recognised structured block is detected.
-        """
-        reply = raw_result[0] if isinstance(raw_result, tuple) else str(raw_result or "")
-        should_exit = raw_result[1] if isinstance(raw_result, tuple) and len(raw_result) > 1 else False
-        block = _parse_structured_block(reply)
-        if block is None:
-            return raw_result
-        resolved = await self._handle_block(context, block, depth=depth)
-        return (resolved, should_exit)
 
-    async def _handle_block(
-        self,
-        context: TurnContext,
-        block: dict,
-        *,
-        depth: int,
-    ) -> str:
-        """Dispatch a structured block to its typed handler."""
-        block_type = str(block.get("type") or "").lower()
-        if block_type == "delegate":
-            return await self._handle_delegation(context, block, depth=depth)
-        if block_type == "tool":
-            return await self._handle_tool_call(context, block)
-        if block_type in ("reasoning", "plan"):
-            return self._handle_reasoning(context, block)
-        return str(block)
+class _InferenceDelegationCoordinator:
+    """Owns all multi-agent sub-task delegation logic for InferenceNode.
 
-    # ------------------------------------------------------------------
-    # Priority 1: Sub-task delegation — helpers
-    # ------------------------------------------------------------------
+    Responsibility boundary: orchestrate sub-task execution (sequential or
+    parallel), merge results, and record delegation metadata.  This class MUST
+    NOT perform inference directly — sub-tasks are dispatched through
+    ``mgr.run_agent`` and structured blocks in sub-task replies are resolved
+    via the injected ``handle_block_fn`` callback (owned by InferenceNode).
+    """
+
+    def __init__(self, mgr: Any, *, handle_block_fn: Any) -> None:
+        self.mgr = mgr
+        self._handle_block_fn = handle_block_fn  # InferenceNode._handle_block
 
     def _delegation_depth_guard(self, context: TurnContext, depth: int) -> str | None:
-        """Return a block-message if delegation depth is exceeded, else ``None``."""
         if depth < _MAX_DELEGATION_DEPTH:
             return None
-        logger.warning(
-            "Delegation depth guard triggered at depth=%d (max=%d).",
-            depth,
-            _MAX_DELEGATION_DEPTH,
-        )
+        logger.warning("Delegation depth guard triggered at depth=%d (max=%d).", depth, _MAX_DELEGATION_DEPTH)
         context.metadata["delegation_depth_exceeded"] = True
         context.state["delegation_depth_exceeded"] = True
         context.state["arbitration_metadata"] = {
@@ -747,7 +805,6 @@ class InferenceNode:
         parent_trace: str,
         depth: int,
     ) -> tuple[str, list[tuple[str, str]], list[str], int]:
-        """Return ``(mode, sorted_task_pairs, subtask_ids, requested_count)``."""
         raw_mode = str(block.get("mode") or "sequential").strip().lower()
         mode = raw_mode if raw_mode in _DELEGATION_MODES else "sequential"
         subtasks = list(block.get("subtasks") or [])
@@ -763,7 +820,6 @@ class InferenceNode:
                 agent_name = str(subtask.get("agent") or f"agent_{i}").strip()
             if sub_input:
                 task_pairs.append((sub_input, agent_name))
-        # Sort by deterministic ID so execution order is input-independent.
         _indexed: list[tuple[str, str, str]] = [
             (f"{parent_trace}.del{depth}.{i}", inp, name) for i, (inp, name) in enumerate(task_pairs)
         ]
@@ -778,7 +834,6 @@ class InferenceNode:
         task_pairs: list[tuple[str, str]],
         depth: int,
     ) -> list[DelegateResult]:
-        """Execute sub-tasks concurrently and collect results."""
         coros = [self._run_subtask(context, inp, depth=depth + 1, agent_name=name) for inp, name in task_pairs]
         gathered = await asyncio.gather(*coros, return_exceptions=True)
         results: list[DelegateResult] = []
@@ -786,9 +841,7 @@ class InferenceNode:
             if isinstance(outcome, BaseException):
                 text = f"[Sub-task failed: {name} -> {str(outcome)[:100]}]"
                 logger.warning("Parallel sub-task %r failed: %s", name, outcome)
-                results.append(
-                    DelegateResult(task_input=_inp, agent_name=name, success=False, payload=None, error=text)
-                )
+                results.append(DelegateResult(task_input=_inp, agent_name=name, success=False, payload=None, error=text))
             else:
                 results.append(outcome)
         return results
@@ -800,18 +853,10 @@ class InferenceNode:
         depth: int,
         blackboard: dict[str, str],
     ) -> list[DelegateResult]:
-        """Execute sub-tasks one-by-one, posting each result to the shared blackboard."""
         results: list[DelegateResult] = []
         for inp, name in task_pairs:
-            sub_result = await self._run_subtask(
-                context,
-                inp,
-                depth=depth + 1,
-                agent_name=name,
-                blackboard=blackboard,
-            )
+            sub_result = await self._run_subtask(context, inp, depth=depth + 1, agent_name=name, blackboard=blackboard)
             results.append(sub_result)
-            # Sequential mode: downstream subtasks see upstream outputs via blackboard.
             blackboard[name] = str(sub_result.payload or "") if sub_result.success else str(sub_result.error or "")
         return results
 
@@ -826,7 +871,6 @@ class InferenceNode:
         requested_subtasks: int,
         blackboard: dict[str, str],
     ) -> str:
-        """Merge results, stamp state/metadata, and return the final reply string."""
         result_texts: list[str] = []
         for item in delegate_results:
             if item.success:
@@ -881,34 +925,13 @@ class InferenceNode:
             context.state["assistant_response"] = f"Task completed with delegation.{visible_summary}"
         return f"{summary}\n\n{merged_details}{visible_summary}"
 
-    # ------------------------------------------------------------------
-    # Priority 1: Sub-task delegation — coordinator
-    # ------------------------------------------------------------------
-
-    async def _handle_delegation(
-        self,
-        context: TurnContext,
-        block: dict,
-        *,
-        depth: int,
-    ) -> str:
-        """Execute delegated sub-tasks and merge their results.
-
-        Execution modes (``mode`` key in the delegate block):
-
-        - ``"sequential"`` (default): tasks run one after another; results
-          are posted to ``context.state["agent_blackboard"]`` for inter-agent
-          messaging.
-        - ``"parallel"``: tasks run concurrently via ``asyncio.gather``.
-        """
+    async def handle_delegation(self, context: TurnContext, block: dict, *, depth: int) -> str:
+        """Execute delegated sub-tasks and merge their results."""
         if (blocked_msg := self._delegation_depth_guard(context, depth)) is not None:
             return blocked_msg
-
         parent_trace = str(context.trace_id or "")
         mode, task_pairs, subtask_ids, requested_subtasks = self._resolve_delegation_tasks(
-            block,
-            parent_trace,
-            depth,
+            block, parent_trace, depth,
         )
         if requested_subtasks > _MAX_DELEGATION_SUBTASKS:
             _append_arbitration_log(
@@ -920,32 +943,17 @@ class InferenceNode:
                     "max_subtasks": _MAX_DELEGATION_SUBTASKS,
                 },
             )
-
         seed_board = dict(context.metadata.get("agent_blackboard_seed") or {})
         blackboard: dict[str, str] = (
             dict(seed_board) if depth <= 0 else dict(context.state.get("agent_blackboard") or seed_board)
         )
         context.state["agent_blackboard"] = blackboard
-
         if mode == "parallel":
             delegate_results = await self._run_parallel_delegation(context, task_pairs, depth)
         else:
-            delegate_results = await self._run_sequential_delegation(
-                context,
-                task_pairs,
-                depth,
-                blackboard,
-            )
-
+            delegate_results = await self._run_sequential_delegation(context, task_pairs, depth, blackboard)
         return self._record_delegation_outcome(
-            context,
-            delegate_results,
-            mode,
-            depth,
-            task_pairs,
-            subtask_ids,
-            requested_subtasks,
-            blackboard,
+            context, delegate_results, mode, depth, task_pairs, subtask_ids, requested_subtasks, blackboard,
         )
 
     async def _run_subtask(
@@ -957,7 +965,6 @@ class InferenceNode:
         agent_name: str = "",
         blackboard: dict[str, str] | None = None,
     ) -> DelegateResult:
-        """Run a single delegated sub-task through inference only."""
         run_agent = getattr(self.mgr, "run_agent", None)
         if not callable(run_agent):
             return DelegateResult(
@@ -981,31 +988,18 @@ class InferenceNode:
                     payload=None,
                     error=(
                         f"[Sub-task failed: '{_safe_snippet(subtask_input)}' -> "
-                        f"{agent_name or 'agent'} returned no output."
-                        "]"
+                        f"{agent_name or 'agent'} returned no output.]"
                     ),
                 )
-            return DelegateResult(
-                task_input=subtask_input,
-                agent_name=str(agent_name or "agent"),
-                success=True,
-                payload=text,
-                error="",
-            )
+            return DelegateResult(task_input=subtask_input, agent_name=str(agent_name or "agent"), success=True, payload=text, error="")
         except Exception as exc:  # noqa: BLE001 — subtask inference may raise arbitrary LLM/IO errors; always return DelegateResult
-            logger.warning(
-                "Sub-task inference failed (depth=%d, agent=%s): %s",
-                depth,
-                agent_name,
-                exc,
-            )
-            error_msg = f"[Sub-task failed: '{_safe_snippet(subtask_input)}' -> {str(exc)[:100]}]"
+            logger.warning("Sub-task inference failed (depth=%d, agent=%s): %s", depth, agent_name, exc)
             return DelegateResult(
                 task_input=subtask_input,
                 agent_name=str(agent_name or "agent"),
                 success=False,
                 payload=None,
-                error=error_msg,
+                error=f"[Sub-task failed: '{_safe_snippet(subtask_input)}' -> {str(exc)[:100]}]",
             )
 
     async def _resolve_subtask_reply(
@@ -1017,11 +1011,11 @@ class InferenceNode:
         subtask_input: str,
         parent_context: TurnContext,
     ) -> str:
-        """Parse sub-task raw reply, handle structured blocks, propagate depth-guard."""
         reply = sub_raw[0] if isinstance(sub_raw, tuple) else str(sub_raw or "")
         sub_block = _parse_structured_block(reply)
         if sub_block is not None:
-            reply = await self._handle_block(sub_ctx, sub_block, depth=depth)
+            # Resolve via InferenceNode._handle_block (injected callback).
+            reply = await self._handle_block_fn(sub_ctx, sub_block, depth=depth)
             if bool(sub_ctx.metadata.get("delegation_depth_exceeded")):
                 parent_context.metadata["delegation_depth_exceeded"] = True
                 parent_context.state["delegation_depth_exceeded"] = True
@@ -1037,76 +1031,87 @@ class InferenceNode:
                 )
         return str(reply or "").strip()
 
+
+class InferenceNode:
+    """Pure cognition loop executor - runs AgentService.run_agent as the sole inference path.
+
+    Phase 4 extensions (all contained inside this node; no pipeline shape change):
+
+    - **Sub-task delegation** (Priority 1): LLM emits
+      ``{"type": "delegate", "subtasks": [...]}``.  Each sub-task is executed
+      synchronously via ``run_agent`` at most ``_MAX_DELEGATION_DEPTH`` levels deep.
+      Results are merged and committed through the existing SaveNode.
+    - **Structured reasoning** (Priority 2): LLM emits
+      ``{"type": "reasoning", "steps": [...], "conclusion": "..."}`` or
+      ``{"type": "plan", ...}``.  The conclusion is extracted as the reply;
+      step list is saved to ``context.state["reasoning_steps"]``.
+    - **Tool calling** (Priority 3): LLM emits
+      ``{"type": "tool", "name": "...", "args": {...}}``.  Dispatched to the
+      built-in tool registry; result fed back for a follow-up inference call.
+    - **Depth guard** (Priority 4): delegation depth is tracked and capped at
+      ``_MAX_DELEGATION_DEPTH``; ``delegation_depth_exceeded`` is stamped in
+      metadata when the guard fires.
+
+    No fallback generation path exists.  If the bound manager does not expose
+    ``run_agent``, the node raises ``RuntimeError`` at run-time rather than
+    silently routing through a legacy path.
+    """
+
+    def __init__(
+        self,
+        llm_manager: Any,
+        *,
+        critique_engine: Any = None,
+        max_loop_iterations: int = 2,
+    ) -> None:
+        self.mgr = llm_manager
+        self._critique_engine = critique_engine
+        self._max_loop_iterations = max(1, int(max_loop_iterations))
+        self._tool_dispatcher = _InferenceToolDispatcher(llm_manager)
+        self._delegation_coordinator = _InferenceDelegationCoordinator(
+            llm_manager, handle_block_fn=self._handle_block
+        )
+
     # ------------------------------------------------------------------
-    # Priority 3: Tool calling
+    # Structured-output dispatch
     # ------------------------------------------------------------------
 
-    async def _handle_tool_call(self, context: TurnContext, block: dict) -> str:
-        """Execute a built-in tool and optionally follow up with inference.
+    async def _resolve_candidate(
+        self,
+        context: TurnContext,
+        raw_result: Any,
+        *,
+        depth: int = 0,
+    ) -> Any:
+        """Resolve raw ``run_agent`` output, expanding any structured block inline.
 
-        Tool name and result are stamped into ``context.state`` and
-        ``context.metadata``.  If the tool succeeds a follow-up ``run_agent``
-        call is made so the LLM can produce a natural-language reply.
+        Returns the same ``(reply, should_exit)`` tuple shape; only the reply
+        text is transformed when a recognised structured block is detected.
         """
-        tool_name = str(block.get("name") or "").strip().lower()
-        tool_args = dict(block.get("args") or {})
-        try:
-            tool_result = _dispatch_builtin_tool(tool_name, tool_args, context)
-            record_external_system_call(
-                operation="inference_tool_call",
-                system=f"builtin_tool:{tool_name}",
-                request_payload={"args": dict(tool_args)},
-                response_payload={"output": tool_result, "status": "ok"},
-                status="ok",
-                source="inference_node",
-                required=False,
-            )
-        except Exception as exc:
-            record_external_system_call(
-                operation="inference_tool_call",
-                system=f"builtin_tool:{tool_name}",
-                request_payload={"args": dict(tool_args)},
-                response_payload={"status": "error", "error": str(exc)},
-                status="error",
-                source="inference_node",
-                required=False,
-            )
-            raise
-        context.state["tool_result"] = tool_result
-        context.state["tool_called"] = tool_name
-        context.metadata["tool_called"] = tool_name
-        context.metadata["tool_call_executed"] = True
+        reply = raw_result[0] if isinstance(raw_result, tuple) else str(raw_result or "")
+        should_exit = raw_result[1] if isinstance(raw_result, tuple) and len(raw_result) > 1 else False
+        block = _parse_structured_block(reply)
+        if block is None:
+            return raw_result
+        resolved = await self._handle_block(context, block, depth=depth)
+        return (resolved, should_exit)
 
-        run_agent = getattr(self.mgr, "run_agent", None)
-        if callable(run_agent) and tool_result:
-            _run_agent_fn = cast(Any, run_agent)
-            follow_input = f"[Tool result for '{tool_name}']: {tool_result}\n\nOriginal question: {context.user_input}"
-            follow_ctx = TurnContext(
-                user_input=follow_input,
-                metadata={
-                    "determinism": dict(context.metadata.get("determinism") or {}),
-                    "temporal": dict(context.metadata.get("temporal") or {}),
-                    "parent_trace_id": context.trace_id,
-                    "tool_follow_up": True,
-                },
-                state={
-                    "rich_context": dict(context.state.get("rich_context") or {}),
-                    "tool_result": tool_result,
-                },
-            )
-            follow_ctx.temporal = context.temporal
-            try:
-                follow_raw = await _run_agent_fn(
-                    follow_ctx,
-                    follow_ctx.state.get("rich_context", {}),
-                )
-                follow_reply = follow_raw[0] if isinstance(follow_raw, tuple) else str(follow_raw or "")
-                # Do not recurse on structured output from follow-up calls.
-                if _parse_structured_block(follow_reply) is None:
-                    return follow_reply
-            except Exception as exc:  # noqa: BLE001 — follow-up inference is best-effort; fall back to raw tool result
-                logger.warning("Tool follow-up inference failed: %s", exc)
-        return str(tool_result)
+    async def _handle_block(
+        self,
+        context: TurnContext,
+        block: dict,
+        *,
+        depth: int,
+    ) -> str:
+        """Dispatch a structured block to its typed handler."""
+        block_type = str(block.get("type") or "").lower()
+        if block_type == "delegate":
+            return await self._delegation_coordinator.handle_delegation(context, block, depth=depth)
+        if block_type == "tool":
+            return await self._tool_dispatcher.handle_tool_call(context, block)
+        if block_type in ("reasoning", "plan"):
+            return self._handle_reasoning(context, block)
+        return str(block)
 
     # ------------------------------------------------------------------
     # Priority 2: Structured reasoning output
@@ -1193,8 +1198,16 @@ class InferenceNode:
             # Inject revision hint so the agent can read it on re-run.
             context.state["_critique_revision_context"] = revision_hint
             return False
-        except Exception as exc:  # noqa: BLE001 — critique is non-fatal; skip revision if engine raises
-            logger.warning("CritiqueEngine.critique failed (non-fatal): %s", exc)
+        except Exception as exc:  # NodeFailureMode.RECOVERABLE — critique engine failure is non-fatal;
+            # the iteration loop continues without revision.  Record explicitly so
+            # the failure is visible in state for post-turn diagnostics.
+            logger.warning("CritiqueEngine.critique failed: %s", exc)
+            context.state["critique_engine_failure"] = {
+                "iteration": iteration,
+                "error": str(exc),
+                "failure_mode": NodeFailureMode.RECOVERABLE.value,
+                "resolution": "critique_skipped",
+            }
             return True
 
     async def run(self, context: TurnContext) -> TurnContext:
@@ -1267,21 +1280,53 @@ class SafetyNode:
         if callable(enforce):
             try:
                 context.state["safe_result"] = enforce(context, candidate)
-            except Exception as exc:  # noqa: BLE001 — safety enforcement must not crash; fall back to unguarded candidate
-                logger.error("SafetyNode.enforce_policies failed: %s", exc)
-                context.state["safe_result"] = candidate
+            except Exception as exc:
+                # NodeFailureMode.FAIL_HARD — safety enforcement failure must never
+                # silently fall back to an unguarded candidate.  Record the failure
+                # in state for post-mortem auditing, then re-raise so the pipeline
+                # aborts rather than delivering an unsafe response.
+                context.state["safety_enforcement_failure"] = {
+                    "stage": "enforce_policies",
+                    "error": str(exc),
+                    "failure_mode": NodeFailureMode.FAIL_HARD.value,
+                }
+                logger.error("SafetyNode.enforce_policies failed [FAIL_HARD]: %s", exc)
+                raise RuntimeError(
+                    f"SafetyNode: safety enforcement failed — turn rejected [{NodeFailureMode.FAIL_HARD.value}]: {exc}"
+                ) from exc
             return context
 
         validate = getattr(self.mgr, "validate", None)
         if callable(validate):
             try:
                 context.state["safe_result"] = validate(candidate)
-            except Exception as exc:  # noqa: BLE001 — validator may raise arbitrary errors; fall back to unvalidated candidate
-                logger.error("SafetyNode.validate failed: %s", exc)
-                context.state["safe_result"] = candidate
+            except Exception as exc:
+                # NodeFailureMode.FAIL_HARD — same rationale as enforce_policies above.
+                context.state["safety_enforcement_failure"] = {
+                    "stage": "validate",
+                    "error": str(exc),
+                    "failure_mode": NodeFailureMode.FAIL_HARD.value,
+                }
+                logger.error("SafetyNode.validate failed [FAIL_HARD]: %s", exc)
+                raise RuntimeError(
+                    f"SafetyNode: safety validation failed — turn rejected [{NodeFailureMode.FAIL_HARD.value}]: {exc}"
+                ) from exc
             return context
 
+        # Neither enforce_policies nor validate is available on this manager.
+        # Stamp the passthrough explicitly so the failure mode is auditable.
+        # NodeFailureMode: RECOVERABLE — degraded safety posture, not a hard failure,
+        # but must be visible for post-mortem inspection.
         context.state["safe_result"] = candidate
+        context.state["safety_passthrough"] = {
+            "reason": "no_safety_manager",
+            "failure_mode": NodeFailureMode.RECOVERABLE.value,
+            "note": "no enforce_policies or validate method found; candidate passed without safety check",
+        }
+        logger.warning(
+            "SafetyNode: no safety manager callable found — candidate passed unguarded [%s]",
+            NodeFailureMode.RECOVERABLE.value,
+        )
         return context
 
 

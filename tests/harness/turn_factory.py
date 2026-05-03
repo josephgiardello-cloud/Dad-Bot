@@ -99,14 +99,35 @@ class TurnFactory:
         return self.build_turn(seed, **kwargs), self.build_turn(seed, **kwargs)
 
     def context_snapshot_hash(self, ctx: TurnContext) -> str:
-        """Stable hash of the observable context state for replay comparison."""
+        """Stable hash of deterministic serialized snapshot scope only.
+
+        Uses serialized context and a normalized execution-trace projection
+        (sequence/type/stage/phase) and explicitly excludes volatile timings.
+        """
         import json
 
-        key_state = {
-            "trace_id": ctx.trace_id,
-            "user_input": ctx.user_input,
-            "temporal_wall_time": ctx.temporal.wall_time,
-            "temporal_wall_date": ctx.temporal.wall_date,
-            "phase": ctx.phase.value,
+        raw_trace = list(getattr(ctx, "state", {}).get("execution_trace") or [])
+        normalized_trace = [
+            {
+                "sequence": int(item.get("sequence", 0) or 0),
+                "event_type": str(item.get("event_type", "") or ""),
+                "stage": str(item.get("stage", "") or ""),
+                "phase": str(item.get("phase", "") or ""),
+            }
+            for item in raw_trace
+            if isinstance(item, dict)
+        ]
+
+        snapshot = {
+            "schema_version": "1",
+            "context": {
+                "trace_id": str(getattr(ctx, "trace_id", "") or ""),
+                "user_input": str(getattr(ctx, "user_input", "") or ""),
+                "temporal_wall_time": str(getattr(getattr(ctx, "temporal", None), "wall_time", "") or ""),
+                "temporal_wall_date": str(getattr(getattr(ctx, "temporal", None), "wall_date", "") or ""),
+                "phase": str(getattr(getattr(ctx, "phase", None), "value", "") or ""),
+            },
+            "trace": normalized_trace,
         }
-        return hashlib.sha256(json.dumps(key_state, sort_keys=True).encode()).hexdigest()[:24]
+        serialized = json.dumps(snapshot, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(serialized.encode()).hexdigest()[:24]

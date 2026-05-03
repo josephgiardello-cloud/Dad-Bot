@@ -13,6 +13,16 @@ from Dad import ensure_streamlit_app_file
 pytestmark = pytest.mark.ui
 
 
+def _copytree_ignore_runtime_artifacts(_src: str, names: list[str]) -> set[str]:
+    ignored: set[str] = set()
+    for name in names:
+        if name == "__pycache__":
+            ignored.add(name)
+        elif name.endswith((".pyc", ".pyo", ".pyd")):
+            ignored.add(name)
+    return ignored
+
+
 def test_ensure_streamlit_app_file_creates_minimal_stub(tmp_path):
     target = tmp_path / "dad_streamlit.py"
 
@@ -33,10 +43,10 @@ def test_dad_streamlit_app_starts_without_streamlit_exceptions(tmp_path):
     for file_name in ("Dad.py", "dad_streamlit.py", "dad_profile.json", "dad_profile.template.json"):
         shutil.copy2(repo_root / file_name, sandbox_root / file_name)
 
-    shutil.copytree(repo_root / "dadbot", sandbox_root / "dadbot")
-    shutil.copytree(repo_root / "dadbot_system", sandbox_root / "dadbot_system")
-    shutil.copytree(repo_root / "static", sandbox_root / "static")
-    shutil.copytree(repo_root / ".streamlit", sandbox_root / ".streamlit")
+    shutil.copytree(repo_root / "dadbot", sandbox_root / "dadbot", ignore=_copytree_ignore_runtime_artifacts)
+    shutil.copytree(repo_root / "dadbot_system", sandbox_root / "dadbot_system", ignore=_copytree_ignore_runtime_artifacts)
+    shutil.copytree(repo_root / "static", sandbox_root / "static", ignore=_copytree_ignore_runtime_artifacts)
+    shutil.copytree(repo_root / ".streamlit", sandbox_root / ".streamlit", ignore=_copytree_ignore_runtime_artifacts)
 
     smoke_code = textwrap.dedent(
         """
@@ -80,10 +90,10 @@ def test_preferences_tab_shows_detected_cloud_llm_api_key_hint(tmp_path):
     for file_name in ("Dad.py", "dad_streamlit.py", "dad_profile.json", "dad_profile.template.json"):
         shutil.copy2(repo_root / file_name, sandbox_root / file_name)
 
-    shutil.copytree(repo_root / "dadbot", sandbox_root / "dadbot")
-    shutil.copytree(repo_root / "dadbot_system", sandbox_root / "dadbot_system")
-    shutil.copytree(repo_root / "static", sandbox_root / "static")
-    shutil.copytree(repo_root / ".streamlit", sandbox_root / ".streamlit")
+    shutil.copytree(repo_root / "dadbot", sandbox_root / "dadbot", ignore=_copytree_ignore_runtime_artifacts)
+    shutil.copytree(repo_root / "dadbot_system", sandbox_root / "dadbot_system", ignore=_copytree_ignore_runtime_artifacts)
+    shutil.copytree(repo_root / "static", sandbox_root / "static", ignore=_copytree_ignore_runtime_artifacts)
+    shutil.copytree(repo_root / ".streamlit", sandbox_root / ".streamlit", ignore=_copytree_ignore_runtime_artifacts)
 
     profile_path = sandbox_root / "dad_profile.json"
     profile_payload = json.loads(profile_path.read_text(encoding="utf-8"))
@@ -154,10 +164,10 @@ def test_sidebar_and_button_surface_accessible(tmp_path):
     for file_name in ("Dad.py", "dad_streamlit.py", "dad_profile.json", "dad_profile.template.json"):
         shutil.copy2(repo_root / file_name, sandbox_root / file_name)
 
-    shutil.copytree(repo_root / "dadbot", sandbox_root / "dadbot")
-    shutil.copytree(repo_root / "dadbot_system", sandbox_root / "dadbot_system")
-    shutil.copytree(repo_root / "static", sandbox_root / "static")
-    shutil.copytree(repo_root / ".streamlit", sandbox_root / ".streamlit")
+    shutil.copytree(repo_root / "dadbot", sandbox_root / "dadbot", ignore=_copytree_ignore_runtime_artifacts)
+    shutil.copytree(repo_root / "dadbot_system", sandbox_root / "dadbot_system", ignore=_copytree_ignore_runtime_artifacts)
+    shutil.copytree(repo_root / "static", sandbox_root / "static", ignore=_copytree_ignore_runtime_artifacts)
+    shutil.copytree(repo_root / ".streamlit", sandbox_root / ".streamlit", ignore=_copytree_ignore_runtime_artifacts)
 
     smoke_code = textwrap.dedent(
         """

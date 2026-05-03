@@ -50,6 +50,34 @@ if ollama is None:
 logger = logging.getLogger(__name__)
 
 
+class _ManagerDescriptor:
+    """Data descriptor for a single named manager slot on DadBot.
+
+    Replaces repetitive ``@property`` / ``@<name>.setter`` pairs.  Both
+    read and write delegate to the instance helpers
+    ``_get_explicit_manager`` and ``_set_explicit_manager`` so that the
+    existing backing-store convention (``self._<name>``) and the
+    service-container fallback are preserved exactly.
+
+    The *name* argument is the *canonical* backing name.  Setting a
+    descriptor whose attribute name differs from *name* produces an alias
+    (e.g. ``context_builder`` aliased to ``context_service``).
+    """
+
+    __slots__ = ("_name",)
+
+    def __init__(self, name: str) -> None:
+        self._name = name
+
+    def __get__(self, obj: Any, objtype: Any = None) -> Any:
+        if obj is None:
+            return self  # class-level access returns the descriptor itself
+        return obj._get_explicit_manager(self._name)
+
+    def __set__(self, obj: Any, value: Any) -> None:
+        obj._set_explicit_manager(self._name, value)
+
+
 class DadBot(
     DadBotBootMixin,
     DadBotTurnMixin,
@@ -361,242 +389,41 @@ class DadBot(
         return self.services.turn_orchestrator
 
     # ------------------------------------------------------------------
-    # Explicit manager properties (getter + setter)
+    # Explicit manager descriptors  (replaces property/setter boilerplate)
     # ------------------------------------------------------------------
+    # Each line is equivalent to a @property + @<name>.setter pair that
+    # delegates to _get_explicit_manager / _set_explicit_manager.
+    # Aliases use a different canonical name than their attribute name.
 
-    @property
-    def runtime_storage(self):
-        return self._get_explicit_manager("runtime_storage")
-
-    @runtime_storage.setter
-    def runtime_storage(self, value: Any):
-        self._set_explicit_manager("runtime_storage", value)
-
-    @property
-    def profile_runtime(self):
-        return self._get_explicit_manager("profile_runtime")
-
-    @profile_runtime.setter
-    def profile_runtime(self, value: Any):
-        self._set_explicit_manager("profile_runtime", value)
-
-    @property
-    def mood_manager(self):
-        return self._get_explicit_manager("mood_manager")
-
-    @mood_manager.setter
-    def mood_manager(self, value: Any):
-        self._set_explicit_manager("mood_manager", value)
-
-    @property
-    def turn_service(self):
-        return self._get_explicit_manager("turn_service")
-
-    @turn_service.setter
-    def turn_service(self, value: Any):
-        self._set_explicit_manager("turn_service", value)
-
-    @property
-    def reply_finalization(self):
-        return self._get_explicit_manager("reply_finalization")
-
-    @reply_finalization.setter
-    def reply_finalization(self, value: Any):
-        self._set_explicit_manager("reply_finalization", value)
-
-    @property
-    def runtime_interface(self):
-        return self._get_explicit_manager("runtime_interface")
-
-    @runtime_interface.setter
-    def runtime_interface(self, value: Any):
-        self._set_explicit_manager("runtime_interface", value)
-
-    @property
-    def status_reporting(self):
-        return self._get_explicit_manager("status_reporting")
-
-    @status_reporting.setter
-    def status_reporting(self, value: Any):
-        self._set_explicit_manager("status_reporting", value)
-
-    @property
-    def model_runtime(self):
-        return self._get_explicit_manager("model_runtime")
-
-    @model_runtime.setter
-    def model_runtime(self, value: Any):
-        self._set_explicit_manager("model_runtime", value)
-
-    @property
-    def runtime_client(self):
-        return self._get_explicit_manager("runtime_client")
-
-    @runtime_client.setter
-    def runtime_client(self, value: Any):
-        self._set_explicit_manager("runtime_client", value)
-
-    @property
-    def maintenance_scheduler(self):
-        return self._get_explicit_manager("maintenance_scheduler")
-
-    @maintenance_scheduler.setter
-    def maintenance_scheduler(self, value: Any):
-        self._set_explicit_manager("maintenance_scheduler", value)
-
-    @property
-    def health_manager(self):
-        return self._get_explicit_manager("health_manager")
-
-    @health_manager.setter
-    def health_manager(self, value: Any):
-        self._set_explicit_manager("health_manager", value)
-
-    @property
-    def internal_state_manager(self):
-        return self._get_explicit_manager("internal_state_manager")
-
-    @internal_state_manager.setter
-    def internal_state_manager(self, value: Any):
-        self._set_explicit_manager("internal_state_manager", value)
-
-    @property
-    def runtime_state_manager(self):
-        return self._get_explicit_manager("runtime_state_manager")
-
-    @runtime_state_manager.setter
-    def runtime_state_manager(self, value: Any):
-        self._set_explicit_manager("runtime_state_manager", value)
-
-    @property
-    def prompt_assembly(self):
-        return self._get_explicit_manager("prompt_assembly")
-
-    @prompt_assembly.setter
-    def prompt_assembly(self, value: Any):
-        self._set_explicit_manager("prompt_assembly", value)
-
-    @property
-    def context_service(self):
-        return self._get_explicit_manager("context_service")
-
-    @context_service.setter
-    def context_service(self, value: Any):
-        self._set_explicit_manager("context_service", value)
-
-    @property
-    def context_builder(self):
-        # Compatibility alias during context_builder collapse.
-        return self._get_explicit_manager("context_service")
-
-    @context_builder.setter
-    def context_builder(self, value: Any):
-        self._set_explicit_manager("context_service", value)
-
-    @property
-    def tone_context(self):
-        return self._get_explicit_manager("tone_context")
-
-    @tone_context.setter
-    def tone_context(self, value: Any):
-        self._set_explicit_manager("tone_context", value)
-
-    @property
-    def memory_query(self):
-        # Compatibility alias during memory_query collapse.
-        return self._get_explicit_manager("memory_manager")
-
-    @memory_query.setter
-    def memory_query(self, value: Any):
-        self._set_explicit_manager("memory_manager", value)
-
-    @property
-    def memory_commands(self):
-        return self._get_explicit_manager("memory_commands")
-
-    @memory_commands.setter
-    def memory_commands(self, value: Any):
-        self._set_explicit_manager("memory_commands", value)
-
-    @property
-    def memory_coordinator(self):
-        return self._get_explicit_manager("memory_coordinator")
-
-    @memory_coordinator.setter
-    def memory_coordinator(self, value: Any):
-        self._set_explicit_manager("memory_coordinator", value)
-
-    @property
-    def long_term_signals(self):
-        return self._get_explicit_manager("long_term_signals")
-
-    @long_term_signals.setter
-    def long_term_signals(self, value: Any):
-        self._set_explicit_manager("long_term_signals", value)
-
-    @property
-    def safety_support(self):
-        return self._get_explicit_manager("safety_support")
-
-    @safety_support.setter
-    def safety_support(self, value: Any):
-        self._set_explicit_manager("safety_support", value)
-
-    @property
-    def reply_supervisor(self):
-        return self._get_explicit_manager("reply_supervisor")
-
-    @reply_supervisor.setter
-    def reply_supervisor(self, value: Any):
-        self._set_explicit_manager("reply_supervisor", value)
-
-    @property
-    def multimodal_handler(self):
-        return self._get_explicit_manager("multimodal_handler")
-
-    @multimodal_handler.setter
-    def multimodal_handler(self, value: Any):
-        self._set_explicit_manager("multimodal_handler", value)
-
-    @property
-    def runtime_orchestration(self):
-        return self._get_explicit_manager("runtime_orchestration")
-
-    @runtime_orchestration.setter
-    def runtime_orchestration(self, value: Any):
-        self._set_explicit_manager("runtime_orchestration", value)
-
-    @property
-    def session_summary_manager(self):
-        return self._get_explicit_manager("session_summary_manager")
-
-    @session_summary_manager.setter
-    def session_summary_manager(self, value: Any):
-        self._set_explicit_manager("session_summary_manager", value)
-
-    @property
-    def tool_registry(self):
-        return self._get_explicit_manager("tool_registry")
-
-    @tool_registry.setter
-    def tool_registry(self, value: Any):
-        self._set_explicit_manager("tool_registry", value)
-
-    @property
-    def agentic_handler(self):
-        return self._get_explicit_manager("agentic_handler")
-
-    @agentic_handler.setter
-    def agentic_handler(self, value: Any):
-        self._set_explicit_manager("agentic_handler", value)
-
-    @property
-    def conversation_persistence(self):
-        return self._get_explicit_manager("conversation_persistence")
-
-    @conversation_persistence.setter
-    def conversation_persistence(self, value: Any):
-        self._set_explicit_manager("conversation_persistence", value)
+    runtime_storage        = _ManagerDescriptor("runtime_storage")
+    profile_runtime        = _ManagerDescriptor("profile_runtime")
+    mood_manager           = _ManagerDescriptor("mood_manager")
+    turn_service           = _ManagerDescriptor("turn_service")
+    reply_finalization     = _ManagerDescriptor("reply_finalization")
+    runtime_interface      = _ManagerDescriptor("runtime_interface")
+    status_reporting       = _ManagerDescriptor("status_reporting")
+    model_runtime          = _ManagerDescriptor("model_runtime")
+    runtime_client         = _ManagerDescriptor("runtime_client")
+    maintenance_scheduler  = _ManagerDescriptor("maintenance_scheduler")
+    health_manager         = _ManagerDescriptor("health_manager")
+    internal_state_manager = _ManagerDescriptor("internal_state_manager")
+    runtime_state_manager  = _ManagerDescriptor("runtime_state_manager")
+    prompt_assembly        = _ManagerDescriptor("prompt_assembly")
+    context_service        = _ManagerDescriptor("context_service")
+    context_builder        = _ManagerDescriptor("context_service")   # compat alias → context_service
+    tone_context           = _ManagerDescriptor("tone_context")
+    memory_query           = _ManagerDescriptor("memory_manager")    # compat alias → memory_manager
+    memory_commands        = _ManagerDescriptor("memory_commands")
+    memory_coordinator     = _ManagerDescriptor("memory_coordinator")
+    long_term_signals      = _ManagerDescriptor("long_term_signals")
+    safety_support         = _ManagerDescriptor("safety_support")
+    reply_supervisor       = _ManagerDescriptor("reply_supervisor")
+    multimodal_handler     = _ManagerDescriptor("multimodal_handler")
+    runtime_orchestration  = _ManagerDescriptor("runtime_orchestration")
+    session_summary_manager = _ManagerDescriptor("session_summary_manager")
+    tool_registry          = _ManagerDescriptor("tool_registry")
+    agentic_handler        = _ManagerDescriptor("agentic_handler")
+    conversation_persistence = _ManagerDescriptor("conversation_persistence")
 
     # ------------------------------------------------------------------
     # Config properties

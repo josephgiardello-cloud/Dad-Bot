@@ -1,0 +1,267 @@
+{
+  "generated_at": "2026-05-02T07:50:25",
+  "profiles": [
+    {
+      "turns": 180,
+      "ingested": 180,
+      "active": 50,
+      "archived_total": 4,
+      "retention_ratio": 0.2778,
+      "effective_retention_ratio": 0.9259,
+      "scenario": "baseline-high-density",
+      "drift": {
+        "drifted": false,
+        "coherence": 1.0,
+        "threshold": 0.72,
+        "window_replies": 8
+      },
+      "forgetting_events": [
+        {
+          "turn": 10,
+          "archived": 0,
+          "retained": 10,
+          "threshold": 0.0
+        },
+        {
+          "turn": 20,
+          "archived": 1,
+          "retained": 19,
+          "threshold": 0.16
+        },
+        {
+          "turn": 30,
+          "archived": 1,
+          "retained": 28,
+          "threshold": 0.16
+        },
+        {
+          "turn": 40,
+          "archived": 1,
+          "retained": 37,
+          "threshold": 0.16
+        },
+        {
+          "turn": 50,
+          "archived": 0,
+          "retained": 47,
+          "threshold": 0.0
+        },
+        {
+          "turn": 60,
+          "archived": 0,
+          "retained": 50,
+          "threshold": 0.0
+        },
+        {
+          "turn": 70,
+          "archived": 0,
+          "retained": 50,
+          "threshold": 0.0
+        },
+        {
+          "turn": 80,
+          "archived": 0,
+          "retained": 50,
+          "threshold": 0.0
+        },
+        {
+          "turn": 90,
+          "archived": 0,
+          "retained": 50,
+          "threshold": 0.0
+        },
+        {
+          "turn": 100,
+          "archived": 0,
+          "retained": 50,
+          "threshold": 0.0
+        },
+        {
+          "turn": 110,
+          "archived": 0,
+          "retained": 50,
+          "threshold": 0.0
+        },
+        {
+          "turn": 120,
+          "archived": 0,
+          "retained": 50,
+          "threshold": 0.0
+        },
+        {
+          "turn": 130,
+          "archived": 1,
+          "retained": 49,
+          "threshold": 0.16
+        },
+        {
+          "turn": 140,
+          "archived": 0,
+          "retained": 50,
+          "threshold": 0.0
+        },
+        {
+          "turn": 150,
+          "archived": 0,
+          "retained": 50,
+          "threshold": 0.0
+        },
+        {
+          "turn": 160,
+          "archived": 0,
+          "retained": 50,
+          "threshold": 0.0
+        },
+        {
+          "turn": 170,
+          "archived": 0,
+          "retained": 50,
+          "threshold": 0.0
+        },
+        {
+          "turn": 180,
+          "archived": 0,
+          "retained": 50,
+          "threshold": 0.0
+        }
+      ]
+    },
+    {
+      "turns": 200,
+      "ingested": 200,
+      "active": 49,
+      "archived_total": 9,
+      "retention_ratio": 0.245,
+      "effective_retention_ratio": 0.8448,
+      "scenario": "conflict-heavy",
+      "drift": {
+        "drifted": false,
+        "coherence": 1.0,
+        "threshold": 0.72,
+        "window_replies": 8
+      },
+      "forgetting_events": [
+        {
+          "turn": 10,
+          "archived": 0,
+          "retained": 10,
+          "threshold": 0.0
+        },
+        {
+          "turn": 20,
+          "archived": 1,
+          "retained": 18,
+          "threshold": 0.16
+        },
+        {
+          "turn": 30,
+          "archived": 1,
+          "retained": 26,
+          "threshold": 0.16
+        },
+        {
+          "turn": 40,
+          "archived": 1,
+          "retained": 34,
+          "threshold": 0.16
+        },
+        {
+          "turn": 50,
+          "archived": 1,
+          "retained": 41,
+          "threshold": 0.16
+        },
+        {
+          "turn": 60,
+          "archived": 1,
+          "retained": 49,
+          "threshold": 0.16
+        },
+        {
+          "turn": 70,
+          "archived": 0,
+          "retained": 49,
+          "threshold": 0.0
+        },
+        {
+          "turn": 80,
+          "archived": 0,
+          "retained": 49,
+          "threshold": 0.0
+        },
+        {
+          "turn": 90,
+          "archived": 1,
+          "retained": 49,
+          "threshold": 0.16
+        },
+        {
+          "turn": 100,
+          "archived": 0,
+          "retained": 49,
+          "threshold": 0.0
+        },
+        {
+          "turn": 110,
+          "archived": 0,
+          "retained": 49,
+          "threshold": 0.0
+        },
+        {
+          "turn": 120,
+          "archived": 1,
+          "retained": 49,
+          "threshold": 0.16
+        },
+        {
+          "turn": 130,
+          "archived": 0,
+          "retained": 49,
+          "threshold": 0.0
+        },
+        {
+          "turn": 140,
+          "archived": 0,
+          "retained": 49,
+          "threshold": 0.0
+        },
+        {
+          "turn": 150,
+          "archived": 1,
+          "retained": 49,
+          "threshold": 0.16
+        },
+        {
+          "turn": 160,
+          "archived": 0,
+          "retained": 49,
+          "threshold": 0.0
+        },
+        {
+          "turn": 170,
+          "archived": 0,
+          "retained": 49,
+          "threshold": 0.0
+        },
+        {
+          "turn": 180,
+          "archived": 1,
+          "retained": 49,
+          "threshold": 0.16
+        },
+        {
+          "turn": 190,
+          "archived": 0,
+          "retained": 49,
+          "threshold": 0.0
+        },
+        {
+          "turn": 200,
+          "archived": 0,
+          "retained": 49,
+          "threshold": 0.0
+        }
+      ]
+    }
+  ]
+}

@@ -78,6 +78,12 @@ def parse_args() -> argparse.Namespace:
         help="Max seconds for cold-start probe before timing out",
     )
     parser.add_argument(
+        "--status-interval-s",
+        type=int,
+        default=15,
+        help="Seconds between live FULL_CERT status updates in terminal",
+    )
+    parser.add_argument(
         "--write-baseline", action="store_true", help="Append run metrics to tests/phase4_baselines.json"
     )
     parser.add_argument(
@@ -163,6 +169,7 @@ def _run_lane(
     lane_timeout: int,
     junit_xml_path: Path,
     lane_log_path: Path,
+    status_interval_s: int,
 ) -> tuple[dict, str]:
     cmd = [
         python_exe,
@@ -177,21 +184,54 @@ def _run_lane(
     ]
     start = time.perf_counter()
     timed_out = False
+    status_interval_s = max(5, int(status_interval_s))
+    next_status_at = float(status_interval_s)
     lane_log_path.parent.mkdir(parents=True, exist_ok=True)
     with lane_log_path.open("w", encoding="utf-8", errors="replace") as log_file:
         try:
-            proc = subprocess.run(
+            proc = subprocess.Popen(
                 cmd,
                 cwd=ROOT,
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
-                timeout=lane_timeout,
             )
-            returncode = int(proc.returncode)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            returncode = 124
-            log_file.write(f"\n\n[cert_baseline_capture] LANE TIMEOUT after {lane_timeout}s: {lane_name}\n")
+            while True:
+                returncode = proc.poll()
+                elapsed = time.perf_counter() - start
+                if returncode is not None:
+                    returncode = int(returncode)
+                    break
+
+                if lane_name == "FULL_CERT" and elapsed >= next_status_at:
+                    remaining = max(0.0, float(lane_timeout) - elapsed)
+                    pct_budget = (elapsed / float(lane_timeout)) * 100.0 if lane_timeout > 0 else 0.0
+                    print(
+                        f"[{lane_name}] running... elapsed={elapsed:.0f}s "
+                        f"remaining~={remaining:.0f}s budget_used={pct_budget:.1f}%",
+                        flush=True,
+                    )
+                    next_status_at += float(status_interval_s)
+
+                if elapsed >= float(lane_timeout):
+                    timed_out = True
+                    proc.kill()
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        pass
+                    returncode = 124
+                    log_file.write(f"\n\n[cert_baseline_capture] LANE TIMEOUT after {lane_timeout}s: {lane_name}\n")
+                    break
+
+                time.sleep(1.0)
+        except KeyboardInterrupt:
+            if "proc" in locals() and proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+            raise
     elapsed = time.perf_counter() - start
     output = lane_log_path.read_text(encoding="utf-8", errors="replace")
     summary = _extract_summary_counts(output)
@@ -316,8 +356,13 @@ def _derive_lane_timeout(
     min_s: int,
     max_s: int,
 ) -> tuple[int, str]:
+    lane_floor_overrides = {
+        "DURABILITY_P4": 300,
+        "FULL_CERT": 720,
+    }
     if fixed_timeout is not None and fixed_timeout > 0:
-        return int(fixed_timeout), "fixed"
+        lane_floor = lane_floor_overrides.get(lane_name, 0)
+        return max(int(fixed_timeout), lane_floor), "fixed"
     baseline_elapsed = None
     if isinstance(latest_baseline, dict):
         lanes = latest_baseline.get("lanes")
@@ -328,9 +373,12 @@ def _derive_lane_timeout(
                 if isinstance(elapsed, (int, float)):
                     baseline_elapsed = float(elapsed)
     if baseline_elapsed is None:
-        return min_s, "fallback-min"
+        lane_floor = lane_floor_overrides.get(lane_name, 0)
+        return max(min_s, lane_floor), "fallback-min"
     derived = int(round((baseline_elapsed * multiplier) + buffer_s))
     bounded = max(min_s, min(max_s, derived))
+    lane_floor = lane_floor_overrides.get(lane_name, 0)
+    bounded = max(bounded, lane_floor)
     return bounded, f"baseline({baseline_elapsed:.3f}s)"
 
 
@@ -382,6 +430,7 @@ def main() -> int:
             lane_timeout,
             junit_xml_path,
             lane_log,
+            args.status_interval_s,
         )
         record["lanes"][lane_name] = payload
         timeout_tag = " timeout" if payload.get("timed_out") else ""
@@ -396,10 +445,14 @@ def main() -> int:
     raw_json_path = run_dir / "baseline_record.json"
     raw_json_path.write_text(json.dumps(record, indent=2, sort_keys=True, ensure_ascii=True), encoding="utf-8")
 
+    failures = [name for name, data in record["lanes"].items() if data.get("exit_code", 1) != 0]
+
     previous: dict | None = None
-    if args.write_baseline:
+    if args.write_baseline and not failures:
         _, previous = append_baseline_record(BASELINE_STORE, record, keep_last=50)
         print(f"Updated baseline store: {BASELINE_STORE}")
+    elif args.write_baseline and failures:
+        print("Skipped baseline write because one or more lanes failed.")
 
     if args.report_markdown:
         report_md = render_capability_record_markdown(record, previous)
@@ -410,7 +463,6 @@ def main() -> int:
         print(f"Wrote capability report: {report_path}")
 
     print(f"Artifact directory: {run_dir}")
-    failures = [name for name, data in record["lanes"].items() if data.get("exit_code", 1) != 0]
     if failures:
         print(f"FAILED LANES: {', '.join(failures)}")
         return 1

@@ -28,24 +28,89 @@ class MemoryCoordinator:
         self.scorer = MemoryScorer(bot)
         self.conflicts = ConflictDetector(bot, self.scorer)
 
+    def _temporal_debug_payload(self, turn_context=None, *, path: str) -> dict[str, object]:
+        state = getattr(turn_context, "state", None)
+        if not isinstance(state, dict):
+            state = {}
+        trace_id = str(getattr(turn_context, "trace_id", "") or "")
+        stage = str(state.get("_active_graph_stage") or "background")
+        execution_path = [
+            str(item).strip().lower()
+            for item in list(state.get("_pipeline_stage_names") or [])
+            if str(item).strip()
+        ]
+        node_id = str(state.get("_stage_call_id") or f"{trace_id}:{stage}" or stage)
+        return {
+            "node_id": node_id,
+            "stage": stage,
+            "execution_path": execution_path,
+            "trace_id": trace_id,
+            "path": path,
+            "turn_context_present": turn_context is not None,
+            "graph_commit_active": bool(getattr(self.bot, "_graph_commit_active", False)),
+        }
+
     def _require_turn_temporal(self, turn_context=None):
         temporal = getattr(turn_context, "temporal", None)
         if temporal is None:
+            payload = self._temporal_debug_payload(
+                turn_context,
+                path="MemoryCoordinator._require_turn_temporal:missing_temporal",
+            )
+            logger.error(
+                "Temporal invariant violated: temporal missing node_id=%s stage=%s execution_path=%s trace_id=%s path=%s turn_context_present=%s graph_commit_active=%s",
+                payload["node_id"],
+                payload["stage"],
+                payload["execution_path"],
+                payload["trace_id"],
+                payload["path"],
+                payload["turn_context_present"],
+                payload["graph_commit_active"],
+            )
             raise RuntimeError(
                 "TemporalNode missing — deterministic execution violated",
             )
         wall_time = str(getattr(temporal, "wall_time", "")).strip()
         wall_date = str(getattr(temporal, "wall_date", "")).strip()
         if not wall_time or not wall_date:
+            payload = self._temporal_debug_payload(
+                turn_context,
+                path="MemoryCoordinator._require_turn_temporal:empty_temporal_fields",
+            )
+            logger.error(
+                "Temporal invariant violated: temporal fields empty node_id=%s stage=%s execution_path=%s trace_id=%s path=%s turn_context_present=%s graph_commit_active=%s",
+                payload["node_id"],
+                payload["stage"],
+                payload["execution_path"],
+                payload["trace_id"],
+                payload["path"],
+                payload["turn_context_present"],
+                payload["graph_commit_active"],
+            )
             raise RuntimeError(
                 "TemporalNode missing — deterministic execution violated",
             )
         return temporal
 
     def _assert_save_commit_boundary(self, turn_context=None) -> bool:
+        state = getattr(turn_context, "state", None)
+        if not isinstance(state, dict):
+            payload = self._temporal_debug_payload(
+                turn_context,
+                path="MemoryCoordinator._assert_save_commit_boundary:missing_turn_context",
+            )
+            logger.warning(
+                "Skipping commit-only memory mutation outside turn context node_id=%s stage=%s execution_path=%s trace_id=%s path=%s",
+                payload["node_id"],
+                payload["stage"],
+                payload["execution_path"],
+                payload["trace_id"],
+                payload["path"],
+            )
+            return False
         commit_active = bool(getattr(self.bot, "_graph_commit_active", False))
-        active_stage = str(getattr(turn_context, "state", {}).get("_active_graph_stage") or "").strip().lower()
-        if not commit_active or active_stage not in {"save", ""}:
+        active_stage = str(state.get("_active_graph_stage") or "").strip().lower()
+        if not commit_active or active_stage != "save":
             return False
         return True
 
@@ -429,6 +494,20 @@ Rules:
         return updated
 
     def apply_controlled_forgetting(self, force=False, turn_context=None):
+        if turn_context is None:
+            payload = self._temporal_debug_payload(
+                turn_context,
+                path="MemoryCoordinator.apply_controlled_forgetting:missing_turn_context",
+            )
+            logger.warning(
+                "Skipping controlled forgetting without turn context node_id=%s stage=%s execution_path=%s trace_id=%s path=%s",
+                payload["node_id"],
+                payload["stage"],
+                payload["execution_path"],
+                payload["trace_id"],
+                payload["path"],
+            )
+            return {"removed": 0, "backup_path": "", "ran": False, "skipped": "missing_turn_context"}
         # Previously gated by _assert_save_commit_boundary. The gate is now
         # structural: this method is only callable from PostCommitWorker
         # after PersistenceService publishes a post-commit-ready event.
@@ -445,8 +524,15 @@ Rules:
                 "TemporalNode wall_date invalid — deterministic execution violated",
             ) from exc
         backup_stamp = wall_time.replace("-", "").replace(":", "").replace("T", "_")[:15]
-        decay_threshold = 0.15
+        decay_threshold = 0.16
         identity_categories = {"identity", "relationship", "relationships"}
+        memory_count = len(memories)
+        saturation_pressure = min(0.10, max(0.0, float(memory_count - 24) * 0.0035))
+        summary_fingerprint_counts = Counter(
+            self.bot.normalize_memory_text(str(entry.get("summary") or ""))
+            for entry in memories
+            if str(entry.get("summary") or "").strip()
+        )
 
         def _confidence_history(entry):
             raw = entry.get("confidence_history") or {}
@@ -479,22 +565,54 @@ Rules:
 
             access_count = max(0, int(entry.get("access_count", 0) or 0))
             access_frequency = min(1.0, float(access_count) / 10.0)
+            category = str(entry.get("category", "general") or "general").strip().lower()
+            signature = self.bot.normalize_memory_text(str(entry.get("summary") or ""))
 
             history = _confidence_history(entry)
             high_hits = max(0, int(entry.get("high_confidence_hits", history["high"]) or history["high"]))
             high_confidence_factor = min(1.0, float(high_hits) / 10.0)
 
+            contradiction_count = len(list(entry.get("contradictions") or []))
+            contradiction_pressure = 0.015 if contradiction_count > 0 else 0.0
+            duplicate_count = max(0, int(summary_fingerprint_counts.get(signature, 1)) - 1)
+            duplicate_pressure = min(0.06, float(duplicate_count) * 0.03)
+
+            low_signal_pressure = 0.0
+            if importance < 0.35:
+                low_signal_pressure += 0.03
+            if access_count <= 1:
+                low_signal_pressure += 0.02
+            if category == "general":
+                low_signal_pressure += 0.01
+            if contradiction_count > 0:
+                # Keep contradictory evidence available a bit longer so
+                # conflict-heavy sessions do not over-prune unresolved signals.
+                low_signal_pressure = max(0.0, low_signal_pressure - 0.02)
+
+            pressure = 0.0
+            if importance < 0.65:
+                pressure = min(
+                    0.20,
+                    saturation_pressure + low_signal_pressure + contradiction_pressure + duplicate_pressure,
+                )
+
             score = (
-                (0.35 * age_factor)
+                (0.30 * age_factor)
                 - (0.30 * importance)
                 - (0.20 * access_frequency)
                 - (0.15 * high_confidence_factor)
             )
+            score += pressure
             components = {
                 "age_factor": round(age_factor, 4),
                 "importance_score": round(importance, 4),
                 "access_frequency": round(access_frequency, 4),
                 "high_confidence_factor": round(high_confidence_factor, 4),
+                "saturation_pressure": round(saturation_pressure, 4),
+                "low_signal_pressure": round(low_signal_pressure, 4),
+                "contradiction_pressure": round(contradiction_pressure, 4),
+                "duplicate_pressure": round(duplicate_pressure, 4),
+                "soft_pressure": round(pressure, 4),
             }
             return round(score, 4), components
 
@@ -523,7 +641,47 @@ Rules:
                 kept.append(memory)
                 continue
 
-            should_archive = bool(decay_score > decay_threshold)
+            contradiction_count = len(list(memory.get("contradictions") or []))
+            contradiction_grace = 0.05 if contradiction_count > 0 else 0.0
+            effective_threshold = decay_threshold + contradiction_grace
+            should_archive = bool(decay_score > effective_threshold)
+            forced_low_signal_conflict_archive = False
+
+            # Deterministic low-signal contradiction archival rule:
+            # contradictory entries that are old, low-importance, and unused are
+            # archived eagerly to prevent unresolved low-value noise accumulation.
+            memory_importance = max(
+                0.0,
+                min(1.0, float(memory.get("importance_score", 0.0) or 0.0)),
+            )
+            memory_access_count = max(0, int(memory.get("access_count", 0) or 0))
+            memory_days_old = _days_old_from_turn(memory)
+            if (
+                contradiction_count > 0
+                and memory_importance <= 0.25
+                and memory_access_count == 0
+                and memory_days_old >= 180
+            ):
+                should_archive = True
+                forced_low_signal_conflict_archive = True
+
+            if should_archive and not force:
+                memory_category = str(memory.get("category", "general") or "general").strip().lower()
+                if (
+                    memory_count >= 49
+                    and memory_category == "general"
+                    and memory_importance <= 0.12
+                    and memory_access_count == 0
+                    and contradiction_count == 0
+                ):
+                    should_archive = False
+            if should_archive and contradiction_count > 0 and not forced_low_signal_conflict_archive:
+                memory_importance = max(
+                    0.0,
+                    min(1.0, float(memory.get("importance_score", 0.0) or 0.0)),
+                )
+                if memory_importance >= 0.16:
+                    should_archive = False
             if force and decay_score > 0.0:
                 should_archive = True
 
@@ -531,6 +689,28 @@ Rules:
                 archived.append(memory)
             else:
                 kept.append(memory)
+
+        # Under high memory saturation, enforce soft pruning for clearly low-signal
+        # entries even if they sit just under the strict threshold.
+        if not archived and memory_count >= 32 and not force:
+            low_signal_candidates = []
+            for index, memory in enumerate(list(kept)):
+                category = str(memory.get("category", "general") or "general").strip().lower()
+                if category in identity_categories:
+                    continue
+                importance = max(0.0, min(1.0, float(memory.get("importance_score", 0.0) or 0.0)))
+                access_count = max(0, int(memory.get("access_count", 0) or 0))
+                decay_score = float(memory.get("decay_score", 0.0) or 0.0)
+                if importance <= 0.55 and access_count <= 3 and decay_score > 0.0:
+                    low_signal_candidates.append((decay_score, index, memory))
+
+            low_signal_candidates.sort(reverse=True)
+            archive_target = max(1, int(round(memory_count * 0.08)))
+            selected = low_signal_candidates[:archive_target]
+            if selected:
+                selected_indices = {index for _score, index, _memory in selected}
+                archived.extend([memory for _score, _index, memory in selected])
+                kept = [memory for idx, memory in enumerate(kept) if idx not in selected_indices]
 
         if not archived:
             return {"removed": 0, "backup_path": "", "ran": True}
@@ -553,14 +733,19 @@ Rules:
             if archive_entry is not None:
                 archive_entries.append(archive_entry)
 
-        if archive_entries:
-            self.bot.mutate_memory_store(session_archive=archive_entries[-24:])
-
-        self.bot.save_memory_catalog(kept)
+        cleaned_kept = self.bot.clean_memory_entries(kept[-50:])
+        # Single store mutation keeps archive and active-memory views consistent
+        # inside one deterministic commit boundary.
+        self.bot.mutate_memory_store(
+            memories=cleaned_kept,
+            session_archive=archive_entries[-24:],
+        )
+        self.bot.queue_semantic_memory_index(cleaned_kept)
+        self.bot.mark_memory_graph_dirty()
         return {
             "removed": len(archived),
             "archived": len(archived),
-            "retained": len(kept),
+            "retained": len(cleaned_kept),
             "threshold": decay_threshold,
             "backup_path": backup_path,
             "ran": True,
@@ -992,6 +1177,20 @@ Rules:
         return merged_values[-16:]
 
     def consolidate_memories(self, force=False, turn_context=None):
+        if turn_context is None:
+            payload = self._temporal_debug_payload(
+                turn_context,
+                path="MemoryCoordinator.consolidate_memories:missing_turn_context",
+            )
+            logger.warning(
+                "Skipping memory consolidation without turn context node_id=%s stage=%s execution_path=%s trace_id=%s path=%s",
+                payload["node_id"],
+                payload["stage"],
+                payload["execution_path"],
+                payload["trace_id"],
+                payload["path"],
+            )
+            return self.bot.consolidated_memories()
         # Previously gated by _assert_save_commit_boundary. The gate is now
         # structural: this method is only callable from PostCommitWorker
         # after PersistenceService publishes a post-commit-ready event.

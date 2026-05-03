@@ -335,14 +335,27 @@ def derive_execution_trace_hash(trace_context: dict[str, Any]) -> str:
     return _stable_sha256(canonical)
 
 
+def _require_execution_context_contract(context: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+    state = getattr(context, "state", None)
+    metadata = getattr(context, "metadata", None)
+    if not isinstance(state, dict):
+        raise TypeError(
+            "Execution trace contract violation: context.state must be a dict",
+        )
+    if not isinstance(metadata, dict):
+        raise TypeError(
+            "Execution trace contract violation: context.metadata must be a dict",
+        )
+    return dict(state), dict(metadata)
+
+
 def build_execution_trace_context(
     *,
     context,
     result,
     recorder: ExecutionTraceRecorder | None = None,
 ) -> dict[str, Any]:
-    state = dict(getattr(context, "state", {}) or {})
-    metadata = dict(getattr(context, "metadata", {}) or {})
+    state, metadata = _require_execution_context_contract(context)
     determinism = dict(metadata.get("determinism") or {})
 
     normalized_response = str(
@@ -579,8 +592,10 @@ from dadbot.core.execution_context import (  # noqa: E402
     ExecutionTraceRecorder as ExecutionTraceRecorder,
     RuntimeTraceViolation as RuntimeTraceViolation,
     active_execution_trace as active_execution_trace,
+    build_external_system_call_graph as build_external_system_call_graph,
     bind_execution_trace as bind_execution_trace,
     ensure_execution_trace_root as ensure_execution_trace_root,
+    record_external_system_call as record_external_system_call,
     record_execution_step as record_execution_step,
     require_execution_trace as require_execution_trace,
 )

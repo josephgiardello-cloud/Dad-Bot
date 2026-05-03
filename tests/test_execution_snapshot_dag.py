@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from dadbot.core.execution_trace_context import ExecutionTraceRecorder, build_execution_trace_context
 
 
@@ -65,3 +67,21 @@ def test_trace_context_hash_is_stable_for_same_input():
     assert t1["execution_snapshot"]["snapshot_hash"] == t2["execution_snapshot"]["snapshot_hash"]
     assert t1["execution_dag"]["dag_hash"] == t2["execution_dag"]["dag_hash"]
     assert t1["final_hash"] == t2["final_hash"]
+
+
+def test_trace_context_requires_dict_state_contract():
+    recorder = ExecutionTraceRecorder(trace_id="trace-123", prompt="How did my week go?")
+    context = _fake_context()
+    context.state = ["not", "a", "dict"]
+
+    with pytest.raises(TypeError, match="context.state must be a dict"):
+        build_execution_trace_context(context=context, result=("final", True), recorder=recorder)
+
+
+def test_trace_context_requires_dict_metadata_contract():
+    recorder = ExecutionTraceRecorder(trace_id="trace-123", prompt="How did my week go?")
+    context = _fake_context()
+    context.metadata = ["not", "a", "dict"]
+
+    with pytest.raises(TypeError, match="context.metadata must be a dict"):
+        build_execution_trace_context(context=context, result=("final", True), recorder=recorder)

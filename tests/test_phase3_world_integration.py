@@ -178,3 +178,8 @@ class TestTraceExternalCallRecorder:
             )
         assert isinstance(step, dict)
         assert str((step or {}).get("operation") or "") == "external_system_call"
+        payload = dict((step or {}).get("payload") or {})
+        record = dict(payload.get("tool_call_record") or {})
+        assert str(record.get("canonicalized_input_hash") or "")
+        assert str(record.get("raw_output_hash") or "")
+        assert str(record.get("response_schema_version") or "") == "1.0"

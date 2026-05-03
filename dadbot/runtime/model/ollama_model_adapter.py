@@ -291,6 +291,16 @@ class OllamaModelAdapter(ModelPort):
             message = raw_output.get("message")
             if isinstance(message, dict):
                 return str(message.get("content") or "")
+        # Handle Pydantic model responses (e.g. ollama ChatResponse)
+        message = getattr(raw_output, "message", None)
+        if message is not None:
+            content = getattr(message, "content", None)
+            if content is not None:
+                return str(content or "")
+            if hasattr(message, "model_dump"):
+                dumped = message.model_dump(exclude_none=True)
+                if isinstance(dumped, dict):
+                    return str(dumped.get("content") or "")
         return str(raw_output or "")
 
     @staticmethod

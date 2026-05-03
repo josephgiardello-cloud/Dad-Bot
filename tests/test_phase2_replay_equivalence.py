@@ -102,3 +102,112 @@ def test_phase2_replay_equivalence_requires_dag_hash_match():
 
     assert report["equivalent"] is False
     assert "execution_dag_hash" in report["violations"]
+
+
+def test_phase2_replay_equivalence_ignores_declared_nondeterministic_tool_fields():
+    trace_context = _trace_context()
+    trace_context["steps"][1] = {
+        "operation": "external_system_call",
+        "payload": {
+            "system": "builtin_tool:calendar",
+            "status": "ok",
+            "tool_call_record": {
+                "canonicalized_input_payload": {"args": {"day": "monday"}},
+                "canonicalized_input_hash": "",
+                "raw_output_payload": {
+                    "result": "ok",
+                    "timing": {"latency_ms": 10},
+                },
+                "raw_output_hash": "",
+                "response_schema_version": "1.0",
+                "determinism_contract": {
+                    "ignore_response_fields": ["timing.latency_ms"],
+                },
+                "stable_time_token": "tok-1",
+            },
+        },
+    }
+    seed = _seed(trace_context)
+
+    trace_context_t2 = _trace_context()
+    trace_context_t2["steps"][1] = {
+        "operation": "external_system_call",
+        "payload": {
+            "system": "builtin_tool:calendar",
+            "status": "ok",
+            "tool_call_record": {
+                "canonicalized_input_payload": {"args": {"day": "monday"}},
+                "canonicalized_input_hash": "",
+                "raw_output_payload": {
+                    "result": "ok",
+                    "timing": {"latency_ms": 9999},
+                },
+                "raw_output_hash": "",
+                "response_schema_version": "1.0",
+                "determinism_contract": {
+                    "ignore_response_fields": ["timing.latency_ms"],
+                },
+                "stable_time_token": "tok-1",
+            },
+        },
+    }
+
+    report = verify_terminal_state_replay_equivalence(
+        terminal_state_seed=seed,
+        execution_trace_context=trace_context_t2,
+        enforce_dag_equivalence=True,
+    )
+
+    assert report["equivalent"] is True
+
+
+def test_phase2_replay_equivalence_detects_non_ignored_tool_field_drift():
+    trace_context = _trace_context()
+    trace_context["steps"][1] = {
+        "operation": "external_system_call",
+        "payload": {
+            "system": "builtin_tool:calendar",
+            "status": "ok",
+            "tool_call_record": {
+                "canonicalized_input_payload": {"args": {"day": "monday"}},
+                "canonicalized_input_hash": "",
+                "raw_output_payload": {"result": "ok"},
+                "raw_output_hash": "",
+                "response_schema_version": "1.0",
+                "determinism_contract": {
+                    "ignore_response_fields": [],
+                },
+                "stable_time_token": "tok-1",
+            },
+        },
+    }
+    seed = _seed(trace_context)
+
+    tampered = _trace_context()
+    tampered["steps"][1] = {
+        "operation": "external_system_call",
+        "payload": {
+            "system": "builtin_tool:calendar",
+            "status": "ok",
+            "tool_call_record": {
+                "canonicalized_input_payload": {"args": {"day": "monday"}},
+                "canonicalized_input_hash": "",
+                "raw_output_payload": {"result": "changed"},
+                "raw_output_hash": "",
+                "response_schema_version": "1.0",
+                "determinism_contract": {
+                    "ignore_response_fields": [],
+                },
+                "stable_time_token": "tok-1",
+            },
+        },
+    }
+
+    report = verify_terminal_state_replay_equivalence(
+        terminal_state_seed=seed,
+        execution_trace_context=tampered,
+        enforce_dag_equivalence=True,
+    )
+
+    assert report["equivalent"] is False
+    assert "tool_invocation_sequence_hash" in report["violations"]

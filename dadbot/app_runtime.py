@@ -682,6 +682,20 @@ def main(
     if args.tenant_id:
         os.environ["DADBOT_TENANT_ID"] = normalize_tenant_id(args.tenant_id)
 
+    # Capture git SHA once at startup so shadow mode never needs a subprocess.
+    if "DADBOT_CODE_VERSION" not in os.environ:
+        try:
+            import subprocess as _sp
+            _r = _sp.run(
+                ["git", "rev-parse", "--short", "HEAD"],
+                capture_output=True, text=True, timeout=3,
+                cwd=str(Path(__file__).resolve().parents[1]),
+            )
+            if _r.returncode == 0 and _r.stdout.strip():
+                os.environ["DADBOT_CODE_VERSION"] = _r.stdout.strip()
+        except Exception:
+            pass
+
     if args.init_profile:
         created = resolved_dadbot_cls.initialize_profile_file()
         if created:

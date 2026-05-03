@@ -594,13 +594,9 @@ class PersistenceService:
         if isinstance(getattr(turn_context, "state", None), dict):
             turn_context.state["_timing_graph_sync_ms"] = graph_sync_ms
 
-        # Publish post-commit readiness only after the full strict commit
-        # sequence succeeds, so failed commits cannot leak readiness events.
-        memory_ops_started = time.perf_counter()
-        self._publish_post_commit_ready(runtime, turn_context)
-        memory_ops_ms = round((time.perf_counter() - memory_ops_started) * 1000, 3)
-        if isinstance(getattr(turn_context, "state", None), dict):
-            turn_context.state["_timing_memory_ops_ms"] = memory_ops_ms
+        # Post-commit publish is intentionally performed by finalize_turn after
+        # checkpoint/checkpointer writes complete to avoid worker-thread state
+        # mutations racing with in-flight finalize snapshotting.
 
     @staticmethod
     def _capture_transaction_snapshot(
@@ -875,6 +871,14 @@ class PersistenceService:
                     logger.error("PersistenceService.checkpointer save failed: %s", exc)
                     if bool(self.strict_mode):
                         raise
+
+            # Publish post-commit readiness only after the full strict commit
+            # sequence succeeds, including checkpoint/checkpointer writes.
+            memory_ops_started = time.perf_counter()
+            self._publish_post_commit_ready(runtime, turn_context)
+            memory_ops_ms = round((time.perf_counter() - memory_ops_started) * 1000, 3)
+            if isinstance(getattr(turn_context, "state", None), dict):
+                turn_context.state["_timing_memory_ops_ms"] = memory_ops_ms
 
             complete_pipeline = getattr(service, "_complete_turn_pipeline", None)
             if callable(complete_pipeline):

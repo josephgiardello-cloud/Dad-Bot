@@ -1288,7 +1288,13 @@ Return only JSON:
         recent_history = self.bot.conversation_history()[-12:]
 
         feedback_summary = self._aggregate_learning_signals()
-        self.bot.relationship_manager.reflect(force=True)
+        reflect = getattr(self.bot.relationship_manager, "reflect", None)
+        if callable(reflect):
+            reflect(force=True)
+        else:
+            current_state = getattr(self.bot.relationship_manager, "current_state", None)
+            if callable(current_state):
+                current_state()
 
         if self.should_evolve_persona():
             self.evolve_persona()
@@ -1327,10 +1333,13 @@ Return only JSON:
             "feedback_signals": len(feedback_summary),
         }
 
-        self.bot.runtime_state_container.record_state_update(
-            "continuous_learning_completed",
-            result,
-        )
+        try:
+            self.bot.runtime_state_container.record_state_event(
+                "continuous_learning_completed",
+                result,
+            )
+        except Exception as exc:
+            logger.warning("state_record_failed error=%s", str(exc))
         return result
 
     def schedule_continuous_learning(self):

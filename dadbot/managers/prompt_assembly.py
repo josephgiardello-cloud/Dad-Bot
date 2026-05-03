@@ -5,7 +5,19 @@ from dadbot.core.turn_coherence import mark_turn_coherence
 
 
 class PromptAssemblyManager:
-    """Builds the layered system prompt and final chat request message list."""
+    """Builds the layered system prompt and final chat request message list.
+
+    Boundary contract (Phase 2):
+    - This class is ORCHESTRATION ONLY.  It reads from memory (via the memory
+      query manager's public accessor) and from personality (via
+      ``personality_service``) but MUST NOT make decisions that belong to
+      either layer.
+    - It MUST NOT call memory scoring functions directly.
+    - It MUST NOT call personality voice methods directly (only
+      ``personality_service.build_personality_context``).
+    - It MUST NOT hold mutable state between turns except ``_turn_memory_context``
+      which is explicitly reset via ``begin_turn_memory_context``.
+    """
 
     VISUAL_TASK_PROFILES = {
         "debug_screenshot": {
@@ -41,7 +53,14 @@ class PromptAssemblyManager:
         self._turn_memory_context: str | None = None
 
     def _memory_confidence_label(self) -> tuple[str, str]:
-        diagnostics = dict(getattr(self.bot, "_last_memory_retrieval_diagnostics", {}) or {})
+        # Access memory diagnostics through the public accessor on the memory
+        # query manager instead of the private bot attribute directly.
+        memory_query_mgr = getattr(self.bot, "memory_query", None)
+        if memory_query_mgr is not None and hasattr(memory_query_mgr, "get_retrieval_diagnostics"):
+            diagnostics = memory_query_mgr.get_retrieval_diagnostics()
+        else:
+            # Graceful degradation: fall back to private attr when manager not available.
+            diagnostics = dict(getattr(self.bot, "_last_memory_retrieval_diagnostics", {}) or {})
         retrieved_count = int(diagnostics.get("retrieved_count", 0) or 0)
         top_score = float(diagnostics.get("top_score", 0.0) or 0.0)
         has_high_confidence = bool(diagnostics.get("has_high_confidence", False))

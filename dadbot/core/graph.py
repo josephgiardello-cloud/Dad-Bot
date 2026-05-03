@@ -81,6 +81,7 @@ from dadbot.core.graph_mutation import (  # re-export mutation primitives
 )
 from dadbot.core.graph_context import (  # re-export turn-scoped state
     TurnContext,
+    TurnContextContractViolation,
     TurnFidelity,
 )
 from dadbot.core.graph_pipeline_nodes import (  # re-export pipeline node stubs
@@ -115,6 +116,47 @@ _DECLARED_TRACE_EVENT_TYPES = frozenset(
         "kernel_ok",
     },
 )
+
+
+class NodeContractViolation(RuntimeError):
+    """Raised when a pipeline node violates its input/output state contract."""
+
+
+# Maps stage name → (required_input_keys, required_output_keys).
+# Input keys are checked before node execution; output keys after.
+# Only canonical production stages are listed here; test or optional nodes
+# are not covered intentionally (open/closed principle for extensibility).
+_NODE_STAGE_CONTRACTS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    "inference": (
+        ("rich_context",),
+        ("candidate",),
+    ),
+    "safety": (
+        ("candidate",),
+        ("safe_result",),
+    ),
+    "save": (
+        ("safe_result",),
+        (),
+    ),
+    "temporal": (
+        (),
+        ("temporal",),
+    ),
+    "context_builder": (
+        (),
+        ("rich_context",),
+    ),
+}
+
+# Maps stage name → name of the stage that must be registered in the pipeline
+# before its input contract is enforced.  If the prerequisite stage is absent
+# from the pipeline (e.g. a partial test graph), the input contract is skipped.
+_NODE_INPUT_PREREQUISITES: dict[str, str] = {
+    "inference": "context_builder",
+    "safety": "inference",
+    "save": "safety",
+}
 
 
 class _LinearTopologyGraph:
@@ -837,6 +879,64 @@ class TurnGraph:
             )
 
     # ------------------------------------------------------------------
+    # Node-level stage boundary contract enforcement
+    # ------------------------------------------------------------------
+
+    def _enforce_node_stage_contract(
+        self,
+        stage_name: str,
+        stage_context: TurnContext,
+        *,
+        phase: str,  # "input" | "output"
+        rejected_stages: frozenset[str] | None = None,
+    ) -> None:
+        """Raise NodeContractViolation if required state keys are missing.
+
+        This is the hard boundary enforcement point for node input/output
+        contracts.  Called by _run_stage_execute before and after node execution.
+        Contracts are defined in _NODE_STAGE_CONTRACTS.  Unknown stage names
+        are silently skipped (no contract registered = no enforcement).
+
+        For input-phase checks, the contract is only enforced when:
+        1. The prerequisite stage is registered in this pipeline instance, AND
+        2. The prerequisite stage was not kernel-rejected at runtime.
+        This allows partial/test pipelines and kernel-rejection scenarios to run
+        without false-positive violations.
+        """
+        normalized = str(stage_name or "").strip().lower()
+        contract = _NODE_STAGE_CONTRACTS.get(normalized)
+        if contract is None:
+            return
+        input_keys, output_keys = contract
+        if phase == "input":
+            prerequisite = _NODE_INPUT_PREREQUISITES.get(normalized)
+            if prerequisite is not None:
+                pipeline_stage_names = {
+                    str(n or "").strip().lower()
+                    for n, _ in self._pipeline_items()
+                }
+                if prerequisite not in pipeline_stage_names:
+                    return  # prerequisite stage absent — skip input contract
+                if rejected_stages and prerequisite in rejected_stages:
+                    return  # prerequisite stage was kernel-rejected — skip input contract
+                # Also check the live rejection contract in state (runtime kernel rejection).
+                _live_rejections = {
+                    str(r.get("stage") or "").strip().lower()
+                    for r in list(stage_context.state.get("kernel_rejection_contract") or [])
+                }
+                if prerequisite in _live_rejections:
+                    return  # prerequisite stage was runtime-rejected — skip input contract
+            required_keys = input_keys
+        else:
+            required_keys = output_keys
+        missing = [k for k in required_keys if k not in stage_context.state]
+        if missing:
+            raise NodeContractViolation(
+                f"Node stage contract violation [{phase}] stage={stage_name!r}: "
+                f"missing required state keys: {missing!r}",
+            )
+
+    # ------------------------------------------------------------------
     # Dispatcher authority: per-stage execution worker
     # ------------------------------------------------------------------
 
@@ -944,15 +1044,47 @@ class TurnGraph:
             event_sequence=stage_context.event_sequence,
         )
 
+        node_id = normalized_stage or str(stage_name or "unknown")
+        execution_path = [
+            str(name or "").strip().lower()
+            for name, _ in self._pipeline_items()
+            if str(name or "").strip()
+        ]
+        logger.debug(
+            "node_execution_boundary node_id=%s stage=%s execution_path=%s trace_id=%s",
+            node_id,
+            stage_name,
+            execution_path,
+            stage_context.trace_id,
+        )
+
         error_msg: str | None = None
         try:
+            assert node_id in execution_path, (
+                f"Node invariant violated: node_id={node_id!r} missing from turn_graph.nodes "
+                f"execution_path={execution_path!r}"
+            )
+            if node_id != "temporal":
+                assert "temporal" in execution_path, (
+                    "Node invariant violated: temporal stage is not registered in turn_graph.nodes"
+                )
             _guard = (
                 MutationGuard(stage_context.mutation_queue)
                 if not self._is_commit_boundary_node(node)
                 else contextlib.nullcontext()
             )
             with _guard:
+                self._enforce_node_stage_contract(stage_name, stage_context, phase="input")
+                _rejection_count_before = len(
+                    list(stage_context.state.get("kernel_rejection_contract") or [])
+                )
                 stage_context = await self._execute_node(node, stage_context)
+                _rejection_count_after = len(
+                    list(stage_context.state.get("kernel_rejection_contract") or [])
+                )
+                _node_was_rejected = _rejection_count_after > _rejection_count_before
+                if not _node_was_rejected:
+                    self._enforce_node_stage_contract(stage_name, stage_context, phase="output")
         except Exception as exc:
             error_msg = str(exc)
             self._record_execution_trace(
@@ -967,6 +1099,19 @@ class TurnGraph:
                 status="error",
                 error=error_msg,
             )
+            # ------------------------------------------------------------------
+            # Phase 4 — Layer 2: Failure-replay stamp
+            # Captures enough context for deterministic replay of any failed turn.
+            # All values are JSON-serialisable; no live objects are captured.
+            # ------------------------------------------------------------------
+            _cv = stage_context.determinism_manifest.get("contract_version", {})
+            stage_context.determinism_manifest.setdefault("failure_replay", []).append({
+                "stage": stage_name,
+                "error_type": type(exc).__name__,
+                "error_msg": str(exc)[:200],
+                "state_keys": sorted(stage_context.state.keys()),
+                "contract_version_hash": _cv.get("node_contracts_hash", ""),
+            })
             raise
         finally:
             stage_context.state["_active_graph_stage"] = ""
@@ -1148,6 +1293,21 @@ class TurnGraph:
         if self._recovery is not None:
             self._recovery.mark_stage_started(stage_name, stage_context)
 
+        # ------------------------------------------------------------------
+        # Phase 4 — Layer 3: Memory-evolution stamps
+        # Capture memory fingerprint before context_builder and after save so
+        # that replayed turns can verify that memory state evolved identically.
+        # ------------------------------------------------------------------
+        _norm_stage = str(stage_name or "").strip().lower()
+        if _norm_stage == "context_builder":
+            _mems_before = list(stage_context.state.get("memories") or [])
+            _mem_fp_before = hashlib.sha256(
+                json.dumps(_mems_before, sort_keys=True, default=str).encode()
+            ).hexdigest()[:16]
+            _mem_ev_init = stage_context.determinism_manifest.setdefault("memory_evolution", {})
+            _mem_ev_init["before_fingerprint"] = _mem_fp_before
+            _mem_ev_init["before_count"] = len(_mems_before)
+
         stage_context, error_msg = await self._run_stage_execute(
             stage_name,
             node,
@@ -1155,6 +1315,15 @@ class TurnGraph:
             started_at=started_at,
             telemetry=telemetry,
         )
+
+        if _norm_stage == "save" and error_msg is None:
+            _mems_after = list(stage_context.state.get("memories") or [])
+            _mem_fp_after = hashlib.sha256(
+                json.dumps(_mems_after, sort_keys=True, default=str).encode()
+            ).hexdigest()[:16]
+            _mem_ev = stage_context.determinism_manifest.setdefault("memory_evolution", {})
+            _mem_ev["after_fingerprint"] = _mem_fp_after
+            _mem_ev["delta"] = len(_mems_after) - _mem_ev.get("before_count", 0)
 
         if error_msg is None:
             duration_ms = stage_context.stage_traces[-1].duration_ms
@@ -1338,6 +1507,19 @@ class TurnGraph:
             # Store all pipeline stage names in turn_context so _run_stage can find the next stage
             pipeline_stage_names = [name for name, _ in pipeline]
             turn_context.state["_pipeline_stage_names"] = pipeline_stage_names
+
+            # ------------------------------------------------------------------
+            # Phase 4 — Layer 1: Contract-version stamp
+            # Hash of _NODE_STAGE_CONTRACTS → determinism_manifest["contract_version"]
+            # Provides a stable replay anchor: replayed turns can detect schema drift.
+            # ------------------------------------------------------------------
+            _contracts_blob = json.dumps(_NODE_STAGE_CONTRACTS, sort_keys=True, default=str)
+            _contracts_hash = hashlib.sha256(_contracts_blob.encode()).hexdigest()[:16]
+            turn_context.determinism_manifest["contract_version"] = {
+                "node_contracts_hash": _contracts_hash,
+                "schema_version": "1",
+            }
+
             # ------------------------------------------------------------------
             # Layer 1 — LangGraph declarative dispatch
             # The execution loop is now owned by LangGraph's StateGraph.
