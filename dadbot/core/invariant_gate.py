@@ -175,3 +175,112 @@ class InvariantGate:
     @property
     def violations_observed(self) -> int:
         return self._violations_observed
+
+    def validate_ledger_lifecycle(self, events: list[dict[str, Any]]) -> None:
+        """Validate job lifecycle ordering across a sequence of events.
+
+        Ensures JOB_STARTED precedes any terminal state for the same job_id
+        and that no job_id reaches a terminal state more than once.
+
+        Raises InvariantViolationError on failure — never logs and continues.
+        """
+        check = ledger_lifecycle_check(events)
+        if not check.passed:
+            self._violations_observed += 1
+            raise InvariantViolationError(check.message)
+
+
+# ---------------------------------------------------------------------------
+# CRITICAL invariant check constructors
+# ---------------------------------------------------------------------------
+
+_TERMINAL_EVENT_TYPES: frozenset[str] = frozenset({"JOB_COMPLETED", "JOB_FAILED"})
+
+
+def execution_state_check(decision: Any) -> Any:
+    """Check 1: Execution State Mismatch.
+
+    Returns a failed InvariantCheck if post-execution states are not equivalent.
+    Wire with: enforce_invariant(execution_state_check(decision), InvariantSeverity.CRITICAL)
+    """
+    from dadbot.core.invariant_engine import InvariantCheck  # noqa: PLC0415
+    if getattr(decision, "equivalent", True):
+        return InvariantCheck(passed=True)
+    violations = list(getattr(decision, "violations", []) or [])
+    return InvariantCheck(
+        passed=False,
+        message=f"State divergence after execution — violations: {violations}",
+    )
+
+
+def causal_structure_check(decision: Any) -> Any:
+    """Check 2: Causal Structure Violation.
+
+    Returns a failed InvariantCheck if 'causal_structure' appears in violations.
+    Wire with: enforce_invariant(causal_structure_check(decision), InvariantSeverity.CRITICAL)
+    """
+    from dadbot.core.invariant_engine import InvariantCheck  # noqa: PLC0415
+    violations = list(getattr(decision, "violations", []) or [])
+    if "causal_structure" not in violations:
+        return InvariantCheck(passed=True)
+    return InvariantCheck(
+        passed=False,
+        message="Invalid causal ordering — causal_structure invariant violated",
+    )
+
+
+def ledger_lifecycle_check(events: list[dict[str, Any]]) -> Any:
+    """Check 3: Ledger Lifecycle Integrity.
+
+    Validates job_started → job_completed ordering and no duplicate terminal states.
+    Wire with: enforce_invariant(ledger_lifecycle_check(events), InvariantSeverity.CRITICAL)
+    """
+    from dadbot.core.invariant_engine import InvariantCheck  # noqa: PLC0415
+    started: set[str] = set()
+    terminal: set[str] = set()
+    for event in events:
+        event_type = str(event.get("type") or "")
+        payload = event.get("payload") or {}
+        job_id = str(event.get("job_id") or payload.get("job_id") or "").strip()
+        if not job_id:
+            continue
+        if event_type == "JOB_STARTED":
+            started.add(job_id)
+        elif event_type in _TERMINAL_EVENT_TYPES:
+            if job_id in terminal:
+                return InvariantCheck(
+                    passed=False,
+                    message=f"Invalid lifecycle sequence: duplicate terminal state for job {job_id!r}",
+                )
+            if job_id not in started:
+                return InvariantCheck(
+                    passed=False,
+                    message=(
+                        f"Invalid lifecycle sequence: {event_type} before JOB_STARTED "
+                        f"for job {job_id!r}"
+                    ),
+                )
+            terminal.add(job_id)
+    return InvariantCheck(passed=True)
+
+
+def lease_ownership_check(
+    session_id: str,
+    requested_owner: str,
+    actual_owner: str | None,
+) -> Any:
+    """Check 4: Lease / Execution Ownership Violation.
+
+    Returns a failed InvariantCheck if a different owner holds the lease.
+    Wire with: enforce_invariant(lease_ownership_check(...), InvariantSeverity.CRITICAL)
+    """
+    from dadbot.core.invariant_engine import InvariantCheck  # noqa: PLC0415
+    if actual_owner is None or actual_owner == str(requested_owner or ""):
+        return InvariantCheck(passed=True)
+    return InvariantCheck(
+        passed=False,
+        message=(
+            f"Execution lease violation: session={session_id!r} "
+            f"owned_by={actual_owner!r} requested_by={requested_owner!r}"
+        ),
+    )

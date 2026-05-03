@@ -23,9 +23,12 @@ from __future__ import annotations
 import enum
 import hashlib
 import json
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
+
+_log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -63,9 +66,11 @@ class InvariantCategory(enum.Enum):
 class InvariantSeverity(enum.Enum):
     """Impact level when an invariant is violated."""
 
-    WARNING = "warning"  # Non-blocking; logged for audit.
-    ERROR = "error"  # Significant — should halt planning.
-    CRITICAL = "critical"  # System-level — must not proceed.
+    WARNING = "warning"      # Non-blocking; logged for audit.
+    ERROR = "error"          # Significant — should halt planning.
+    CRITICAL = "critical"    # System-level — must not proceed.
+    IMPORTANT = "important"  # Alias tier: significant but not system-halting.
+    DIAGNOSTIC = "diagnostic"  # Observability only; never gate execution.
 
 
 # ---------------------------------------------------------------------------
@@ -153,6 +158,45 @@ class InvariantViolation:
             "severity": self.severity.value,
             "message": self.message,
         }
+
+
+# ---------------------------------------------------------------------------
+# Enforcement API
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class InvariantCheck:
+    """Lightweight check result consumed by enforce_invariant().
+
+    Attributes:
+        passed:  True iff the invariant holds.
+        message: Human-readable description of the failure (may be empty when passed).
+    """
+
+    passed: bool
+    message: str = ""
+
+
+def enforce_invariant(check: InvariantCheck, severity: InvariantSeverity) -> None:
+    """Centralized invariant enforcement gate.
+
+    CRITICAL → raises InvariantViolationError immediately (never silenced).
+    IMPORTANT / DIAGNOSTIC → logs a warning.
+
+    Parameters
+    ----------
+    check:    An InvariantCheck produced by one of the CRITICAL check constructors.
+    severity: Determines enforcement behavior.
+    """
+    if check.passed:
+        return
+    # Local import avoids module-level circularity; invariant_gate does not
+    # import invariant_engine at the top level.
+    from dadbot.core.invariant_gate import InvariantViolationError  # noqa: PLC0415
+    if severity == InvariantSeverity.CRITICAL:
+        raise InvariantViolationError(check.message)
+    _log.warning("Invariant warning [%s]: %s", severity.value, check.message)
 
 
 # ---------------------------------------------------------------------------
@@ -430,7 +474,9 @@ __all__ = [
     "GlobalInvariantEngine",
     "GlobalValidationReport",
     "InvariantCategory",
+    "InvariantCheck",
     "InvariantSeverity",
     "InvariantViolation",
     "SystemInvariant",
+    "enforce_invariant",
 ]
