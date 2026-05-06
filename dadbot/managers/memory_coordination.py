@@ -716,7 +716,9 @@ Rules:
             return {"removed": 0, "backup_path": "", "ran": True}
 
         backup_name = f"memory_forgetting_backup_{backup_stamp}.json"
-        backup_path = str(self.bot.script_path.with_name(backup_name))
+        _backup_root = self.bot.script_path.parent / "artifacts" / "backups"
+        _backup_root.mkdir(parents=True, exist_ok=True)
+        backup_path = str(_backup_root / backup_name)
         self.bot.memory.export_memory_store(backup_path)
 
         archive_entries = list(self.bot.session_archive())

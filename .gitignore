@@ -29,6 +29,12 @@ session_logs/
 # Export / import artefacts
 memory_export*.json
 
+# Memory forgetting snapshots (belt-and-suspenders for repo-root stragglers)
+memory_forgetting_backup_*.json
+
+# System snapshots / runtime backups (canonical home: artifacts/backups/)
+artifacts/backups/
+
 # Diagnostic / process logs
 _dad_stop_stdout.txt
 _dad_stop_stderr.txt
