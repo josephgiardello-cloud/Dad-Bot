@@ -6,13 +6,13 @@ import gzip
 import hashlib
 import json
 import pickle
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from dadbot.contracts import DadBotContext, SupportsDadBotAccess
 from dadbot.core.kernel_locks import KernelReplaySequenceLock
-from dadbot.core.execution_recovery import ExecutionRecovery
 from dadbot.core.execution_replay_engine import verify_terminal_state_replay_equivalence
 from dadbot.core.execution_context import (
     RuntimeTraceViolation,
@@ -20,6 +20,7 @@ from dadbot.core.execution_context import (
     ensure_execution_trace_root,
     record_execution_step,
 )
+from dadbot.core.execution_ledger import WriteBoundaryGuard
 
 
 class ConversationPersistenceManager:
@@ -79,6 +80,49 @@ class ConversationPersistenceManager:
             payload={"layer": "persistence"},
             required=True,
         )
+
+    def _execution_ledger(self) -> Any:
+        orchestrator = getattr(self.bot, "turn_orchestrator", None)
+        control_plane = getattr(orchestrator, "control_plane", None)
+        ledger = getattr(control_plane, "ledger", None)
+        if ledger is None:
+            raise RuntimeTraceViolation("ExecutionLedger is required for conversation persistence authority")
+        return ledger
+
+    def _append_ledger_event(
+        self,
+        *,
+        event_type: str,
+        trace_id: str,
+        payload: dict[str, Any],
+        kernel_step_id: str,
+        session_id: str = "default",
+    ) -> dict[str, Any]:
+        ledger = self._execution_ledger()
+        event = {
+            "type": str(event_type or "").strip() or "TURN_EVENT",
+            "session_id": str(session_id or "default"),
+            "trace_id": str(trace_id or "unknown").strip() or "unknown",
+            "timestamp": self._active_turn_wall_time(),
+            "kernel_step_id": str(kernel_step_id or "conversation_persistence"),
+            "payload": copy.deepcopy(dict(payload or {})),
+        }
+        if bool(getattr(ledger, "_strict_writes", False)):
+            with WriteBoundaryGuard(ledger):
+                return ledger.write(event)
+        return ledger.write(event)
+
+    def _derived_exports_enabled(self) -> bool:
+        return bool(getattr(self.bot, "ENABLE_DERIVED_PERSISTENCE_EXPORTS", False))
+
+    def _run_derived_async(self, fn: Any, *args: Any) -> None:
+        if not self._derived_exports_enabled():
+            return
+        try:
+            thread = threading.Thread(target=fn, args=args, daemon=True)
+            thread.start()
+        except Exception:
+            pass
 
     def _apply_snapshot_mutations(
         self,
@@ -227,57 +271,18 @@ class ConversationPersistenceManager:
         trace_id = str(payload.get("trace_id") or "unknown").strip() or "unknown"
         stage = str(payload.get("stage") or "stage").strip().replace(" ", "-") or "stage"
         status = str(payload.get("status") or "unknown").strip().replace(" ", "-") or "unknown"
-        timestamp = self._active_turn_file_token()
-        binary_payload = gzip.compress(
-            pickle.dumps(payload, protocol=pickle.HIGHEST_PROTOCOL),
+        self._append_ledger_event(
+            event_type="GRAPH_CHECKPOINT",
+            trace_id=trace_id,
+            payload={
+                "trace_id": trace_id,
+                "stage": stage,
+                "status": status,
+                "checkpoint": payload,
+            },
+            kernel_step_id="persist_graph_checkpoint",
+            session_id=str(payload.get("session_id") or "default"),
         )
-        wrapped_payload = {
-            "format": "gzip+pickle",
-            "trace_id": trace_id,
-            "stage": stage,
-            "status": status,
-            "created_at": self._active_turn_wall_time(),
-            "payload_b64": base64.b64encode(binary_payload).decode("ascii"),
-        }
-
-        if self.bot._tenant_document_store is not None:
-            checkpoint_key = f"graph-checkpoint:{trace_id}:{timestamp}:{stage}:{status}"
-            self.bot._tenant_document_store.save_session_state(
-                checkpoint_key,
-                wrapped_payload,
-            )
-            self.bot._tenant_document_store.save_session_state(
-                f"graph-checkpoint-latest:{trace_id}",
-                wrapped_payload,
-            )
-            self.bot._tenant_document_store.save_session_state(
-                "graph-checkpoint-latest",
-                wrapped_payload,
-            )
-            if not _skip_turn_event:
-                determinism_lock = dict(
-                    (payload.get("metadata") or {}).get("determinism") or {},
-                )
-                self.persist_turn_event(
-                    {
-                        "event_type": "graph_checkpoint",
-                        "trace_id": trace_id,
-                        "stage": stage,
-                        "status": status,
-                        "determinism_lock": determinism_lock,
-                        "checkpoint": payload,
-                    },
-                )
-            return
-
-        checkpoint_dir = self.bot.SESSION_LOG_DIR / "graph_checkpoints"
-        checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        checkpoint_path = checkpoint_dir / f"{timestamp}-{trace_id[:12]}-{stage}-{status}.bin"
-        latest_path = checkpoint_dir / f"latest-{trace_id[:12]}.bin"
-        latest_global_path = checkpoint_dir / "latest.bin"
-        checkpoint_path.write_bytes(binary_payload)
-        latest_path.write_bytes(binary_payload)
-        latest_global_path.write_bytes(binary_payload)
 
         # When called directly (not from TurnGraph), write a turn event so that
         # validate_replay_determinism can fold the lock_hash from checkpoints.
@@ -297,6 +302,49 @@ class ConversationPersistenceManager:
                     "checkpoint": payload,
                 },
             )
+
+        # Optional derived export layer; never used as runtime authority.
+        self._run_derived_async(
+            self._export_checkpoint_projection,
+            trace_id,
+            stage,
+            status,
+            payload,
+        )
+
+    def _export_checkpoint_projection(
+        self,
+        trace_id: str,
+        stage: str,
+        status: str,
+        payload: dict[str, Any],
+    ) -> None:
+        timestamp = self._active_turn_file_token()
+        binary_payload = gzip.compress(
+            pickle.dumps(payload, protocol=pickle.HIGHEST_PROTOCOL),
+        )
+        wrapped_payload = {
+            "format": "gzip+pickle",
+            "trace_id": trace_id,
+            "stage": stage,
+            "status": status,
+            "created_at": self._active_turn_wall_time(),
+            "payload_b64": base64.b64encode(binary_payload).decode("ascii"),
+        }
+        if self.bot._tenant_document_store is not None:
+            checkpoint_key = f"graph-checkpoint:{trace_id}:{timestamp}:{stage}:{status}"
+            self.bot._tenant_document_store.save_session_state(checkpoint_key, wrapped_payload)
+            self.bot._tenant_document_store.save_session_state(f"graph-checkpoint-latest:{trace_id}", wrapped_payload)
+            self.bot._tenant_document_store.save_session_state("graph-checkpoint-latest", wrapped_payload)
+            return
+        checkpoint_dir = self.bot.SESSION_LOG_DIR / "graph_checkpoints"
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        checkpoint_path = checkpoint_dir / f"{timestamp}-{trace_id[:12]}-{stage}-{status}.bin"
+        latest_path = checkpoint_dir / f"latest-{trace_id[:12]}.bin"
+        latest_global_path = checkpoint_dir / "latest.bin"
+        checkpoint_path.write_bytes(binary_payload)
+        latest_path.write_bytes(binary_payload)
+        latest_global_path.write_bytes(binary_payload)
 
     def _turn_event_dir(self) -> Path:
         event_dir = self.bot.SESSION_LOG_DIR / "turn_events"
@@ -332,22 +380,16 @@ class ConversationPersistenceManager:
             hashlib.sha256(event_id_seed.encode()).hexdigest()[:16],
         )
         payload.setdefault("occurred_at", self._active_turn_wall_time())
+        self._append_ledger_event(
+            event_type="TURN_EVENT",
+            trace_id=trace_id,
+            payload=payload,
+            kernel_step_id="persist_turn_event",
+            session_id=str(payload.get("session_id") or "default"),
+        )
 
-        if self.bot._tenant_document_store is not None:
-            key = f"turn-events:{trace_id}"
-            existing = self.bot._tenant_document_store.load_session_state(key)
-            events = list(existing) if isinstance(existing, list) else []
-            events.append(payload)
-            self.bot._tenant_document_store.save_session_state(key, events)
-            self.bot._tenant_document_store.save_session_state(
-                f"turn-events-latest:{trace_id}",
-                payload,
-            )
-        else:
-            event_path = self._turn_event_path(trace_id)
-            line = json.dumps(payload, sort_keys=True, ensure_ascii=True)
-            with event_path.open("a", encoding="utf-8") as handle:
-                handle.write(line + "\n")
+        # Optional derived export layer; never used as runtime authority.
+        self._run_derived_async(self._export_turn_event_projection, trace_id, payload)
 
         # Snapshot compaction every 25 events: replay can start from latest snapshot.
         compact_sequence = int(payload.get("sequence") or 0)
@@ -373,32 +415,35 @@ class ConversationPersistenceManager:
                     encoding="utf-8",
                 )
 
+    def _export_turn_event_projection(self, trace_id: str, payload: dict[str, Any]) -> None:
+        if self.bot._tenant_document_store is not None:
+            key = f"turn-events:{trace_id}"
+            existing = self.bot._tenant_document_store.load_session_state(key)
+            events = list(existing) if isinstance(existing, list) else []
+            events.append(payload)
+            self.bot._tenant_document_store.save_session_state(key, events)
+            self.bot._tenant_document_store.save_session_state(f"turn-events-latest:{trace_id}", payload)
+            return
+        event_path = self._turn_event_path(trace_id)
+        line = json.dumps(payload, sort_keys=True, ensure_ascii=True)
+        with event_path.open("a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+
     def list_turn_events(self, trace_id: str, limit: int = 0) -> list[dict[str, Any]]:
         self._require_active_trace("list_turn_events")
         normalized = str(trace_id or "").strip()
         if not normalized:
             return []
 
+        ledger = self._execution_ledger()
         events: list[dict[str, Any]] = []
-        if self.bot._tenant_document_store is not None:
-            stored = self.bot._tenant_document_store.load_session_state(
-                f"turn-events:{normalized}",
-            )
-            if isinstance(stored, list):
-                events = [item for item in stored if isinstance(item, dict)]
-        else:
-            event_path = self._turn_event_path(normalized)
-            if event_path.exists():
-                for raw_line in event_path.read_text(encoding="utf-8").splitlines():
-                    line = str(raw_line or "").strip()
-                    if not line:
-                        continue
-                    try:
-                        item = json.loads(line)
-                    except Exception:
-                        continue
-                    if isinstance(item, dict):
-                        events.append(item)
+        for event in ledger.read():
+            if str(event.get("type") or "") != "TURN_EVENT":
+                continue
+            payload = dict(event.get("payload") or {})
+            if str(payload.get("trace_id") or "").strip() != normalized:
+                continue
+            events.append(payload)
 
         events.sort(key=lambda item: int(item.get("sequence") or 0))
         if limit and limit > 0:
@@ -519,9 +564,8 @@ class ConversationPersistenceManager:
             and effective_terminal_state
             and effective_trace_context
         ):
-            repaired_trace_context = ExecutionRecovery.repair_partial_trace_context(
-                effective_trace_context,
-            )
+            # Phase 3: ledger replay uses canonical events; no repair needed.
+            repaired_trace_context = effective_trace_context
             terminal_equivalence = verify_terminal_state_replay_equivalence(
                 terminal_state_seed=effective_terminal_state,
                 execution_trace_context=repaired_trace_context,
@@ -549,34 +593,19 @@ class ConversationPersistenceManager:
 
     def load_latest_graph_checkpoint(self, trace_id: str = "") -> dict | None:
         self._require_active_trace("load_latest_graph_checkpoint")
-        encoded_payload = None
         normalized_trace_id = str(trace_id or "").strip()
-        if self.bot._tenant_document_store is not None:
-            lookup_key = (
-                f"graph-checkpoint-latest:{normalized_trace_id}" if normalized_trace_id else "graph-checkpoint-latest"
-            )
-            encoded_payload = self.bot._tenant_document_store.load_session_state(
-                lookup_key,
-            )
-        else:
-            checkpoint_dir = self.bot.SESSION_LOG_DIR / "graph_checkpoints"
-            checkpoint_path = checkpoint_dir / (
-                f"latest-{normalized_trace_id[:12]}.bin" if normalized_trace_id else "latest.bin"
-            )
-            if checkpoint_path.exists():
-                try:
-                    return pickle.loads(gzip.decompress(checkpoint_path.read_bytes()))
-                except Exception:
-                    return None
-        if not isinstance(encoded_payload, dict):
-            return None
-        payload_b64 = str(encoded_payload.get("payload_b64") or "").strip()
-        if not payload_b64:
-            return None
-        try:
-            return pickle.loads(gzip.decompress(base64.b64decode(payload_b64)))
-        except Exception:
-            return None
+        ledger = self._execution_ledger()
+        for event in reversed(ledger.read()):
+            if str(event.get("type") or "") != "GRAPH_CHECKPOINT":
+                continue
+            payload = dict(event.get("payload") or {})
+            event_trace_id = str(payload.get("trace_id") or "").strip()
+            if normalized_trace_id and event_trace_id != normalized_trace_id:
+                continue
+            checkpoint = dict(payload.get("checkpoint") or {})
+            if checkpoint:
+                return checkpoint
+        return None
 
     def resume_graph_checkpoint(self, trace_id: str = "") -> dict | None:
         self._require_active_trace("resume_graph_checkpoint")

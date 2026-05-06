@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, Literal
 
-from dadbot.core.capability_contracts import CAPABILITY_CONTRACTS
+from dadbot.core.contract_evaluator import CAPABILITY_CONTRACTS
 
 CapabilityStatus = Literal["pass", "fail", "not_evaluated"]
 CAPABILITY_AUDIT_EVENT_TYPE = "CAPABILITY_AUDIT_EVENT"

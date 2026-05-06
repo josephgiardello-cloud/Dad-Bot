@@ -27,9 +27,9 @@ from dadbot.core.interfaces import (
     validate_pipeline_services,
 )
 from dadbot.core.job_builder import JobBuilder
-from dadbot.core.lg_topology import create_topology_provider
 from dadbot.core.persistence.base import CheckpointNotFoundError
 from dadbot.core.execution_binder import TraceBinder
+from dadbot.core.execution_terminal_state import build_execution_terminal_state
 from dadbot.registry import ServiceRegistry, boot_registry
 
 logger = logging.getLogger(__name__)
@@ -118,7 +118,6 @@ class DadBotOrchestrator:
         )
         return TurnGraph(
             registry=self.registry,
-            topology_provider_factory=create_topology_provider,
         )
 
     def _build_turn_context(
@@ -244,43 +243,38 @@ class DadBotOrchestrator:
             return
         typed_state = cast("dict[str, Any]", state)
         typed_state["last_result"] = result
+        prior_goals = typed_state.get("goals")
+        persisted_goals = list(cast("list[Any]", prior_goals)) if isinstance(prior_goals, list) else []
         goals_any_raw = context.state.get("goals")
         if isinstance(goals_any_raw, list):
-            typed_state["goals"] = list(cast("list[Any]", goals_any_raw))
+            persisted_goals = list(cast("list[Any]", goals_any_raw))
         else:
-            prior_goals = typed_state.get("goals")
-            typed_state["goals"] = list(cast("list[Any]", prior_goals)) if isinstance(prior_goals, list) else []
+            new_goals_raw = context.state.get("new_goals")
+            if isinstance(new_goals_raw, list) and new_goals_raw:
+                seen_ids = {
+                    str(item.get("id") or "")
+                    for item in persisted_goals
+                    if isinstance(item, dict)
+                }
+                for raw in new_goals_raw:
+                    if not isinstance(raw, dict):
+                        continue
+                    goal_id = str(raw.get("id") or "")
+                    if goal_id and goal_id in seen_ids:
+                        continue
+                    persisted_goals.append(dict(raw))
+                    if goal_id:
+                        seen_ids.add(goal_id)
+        typed_state["goals"] = persisted_goals
         final_output = str(result[0] if isinstance(result, tuple) else result or "")
-        retrieval_set = context.state.get("memory_retrieval_set") or []
-        kernel_policy = dict(context.metadata.get("kernel_policy") or {})
-        memory_retrieval_hash = hashlib.sha256(
-            _json.dumps(retrieval_set, sort_keys=True, default=str).encode(),
-        ).hexdigest()[:32]
-        policy_hash = hashlib.sha256(
-            _json.dumps(kernel_policy, sort_keys=True, default=str).encode(),
-        ).hexdigest()[:32]
-        final_trace_hash = str(context.trace_id or "")
-        typed_state["last_terminal_state"] = {
-            "schema_version": "1",
-            "final_output": final_output,
-            "final_memory_view": {
-                k: context.state.get(k)
-                for k in [
-                    "memory_full_history_id",
-                    "memory_structured",
-                    "memory_retrieval_set",
-                ]
-                if context.state.get(k) is not None
-            },
-            "final_trace_hash": final_trace_hash,
-            "execution_dag_hash": str(context.metadata.get("tool_execution_graph_hash") or ""),
-            "policy_snapshot": kernel_policy,
-            "model_output_hashes": {},
-            "memory_retrieval_hash": memory_retrieval_hash,
-            "policy_hash": policy_hash,
-            "determinism_closure_hash": "",
+        terminal_state = build_execution_terminal_state(
+            context,
+            finalized_result=result,
+        )
+        typed_state["last_terminal_state"] = terminal_state.to_dict()
+        typed_state["last_execution_trace_context"] = {
+            "final_hash": str(terminal_state.final_trace_hash or context.trace_id or ""),
         }
-        typed_state["last_execution_trace_context"] = {"final_hash": final_trace_hash}
         typed_state["last_determinism_manifest"] = dict(manifest)
         typed_state["last_memory_full_history_id"] = str(context.state.get("memory_full_history_id") or "")
         typed_state["last_checkpoint_hash"] = str(getattr(context, "last_checkpoint_hash", "") or "")
@@ -297,6 +291,11 @@ class DadBotOrchestrator:
             session_id=str(job.session_id or "default"),
             metadata=dict(job.metadata or {}),
         )
+        session_state = session.get("state")
+        if isinstance(session_state, dict):
+            session_goals = session_state.get("goals")
+            if isinstance(session_goals, list):
+                context.state["session_goals"] = list(session_goals)
         if not context.trace_id:
             raise RuntimeError("TurnContext.trace_id must be non-empty")
 

@@ -26,7 +26,10 @@ from typing import Any
 
 from dadbot.core.event_reducer import CanonicalEventReducer
 from dadbot.core.execution_ledger import ExecutionLedger
+from dadbot.core.ledger_writer import LedgerWriter
 from dadbot.core.session_store import SessionStore
+
+_SNAPSHOT_EVENT_TYPE = "ledger_snapshot_projection"
 
 
 class SnapshotConsistencyError(RuntimeError):
@@ -40,6 +43,7 @@ class SnapshotEngine:
         self._reducer = reducer or CanonicalEventReducer()
         self._lock = RLock()
         self._snapshots: list[dict[str, Any]] = []
+        self._ledger_ref: ExecutionLedger | None = None
 
     # ------------------------------------------------------------------
     # Take
@@ -78,6 +82,9 @@ class SnapshotEngine:
         }
         snapshot["snapshot_hash"] = self._hash_snapshot(snapshot)
 
+        self._ledger_ref = ledger
+        self._append_snapshot_event(ledger=ledger, snapshot=snapshot)
+
         with self._lock:
             self._snapshots.append(deepcopy(snapshot))
 
@@ -100,14 +107,20 @@ class SnapshotEngine:
         """
         store_snap = dict(snapshot.get("session_snapshot") or {})
         sessions = dict(store_snap.get("sessions") or {})
+        seed_events: list[dict[str, Any]] = []
         for session_id, state in sessions.items():
-            if isinstance(state, dict):
-                session_store.apply_kernel_mutation(
-                    session_id=session_id,
-                    state_patch=state,
-                    kernel_step_id="snapshot_engine.restore",
-                    trace_id="snapshot_engine.restore",
-                )
+            if not isinstance(state, dict):
+                continue
+            seed_events.append(
+                {
+                    "type": "SESSION_STATE_UPDATED",
+                    "session_id": str(session_id or "default"),
+                    "kernel_step_id": "snapshot_engine.restore",
+                    "trace_id": "snapshot_engine.restore",
+                    "payload": {"state": dict(state)},
+                },
+            )
+        session_store.rebuild_from_ledger(seed_events)
 
     def replay_tail(
         self,
@@ -123,8 +136,11 @@ class SnapshotEngine:
         head_sequence = int(snapshot.get("head_sequence") or 0)
         all_events = ledger.read()
         tail = [event for event in all_events if int(event.get("sequence") or 0) > head_sequence]
-        for event in tail:
-            session_store.apply_event(event)
+        if tail:
+            restored_events = [
+                event for event in all_events if int(event.get("sequence") or 0) <= head_sequence
+            ]
+            session_store.rebuild_from_ledger(restored_events + tail)
         return {
             "head_sequence": head_sequence,
             "tail_events_applied": len(tail),
@@ -167,10 +183,16 @@ class SnapshotEngine:
     # ------------------------------------------------------------------
 
     def latest(self) -> dict[str, Any] | None:
+        projected = self._history_from_ledger()
+        if projected:
+            return deepcopy(projected[-1])
         with self._lock:
             return deepcopy(self._snapshots[-1]) if self._snapshots else None
 
     def history(self) -> list[dict[str, Any]]:
+        projected = self._history_from_ledger()
+        if projected:
+            return deepcopy(projected)
         with self._lock:
             return deepcopy(self._snapshots)
 
@@ -186,3 +208,33 @@ class SnapshotEngine:
             default=str,
         ).encode("utf-8")
         return hashlib.sha256(serialized).hexdigest()
+
+    def _append_snapshot_event(
+        self,
+        *,
+        ledger: ExecutionLedger,
+        snapshot: dict[str, Any],
+    ) -> None:
+        writer = LedgerWriter(ledger)
+        writer.write_event(
+            _SNAPSHOT_EVENT_TYPE,
+            session_id="system:snapshot_engine",
+            trace_id=str(snapshot.get("snapshot_hash") or "snapshot"),
+            kernel_step_id="snapshot-engine",
+            payload=deepcopy(snapshot),
+            committed=False,
+        )
+
+    def _history_from_ledger(self) -> list[dict[str, Any]]:
+        if self._ledger_ref is None:
+            return []
+        events = self._ledger_ref.read()
+        history: list[dict[str, Any]] = []
+        for event in events:
+            if str(event.get("type") or "") != _SNAPSHOT_EVENT_TYPE:
+                continue
+            payload = dict(event.get("payload") or {})
+            if not payload:
+                continue
+            history.append(payload)
+        return history

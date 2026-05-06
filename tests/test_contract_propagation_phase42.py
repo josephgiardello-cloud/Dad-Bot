@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dadbot.core.contract_propagation import (
+from dadbot.core.contract_evaluator import (
     ContractNode,
     ContractPropagationMap,
     build_dadbot_contract_map,

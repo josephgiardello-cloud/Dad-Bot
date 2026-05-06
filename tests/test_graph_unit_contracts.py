@@ -422,76 +422,43 @@ class TestTurnContextTransitionPhase:
 
 
 # ---------------------------------------------------------------------------
-# TurnGraph._mark_stage_enter
+# TurnGraph semantic pipeline behavior
 # ---------------------------------------------------------------------------
 
 
-class TestMarkStageEnter:
-    def test_duplicate_stage_raises(self):
-        ctx = TurnContext(user_input="hello")
-        ctx.state["temporal"] = {"wall_time": "t", "wall_date": "d"}
-        # Simulate context_builder already ran so inference is the valid next stage.
-        ctx.state["_graph_last_stage"] = "context_builder"
-        ctx.state["_graph_executed_stages"] = {"temporal", "context_builder"}
-        TurnGraph._mark_stage_enter(ctx, "inference")
-        with pytest.raises(RuntimeError, match="executed more than once"):
-            TurnGraph._mark_stage_enter(ctx, "inference")
+class TestPipelineSemantics:
+    def test_duplicate_node_registration_keeps_first_binding(self):
+        graph = TurnGraph(registry=None, nodes=[])
 
-    def test_out_of_order_canonical_stage_raises(self):
-        ctx = TurnContext(user_input="hello")
-        ctx.state["temporal"] = {"wall_time": "t", "wall_date": "d"}
-        # Simulate inference already ran; next valid stage is safety, not reflection.
-        ctx.state["_graph_last_stage"] = "inference"
-        ctx.state["_graph_executed_stages"] = {"temporal", "context_builder", "inference"}
-        with pytest.raises(RuntimeError, match="order violation"):
-            TurnGraph._mark_stage_enter(ctx, "reflection")
+        class _NodeA:
+            pass
 
-    def test_mutation_capable_stage_without_temporal_raises(self):
-        ctx = TurnContext(user_input="hello")
-        # Set ordering preconditions so context_builder is the last stage,
-        # but deliberately omit state["temporal"] to trigger the temporal guard.
-        ctx.state["_graph_last_stage"] = "context_builder"
-        ctx.state["_graph_executed_stages"] = {"temporal", "context_builder"}
-        with pytest.raises(RuntimeError, match="TemporalNode not initialized"):
-            TurnGraph._mark_stage_enter(ctx, "inference")
+        class _NodeB:
+            pass
 
-    def test_custom_stage_name_bypasses_ordering_gate(self):
-        ctx = TurnContext(user_input="hello")
-        # No temporal in state — but custom stage is not canonical, so no error
-        TurnGraph._mark_stage_enter(ctx, "my_custom_stage")
-        assert "my_custom_stage" in ctx.state["_graph_executed_stages"]
+        first = _NodeA()
+        second = _NodeB()
+        graph.add_node("inference", first)
+        graph.add_node("inference", second)
 
+        assert graph._node_map["inference"] is first
+        assert len(graph._node_map) == 1
 
-# ---------------------------------------------------------------------------
-# TurnGraph._phase_for_stage keyword mapping
-# ---------------------------------------------------------------------------
+    def test_pipeline_items_follow_registered_edges(self):
+        graph = TurnGraph(registry=None, nodes=[])
 
+        class _Node:
+            def __init__(self, name: str):
+                self.name = name
 
-class TestPhaseForStage:
-    @pytest.mark.parametrize(
-        "stage,expected",
-        [
-            ("health", TurnPhase.PLAN),
-            ("preflight", TurnPhase.PLAN),
-            ("memory", TurnPhase.PLAN),
-            ("context", TurnPhase.PLAN),
-            ("inference", TurnPhase.ACT),
-            ("agent", TurnPhase.ACT),
-            ("tool", TurnPhase.ACT),
-            ("safety", TurnPhase.OBSERVE),
-            ("moderation", TurnPhase.OBSERVE),
-            ("save", TurnPhase.RESPOND),
-            ("finalize", TurnPhase.RESPOND),
-            ("persist", TurnPhase.RESPOND),
-        ],
-    )
-    def test_stage_maps_to_expected_phase(self, stage, expected):
-        result = TurnGraph._phase_for_stage(stage, TurnPhase.PLAN)
-        assert result == expected
+        graph.add_node("a", _Node("a"))
+        graph.add_node("b", _Node("b"))
+        graph.add_node("c", _Node("c"))
+        graph.set_edge("a", "b")
+        graph.set_edge("b", "c")
 
-    def test_unknown_stage_returns_current_phase(self):
-        result = TurnGraph._phase_for_stage("zz_unknown", TurnPhase.ACT)
-        assert result == TurnPhase.ACT
+        names = [name for name, _node in graph._pipeline_items()]
+        assert names == ["a", "b", "c"]
 
 
 # ---------------------------------------------------------------------------

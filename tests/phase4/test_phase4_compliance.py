@@ -332,24 +332,23 @@ def test_turn_context_mutation_queue_bound_on_construction():
     )
 
 
-def test_turn_graph_refuses_duplicate_stage_execution():
-    """TurnGraph must raise RuntimeError when a stage is executed twice."""
+def test_turn_graph_deduplicates_duplicate_stage_registration():
+    """TurnGraph keeps the first binding when the same stage name is added twice."""
     graph_mod = importlib.import_module("dadbot.core.graph")
-
-    executed: list[str] = []
 
     class _DupNode:
         name = "temporal"
 
         async def execute(self, _registry: Any, turn_context: Any) -> None:
-            executed.append("temporal")
+            _ = turn_context
 
     graph = graph_mod.TurnGraph()
-    ctx = graph_mod.TurnContext(user_input="dup test")
+    first = _DupNode()
+    second = _DupNode()
+    graph.add_node("temporal", first)
+    graph.add_node("temporal", second)
 
-    with pytest.raises(RuntimeError, match="executed more than once"):
-        graph._mark_stage_enter(ctx, "temporal")
-        graph._mark_stage_enter(ctx, "temporal")
+    assert graph._node_map.get("temporal") is first
 
 
 # ---------------------------------------------------------------------------

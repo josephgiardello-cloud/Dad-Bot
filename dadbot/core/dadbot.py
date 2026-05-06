@@ -41,6 +41,7 @@ from dadbot.core.mcp_mixin import DadBotMcpMixin
 from dadbot.core.turn_mixin import DadBotTurnMixin
 from dadbot.core.ux_projection_gateway import TurnUxProjectionGateway
 from dadbot.runtime.model import ModelPort
+from dadbot.assistant_runtime import AssistantRuntime
 
 if ollama is None:
     logging.getLogger(__name__).warning(
@@ -387,6 +388,14 @@ class DadBot(
     @property
     def turn_orchestrator(self) -> Any:
         return self.services.turn_orchestrator
+
+    @property
+    def assistant(self) -> AssistantRuntime:
+        cached = getattr(self, "_assistant_runtime", None)
+        if cached is None:
+            cached = AssistantRuntime(self)
+            object.__setattr__(self, "_assistant_runtime", cached)
+        return cast(AssistantRuntime, cached)
 
     # ------------------------------------------------------------------
     # Explicit manager descriptors  (replaces property/setter boilerplate)

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol, cast
-from uuid import uuid4
 
 from dadbot.contracts import AttachmentList, FinalizedTurnResult
 from dadbot.core.execution_boundary import ControlPlaneExecutionBoundary
@@ -14,10 +15,10 @@ from dadbot.core.execution_ledger import ExecutionLedger
 from dadbot.core.execution_ledger_memory import InMemoryExecutionLedger
 from dadbot.core.ledger_reader import LedgerReader
 from dadbot.core.ledger_writer_adapter import LedgerWriterAdapter
-from dadbot.core.kernel_mutation_gate import apply_event, emit_event
 from dadbot.core.kernel_signals import get_exporter, get_metrics, get_tracer
 from dadbot.core.recovery_manager import RecoveryManager
 from dadbot.core.session_store import SessionStore
+from dadbot.core.turn_resume_store import TurnResumeStore
 
 
 @dataclass(slots=True)
@@ -27,16 +28,33 @@ class ExecutionJob:
     attachments: AttachmentList | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     trace_id: str = ""
-    job_id: str = field(default_factory=lambda: f"job-{uuid4().hex}")
+    job_id: str = ""
+
+    @staticmethod
+    def _stable_token(*parts: Any, prefix: str) -> str:
+        payload = "|".join(str(part or "") for part in parts)
+        digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:20]
+        return f"{prefix}-{digest}"
 
     def __post_init__(self) -> None:
         metadata = dict(self.metadata or {})
         trace_id = str(self.trace_id or metadata.get("trace_id") or "").strip()
         if not trace_id:
-            trace_id = f"tr-{uuid4().hex}"
+            trace_id = self._stable_token(
+                self.session_id,
+                metadata.get("request_id"),
+                self.user_input,
+                self.attachments,
+                prefix="tr",
+            )
+        job_id = str(self.job_id or metadata.get("job_id") or "").strip()
+        if not job_id:
+            job_id = self._stable_token(self.session_id, trace_id, prefix="job")
         metadata["trace_id"] = trace_id
+        metadata["job_id"] = job_id
         self.metadata = metadata
         self.trace_id = trace_id
+        self.job_id = job_id
 
 
 @dataclass(slots=True)
@@ -293,7 +311,8 @@ class ExecutionControlPlane:
         resolved_options = self._resolve_options(options, legacy_options)
         self.registry = registry
         self.kernel_executor = kernel_executor
-        self.execution_token = f"exec-{uuid4().hex}"
+        token_seed = f"{resolved_options.worker_id}|{resolved_options.max_inflight_jobs}|{int(bool(resolved_options.enable_observability))}"
+        self.execution_token = f"exec-{hashlib.sha256(token_seed.encode('utf-8')).hexdigest()[:20]}"
         self.ledger = resolved_options.ledger or InMemoryExecutionLedger()
         self.ledger_writer = LedgerWriterAdapter(self.ledger)
         self.ledger_reader = LedgerReader(self.ledger)
@@ -311,21 +330,10 @@ class ExecutionControlPlane:
             writer=self.ledger_writer,
             options=scheduler_options,
         )
-        self.recovery = RecoveryManager(self.ledger)
+        self.recovery = RecoveryManager(ledger=self.ledger)
+        self._inflight_by_request: dict[tuple[str, str], asyncio.Future[FinalizedTurnResult]] = {}
+        self._inflight_lock = asyncio.Lock()
         self.graph = graph
-        self._inflight_by_request: dict[
-            tuple[str, str],
-            asyncio.Future[FinalizedTurnResult],
-        ] = {}
-
-        if self.graph is not None and callable(
-            getattr(self.graph, "set_required_execution_token", None),
-        ):
-            self.graph.set_required_execution_token(self.execution_token)
-        if self.graph is not None and callable(
-            getattr(self.graph, "set_execution_witness_emitter", None),
-        ):
-            self.graph.set_execution_witness_emitter(self._emit_execution_witness)
 
     @staticmethod
     def _resolve_options(
@@ -353,17 +361,6 @@ class ExecutionControlPlane:
     def terminate_session(self, session_id: str) -> None:
         self.registry.terminate_session(session_id)
 
-    def _emit_execution_witness(self, component: str, turn_context: Any) -> None:
-        trace_id = str(getattr(turn_context, "trace_id", "") or "")
-        session_id = str(
-            (getattr(turn_context, "metadata", {}) or {}).get("session_id") or "",
-        )
-        self.ledger_writer.append_runtime_witness(
-            component=component,
-            trace_id=trace_id,
-            session_id=session_id,
-        )
-
     async def submit_turn(
         self,
         *,
@@ -378,24 +375,34 @@ class ExecutionControlPlane:
             raise RuntimeError(f"session {session_key!r} has been terminated")
 
         md = dict(metadata or {})
-        trace_id = str(md.get("trace_id") or "").strip() or f"tr-{uuid4().hex}"
-        md_event = emit_event(
-            "MUTATION_EVENT",
-            {"op": "dict_set", "key": "trace_id", "value": trace_id},
-            source="ExecutionControlPlane.submit_turn",
-        )
-        md = apply_event(
-            md_event,
-            md,
-            lambda state, evt: {**state, str(evt.payload.get("key") or ""): evt.payload.get("value")},
-        )
+        request_id = str(md.get("request_id") or "").strip()
+        dedupe_key = (session_key, request_id)
+        dedupe_future: asyncio.Future[FinalizedTurnResult] | None = None
+        owns_dedupe_slot = False
+        if request_id:
+            async with self._inflight_lock:
+                existing = self._inflight_by_request.get(dedupe_key)
+                if existing is not None:
+                    dedupe_future = existing
+                else:
+                    dedupe_future = asyncio.get_running_loop().create_future()
+                    self._inflight_by_request[dedupe_key] = dedupe_future
+                    owns_dedupe_slot = True
+            if not owns_dedupe_slot and dedupe_future is not None:
+                return await dedupe_future
+
+        trace_id = str(md.get("trace_id") or "").strip()
+        if not trace_id:
+            trace_seed = {
+                "session_id": session_key,
+                "request_id": str(md.get("request_id") or ""),
+                "user_input": str(user_input or ""),
+                "attachments": list(attachments or []),
+            }
+            trace_blob = json_dumps_sorted(trace_seed)
+            trace_id = f"tr-{hashlib.sha256(trace_blob.encode('utf-8')).hexdigest()[:20]}"
+        md["trace_id"] = trace_id
         assert trace_id, "Missing trace_id at control plane entry"
-        request_id = str(md.get("request_id") or "")
-        inflight_key = (session_key, request_id) if request_id else None
-        if inflight_key is not None:
-            existing = self._inflight_by_request.get(inflight_key)
-            if existing is not None:
-                return await existing
 
         job = ExecutionJob(
             session_id=session_key,
@@ -413,33 +420,48 @@ class ExecutionControlPlane:
             kernel_step_id="control_plane.bind_session",
         )
         future = await self.scheduler.register(job)
-        if inflight_key is not None:
-            # Inflight values are asyncio.Future objects, which are intentionally
-            # not deepcopy/pickle-safe. Keep this map mutation direct so
-            # mutation-gate deep-copy semantics do not serialize Future objects.
-            self._inflight_by_request[inflight_key] = future
-
-        deadline = time.monotonic() + float(timeout_seconds or 30.0)
+        max_wait_seconds = timeout_seconds or 30.0
+        deadline = time.time() + max_wait_seconds
         try:
             while not future.done():
+                if time.time() > deadline:
+                    raise TimeoutError("submit_turn exceeded timeout")
                 drained = await self.scheduler.drain_once(self.kernel_executor)
                 if not drained:
-                    if time.monotonic() >= deadline:
-                        raise TimeoutError(
-                            "submit_turn timed out waiting for scheduler",
-                        )
                     await asyncio.sleep(0.01)
-            return await asyncio.wait_for(
-                future,
-                timeout=max(0.001, deadline - time.monotonic()),
-            )
+            result = await future
+            if dedupe_future is not None and not dedupe_future.done():
+                dedupe_future.set_result(result)
+            return result
+        except Exception as exc:
+            if dedupe_future is not None and not dedupe_future.done():
+                dedupe_future.set_exception(exc)
+            raise
         finally:
-            if inflight_key is not None:
-                self._inflight_by_request.pop(inflight_key, None)
+            if request_id and owns_dedupe_slot:
+                async with self._inflight_lock:
+                    if self._inflight_by_request.get(dedupe_key) is dedupe_future:
+                        self._inflight_by_request.pop(dedupe_key, None)
 
     def ledger_events(self) -> list[dict[str, Any]]:
         return self.ledger.read()
 
     def boot_reconcile(self) -> dict[str, Any]:
+        """Phase 3: boot reconciliation is now ledger-only via direct replay."""
         store = SessionStore(ledger=self.ledger, projection_only=True)
-        return self.recovery.boot_reconcile(session_store=store)
+        events = self.ledger.read()
+        store.rebuild_from_ledger(events)
+        snap = store.snapshot()
+        pending = list(store.pending_jobs())
+        return {
+            "pending_jobs": pending,
+            "ledger_events": len(events),
+            "replay_hash": self.ledger.replay_hash(),
+            "session_count": len(dict(snap.get("sessions") or {})),
+            "session_snapshot_version": int(snap.get("version") or 0),
+            "ok": True,
+        }
+
+
+def json_dumps_sorted(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, default=str)

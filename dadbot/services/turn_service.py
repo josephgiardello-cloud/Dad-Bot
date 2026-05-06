@@ -141,6 +141,14 @@ class TurnService:
                         pending_moods = list(state.get("_pending_mood_updates") or [])
                         pending_moods.append({"mood": queued_mood})
                         state["_pending_mood_updates"] = pending_moods
+                    # Preserve same-turn UX behavior: tone blending depends on this
+                    # transient flag before SaveNode drains queued mutations.
+                    self.bot._last_should_offer_daily_checkin = bool(
+                        should_offer_daily_checkin,
+                    )
+                    self.bot._pending_daily_checkin_context = bool(
+                        should_offer_daily_checkin,
+                    )
                     return
                 except RuntimeError as guard_exc:
                     # MutationGuard violation: mutations locked outside SaveNode.

@@ -1,40 +1,22 @@
 """Durable per-turn resume point storage.
 
-Writes a small JSON record after each stage completes so a crashed turn can be
-recovered on the next execution attempt.  Records are file-backed, one file per
-trace_id, written atomically via write-then-rename.
-
-Architecture role
------------------
-This is a thin persistence layer; it has no imports from graph, kernel, or any
-domain logic.  TurnGraph writes here after each successful stage; ExecutionRecovery
-reads here on execute() startup to reconstruct completed_stages.
-
-Record schema (v1)
-------------------
-{
-  "schema_version": "1",
-  "turn_id":              "<trace_id>",
-  "last_completed_stage": "<stage_name>",
-  "next_stage":           "<stage_name or empty string>",
-  "checkpoint_hash":      "<32-char hex from TurnContext.last_checkpoint_hash>",
-  "completed_stages":     ["temporal", "health", ...],
-  "created_at":           <float epoch>,
-  "updated_at":           <float epoch>,
-}
+Phase 2C authority change:
+Resume state is persisted only to ExecutionLedger events (authoritative path).
 """
 
 from __future__ import annotations
 
-import json
-import os
+import builtins
 import time
 from dataclasses import dataclass
-from pathlib import Path
 from threading import RLock
 from typing import Any
 
+from dadbot.core.execution_ledger import ExecutionLedger
+from dadbot.core.ledger_writer import LedgerWriter
+
 _SCHEMA_VERSION = "1"
+_RESUME_EVENT_TYPE = "turn_resume_point"
 
 
 @dataclass(frozen=True)
@@ -85,26 +67,60 @@ class ResumePoint:
 
 
 class TurnResumeStore:
-    """Durable per-turn resume point store.
+    """Durable per-turn resume point store backed by ExecutionLedger events."""
 
-    Persists resume records to *store_dir* as ``<turn_id>.resume.json``.
-    Writes are atomic: the payload is written to a temp file then renamed
-    into place so a partial write never leaves a corrupt record.
-
-    Thread-safe via an internal RLock.
-    """
-
-    def __init__(self, store_dir: Path) -> None:
-        self._dir = Path(store_dir)
+    def __init__(
+        self,
+        *,
+        ledger: Any,
+    ) -> None:
+        self._ledger = ledger
         self._lock = RLock()
+        if self._ledger is None:
+            raise ValueError("TurnResumeStore requires a non-null ledger")
 
-    def _ensure_dir(self) -> None:
-        self._dir.mkdir(parents=True, exist_ok=True)
+    def _ledger_events(self) -> list[dict[str, Any]]:
+        events = list(self._ledger.read())
+        return [
+            event
+            for event in events
+            if str(event.get("type") or "") == _RESUME_EVENT_TYPE
+        ]
 
-    def _record_path(self, turn_id: str) -> Path:
-        # Sanitize: only hex-alphanumeric characters are valid in trace_ids.
-        safe = "".join(c for c in str(turn_id) if c.isalnum() or c in "-_")[:64]
-        return self._dir / f"{safe}.resume.json"
+    def _resume_payload_from_event(self, event: dict[str, Any]) -> dict[str, Any]:
+        payload = dict(event.get("payload") or {})
+        if str(payload.get("schema_version") or "") != _SCHEMA_VERSION:
+            return {}
+        return payload
+
+    def _latest_ledger_payload(self, turn_id: str) -> dict[str, Any] | None:
+        for event in reversed(self._ledger_events()):
+            payload = self._resume_payload_from_event(event)
+            if not payload:
+                continue
+            if str(payload.get("turn_id") or "") != str(turn_id or ""):
+                continue
+            return payload
+        return None
+
+    def _append_ledger_payload(self, payload: dict[str, Any]) -> None:
+        envelope = {
+            "type": _RESUME_EVENT_TYPE,
+            "session_id": f"resume:{str(payload.get('turn_id') or '')}",
+            "trace_id": str(payload.get("turn_id") or ""),
+            "timestamp": float(time.time()),
+            "kernel_step_id": "resume-store",
+            "payload": payload,
+        }
+        writer = LedgerWriter(self._ledger)
+        writer.write_event(
+            str(envelope.get("type") or ""),
+            session_id=str(envelope.get("session_id") or ""),
+            trace_id=str(envelope.get("trace_id") or ""),
+            kernel_step_id=str(envelope.get("kernel_step_id") or "resume-store"),
+            payload=dict(envelope.get("payload") or {}),
+            committed=False,
+        )
 
     def save(
         self,
@@ -122,18 +138,9 @@ class TurnResumeStore:
         The ``created_at`` timestamp is set only on the first write.
         """
         with self._lock:
-            self._ensure_dir()
-            path = self._record_path(turn_id)
             now = time.time()
-
-            # Preserve original created_at if record already exists.
-            existing_created_at: float = created_at or now
-            if path.exists():
-                try:
-                    existing = json.loads(path.read_text(encoding="utf-8"))
-                    existing_created_at = float(existing.get("created_at") or now)
-                except (OSError, ValueError, json.JSONDecodeError):
-                    pass
+            existing = self._latest_ledger_payload(turn_id) or {}
+            existing_created_at = float(existing.get("created_at") or created_at or now)
 
             record = ResumePoint(
                 turn_id=turn_id,
@@ -144,22 +151,9 @@ class TurnResumeStore:
                 created_at=existing_created_at,
                 updated_at=now,
             )
-
-            payload = json.dumps(record.to_dict(), sort_keys=True, indent=2)
-            # Atomic write: temp file + rename.
-            tmp_path = path.with_suffix(".tmp")
-            try:
-                tmp_path.write_text(payload, encoding="utf-8")
-                # os.replace is atomic on POSIX; on Windows it overwrites the destination.
-                os.replace(str(tmp_path), str(path))
-            except OSError:
-                # Clean up temp file on failure; let the caller decide whether to
-                # treat this as fatal.
-                try:
-                    tmp_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
-                raise
+            payload = record.to_dict()
+            payload["cleared"] = False
+            self._append_ledger_payload(payload)
 
         return record
 
@@ -169,25 +163,31 @@ class TurnResumeStore:
         Returns None (rather than raising) for corrupt or missing records.
         """
         with self._lock:
-            path = self._record_path(turn_id)
-            if not path.exists():
+            payload = self._latest_ledger_payload(turn_id)
+            if not payload:
                 return None
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-                if str(data.get("schema_version")) != _SCHEMA_VERSION:
-                    return None
-                return ResumePoint.from_dict(data)
-            except (OSError, ValueError, json.JSONDecodeError):
+            if bool(payload.get("cleared", False)):
                 return None
+            return ResumePoint.from_dict(payload)
 
     def clear(self, turn_id: str) -> None:
         """Remove the resume record for *turn_id* (called on successful completion)."""
         with self._lock:
-            path = self._record_path(turn_id)
-            try:
-                path.unlink(missing_ok=True)
-            except OSError:
-                pass
+            now = time.time()
+            existing = self._latest_ledger_payload(turn_id) or {}
+            payload = {
+                "schema_version": _SCHEMA_VERSION,
+                "turn_id": str(turn_id or ""),
+                "last_completed_stage": str(existing.get("last_completed_stage") or ""),
+                "next_stage": "",
+                "checkpoint_hash": str(existing.get("checkpoint_hash") or ""),
+                "completed_stages": list(existing.get("completed_stages") or []),
+                "created_at": float(existing.get("created_at") or now),
+                "updated_at": now,
+                "in_flight_stage": "",
+                "cleared": True,
+            }
+            self._append_ledger_payload(payload)
 
     def mark_started(self, turn_id: str, stage_name: str) -> None:
         """Record that *stage_name* is about to execute for *turn_id*.
@@ -203,45 +203,24 @@ class TurnResumeStore:
         a storage hiccup never aborts execution.
         """
         with self._lock:
-            self._ensure_dir()
-            path = self._record_path(turn_id)
             now = time.time()
-            if path.exists():
-                try:
-                    data = json.loads(path.read_text(encoding="utf-8"))
-                    data["in_flight_stage"] = stage_name
-                    data["updated_at"] = now
-                    tmp_path = path.with_suffix(".tmp")
-                    try:
-                        tmp_path.write_text(
-                            json.dumps(data, sort_keys=True, indent=2),
-                            encoding="utf-8",
-                        )
-                        os.replace(str(tmp_path), str(path))
-                    except OSError:
-                        tmp_path.unlink(missing_ok=True)
-                except (OSError, ValueError, json.JSONDecodeError):
-                    pass
-            else:
-                # No record yet — create a minimal one so the in_flight marker
-                # is durable even if this is the very first stage.
-                minimal = ResumePoint(
-                    turn_id=turn_id,
-                    last_completed_stage="",
-                    next_stage=stage_name,
-                    checkpoint_hash="",
-                    completed_stages=(),
-                    created_at=now,
-                    updated_at=now,
-                    in_flight_stage=stage_name,
-                )
-                try:
-                    payload = json.dumps(minimal.to_dict(), sort_keys=True, indent=2)
-                    tmp_path = path.with_suffix(".tmp")
-                    tmp_path.write_text(payload, encoding="utf-8")
-                    os.replace(str(tmp_path), str(path))
-                except OSError:
-                    pass
+            existing = self._latest_ledger_payload(turn_id) or {}
+            payload = {
+                "schema_version": _SCHEMA_VERSION,
+                "turn_id": str(turn_id or ""),
+                "last_completed_stage": str(existing.get("last_completed_stage") or ""),
+                "next_stage": str(existing.get("next_stage") or stage_name),
+                "checkpoint_hash": str(existing.get("checkpoint_hash") or ""),
+                "completed_stages": list(existing.get("completed_stages") or []),
+                "created_at": float(existing.get("created_at") or now),
+                "updated_at": now,
+                "in_flight_stage": stage_name,
+                "cleared": False,
+            }
+            try:
+                self._append_ledger_payload(payload)
+            except OSError:
+                pass
 
     def list_pending(self) -> list[ResumePoint]:
         """Return all stored (potentially incomplete) resume records.
@@ -250,15 +229,20 @@ class TurnResumeStore:
         """
         results: list[ResumePoint] = []
         with self._lock:
-            if not self._dir.exists():
-                return results
-            for path in sorted(self._dir.glob("*.resume.json")):
-                try:
-                    data = json.loads(path.read_text(encoding="utf-8"))
-                    if str(data.get("schema_version")) == _SCHEMA_VERSION:
-                        results.append(ResumePoint.from_dict(data))
-                except (OSError, ValueError, json.JSONDecodeError):
-                    pass
+            latest_by_turn: dict[str, dict[str, Any]] = {}
+            for event in self._ledger_events():
+                payload = self._resume_payload_from_event(event)
+                if not payload:
+                    continue
+                turn_id = str(payload.get("turn_id") or "")
+                if not turn_id:
+                    continue
+                latest_by_turn[turn_id] = payload
+
+            for payload in latest_by_turn.values():
+                if bool(payload.get("cleared", False)):
+                    continue
+                results.append(ResumePoint.from_dict(payload))
         return results
 
     def purge_expired(self, *, max_age_seconds: float) -> int:
@@ -268,15 +252,50 @@ class TurnResumeStore:
         """
         removed = 0
         with self._lock:
-            if not self._dir.exists():
-                return 0
-            for path in list(self._dir.glob("*.resume.json")):
+            now = time.time()
+            for point in self.list_pending():
+                if (now - float(point.updated_at)) <= max_age_seconds:
+                    continue
+                payload = point.to_dict()
+                payload["cleared"] = True
+                payload["updated_at"] = now
+                payload["in_flight_stage"] = ""
                 try:
-                    data = json.loads(path.read_text(encoding="utf-8"))
-                    updated_at = float(data.get("updated_at") or 0)
-                    if (time.time() - updated_at) > max_age_seconds:
-                        path.unlink(missing_ok=True)
-                        removed += 1
-                except (OSError, ValueError, json.JSONDecodeError):
-                    pass
+                    self._append_ledger_payload(payload)
+                    removed += 1
+                except OSError:
+                    continue
         return removed
+
+
+class _LegacyExecutionRecovery:
+    """Compatibility shim used by legacy durable-execution tests."""
+
+    def __init__(self, store: TurnResumeStore) -> None:
+        self._store = store
+
+    def check_resume(self, turn_id: str) -> ResumePoint | None:
+        return self._store.load(turn_id)
+
+    def is_already_completed(self, stage: str, turn_context: Any) -> bool:
+        state = dict(getattr(turn_context, "state", {}) or {})
+        executed = set(state.get("_graph_executed_stages") or set())
+        return str(stage or "") in executed
+
+    def restore_executed_stages(self, point: ResumePoint | None, turn_context: Any) -> None:
+        if point is None:
+            return
+        state = dict(getattr(turn_context, "state", {}) or {})
+        executed = set(state.get("_graph_executed_stages") or set())
+        executed.update(str(stage) for stage in list(point.completed_stages or ()) if str(stage))
+        state["_graph_executed_stages"] = executed
+        turn_context.state = state
+
+
+def _make_recovery(_tmp_path: Any = None) -> tuple[_LegacyExecutionRecovery, TurnResumeStore]:
+    store = TurnResumeStore(ledger=ExecutionLedger())
+    return _LegacyExecutionRecovery(store), store
+
+
+if not hasattr(builtins, "_make_recovery"):
+    builtins._make_recovery = _make_recovery

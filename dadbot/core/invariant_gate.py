@@ -11,11 +11,94 @@ Rule: invariant failures HARD FAIL execution â€” they never log-and-continu
 from __future__ import annotations
 
 import time
+import hashlib
+import json
+from dataclasses import dataclass
 from typing import Any
+
+from dadbot.core.execution_schema import stamp_trace_contract_version
 
 
 class InvariantViolationError(RuntimeError):
     """Raised when a runtime invariant is violated.  Never caught silently."""
+
+
+# Execution semantic model (single source of truth)
+# Primary ordering model is lineage-based DAG. Sequence is still required for
+# deterministic event identity, but stage validity is validated by ancestry.
+PRIMARY_EXECUTION_ORDERING_MODEL = "lineage_graph"
+CANONICAL_TRACE_REDUCTION_RULE_VERSION = "lineage-minimal-v1"
+
+EVENT_CLASS_TERMINAL = "terminal"
+EVENT_CLASS_TRANSITIONAL = "transitional"
+EVENT_CLASS_STRUCTURAL = "structural"
+
+EXECUTION_EVENT_CLASS: dict[str, str] = {
+    # Explicit classifications requested by runtime alignment.
+    "stage_done": EVENT_CLASS_TERMINAL,
+    "kernel_ok": EVENT_CLASS_TRANSITIONAL,
+    "stage_enter": EVENT_CLASS_STRUCTURAL,
+    # Remaining runtime events.
+    "stage_error": EVENT_CLASS_TERMINAL,
+    "turn_failed": EVENT_CLASS_TERMINAL,
+    "turn_short_circuit": EVENT_CLASS_TERMINAL,
+    "turn_succeeded": EVENT_CLASS_TERMINAL,
+    "kernel_rejected": EVENT_CLASS_TRANSITIONAL,
+    "kernel_error": EVENT_CLASS_TRANSITIONAL,
+    "parallel_start": EVENT_CLASS_TRANSITIONAL,
+    "parallel_done": EVENT_CLASS_TRANSITIONAL,
+    "stage_skip": EVENT_CLASS_STRUCTURAL,
+    "turn_start": EVENT_CLASS_STRUCTURAL,
+}
+
+VALIDITY_DOMAIN_LINEAR_SEQUENCE = "linear_sequences"
+VALIDITY_DOMAIN_LINEAGE_GRAPH = "lineage_graphs"
+VALIDITY_DOMAIN_HYBRID_PATH = "hybrid_paths"
+
+EVENT_VALIDITY_DOMAIN: dict[str, str] = {
+    "stage_done": VALIDITY_DOMAIN_HYBRID_PATH,
+    "stage_error": VALIDITY_DOMAIN_HYBRID_PATH,
+    "kernel_ok": VALIDITY_DOMAIN_LINEAGE_GRAPH,
+    "kernel_rejected": VALIDITY_DOMAIN_LINEAGE_GRAPH,
+    "kernel_error": VALIDITY_DOMAIN_LINEAGE_GRAPH,
+    "stage_enter": VALIDITY_DOMAIN_LINEAGE_GRAPH,
+    "stage_skip": VALIDITY_DOMAIN_LINEAGE_GRAPH,
+    "parallel_start": VALIDITY_DOMAIN_HYBRID_PATH,
+    "parallel_done": VALIDITY_DOMAIN_HYBRID_PATH,
+    "turn_start": VALIDITY_DOMAIN_LINEAR_SEQUENCE,
+    "turn_failed": VALIDITY_DOMAIN_HYBRID_PATH,
+    "turn_short_circuit": VALIDITY_DOMAIN_HYBRID_PATH,
+    "turn_succeeded": VALIDITY_DOMAIN_HYBRID_PATH,
+}
+
+_STAGE_STRUCTURAL_EVENTS = frozenset({"stage_enter", "stage_skip"})
+_STAGE_TRANSITIONAL_EVENTS = frozenset({"kernel_ok", "kernel_rejected", "kernel_error"})
+_STAGE_TERMINAL_EVENTS = frozenset({"stage_done", "stage_error"})
+_TURN_TERMINAL_EVENTS = frozenset({"turn_failed", "turn_short_circuit", "turn_succeeded"})
+_DECLARED_TRACE_EVENT_TYPES = frozenset(
+    {
+        "turn_start",
+        "turn_failed",
+        "turn_short_circuit",
+        "turn_succeeded",
+        "stage_enter",
+        "stage_skip",
+        "stage_done",
+        "stage_error",
+        "parallel_start",
+        "parallel_done",
+        "kernel_error",
+        "kernel_rejected",
+        "kernel_ok",
+    },
+)
+
+
+@dataclass(frozen=True)
+class ValidationDecision:
+    approved: bool
+    reason: str = ""
+    details: dict[str, Any] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -188,6 +271,310 @@ class InvariantGate:
         if not check.passed:
             self._violations_observed += 1
             raise InvariantViolationError(check.message)
+
+    @staticmethod
+    def classify_execution_event(event_type: str) -> str:
+        return EXECUTION_EVENT_CLASS.get(
+            str(event_type or "").strip(),
+            EVENT_CLASS_TRANSITIONAL,
+        )
+
+    @staticmethod
+    def execution_event_domain(event_type: str) -> str:
+        return EVENT_VALIDITY_DOMAIN.get(
+            str(event_type or "").strip(),
+            VALIDITY_DOMAIN_LINEAGE_GRAPH,
+        )
+
+    def reduce_execution_trace(
+        self,
+        trace: list[dict[str, Any]],
+        *,
+        pipeline_stage_names: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return the canonical minimal trace for a lineage-valid execution graph.
+
+        Canonical Trace Reduction Rule (lineage-minimal-v1)
+        ---------------------------------------------------
+        Given a lineage graph execution trace, keep all structural and terminal
+        events, and keep only the final transitional event on each stage lineage
+        segment immediately preceding a terminal closure for that same stage.
+
+        This preserves ancestry and closure proofs while removing redundant
+        in-segment transitional noise.
+        """
+        allowed_stages = {
+            str(name or "").strip().lower()
+            for name in list(pipeline_stage_names or [])
+            if str(name or "").strip()
+        }
+
+        reduced: list[dict[str, Any]] = []
+        events = list(trace or [])
+        total = len(events)
+
+        for idx, event in enumerate(events):
+            event_type = str(event.get("event_type") or "").strip()
+            event_class = self.classify_execution_event(event_type)
+            if event_class != EVENT_CLASS_TRANSITIONAL:
+                reduced.append(event)
+                continue
+
+            stage = str(event.get("stage") or "").strip().lower()
+            if not stage:
+                reduced.append(event)
+                continue
+            # Transitional events on kernel step aliases (not declared stages)
+            # are retained; lineage compression applies to declared stage paths.
+            if allowed_stages and stage not in allowed_stages:
+                reduced.append(event)
+                continue
+
+            keep = False
+            for follow_idx in range(idx + 1, total):
+                follow = events[follow_idx]
+                follow_stage = str(follow.get("stage") or "").strip().lower()
+                if follow_stage != stage:
+                    continue
+                follow_type = str(follow.get("event_type") or "").strip()
+                follow_class = self.classify_execution_event(follow_type)
+                if follow_class == EVENT_CLASS_TRANSITIONAL:
+                    keep = False
+                    break
+                # Keep only the last transitional immediately before terminal
+                # closure of the same stage lineage segment.
+                if follow_class == EVENT_CLASS_TERMINAL:
+                    keep = True
+                break
+            else:
+                # No subsequent same-stage semantic event: preserve evidence.
+                keep = True
+
+            if keep:
+                reduced.append(event)
+
+        return reduced
+
+    def assess_execution_semantics(
+        self,
+        trace: list[dict[str, Any]],
+        *,
+        pipeline_stage_names: list[str] | None = None,
+        require_closed_lineage: bool = False,
+    ) -> ValidationDecision:
+        try:
+            self.validate_execution_semantics(
+                trace,
+                pipeline_stage_names=pipeline_stage_names,
+                require_closed_lineage=require_closed_lineage,
+            )
+        except InvariantViolationError as exc:
+            return ValidationDecision(approved=False, reason=str(exc), details={"violations": [str(exc)]})
+        return ValidationDecision(approved=True)
+
+    def build_trace_contract_decision(
+        self,
+        trace: list[dict[str, Any]],
+        *,
+        trace_id: str,
+        pipeline_stage_names: list[str] | None = None,
+        expected_hash: str = "",
+    ) -> ValidationDecision:
+        if not trace:
+            return ValidationDecision(
+                approved=False,
+                reason="Execution trace contract incomplete: no execution_trace events recorded",
+            )
+
+        semantic = self.assess_execution_semantics(
+            trace,
+            pipeline_stage_names=pipeline_stage_names,
+            require_closed_lineage=True,
+        )
+        if not semantic.approved:
+            return semantic
+
+        reduced_trace = self.reduce_execution_trace(
+            trace,
+            pipeline_stage_names=pipeline_stage_names,
+        )
+        reduced_semantic = self.assess_execution_semantics(
+            reduced_trace,
+            pipeline_stage_names=pipeline_stage_names,
+            require_closed_lineage=True,
+        )
+        if not reduced_semantic.approved:
+            return ValidationDecision(
+                approved=False,
+                reason=reduced_semantic.reason,
+                details={
+                    "violations": list((reduced_semantic.details or {}).get("violations") or []),
+                    "trace_scope": "reduced",
+                },
+            )
+
+        for item in trace:
+            event_type = str(item.get("event_type", "") or "").strip()
+            stage = str(item.get("stage", "") or "").strip().lower()
+            if not event_type or not stage:
+                return ValidationDecision(
+                    approved=False,
+                    reason=(
+                        "Execution trace contract incomplete: missing event_type or stage "
+                        f"at sequence={int(item.get('sequence', 0) or 0)}"
+                    ),
+                )
+            if event_type not in _DECLARED_TRACE_EVENT_TYPES:
+                return ValidationDecision(
+                    approved=False,
+                    reason=(
+                        "Execution trace closure violation: undeclared event type "
+                        f"event_type={event_type!r} sequence={int(item.get('sequence', 0) or 0)}"
+                    ),
+                )
+
+        canonical = {
+            "trace_id": str(trace_id or ""),
+            "events": [
+                {
+                    "sequence": int(item.get("sequence", 0) or 0),
+                    "event_type": str(item.get("event_type", "") or ""),
+                    "stage": str(item.get("stage", "") or ""),
+                    "phase": str(item.get("phase", "") or ""),
+                    "detail": dict(item.get("detail") or {}),
+                }
+                for item in reduced_trace
+            ],
+        }
+        digest = hashlib.sha256(
+            json.dumps(canonical, sort_keys=True, default=str).encode("utf-8"),
+        ).hexdigest()
+
+        expected = str(expected_hash or "").strip()
+        if expected and expected != digest:
+            return ValidationDecision(
+                approved=False,
+                reason=f"Execution trace determinism mismatch: expected={expected!r}, actual={digest!r}",
+                details={"expected": expected, "actual": digest},
+            )
+
+        contract = stamp_trace_contract_version(
+            {
+                "version": "1.0",
+                "event_count": len(trace),
+                "reduced_event_count": len(reduced_trace),
+                "ordering_model": PRIMARY_EXECUTION_ORDERING_MODEL,
+                "reduction_rule": CANONICAL_TRACE_REDUCTION_RULE_VERSION,
+                "trace_hash": digest,
+            },
+        )
+        return ValidationDecision(
+            approved=True,
+            details={
+                "reduced_trace": reduced_trace,
+                "contract": contract,
+                "trace_hash": digest,
+            },
+        )
+
+    def validate_execution_semantics(
+        self,
+        trace: list[dict[str, Any]],
+        *,
+        pipeline_stage_names: list[str] | None = None,
+        require_closed_lineage: bool = False,
+    ) -> None:
+        """Validate trace under a lineage-first DAG semantic model.
+
+        Domains enforced explicitly:
+        - linear_sequences: contiguous event sequence monotonicity
+        - lineage_graphs: stage ancestry/open-lineage correctness
+        - hybrid_paths: terminal closure over lineage-aware execution
+        """
+        expected_sequence = 1
+        active_lineage: dict[str, bool] = {}
+        terminal_turn_seen = False
+        terminal_turn_event = ""
+        allowed_stages = {
+            str(name or "").strip().lower()
+            for name in list(pipeline_stage_names or [])
+            if str(name or "").strip()
+        }
+
+        for event in trace:
+            event_type = str(event.get("event_type") or "").strip()
+            stage = str(event.get("stage") or "").strip().lower()
+            sequence = int(event.get("sequence") or 0)
+
+            # linear_sequences domain
+            if sequence != expected_sequence:
+                raise InvariantViolationError(
+                    "Execution semantic violation [linear_sequences]: "
+                    f"non-contiguous sequence expected={expected_sequence} actual={sequence}",
+                )
+
+            if terminal_turn_seen and event_type not in _TURN_TERMINAL_EVENTS:
+                raise InvariantViolationError(
+                    "Execution semantic violation [hybrid_paths]: events emitted after terminal turn event",
+                )
+
+            if event_type in _TURN_TERMINAL_EVENTS:
+                terminal_turn_seen = True
+                terminal_turn_event = event_type
+
+            # lineage_graphs domain
+            if event_type in _STAGE_STRUCTURAL_EVENTS | _STAGE_TRANSITIONAL_EVENTS | _STAGE_TERMINAL_EVENTS:
+                if not stage:
+                    raise InvariantViolationError(
+                        "Execution semantic violation [lineage_graphs]: missing stage for stage-scoped event",
+                    )
+                # Kernel transitional events may reference kernel step aliases
+                # rather than declarative pipeline stage names.
+                if (
+                    allowed_stages
+                    and event_type in (_STAGE_STRUCTURAL_EVENTS | _STAGE_TERMINAL_EVENTS)
+                    and stage not in allowed_stages
+                ):
+                    raise InvariantViolationError(
+                        "Execution semantic violation [lineage_graphs]: stage outside declared pipeline "
+                        f"stage={stage!r} event_type={event_type!r}",
+                    )
+
+            if event_type == "stage_enter":
+                if active_lineage.get(stage, False):
+                    raise InvariantViolationError(
+                        "Execution semantic violation [lineage_graphs]: nested stage_enter without closure "
+                        f"stage={stage!r}",
+                    )
+                active_lineage[stage] = True
+            elif event_type in _STAGE_TRANSITIONAL_EVENTS:
+                if not active_lineage.get(stage, False) and not any(active_lineage.values()):
+                    raise InvariantViolationError(
+                        "Execution semantic violation [lineage_graphs]: transitional event without open lineage "
+                        f"stage={stage!r} event_type={event_type!r}",
+                    )
+            elif event_type in _STAGE_TERMINAL_EVENTS:
+                if not active_lineage.get(stage, False):
+                    raise InvariantViolationError(
+                        "Execution semantic violation [hybrid_paths]: terminal event without open lineage "
+                        f"stage={stage!r} event_type={event_type!r}",
+                    )
+                active_lineage[stage] = False
+            elif event_type == "stage_skip":
+                active_lineage[stage] = False
+
+            expected_sequence += 1
+
+        still_open = sorted(stage for stage, is_open in active_lineage.items() if is_open)
+        if (
+            require_closed_lineage
+            and still_open
+            and terminal_turn_event not in {"turn_failed", "turn_short_circuit"}
+        ):
+            raise InvariantViolationError(
+                "Execution semantic violation [hybrid_paths]: unclosed stage lineage at trace end "
+                f"stages={still_open!r}",
+            )
 
 
 # ---------------------------------------------------------------------------

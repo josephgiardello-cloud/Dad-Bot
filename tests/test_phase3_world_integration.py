@@ -5,7 +5,6 @@ from types import SimpleNamespace
 import pytest
 
 from dadbot.core.execution_equivalence_oracle import ExecutionEquivalenceOracle
-from dadbot.core.execution_recovery import ExecutionRecovery
 from dadbot.core.execution_replay_engine import reconstruct_terminal_state_from_trace
 from dadbot.core.execution_trace_context import (
     ExecutionTraceRecorder,
@@ -133,24 +132,6 @@ class TestPhase3ExecutionEquivalenceOracle:
         assert report.equivalent is True
         assert report.violations == []
         assert report.invariance_hash
-
-
-class TestPhase3FailureRecovery:
-    def test_partial_trace_repair_and_fallback_is_rejected(self):
-        broken_trace = {
-            "steps": [
-                {"operation": "model_call", "payload": {"input_hash": "x"}},
-                "bad-step",
-                {"operation": "model_output", "payload": {"output_hash": "y"}},
-            ]
-        }
-        repaired = ExecutionRecovery.repair_partial_trace_context(broken_trace)
-        assert len(repaired["steps"]) == 2
-        with pytest.raises(RuntimeError, match="replay-only"):
-            ExecutionRecovery.safe_fallback_reconstruction(
-                checkpoint={"state": {"k": "v"}, "metadata": {"m": 1}},
-                trace_context=broken_trace,
-            )
 
 
 class TestPhase3TruthSystem:

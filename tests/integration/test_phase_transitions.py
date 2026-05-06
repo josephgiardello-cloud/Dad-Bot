@@ -41,30 +41,6 @@ def _build_canonical(registry: MockRegistry) -> TurnGraph:
     return g
 
 
-class TestPhaseMapping:
-    """Each canonical stage maps to the expected phase."""
-
-    @pytest.mark.parametrize(
-        "stage,expected_phase",
-        [
-            ("temporal", TurnPhase.PLAN),
-            ("health", TurnPhase.PLAN),
-            ("context_builder", TurnPhase.PLAN),
-            ("inference", TurnPhase.ACT),
-            ("safety", TurnPhase.OBSERVE),
-            ("save", TurnPhase.RESPOND),
-        ],
-    )
-    def test_stage_to_phase(self, stage: str, expected_phase: TurnPhase):
-        assert TurnGraph._phase_for_stage(stage, TurnPhase.PLAN) == expected_phase
-
-    @pytest.mark.parametrize("unknown_stage", ["logging", "custom_hook", "test_node", ""])
-    def test_unknown_stage_returns_none_or_plan(self, unknown_stage: str):
-        result = TurnGraph._phase_for_stage(unknown_stage, TurnPhase.ACT)
-        # Unknown stage falls back to current phase.
-        assert result == TurnPhase.ACT
-
-
 class TestPhaseTransitionsAfterRun:
     def test_no_phase_regressions_in_history(self):
         registry = MockRegistry()

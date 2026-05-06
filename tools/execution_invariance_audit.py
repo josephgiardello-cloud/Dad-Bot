@@ -9,7 +9,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
-from dadbot.core.invariance_contract import evaluation_contract_payload
+from dadbot.core.contract_evaluator import evaluation_contract_payload
 from tests.stress.phase4_certification_gate import build_bot
 
 ROOT = Path(__file__).resolve().parents[1]

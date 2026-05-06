@@ -11,7 +11,6 @@ from dadbot.core.control_plane import (
     SessionRegistry,
 )
 from dadbot.core.ledger_writer import LedgerWriter
-from dadbot.core.recovery_manager import RecoveryManager
 from dadbot.core.replay_verifier import ReplayVerifier
 from dadbot.core.session_store import SessionStore
 
@@ -70,9 +69,10 @@ def test_scheduler_enforces_backpressure_limit():
     asyncio.run(_run())
 
 
-def test_recovery_manager_rebuilds_projection_and_returns_pending_jobs():
+def test_ledger_replay_rebuilds_projection_and_returns_pending_jobs():
+    """Phase 3: recovery is ledger-only via direct replay."""
     ledger = InMemoryExecutionLedger()
-    session_store = SessionStore(projection_only=True)
+    session_store = SessionStore(ledger=ledger, projection_only=True)
 
     ledger.write(
         {
@@ -103,14 +103,18 @@ def test_recovery_manager_rebuilds_projection_and_returns_pending_jobs():
         }
     )
 
-    manager = RecoveryManager(ledger=ledger)
-    report = manager.recover(session_store=session_store)
+    # Phase 3: direct ledger replay
+    events = ledger.read()
+    session_store.rebuild_from_ledger(events)
 
-    assert report["ledger_events"] == 2
-    assert report["session_count"] == 1
-    assert report["session_snapshot_version"] >= 1
-    assert len(report["pending_jobs"]) == 1
-    assert report["pending_jobs"][0]["job_id"] == "job-recover-1"
+    snap = session_store.snapshot()
+    pending = list(session_store.pending_jobs())
+
+    assert len(events) == 2
+    assert len(dict(snap.get("sessions") or {})) == 1
+    assert int(snap.get("version") or 0) >= 1
+    assert len(pending) == 1
+    assert pending[0]["job_id"] == "job-recover-1"
 
     state = session_store.get("s-recover")
     assert state == {"x": 1}

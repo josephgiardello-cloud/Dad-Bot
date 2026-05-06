@@ -5,6 +5,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from dadbot.core.canonical_execution_reducer import reduce_official_execution_state
 from dadbot.core.execution_context import build_tool_invocation_projection
 from dadbot.core.execution_memory_view import ExecutionMemoryView
 from dadbot.core.graph_context import TurnContext
@@ -180,63 +181,41 @@ def build_execution_terminal_state(
     finalized_result: Any,
 ) -> ExecutionTerminalState:
     trace_context = dict(context.metadata.get("execution_trace_context") or {})
-    final_trace_hash = str(trace_context.get("final_hash") or "")
-    execution_dag = dict(trace_context.get("execution_dag") or {})
-    execution_dag_hash = str(execution_dag.get("dag_hash") or "")
-
-    model_hashes = _model_output_hashes(trace_context)
     memory_view = ExecutionMemoryView.from_context(context)
     final_memory_view = memory_view.to_dict()
     policy_snapshot = _policy_snapshot(context)
-
-    memory_retrieval_hash = _stable_sha256(list(memory_view.memory_retrieval_set or []))
-    policy_hash = _stable_sha256(policy_snapshot)
-    execution_order_hash = _execution_order_hash(trace_context)
-    node_decision_sequence_hash = _node_decision_sequence_hash(trace_context)
-    failure_recovery_transition_hash = _failure_recovery_transition_hash(
-        trace_context,
-        dict(getattr(context, "determinism_manifest", {}) or {}),
-    )
-    tool_invocation_sequence_hash = _tool_invocation_sequence_hash(trace_context)
-    post_commit_mutation_effects_hash = _post_commit_mutation_effects_hash(
-        context,
-        trace_context,
-    )
-
     determinism = dict(context.metadata.get("determinism") or {})
     tool_trace_hash = str(determinism.get("tool_trace_hash") or "")
 
-    closure_payload = {
-        "model_output_hashes": model_hashes,
-        "memory_retrieval_hash": memory_retrieval_hash,
-        "policy_hash": policy_hash,
-        "final_trace_hash": final_trace_hash,
-        "execution_dag_hash": execution_dag_hash,
-        "tool_trace_hash": tool_trace_hash,
-        "execution_order_hash": execution_order_hash,
-        "node_decision_sequence_hash": node_decision_sequence_hash,
-        "failure_recovery_transition_hash": failure_recovery_transition_hash,
-        "tool_invocation_sequence_hash": tool_invocation_sequence_hash,
-        "post_commit_mutation_effects_hash": post_commit_mutation_effects_hash,
-    }
-    determinism_closure_hash = _stable_sha256(closure_payload)
+    official_state = reduce_official_execution_state(
+        graph_output=_final_output_value(finalized_result),
+        execution_trace_context=trace_context,
+        memory_view=final_memory_view,
+        memory_view_state_id=memory_view.state_id,
+        policy_snapshot=policy_snapshot,
+        tool_trace_hash=tool_trace_hash,
+        final_trace_hash_fallback=str(context.trace_id or ""),
+        invariant_decisions=list(context.state.get("invariant_decisions") or []),
+        ledger_events=list(context.state.get("execution_trace") or []),
+        live_tool_mode=False,
+    )
 
     return ExecutionTerminalState(
         schema_version=_SCHEMA_VERSION,
-        final_output=_final_output_value(finalized_result),
+        final_output=str(official_state.get("final_output") or ""),
         final_memory_view=final_memory_view,
         memory_view_state_id=memory_view.state_id,
-        final_trace_hash=final_trace_hash,
-        execution_dag_hash=execution_dag_hash,
+        final_trace_hash=str(official_state.get("final_trace_hash") or ""),
+        execution_dag_hash=str(official_state.get("execution_dag_hash") or ""),
         policy_snapshot=policy_snapshot,
-        model_output_hashes=model_hashes,
-        memory_retrieval_hash=memory_retrieval_hash,
-        policy_hash=policy_hash,
+        model_output_hashes=list(official_state.get("model_output_hashes") or []),
+        memory_retrieval_hash=str(official_state.get("memory_retrieval_hash") or ""),
+        policy_hash=str(official_state.get("policy_hash") or ""),
         tool_trace_hash=tool_trace_hash,
-        execution_order_hash=execution_order_hash,
-        node_decision_sequence_hash=node_decision_sequence_hash,
-        failure_recovery_transition_hash=failure_recovery_transition_hash,
-        tool_invocation_sequence_hash=tool_invocation_sequence_hash,
-        post_commit_mutation_effects_hash=post_commit_mutation_effects_hash,
-        determinism_closure_hash=determinism_closure_hash,
+        execution_order_hash=str(official_state.get("execution_order_hash") or ""),
+        node_decision_sequence_hash=str(official_state.get("node_decision_sequence_hash") or ""),
+        failure_recovery_transition_hash=str(official_state.get("failure_recovery_transition_hash") or ""),
+        tool_invocation_sequence_hash=str(official_state.get("tool_invocation_sequence_hash") or ""),
+        post_commit_mutation_effects_hash=str(official_state.get("post_commit_mutation_effects_hash") or ""),
+        determinism_closure_hash=str(official_state.get("determinism_closure_hash") or ""),
     )

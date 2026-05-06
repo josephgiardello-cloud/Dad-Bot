@@ -13,8 +13,10 @@ import inspect
 import logging
 from typing import Any, Protocol
 
+from dadbot.core.critic import CritiqueEngine
 from dadbot.core.graph_context import TurnContext
 from dadbot.core.graph_types import NodeType
+from dadbot.core.planner import PlannerNode
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +37,11 @@ class _NodeContractMixin:
         return ()
 
     async def run(self, registry: Any, ctx: TurnContext) -> None:
-        await self.execute(registry, ctx)
+        execute_method = getattr(self, "execute")
+        execute_params = inspect.signature(execute_method).parameters
+        result = execute_method(registry, ctx) if len(execute_params) >= 2 else execute_method(ctx)
+        if inspect.isawaitable(result):
+            await result
 
 
 async def _invoke_node_run_compat(run_method: Any, registry: Any, turn_context: TurnContext) -> Any:
@@ -59,7 +65,11 @@ class ContextBuilderNode(_NodeContractMixin):
 
     async def execute(self, registry: Any, turn_context: TurnContext) -> None:
         service = registry.get("context_service")
-        turn_context.state["rich_context"] = service.build_context(turn_context)
+        rich_context = dict(service.build_context(turn_context) or {})
+        rich_context.setdefault("temporal", dict(turn_context.state.get("temporal") or {}))
+        turn_context.state["rich_context"] = rich_context
+        # Keep semantic cognition contract: planner always runs after context build.
+        await PlannerNode().run(turn_context)
 
 
 MemoryNode = ContextBuilderNode
@@ -68,13 +78,49 @@ MemoryNode = ContextBuilderNode
 class InferenceNode(_NodeContractMixin):
     name = "inference"
 
+    def __init__(self) -> None:
+        self._critique_engine = CritiqueEngine()
+
+    def _run_critique_check(self, turn_context: TurnContext, candidate: Any, iteration: int) -> bool:
+        plan = dict(turn_context.state.get("turn_plan") or {})
+        reply = candidate[0] if isinstance(candidate, tuple) else str(candidate or "")
+        critique = self._critique_engine.critique(reply, turn_context.user_input, plan, iteration)
+        passed = bool(getattr(critique, "passed", False))
+        hint = str(getattr(critique, "revision_hint", "") or "")
+        turn_context.state["critique_record"] = {
+            "iteration": iteration,
+            "score": getattr(critique, "score", 0.0),
+            "passed": passed,
+            "issues": list(getattr(critique, "issues", []) or []),
+            "revision_hint": hint,
+            "tool_necessity_score": getattr(critique, "tool_necessity_score", 0.0),
+            "tool_correctness_score": getattr(critique, "tool_correctness_score", 0.0),
+        }
+        if not passed:
+            turn_context.state["_critique_revision_context"] = hint
+        return passed
+
+    @staticmethod
+    def _blend_daily_checkin_reply(service: Any, turn_context: TurnContext, candidate: Any) -> Any:
+        bot = getattr(service, "bot", None)
+        tone_context = getattr(bot, "tone_context", None)
+        blend = getattr(tone_context, "blend_daily_checkin_reply", None)
+        if not callable(blend):
+            return candidate
+        current_mood = str(turn_context.state.get("mood") or "neutral")
+        if isinstance(candidate, tuple):
+            reply = str(candidate[0] or "")
+            return blend(reply, current_mood), bool(candidate[1])
+        return blend(str(candidate or ""), current_mood)
+
     async def execute(self, registry: Any, turn_context: TurnContext) -> None:
         service = registry.get("agent_service")
         rich_context = turn_context.state.get("rich_context", {})
-        turn_context.state["candidate"] = await service.run_agent(
-            turn_context,
-            rich_context,
-        )
+        candidate = await service.run_agent(turn_context, rich_context)
+        candidate = self._blend_daily_checkin_reply(service, turn_context, candidate)
+        self._run_critique_check(turn_context, candidate, 0)
+        turn_context.state.pop("_critique_revision_context", None)
+        turn_context.state["candidate"] = candidate
 
 
 class SafetyNode(_NodeContractMixin):
@@ -83,10 +129,19 @@ class SafetyNode(_NodeContractMixin):
     async def execute(self, registry: Any, turn_context: TurnContext) -> None:
         service = registry.get("safety_service")
         candidate = turn_context.state.get("candidate")
-        turn_context.state["safe_result"] = service.enforce_policies(
-            turn_context,
-            candidate,
-        )
+        enforce = getattr(service, "enforce_policies", None)
+        if callable(enforce):
+            turn_context.state["safe_result"] = enforce(turn_context, candidate)
+            return
+        validate = getattr(service, "validate", None)
+        if callable(validate):
+            turn_context.state["safe_result"] = validate(candidate)
+            return
+        turn_context.state["safe_result"] = candidate
+        turn_context.state["safety_passthrough"] = {
+            "reason": "no_safety_manager",
+            "failure_mode": "passthrough",
+        }
 
 
 class SaveNode(_NodeContractMixin):
@@ -108,10 +163,12 @@ class SaveNode(_NodeContractMixin):
                         error=None,
                     )
                     save_checkpoint(checkpoint, _skip_turn_event=True)
+                turn_context.fidelity.save = True
                 return
             except Exception as exc:  # noqa: BLE001 — SaveNode optimistic path; non-fatal
                 logger.debug("SaveNode optimistic checkpoint skipped: %s", exc)
         service.save_turn(turn_context, result)
+        turn_context.fidelity.save = True
 
 
 class TemporalNode(_NodeContractMixin):

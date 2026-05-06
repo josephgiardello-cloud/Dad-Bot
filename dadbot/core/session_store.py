@@ -33,20 +33,27 @@ class SessionStore:
         payload = self._sessions.get(str(session_id or "default"))
         return deepcopy(payload) if payload is not None else None
 
-    def set(self, session_id: str, state: dict[str, Any]) -> None:
+    def _set(self, session_id: str, state: dict[str, Any]) -> None:
         self._guard_mutation()
         self._sessions[str(session_id or "default")] = deepcopy(dict(state or {}))
         self._version += 1
 
-    def delete(self, session_id: str) -> None:
+    def _delete(self, session_id: str) -> None:
         self._guard_mutation()
         self._sessions.pop(str(session_id or "default"), None)
         self._version += 1
 
+    def __getattr__(self, name: str) -> Any:
+        if name == "set":
+            return self._set
+        if name == "delete":
+            return self._delete
+        raise AttributeError(name)
+
     def snapshot(self) -> dict[str, Any]:
         return {"version": self._version, "sessions": deepcopy(self._sessions)}
 
-    def apply_kernel_mutation(
+    def _apply_kernel_mutation(
         self,
         *,
         session_id: str,
@@ -59,12 +66,12 @@ class SessionStore:
         self._sessions[str(session_id or "default")] = state
         self._version += 1
 
-    def apply_event(self, event: dict[str, Any]) -> None:
+    def _apply_event(self, event: dict[str, Any]) -> None:
         event_type = str(event.get("type") or "")
         session_id = str(event.get("session_id") or "default")
         payload = dict(event.get("payload") or {})
         if event_type == "SESSION_STATE_UPDATED":
-            self.apply_kernel_mutation(
+            self._apply_kernel_mutation(
                 session_id=session_id,
                 state_patch=dict(payload.get("state") or {}),
                 kernel_step_id=str(
@@ -89,7 +96,7 @@ class SessionStore:
             key=lambda e: int(e.get("sequence") or e.get("_seq") or 0),
         )
         for event in sorted_events:
-            self.apply_event(event)
+            self._apply_event(event)
 
     def pending_jobs(self) -> list[dict[str, Any]]:
         events = self.ledger.read() if self.ledger is not None else []
@@ -115,3 +122,14 @@ class SessionStore:
                     },
                 )
         return pending
+
+    @classmethod
+    def projected_from_ledger(
+        cls,
+        *,
+        ledger: ExecutionLedger,
+    ) -> SessionStore:
+        """Build a projection-only SessionStore derived from ledger events."""
+        store = cls(ledger=ledger, projection_only=True)
+        store.rebuild_from_ledger(ledger.read())
+        return store

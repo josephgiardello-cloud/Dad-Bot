@@ -400,7 +400,9 @@ class _Transaction:
 
     def apply_session(self, session_id: str, mutation: dict[str, Any]) -> None:
         if self._session_store is not None:
-            self._session_store.apply_event({"session_id": session_id, **mutation})
+            apply_event = getattr(self._session_store, "_apply_event", None)
+            if callable(apply_event):
+                apply_event({"session_id": session_id, **mutation})
 
     def save_checkpoint(self, label: str = "") -> None:
         if self._checkpoint is not None:

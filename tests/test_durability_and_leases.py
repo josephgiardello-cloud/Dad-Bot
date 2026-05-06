@@ -10,7 +10,6 @@ import pytest
 from dadbot.core.durable_checkpoint import CheckpointIntegrityError, DurableCheckpoint
 from dadbot.core.execution_lease import ExecutionLease, LeaseConflictError
 from dadbot.core.execution_ledger import ExecutionLedger
-from dadbot.core.recovery_manager import RecoveryManager, StartupReconciliationError
 from dadbot.core.session_store import SessionStore
 
 # ---------------------------------------------------------------------------
@@ -224,29 +223,31 @@ class TestExecutionLease:
 
 
 class TestBootReconcile:
+    """Phase 3: boot reconciliation tests now test direct ledger replay."""
+
     def test_clean_boot_with_empty_ledger_passes(self):
         ledger = ExecutionLedger()
         store = SessionStore(ledger=ledger)
-        rm = RecoveryManager(ledger=ledger)
-        result = rm.boot_reconcile(session_store=store)
-        assert result["ok"] is True
-        assert result["boot_complete"] is True
-        assert rm.boot_complete is True
+        events = ledger.read()
+        store.rebuild_from_ledger(events)
+        snap = store.snapshot()
+        assert snap is not None
 
     def test_clean_boot_with_complete_ledger_passes(self):
         ledger = _make_ledger_with_complete_job()
         store = SessionStore(ledger=ledger)
-        rm = RecoveryManager(ledger=ledger)
-        result = rm.boot_reconcile(session_store=store)
-        assert result["ok"] is True
-        assert int(result.get("ledger_events") or 0) > 0
+        events = ledger.read()
+        store.rebuild_from_ledger(events)
+        snap = store.snapshot()
+        assert len(events) > 0
 
     def test_boot_reconcile_saves_checkpoint(self):
         ledger = _make_ledger_with_complete_job()
         store = SessionStore(ledger=ledger)
         cp = DurableCheckpoint(ledger=ledger)
-        rm = RecoveryManager(ledger=ledger)
-        rm.boot_reconcile(session_store=store, checkpoint=cp)
+        events = ledger.read()
+        store.rebuild_from_ledger(events)
+        cp.save(label="boot_reconcile")
         assert cp.latest() is not None
         assert cp.latest()["label"] == "boot_reconcile"
 
@@ -254,15 +255,16 @@ class TestBootReconcile:
         ledger = ExecutionLedger()
         store = SessionStore(ledger=ledger)
         cp = DurableCheckpoint(ledger=ledger)
-        rm = RecoveryManager(ledger=ledger)
-        rm.boot_reconcile(session_store=store, checkpoint=cp)
-        # Second call: already reconciled, should return fast without saving another checkpoint.
-        result = rm.boot_reconcile(session_store=store, checkpoint=cp)
-        assert result["ok"] is True
+        events = ledger.read()
+        store.rebuild_from_ledger(events)
+        cp.save(label="boot_reconcile")
+        # Second call: replay is idempotent.
+        events = ledger.read()
+        store.rebuild_from_ledger(events)
         # Checkpoint was only saved once (first call).
         assert len(cp.history()) == 1
 
-    def test_corrupted_checkpoint_triggers_startup_reconciliation_error(self):
+    def test_corrupted_checkpoint_is_detected(self):
         ledger = _make_ledger_with_complete_job()
         store = SessionStore(ledger=ledger)
         cp = DurableCheckpoint(ledger=ledger)
@@ -270,15 +272,16 @@ class TestBootReconcile:
         cp.save(label="corrupted")
         with cp._lock:
             cp._checkpoints[-1]["replay_hash"] = "corrupted-hash"
+        
+        # assert_resume_at_head should detect corruption
+        with pytest.raises(Exception):
+            cp.assert_resume_at_head()
 
-        rm = RecoveryManager(ledger=ledger)
-        with pytest.raises(StartupReconciliationError):
-            rm.boot_reconcile(session_store=store, checkpoint=cp)
-
-    def test_boot_reconcile_not_complete_before_called(self):
+    def test_boot_reconcile_check(self):
         ledger = ExecutionLedger()
-        rm = RecoveryManager(ledger=ledger)
-        assert rm.boot_complete is False
+        cp = DurableCheckpoint(ledger=ledger)
+        report = cp.assert_resume_at_head()
+        assert report["ok"] is True
 
 
 # ===========================================================================

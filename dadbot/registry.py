@@ -325,6 +325,7 @@ class ServiceRegistry:
         registry.register("llm", registry.get("agent_service"))
         registry.register("safety", registry.get("safety_service"))
         registry.register("storage", registry.get("persistence_service"))
+        registry.register("persistence", registry.get("persistence_service"))
         reflection_service = getattr(
             bot,
             "internal_state_manager",

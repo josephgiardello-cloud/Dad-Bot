@@ -7,48 +7,36 @@ from dadbot.core.session_store import SessionStore
 
 
 class StartupReconciliationError(RuntimeError):
-    """Raised when boot reconciliation detects a corrupted durable state."""
+    """Raised when recovery cannot reconcile startup state from ledger."""
 
 
 class RecoveryManager:
-    """Reconstruct pending execution state from an append-only ledger."""
+    """Ledger-backed startup/session recovery helper for control-plane wiring."""
 
-    def __init__(self, ledger: ExecutionLedger):
+    def __init__(self, *, ledger: ExecutionLedger):
         self.ledger = ledger
-        self.boot_complete = False
 
-    def recover(self, session_store: SessionStore) -> dict[str, Any]:
-        events = self.ledger.read()
-        if session_store.ledger is None:
-            session_store.ledger = self.ledger
-        session_store.rebuild_from_ledger(events)
-        snap = session_store.snapshot()
-        pending = list(session_store.pending_jobs())
+    def recover(self, *, session_store: SessionStore | None = None) -> dict[str, Any]:
+        store = session_store or SessionStore(ledger=self.ledger, projection_only=True)
+        if store.ledger is None:
+            store.ledger = self.ledger
+
+        try:
+            events = self.ledger.read()
+            store.rebuild_from_ledger(events)
+            snapshot = store.snapshot()
+            pending = list(store.pending_jobs())
+        except Exception as exc:  # noqa: BLE001 - recovery boundary
+            raise StartupReconciliationError(str(exc)) from exc
+
         return {
             "pending_jobs": pending,
             "ledger_events": len(events),
             "replay_hash": self.ledger.replay_hash(),
-            "session_count": len(dict(snap.get("sessions") or {})),
-            "session_snapshot_version": int(snap.get("version") or 0),
+            "session_count": len(dict(snapshot.get("sessions") or {})),
+            "session_snapshot_version": int(snapshot.get("version") or 0),
+            "ok": True,
         }
 
-    def boot_reconcile(
-        self,
-        session_store: SessionStore,
-        checkpoint: Any | None = None,
-    ) -> dict[str, Any]:
-        if self.boot_complete:
-            report = self.recover(session_store)
-            report.update({"ok": True, "boot_complete": True})
-            return report
-        if checkpoint is not None:
-            try:
-                checkpoint.assert_resume_at_head()
-            except Exception as exc:
-                raise StartupReconciliationError(str(exc)) from exc
-        report = self.recover(session_store)
-        if checkpoint is not None and checkpoint.latest() is None:
-            checkpoint.save(label="boot_reconcile")
-        self.boot_complete = True
-        report.update({"ok": True, "boot_complete": True})
-        return report
+
+__all__ = ["RecoveryManager", "StartupReconciliationError"]

@@ -18,7 +18,6 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from dadbot.core.capability_registry import CapabilityRegistry
-    from dadbot.core.execution_recovery import ExecutionRecovery
     from dadbot.core.graph_context import TurnContext
 
 from dadbot.core.capability_registry import EnforcementMode, enforce_node_entry
@@ -60,19 +59,11 @@ class StageEntryGate:
         self,
         stage_name: str,
         context: TurnContext,
-        recovery: ExecutionRecovery | None,
     ) -> bool:
-        """Return True if the stage should be skipped (already completed in a prior run).
+        """Phase 3: recovery is now ledger-replay only. Always returns False.
 
-        No mutations.
+        Stage idempotency is handled via ledger event replay, not stored resume points.
         """
-        if recovery is not None and recovery.is_already_completed(stage_name, context):
-            logger.debug(
-                "Idempotency guard: skipping already-completed stage %r for turn %r",
-                stage_name,
-                context.trace_id,
-            )
-            return True
         return False
 
     def check_capability_skip(

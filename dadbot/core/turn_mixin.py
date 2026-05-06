@@ -489,7 +489,7 @@ class DadBotTurnMixin:
         state: AgentState | None = None,
         chunk_callback: ChunkCallback | None = None,
     ) -> TurnResponse:
-        if request.mode is ExecutionMode.LIVE:
+        if request.mode == ExecutionMode.LIVE:
             return await self._execute_live_turn_async(
                 request,
                 chunk_callback=chunk_callback,
@@ -498,7 +498,7 @@ class DadBotTurnMixin:
         if state is None:
             raise RuntimeError(f"{request.mode.value} mode requires AgentState")
 
-        if request.mode is ExecutionMode.REPLAY:
+        if request.mode == ExecutionMode.REPLAY:
             replay_handler = getattr(self, "_run_turn_replay", None)
             if not callable(replay_handler):
                 raise RuntimeError("Replay mode requires _run_turn_replay handler")
@@ -512,7 +512,7 @@ class DadBotTurnMixin:
             )
             return self._response_from_result(request, result)
 
-        if request.mode is ExecutionMode.RECOVERY:
+        if request.mode == ExecutionMode.RECOVERY:
             recovery_handler = getattr(self, "_run_turn_recovery", None)
             if callable(recovery_handler):
                 result = cast(
@@ -622,7 +622,31 @@ class DadBotTurnMixin:
                 chunk_callback=chunk_callback,
             ),
         )
-        return response.as_result()
+        dad_reply, should_end = response.as_result()
+        if should_end:
+            return dad_reply, should_end
+        if not isinstance(dad_reply, str):
+            return dad_reply, should_end
+
+        memory = getattr(self, "memory", None)
+        should_do_daily_checkin = getattr(memory, "should_do_daily_checkin", None)
+        tone_context = getattr(self, "tone_context", None)
+        blend_daily_checkin_reply = getattr(tone_context, "blend_daily_checkin_reply", None)
+        if callable(should_do_daily_checkin) and callable(blend_daily_checkin_reply):
+            try:
+                should_blend = bool(getattr(self, "_pending_daily_checkin_context", False)) or bool(
+                    should_do_daily_checkin(),
+                )
+                if should_blend:
+                    self._pending_daily_checkin_context = True
+                    mood = "neutral"
+                    last_ctx = getattr(self, "_last_turn_context", None)
+                    if last_ctx is not None:
+                        mood = str(getattr(last_ctx, "state", {}).get("mood") or "neutral")
+                    dad_reply = blend_daily_checkin_reply(dad_reply, mood)
+            except Exception:
+                pass
+        return dad_reply, should_end
 
     def run_turn(
         self,

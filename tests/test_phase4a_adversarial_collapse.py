@@ -4,7 +4,6 @@ from copy import deepcopy
 
 import pytest
 
-from dadbot.core.execution_recovery import ExecutionRecovery
 from dadbot.core.execution_replay_engine import (
     reconstruct_terminal_state_from_trace,
     verify_terminal_state_replay_equivalence,
@@ -66,19 +65,6 @@ def _baseline_seed(trace: dict) -> dict:
 
 
 class TestPhase4ATraceCorruption:
-    def test_missing_trace_nodes_are_repaired_to_safe_subset(self):
-        corrupted = {
-            "steps": [
-                {"operation": "model_output", "payload": {"output_hash": "x"}},
-                "broken-step",
-                {"operation": "external_system_call", "payload": {"system": "builtin_tool:calendar"}},
-            ]
-        }
-        repaired = ExecutionRecovery.repair_partial_trace_context(corrupted)
-        assert len(repaired["steps"]) == 2
-        assert repaired["steps"][0]["seq"] == 0
-        assert repaired["steps"][1]["seq"] == 2
-
     def test_broken_ordering_in_replay_is_flagged(self):
         baseline = _baseline_trace()
         seed = _baseline_seed(baseline)

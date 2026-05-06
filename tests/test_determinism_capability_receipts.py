@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from dadbot.core.execution_ledger import ExecutionLedger
 
 # ---------------------------------------------------------------------------
 # Side-Effect Deduplication Tests (Critical Fix)
@@ -20,7 +21,7 @@ class TestSideEffectDeduplication:
     def test_mark_started_persists_in_flight_marker(self, tmp_path: Path) -> None:
         from dadbot.core.turn_resume_store import TurnResumeStore
 
-        store = TurnResumeStore(tmp_path)
+        store = TurnResumeStore(ledger=ExecutionLedger())
         # No record yet — mark_started creates a minimal one.
         store.mark_started("t1", "inference")
         record = store.load("t1")
@@ -30,7 +31,7 @@ class TestSideEffectDeduplication:
     def test_mark_started_updates_existing_record(self, tmp_path: Path) -> None:
         from dadbot.core.turn_resume_store import TurnResumeStore
 
-        store = TurnResumeStore(tmp_path)
+        store = TurnResumeStore(ledger=ExecutionLedger())
         store.save(
             turn_id="t2",
             last_completed_stage="temporal",
@@ -48,7 +49,7 @@ class TestSideEffectDeduplication:
     def test_completed_save_clears_in_flight(self, tmp_path: Path) -> None:
         from dadbot.core.turn_resume_store import TurnResumeStore
 
-        store = TurnResumeStore(tmp_path)
+        store = TurnResumeStore(ledger=ExecutionLedger())
         store.mark_started("t3", "inference")
         store.save(
             turn_id="t3",
@@ -66,51 +67,13 @@ class TestSideEffectDeduplication:
     def test_resume_point_round_trips_in_flight(self, tmp_path: Path) -> None:
         from dadbot.core.turn_resume_store import ResumePoint, TurnResumeStore
 
-        store = TurnResumeStore(tmp_path)
+        store = TurnResumeStore(ledger=ExecutionLedger())
         store.mark_started("t4", "safety")
         record = store.load("t4")
         assert record is not None
         # Round-trip via dict
         reconstructed = ResumePoint.from_dict(record.to_dict())
         assert reconstructed.in_flight_stage == "safety"
-
-    def test_execution_recovery_injects_stage_call_id(self, tmp_path: Path) -> None:
-        from dadbot.core.execution_policy import ResumabilityPolicy
-        from dadbot.core.execution_recovery import ExecutionRecovery, _compute_stage_call_id
-        from dadbot.core.turn_resume_store import TurnResumeStore
-
-        store = TurnResumeStore(tmp_path)
-        policy = ResumabilityPolicy()
-        recovery = ExecutionRecovery(store, policy)
-
-        ctx = MagicMock()
-        ctx.trace_id = "myturn"
-        ctx.state = {}
-        call_id = recovery.mark_stage_started("inference", ctx)
-
-        # call_id returned must match deterministic formula.
-        expected = _compute_stage_call_id("myturn", "inference")
-        assert call_id == expected
-
-        # State must have _stage_call_id injected.
-        assert ctx.state.get("_stage_call_id") == expected
-
-    def test_stage_call_id_is_deterministic(self) -> None:
-        from dadbot.core.execution_recovery import _compute_stage_call_id
-
-        id1 = _compute_stage_call_id("turn-abc", "inference")
-        id2 = _compute_stage_call_id("turn-abc", "inference")
-        assert id1 == id2
-
-    def test_stage_call_id_differs_by_stage(self) -> None:
-        from dadbot.core.execution_recovery import _compute_stage_call_id
-
-        assert _compute_stage_call_id("t", "inference") != _compute_stage_call_id("t", "safety")
-
-    def test_stage_call_id_differs_by_turn(self) -> None:
-        from dadbot.core.execution_recovery import _compute_stage_call_id
-
-        assert _compute_stage_call_id("turn-A", "inference") != _compute_stage_call_id("turn-B", "inference")
 
 
 # ---------------------------------------------------------------------------

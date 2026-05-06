@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dadbot.core.invariance_contract import evaluation_contract_payload
+from dadbot.core.contract_evaluator import evaluation_contract_payload
 from tools import execution_invariance_audit as audit
 
 

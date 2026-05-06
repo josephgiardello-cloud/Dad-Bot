@@ -233,7 +233,7 @@ def build_dadbot_contract_map() -> ContractPropagationMap:
                 └─► graph_integrity_contract
                         └─► determinism_boundary_contract
     """
-    from dadbot.core.capability_contracts import CAPABILITY_CONTRACTS
+    from dadbot.core.contract_evaluator import CAPABILITY_CONTRACTS
 
     cmap = ContractPropagationMap()
 

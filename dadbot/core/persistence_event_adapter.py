@@ -9,6 +9,8 @@ class GraphPersistenceEventAdapter:
     """Adapter for persistence event emission from graph execution.
 
     This keeps persistence payload shaping out of TurnGraph orchestration logic.
+    The persistence service is the authority boundary; it must append runtime
+    events to ExecutionLedger, and any filesystem emission is derived-only.
     """
 
     def __init__(self, *, json_safe: Callable[[Any], Any]) -> None:

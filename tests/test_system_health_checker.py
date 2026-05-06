@@ -37,7 +37,7 @@ def test_health_checker_passes_basic_ledger_invariants():
             "payload": {"job_id": "j1", "result": ("ok", False)},
         }
     )
-    session_store.apply_event(completed)
+    session_store.rebuild_from_ledger([completed])
 
     checker = SystemHealthChecker(base_path=".")
     completeness = checker.check_ledger_completeness(ledger)
