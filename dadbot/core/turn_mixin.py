@@ -624,8 +624,11 @@ class DadBotTurnMixin:
         )
         dad_reply, should_end = response.as_result()
         if should_end:
-            return dad_reply, should_end
+            if dad_reply is None or isinstance(dad_reply, str):
+                return dad_reply, should_end
+            return str(dad_reply), should_end
         if not isinstance(dad_reply, str):
+            dad_reply = None if dad_reply is None else str(dad_reply)
             return dad_reply, should_end
 
         memory = getattr(self, "memory", None)
@@ -646,7 +649,9 @@ class DadBotTurnMixin:
                     dad_reply = blend_daily_checkin_reply(dad_reply, mood)
             except Exception:
                 pass
-        return dad_reply, should_end
+                if not isinstance(dad_reply, str):
+                    dad_reply = None if dad_reply is None else str(dad_reply)
+        return cast(str | None, dad_reply), should_end
 
     def run_turn(
         self,

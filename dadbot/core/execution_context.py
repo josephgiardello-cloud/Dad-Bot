@@ -388,13 +388,14 @@ def _normalized_steps(raw_steps: list[Any]) -> list[dict[str, Any]]:
     for index, item in enumerate(list(raw_steps or [])):
         if not isinstance(item, dict):
             continue
+        raw_seq = item.get("seq")
+        seq = int(raw_seq if isinstance(raw_seq, int) else index)
         operation = str(item.get("operation") or "").strip().lower()
         payload = dict(item.get("payload") or {})
         for key in temporal_only_keys:
             payload.pop(key, None)
 
         if operation == "external_system_call":
-            seq = int(item.get("seq") if isinstance(item.get("seq"), int) else index)
             system = str(payload.get("system") or "").strip().lower()
             tool_call_record = dict(payload.get("tool_call_record") or {})
             request_hash = str(
@@ -435,9 +436,7 @@ def _normalized_steps(raw_steps: list[Any]) -> list[dict[str, Any]]:
 
         steps.append(
             {
-                "seq": int(
-                    item.get("seq") if isinstance(item.get("seq"), int) else index,
-                ),
+                "seq": seq,
                 "operation": operation,
                 "payload": payload,
             },

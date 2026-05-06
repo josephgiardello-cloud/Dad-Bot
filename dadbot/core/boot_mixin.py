@@ -17,7 +17,7 @@ import uuid
 from collections import deque
 from pathlib import Path
 from threading import RLock
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 try:
     import ollama
@@ -77,6 +77,32 @@ class DadBotBootMixin:
             "append_signoff": True,
         },
     }
+
+    if TYPE_CHECKING:
+        config: Any
+        runtime_config: Any
+        _service_config: Any
+        profile_runtime: Any
+        memory: Any
+        runtime_client: Any
+        model_runtime: Any
+        maintenance_scheduler: Any
+        CONTEXT_TOKEN_BUDGET: int
+        _DEPRECATED_FACADE_ALIASES: dict[str, Any]
+
+        def _resolve_dependency(self, key: str, default_factory: Any) -> Any: ...
+
+        def initialize_tokenizer(self, model_name: str) -> Any: ...
+
+        def refresh_memory_graph(self, *, force: bool = False) -> Any: ...
+
+        def ical_feed_url(self) -> str: ...
+
+        def schedule_calendar_sync(self) -> Any: ...
+
+        def _validate_managers(self, *, smoke: bool = False) -> Any: ...
+
+        def reset_session_state(self) -> Any: ...
 
     @staticmethod
     def runtime_root_path() -> Path:
@@ -414,7 +440,7 @@ class DadBotBootMixin:
     # ------------------------------------------------------------------
 
     @property
-    def lifecycle_state(self) -> DadBotLifecycleState:
+    def lifecycle_state(self) -> str:
         """Queryable lifecycle state — useful for health checks and diagnostics."""
         return getattr(self, "_lifecycle_state", DadBotLifecycleState.UNINITIALIZED)
 

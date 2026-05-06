@@ -1,6 +1,0 @@
-{
-  "test_full_execution_trace.py": [
-    "tests/phase4/test_full_execution_trace.py",
-    "tests/stress/test_full_execution_trace.py"
-  ]
-}
