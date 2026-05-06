@@ -40,6 +40,42 @@ class ToolResult:
     deterministic_id: str
 
 
+# ---------------------------------------------------------------------------
+# Phase 3: ToolStatus taxonomy + ToolContractResult
+# ---------------------------------------------------------------------------
+
+
+class ToolStatus(enum.Enum):
+    """Structured failure taxonomy for contractual tool use.
+
+    SUCCESS           — Tool executed and returned valid output.
+    RETRY             — Transient failure; safe to retry with same args.
+    CONTRACT_VIOLATION — Required arguments missing or schema mismatch.
+                         Surfaces repair_hint to the Planner repair loop.
+    FATAL             — Non-recoverable failure; abort the tool call branch.
+    """
+
+    SUCCESS = "success"
+    RETRY = "retry"
+    CONTRACT_VIOLATION = "contract_violation"
+    FATAL = "fatal"
+
+
+@dataclass(frozen=True)
+class ToolContractResult:
+    """Structured tool result with failure taxonomy for the ValidationGate.
+
+    On CONTRACT_VIOLATION, ``repair_hint`` is forwarded to the Planner so the
+    repair loop can emit a corrected tool request.
+    """
+
+    tool_name: str
+    status: ToolStatus
+    data: Any
+    error_context: dict[str, Any]
+    repair_hint: str = ""
+
+
 def stable_tool_input_hash(tool_name: str, args: dict[str, Any]) -> str:
     payload = {
         "tool_name": str(tool_name or "").strip().lower(),

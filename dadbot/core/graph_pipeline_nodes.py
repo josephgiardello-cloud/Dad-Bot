@@ -76,6 +76,119 @@ class ContextBuilderNode(_NodeContractMixin):
 MemoryNode = ContextBuilderNode
 
 
+# ---------------------------------------------------------------------------
+# Required-arg schema per built-in tool (single source of truth for the Gate)
+# ---------------------------------------------------------------------------
+
+_TOOL_REQUIRED_ARGS: dict[str, frozenset[str]] = {
+    "memory_lookup": frozenset({"query"}),
+    "echo": frozenset({"message"}),
+    "current_time": frozenset(),
+}
+
+
+class ValidationGateNode(_NodeContractMixin):
+    """Middleware between ContextBuilderNode/Planner and InferenceNode.
+
+    Validates every tool request in ``context.state["tool_ir"]["requests"]``
+    against the declared required-arg schema before inference runs.
+
+    Valid path   → pass-through; inference proceeds normally.
+    Invalid path → emit a CONTRACT_VIOLATION CognitionEnvelope, write a
+                   ``_validation_gate_repair`` context, strip violating
+                   requests from tool_ir, and re-run PlannerNode once so the
+                   planner can adjust its strategy with the error in context.
+    """
+
+    name = "validation_gate"
+    _MAX_REPAIR_ITERATIONS: int = 1
+
+    async def execute(self, registry: Any, turn_context: TurnContext) -> None:
+        for _attempt in range(self._MAX_REPAIR_ITERATIONS + 1):
+            violations = self._collect_violations(turn_context)
+            if not violations:
+                return  # All requests valid — pass through
+            self._handle_violations(turn_context, violations)
+            # Re-run PlannerNode with the repair context in state so it can
+            # adjust its tool selection strategy.
+            await PlannerNode().run(turn_context)
+        # After the repair attempt, remove any still-violating requests to
+        # prevent them from reaching the execution layer.
+        remaining = self._collect_violations(turn_context)
+        if remaining:
+            self._strip_violations(turn_context, remaining)
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _collect_violations(self, turn_context: TurnContext) -> list[dict[str, Any]]:
+        tool_ir = turn_context.state.get("tool_ir") or {}
+        requests = list(tool_ir.get("requests") or [])
+        violations: list[dict[str, Any]] = []
+        for req in requests:
+            tool_name = str(req.get("tool_name") or "").strip().lower()
+            args = dict(req.get("args") or {})
+            required = _TOOL_REQUIRED_ARGS.get(tool_name)
+            if required is None:
+                # Unknown tool — not our schema, skip validation
+                continue
+            missing = sorted(required - set(args.keys()))
+            if missing:
+                violations.append({
+                    "tool_name": tool_name,
+                    "missing_args": missing,
+                    "received_args": sorted(args.keys()),
+                    "repair_hint": (
+                        f"Tool '{tool_name}' requires args {sorted(required)}; "
+                        f"received {sorted(args.keys())}. Missing: {missing}."
+                    ),
+                })
+        return violations
+
+    def _handle_violations(
+        self,
+        turn_context: TurnContext,
+        violations: list[dict[str, Any]],
+    ) -> None:
+        repair_context = {
+            "violations": violations,
+            "repair_requested": True,
+        }
+        turn_context.state["_validation_gate_repair"] = repair_context
+        for v in violations:
+            emit_cognition(
+                turn_context,
+                CognitionEnvelope(
+                    step_id=f"{turn_context.trace_id}:validation_gate:violation:{v['tool_name']}",
+                    thought_trace=(
+                        f"ValidationGate: CONTRACT_VIOLATION for tool '{v['tool_name']}' — "
+                        f"missing args {v['missing_args']}. {v['repair_hint']}"
+                    ),
+                    target_node="validation_gate",
+                    confidence_score=0.0,
+                ),
+            )
+
+    def _strip_violations(
+        self,
+        turn_context: TurnContext,
+        violations: list[dict[str, Any]],
+    ) -> None:
+        violating_names = {v["tool_name"] for v in violations}
+        tool_ir = dict(turn_context.state.get("tool_ir") or {})
+        requests = [
+            r for r in list(tool_ir.get("requests") or [])
+            if str(r.get("tool_name") or "").strip().lower() not in violating_names
+        ]
+        tool_ir["requests"] = requests
+        tool_ir["validation_gate"] = {
+            "stripped_tools": sorted(violating_names),
+            "violations": violations,
+        }
+        turn_context.state["tool_ir"] = tool_ir
+
+
 class InferenceNode(_NodeContractMixin):
     name = "inference"
 

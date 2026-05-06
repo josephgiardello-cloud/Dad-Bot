@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any
 
 from dadbot.core.graph import NodeType, TurnContext
-from dadbot.core.tool_ir import deterministic_tool_id
+from dadbot.core.tool_ir import ToolContractResult, ToolStatus, deterministic_tool_id
 
 _MAX_DELEGATION_DEPTH: int = 2
 _MAX_DELEGATION_SUBTASKS: int = 8
@@ -128,9 +128,22 @@ class ToolExecutorNode:
             det_id = str(item.get("deterministic_id") or deterministic_tool_id(name, args))
             start = time.perf_counter()
             try:
-                output, status = _dispatch_builtin_tool(name, args, context), "ok"
+                raw = _dispatch_builtin_tool(name, args, context)
+                if isinstance(raw, ToolContractResult):
+                    status = raw.status.value
+                    output = raw
+                else:
+                    status = "ok"
+                    output = raw
             except Exception as exc:
-                output, status = str(exc), "error"
+                status = "error"
+                output = ToolContractResult(
+                    tool_name=name,
+                    status=ToolStatus.FATAL,
+                    data=None,
+                    error_context={"exception": str(exc)},
+                    repair_hint=f"Tool {name!r} raised an unexpected exception.",
+                )
             rec = {"sequence": seq, "tool_name": name, "status": status, "output": output, "latency": time.perf_counter() - start, "deterministic_id": det_id}
             executions.append(rec)
             results.append({"sequence": seq, "tool_name": name, "status": status, "output": output, "deterministic_id": det_id})
@@ -268,14 +281,29 @@ def _dispatch_builtin_tool(name: str, args: dict[str, Any], context: TurnContext
         return datetime.now().astimezone().isoformat(timespec="seconds")
     if tool_name == "memory_lookup":
         query = str(payload.get("query") or "").strip()
+        if not query:
+            return ToolContractResult(
+                tool_name="memory_lookup",
+                status=ToolStatus.CONTRACT_VIOLATION,
+                data=None,
+                error_context={"missing_args": ["query"], "received_args": list(payload.keys())},
+                repair_hint="memory_lookup requires a non-empty 'query' argument.",
+            )
         scope = str(payload.get("scope") or "session").strip().lower()
         if scope == "goals":
             goals = list(context.state.get("session_goals") or [])
             ids = set(str(g) for g in list(payload.get("goal_ids") or []))
             if ids:
                 goals = [g for g in goals if str(g.get("id") or "") in ids]
-            return {"query": query, "scope": "goals", "goals": goals}
-        return {"query": query, "scope": "session", "memories": list(context.state.get("memories") or [])}
+            data = {"query": query, "scope": "goals", "goals": goals}
+        else:
+            data = {"query": query, "scope": "session", "memories": list(context.state.get("memories") or [])}
+        return ToolContractResult(
+            tool_name="memory_lookup",
+            status=ToolStatus.SUCCESS,
+            data=data,
+            error_context={},
+        )
     raise ValueError(f"Unsupported built-in tool: {tool_name}")
 
 

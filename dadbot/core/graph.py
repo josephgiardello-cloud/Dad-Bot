@@ -93,6 +93,7 @@ from dadbot.core.graph_pipeline_nodes import (  # re-export pipeline node stubs
     SafetyNode,
     SaveNode,
     TemporalNode,
+    ValidationGateNode,
     _invoke_node_run_compat,
 )
 
@@ -160,6 +161,7 @@ class TurnGraph:
             TemporalNode(),
             HealthNode(),
             ContextBuilderNode(),
+            ValidationGateNode(),
             InferenceNode(),
             SafetyNode(),
             ReflectionNode(),
