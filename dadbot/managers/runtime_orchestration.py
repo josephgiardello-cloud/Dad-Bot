@@ -3,10 +3,14 @@ from __future__ import annotations
 import uuid
 from collections import Counter
 from concurrent.futures import Future
+import logging
 
 from dadbot.contracts import DadBotContext, SupportsDadBotAccess
 from dadbot.models import BackgroundTaskRecord
 from dadbot_system import EventType
+
+
+logger = logging.getLogger(__name__)
 
 
 class RuntimeOrchestrationManager:
@@ -244,7 +248,40 @@ class RuntimeOrchestrationManager:
             )
             return result
 
-        future = self.bot.background_tasks.submit(run_tracked_task)
+        try:
+            future = self.bot.background_tasks.submit(run_tracked_task)
+        except RuntimeError as exc:
+            # During shutdown, non-critical follow-up jobs may race with executor shutdown.
+            # Treat these as deferred (not failed) to keep teardown deterministic and quiet.
+            if "shutdown" in str(exc).lower():
+                task_metadata.update(
+                    {
+                        "deferred_by_shutdown": True,
+                        "deferred_reason": "background manager shutdown",
+                    },
+                )
+                self.record_background_task(
+                    task_id,
+                    task_kind=task_kind_name,
+                    status="completed",
+                    metadata=task_metadata,
+                )
+                return _completed_future(
+                    {
+                        "deferred": True,
+                        "task_id": task_id,
+                        "reason": "background manager shutdown",
+                    },
+                )
+            self.record_background_task(
+                task_id,
+                task_kind=task_kind_name,
+                status="failed",
+                metadata=task_metadata,
+                error=self.bot.ollama_error_summary(exc),
+            )
+            logger.exception("Background task submission failed for %s", task_kind_name)
+            raise
         future.dadbot_task_id = task_id
         future.dadbot_task_kind = str(task_kind or "background")
         return future
