@@ -110,6 +110,12 @@ Phase 4 graph hardening is complete and the turn pipeline is now frozen around t
 
 This means current work is in system hardening and validation mode rather than graph redesign. Node ordering, Save ownership, reflection timing, and core graph wiring should be treated as frozen unless a concrete bug is found.
 
+## Runtime Model Docs
+
+- Explicit execution model: `docs/explicit-execution-model.md`
+- End-to-end explainability: `docs/system-level-explainability.md`
+- Failure/degradation/divergence model: `docs/failure-model.md`
+
 ## Status/Dashboard Observability
 
 The Status/Dashboard surfaces guardrails and runtime safety signals, including:
