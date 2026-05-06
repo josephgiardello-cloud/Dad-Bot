@@ -17,6 +17,7 @@ from dadbot.core.critic import CritiqueEngine
 from dadbot.core.graph_context import TurnContext
 from dadbot.core.graph_types import NodeType
 from dadbot.core.planner import PlannerNode
+from dadbot.core.cognition_event import CognitionEnvelope, emit_cognition
 
 logger = logging.getLogger(__name__)
 
@@ -87,9 +88,10 @@ class InferenceNode(_NodeContractMixin):
         critique = self._critique_engine.critique(reply, turn_context.user_input, plan, iteration)
         passed = bool(getattr(critique, "passed", False))
         hint = str(getattr(critique, "revision_hint", "") or "")
+        score = float(getattr(critique, "score", 0.0))
         turn_context.state["critique_record"] = {
             "iteration": iteration,
-            "score": getattr(critique, "score", 0.0),
+            "score": score,
             "passed": passed,
             "issues": list(getattr(critique, "issues", []) or []),
             "revision_hint": hint,
@@ -98,6 +100,15 @@ class InferenceNode(_NodeContractMixin):
         }
         if not passed:
             turn_context.state["_critique_revision_context"] = hint
+        emit_cognition(turn_context, CognitionEnvelope(
+            step_id=f"{turn_context.trace_id}:critique:{iteration}",
+            thought_trace=(
+                f"Critique (iter={iteration}): passed={passed}, score={score:.2f}"
+                + (f", hint={hint[:80]!r}" if hint else "")
+            ),
+            target_node="critique",
+            confidence_score=score,
+        ))
         return passed
 
     @staticmethod
@@ -116,6 +127,16 @@ class InferenceNode(_NodeContractMixin):
     async def execute(self, registry: Any, turn_context: TurnContext) -> None:
         service = registry.get("agent_service")
         rich_context = turn_context.state.get("rich_context", {})
+        plan = dict(turn_context.state.get("turn_plan") or {})
+        emit_cognition(turn_context, CognitionEnvelope(
+            step_id=f"{turn_context.trace_id}:inference:start",
+            thought_trace=(
+                f"Inference: running agent, strategy={plan.get('strategy', '?')!r}, "
+                f"intent={plan.get('intent_type', '?')!r}"
+            ),
+            target_node="inference",
+            confidence_score=0.5,
+        ))
         candidate = await service.run_agent(turn_context, rich_context)
         candidate = self._blend_daily_checkin_reply(service, turn_context, candidate)
         self._run_critique_check(turn_context, candidate, 0)

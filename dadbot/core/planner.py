@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
+from dadbot.core.cognition_event import CognitionEnvelope, emit_cognition
+
 if TYPE_CHECKING:
     from dadbot.core.graph_context import TurnContext
 
@@ -224,6 +226,13 @@ class PlannerNode:
         user_input = str(context.user_input or "").strip()
         active_goals = list(context.state.get("session_goals") or [])
 
+        emit_cognition(context, CognitionEnvelope(
+            step_id=f"{context.trace_id}:planner:start",
+            thought_trace=f"Planner: classifying intent for {len(user_input)} char input, {len(active_goals)} active goals",
+            target_node="planner",
+            confidence_score=0.5,
+        ))
+
         intent_type = self._classify_intent(user_input)
         complexity = self._estimate_complexity(user_input, active_goals)
         subgoals = self._extract_subgoals(user_input, intent_type, complexity)
@@ -249,6 +258,22 @@ class PlannerNode:
             new_goal_detected=new_goal_detected,
         )
         context.state["turn_plan"] = plan.to_dict()
+
+        _complexity_confidence = {
+            ComplexityLevel.SIMPLE: 0.9,
+            ComplexityLevel.MODERATE: 0.75,
+            ComplexityLevel.COMPLEX: 0.6,
+        }
+        emit_cognition(context, CognitionEnvelope(
+            step_id=f"{context.trace_id}:planner:done",
+            thought_trace=(
+                f"Planner: intent={intent_type}, complexity={complexity}, "
+                f"strategy={strategy}, subgoals={len(subgoals)}, "
+                f"new_goal={new_goal_detected}"
+            ),
+            target_node="planner",
+            confidence_score=_complexity_confidence.get(complexity, 0.7),
+        ))
 
         # Phase 3: Planner emits only MemoryTool requests behind the v2 switch.
         if bool(context.metadata.get("tool_system_v2_enabled", False)):
