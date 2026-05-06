@@ -117,7 +117,7 @@
       "missing_fields": [
         "ledger_entry"
       ],
-      "lineno": 194
+      "lineno": 219
     },
     {
       "file": "dadbot/core/nodes.py",
@@ -125,7 +125,7 @@
       "missing_fields": [
         "ledger_entry"
       ],
-      "lineno": 227
+      "lineno": 252
     },
     {
       "file": "dadbot/core/nodes.py",
@@ -133,7 +133,7 @@
       "missing_fields": [
         "ledger_entry"
       ],
-      "lineno": 246
+      "lineno": 271
     },
     {
       "file": "dadbot/core/nodes.py",
@@ -141,7 +141,7 @@
       "missing_fields": [
         "ledger_entry"
       ],
-      "lineno": 323
+      "lineno": 366
     },
     {
       "file": "dadbot/core/nodes.py",
@@ -149,7 +149,7 @@
       "missing_fields": [
         "ledger_entry"
       ],
-      "lineno": 448
+      "lineno": 491
     },
     {
       "file": "dadbot/core/nodes.py",
@@ -157,7 +157,7 @@
       "missing_fields": [
         "ledger_entry"
       ],
-      "lineno": 1204
+      "lineno": 1213
     },
     {
       "file": "dadbot/core/nodes.py",
@@ -165,7 +165,7 @@
       "missing_fields": [
         "ledger_entry"
       ],
-      "lineno": 1264
+      "lineno": 1272
     },
     {
       "file": "dadbot/core/nodes.py",
@@ -173,7 +173,7 @@
       "missing_fields": [
         "ledger_entry"
       ],
-      "lineno": 1365
+      "lineno": 1405
     },
     {
       "file": "dadbot/core/nodes.py",
@@ -181,7 +181,7 @@
       "missing_fields": [
         "ledger_entry"
       ],
-      "lineno": 1416
+      "lineno": 1456
     }
   ],
   "orphan_expectations": [],
