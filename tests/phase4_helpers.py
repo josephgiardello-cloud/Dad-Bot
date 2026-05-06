@@ -30,7 +30,7 @@ def phase4a_db_path(monkeypatch: pytest.MonkeyPatch) -> str:
     Default mode uses a temporary on-disk DB and deletes it after test.
     """
     mode = str(os.environ.get("DADBOT_PHASE4_DB_MODE", "file")).strip().lower()
-    with tempfile.TemporaryDirectory() as runtime_dir:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as runtime_dir:
         runtime_root = Path(runtime_dir)
         profile_path = runtime_root / "dad_profile.json"
         memory_path = runtime_root / "dad_memory.json"
