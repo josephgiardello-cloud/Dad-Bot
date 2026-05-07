@@ -1975,7 +1975,16 @@ def evaluate_tool_policy_violation(prompt: str, allowed_tools: list[str]) -> str
         ),
         (
             "document_read",
-            ["read this file", "read document", "pdf", "document"],
+            [
+                "read this file",
+                "read file",
+                "open file",
+                "load file",
+                "read document",
+                "open document",
+                "read pdf",
+                ".pdf",
+            ],
             "Tool policy blocked this turn: document_read is disabled for current scope.",
         ),
         (
