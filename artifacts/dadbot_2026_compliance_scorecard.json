@@ -1,0 +1,43 @@
+{
+  "generated_at": "2026-05-07T00:18:40.572700+00:00",
+  "overall_status": "PASS",
+  "results": [
+    {
+      "compliance_test": "Memory_Integrity_Divergence",
+      "evidence": {
+        "difference_count": 1,
+        "halt_intercepted": true,
+        "latency_penalty_ms": 0.379,
+        "ledger_hash": "b8ebba42a8008f4237fcef2fd962a6d3634095a6a8d3dc9f5d4005f59ec395b5",
+        "policy_trace_id": "authority::split-brain-trace",
+        "projection_hash": "95b8eeb1075ecb3315613aa6d017957e8583c487880dea567340028e587d6687"
+      },
+      "status": "PASS"
+    },
+    {
+      "compliance_test": "Permission_Ghost_Idempotency",
+      "evidence": {
+        "admin_idempotency_key": "d2bfa19d3ae60f0da452df89615cb5db",
+        "admin_status": "ok",
+        "fresh_call_forced": true,
+        "policy_trace_id": "idempotency::security-fingerprint",
+        "restricted_idempotency_key": "3163633f876b6477b564bd8f029d220f",
+        "restricted_status": "error"
+      },
+      "status": "PASS"
+    },
+    {
+      "compliance_test": "Conflicting_Facet_Safety_Override",
+      "evidence": {
+        "candidate_hash": "465e27ff890ad177a198829c8af3ea971f6d5e9244d0aa1a1509a99ca1bd543c",
+        "output_hash": "cad7ea9cf6668e9df187dad0f493625256ff9b1c2e5f9d7c2ce8e68c1f42fa2c",
+        "output_mutated": true,
+        "policy_rule": "enforce_policies",
+        "policy_trace_id": "policy::6dbdc2b987f64da0af7f40db516a3428",
+        "safe_result": "I recommend avoiding that approach because it may cause issues."
+      },
+      "status": "PASS"
+    }
+  ],
+  "suite": "DadBot_2026_Compliance_Stress_Test"
+}
