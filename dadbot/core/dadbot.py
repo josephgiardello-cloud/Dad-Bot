@@ -387,7 +387,14 @@ class DadBot(
 
     @property
     def turn_orchestrator(self) -> Any:
-        return self.services.turn_orchestrator
+        orchestrator = getattr(self, "_turn_orchestrator", None)
+        if orchestrator is not None:
+            return orchestrator
+        services_orchestrator = getattr(self.services, "turn_orchestrator", None)
+        if services_orchestrator is not None:
+            self._turn_orchestrator = services_orchestrator
+            return services_orchestrator
+        return self._get_turn_orchestrator()
 
     @property
     def assistant(self) -> AssistantRuntime:

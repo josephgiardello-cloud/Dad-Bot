@@ -80,10 +80,6 @@ class TestPhase4ATraceCorruption:
 
 
 class TestPhase4AExternalIONondeterminism:
-    @pytest.mark.xfail(
-        reason="Known Phase 4A gap: external IO ordering is not yet included in replay equivalence closure",
-        strict=False,
-    )
     def test_out_of_order_external_calls_flag_replay_divergence(self):
         baseline = _baseline_trace()
         seed = _baseline_seed(baseline)
@@ -100,10 +96,6 @@ class TestPhase4AExternalIONondeterminism:
         assert report["equivalent"] is False
         assert "execution_dag_hash" in report["violations"] or "final_trace_hash" in report["violations"]
 
-    @pytest.mark.xfail(
-        reason="Known Phase 4A gap: duplicate external IO events are not yet hard-gated by replay equivalence",
-        strict=False,
-    )
     def test_duplicate_external_call_is_treated_as_divergence(self):
         baseline = _baseline_trace()
         seed = _baseline_seed(baseline)

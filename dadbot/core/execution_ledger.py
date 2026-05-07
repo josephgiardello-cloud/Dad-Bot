@@ -18,6 +18,9 @@ from dadbot.core.event_schema import get_migrator, stamp_schema_version
 from dadbot.core.ledger_backend import InMemoryLedgerBackend, SequenceValidator
 
 
+_TAIL_LIMIT = 256
+
+
 class WriteBoundaryViolationError(RuntimeError):
     """Raised when strict ledger mode rejects a write outside the boundary guard."""
 
@@ -97,6 +100,15 @@ class ExecutionLedger:
     ) -> None:
         self._backend = backend or InMemoryLedgerBackend()
         self._events: list[dict[str, Any]] = []
+        self._cache: dict[str, Any] = {
+            "sequence_counter": 0,
+            "event_count": 0,
+            "last_event_hash": None,
+            "recent_tail": [],
+            "trace_sequence_counters": {},
+            "cache_rebuild_count": 0,
+            "version": 0,
+        }
         self._lock = threading.RLock()
         self._session_heads: dict[str, str] = {}
         self._session_indices: dict[str, int] = {}
@@ -120,13 +132,66 @@ class ExecutionLedger:
                 "ExecutionLedger strict mode requires WriteBoundaryGuard",
             )
 
+    def get_next_sequence(self) -> int:
+        with self._lock:
+            return int(self._cache.get("sequence_counter") or 0) + 1
+
+    def get_next_trace_sequence(self, trace_id: str) -> int:
+        with self._lock:
+            counters = dict(self._cache.get("trace_sequence_counters") or {})
+            key = str(trace_id or "").strip()
+            return int(counters.get(key, 0)) + 1
+
+    def event_count(self) -> int:
+        with self._lock:
+            return int(self._cache.get("event_count") or 0)
+
+    def _rebuild_cache(self) -> None:
+        trace_sequence_counters: dict[str, int] = {}
+        for event in self._events:
+            if str(event.get("type") or "") != "TURN_EVENT":
+                continue
+            payload = dict(event.get("payload") or {})
+            trace_id = str(payload.get("trace_id") or "").strip()
+            if not trace_id:
+                continue
+            seq = int(payload.get("sequence") or 0)
+            if seq > int(trace_sequence_counters.get(trace_id, 0)):
+                trace_sequence_counters[trace_id] = seq
+
+        self._cache["sequence_counter"] = len(self._events)
+        self._cache["event_count"] = len(self._events)
+        self._cache["last_event_hash"] = (
+            str(self._events[-1].get("chain_hash") or "") if self._events else None
+        )
+        self._cache["recent_tail"] = list(self._events[-_TAIL_LIMIT:])
+        self._cache["trace_sequence_counters"] = trace_sequence_counters
+        self._cache["cache_rebuild_count"] = int(self._cache.get("cache_rebuild_count") or 0) + 1
+        self._cache["version"] = int(self._cache.get("version") or 0) + 1
+
+    def telemetry_snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            self.validate_cache()
+            return {
+                "sequence_counter": int(self._cache.get("sequence_counter") or 0),
+                "event_count": int(self._cache.get("event_count") or 0),
+                "cache_rebuild_count": int(self._cache.get("cache_rebuild_count") or 0),
+                "tail_size": int(len(self._cache.get("recent_tail") or [])),
+                "version": int(self._cache.get("version") or 0),
+            }
+
+    def validate_cache(self) -> None:
+        if int(self._cache.get("event_count") or 0) != len(self._events):
+            self._rebuild_cache()
+
     def write(self, event: dict[str, Any]) -> dict[str, Any]:
         from dadbot.core.ledger.enforcement import LedgerEnforcer
 
         self._ensure_write_allowed()
         LedgerEnforcer().validate(dict(event or {}))
         with self._lock:
-            payload = deepcopy(dict(event or {}))
+            payload = dict(event or {})
+            cache = self._cache
             session_id = str(payload.get("session_id") or "")
             parent_event_id = str(payload.get("parent_event_id") or "")
             current_head = str(self._session_heads.get(session_id) or "")
@@ -144,8 +209,9 @@ class ExecutionLedger:
                 payload.setdefault("session_index", 0)
 
             payload.setdefault("payload", {})
+            next_sequence = int(cache.get("sequence_counter") or 0) + 1
             payload["_seq"] = len(self._events)
-            payload.setdefault("sequence", len(self._events) + 1)
+            payload.setdefault("sequence", next_sequence)
             payload.setdefault("event_id", _deterministic_event_id(payload))
             stamp_schema_version(payload)
             event_sha256 = _event_sha256(payload)
@@ -161,19 +227,40 @@ class ExecutionLedger:
                     payload.get("session_index") or 0,
                 )
 
-            self._events.append(deepcopy(payload))
+            self._events.append(payload)
             self._backend.append(
                 deepcopy(payload),
                 committed=bool(payload.get("committed", False)),
             )
-            return deepcopy(payload)
+
+            cache["sequence_counter"] = int(payload.get("sequence") or next_sequence)
+            cache["event_count"] = int(cache.get("event_count") or 0) + 1
+            cache["last_event_hash"] = str(payload.get("chain_hash") or "")
+            if str(payload.get("type") or "") == "TURN_EVENT":
+                turn_payload = dict(payload.get("payload") or {})
+                trace_id = str(turn_payload.get("trace_id") or "").strip()
+                if trace_id:
+                    counters = dict(cache.get("trace_sequence_counters") or {})
+                    counters[trace_id] = int(turn_payload.get("sequence") or 0)
+                    cache["trace_sequence_counters"] = counters
+            tail = list(cache.get("recent_tail") or [])
+            tail.append(payload)
+            if len(tail) > _TAIL_LIMIT:
+                tail = tail[-_TAIL_LIMIT:]
+            cache["recent_tail"] = tail
+            cache["version"] = int(cache.get("version") or 0) + 1
+            self.validate_cache()
+            return payload
 
     def append(self, event: dict[str, Any]) -> dict[str, Any]:
         return self.write(event)
 
-    def read(self) -> list[dict[str, Any]]:
+    def read(self, full: bool = True) -> list[dict[str, Any]]:
         with self._lock:
-            return deepcopy(self._events)
+            self.validate_cache()
+            if full:
+                return self._events
+            return list(self._cache.get("recent_tail") or [])
 
     def replay_hash(self) -> str:
         events = [event for event in self.read() if str(event.get("type") or "") not in NON_REPLAY_EVENT_TYPES]
@@ -260,6 +347,8 @@ class ExecutionLedger:
                     self._session_indices[session_id] = int(
                         event.get("session_index") or 0,
                     )
+            self._rebuild_cache()
+            self.validate_cache()
             return len(self._events)
 
 InMemoryExecutionLedger = ExecutionLedger

@@ -11,7 +11,7 @@ from typing import Any
 
 from dadbot.core.egress_policy import enforce_url
 from dadbot.core.execution_boundary import ModelGatewayScope
-from dadbot.core.execution_trace_context import (
+from dadbot.core.execution_context import (
     ensure_execution_trace_root,
     record_execution_step,
     record_external_system_call,

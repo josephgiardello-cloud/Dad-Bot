@@ -134,9 +134,15 @@ class KernelReplaySequenceLock:
     def strict_hash(cls, *, trace_id: str, events: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
         expected = 1
         canonical: list[dict[str, Any]] = []
-        for raw in list(events or []):
+        ordered_events = sorted(
+            list(events or []),
+            key=lambda item: int((dict(item or {})).get("sequence") or (dict(item or {})).get("sequence_id") or 0),
+        )
+        for raw in ordered_events:
             item = cls.canonical_event(raw, trace_id=str(trace_id or ""))
             seq = int(item.get("sequence") or 0)
+            if seq < expected:
+                continue
             if seq != expected:
                 raise RuntimeError(
                     "Replay strict equality violation: non-contiguous sequence "

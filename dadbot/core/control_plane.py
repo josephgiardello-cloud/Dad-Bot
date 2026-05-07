@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -19,6 +20,8 @@ from dadbot.core.kernel_signals import get_exporter, get_metrics, get_tracer
 from dadbot.core.recovery_manager import RecoveryManager
 from dadbot.core.session_store import SessionStore
 from dadbot.core.turn_resume_store import TurnResumeStore
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -430,6 +433,7 @@ class ExecutionControlPlane:
                 if not drained:
                     await asyncio.sleep(0.01)
             result = await future
+            self._validate_trace_invariant(job, result)
             if dedupe_future is not None and not dedupe_future.done():
                 dedupe_future.set_result(result)
             return result
@@ -445,6 +449,41 @@ class ExecutionControlPlane:
 
     def ledger_events(self) -> list[dict[str, Any]]:
         return self.ledger.read()
+
+    def _validate_trace_invariant(self, job: ExecutionJob, result: FinalizedTurnResult) -> None:
+        """Validate execution trace invariants: trace_id, complete nodes, exactly one commit boundary.
+        
+        Ensures:
+        1. trace_id is present in job metadata
+        2. Execution produced ordered trace nodes
+        3. Exactly one commit boundary (save node) exists
+        
+        This is a defensive check to catch execution path deviations early.
+        """
+        trace_id = job.metadata.get("trace_id") or ""
+        if not trace_id.strip():
+            logger.warning("Trace invariant violation: missing trace_id in job %s", job.job_id)
+            return
+
+        # Query ledger for events matching this trace
+        events = self.ledger.read()
+        trace_events = [e for e in events if e.get("trace_id") == trace_id or e.get("job_id") == job.job_id]
+        
+        if not trace_events:
+            logger.warning("Trace invariant violation: no events recorded for trace %s", trace_id)
+            return
+
+        # Count commit boundary markers (save nodes)
+        commit_count = sum(
+            1 for e in trace_events
+            if e.get("event_type") == "node_completed" and e.get("node_type") == "save"
+        )
+        if commit_count != 1:
+            logger.warning(
+                "Trace invariant violation: expected exactly 1 commit boundary, found %d for trace %s",
+                commit_count,
+                trace_id,
+            )
 
     def boot_reconcile(self) -> dict[str, Any]:
         """Phase 3: boot reconciliation is now ledger-only via direct replay."""

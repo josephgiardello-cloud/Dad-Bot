@@ -96,6 +96,36 @@ def test_persistence_events_are_ledger_authoritative(tmp_path: Path):
     assert any(str(event.get("event_type") or "") == "phase_transition" for event in events)
 
 
+def test_graph_checkpoint_snapshot_is_canonical_and_thin(tmp_path: Path):
+    ledger = ExecutionLedger()
+    manager = ConversationPersistenceManager(_FakeBot(ledger, tmp_path))
+
+    recorder = ExecutionTraceRecorder(trace_id="inv-canonical", prompt="invariants")
+    with bind_execution_trace(recorder, required=True):
+        manager.persist_graph_checkpoint(
+            {
+                "trace_id": "inv-canonical",
+                "stage": "save",
+                "status": "after",
+                "phase": "RESPOND",
+                "state": {"safe_result": "ok"},
+                "metadata": {"determinism": {"enforced": True, "lock_hash": "lock-c"}},
+                "session_state": {"history": [{"role": "user", "content": "x"}]},
+            },
+        )
+        checkpoint = manager.load_latest_graph_checkpoint(trace_id="inv-canonical")
+        replay = manager.replay_turn_events("inv-canonical")
+
+    assert isinstance(checkpoint, dict)
+    assert checkpoint.get("trace_id") == "inv-canonical"
+    assert checkpoint.get("phase") == "RESPOND"
+    assert "state" not in checkpoint
+    assert "metadata" not in checkpoint
+    assert "session_state" not in checkpoint
+    assert replay["determinism"]["consistent"] is True
+    assert replay["determinism"]["lock_hash"] == "lock-c"
+
+
 def test_policy_trace_events_are_queryable_historically(tmp_path: Path):
     ledger = ExecutionLedger()
     manager = ConversationPersistenceManager(_FakeBot(ledger, tmp_path))

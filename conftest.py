@@ -5,6 +5,9 @@ from __future__ import annotations
 import pytest
 
 
+pytest_plugins = ("dadbot.core.kernel_boundary_enforcer",)
+
+
 def pytest_addoption(parser: pytest.Parser) -> None:
     parser.addoption(
         "--run-stress",

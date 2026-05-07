@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -34,6 +35,12 @@ from dadbot.core.graph import (
 from dadbot.core.merkle_anchor import append_leaf_and_anchor
 from dadbot.core.persistence import AbstractCheckpointer
 from dadbot.core.post_commit_events import PostCommitEvent
+from dadbot.core.runtime_errors import (
+    ExecutionStageError,
+    InvariantViolation,
+    NON_FATAL_RUNTIME_EXCEPTIONS,
+    PersistenceFailure,
+)
 from dadbot.managers.conversation_persistence import ConversationPersistenceManager
 
 logger = logging.getLogger(__name__)
@@ -118,8 +125,8 @@ class PersistenceService:
                         for token in token_values
                         if str(token).strip()
                     }
-            except Exception:
-                pass
+            except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
+                logger.debug("Token extraction fallback used: %s", exc)
         return {
             part.strip().lower()
             for part in str(text or "").replace("-", " ").split()
@@ -142,7 +149,8 @@ class PersistenceService:
                     for topic in iterable_topics
                     if str(topic).strip()
                 ]
-            except Exception:
+            except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
+                logger.debug("Recent topic extraction fallback used: %s", exc)
                 recent_topics = []
 
         dominant_topic = recent_topics[0] if recent_topics else "general"
@@ -176,7 +184,8 @@ class PersistenceService:
                 raw_turn_count = session_turn_count_fn()
                 if isinstance(raw_turn_count, (int, float, str)):
                     turn_index = int(raw_turn_count) + 1
-            except Exception:
+            except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
+                logger.debug("Session turn count fallback used: %s", exc)
                 turn_index = 0
 
         state = getattr(turn_context, "state", None)
@@ -329,7 +338,7 @@ class PersistenceService:
             ledger_path = session_log_dir / "relational_ledger.jsonl"
             with ledger_path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(entry, ensure_ascii=True, sort_keys=True) + "\n")
-        except Exception as exc:
+        except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
             logger.warning("Relational ledger append failed (non-fatal): %s", exc)
 
     def _normalize_authority_snapshot(self, payload: Any) -> Any:
@@ -363,55 +372,163 @@ class PersistenceService:
         max_items: int = 512,
     ) -> list[dict[str, Any]]:
         diffs: list[dict[str, Any]] = []
-        missing = "<missing>"
+        self._walk_authority_state_diff(
+            "",
+            projected,
+            event_sourced,
+            diffs=diffs,
+            max_items=max_items,
+            missing="<missing>",
+        )
+        return diffs
 
-        def _record(path: str, left: Any, right: Any) -> None:
-            if len(diffs) >= max_items:
-                return
-            diffs.append(
-                {
-                    "path": path,
-                    "projected": left,
-                    "event_sourced": right,
-                },
+    @staticmethod
+    def _record_authority_state_diff(
+        diffs: list[dict[str, Any]],
+        *,
+        max_items: int,
+        path: str,
+        projected: Any,
+        event_sourced: Any,
+    ) -> None:
+        if len(diffs) >= max_items:
+            return
+        diffs.append(
+            {
+                "path": path,
+                "projected": projected,
+                "event_sourced": event_sourced,
+            },
+        )
+
+    def _walk_authority_state_diff(
+        self,
+        path: str,
+        projected: Any,
+        event_sourced: Any,
+        *,
+        diffs: list[dict[str, Any]],
+        max_items: int,
+        missing: str,
+    ) -> None:
+        if len(diffs) >= max_items:
+            return
+        if isinstance(projected, dict) and isinstance(event_sourced, dict):
+            self._walk_authority_state_dict(
+                path,
+                projected,
+                event_sourced,
+                diffs=diffs,
+                max_items=max_items,
+                missing=missing,
+            )
+            return
+        if isinstance(projected, list) and isinstance(event_sourced, list):
+            self._walk_authority_state_list(
+                path,
+                projected,
+                event_sourced,
+                diffs=diffs,
+                max_items=max_items,
+                missing=missing,
+            )
+            return
+        if projected != event_sourced:
+            self._record_authority_state_diff(
+                diffs,
+                max_items=max_items,
+                path=path or "$",
+                projected=projected,
+                event_sourced=event_sourced,
             )
 
-        def _walk(path: str, left: Any, right: Any) -> None:
+    def _walk_authority_state_dict(
+        self,
+        path: str,
+        projected: dict[Any, Any],
+        event_sourced: dict[Any, Any],
+        *,
+        diffs: list[dict[str, Any]],
+        max_items: int,
+        missing: str,
+    ) -> None:
+        keys = sorted(set(projected.keys()) | set(event_sourced.keys()))
+        for key in keys:
             if len(diffs) >= max_items:
                 return
-            if isinstance(left, dict) and isinstance(right, dict):
-                keys = sorted(set(left.keys()) | set(right.keys()))
-                for key in keys:
-                    child_path = f"{path}.{key}" if path else str(key)
-                    has_left = key in left
-                    has_right = key in right
-                    if not has_left:
-                        _record(child_path, missing, right.get(key))
-                        continue
-                    if not has_right:
-                        _record(child_path, left.get(key), missing)
-                        continue
-                    _walk(child_path, left.get(key), right.get(key))
-                return
-            if isinstance(left, list) and isinstance(right, list):
-                size = max(len(left), len(right))
-                for idx in range(size):
-                    child_path = f"{path}[{idx}]"
-                    has_left = idx < len(left)
-                    has_right = idx < len(right)
-                    if not has_left:
-                        _record(child_path, missing, right[idx])
-                        continue
-                    if not has_right:
-                        _record(child_path, left[idx], missing)
-                        continue
-                    _walk(child_path, left[idx], right[idx])
-                return
-            if left != right:
-                _record(path or "$", left, right)
+            child_path = f"{path}.{key}" if path else str(key)
+            has_projected = key in projected
+            has_event_sourced = key in event_sourced
+            if not has_projected:
+                self._record_authority_state_diff(
+                    diffs,
+                    max_items=max_items,
+                    path=child_path,
+                    projected=missing,
+                    event_sourced=event_sourced.get(key),
+                )
+                continue
+            if not has_event_sourced:
+                self._record_authority_state_diff(
+                    diffs,
+                    max_items=max_items,
+                    path=child_path,
+                    projected=projected.get(key),
+                    event_sourced=missing,
+                )
+                continue
+            self._walk_authority_state_diff(
+                child_path,
+                projected.get(key),
+                event_sourced.get(key),
+                diffs=diffs,
+                max_items=max_items,
+                missing=missing,
+            )
 
-        _walk("", projected, event_sourced)
-        return diffs
+    def _walk_authority_state_list(
+        self,
+        path: str,
+        projected: list[Any],
+        event_sourced: list[Any],
+        *,
+        diffs: list[dict[str, Any]],
+        max_items: int,
+        missing: str,
+    ) -> None:
+        size = max(len(projected), len(event_sourced))
+        for idx in range(size):
+            if len(diffs) >= max_items:
+                return
+            child_path = f"{path}[{idx}]"
+            has_projected = idx < len(projected)
+            has_event_sourced = idx < len(event_sourced)
+            if not has_projected:
+                self._record_authority_state_diff(
+                    diffs,
+                    max_items=max_items,
+                    path=child_path,
+                    projected=missing,
+                    event_sourced=event_sourced[idx],
+                )
+                continue
+            if not has_event_sourced:
+                self._record_authority_state_diff(
+                    diffs,
+                    max_items=max_items,
+                    path=child_path,
+                    projected=projected[idx],
+                    event_sourced=missing,
+                )
+                continue
+            self._walk_authority_state_diff(
+                child_path,
+                projected[idx],
+                event_sourced[idx],
+                diffs=diffs,
+                max_items=max_items,
+                missing=missing,
+            )
 
     def _load_event_sourced_checkpoint(self, trace_id: str) -> dict[str, Any]:
         trace_key = str(trace_id or "").strip()
@@ -540,6 +657,18 @@ class PersistenceService:
             event_hash,
             len(diffs),
         )
+        if not bool(getattr(self, "strict_mode", False)):
+            if isinstance(state, dict):
+                state["memory_authority_check"] = {
+                    **dict(report),
+                    "consistent": False,
+                    "soft_failure": True,
+                }
+            logger.warning(
+                "Memory authority divergence detected in non-strict mode; continuing commit (trace_id=%s)",
+                trace_id,
+            )
+            return
         raise StateDivergenceError(
             "Memory authority divergence detected; commit blocked",
             report=report,
@@ -570,27 +699,13 @@ class PersistenceService:
         leaves = self._merkle_session_leaves.setdefault(session_id, [])
         anchor = append_leaf_and_anchor(leaves, payload)
         if isinstance(metadata, dict):
-            metadata_event = emit_event(
-                "MUTATION_EVENT",
-                {"op": "dict_set", "key": "merkle_anchor", "value": dict(anchor)},
-                source="PersistenceService._record_merkle_anchor",
-            )
-            turn_context.metadata = apply_event(
-                metadata_event,
-                metadata,
-                lambda state, evt: {**state, str(evt.payload.get("key") or ""): evt.payload.get("value")},
-            )
+            metadata_snapshot = dict(metadata)
+            metadata_snapshot["merkle_anchor"] = dict(anchor)
+            turn_context.metadata = metadata_snapshot
         if isinstance(getattr(turn_context, "state", None), dict):
-            state_event = emit_event(
-                "MUTATION_EVENT",
-                {"op": "dict_set", "key": "merkle_anchor", "value": dict(anchor)},
-                source="PersistenceService._record_merkle_anchor",
-            )
-            turn_context.state = apply_event(
-                state_event,
-                turn_context.state,
-                lambda state, evt: {**state, str(evt.payload.get("key") or ""): evt.payload.get("value")},
-            )
+            state_snapshot = dict(getattr(turn_context, "state", {}) or {})
+            state_snapshot["merkle_anchor"] = dict(anchor)
+            turn_context.state = state_snapshot
         self.save_turn_event(
             {
                 "event_type": "merkle_anchor_commit",
@@ -615,7 +730,7 @@ class PersistenceService:
             return None
         try:
             return callable_obj(*args, **kwargs)
-        except Exception as exc:
+        except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
             logger.warning(
                 "PersistenceService post-finalize hook failed (non-fatal): %s",
                 exc,
@@ -628,9 +743,9 @@ class PersistenceService:
         Memory decay and lifecycle evolution are post-commit responsibilities
         and must run in post-commit worker / maintenance services only.
         """
-        raise RuntimeError(
-            "PersistenceService._apply_memory_decay is not allowed; "
-            "run decay via post-commit worker or maintenance service"
+        raise ExecutionStageError(
+            "PersistenceService._apply_memory_decay is not allowed",
+            context={"required_path": "post-commit worker or maintenance service"},
         )
 
     def _apply_pending_save_boundary_mutations(
@@ -661,7 +776,7 @@ class PersistenceService:
 
         memory = getattr(runtime, "memory", None)
         if memory is None:
-            raise RuntimeError("SaveNode strict mode requires runtime.memory")
+            raise PersistenceFailure("SaveNode strict mode requires runtime.memory")
 
         for item in pending_moods:
             mood = str(item.get("mood") or "neutral")
@@ -685,308 +800,366 @@ class PersistenceService:
             lambda current, evt: {**current, **dict(evt.payload.get("updates") or {})},
         )
 
+    @staticmethod
+    def _resolve_event_tap(runtime: Any) -> Any:
+        direct = getattr(runtime, "event_tap", None) or getattr(runtime, "_event_tap", None)
+        if direct is not None:
+            return direct
+        services = getattr(runtime, "services", None)
+        return getattr(services, "event_tap", None)
+
+    def _require_mutation_witness(self, *, runtime: Any, turn_context: Any, intent: MutationIntent) -> None:
+        trace_id = str(getattr(turn_context, "trace_id", "") or "").strip()
+        if not trace_id:
+            return
+        source_tag = str(getattr(intent, "source", "") or "")
+        tap = self._resolve_event_tap(runtime)
+        emit = getattr(tap, "emit", None)
+        if not callable(emit):
+            return
+        try:
+            KernelEventTotalityLock.require_event_witness(
+                run_id=trace_id,
+                source=source_tag,
+            )
+        except RuntimeError as exc:
+            emit(
+                "MUTATION_EVENT_TOTALITY_VIOLATION",
+                run_id=trace_id,
+                source=source_tag,
+                error=str(exc),
+            )
+            raise
+
+    @staticmethod
+    def _ledger_op_append_history(runtime: Any, payload: dict[str, Any]) -> None:
+        entry = dict(payload.get("entry") or {})
+        with runtime._session_lock:
+            runtime.history.append(entry)
+
+    @staticmethod
+    def _ledger_op_record_turn_state(runtime: Any, payload: dict[str, Any]) -> None:
+        mood = str(payload.get("mood") or "neutral")
+        should_offer_daily_checkin = bool(
+            payload.get("should_offer_daily_checkin", False),
+        )
+        with runtime._session_lock:
+            runtime.session_moods.append(mood)
+            runtime._pending_daily_checkin_context = should_offer_daily_checkin
+
+    @staticmethod
+    def _ledger_op_sync_thread_snapshot(runtime: Any, _payload: dict[str, Any]) -> None:
+        runtime.sync_active_thread_snapshot()
+
+    @staticmethod
+    def _ledger_op_clear_turn_context(runtime: Any, _payload: dict[str, Any]) -> None:
+        with runtime._session_lock:
+            runtime._pending_daily_checkin_context = False
+            runtime._active_tool_observation_context = None
+
+    @staticmethod
+    def _append_turn_pipeline_step(service: Any, step: str, **kwargs: Any) -> None:
+        append_step = getattr(service, "_append_turn_pipeline_step", None)
+        if callable(append_step):
+            append_step(step, **kwargs)
+
+    def _ledger_op_schedule_maintenance(self, runtime: Any, payload: dict[str, Any], service: Any) -> None:
+        turn_text = str(payload.get("turn_text") or "")
+        mood = payload.get("mood")
+        if not bool(getattr(runtime, "LIGHT_MODE", False)):
+            runtime.schedule_post_turn_maintenance(turn_text, mood)
+            self._append_turn_pipeline_step(
+                service,
+                "schedule_maintenance",
+                detail="queued post-turn maintenance",
+            )
+            return
+        self._append_turn_pipeline_step(
+            service,
+            "schedule_maintenance",
+            status="skipped",
+            detail="light mode skips maintenance",
+        )
+
+    def _ledger_op_health_snapshot(self, runtime: Any, service: Any) -> None:
+        runtime.current_runtime_health_snapshot(
+            force=True,
+            log_warnings=True,
+            persist=True,
+        )
+        self._append_turn_pipeline_step(
+            service,
+            "health_snapshot",
+            detail="refreshed runtime health snapshot",
+        )
+
+    def _ledger_op_policy_trace_event(self, runtime: Any, turn_context: Any, payload: dict[str, Any]) -> None:
+        try:
+            policy_events = list(payload.get("events") or [])
+            if not policy_events:
+                policy_events = list(
+                    getattr(turn_context, "state", {}).get("policy_trace_events") or [],
+                )
+            trace_id = str(
+                getattr(turn_context, "trace_id", "") or "unknown",
+            )
+            phase_value = str(
+                getattr(getattr(turn_context, "phase", None), "value", "") or "",
+            )
+            occurred_at = ""
+            temporal = getattr(turn_context, "temporal", None)
+            if temporal is not None:
+                occurred_at = str(getattr(temporal, "wall_time", "") or "")
+
+            control_plane = getattr(
+                getattr(runtime, "turn_orchestrator", None),
+                "control_plane",
+                None,
+            )
+            ledger_writer = getattr(control_plane, "ledger_writer", None)
+            write_event = getattr(ledger_writer, "write_event", None)
+            session_id = str(
+                (getattr(turn_context, "metadata", {}) or {}).get("control_plane", {}).get("session_id")
+                or "default",
+            )
+
+            for index, raw in enumerate(policy_events, start=1):
+                event_payload = dict(raw or {})
+                summary = {
+                    "policy": str(event_payload.get("policy") or "safety"),
+                    "event_type": str(event_payload.get("event_type") or "policy_decision"),
+                    "node": str(event_payload.get("node") or ""),
+                    "decision_action": str(
+                        ((event_payload.get("trace") or {}).get("final_action") or {}).get("action")
+                        or "",
+                    ),
+                    "decision_step": str(
+                        ((event_payload.get("trace") or {}).get("final_action") or {}).get("step_name")
+                        or "",
+                    ),
+                }
+
+                if hasattr(turn_context, "event_sequence"):
+                    turn_context.event_sequence += 1
+                    sequence = int(turn_context.event_sequence)
+                else:
+                    sequence = 0
+
+                turn_event_payload = {
+                    "event_type": POLICY_TRACE_EVENT_TYPE,
+                    "trace_id": trace_id,
+                    "sequence": sequence,
+                    "occurred_at": occurred_at,
+                    "stage": "save",
+                    "status": "after",
+                    "phase": phase_value,
+                    "payload": {
+                        "index": index,
+                        "summary": summary,
+                        "policy_trace": event_payload,
+                    },
+                }
+                self.save_turn_event(turn_event_payload)
+
+                if callable(write_event):
+                    write_event(
+                        event_type=POLICY_TRACE_EVENT_TYPE,
+                        session_id=session_id,
+                        trace_id=trace_id,
+                        kernel_step_id="save_node.policy_trace",
+                        payload=turn_event_payload["payload"],
+                        committed=False,
+                    )
+        except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
+            logger.warning(
+                "PersistenceService policy trace persistence failed (non-fatal): %s",
+                exc,
+            )
+
+    def _ledger_op_capability_audit_event(self, runtime: Any, turn_context: Any, payload: dict[str, Any]) -> None:
+        # Non-authoritative observability write: never block turn correctness.
+        try:
+            stage_order = [
+                str(getattr(trace, "stage", "") or "")
+                for trace in list(
+                    getattr(turn_context, "stage_traces", []) or [],
+                )
+            ]
+            if "save" not in [s.strip().lower() for s in stage_order]:
+                stage_order = [*stage_order, "save"]
+
+            report = build_runtime_capability_audit_report(
+                turn_context,
+                stage_order=stage_order,
+                failed=False,
+            )
+            report_payload = report.to_dict()
+            if isinstance(getattr(turn_context, "state", None), dict):
+                turn_context.state["capability_audit_report"] = report_payload
+            if isinstance(getattr(turn_context, "metadata", None), dict):
+                turn_context.metadata["capability_audit_report"] = dict(
+                    report_payload,
+                )
+
+            event_payload = build_capability_audit_event_payload(
+                report,
+                scenario=str(payload.get("scenario") or "runtime_turn"),
+            )
+            if hasattr(turn_context, "event_sequence"):
+                turn_context.event_sequence += 1
+                sequence = int(turn_context.event_sequence)
+            else:
+                sequence = 0
+
+            trace_id = str(
+                getattr(turn_context, "trace_id", "") or "unknown",
+            )
+            phase_value = str(
+                getattr(getattr(turn_context, "phase", None), "value", "") or "",
+            )
+            occurred_at = ""
+            temporal = getattr(turn_context, "temporal", None)
+            if temporal is not None:
+                occurred_at = str(getattr(temporal, "wall_time", "") or "")
+
+            self.save_turn_event(
+                {
+                    "event_type": CAPABILITY_AUDIT_EVENT_TYPE,
+                    "trace_id": trace_id,
+                    "sequence": sequence,
+                    "occurred_at": occurred_at,
+                    "stage": "save",
+                    "status": "after",
+                    "phase": phase_value,
+                    "payload": event_payload,
+                },
+            )
+
+            control_plane = getattr(
+                getattr(runtime, "turn_orchestrator", None),
+                "control_plane",
+                None,
+            )
+            ledger_writer = getattr(control_plane, "ledger_writer", None)
+            write_event = getattr(ledger_writer, "write_event", None)
+            if callable(write_event):
+                session_id = str(
+                    (getattr(turn_context, "metadata", {}) or {}).get("control_plane", {}).get("session_id")
+                    or "default",
+                )
+                write_event(
+                    event_type=CAPABILITY_AUDIT_EVENT_TYPE,
+                    session_id=session_id,
+                    trace_id=trace_id,
+                    kernel_step_id="save_node.capability_audit",
+                    payload=event_payload,
+                    committed=False,
+                )
+        except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
+            logger.warning(
+                "PersistenceService capability audit persistence failed (non-fatal): %s",
+                exc,
+            )
+
+    def _dispatch_graph_mutation_intent(self, runtime: Any, turn_context: Any, *, payload: dict[str, Any], source: str) -> None:
+        memory_manager = getattr(runtime, "memory_manager", None)
+        graph_manager = getattr(memory_manager, "graph_manager", None) if memory_manager else None
+        if graph_manager is None:
+            raise PersistenceFailure(
+                f"MutationIntent(type=graph, source={source!r}): graph_manager unavailable",
+            )
+        _fn = getattr(graph_manager, "apply_mutation", None)
+        if callable(_fn):
+            _fn(payload, turn_context=turn_context)
+            return
+        raise PersistenceFailure(
+            f"MutationIntent(type=graph, source={source!r}): graph_manager.apply_mutation not callable",
+        )
+
+    def _dispatch_ledger_mutation_intent(
+        self,
+        runtime: Any,
+        turn_context: Any,
+        service: Any,
+        *,
+        payload: dict[str, Any],
+        source: str,
+    ) -> None:
+        op = str(payload.get("op") or "").strip().lower()
+        handlers = {
+            LedgerMutationOp.APPEND_HISTORY.value: lambda: self._ledger_op_append_history(runtime, payload),
+            LedgerMutationOp.RECORD_TURN_STATE.value: lambda: self._ledger_op_record_turn_state(runtime, payload),
+            LedgerMutationOp.SYNC_THREAD_SNAPSHOT.value: lambda: self._ledger_op_sync_thread_snapshot(runtime, payload),
+            LedgerMutationOp.CLEAR_TURN_CONTEXT.value: lambda: self._ledger_op_clear_turn_context(runtime, payload),
+            LedgerMutationOp.SCHEDULE_MAINTENANCE.value: lambda: self._ledger_op_schedule_maintenance(runtime, payload, service),
+            LedgerMutationOp.HEALTH_SNAPSHOT.value: lambda: self._ledger_op_health_snapshot(runtime, service),
+            LedgerMutationOp.POLICY_TRACE_EVENT.value: lambda: self._ledger_op_policy_trace_event(runtime, turn_context, payload),
+            LedgerMutationOp.CAPABILITY_AUDIT_EVENT.value: lambda: self._ledger_op_capability_audit_event(runtime, turn_context, payload),
+        }
+        handler = handlers.get(op)
+        if handler is None:
+            raise PersistenceFailure(
+                f"MutationIntent(type=ledger, source={source!r}): unsupported op={op!r}",
+            )
+        handler()
+
+    def _dispatch_mutation_intent(
+        self,
+        runtime: Any,
+        turn_context: Any,
+        service: Any,
+        intent: Any,
+    ) -> None:
+        if not isinstance(intent, MutationIntent):
+            raise PersistenceFailure(
+                f"MutationQueue received non-MutationIntent payload: {type(intent).__name__}",
+            )
+
+        self._require_mutation_witness(runtime=runtime, turn_context=turn_context, intent=intent)
+
+        intent_type = intent.type
+        payload = dict(intent.payload or {})
+        source = str(intent.source or "")
+
+        if intent_type is MutationKind.GRAPH:
+            self._dispatch_graph_mutation_intent(
+                runtime,
+                turn_context,
+                payload=payload,
+                source=source,
+            )
+            return
+
+        if intent_type is MutationKind.LEDGER:
+            self._dispatch_ledger_mutation_intent(
+                runtime,
+                turn_context,
+                service,
+                payload=payload,
+                source=source,
+            )
+            return
+
+        raise PersistenceFailure(
+            f"MutationIntent: unknown type={intent_type!r} source={source!r}",
+        )
+
     def _drain_mutation_queue(self, runtime: Any, turn_context: Any) -> None:
         mutation_queue = getattr(turn_context, "mutation_queue", None)
         if mutation_queue is None:
             return
 
         service = self.turn_service
-
-        def _resolve_event_tap() -> Any:
-            direct = getattr(runtime, "event_tap", None) or getattr(runtime, "_event_tap", None)
-            if direct is not None:
-                return direct
-            services = getattr(runtime, "services", None)
-            return getattr(services, "event_tap", None)
-
-        def _dispatch_mutation_intent(intent: Any) -> None:
-            if not isinstance(intent, MutationIntent):
-                raise RuntimeError(
-                    f"MutationQueue received non-MutationIntent payload: {type(intent).__name__}",
-                )
-            intent_type = intent.type
-            payload = dict(intent.payload or {})
-            source = str(intent.source or "")
-            trace_id = str(getattr(turn_context, "trace_id", "") or "").strip()
-            source_tag = str(getattr(intent, "source", "") or "")
-            witness: dict[str, Any] = {}
-            if trace_id:
-                tap = _resolve_event_tap()
-                emit = getattr(tap, "emit", None)
-                # Enforce strictly only when an event tap is active for this runtime.
-                if callable(emit):
-                    try:
-                        witness = KernelEventTotalityLock.require_event_witness(
-                            run_id=trace_id,
-                            source=source_tag,
-                        )
-                    except RuntimeError as exc:
-                        emit(
-                            "MUTATION_EVENT_TOTALITY_VIOLATION",
-                            run_id=trace_id,
-                            source=source_tag,
-                            error=str(exc),
-                        )
-                        raise
-            if intent_type is MutationKind.GRAPH:
-                memory_manager = getattr(runtime, "memory_manager", None)
-                graph_manager = getattr(memory_manager, "graph_manager", None) if memory_manager else None
-                if graph_manager is None:
-                    raise RuntimeError(
-                        f"MutationIntent(type=graph, source={source!r}): graph_manager unavailable",
-                    )
-                _fn = getattr(graph_manager, "apply_mutation", None)
-                if callable(_fn):
-                    _fn(payload, turn_context=turn_context)
-                    return
-                raise RuntimeError(
-                    f"MutationIntent(type=graph, source={source!r}): graph_manager.apply_mutation not callable",
-                )
-
-            if intent_type is MutationKind.LEDGER:
-                op = str(payload.get("op") or "").strip().lower()
-                if op == LedgerMutationOp.APPEND_HISTORY.value:
-                    entry = dict(payload.get("entry") or {})
-                    with runtime._session_lock:
-                        runtime.history.append(entry)
-                    return
-                if op == LedgerMutationOp.RECORD_TURN_STATE.value:
-                    mood = str(payload.get("mood") or "neutral")
-                    should_offer_daily_checkin = bool(
-                        payload.get("should_offer_daily_checkin", False),
-                    )
-                    with runtime._session_lock:
-                        runtime.session_moods.append(mood)
-                        runtime._pending_daily_checkin_context = should_offer_daily_checkin
-                    return
-                if op == LedgerMutationOp.SYNC_THREAD_SNAPSHOT.value:
-                    runtime.sync_active_thread_snapshot()
-                    return
-                if op == LedgerMutationOp.CLEAR_TURN_CONTEXT.value:
-                    with runtime._session_lock:
-                        runtime._pending_daily_checkin_context = False
-                        runtime._active_tool_observation_context = None
-                    return
-                if op == LedgerMutationOp.SCHEDULE_MAINTENANCE.value:
-                    turn_text = str(payload.get("turn_text") or "")
-                    mood = payload.get("mood")
-                    if not bool(getattr(runtime, "LIGHT_MODE", False)):
-                        runtime.schedule_post_turn_maintenance(turn_text, mood)
-                        append_step = getattr(
-                            service,
-                            "_append_turn_pipeline_step",
-                            None,
-                        )
-                        if callable(append_step):
-                            append_step(
-                                "schedule_maintenance",
-                                detail="queued post-turn maintenance",
-                            )
-                    else:
-                        append_step = getattr(
-                            service,
-                            "_append_turn_pipeline_step",
-                            None,
-                        )
-                        if callable(append_step):
-                            append_step(
-                                "schedule_maintenance",
-                                status="skipped",
-                                detail="light mode skips maintenance",
-                            )
-                    return
-                if op == LedgerMutationOp.HEALTH_SNAPSHOT.value:
-                    runtime.current_runtime_health_snapshot(
-                        force=True,
-                        log_warnings=True,
-                        persist=True,
-                    )
-                    append_step = getattr(service, "_append_turn_pipeline_step", None)
-                    if callable(append_step):
-                        append_step(
-                            "health_snapshot",
-                            detail="refreshed runtime health snapshot",
-                        )
-                    return
-                if op == LedgerMutationOp.POLICY_TRACE_EVENT.value:
-                    try:
-                        policy_events = list(payload.get("events") or [])
-                        if not policy_events:
-                            policy_events = list(
-                                getattr(turn_context, "state", {}).get("policy_trace_events") or [],
-                            )
-                        trace_id = str(
-                            getattr(turn_context, "trace_id", "") or "unknown",
-                        )
-                        phase_value = str(
-                            getattr(getattr(turn_context, "phase", None), "value", "") or "",
-                        )
-                        occurred_at = ""
-                        temporal = getattr(turn_context, "temporal", None)
-                        if temporal is not None:
-                            occurred_at = str(getattr(temporal, "wall_time", "") or "")
-
-                        control_plane = getattr(
-                            getattr(runtime, "turn_orchestrator", None),
-                            "control_plane",
-                            None,
-                        )
-                        ledger_writer = getattr(control_plane, "ledger_writer", None)
-                        write_event = getattr(ledger_writer, "write_event", None)
-                        session_id = str(
-                            (getattr(turn_context, "metadata", {}) or {}).get("control_plane", {}).get("session_id")
-                            or "default",
-                        )
-
-                        for index, raw in enumerate(policy_events, start=1):
-                            event_payload = dict(raw or {})
-                            summary = {
-                                "policy": str(event_payload.get("policy") or "safety"),
-                                "event_type": str(event_payload.get("event_type") or "policy_decision"),
-                                "node": str(event_payload.get("node") or ""),
-                                "decision_action": str(
-                                    ((event_payload.get("trace") or {}).get("final_action") or {}).get("action")
-                                    or "",
-                                ),
-                                "decision_step": str(
-                                    ((event_payload.get("trace") or {}).get("final_action") or {}).get("step_name")
-                                    or "",
-                                ),
-                            }
-
-                            if hasattr(turn_context, "event_sequence"):
-                                turn_context.event_sequence += 1
-                                sequence = int(turn_context.event_sequence)
-                            else:
-                                sequence = 0
-
-                            turn_event_payload = {
-                                "event_type": POLICY_TRACE_EVENT_TYPE,
-                                "trace_id": trace_id,
-                                "sequence": sequence,
-                                "occurred_at": occurred_at,
-                                "stage": "save",
-                                "status": "after",
-                                "phase": phase_value,
-                                "payload": {
-                                    "index": index,
-                                    "summary": summary,
-                                    "policy_trace": event_payload,
-                                },
-                            }
-                            self.save_turn_event(turn_event_payload)
-
-                            if callable(write_event):
-                                write_event(
-                                    event_type=POLICY_TRACE_EVENT_TYPE,
-                                    session_id=session_id,
-                                    trace_id=trace_id,
-                                    kernel_step_id="save_node.policy_trace",
-                                    payload=turn_event_payload["payload"],
-                                    committed=False,
-                                )
-                    except Exception as exc:
-                        logger.warning(
-                            "PersistenceService policy trace persistence failed (non-fatal): %s",
-                            exc,
-                        )
-                    return
-                if op == LedgerMutationOp.CAPABILITY_AUDIT_EVENT.value:
-                    # Non-authoritative observability write: never block turn correctness.
-                    try:
-                        stage_order = [
-                            str(getattr(trace, "stage", "") or "")
-                            for trace in list(
-                                getattr(turn_context, "stage_traces", []) or [],
-                            )
-                        ]
-                        if "save" not in [s.strip().lower() for s in stage_order]:
-                            stage_order = [*stage_order, "save"]
-
-                        report = build_runtime_capability_audit_report(
-                            turn_context,
-                            stage_order=stage_order,
-                            failed=False,
-                        )
-                        report_payload = report.to_dict()
-                        if isinstance(getattr(turn_context, "state", None), dict):
-                            turn_context.state["capability_audit_report"] = report_payload
-                        if isinstance(getattr(turn_context, "metadata", None), dict):
-                            turn_context.metadata["capability_audit_report"] = dict(
-                                report_payload,
-                            )
-
-                        event_payload = build_capability_audit_event_payload(
-                            report,
-                            scenario=str(payload.get("scenario") or "runtime_turn"),
-                        )
-                        if hasattr(turn_context, "event_sequence"):
-                            turn_context.event_sequence += 1
-                            sequence = int(turn_context.event_sequence)
-                        else:
-                            sequence = 0
-
-                        trace_id = str(
-                            getattr(turn_context, "trace_id", "") or "unknown",
-                        )
-                        phase_value = str(
-                            getattr(getattr(turn_context, "phase", None), "value", "") or "",
-                        )
-                        occurred_at = ""
-                        temporal = getattr(turn_context, "temporal", None)
-                        if temporal is not None:
-                            occurred_at = str(getattr(temporal, "wall_time", "") or "")
-
-                        self.save_turn_event(
-                            {
-                                "event_type": CAPABILITY_AUDIT_EVENT_TYPE,
-                                "trace_id": trace_id,
-                                "sequence": sequence,
-                                "occurred_at": occurred_at,
-                                "stage": "save",
-                                "status": "after",
-                                "phase": phase_value,
-                                "payload": event_payload,
-                            },
-                        )
-
-                        control_plane = getattr(
-                            getattr(runtime, "turn_orchestrator", None),
-                            "control_plane",
-                            None,
-                        )
-                        ledger_writer = getattr(control_plane, "ledger_writer", None)
-                        write_event = getattr(ledger_writer, "write_event", None)
-                        if callable(write_event):
-                            session_id = str(
-                                (getattr(turn_context, "metadata", {}) or {}).get("control_plane", {}).get("session_id")
-                                or "default",
-                            )
-                            write_event(
-                                event_type=CAPABILITY_AUDIT_EVENT_TYPE,
-                                session_id=session_id,
-                                trace_id=trace_id,
-                                kernel_step_id="save_node.capability_audit",
-                                payload=event_payload,
-                                committed=False,
-                            )
-                    except Exception as exc:
-                        logger.warning(
-                            "PersistenceService capability audit persistence failed (non-fatal): %s",
-                            exc,
-                        )
-                    return
-                raise RuntimeError(
-                    f"MutationIntent(type=ledger, source={source!r}): unsupported op={op!r}",
-                )
-
-            raise RuntimeError(
-                f"MutationIntent: unknown type={intent_type!r} source={source!r}",
-            )
+        dispatch = lambda intent: self._dispatch_mutation_intent(
+            runtime,
+            turn_context,
+            service,
+            intent,
+        )
 
         try:
             mutation_queue.drain(
-                _dispatch_mutation_intent,
+                dispatch,
                 hard_fail_on_error=True,
                 transactional=True,
             )
@@ -996,7 +1169,7 @@ class PersistenceService:
             if "unexpected keyword argument 'transactional'" not in str(exc):
                 raise
             mutation_queue.drain(
-                _dispatch_mutation_intent,
+                dispatch,
                 hard_fail_on_error=True,
             )
         if not mutation_queue.is_empty():
@@ -1111,7 +1284,7 @@ class PersistenceService:
         service = self.turn_service
         runtime = None if service is None else getattr(service, "bot", None)
         if runtime is None:
-            raise RuntimeError(
+            raise PersistenceFailure(
                 "SaveNode strict mode requires an attached turn_service runtime",
             )
 
@@ -1140,7 +1313,7 @@ class PersistenceService:
             None,
         )
         if not callable(materialize_projection):
-            raise RuntimeError(
+            raise PersistenceFailure(
                 "SaveNode strict mode requires relationship_projector.materialize_projection",
             )
         materialize_projection(turn_context=turn_context)
@@ -1149,7 +1322,7 @@ class PersistenceService:
         graph_manager = getattr(memory_manager, "graph_manager", None) if memory_manager is not None else None
         sync_graph_store = getattr(graph_manager, "sync_graph_store", None)
         if not callable(sync_graph_store):
-            raise RuntimeError(
+            raise PersistenceFailure(
                 "SaveNode strict mode requires memory_graph_manager.sync_graph_store",
             )
         graph_sync_started = time.perf_counter()
@@ -1246,7 +1419,7 @@ class PersistenceService:
     def begin_transaction(self, turn_context: Any) -> None:
         temporal = getattr(turn_context, "temporal", None)
         if temporal is None:
-            raise RuntimeError("TemporalNode required — execution invalid")
+            raise InvariantViolation("TemporalNode required — execution invalid")
         state = getattr(turn_context, "state", None)
         service = self.turn_service
         runtime = None if service is None else getattr(service, "bot", None)
@@ -1254,8 +1427,13 @@ class PersistenceService:
             if runtime is not None:
                 state["_save_transaction_snapshot"] = self._capture_transaction_snapshot(runtime, turn_context)
             trace_id = str(getattr(turn_context, "trace_id", "") or "")
+            if trace_id:
+                commit_seed = f"{trace_id}:{str(getattr(turn_context, 'user_input', '') or '')}"
+                commit_id = hashlib.sha256(commit_seed.encode("utf-8")).hexdigest()[:32]
+            else:
+                commit_id = uuid.uuid4().hex
             state["_save_transaction"] = {
-                "commit_id": uuid.uuid4().hex,
+                "commit_id": commit_id,
                 "trace_id": trace_id,
                 "started_at": str(getattr(temporal, "wall_time", "") or ""),
                 "status": "active",
@@ -1265,11 +1443,11 @@ class PersistenceService:
     def apply_mutations(self, turn_context: Any) -> None:
         temporal = getattr(turn_context, "temporal", None)
         if temporal is None:
-            raise RuntimeError("TemporalNode required — execution invalid")
+            raise InvariantViolation("TemporalNode required — execution invalid")
         service = self.turn_service
         runtime = None if service is None else getattr(service, "bot", None)
         if runtime is None:
-            raise RuntimeError("SaveNode strict mode requires turn_service.bot")
+            raise PersistenceFailure("SaveNode strict mode requires turn_service.bot")
         # SaveNode finalize_turn performs the canonical commit sequence in strict mode.
         # This hook exists to preserve transaction staging semantics in core.nodes.SaveNode.
         state = getattr(turn_context, "state", None)
@@ -1337,7 +1515,7 @@ class PersistenceService:
         turn_context: Any,
     ) -> tuple:
         if self.turn_service is None:
-            raise RuntimeError(
+            raise PersistenceFailure(
                 "SaveNode strict mode requires graph turn_service wiring in Phase 4",
             )
         return self.turn_service.finalize_user_turn(
@@ -1358,33 +1536,149 @@ class PersistenceService:
         ):
             return self._finalize_turn_impl(turn_context, result)
 
-    def _finalize_turn_impl(self, turn_context: Any, result: Any) -> tuple:
-        """Internal finalize implementation executed under an active trace context."""
-        # Session exit was already handled inside prepare_user_turn_async â€” skip double-commit.
-        if turn_context.state.get("already_finalized"):
-            if isinstance(result, tuple) and len(result) >= 2:
-                return result
-            return (
-                str(result or ""),
-                bool(turn_context.state.get("should_end", False)),
-            )
+    @staticmethod
+    def _finalize_fast_path_if_already_finalized(turn_context: Any, result: Any) -> tuple | None:
+        # Session exit was already handled inside prepare_user_turn_async; avoid double-commit.
+        if not turn_context.state.get("already_finalized"):
+            return None
+        if isinstance(result, tuple) and len(result) >= 2:
+            return result
+        return (
+            str(result or ""),
+            bool(turn_context.state.get("should_end", False)),
+        )
 
+    @staticmethod
+    def _finalize_inputs(turn_context: Any, result: Any) -> tuple[str, str, Any, str]:
         turn_text = turn_context.state.get("turn_text") or turn_context.user_input
         mood = turn_context.state.get("mood") or "neutral"
         norm_attachments = turn_context.state.get("norm_attachments") or turn_context.attachments
         reply = result[0] if isinstance(result, tuple) else str(result or "")
+        return str(turn_text or ""), str(mood or "neutral"), norm_attachments, reply
 
+    def _finalize_validate_mutation_set(self, turn_context: Any) -> tuple[Any, Any]:
         service = self.turn_service
         if service is None:
-            raise RuntimeError(
+            raise PersistenceFailure(
                 "Strict mode requires graph turn_service wiring in Phase 4",
             )
 
         runtime = getattr(service, "bot", None)
         if runtime is None:
-            raise RuntimeError("SaveNode strict mode requires turn_service.bot")
+            raise PersistenceFailure("SaveNode strict mode requires turn_service.bot")
         if getattr(turn_context, "temporal", None) is None:
-            raise RuntimeError("TemporalNode required — execution invalid")
+            raise InvariantViolation("TemporalNode required — execution invalid")
+        return service, runtime
+
+    def _finalize_apply_final_graph_commit(
+        self,
+        runtime: Any,
+        turn_context: Any,
+        *,
+        turn_text: str,
+    ) -> None:
+        self.begin_transaction(turn_context)
+        self.apply_mutations(turn_context)
+        # Persist behavioral ledger state before SaveNode checkpoint capture.
+        self._inject_behavioral_ledger_state(runtime, turn_context, turn_text)
+        self._record_relational_ledger(runtime, turn_context, turn_text)
+
+    def _finalize_apply_ledger_commit(
+        self,
+        runtime: Any,
+        turn_context: Any,
+        *,
+        turn_text: str,
+        mood: str,
+        reply: str,
+        norm_attachments: Any,
+    ) -> tuple:
+        finalized = self.final_ledger_commit(
+            turn_text,
+            mood,
+            reply,
+            norm_attachments,
+            turn_context,
+        )
+        self._commit_post_finalize_side_effects(turn_context)
+        return finalized
+
+    def _finalize_trace_envelope(
+        self,
+        runtime: Any,
+        turn_context: Any,
+    ) -> None:
+        # Atomic checkpoint capture inside finalize boundary.
+        checkpoint = None
+        checkpoint_snapshot = getattr(turn_context, "checkpoint_snapshot", None)
+        if callable(checkpoint_snapshot):
+            checkpoint = checkpoint_snapshot(
+                stage="save",
+                status="atomic_finalize",
+                error=None,
+            )
+            turn_context.state["_atomic_checkpoint_saved"] = True
+            save_graph_checkpoint = getattr(self, "save_graph_checkpoint", None)
+            if callable(save_graph_checkpoint):
+                save_graph_checkpoint(checkpoint, _skip_turn_event=True)
+
+        if self.checkpointer is not None and checkpoint is not None:
+            _md = dict(getattr(turn_context, "metadata", {}) or {})
+            control_plane = dict(_md.get("control_plane") or {})
+            session_id = str(
+                control_plane.get("session_id") or _md.get("session_id") or "default",
+            )
+            trace_id = str(getattr(turn_context, "trace_id", "") or "")
+            manifest = dict(
+                getattr(turn_context, "metadata", {}).get("determinism_manifest") or {},
+            )
+            try:
+                self.checkpointer.save_checkpoint(
+                    session_id=session_id,
+                    trace_id=trace_id,
+                    checkpoint=dict(checkpoint) if isinstance(checkpoint, dict) else {},
+                    manifest=manifest,
+                )
+            except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
+                logger.error("PersistenceService.checkpointer save failed: %s", exc)
+                if bool(self.strict_mode):
+                    raise PersistenceFailure(
+                        "PersistenceService.checkpointer save failed",
+                        context={"error": str(exc)},
+                    ) from exc
+
+        self._enforce_memory_authority(
+            runtime,
+            turn_context,
+            checkpoint=dict(checkpoint) if isinstance(checkpoint, dict) else None,
+        )
+
+    def _finalize_emit_completion_event(
+        self,
+        runtime: Any,
+        turn_context: Any,
+        service: Any,
+    ) -> None:
+        # Completion side effects are centralized after all commit validations.
+        memory_ops_started = time.perf_counter()
+        self._publish_post_commit_ready(runtime, turn_context)
+        memory_ops_ms = round((time.perf_counter() - memory_ops_started) * 1000, 3)
+        if isinstance(getattr(turn_context, "state", None), dict):
+            turn_context.state["_timing_memory_ops_ms"] = memory_ops_ms
+
+        complete_pipeline = getattr(service, "_complete_turn_pipeline", None)
+        if callable(complete_pipeline):
+            complete_pipeline(should_end=False)
+        self.commit_transaction(turn_context)
+
+    def _finalize_turn_impl(self, turn_context: Any, result: Any) -> tuple:
+        """Internal finalize implementation executed under an active trace context."""
+        fast_path = self._finalize_fast_path_if_already_finalized(turn_context, result)
+        if fast_path is not None:
+            return fast_path
+
+        turn_text, mood, norm_attachments, reply = self._finalize_inputs(turn_context, result)
+        service, runtime = self._finalize_validate_mutation_set(turn_context)
 
         previous_temporal = getattr(runtime, "_current_turn_time_base", None)
         previous_commit_active = bool(getattr(runtime, "_graph_commit_active", False))
@@ -1398,83 +1692,44 @@ class PersistenceService:
             runtime._current_turn_time_base = getattr(turn_context, "temporal", None)
             runtime._graph_commit_active = True
 
-            # Week 1 Behavioral Ledger: persist relational + temporal expansion
-            # directly on TurnContext state before SaveNode checkpoint capture.
-            self._inject_behavioral_ledger_state(runtime, turn_context, str(turn_text or ""))
-            self._record_relational_ledger(runtime, turn_context, str(turn_text or ""))
-
-            # Strict sequence: finalize queues ledger intents; then one canonical SaveNode commit.
-            finalized = self.final_ledger_commit(
-                turn_text,
-                mood,
-                reply,
-                norm_attachments,
-                turn_context,
-            )
-            self._commit_post_finalize_side_effects(turn_context)
-
-            # Atomic checkpoint capture: emit from inside finalize_turn boundary so
-            # hash-chain state is committed with the same save transaction.
-            checkpoint = None
-            checkpoint_snapshot = getattr(turn_context, "checkpoint_snapshot", None)
-            if callable(checkpoint_snapshot):
-                checkpoint = checkpoint_snapshot(
-                    stage="save",
-                    status="atomic_finalize",
-                    error=None,
-                )
-                turn_context.state["_atomic_checkpoint_saved"] = True
-                save_graph_checkpoint = getattr(self, "save_graph_checkpoint", None)
-                if callable(save_graph_checkpoint):
-                    save_graph_checkpoint(checkpoint, _skip_turn_event=True)
-
-            if self.checkpointer is not None and checkpoint is not None:
-                _md = dict(getattr(turn_context, "metadata", {}) or {})
-                control_plane = dict(_md.get("control_plane") or {})
-                session_id = str(
-                    control_plane.get("session_id") or _md.get("session_id") or "default",
-                )
-                trace_id = str(getattr(turn_context, "trace_id", "") or "")
-                manifest = dict(
-                    getattr(turn_context, "metadata", {}).get("determinism_manifest") or {},
-                )
-                try:
-                    self.checkpointer.save_checkpoint(
-                        session_id=session_id,
-                        trace_id=trace_id,
-                        checkpoint=dict(checkpoint) if isinstance(checkpoint, dict) else {},
-                        manifest=manifest,
-                    )
-                except Exception as exc:
-                    # Non-fatal by default; strict mode escalates.
-                    logger.error("PersistenceService.checkpointer save failed: %s", exc)
-                    if bool(self.strict_mode):
-                        raise
-
-            self._enforce_memory_authority(
+            # 1) Validate final mutation set (preconditions + transaction gate)
+            # 2) Apply final graph commit
+            self._finalize_apply_final_graph_commit(
                 runtime,
                 turn_context,
-                checkpoint=dict(checkpoint) if isinstance(checkpoint, dict) else None,
+                turn_text=turn_text,
             )
 
-            # Publish post-commit readiness only after the full strict commit
-            # sequence succeeds, including checkpoint/checkpointer writes.
-            memory_ops_started = time.perf_counter()
-            self._publish_post_commit_ready(runtime, turn_context)
-            memory_ops_ms = round((time.perf_counter() - memory_ops_started) * 1000, 3)
-            if isinstance(getattr(turn_context, "state", None), dict):
-                turn_context.state["_timing_memory_ops_ms"] = memory_ops_ms
+            # 3) Apply ledger commit
+            finalized = self._finalize_apply_ledger_commit(
+                runtime,
+                turn_context,
+                turn_text=turn_text,
+                mood=mood,
+                reply=reply,
+                norm_attachments=norm_attachments,
+            )
 
-            complete_pipeline = getattr(service, "_complete_turn_pipeline", None)
-            if callable(complete_pipeline):
-                complete_pipeline(should_end=False)
+            # 4) Finalize trace envelope
+            self._finalize_trace_envelope(runtime, turn_context)
+
+            # 5) Emit completion event (single centralized post-commit side-effect stage)
+            self._finalize_emit_completion_event(runtime, turn_context, service)
             return finalized
-        except Exception as exc:
+        except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
+            with contextlib.suppress(Exception):
+                self.rollback_transaction(turn_context)
             logger.error(
                 "PersistenceService.finalize_turn strict-mode failure: %s",
                 exc,
             )
-            raise
+            raise PersistenceFailure(
+                "PersistenceService.finalize_turn strict-mode failure",
+                context={
+                    "trace_id": str(getattr(turn_context, "trace_id", "") or ""),
+                    "error": str(exc),
+                },
+            ) from exc
         finally:
             if isinstance(getattr(turn_context, "state", None), dict):
                 turn_context.state["_timing_finalize_ms"] = round(
@@ -1519,7 +1774,7 @@ class PersistenceService:
                 )
                 return
             raise
-        except Exception as exc:
+        except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
             logger.error("PersistenceService.save_graph_checkpoint failed: %s", exc)
 
     def save_turn_event(self, event: dict[str, Any]) -> None:
@@ -1533,7 +1788,7 @@ class PersistenceService:
                 )
                 return
             raise
-        except Exception as exc:
+        except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
             logger.error("PersistenceService.save_turn_event failed: %s", exc)
 
     def list_turn_events(self, trace_id: str, limit: int = 0) -> list[dict[str, Any]]:
@@ -1546,7 +1801,7 @@ class PersistenceService:
             if not str(trace_id or "").strip():
                 return []
             raise
-        except Exception as exc:
+        except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
             logger.error("PersistenceService.list_turn_events failed: %s", exc)
             return []
 
@@ -1565,7 +1820,7 @@ class PersistenceService:
             if not str(trace_id or "").strip():
                 return []
             raise
-        except Exception as exc:
+        except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
             logger.error("PersistenceService.list_policy_trace_events failed: %s", exc)
             return []
 
@@ -1592,7 +1847,7 @@ class PersistenceService:
                     "latest_trace_id": "",
                 }
             raise
-        except Exception as exc:
+        except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
             logger.error("PersistenceService.summarize_policy_trace_events failed: %s", exc)
             return {
                 "event_type": "PolicyTraceEvent",
@@ -1611,7 +1866,7 @@ class PersistenceService:
             if not str(trace_id or "").strip():
                 return {"trace_id": "", "events": [], "replayed_state": {}}
             raise
-        except Exception as exc:
+        except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
             logger.error("PersistenceService.replay_turn_events failed: %s", exc)
             return {"trace_id": str(trace_id or ""), "events": [], "replayed_state": {}}
 
@@ -1636,7 +1891,7 @@ class PersistenceService:
                     "lock_hashes": [],
                 }
             raise
-        except Exception as exc:
+        except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
             logger.error(
                 "PersistenceService.validate_replay_determinism failed: %s",
                 exc,

@@ -6,6 +6,7 @@ Usage:
   python _ci_gate_check.py --post-module <module.name>     # after completing a module
   python _ci_gate_check.py --group-gate  <group_number>    # full hard-gate evaluation
   python _ci_gate_check.py --cycle-check                   # import cycle delta only
+    python _ci_gate_check.py --contract-gate                # contract-to-test compiler gate only
   python _ci_gate_check.py --no-parallel-groups            # parallel branch check only
 
 Exit codes:
@@ -30,6 +31,7 @@ VENV_PYTHON = ROOT / ".venv" / "Scripts" / "python.exe"
 GROUP1_MANIFEST = ROOT / "refactor_group_1.yaml"
 BACKLOG = ROOT / "refactor_backlog.yaml"
 BASELINE_CYCLE_FILE = ROOT / "_baseline_cycles.txt"
+CONTRACT_COMPILER = ROOT / "tools" / "contract_test_compiler.py"
 
 # Group-prefix patterns for refactor branches (e.g. refactor/group-02-*)
 GROUP_BRANCH_PATTERN = re.compile(r"refactor/group-(\d+)-")
@@ -324,6 +326,34 @@ def check_integration_lane() -> bool:
     return True
 
 
+def check_contract_gate() -> bool:
+    """Run contract-to-test compiler gate and fail on anchor drift or invalid nodeids."""
+    if not CONTRACT_COMPILER.exists():
+        _fail(f"Contract compiler not found: {CONTRACT_COMPILER}")
+        return False
+
+    print("  Running contract compiler (strict validate-nodeids)...")
+    rc_validate, out_validate = _run(
+        [str(VENV_PYTHON), str(CONTRACT_COMPILER), "--validate-nodeids", "--fail-on-untested"],
+        capture=True,
+    )
+    if rc_validate != 0:
+        _fail(f"Contract compiler validation failed. Output tail:\n{out_validate[-800:]}")
+        return False
+
+    print("  Checking contract manifest drift...")
+    rc_check, out_check = _run(
+        [str(VENV_PYTHON), str(CONTRACT_COMPILER), "--check", "--fail-on-untested"],
+        capture=True,
+    )
+    if rc_check != 0:
+        _fail(f"Contract manifest drift detected. Output tail:\n{out_check[-800:]}")
+        return False
+
+    _pass("Contract gate: anchors compile, collect, and manifest is in sync.")
+    return True
+
+
 # ─── Full hard gate — Group N ─────────────────────────────────────────────────
 
 
@@ -348,7 +378,10 @@ def run_group_gate(group_number: int) -> bool:
         print("\n[ 4/5 ] No new import cycles?")
         results.append(check_no_new_cycles())
 
-        print("\n[ 5/5 ] No parallel group branches?")
+        print("\n[ 5/6 ] Contract gate green?")
+        results.append(check_contract_gate())
+
+        print("\n[ 6/6 ] No parallel group branches?")
         results.append(check_no_parallel_groups())
     else:
         _warn(f"No gate specification for group {group_number}. Add it to _ci_gate_check.py.")
@@ -434,6 +467,7 @@ def main() -> None:
     parser.add_argument("--post-module", metavar="MODULE", help="Run post-completion checks for a module")
     parser.add_argument("--group-gate", metavar="N", type=int, help="Run full hard gate for group N")
     parser.add_argument("--cycle-check", action="store_true", help="Import cycle delta check only")
+    parser.add_argument("--contract-gate", action="store_true", help="Contract compiler gate only")
     parser.add_argument("--no-parallel-groups", action="store_true", help="Parallel branch check only")
     parser.add_argument(
         "--save-baseline", action="store_true", help="Overwrite baseline cycle snapshot with current state"
@@ -462,6 +496,11 @@ def main() -> None:
     if args.cycle_check:
         print("\n[ cycle check ]")
         ok = check_no_new_cycles()
+        sys.exit(0 if ok else 1)
+
+    if args.contract_gate:
+        print("\n[ contract gate ]")
+        ok = check_contract_gate()
         sys.exit(0 if ok else 1)
 
     if args.no_parallel_groups:

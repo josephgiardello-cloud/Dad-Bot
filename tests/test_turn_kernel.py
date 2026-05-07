@@ -370,7 +370,7 @@ def test_turn_graph_routes_through_kernel():
         async def execute(self, registry, ctx):
             ctx.state["safe_result"] = (str(ctx.state.get("result") or ""), False)
 
-    graph = TurnGraph(registry=None)
+    graph = TurnGraph(registry=None, nodes=[])
     graph.add_node("temporal", TemporalNode())
     graph.add_node("kernel_step", _SimpleNode())
     graph.add_node("save", _SaveNode())
@@ -410,7 +410,7 @@ def test_turn_graph_kernel_rejection_skips_state_mutation():
         async def execute(self, registry, ctx):
             ctx.state["safe_result"] = ("ok", False)
 
-    graph = TurnGraph(registry=None)
+    graph = TurnGraph(registry=None, nodes=[])
     graph.add_node("temporal", TemporalNode())
     graph.add_node("mutate_stage", _MutatingNode())
     graph.add_node("save", _SaveNode())

@@ -427,7 +427,7 @@ class TestTurnContextTransitionPhase:
 
 
 class TestPipelineSemantics:
-    def test_duplicate_node_registration_keeps_first_binding(self):
+    def test_duplicate_node_registration_keeps_latest_binding(self):
         graph = TurnGraph(registry=None, nodes=[])
 
         class _NodeA:
@@ -441,7 +441,7 @@ class TestPipelineSemantics:
         graph.add_node("inference", first)
         graph.add_node("inference", second)
 
-        assert graph._node_map["inference"] is first
+        assert graph._node_map["inference"] is second
         assert len(graph._node_map) == 1
 
     def test_pipeline_items_follow_registered_edges(self):

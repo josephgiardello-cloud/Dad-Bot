@@ -1,0 +1,208 @@
+{
+  "schema_version": "contract-test-manifest.v1",
+  "generated_at_utc": "2026-05-07T21:42:22+00:00",
+  "contract_map": {
+    "path": "docs/system_contract_map.md",
+    "version": "2026-05-07.v2.",
+    "sha256": "843b8706f8de24fde32f0a3137d3de1d1c51be7628ea24d464658c519bd04030"
+  },
+  "contracts": [
+    {
+      "id": "G-1",
+      "title": "Node Binding Semantics",
+      "test_anchors": [
+        "tests/test_graph_unit_contracts.py::TestPipelineSemantics::test_duplicate_node_registration_keeps_latest_binding"
+      ],
+      "anchor_count": 1
+    },
+    {
+      "id": "G-2",
+      "title": "Pipeline Resolution Semantics",
+      "test_anchors": [
+        "tests/test_graph_unit_contracts.py::TestPipelineSemantics::test_pipeline_items_follow_registered_edges"
+      ],
+      "anchor_count": 1
+    },
+    {
+      "id": "G-3",
+      "title": "Execution Token Boundary",
+      "test_anchors": [
+        "tests/test_graph_unit_contracts.py::TestExecutionTokenBoundary::test_execute_raises_when_token_mismatch"
+      ],
+      "anchor_count": 1
+    },
+    {
+      "id": "L-1",
+      "title": "Sealed Events View",
+      "test_anchors": [
+        "tests/test_production_hardening_wave4.py::TestSealedEventsAndReplayFilters::test_sealed_events_exposes_live_authoritative_events",
+        "tests/test_production_hardening_wave4.py::TestSealedEventsAndReplayFilters::test_sealed_events_returns_tuple"
+      ],
+      "anchor_count": 2
+    },
+    {
+      "id": "L-2",
+      "title": "Write Boundary and Causal Chain",
+      "test_anchors": [
+        "tests/test_production_hardening_wave3.py::TestWriteBoundary::test_strict_mode_blocks_direct_write",
+        "tests/test_production_hardening_wave3.py::TestWriteBoundary::test_write_boundary_guard_allows_write"
+      ],
+      "anchor_count": 2
+    },
+    {
+      "id": "L-3",
+      "title": "Sequence and Replay Semantics",
+      "test_anchors": [
+        "tests/test_boundary_mutation_closure.py::test_replay_is_source_of_truth",
+        "tests/test_boundary_mutation_closure.py::test_replay_matches_live_execution"
+      ],
+      "anchor_count": 2
+    },
+    {
+      "id": "L-4",
+      "title": "Replay Filter Semantics",
+      "test_anchors": [
+        "tests/test_production_hardening_wave4.py::TestSealedEventsAndReplayFilters::test_replay_filter_applied_on_load"
+      ],
+      "anchor_count": 1
+    },
+    {
+      "id": "L-5",
+      "title": "Ledger Telemetry",
+      "test_anchors": [
+        "tests/test_contract_runtime_telemetry.py::test_execution_ledger_telemetry_snapshot_tracks_cache_rebuilds"
+      ],
+      "anchor_count": 1
+    },
+    {
+      "id": "P-1",
+      "title": "Turn Event Authority",
+      "test_anchors": [
+        "tests/test_ledger_authority_invariants.py::test_persistence_events_are_ledger_authoritative"
+      ],
+      "anchor_count": 1
+    },
+    {
+      "id": "P-2",
+      "title": "Snapshot Thinness and Invariants",
+      "test_anchors": [
+        "tests/test_ledger_authority_invariants.py::test_graph_checkpoint_snapshot_is_canonical_and_thin"
+      ],
+      "anchor_count": 1
+    },
+    {
+      "id": "P-3",
+      "title": "Compaction Policy Contract",
+      "test_anchors": [
+        "tests/test_production_hardening_wave4.py::TestCompaction::test_compact_removes_pre_snapshot_events"
+      ],
+      "anchor_count": 1
+    },
+    {
+      "id": "P-4",
+      "title": "Post-Commit Emission Contract",
+      "test_anchors": [
+        "tests/test_post_commit_events.py::test_finalize_turn_does_not_emit_post_commit_event_on_failed_commit",
+        "tests/test_post_commit_events.py::test_finalize_turn_emits_post_commit_event_once_on_success"
+      ],
+      "anchor_count": 2
+    },
+    {
+      "id": "P-5",
+      "title": "Memory Authority Divergence Contract",
+      "test_anchors": [
+        "tests/test_post_commit_events.py::test_finalize_turn_allows_commit_when_memory_authority_matches",
+        "tests/test_post_commit_events.py::test_finalize_turn_blocks_commit_on_memory_authority_divergence"
+      ],
+      "anchor_count": 2
+    },
+    {
+      "id": "P-6",
+      "title": "Persistence Telemetry and SLO Contract",
+      "test_anchors": [
+        "tests/test_contract_runtime_telemetry.py::test_persistence_telemetry_snapshot_exposes_slo_and_policy"
+      ],
+      "anchor_count": 1
+    },
+    {
+      "id": "E-1",
+      "title": "Runtime Error Taxonomy",
+      "test_anchors": [
+        "tests/test_post_commit_events.py::test_finalize_turn_does_not_emit_post_commit_event_on_failed_commit"
+      ],
+      "anchor_count": 1
+    },
+    {
+      "id": "E-2",
+      "title": "Finalize Wrapping Semantics",
+      "test_anchors": [
+        "tests/test_post_commit_events.py::test_finalize_turn_blocks_commit_on_memory_authority_divergence",
+        "tests/test_post_commit_events.py::test_finalize_turn_does_not_emit_post_commit_event_on_failed_commit"
+      ],
+      "anchor_count": 2
+    },
+    {
+      "id": "E-3",
+      "title": "Non-Fatal Runtime Catch Surface",
+      "test_anchors": [
+        "tests/test_post_commit_events.py::test_finalize_turn_does_not_emit_post_commit_event_on_failed_commit"
+      ],
+      "anchor_count": 1
+    },
+    {
+      "id": "D-1",
+      "title": "Required Update Bundle",
+      "test_anchors": [
+        "tests/test_contract_map_governance.py::test_contract_map_declares_required_update_bundle_rule"
+      ],
+      "anchor_count": 1
+    },
+    {
+      "id": "D-2",
+      "title": "CI Contract Gate",
+      "test_anchors": [
+        "tests/test_contract_map_governance.py::test_ci_gate_exposes_contract_gate_flag",
+        "tests/test_contract_map_governance.py::test_contract_map_declares_ci_contract_gate_rule"
+      ],
+      "anchor_count": 2
+    },
+    {
+      "id": "D-3",
+      "title": "Documentation Staleness Rule",
+      "test_anchors": [
+        "tests/test_contract_map_governance.py::test_contract_map_declares_documentation_staleness_rule"
+      ],
+      "anchor_count": 1
+    }
+  ],
+  "compiled": {
+    "nodeids": [
+      "tests/test_boundary_mutation_closure.py::test_replay_is_source_of_truth",
+      "tests/test_boundary_mutation_closure.py::test_replay_matches_live_execution",
+      "tests/test_contract_map_governance.py::test_ci_gate_exposes_contract_gate_flag",
+      "tests/test_contract_map_governance.py::test_contract_map_declares_ci_contract_gate_rule",
+      "tests/test_contract_map_governance.py::test_contract_map_declares_documentation_staleness_rule",
+      "tests/test_contract_map_governance.py::test_contract_map_declares_required_update_bundle_rule",
+      "tests/test_contract_runtime_telemetry.py::test_execution_ledger_telemetry_snapshot_tracks_cache_rebuilds",
+      "tests/test_contract_runtime_telemetry.py::test_persistence_telemetry_snapshot_exposes_slo_and_policy",
+      "tests/test_graph_unit_contracts.py::TestExecutionTokenBoundary::test_execute_raises_when_token_mismatch",
+      "tests/test_graph_unit_contracts.py::TestPipelineSemantics::test_duplicate_node_registration_keeps_latest_binding",
+      "tests/test_graph_unit_contracts.py::TestPipelineSemantics::test_pipeline_items_follow_registered_edges",
+      "tests/test_ledger_authority_invariants.py::test_graph_checkpoint_snapshot_is_canonical_and_thin",
+      "tests/test_ledger_authority_invariants.py::test_persistence_events_are_ledger_authoritative",
+      "tests/test_post_commit_events.py::test_finalize_turn_allows_commit_when_memory_authority_matches",
+      "tests/test_post_commit_events.py::test_finalize_turn_blocks_commit_on_memory_authority_divergence",
+      "tests/test_post_commit_events.py::test_finalize_turn_does_not_emit_post_commit_event_on_failed_commit",
+      "tests/test_post_commit_events.py::test_finalize_turn_emits_post_commit_event_once_on_success",
+      "tests/test_production_hardening_wave3.py::TestWriteBoundary::test_strict_mode_blocks_direct_write",
+      "tests/test_production_hardening_wave3.py::TestWriteBoundary::test_write_boundary_guard_allows_write",
+      "tests/test_production_hardening_wave4.py::TestCompaction::test_compact_removes_pre_snapshot_events",
+      "tests/test_production_hardening_wave4.py::TestSealedEventsAndReplayFilters::test_replay_filter_applied_on_load",
+      "tests/test_production_hardening_wave4.py::TestSealedEventsAndReplayFilters::test_sealed_events_exposes_live_authoritative_events",
+      "tests/test_production_hardening_wave4.py::TestSealedEventsAndReplayFilters::test_sealed_events_returns_tuple"
+    ],
+    "nodeid_count": 23,
+    "untested_contract_ids": [],
+    "untested_contract_count": 0
+  }
+}

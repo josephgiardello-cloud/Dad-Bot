@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import copy
 import gzip
 import hashlib
@@ -9,6 +10,7 @@ import os
 import pickle
 import sys
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -25,6 +27,39 @@ from dadbot.core.execution_context import (
 from dadbot.core.execution_ledger import WriteBoundaryGuard
 
 POLICY_TRACE_EVENT_TYPE = "PolicyTraceEvent"
+_WRITE_P95_SLO_MS = 15.0
+_WRITE_P99_SLO_MS = 30.0
+_COMPACTION_P95_SLO_MS = 40.0
+_COMPACTION_P99_SLO_MS = 80.0
+_PERSISTENCE_LATENCY_WINDOW = 256
+_DEFAULT_COMPACTION_INTERVAL_EVENTS = 25
+_ELEVATED_COMPACTION_INTERVAL_EVENTS = 50
+_DEFAULT_RECOMMENDED_RETENTION_EVENTS = 1600
+_HIGH_PRESSURE_RECOMMENDED_RETENTION_EVENTS = 1200
+_MAX_SNAPSHOT_BYTES = 256_000
+_BANNED_SNAPSHOT_KEYS = {
+    "state",
+    "metadata",
+    "session_state",
+    "execution_trace",
+    "execution_graph",
+    "events",
+    "memory_projection",
+    "ui_projection",
+    "replayed_state",
+    "replayed_metadata",
+}
+_CANONICAL_CHECKPOINT_FIELDS = {
+    "trace_id",
+    "session_id",
+    "stage",
+    "status",
+    "phase",
+    "checkpoint_hash",
+    "prev_checkpoint_hash",
+    "event_sequence_id",
+    "occurred_at",
+}
 
 
 class ConversationPersistenceManager:
@@ -33,6 +68,91 @@ class ConversationPersistenceManager:
     def __init__(self, bot: DadBotContext | SupportsDadBotAccess):
         self.context = DadBotContext.from_runtime(bot)
         self.bot = self.context.bot
+        self._telemetry: dict[str, Any] = {
+            "write_latencies_ms": [],
+            "compaction_latencies_ms": [],
+            "write_count": 0,
+            "compaction_count": 0,
+            "last_write_ms": 0.0,
+            "last_compaction_ms": 0.0,
+        }
+
+    @staticmethod
+    def _rolling_append(values: list[float], value: float, *, limit: int = _PERSISTENCE_LATENCY_WINDOW) -> None:
+        values.append(float(value))
+        if len(values) > int(limit):
+            del values[: len(values) - int(limit)]
+
+    @staticmethod
+    def _percentile(values: list[float], p: float) -> float:
+        if not values:
+            return 0.0
+        ordered = sorted(float(v) for v in values)
+        idx = max(0, min(len(ordered) - 1, int(round((len(ordered) - 1) * float(p)))))
+        return float(ordered[idx])
+
+    def persistence_telemetry_snapshot(self) -> dict[str, Any]:
+        writes = list(self._telemetry.get("write_latencies_ms") or [])
+        compactions = list(self._telemetry.get("compaction_latencies_ms") or [])
+        write_p95 = self._percentile(writes, 0.95)
+        write_p99 = self._percentile(writes, 0.99)
+        compaction_p95 = self._percentile(compactions, 0.95)
+        compaction_p99 = self._percentile(compactions, 0.99)
+
+        ledger = None
+        ledger_rebuilds = 0
+        try:
+            ledger = self._execution_ledger()
+        except Exception:
+            ledger = None
+        if ledger is not None and callable(getattr(ledger, "telemetry_snapshot", None)):
+            ledger_rebuilds = int((ledger.telemetry_snapshot() or {}).get("cache_rebuild_count") or 0)
+
+        write_p95_ok = bool(write_p95 <= _WRITE_P95_SLO_MS)
+        write_p99_ok = bool(write_p99 <= _WRITE_P99_SLO_MS)
+        compaction_p95_ok = bool(compaction_p95 <= _COMPACTION_P95_SLO_MS)
+        compaction_p99_ok = bool(compaction_p99 <= _COMPACTION_P99_SLO_MS)
+
+        under_pressure = not (write_p95_ok and write_p99_ok and compaction_p95_ok and compaction_p99_ok)
+        recommended_compaction_interval = (
+            _ELEVATED_COMPACTION_INTERVAL_EVENTS
+            if under_pressure
+            else _DEFAULT_COMPACTION_INTERVAL_EVENTS
+        )
+        recommended_retention_events = (
+            _HIGH_PRESSURE_RECOMMENDED_RETENTION_EVENTS
+            if under_pressure
+            else _DEFAULT_RECOMMENDED_RETENTION_EVENTS
+        )
+
+        return {
+            "write_count": int(self._telemetry.get("write_count") or 0),
+            "compaction_count": int(self._telemetry.get("compaction_count") or 0),
+            "last_write_ms": float(self._telemetry.get("last_write_ms") or 0.0),
+            "last_compaction_ms": float(self._telemetry.get("last_compaction_ms") or 0.0),
+            "write_p95_ms": float(write_p95),
+            "write_p99_ms": float(write_p99),
+            "compaction_p95_ms": float(compaction_p95),
+            "compaction_p99_ms": float(compaction_p99),
+            "slo": {
+                "write_p95_ms": float(_WRITE_P95_SLO_MS),
+                "write_p99_ms": float(_WRITE_P99_SLO_MS),
+                "compaction_p95_ms": float(_COMPACTION_P95_SLO_MS),
+                "compaction_p99_ms": float(_COMPACTION_P99_SLO_MS),
+            },
+            "slo_ok": {
+                "write_p95": bool(write_p95_ok),
+                "write_p99": bool(write_p99_ok),
+                "compaction_p95": bool(compaction_p95_ok),
+                "compaction_p99": bool(compaction_p99_ok),
+            },
+            "policy": {
+                "active_compaction_interval_events": int(_DEFAULT_COMPACTION_INTERVAL_EVENTS),
+                "recommended_compaction_interval_events": int(recommended_compaction_interval),
+                "recommended_retention_events": int(recommended_retention_events),
+            },
+            "cache_rebuild_count": int(ledger_rebuilds),
+        }
 
     def _save_commit_active(self, turn_context: Any | None = None) -> bool:
         commit_active = bool(getattr(self.bot, "_graph_commit_active", False))
@@ -42,6 +162,36 @@ class ConversationPersistenceManager:
             return True
         active_stage = str(getattr(turn_context, "state", {}).get("_active_graph_stage") or "").strip().lower()
         return active_stage in {"save", ""}
+
+    @staticmethod
+    def _payload_size_bytes(payload: dict[str, Any]) -> int:
+        return len(json.dumps(payload, sort_keys=True, ensure_ascii=True, default=str).encode("utf-8"))
+
+    def _assert_snapshot_invariants(self, payload: dict[str, Any], *, label: str) -> None:
+        keys = set(str(k) for k in dict(payload or {}).keys())
+        forbidden = sorted(keys & _BANNED_SNAPSHOT_KEYS)
+        if forbidden:
+            raise RuntimeError(f"{label} contains banned derived keys: {', '.join(forbidden)}")
+        if self._payload_size_bytes(dict(payload or {})) > _MAX_SNAPSHOT_BYTES:
+            raise RuntimeError(f"{label} exceeds max snapshot size ({_MAX_SNAPSHOT_BYTES} bytes)")
+
+    def _thin_checkpoint_payload(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
+        source = dict(checkpoint or {})
+        thin: dict[str, Any] = {}
+        for key in _CANONICAL_CHECKPOINT_FIELDS:
+            if key in source:
+                thin[key] = copy.deepcopy(source.get(key))
+
+        metadata = dict(source.get("metadata") or {})
+        determinism = dict(metadata.get("determinism") or {})
+        lock_hash = str(determinism.get("lock_hash") or "").strip()
+        enforced = bool(determinism.get("enforced", False))
+        if lock_hash or enforced:
+            thin["determinism_lock"] = {
+                "lock_hash": lock_hash,
+                "enforced": enforced,
+            }
+        return thin
 
     def _snapshot_mutation_queue(self) -> list[dict[str, Any]]:
         queue = getattr(self.bot, "_deferred_save_boundary_snapshots", None)
@@ -302,11 +452,16 @@ class ConversationPersistenceManager:
         payload = copy.deepcopy(dict(checkpoint or {}))
         if not payload:
             return
-        payload["session_state"] = self.bot.snapshot_session_state()
+        payload = self._thin_checkpoint_payload(payload)
 
         trace_id = str(payload.get("trace_id") or "unknown").strip() or "unknown"
         stage = str(payload.get("stage") or "stage").strip().replace(" ", "-") or "stage"
         status = str(payload.get("status") or "unknown").strip().replace(" ", "-") or "unknown"
+        payload["trace_id"] = trace_id
+        payload["stage"] = stage
+        payload["status"] = status
+        payload.setdefault("occurred_at", self._active_turn_wall_time())
+        self._assert_snapshot_invariants(payload, label="graph_checkpoint")
         self._append_ledger_event(
             event_type="GRAPH_CHECKPOINT",
             trace_id=trace_id,
@@ -325,9 +480,12 @@ class ConversationPersistenceManager:
         # TurnGraph calls persist_graph_checkpoint with _skip_turn_event=True and
         # emits its own turn event via save_turn_event to avoid duplicate writes.
         if not _skip_turn_event:
-            determinism_lock = dict(
-                (payload.get("metadata") or {}).get("determinism") or {},
-            )
+            determinism_lock = dict(payload.get("determinism_lock") or {})
+            session_state = {}
+            with contextlib.suppress(Exception):
+                maybe_snapshot = self.bot.snapshot_session_state()
+                if isinstance(maybe_snapshot, dict):
+                    session_state = maybe_snapshot
             self.persist_turn_event(
                 {
                     "event_type": "graph_checkpoint",
@@ -336,6 +494,7 @@ class ConversationPersistenceManager:
                     "status": status,
                     "determinism_lock": determinism_lock,
                     "checkpoint": payload,
+                    "session_state": session_state,
                 },
             )
 
@@ -395,14 +554,38 @@ class ConversationPersistenceManager:
         normalized = str(trace_id or "unknown").strip() or "unknown"
         return self._turn_event_dir() / f"snapshot-{normalized[:40]}.json"
 
-    def _compute_next_sequence(self, trace_id: str) -> int:
-        events = self.list_turn_events(trace_id=trace_id)
+    def _compute_next_sequence(
+        self,
+        trace_id: str,
+        *,
+        events_snapshot: list[dict[str, Any]] | None = None,
+    ) -> int:
+        _ = trace_id
+        _ = events_snapshot
+        ledger = self._execution_ledger()
+        get_next_trace_sequence = getattr(ledger, "get_next_trace_sequence", None)
+        if callable(get_next_trace_sequence):
+            return int(get_next_trace_sequence(trace_id))
+        get_next_sequence = getattr(ledger, "get_next_sequence", None)
+        if callable(get_next_sequence):
+            return int(get_next_sequence())
+        events = self.list_turn_events(
+            trace_id=trace_id,
+            events_snapshot=events_snapshot,
+        )
         if not events:
             return 1
         return int(events[-1].get("sequence") or len(events)) + 1
 
+    @staticmethod
+    def _use_full_compaction_snapshot(sequence: int) -> bool:
+        # Most compaction checkpoints can run off the tail snapshot; periodically
+        # force a full ledger view to keep strict hash/reporting anchored.
+        return sequence % 250 == 0
+
     def persist_turn_event(self, event: dict[str, Any]) -> None:
         self._require_active_trace("persist_turn_event")
+        write_started = time.perf_counter()
         payload = copy.deepcopy(dict(event or {}))
         if not payload:
             return
@@ -429,16 +612,29 @@ class ConversationPersistenceManager:
 
         # Snapshot compaction every 25 events: replay can start from latest snapshot.
         compact_sequence = int(payload.get("sequence") or 0)
-        if compact_sequence > 0 and compact_sequence % 25 == 0:
-            replay = self.replay_turn_events(trace_id=trace_id)
+        if compact_sequence > 0 and compact_sequence % _DEFAULT_COMPACTION_INTERVAL_EVENTS == 0:
+            compaction_started = time.perf_counter()
+            ledger = self._execution_ledger()
+            snapshot_full = self._use_full_compaction_snapshot(compact_sequence)
+            compaction_snapshot = ledger.read(full=snapshot_full)
+            replay = self.replay_turn_events(
+                trace_id=trace_id,
+                events_snapshot=compaction_snapshot,
+            )
+            determinism = dict(replay.get("determinism") or {})
             snapshot_payload = {
                 "trace_id": trace_id,
                 "created_at": self._active_turn_wall_time(),
                 "last_sequence": compact_sequence,
                 "phase": replay.get("phase"),
-                "state": replay.get("replayed_state", {}),
-                "metadata": replay.get("replayed_metadata", {}),
+                "strict_sequence_hash": str(replay.get("strict_sequence_hash") or ""),
+                "event_count": int(replay.get("event_count") or 0),
+                "determinism_lock": {
+                    "lock_hash": str(determinism.get("lock_hash") or ""),
+                    "consistent": bool(determinism.get("consistent", True)),
+                },
             }
+            self._assert_snapshot_invariants(snapshot_payload, label="turn_snapshot")
             if self.bot._tenant_document_store is not None:
                 self.bot._tenant_document_store.save_session_state(
                     f"turn-snapshot-latest:{trace_id}",
@@ -450,6 +646,15 @@ class ConversationPersistenceManager:
                     json.dumps(snapshot_payload, sort_keys=True, ensure_ascii=True),
                     encoding="utf-8",
                 )
+            compaction_ms = (time.perf_counter() - compaction_started) * 1000.0
+            self._telemetry["compaction_count"] = int(self._telemetry.get("compaction_count") or 0) + 1
+            self._telemetry["last_compaction_ms"] = float(compaction_ms)
+            self._rolling_append(self._telemetry["compaction_latencies_ms"], compaction_ms)
+
+        write_ms = (time.perf_counter() - write_started) * 1000.0
+        self._telemetry["write_count"] = int(self._telemetry.get("write_count") or 0) + 1
+        self._telemetry["last_write_ms"] = float(write_ms)
+        self._rolling_append(self._telemetry["write_latencies_ms"], write_ms)
 
     def _export_turn_event_projection(self, trace_id: str, payload: dict[str, Any]) -> None:
         if self.bot._tenant_document_store is not None:
@@ -465,15 +670,24 @@ class ConversationPersistenceManager:
         with event_path.open("a", encoding="utf-8") as handle:
             handle.write(line + "\n")
 
-    def list_turn_events(self, trace_id: str, limit: int = 0) -> list[dict[str, Any]]:
+    def list_turn_events(
+        self,
+        trace_id: str,
+        limit: int = 0,
+        *,
+        events_snapshot: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
         self._require_active_trace("list_turn_events")
         normalized = str(trace_id or "").strip()
         if not normalized:
             return []
 
-        ledger = self._execution_ledger()
+        snapshot = events_snapshot
+        if snapshot is None:
+            ledger = self._execution_ledger()
+            snapshot = ledger.read()
         events: list[dict[str, Any]] = []
-        for event in ledger.read():
+        for event in snapshot:
             if str(event.get("type") or "") != "TURN_EVENT":
                 continue
             payload = dict(event.get("payload") or {})
@@ -598,13 +812,7 @@ class ConversationPersistenceManager:
                     seen_lock_hashes.add(lock_hash)
             checkpoint = event.get("checkpoint")
             if isinstance(checkpoint, dict):
-                state = checkpoint.get("state")
-                metadata = checkpoint.get("metadata")
-                if isinstance(state, dict):
-                    replayed_state.update(copy.deepcopy(state))
-                if isinstance(metadata, dict):
-                    replayed_metadata.update(copy.deepcopy(metadata))
-                replayed_determinism = metadata.get("determinism") if isinstance(metadata, dict) else None
+                replayed_determinism = checkpoint.get("determinism_lock")
                 if isinstance(replayed_determinism, dict):
                     lock_hash = str(replayed_determinism.get("lock_hash") or "").strip()
                     if lock_hash:
@@ -631,10 +839,18 @@ class ConversationPersistenceManager:
         }
         return replayed_state, replayed_metadata, phase, determinism_summary
 
-    def replay_turn_events(self, trace_id: str) -> dict[str, Any]:
+    def replay_turn_events(
+        self,
+        trace_id: str,
+        *,
+        events_snapshot: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         self._require_active_trace("replay_turn_events")
         normalized = str(trace_id or "").strip()
-        events = self.list_turn_events(trace_id=normalized)
+        events = self.list_turn_events(
+            trace_id=normalized,
+            events_snapshot=events_snapshot,
+        )
         strict_sequence_hash, strict_sequence = KernelReplaySequenceLock.strict_hash(
             trace_id=normalized,
             events=events,
@@ -754,6 +970,15 @@ class ConversationPersistenceManager:
             if not isinstance(checkpoint, dict):
                 return None
             session_state = checkpoint.get("session_state")
+            if not isinstance(session_state, dict):
+                events = self.list_turn_events(trace_id=trace_id)
+                for event in reversed(events):
+                    if str(event.get("event_type") or "").strip().lower() != "graph_checkpoint":
+                        continue
+                    event_state = event.get("session_state")
+                    if isinstance(event_state, dict):
+                        session_state = event_state
+                        break
             if isinstance(session_state, dict):
                 self.bot.load_session_state_snapshot(session_state)
             return checkpoint

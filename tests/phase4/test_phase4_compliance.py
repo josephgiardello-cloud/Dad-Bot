@@ -333,7 +333,7 @@ def test_turn_context_mutation_queue_bound_on_construction():
 
 
 def test_turn_graph_deduplicates_duplicate_stage_registration():
-    """TurnGraph keeps the first binding when the same stage name is added twice."""
+    """TurnGraph uses latest-write-wins when the same stage is added twice."""
     graph_mod = importlib.import_module("dadbot.core.graph")
 
     class _DupNode:
@@ -348,7 +348,7 @@ def test_turn_graph_deduplicates_duplicate_stage_registration():
     graph.add_node("temporal", first)
     graph.add_node("temporal", second)
 
-    assert graph._node_map.get("temporal") is first
+    assert graph._node_map.get("temporal") is second
 
 
 # ---------------------------------------------------------------------------

@@ -74,7 +74,7 @@ class TestCheckpointTamperDetection:
 
 class TestPartialCrashSimulation:
     def test_finalize_turn_exception_falls_back_to_save_turn(self):
-        """If finalize_turn raises, SaveNode must call save_turn as fallback."""
+        """Current contract: finalize_turn errors propagate; no legacy save_turn fallback."""
         registry = MockRegistry()
 
         class _CrashyPersistence(MockPersistenceService):
@@ -86,12 +86,9 @@ class TestPartialCrashSimulation:
         graph = _build_canonical(registry)
         ctx = TurnFactory().build_turn(seed=CHAOS_BASE)
         result = GraphRunner().run(graph, ctx, registry)
-        # Run may succeed via fallback save_turn path
-        assert result.error is None or registry.persistence.save_turn_calls >= 1, (
-            "Expected either no error or save_turn fallback was called"
-        )
-        if result.error is None:
-            assert registry.persistence.save_turn_calls == 1
+        assert result.error is not None
+        assert "simulated finalize crash" in str(result.error)
+        assert registry.persistence.save_turn_calls == 0
 
     def test_health_service_failure_does_not_skip_save(self):
         """If health service fails (returns error dict), SaveNode must still run."""

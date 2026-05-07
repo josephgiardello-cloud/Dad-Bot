@@ -115,8 +115,8 @@ class DadServiceClient:
         parsed = urlparse(self.base_url)
         scheme = "wss" if parsed.scheme == "https" else "ws"
         base_path = parsed.path.rstrip("/")
-        query = urlencode({"access_token": self._auth_token(tenant_id=resolved_tenant_id)})
-        return f"{scheme}://{parsed.netloc}{base_path}{self._api_path(f'/sessions/{session_id}/events/stream')}?{query}"
+        query = urlencode({"tenant_id": resolved_tenant_id})
+        return f"{scheme}://{parsed.netloc}{base_path}/sessions/{session_id}/events/stream?{query}"
 
     def stream_url(self, session_id: str, *, tenant_id: str = "") -> str:
         return self.session_event_stream_url(session_id, tenant_id=tenant_id)
@@ -127,12 +127,12 @@ class DadServiceClient:
         path: str,
         payload: dict[str, Any] | None = None,
         timeout: float = 10.0,
-        auth_tenant_id: str = "",
+        tenant_id: str = "",
     ) -> dict[str, Any]:
         body = None
         headers = {"Accept": "application/json"}
         resolved_tenant_id = normalize_tenant_id(
-            str(auth_tenant_id or (payload or {}).get("tenant_id") or self.config.tenant_id or DEFAULT_TENANT_ID)
+            str(tenant_id or (payload or {}).get("tenant_id") or self.config.tenant_id or DEFAULT_TENANT_ID)
         )
         auth_token = self._auth_token(tenant_id=resolved_tenant_id)
         if auth_token:
@@ -347,12 +347,13 @@ class DadServiceClient:
         return self._request("GET", f"/sessions/{session_id}/replay?{query}", timeout=15.0)
 
     def task_status(self, task_id: str, *, tenant_id: str = "") -> dict[str, Any]:
-        return self._request(
-            "GET",
-            f"/tasks/{task_id}",
-            timeout=15.0,
-            auth_tenant_id=tenant_id,
-        )
+        resolved_tenant_id = normalize_tenant_id(tenant_id or self.config.tenant_id)
+        path = f"/tasks/{task_id}?{urlencode({'tenant_id': resolved_tenant_id})}"
+        try:
+            return self._request("GET", path, timeout=15.0, tenant_id=resolved_tenant_id)
+        except Exception:
+            # Compatibility fallback for legacy servers and local stubs that only accept /tasks/{task_id}.
+            return self._request("GET", f"/tasks/{task_id}", timeout=15.0)
 
     def wait_for_chat_result(self, task_id: str, *, tenant_id: str = "") -> ServiceChatResult:
         deadline = time.monotonic() + self.config.task_timeout_seconds

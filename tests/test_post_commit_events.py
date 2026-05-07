@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from dadbot.core.post_commit_events import POST_COMMIT_READY, PostCommitEvent
+from dadbot.core.runtime_errors import PersistenceFailure
 from dadbot.services.persistence import PersistenceService, StateDivergenceError
 from dadbot.services.post_commit_worker import PostCommitWorker
 from dadbot_system.events import InMemoryEventBus
@@ -185,8 +186,11 @@ def test_finalize_turn_does_not_emit_post_commit_event_on_failed_commit():
     service = PersistenceService(_PersistenceManagerStub(), turn_service=_TurnServiceStub(runtime))
     turn_context = _make_turn_context()
 
-    with pytest.raises(RuntimeError, match="graph sync failed"):
+    with pytest.raises(PersistenceFailure, match="strict-mode failure") as exc_info:
         service.finalize_turn(turn_context, ("done", False))
+
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
+    assert "graph sync failed" in str(exc_info.value.__cause__)
 
     assert event_bus.events() == []
     assert relationship_manager.calls == [turn_context]
@@ -245,13 +249,17 @@ def test_finalize_turn_blocks_commit_on_memory_authority_divergence():
         tamper_checkpoint_state={"safe_result": ("tampered", False)},
     )
     service = PersistenceService(persistence, turn_service=_TurnServiceStub(runtime))
+    service.strict_mode = True  # authority divergence blocks commit only in strict mode
     turn_context = _make_turn_context(trace_id="trace-authority-bad")
     turn_context.checkpoint_snapshot = _checkpoint_snapshot_factory(trace_id="trace-authority-bad")
 
-    with pytest.raises(StateDivergenceError, match="commit blocked") as exc_info:
+    with pytest.raises(PersistenceFailure, match="strict-mode failure") as exc_info:
         service.finalize_turn(turn_context, ("done", False))
 
-    report = dict(getattr(exc_info.value, "report", {}) or {})
+    assert isinstance(exc_info.value.__cause__, StateDivergenceError)
+    assert "commit blocked" in str(exc_info.value.__cause__)
+
+    report = dict(getattr(exc_info.value.__cause__, "report", {}) or {})
     assert report.get("consistent") is False
     assert int(report.get("difference_count") or 0) >= 1
     assert any("checkpoint.state" in str(item.get("path") or "") for item in list(report.get("differences") or []))

@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Callable, Coroutine
 from typing import Any, TypeVar
 
-from dadbot.core.execution_trace_context import (
+from dadbot.core.execution_context import (
     ExecutionTraceRecorder,
     bind_execution_trace,
 )

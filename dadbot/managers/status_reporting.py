@@ -411,9 +411,32 @@ class StatusReportingManager:
         memory_context = dashboard.get("memory_context", {})
         prompt_guard = dashboard.get("prompt_guard", {})
         health = dashboard.get("health", {})
+        persistence_telemetry = dict(health.get("persistence_telemetry") or {})
+        persistence_slo = dict(persistence_telemetry.get("slo_ok") or {})
+        persistence_policy = dict(persistence_telemetry.get("policy") or {})
         health_warnings = [str(item).strip() for item in health.get("warnings", []) if str(item).strip()]
         warning_text = " | ".join(health_warnings) if health_warnings else "none"
         memory_pruned = "pruned" if memory_context.get("pruned") else "full"
+        telemetry_text = (
+            f"writes={persistence_telemetry.get('write_count', 0)} "
+            f"(p95={float(persistence_telemetry.get('write_p95_ms', 0.0) or 0.0):.2f}ms, "
+            f"p99={float(persistence_telemetry.get('write_p99_ms', 0.0) or 0.0):.2f}ms), "
+            f"compactions={persistence_telemetry.get('compaction_count', 0)} "
+            f"(p95={float(persistence_telemetry.get('compaction_p95_ms', 0.0) or 0.0):.2f}ms, "
+            f"p99={float(persistence_telemetry.get('compaction_p99_ms', 0.0) or 0.0):.2f}ms), "
+            f"cache rebuilds={persistence_telemetry.get('cache_rebuild_count', 0)}"
+        )
+        slo_text = (
+            f"write(p95={'ok' if persistence_slo.get('write_p95', True) else 'breach'}, "
+            f"p99={'ok' if persistence_slo.get('write_p99', True) else 'breach'}), "
+            f"compaction(p95={'ok' if persistence_slo.get('compaction_p95', True) else 'breach'}, "
+            f"p99={'ok' if persistence_slo.get('compaction_p99', True) else 'breach'})"
+        )
+        policy_text = (
+            f"interval={persistence_policy.get('active_compaction_interval_events', 25)} "
+            f"(recommend {persistence_policy.get('recommended_compaction_interval_events', 25)}), "
+            f"retention recommend={persistence_policy.get('recommended_retention_events', 1600)}"
+        )
         if snapshot["top_trait_metrics"]:
             trait_text = "; ".join(
                 f"{item['trait']} (strength={item['strength']:.2f}, impact={item['impact_score']:.2f})"
@@ -432,7 +455,8 @@ class StatusReportingManager:
             f"recent degradations={len(self.bot.recent_runtime_issues(limit=3))}, "
             f"graph fallback={graph_fallback.get('degraded_mode', 'none')} ({graph_fallback.get('event_count', 0)}), "
             f"health={health.get('level', 'green')} (worker limit={health.get('background_worker_limit', 0)}, "
-            f"prompt factor={health.get('prompt_budget_factor', 1.0):.2f}, warnings={warning_text})."
+            f"prompt factor={health.get('prompt_budget_factor', 1.0):.2f}, warnings={warning_text}), "
+            f"persistence telemetry={telemetry_text}, slo={slo_text}, policy={policy_text}."
         )
 
     def format_dad_snapshot(self) -> str:

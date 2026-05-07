@@ -188,32 +188,17 @@ class TestTracingPropagation:
 
 
 class TestControlPlaneWiring:
-    def test_handle_turn_routes_through_execute_turn_not_direct_graph(self):
-        """Bot-backed orchestrator entrypoints must defer to execute_turn."""
-        from dadbot.core.execution_contract import TurnDelivery, TurnResponse
+    def test_handle_turn_routes_through_control_plane(self):
+        """Canonical orchestrator entrypoints must route through control plane."""
         from dadbot.core.orchestrator import DadBotOrchestrator
 
         calls: list[str] = []
 
-        class _Bot:
-            async def execute_turn(self, request):
-                calls.append(request.delivery.value)
-                return TurnResponse(
-                    reply="ok",
-                    should_end=False,
-                    delivery=request.delivery,
-                )
-
         class _OrchestratorLike:
-            bot = _Bot()
-
-            @staticmethod
-            def _can_delegate_to_bot_execute_turn() -> bool:
-                return True
-
             @staticmethod
             async def _submit_turn_via_control_plane(*args, **kwargs):
-                raise AssertionError("control plane fallback should not be used")
+                calls.append("control_plane")
+                return ("ok", False)
 
         async def _run() -> None:
             result = await DadBotOrchestrator.handle_turn(
@@ -224,7 +209,7 @@ class TestControlPlaneWiring:
             assert result == ("ok", False)
 
         asyncio.run(_run())
-        assert calls == [TurnDelivery.ASYNC.value]
+        assert calls == ["control_plane"]
 
     def test_submit_turn_produces_ledger_events(self):
         """Every submit_turn must write at least one event to the ledger."""

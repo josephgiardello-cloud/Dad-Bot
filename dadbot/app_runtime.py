@@ -15,6 +15,7 @@ from socket import AF_INET, SO_REUSEADDR, SOCK_STREAM, SOL_SOCKET, socket
 from urllib.request import urlopen
 
 from dadbot.runtime_adapter import runtime_contract_errors
+from dadbot.runtime.supervisor import get_runtime_supervisor
 from dadbot_system import (
     CompositeStateStore,
     DadBotOrchestrator,
@@ -149,6 +150,23 @@ def check_system_resources(args) -> None:
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(add_help=True)
+    subparsers = parser.add_subparsers(dest="command")
+
+    status_parser = subparsers.add_parser("status", help="Show runtime ownership and lifecycle status.")
+    status_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON output.")
+
+    trace_parser = subparsers.add_parser("trace", help="Inspect persisted execution trace events by trace ID.")
+    trace_parser.add_argument("turn_id", help="Trace/turn identifier to inspect.")
+    trace_parser.add_argument("--limit", type=int, default=25, help="Maximum event count to display.")
+    trace_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON output.")
+
+    doctor_parser = subparsers.add_parser("doctor", help="Run runtime preflight diagnostics.")
+    doctor_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON output.")
+
+    restart_parser = subparsers.add_parser("restart", help="Restart Dad Bot Streamlit runtime.")
+    restart_parser.add_argument("--light", action="store_true", help="Restart in light mode.")
+    restart_parser.add_argument("--no-signoff", action="store_true", help="Disable signoff after restart.")
+
     parser.add_argument(
         "--cli",
         action="store_true",
@@ -249,6 +267,89 @@ def parse_args(argv=None):
         help="Use a lighter runtime that skips mood detection and extra review passes.",
     )
     return parser.parse_args(argv)
+
+
+def _emit_operator_output(payload: dict, *, as_json: bool) -> int:
+    if as_json:
+        print(json.dumps(payload, indent=2, default=str))
+    else:
+        for key, value in payload.items():
+            print(f"{key}: {value}")
+    return 0
+
+
+def _cli_status(*, as_json: bool) -> int:
+    supervisor = get_runtime_supervisor()
+    payload = {
+        "command": "status",
+        "runtime": supervisor.get_status(),
+    }
+    return _emit_operator_output(payload, as_json=as_json)
+
+
+def _cli_trace(dadbot_cls, *, turn_id: str, limit: int, as_json: bool) -> int:
+    bot = dadbot_cls()
+    trace_id = str(turn_id or "").strip()
+    if not trace_id:
+        print("trace command requires a non-empty turn_id", file=sys.stderr)
+        return 2
+
+    events = list(bot.list_turn_events(trace_id, limit=max(0, int(limit or 0))) or [])
+    replay = dict(bot.replay_turn_events(trace_id) or {})
+    payload = {
+        "command": "trace",
+        "trace_id": trace_id,
+        "event_count": len(events),
+        "events": events,
+        "replay": replay,
+    }
+    return _emit_operator_output(payload, as_json=as_json)
+
+
+def _cli_doctor(dadbot_cls, *, as_json: bool) -> int:
+    supervisor = get_runtime_supervisor()
+    preflight_ok, preflight_issues = supervisor.preflight_check()
+
+    bot = dadbot_cls(light_mode=True)
+    health = dict(bot.current_runtime_health_snapshot(force=True, log_warnings=False, persist=False) or {})
+
+    payload = {
+        "command": "doctor",
+        "preflight_ok": bool(preflight_ok),
+        "preflight_issues": list(preflight_issues or []),
+        "runtime": supervisor.get_status(),
+        "health": health,
+    }
+    code = _emit_operator_output(payload, as_json=as_json)
+    return code if preflight_ok else 1
+
+
+def _run_operator_command(args, *, dadbot_cls, script_path: Path) -> int | None:
+    command = str(getattr(args, "command", "") or "").strip().lower()
+    if not command:
+        return None
+    if command == "status":
+        return _cli_status(as_json=bool(getattr(args, "json", False)))
+    if command == "trace":
+        return _cli_trace(
+            dadbot_cls,
+            turn_id=str(getattr(args, "turn_id", "") or ""),
+            limit=int(getattr(args, "limit", 25) or 25),
+            as_json=bool(getattr(args, "json", False)),
+        )
+    if command == "doctor":
+        return _cli_doctor(dadbot_cls, as_json=bool(getattr(args, "json", False)))
+    if command == "restart":
+        stop_code = stop_streamlit_app(script_path=script_path)
+        if stop_code != 0:
+            return stop_code
+        return launch_streamlit_app(
+            append_signoff=not bool(getattr(args, "no_signoff", False)),
+            light_mode=bool(getattr(args, "light", False)),
+            script_path=script_path,
+        )
+    print(f"Unknown command: {command}", file=sys.stderr)
+    return 2
 
 
 def minimal_streamlit_stub_source():
@@ -675,6 +776,15 @@ def main(
             resolved_dadbot_cls = ImportedDadBot
 
     base_script_path = Path(script_path) if script_path is not None else Path.cwd() / "Dad.py"
+
+    operator_result = _run_operator_command(
+        args,
+        dadbot_cls=resolved_dadbot_cls,
+        script_path=base_script_path,
+    )
+    if operator_result is not None:
+        return operator_result
+
     check_dependencies(
         args,
         base_script_path=base_script_path,

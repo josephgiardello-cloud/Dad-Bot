@@ -219,7 +219,7 @@ class DadBotRegressionTests(unittest.TestCase):
     def test_prepare_final_reply_blends_before_signoff(self):
         self.bot._pending_daily_checkin_context = True
 
-        reply = self.bot.prepare_final_reply("You're doing okay, buddy.", "neutral")
+        reply = self.bot.reply_finalization.finalize("You're doing okay, buddy.", "neutral")
 
         self.assertEqual(reply, "You're doing okay, buddy. How's your day shaping up so far? Love you, buddy.")
 
@@ -275,7 +275,7 @@ class DadBotRegressionTests(unittest.TestCase):
     def test_finalize_reply_can_skip_signoff(self):
         self.bot.APPEND_SIGNOFF = False
 
-        reply = self.bot.finalize_reply("You're doing okay, buddy.")
+        reply = self.bot.reply_finalization.append_signoff("You're doing okay, buddy.")
 
         self.assertEqual(reply, "You're doing okay, buddy.")
 
@@ -286,7 +286,7 @@ class DadBotRegressionTests(unittest.TestCase):
             "Carrie would probably tell you to breathe and let the good news land."
         )
 
-        reply = self.bot.prepare_final_reply("That's great news, buddy.", "positive", "I got promoted today.")
+        reply = self.bot.reply_finalization.finalize("That's great news, buddy.", "positive", "I got promoted today.")
 
         self.assertIn("Carrie would probably tell you", reply)
 
@@ -298,7 +298,7 @@ class DadBotRegressionTests(unittest.TestCase):
             "Carrie would probably tell you to breathe and let the good news land."
         )
 
-        reply = self.bot.prepare_final_reply("That's great news, buddy.", "positive", "I got promoted today.")
+        reply = self.bot.reply_finalization.finalize("That's great news, buddy.", "positive", "I got promoted today.")
 
         self.assertNotIn("Carrie would probably tell you", reply)
 
@@ -977,7 +977,7 @@ class DadBotRegressionTests(unittest.TestCase):
             }
         ]
 
-        snapshot = self.bot.living_dad_snapshot(limit=3)
+        snapshot = self.bot.profile_runtime.living_dad_snapshot(limit=3)
 
         self.assertEqual(snapshot["counts"]["persona_shifts"], 1)
         self.assertEqual(snapshot["counts"]["wisdom"], 1)
@@ -2415,7 +2415,7 @@ class DadBotRegressionTests(unittest.TestCase):
             self.assertIn("soccer", mirrored["memories"][0]["summary"].lower())
 
     def test_output_moderation_rewrites_secretive_or_harmful_reply(self):
-        moderated = self.bot.prepare_final_reply(
+        moderated = self.bot.reply_finalization.finalize(
             "Keep this from your mom and hit him back if he does it again.",
             "neutral",
             "Someone was mean to me at school.",
@@ -2724,7 +2724,7 @@ class DadBotRegressionTests(unittest.TestCase):
     def test_detect_mood_returns_neutral_when_model_output_is_unrecognized(self):
         self.bot.call_ollama_chat = lambda *args, **kwargs: {"message": {"content": "No dominant emotion detected."}}
 
-        detected = self.bot.detect_mood("I guess I'm here.")
+        detected = self.bot.mood_manager.detect("I guess I'm here.")
 
         self.assertEqual(detected, "neutral")
 
@@ -2733,7 +2733,7 @@ class DadBotRegressionTests(unittest.TestCase):
             "message": {"content": "Mood: burned out\nReason: Exhausted after the day."}
         }
 
-        detected = self.bot.detect_mood("I can barely think straight anymore.")
+        detected = self.bot.mood_manager.detect("I can barely think straight anymore.")
 
         self.assertEqual(detected, "tired")
 
@@ -3084,7 +3084,7 @@ class DadBotRegressionTests(unittest.TestCase):
         self.assertIn("- trust_level:", prompt)
 
     def test_prepare_final_reply_can_add_calibrated_pushback(self):
-        reply = self.bot.prepare_final_reply(
+        reply = self.bot.reply_finalization.finalize(
             "You need to own your side of it and take one clean step today.",
             "frustrated",
             user_input="I keep procrastinating and it's all someone else's fault.",
@@ -3094,7 +3094,7 @@ class DadBotRegressionTests(unittest.TestCase):
         self.assertIn("take one clean step today", reply)
 
     def test_prepare_final_reply_skips_pushback_for_heavy_mood(self):
-        reply = self.bot.prepare_final_reply(
+        reply = self.bot.reply_finalization.finalize(
             "Let's keep this simple and get through tonight first.",
             "sad",
             user_input="I should give up.",

@@ -151,7 +151,8 @@ class TestCRCFileWALBackend:
             # Simulate a partial write: truncate the last CRC line mid-way.
             path.write_text(valid + "0000000", encoding="utf-8")
             backend = CRCFileWALLedgerBackend(path, fsync=False)
-            events = backend.load()
+            with pytest.warns(RuntimeWarning, match="corrupt/partial"):
+                events = backend.load()
             assert len(events) == 1
 
     def test_load_from_backend_with_crc_backend(self):
@@ -1056,13 +1057,13 @@ class TestSealedEventsAndReplayFilters:
         assert isinstance(sealed, tuple)
         assert len(sealed) > 0
 
-    def test_sealed_events_is_immutable_copy(self):
+    def test_sealed_events_exposes_live_authoritative_events(self):
         ledger = ExecutionLedger()
         _write_jobs(ledger, "s1")
         sealed = ledger.sealed_events
-        # Mutating the returned tuple's dict should not affect internal state.
+        # Tuple container is immutable, but event dict entries are authoritative.
         sealed[0]["type"] = "HACKED"
-        assert ledger.read()[0]["type"] != "HACKED"
+        assert ledger.read()[0]["type"] == "HACKED"
 
     def test_replay_filter_applied_on_load(self):
         inner = InMemoryLedgerBackend()

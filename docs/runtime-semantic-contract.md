@@ -2,6 +2,10 @@
 
 Status: Active runtime contract.
 
+Authoritative cross-reference:
+
+- docs/system_contract_map.md (normative multi-surface contract map and drift gate)
+
 ## Purpose
 
 Define one unambiguous execution semantic for turn traces so runtime validation,

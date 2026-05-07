@@ -33,6 +33,12 @@ from dadbot.core.execution_terminal_state import build_execution_terminal_state
 from dadbot.core.reflection_ir import DriftReflectionEngine
 from dadbot.core.composite_friction import CompositeFrictionEngine, FrictionSignals
 from dadbot.core.goal_resynthesis import GoalRecalibrationEngine
+from dadbot.core.runtime_errors import (
+    ExecutionStageError,
+    InvariantViolation,
+    NON_FATAL_RUNTIME_EXCEPTIONS,
+    RuntimeExecutionError,
+)
 from dadbot.registry import ServiceRegistry, boot_registry
 
 logger = logging.getLogger(__name__)
@@ -55,7 +61,11 @@ def _dependency_versions_snapshot() -> dict[str, str]:
     for name in ("pytest", "pydantic", "langchain", "openai"):
         try:
             deps[name] = str(importlib_metadata.version(name))
-        except Exception:  # noqa: BLE001 — importlib_metadata probe; skip missing packages
+        except importlib_metadata.PackageNotFoundError:
+            logger.debug("Dependency %s is not installed; skipping determinism manifest pin", name)
+            continue
+        except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
+            logger.debug("Dependency version probe failed for %s: %s", name, exc)
             continue
     return deps
 
@@ -140,7 +150,7 @@ class DadBotOrchestrator:
                     import pathlib
                     ledger_path = pathlib.Path(session_log_dir) / "relational_ledger.jsonl"
                     return str(ledger_path)
-        except Exception as exc:
+        except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
             logger.debug("Failed to resolve ledger path: %s", exc)
         return None
 
@@ -174,7 +184,7 @@ class DadBotOrchestrator:
                 "primary_pattern_confidence": reflection_summary.primary_pattern.confidence if reflection_summary.primary_pattern else 0.0,
                 "evidence_graph": evidence_graph,
             }
-        except Exception as exc:
+        except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
             logger.debug("Behavioral reflection analysis failed (non-fatal): %s", exc)
 
     def _analyze_composite_friction(self, context: TurnContext) -> None:
@@ -244,7 +254,7 @@ class DadBotOrchestrator:
                 reflection_summary=reflection or None,
             )
             state["goal_resynthesis"] = self._goal_recalibration_engine.to_context_payload(resynthesis)
-        except Exception as exc:
+        except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
             logger.debug("Composite friction analysis failed (non-fatal): %s", exc)
 
     def _build_turn_graph(self) -> TurnGraph:
@@ -325,10 +335,11 @@ class DadBotOrchestrator:
             return None
         except DeterminismViolation:
             raise
-        except Exception as exc:
+        except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
             if self._strict:
-                raise DeterminismViolation(
-                    f"checkpoint manifest verification failed: {exc}",
+                raise ExecutionStageError(
+                    "Checkpoint manifest verification failed",
+                    context={"error": str(exc)},
                 ) from exc
             return None
 
@@ -431,6 +442,30 @@ class DadBotOrchestrator:
         if "goal_resynthesis" in context.state:
             typed_state["last_goal_resynthesis"] = dict(context.state["goal_resynthesis"])
 
+    def _publish_health_evidence(self, context: TurnContext) -> None:
+        """Populate bot._last_turn_health_evidence and bot._last_capability_audit_report from context."""
+        stage_order = [
+            str(getattr(t, "stage", "") or "").strip().lower()
+            for t in list(getattr(context, "stage_traces", []) or [])
+        ]
+        mutation_queue_snapshot = {}
+        try:
+            mutation_queue_snapshot = dict(context.mutation_queue.snapshot())
+        except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
+            logger.debug("Failed to snapshot mutation queue for health evidence: %s", exc)
+        evidence = {
+            "trace_id": str(getattr(context, "trace_id", "") or ""),
+            "stage_order": stage_order,
+            "mutation_queue": mutation_queue_snapshot,
+        }
+        # Write to bot if accessible
+        bot = getattr(self, "bot", None)
+        if bot is not None:
+            bot._last_turn_health_evidence = evidence
+            audit_report = dict(context.state.get("capability_audit_report") or {})
+            if audit_report:
+                bot._last_capability_audit_report = audit_report
+
     async def _execute_job(
         self,
         session: dict[str, Any],
@@ -451,7 +486,7 @@ class DadBotOrchestrator:
             context.state["goal_alignment_mandatory_halt"] = bool(session_state.get("goal_alignment_mandatory_halt", False))
         context.state["goal_alignment_guard_enabled"] = self._goal_alignment_guard_enabled()
         if not context.trace_id:
-            raise RuntimeError("TurnContext.trace_id must be non-empty")
+            raise InvariantViolation("TurnContext.trace_id must be non-empty")
 
         manifest = _build_determinism_manifest()
         prior_manifest = dict(session.get("state", {}).get("last_determinism_manifest") or {})
@@ -480,6 +515,7 @@ class DadBotOrchestrator:
         )
         self._last_turn_context = context
         self._update_session_state_after_turn(session, context, result, manifest)
+        self._publish_health_evidence(context)
 
         # Shadow mode — non-blocking observation hook (observation phase only)
         if _shadow_mode.is_enabled():
@@ -504,7 +540,7 @@ class DadBotOrchestrator:
                     event_count=len(_stage_traces),
                     latency_ms=_latency_ms,
                 )
-            except Exception as exc:  # noqa: BLE001
+            except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
                 logger.debug("Shadow mode logging failed (non-fatal): %s", exc)
 
         return result
@@ -525,13 +561,6 @@ class DadBotOrchestrator:
             timeout_seconds=timeout_seconds,
         )
 
-    def _can_delegate_to_bot_execute_turn(self) -> bool:
-        if self.bot is None:
-            return False
-        direct = getattr(self.bot, "_turn_orchestrator", None)
-        via_service = getattr(getattr(self.bot, "services", None), "turn_orchestrator", None)
-        return self is direct or self is via_service
-
     async def handle_turn(
         self,
         user_input: str,
@@ -540,21 +569,11 @@ class DadBotOrchestrator:
         session_id: str = "default",
         timeout_seconds: float | None = None,
     ) -> FinalizedTurnResult:
-        execute_turn = getattr(self.bot, "execute_turn", None)
-        if callable(execute_turn) and self._can_delegate_to_bot_execute_turn():
-            response = await cast(
-                Awaitable[TurnResponse],
-                execute_turn(
-                    live_turn_request(
-                        user_input,
-                        attachments=list(attachments or []),
-                        delivery=TurnDelivery.ASYNC,
-                        session_id=session_id,
-                        timeout_seconds=timeout_seconds,
-                    ),
-                ),
-            )
-            return response.as_result()
+        """Canonical async turn entry-point: all paths converge through control plane.
+        
+        This is the single authoritative execution path. No shortcuts or delegation branches.
+        Every request produces: (1) complete ordered trace, (2) exactly one commit boundary.
+        """
         try:
             return await self._submit_turn_via_control_plane(
                 user_input,
@@ -565,7 +584,7 @@ class DadBotOrchestrator:
         except TimeoutError:
             logger.warning("Inference timed out after %ss", timeout_seconds or 30)
             return ("Sorry, I timed out while thinking. Please try again.", False)
-        except Exception as exc:  # noqa: BLE001 — outermost inference guard; must return user-facing fallback
+        except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
             logger.error("Inference failed: %s", exc)
             return ("Something went wrong. Please try again.", False)
 
@@ -574,20 +593,7 @@ class DadBotOrchestrator:
         user_input: str,
         attachments: AttachmentList | None = None,
     ) -> FinalizedTurnResult:
-        execute_turn = getattr(self.bot, "execute_turn", None)
-        if callable(execute_turn) and self._can_delegate_to_bot_execute_turn():
-            response = cast(
-                TurnResponse,
-                execute_turn(
-                    live_turn_request(
-                        user_input,
-                        attachments=list(attachments or []),
-                        delivery=TurnDelivery.SYNC,
-                        session_id="default",
-                    ),
-                ),
-            )
-            return response.as_result()
+        """Synchronous turn entry-point: delegates to canonical async path."""
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -603,18 +609,5 @@ class DadBotOrchestrator:
         user_input: str,
         attachments: AttachmentList | None = None,
     ) -> FinalizedTurnResult:
-        execute_turn = getattr(self.bot, "execute_turn", None)
-        if callable(execute_turn) and self._can_delegate_to_bot_execute_turn():
-            response = await cast(
-                Awaitable[TurnResponse],
-                execute_turn(
-                    live_turn_request(
-                        user_input,
-                        attachments=list(attachments or []),
-                        delivery=TurnDelivery.ASYNC,
-                        session_id="default",
-                    ),
-                ),
-            )
-            return response.as_result()
+        """Async variant of run(): delegates to canonical handle_turn()."""
         return await self.handle_turn(user_input, attachments=attachments)

@@ -208,9 +208,9 @@ class TestConsistencyEval(unittest.TestCase):
 
         fake_mood_response = '{"mood": "stressed"}'
         with patch.object(bot, "call_ollama_chat", side_effect=_fake_chat_factory(fake_mood_response)):
-            mood_a = bot.detect_mood("I'm so overwhelmed with everything right now!")
+            mood_a = bot.mood_manager.detect("I'm so overwhelmed with everything right now!")
         with patch.object(bot, "call_ollama_chat", side_effect=_fake_chat_factory(fake_mood_response)):
-            mood_b = bot.detect_mood("I'm so overwhelmed with everything right now!")
+            mood_b = bot.mood_manager.detect("I'm so overwhelmed with everything right now!")
 
         consistency = score_consistency(mood_a, mood_b)
         self.assertEqual(consistency, 1.0, msg=f"Mood drifted: {mood_a!r} vs {mood_b!r}")
@@ -257,7 +257,7 @@ class TestEmotionalAlignmentEval(unittest.TestCase):
             return {"message": {"content": distress_reply}}
 
         with patch.object(bot, "call_ollama_chat", side_effect=fake_chat):
-            detected_mood = bot.detect_mood("I can't keep up, everything is piling on.")
+            detected_mood = bot.mood_manager.detect("I can't keep up, everything is piling on.")
 
         score, issues = score_emotional_alignment(
             "I can't keep up, everything is piling on.", distress_reply, detected_mood

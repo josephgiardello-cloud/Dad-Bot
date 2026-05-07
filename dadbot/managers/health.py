@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import time
 from datetime import datetime
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -509,6 +510,19 @@ class RuntimeHealthManager:
             warnings.append(
                 "Quiet mode is active while Dad recovers, so proactive nudges are paused.",
             )
+
+        persistence_telemetry: dict[str, Any] = {}
+        persistence_manager = getattr(self.bot, "conversation_persistence", None)
+        if callable(getattr(persistence_manager, "persistence_telemetry_snapshot", None)):
+            persistence_telemetry = dict(
+                persistence_manager.persistence_telemetry_snapshot() or {},
+            )
+            slo_ok = dict(persistence_telemetry.get("slo_ok") or {})
+            if not bool(slo_ok.get("write_p95", True)):
+                warnings.append("Persistence write p95 exceeds SLO.")
+            if not bool(slo_ok.get("compaction_p95", True)):
+                warnings.append("Persistence compaction p95 exceeds SLO.")
+
         snapshot = {
             "level": level,
             "warnings": warnings,
@@ -526,6 +540,7 @@ class RuntimeHealthManager:
             "clarification_message": clarification_message,
             "optimization_recommended": bool(optimization.get("recommended", False)),
             "optimization_applied": bool(optimization_state.get("applied", False)),
+            "persistence_telemetry": persistence_telemetry,
             "updated_at": datetime.now().isoformat(timespec="seconds"),
         }
         if persist:

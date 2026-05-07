@@ -29,16 +29,8 @@ def get_chat_event_api() -> Any:
     return get_runtime().api
 
 
-def process_prompt_via_runtime(
-    *,
-    thread_id: str,
-    prompt: str,
-    attachments: list[dict] | None = None,
-    model_override: str = "",
-    temperature_style: str = "balanced",
-    message_metadata: dict | None = None,
-) -> dict:
-    metrics = st.session_state.setdefault(
+def _runtime_delivery_metrics() -> dict[str, Any]:
+    return st.session_state.setdefault(
         "runtime_delivery_metrics",
         {
             "sent": 0,
@@ -49,8 +41,98 @@ def process_prompt_via_runtime(
             "ttft_ms": [],
         },
     )
+
+
+def _normalized_prompt_inputs(thread_id: str, prompt: str) -> tuple[str, str]:
     normalized_thread_id = str(thread_id or "default").strip() or "default"
     normalized_prompt = str(prompt or "").strip()
+    return normalized_thread_id, normalized_prompt
+
+
+def _apply_model_override(bot: Any, target_model: str) -> tuple[bool, str]:
+    previous_model = ""
+    model_overridden = False
+    if bot is None or not target_model:
+        return model_overridden, previous_model
+
+    config = getattr(bot, "config", None)
+    previous_model = str(
+        getattr(bot, "LLM_MODEL", "")
+        or getattr(config, "llm_model", "")
+        or "",
+    ).strip()
+    if previous_model == target_model:
+        return model_overridden, previous_model
+
+    try:
+        if config is not None and hasattr(config, "apply_profile_llm_settings"):
+            provider = str(getattr(config, "llm_provider", "") or getattr(bot, "LLM_PROVIDER", "ollama"))
+            config.apply_profile_llm_settings(provider, target_model)
+        setattr(bot, "LLM_MODEL", target_model)
+        model_overridden = True
+    except Exception:
+        logger.debug("Could not apply model override %s", target_model, exc_info=True)
+
+    return model_overridden, previous_model
+
+
+def _restore_model_override(bot: Any, previous_model: str, model_overridden: bool) -> None:
+    if not model_overridden or bot is None or not previous_model:
+        return
+    try:
+        config = getattr(bot, "config", None)
+        if config is not None and hasattr(config, "apply_profile_llm_settings"):
+            provider = str(getattr(config, "llm_provider", "") or getattr(bot, "LLM_PROVIDER", "ollama"))
+            config.apply_profile_llm_settings(provider, previous_model)
+        setattr(bot, "LLM_MODEL", previous_model)
+    except Exception:
+        logger.debug("Could not restore previous model %s", previous_model, exc_info=True)
+
+
+def _fallback_runtime_result(
+    *,
+    normalized_thread_id: str,
+    temperature_style: str,
+    target_model: str,
+    max_attempts: int,
+    exc: Exception,
+) -> dict[str, Any]:
+    fallback_messages = get_chat_event_api().snapshot_thread_messages(normalized_thread_id, default_greeting="")
+    last_assistant = ""
+    for message in reversed(list(fallback_messages or [])):
+        if str(message.get("role") or "").strip().lower() == "assistant":
+            last_assistant = str(message.get("content") or "").strip()
+            if last_assistant:
+                break
+    fallback_reply = (
+        "Reconnecting now. I queued your message and switched to cached context so we can keep momentum.\n\n"
+        + (f"Last stable reply: {last_assistant[:380]}" if last_assistant else "Dad will resume as soon as the runtime is back.")
+    )
+    return {
+        "reply": fallback_reply,
+        "should_end": False,
+        "mood": str(get_chat_event_api().last_saved_mood() or "neutral"),
+        "retry_count": max(0, max_attempts - 1),
+        "ttft_ms": 0,
+        "degraded_mode": "cached_context",
+        "queued": True,
+        "error": str(exc),
+        "temperature_style": str(temperature_style or "balanced"),
+        "active_model": str(target_model or ""),
+    }
+
+
+def process_prompt_via_runtime(
+    *,
+    thread_id: str,
+    prompt: str,
+    attachments: list[dict] | None = None,
+    model_override: str = "",
+    temperature_style: str = "balanced",
+    message_metadata: dict | None = None,
+) -> dict:
+    metrics = _runtime_delivery_metrics()
+    normalized_thread_id, normalized_prompt = _normalized_prompt_inputs(thread_id, prompt)
     if not normalized_prompt:
         return {
             "reply": "",
@@ -68,26 +150,8 @@ def process_prompt_via_runtime(
 
     runtime = get_runtime()
     bot = getattr(runtime.api, "_bot", None)
-    previous_model = ""
     target_model = str(model_override or "").strip()
-    model_overridden = False
-
-    if bot is not None and target_model:
-        config = getattr(bot, "config", None)
-        previous_model = str(
-            getattr(bot, "LLM_MODEL", "")
-            or getattr(config, "llm_model", "")
-            or "",
-        ).strip()
-        if previous_model != target_model:
-            try:
-                if config is not None and hasattr(config, "apply_profile_llm_settings"):
-                    provider = str(getattr(config, "llm_provider", "") or getattr(bot, "LLM_PROVIDER", "ollama"))
-                    config.apply_profile_llm_settings(provider, target_model)
-                setattr(bot, "LLM_MODEL", target_model)
-                model_overridden = True
-            except Exception:
-                logger.debug("Could not apply model override %s", target_model, exc_info=True)
+    model_overridden, previous_model = _apply_model_override(bot, target_model)
 
     try:
         metrics["sent"] = int(metrics.get("sent", 0) or 0) + 1
@@ -138,39 +202,15 @@ def process_prompt_via_runtime(
         metrics["dropouts"] = int(metrics.get("dropouts", 0) or 0) + 1
         st.session_state["runtime_reconnecting"] = True
         record_runtime_rejection(exc, action="process_prompt_via_runtime")
-        fallback_messages = get_chat_event_api().snapshot_thread_messages(normalized_thread_id, default_greeting="")
-        last_assistant = ""
-        for message in reversed(list(fallback_messages or [])):
-            if str(message.get("role") or "").strip().lower() == "assistant":
-                last_assistant = str(message.get("content") or "").strip()
-                if last_assistant:
-                    break
-        fallback_reply = (
-            "Reconnecting now. I queued your message and switched to cached context so we can keep momentum.\n\n"
-            + (f"Last stable reply: {last_assistant[:380]}" if last_assistant else "Dad will resume as soon as the runtime is back.")
+        return _fallback_runtime_result(
+            normalized_thread_id=normalized_thread_id,
+            temperature_style=temperature_style,
+            target_model=target_model,
+            max_attempts=max_attempts,
+            exc=exc,
         )
-        return {
-            "reply": fallback_reply,
-            "should_end": False,
-            "mood": str(get_chat_event_api().last_saved_mood() or "neutral"),
-            "retry_count": max(0, max_attempts - 1),
-            "ttft_ms": 0,
-            "degraded_mode": "cached_context",
-            "queued": True,
-            "error": str(exc),
-            "temperature_style": str(temperature_style or "balanced"),
-            "active_model": str(target_model or ""),
-        }
     finally:
-        if model_overridden and bot is not None and previous_model:
-            try:
-                config = getattr(bot, "config", None)
-                if config is not None and hasattr(config, "apply_profile_llm_settings"):
-                    provider = str(getattr(config, "llm_provider", "") or getattr(bot, "LLM_PROVIDER", "ollama"))
-                    config.apply_profile_llm_settings(provider, previous_model)
-                setattr(bot, "LLM_MODEL", previous_model)
-            except Exception:
-                logger.debug("Could not restore previous model %s", previous_model, exc_info=True)
+        _restore_model_override(bot, previous_model, model_overridden)
 
 
 def emit_voice_runtime_ledger_event(event_type: str, payload: dict) -> None:

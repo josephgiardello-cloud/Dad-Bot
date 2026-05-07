@@ -180,7 +180,7 @@ class DriftReflectionEngine:
         self.turn_alignment_history: List[Tuple[int, bool, Optional[str], Optional[datetime]]] = []  # (turn, is_aligned, goal, occurred_at)
         self.turn_halt_history: Dict[int, bool] = {}
         self.turn_topic_labels: Dict[int, str] = {}
-        self._ledger_entries: List[Dict[str, Any]] = []
+        self._reflection_entries: List[Dict[str, Any]] = []
         self.evidence_graph = EvidenceGraph()
         self.session_start_time = datetime.now()
         self.min_pattern_frequency = 2  # Confidence requires at least 2 observations
@@ -237,11 +237,11 @@ class DriftReflectionEngine:
         self.turn_alignment_history.clear()
         self.turn_halt_history.clear()
         self.turn_topic_labels.clear()
-        self._ledger_entries.clear()
+        self._reflection_entries.clear()
 
         try:
             for entry in self._stream_ledger_entries():
-                    self._ledger_entries.append(dict(entry))
+                    self._reflection_entries.append(dict(entry))
 
                     # Extract turn-level alignment data
                     turn_num_raw = entry.get("turn_index", len(self.turn_alignment_history))
@@ -562,7 +562,7 @@ class DriftReflectionEngine:
     def _detect_burnout_signal(self) -> Tuple[bool, Dict[str, Any]]:
         """Flag burnout when trust credit drops >20% within 2h of high-complexity activity."""
         timed_entries: List[Tuple[datetime, Dict[str, Any]]] = []
-        for entry in self._ledger_entries:
+        for entry in self._reflection_entries:
             recorded_at = self._parse_ledger_timestamp(entry)
             if recorded_at is None:
                 continue

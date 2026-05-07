@@ -56,6 +56,21 @@
 			"group": "test"
 		},
 		{
+			"label": "Test Lane: DETERMINISM STRESS",
+			"type": "shell",
+			"command": "c:/Users/josep/OneDrive/Desktop/Dad-Bot/.venv/Scripts/python.exe",
+			"args": [
+				"-m",
+				"pytest",
+				"--run-stress",
+				"-m",
+				"stress",
+				"--durations=20",
+				"-q"
+			],
+			"group": "test"
+		},
+		{
 			"label": "Test Lane: UI",
 			"type": "shell",
 			"command": "c:/Users/josep/OneDrive/Desktop/Dad-Bot/.venv/Scripts/python.exe",
@@ -116,6 +131,16 @@
 			"command": "c:/Users/josep/OneDrive/Desktop/Dad-Bot/.venv/Scripts/python.exe -m dadbot_system.local_mcp_server *> session_logs/local_mcp_server.task.log",
 			"isBackground": true,
 			"group": "build"
+		},
+		{
+			"label": "Contract Gate: STRICT",
+			"type": "shell",
+			"command": "c:/Users/josep/OneDrive/Desktop/Dad-Bot/.venv/Scripts/python.exe",
+			"args": [
+				"_ci_gate_check.py",
+				"--contract-gate"
+			],
+			"group": "test"
 		}
 	]
 }

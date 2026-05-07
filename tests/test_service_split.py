@@ -181,7 +181,7 @@ def test_prepare_final_reply_delegates_to_reply_finalization(bot, monkeypatch):
         lambda reply, current_mood, user_input=None: f"delegated::{reply}::{current_mood}::{user_input}",
     )
 
-    reply = bot.prepare_final_reply("You did good, buddy.", "positive", "I got promoted.")
+    reply = bot.reply_finalization.finalize("You did good, buddy.", "positive", "I got promoted.")
 
     assert reply == "delegated::You did good, buddy.::positive::I got promoted."
 
@@ -192,7 +192,7 @@ def test_prepare_final_reply_async_delegates_to_reply_finalization(bot, monkeypa
 
     monkeypatch.setattr(bot.reply_finalization, "finalize_async", fake_finalize)
 
-    reply = asyncio.run(bot.prepare_final_reply_async("You did good, buddy.", "positive", "I got promoted."))
+    reply = asyncio.run(bot.reply_finalization.finalize_async("You did good, buddy.", "positive", "I got promoted."))
 
     assert reply == "async::You did good, buddy.::positive::I got promoted."
 
@@ -258,7 +258,7 @@ def test_turn_service_helper_methods_delegate_to_manager(bot, monkeypatch):
     )
 
     should_offer = bot.should_offer_daily_checkin_for_turn()
-    recorded = bot.record_user_turn_state("Just checking in.", "neutral")
+    recorded = bot.turn_service.record_user_turn_state("Just checking in.", "neutral")
     reply = bot.direct_reply_for_input("Where was I born?", "neutral")
 
     assert should_offer is True
@@ -677,7 +677,9 @@ def test_background_task_manager_is_available_on_bot(bot):
 def test_internal_state_reflection_and_soft_reset(bot):
     bot.session_summary = "Tony felt overloaded by work this week."
 
-    reflected = bot.reflect_internal_state("Work has been heavy", "stressed", "We can take this one step at a time.")
+    reflected = bot.internal_state_manager.reflect_after_turn(
+        "Work has been heavy", "stressed", "We can take this one step at a time."
+    )
     assert reflected.get("turn_count", 0) >= 1
     assert "belief_vector" in reflected
     assert len(list(reflected.get("target_history") or [])) >= 1
@@ -685,7 +687,7 @@ def test_internal_state_reflection_and_soft_reset(bot):
     result = bot.soft_reset_session_context(preserve_recent_summary=True)
     assert result.get("mode") == "soft"
     assert bool(bot.session_summary)
-    post_reset = bot.internal_state_snapshot()
+    post_reset = bot.internal_state_manager.snapshot()
     assert isinstance(post_reset, dict)
     assert len(list(post_reset.get("target_history") or [])) >= 1
 

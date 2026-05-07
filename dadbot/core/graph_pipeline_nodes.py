@@ -654,7 +654,8 @@ class SaveNode(_NodeContractMixin):
                 turn_context.fidelity.save = True
                 return
             except Exception as exc:  # noqa: BLE001 — SaveNode optimistic path; non-fatal
-                logger.debug("SaveNode optimistic checkpoint skipped: %s", exc)
+                logger.debug("SaveNode finalize_turn failed: %s", exc)
+                raise
         service.save_turn(turn_context, result)
         turn_context.fidelity.save = True
 

@@ -1608,15 +1608,37 @@ Return ONLY valid JSON (no extra text):
         *,
         turn_context: TurnContext | None = None,
     ) -> FinalizedTurnResult:
-        warnings.warn(
-            "_finalize_direct_compat_turn is a legacy compat shim scheduled for removal in 2026-Q3. "
-            "Migrate callers to process_user_message() or the TurnGraph pipeline.",
-            DeprecationWarning,
-            stacklevel=3,
+        return self._finalize_turn_compat_context(
+            stripped_input,
+            current_mood,
+            dad_reply,
+            attachments,
+            turn_context=turn_context,
+            mark_legacy_direct_compat=True,
+            emit_deprecation_warning=True,
         )
+
+    def _finalize_turn_compat_context(
+        self,
+        stripped_input: str,
+        current_mood: str | None,
+        dad_reply: str | None,
+        attachments: AttachmentList | None = None,
+        *,
+        turn_context: TurnContext | None = None,
+        mark_legacy_direct_compat: bool = False,
+        emit_deprecation_warning: bool = False,
+    ) -> FinalizedTurnResult:
+        if emit_deprecation_warning:
+            warnings.warn(
+                "_finalize_direct_compat_turn is a legacy compat shim scheduled for removal in 2026-Q3. "
+                "Migrate callers to process_user_message() or the TurnGraph pipeline.",
+                DeprecationWarning,
+                stacklevel=3,
+            )
         context = turn_context or self._compat_turn_context(stripped_input, attachments)
         metadata = getattr(context, "metadata", None)
-        if isinstance(metadata, dict):
+        if mark_legacy_direct_compat and isinstance(metadata, dict):
             metadata.setdefault("legacy_direct_compat", True)
         context.state["turn_text"] = stripped_input
         context.state["mood"] = current_mood or "neutral"
@@ -1678,7 +1700,7 @@ Return ONLY valid JSON (no extra text):
                 "generate_reply",
                 detail="generated sync reply",
             )
-        return self._finalize_direct_compat_turn(
+        return self._finalize_turn_compat_context(
             turn_text,
             current_mood,
             dad_reply,
@@ -1725,7 +1747,7 @@ Return ONLY valid JSON (no extra text):
                 "generate_reply",
                 detail="generated async reply",
             )
-        return self._finalize_direct_compat_turn(
+        return self._finalize_turn_compat_context(
             turn_text,
             current_mood,
             dad_reply,
@@ -1771,7 +1793,7 @@ Return ONLY valid JSON (no extra text):
             )
         elif callable(chunk_callback) and dad_reply:
             chunk_callback(dad_reply)
-        return self._finalize_direct_compat_turn(
+        return self._finalize_turn_compat_context(
             turn_text,
             current_mood,
             dad_reply,
@@ -1825,7 +1847,7 @@ Return ONLY valid JSON (no extra text):
             maybe_coro = chunk_callback(dad_reply)
             if asyncio.iscoroutine(maybe_coro):
                 await maybe_coro
-        return self._finalize_direct_compat_turn(
+        return self._finalize_turn_compat_context(
             turn_text,
             current_mood,
             dad_reply,

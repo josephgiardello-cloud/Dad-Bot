@@ -30,6 +30,7 @@ from PIL import Image, ImageDraw, ImageFont
 from dadbot.consumers.streamlit import load_thread_projection
 from dadbot.runtime_core import ThreadView, UIRuntimeAPI
 from dadbot.runtime_core.streamlit_runtime import StreamlitRuntime
+from dadbot.runtime.supervisor import get_runtime_supervisor
 from dadbot.ui import interaction_controller, state_manager
 from dadbot.ui.data import render_data_tab
 from dadbot.ui.helpers import (
@@ -929,13 +930,20 @@ def _render_voice_capture_layer(controller: VoiceSessionController, voice: dict,
         media_audio = {"deviceId": {"exact": str(selected_device)}}
 
     rtc_config = WebRtcRTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
-    webrtc_ctx = webrtc_streamer(
-        key=f"{key_prefix}-webrtc-capture",
-        mode=WebRtcMode.SENDONLY,
-        rtc_configuration=rtc_config,
-        media_stream_constraints={"video": False, "audio": media_audio},
-        async_processing=True,
-    )
+    try:
+        webrtc_ctx = webrtc_streamer(
+            key=f"{key_prefix}-webrtc-capture",
+            mode=WebRtcMode.SENDONLY,
+            rtc_configuration=rtc_config,
+            media_stream_constraints={"video": False, "audio": media_audio},
+            async_processing=True,
+        )
+    except Exception:
+        st.caption("WebRTC runtime unavailable in this environment; using audio input fallback.")
+        clip = st.audio_input("Hold mic, speak, release", key=f"{key_prefix}-audio-fallback")
+        if clip is None:
+            return b""
+        return bytes(clip.getvalue() or b"")
 
     if not (webrtc_ctx and webrtc_ctx.state.playing):
         st.caption("Click START to begin WebRTC microphone capture.")
@@ -3497,6 +3505,119 @@ def render_status_tab(bot: DadBot):
                 st.caption(f"Last graph error: {last_error}")
         else:
             st.success("Graph orchestration healthy. No recent fallback events.")
+
+    with st.container(border=True):
+        st.subheader("Operator Panel")
+        supervisor = get_runtime_supervisor()
+        runtime_lock = dict(supervisor.get_status() or {})
+        lock_state = str(runtime_lock.get("state") or "no_lock")
+        lock_pid = runtime_lock.get("pid")
+        lock_port = runtime_lock.get("port")
+        lock_age = runtime_lock.get("age_seconds")
+
+        op_col1, op_col2, op_col3 = st.columns(3)
+        op_col1.metric("Lifecycle State", lock_state)
+        op_col2.metric("Active Process", str(lock_pid or "none"))
+        op_col3.metric("Process Port", str(lock_port or "n/a"))
+        st.caption(f"Runtime lock age: {lock_age if lock_age is not None else 'n/a'}s")
+
+        orchestrator = getattr(api, "turn_orchestrator", None)
+        turn_context = getattr(orchestrator, "_last_turn_context", None)
+        trace_id = str(getattr(turn_context, "trace_id", "") or "")
+        stage_traces = list(getattr(turn_context, "stage_traces", []) or [])
+        if trace_id:
+            st.caption(f"Last turn trace: {trace_id}")
+            trace_rows = [
+                {
+                    "stage": str(getattr(item, "stage", "") or ""),
+                    "duration_ms": float(getattr(item, "duration_ms", 0.0) or 0.0),
+                    "error": str(getattr(item, "error", "") or ""),
+                }
+                for item in stage_traces[-8:]
+            ]
+            if trace_rows:
+                st.dataframe(trace_rows, use_container_width=True, hide_index=True)
+        else:
+            st.caption("Last turn trace: unavailable (no executed turn in this runtime yet)")
+
+        with st.expander("Doctor / Preflight Check", expanded=False):
+            preflight_ok, preflight_issues = supervisor.preflight_check()
+            if preflight_ok:
+                st.success("Preflight OK — no lock conflicts or stale processes detected.")
+            else:
+                for issue in preflight_issues:
+                    st.warning(issue)
+            try:
+                _health_snap = dict(
+                    bot.current_runtime_health_snapshot(force=True, log_warnings=False, persist=False) or {}
+                )
+                _snap_level = str(_health_snap.get("level", "green")).lower()
+                if _snap_level == "red":
+                    st.error(f"Health snapshot: {_snap_level.upper()} — {_health_snap.get('message', '')}")
+                elif _snap_level == "yellow":
+                    st.warning(f"Health snapshot: {_snap_level.upper()} — {_health_snap.get('message', '')}")
+                else:
+                    st.success(f"Health snapshot: {_snap_level.upper()} — runtime stable")
+            except Exception as _e:
+                st.caption(f"Health snapshot unavailable: {_e}")
+
+        with st.expander("Trace Lookup", expanded=False):
+            _lookup_id = st.text_input(
+                "Turn trace ID",
+                value=trace_id,
+                placeholder="Enter a trace ID to inspect...",
+                key="operator-trace-lookup-id",
+            )
+            _lookup_limit = st.number_input(
+                "Max events", min_value=1, max_value=200, value=25, key="operator-trace-lookup-limit"
+            )
+            if st.button("Fetch Events", key="operator-trace-fetch"):
+                _lookup_id = str(_lookup_id or "").strip()
+                if not _lookup_id:
+                    st.warning("Enter a trace ID first.")
+                else:
+                    try:
+                        _events = list(
+                            bot.list_turn_events(_lookup_id, limit=int(_lookup_limit)) or []
+                        )
+                        if _events:
+                            st.caption(f"{len(_events)} event(s) for trace {_lookup_id}")
+                            st.dataframe(_events, use_container_width=True, hide_index=True)
+                        else:
+                            st.info("No events found for that trace ID.")
+                    except Exception as _e:
+                        st.error(f"Trace lookup failed: {_e}")
+
+        with st.expander("Restart Runtime", expanded=False):
+            st.caption(
+                "Stops the current Streamlit process and relaunches it. "
+                "Active conversations will reconnect on next page load."
+            )
+            _confirm_restart = st.checkbox(
+                "I understand this will interrupt the active session",
+                key="operator-restart-confirm",
+            )
+            _light_mode = st.checkbox("Light mode restart", key="operator-restart-light")
+            if st.button(
+                "Restart Dad Bot",
+                disabled=not _confirm_restart,
+                use_container_width=True,
+                key="operator-restart-btn",
+            ):
+                try:
+                    from dadbot.app_runtime import launch_streamlit_app, stop_streamlit_app
+                    _stop = stop_streamlit_app(script_path=Path("Dad.py"))
+                    if _stop == 0:
+                        launch_streamlit_app(
+                            append_signoff=True,
+                            light_mode=bool(_light_mode),
+                            script_path=Path("Dad.py"),
+                        )
+                        st.success("Restart initiated.")
+                    else:
+                        st.error(f"Stop failed (code {_stop}). Restart aborted.")
+                except Exception as _e:
+                    st.error(f"Restart failed: {_e}")
 
     with st.container(border=True):
         st.subheader("Dad's Internal State")

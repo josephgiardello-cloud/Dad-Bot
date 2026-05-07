@@ -142,14 +142,14 @@ class DadBotTaskProcessor:
         request_policy = self._request_policy_metadata(request)
         previous_policy = getattr(bot, "_service_request_policy", None)
         if request_policy is not None:
-            setattr(bot, "_service_request_policy", request_policy)
+            bot._service_request_policy = request_policy
         try:
             if hasattr(bot, "process_user_message_async"):
                 return await bot.process_user_message_async(request.user_input, attachments=attachments)
             return bot.process_user_message(request.user_input, attachments=attachments)
         finally:
             if request_policy is not None:
-                setattr(bot, "_service_request_policy", previous_policy)
+                bot._service_request_policy = previous_policy
 
     def process(self, task: WorkerTask) -> WorkerResult:
         if not self._circuit.allow_request():

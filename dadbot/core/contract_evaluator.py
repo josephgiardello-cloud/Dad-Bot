@@ -150,9 +150,9 @@ def live_turn_request(user_text: str, metadata: dict[str, Any] | None = None) ->
 
 CAPABILITY_CONTRACTS: dict[str, dict[str, Any]] = {
     "temporal_ordering": {
-        "required_stages": ["plan", "execute", "recover"],
+        "required_stages": ["temporal", "inference", "save"],
         "runtime_enforcement": True,
-        "description": "Turns must follow temporal ordering (plan → execute → recover)",
+        "description": "Turns must follow temporal ordering (temporal → inference → save)",
     },
     "mutation_safety": {
         "rule": "Only recovery phase mutates graph state",

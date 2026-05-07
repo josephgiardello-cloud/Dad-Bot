@@ -104,8 +104,14 @@ def test_graph_checkpoint_events_are_replayable(bot):
     assert len(events) >= 1
     assert replay["trace_id"] == "trace-replay-001"
     assert replay["event_count"] >= 1
-    assert replay["replayed_state"].get("candidate") == "draft reply"
-    assert replay["replayed_metadata"].get("determinism", {}).get("enforced") is True
+    checkpoint_events = [evt for evt in events if evt.get("event_type") == "graph_checkpoint"]
+    assert checkpoint_events
+    checkpoint_payload = dict(checkpoint_events[0].get("checkpoint") or {})
+    assert "state" not in checkpoint_payload
+    assert "metadata" not in checkpoint_payload
+    assert "session_state" not in checkpoint_payload
+    assert checkpoint_payload.get("stage") == "inference"
+    assert checkpoint_payload.get("status") == "after"
     assert replay["determinism"]["consistent"] is True
     assert replay["determinism"]["lock_hash"] == "det-lock-001"
 

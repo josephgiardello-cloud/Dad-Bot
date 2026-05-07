@@ -13,6 +13,7 @@ from socket import AF_INET, SO_REUSEADDR, SOCK_STREAM, SOL_SOCKET, socket
 from urllib.request import urlopen
 
 from dadbot.core.execution_boundary import enforce_execution_role
+from dadbot.runtime.supervisor import get_runtime_supervisor
 from dadbot_system import (
     DadBotOrchestrator,
     DadServiceClient,
@@ -49,6 +50,22 @@ def launch_streamlit_app(
     script_path: str | Path | None = None,
     ensure_streamlit_app_file,
 ):
+    # Run startup preflight checks
+    supervisor = get_runtime_supervisor()
+    ok, issues = supervisor.preflight_check()
+    
+    if not ok:
+        logger.error("Startup preflight check failed:")
+        for issue in issues:
+            logger.error("  - %s", issue)
+        # Attempt to recover from stale locks
+        existing_lock = supervisor._read_lock()
+        if existing_lock and existing_lock.is_stale(supervisor.stale_timeout):
+            logger.info("Recovering from stale lock...")
+            supervisor._delete_lock()
+        else:
+            raise RuntimeError(f"Startup preflight failed: {'; '.join(issues)}")
+    
     def required_streamlit_port():
         configured_port = os.environ.get("DADBOT_STREAMLIT_PORT", "8501")
         try:
@@ -119,6 +136,16 @@ def launch_streamlit_app(
         "--server.port",
         str(chosen_port),
     ]
+    
+    # Acquire runtime lock before starting process
+    lock_acquired, lock_msg = supervisor.acquire_lock(
+        pid=os.getpid(),
+        port=chosen_port,
+        owner_id=f"streamlit-{os.getpid()}",
+    )
+    if not lock_acquired:
+        raise RuntimeError(f"Failed to acquire runtime lock: {lock_msg}")
+    
     process = subprocess.Popen(command, cwd=str(workspace_path), env=command_env)
     try:
         if wait_for_streamlit(local_url, process):
@@ -140,6 +167,9 @@ def launch_streamlit_app(
                 process.kill()
                 return process.wait()
         return process.returncode or 0
+    finally:
+        # Release lock on shutdown
+        supervisor.release_lock()
 
 
 def stop_streamlit_app(script_path: str | Path | None = None):

@@ -31,7 +31,7 @@ def test_extract_mood_label_handles_formats_and_aliases(bot, response_text, expe
 def test_detect_mood_uses_mocked_ollama_reply(bot, mocker, model_reply, expected):
     mocker.patch.object(bot, "call_ollama_chat", return_value={"message": {"content": model_reply}})
 
-    mood = bot.detect_mood("test input")
+    mood = bot.mood_manager.detect("test input")
 
     assert mood == expected
 
@@ -39,19 +39,19 @@ def test_detect_mood_uses_mocked_ollama_reply(bot, mocker, model_reply, expected
 def test_detect_mood_defaults_to_neutral_on_invalid_response(bot, mocker):
     mocker.patch.object(bot, "call_ollama_chat", return_value={"message": {"content": "I cannot tell."}})
 
-    assert bot.detect_mood("ambiguous") == "neutral"
+    assert bot.mood_manager.detect("ambiguous") == "neutral"
 
 
 def test_detect_mood_defaults_to_neutral_on_runtime_error(bot, mocker):
     mocker.patch.object(bot, "call_ollama_chat", side_effect=RuntimeError("ollama unavailable"))
 
-    assert bot.detect_mood("overwhelmed") == "neutral"
+    assert bot.mood_manager.detect("overwhelmed") == "neutral"
 
 
 def test_detect_mood_fastpath_skips_ollama_for_obvious_signal(bot, mocker):
     mocked = mocker.patch.object(bot, "call_ollama_chat")
 
-    detected = bot.detect_mood("I am completely overwhelmed and really anxious about everything.")
+    detected = bot.mood_manager.detect("I am completely overwhelmed and really anxious about everything.")
 
     assert detected == "stressed"
     mocked.assert_not_called()
@@ -64,8 +64,8 @@ def test_detect_mood_reuses_recent_cached_result(bot, mocker):
         return_value={"message": {"content": "Mood: neutral\nReason: Mostly factual and reflective."}},
     )
 
-    first = bot.detect_mood("I guess I'm here again.")
-    second = bot.detect_mood("I guess I'm here again.")
+    first = bot.mood_manager.detect("I guess I'm here again.")
+    second = bot.mood_manager.detect("I guess I'm here again.")
 
     assert first == "neutral"
     assert second == "neutral"
@@ -76,7 +76,7 @@ def test_detect_mood_returns_neutral_without_model_in_light_mode(bot, mocker):
     bot.LIGHT_MODE = True
     mocked = mocker.patch.object(bot, "call_ollama_chat")
 
-    detected = bot.detect_mood("I am completely overwhelmed and really anxious about everything.")
+    detected = bot.mood_manager.detect("I am completely overwhelmed and really anxious about everything.")
 
     assert detected == "neutral"
     mocked.assert_not_called()
