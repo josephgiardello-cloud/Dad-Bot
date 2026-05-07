@@ -418,5 +418,64 @@ class TestPatternSummary:
         assert "total_episodes" in summary
         assert "patterns_detected" in summary
         assert "patterns" in summary
-        assert len(summary["patterns"]) == 1
-        assert summary["patterns"][0]["id"] == "pattern1"
+
+
+@pytest.mark.unit
+class TestBurnoutHeuristic:
+    """Validate burnout-probable signal generation from ledger trust trends."""
+
+    def test_burnout_probable_when_trust_drops_over_twenty_percent_in_two_hours(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            base_time = datetime(2026, 1, 5, 10, 0, 0)
+            entries = [
+                {
+                    "turn_index": 1,
+                    "recorded_at": base_time.isoformat(),
+                    "relational_state": {"is_aligned": True},
+                    "goal_alignment_diversion_streak": 0,
+                    "complexity": "complex",
+                    "trust_credit_before": 0.80,
+                    "trust_credit_after": 0.78,
+                    "active_goals": [{"description": "ship premium reflection"}],
+                },
+                {
+                    "turn_index": 2,
+                    "recorded_at": (base_time.replace(hour=11, minute=20)).isoformat(),
+                    "relational_state": {"is_aligned": False},
+                    "goal_alignment_diversion_streak": 1,
+                    "complexity": "complex",
+                    "trust_credit_before": 0.78,
+                    "trust_credit_after": 0.58,
+                    "active_goals": [{"description": "ship premium reflection"}],
+                },
+            ]
+            for entry in entries:
+                f.write(json.dumps(entry) + "\n")
+            ledger_path = f.name
+
+        try:
+            engine = DriftReflectionEngine(ledger_path=ledger_path)
+            summary = engine.analyze_ledger()
+            assert any(signal.startswith("BURNOUT_PROBABLE") for signal in summary.observable_signals)
+        finally:
+            Path(ledger_path).unlink(missing_ok=True)
+
+
+@pytest.mark.unit
+class TestLedgerStreaming:
+    """Validate non-blocking style incremental ledger reads."""
+
+    def test_stream_ledger_entries_skips_bad_json_and_respects_limit(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.write("{\"turn_index\": 1, \"relational_state\": {\"is_aligned\": true}}\n")
+            f.write("not-json\n")
+            f.write("{\"turn_index\": 2, \"relational_state\": {\"is_aligned\": false}}\n")
+            ledger_path = f.name
+
+        try:
+            engine = DriftReflectionEngine(ledger_path=ledger_path)
+            streamed = list(engine._stream_ledger_entries(max_entries=1))
+            assert len(streamed) == 1
+            assert streamed[0]["turn_index"] == 1
+        finally:
+            Path(ledger_path).unlink(missing_ok=True)

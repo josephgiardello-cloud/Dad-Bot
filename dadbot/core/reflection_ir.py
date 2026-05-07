@@ -18,8 +18,8 @@ Principles:
 """
 
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Tuple, Any
-from datetime import datetime
+from typing import List, Dict, Optional, Tuple, Any, Iterator
+from datetime import datetime, timedelta
 from collections import defaultdict
 import json
 import math
@@ -180,10 +180,13 @@ class DriftReflectionEngine:
         self.turn_alignment_history: List[Tuple[int, bool, Optional[str], Optional[datetime]]] = []  # (turn, is_aligned, goal, occurred_at)
         self.turn_halt_history: Dict[int, bool] = {}
         self.turn_topic_labels: Dict[int, str] = {}
+        self._ledger_entries: List[Dict[str, Any]] = []
         self.evidence_graph = EvidenceGraph()
         self.session_start_time = datetime.now()
         self.min_pattern_frequency = 2  # Confidence requires at least 2 observations
         self.recent_window_turns = 20  # Consider last N turns for "recent" signals
+        self.burnout_trust_drop_threshold = 0.20
+        self.burnout_window = timedelta(hours=2)
 
     def analyze_ledger(self) -> ReflectionSummary:
         """
@@ -234,14 +237,11 @@ class DriftReflectionEngine:
         self.turn_alignment_history.clear()
         self.turn_halt_history.clear()
         self.turn_topic_labels.clear()
+        self._ledger_entries.clear()
 
         try:
-            with open(self.ledger_path, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    entry = json.loads(line)
+            for entry in self._stream_ledger_entries():
+                    self._ledger_entries.append(dict(entry))
 
                     # Extract turn-level alignment data
                     turn_num_raw = entry.get("turn_index", len(self.turn_alignment_history))
@@ -273,6 +273,27 @@ class DriftReflectionEngine:
         except FileNotFoundError:
             # Ledger doesn't exist yet; engine remains initialized but empty
             pass
+
+    def _stream_ledger_entries(self, *, max_entries: int = 4096) -> Iterator[Dict[str, Any]]:
+        """Yield ledger entries incrementally to avoid full-buffer blocking reads."""
+        if not self.ledger_path:
+            return
+        emitted = 0
+        with open(self.ledger_path, "r", encoding="utf-8") as handle:
+            for raw_line in handle:
+                if emitted >= max(1, int(max_entries)):
+                    break
+                line = str(raw_line or "").strip()
+                if not line:
+                    continue
+                try:
+                    payload = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                emitted += 1
+                yield payload
 
     def _extract_drift_episodes(self) -> None:
         """
@@ -509,6 +530,13 @@ class DriftReflectionEngine:
 
         # Build observable signals
         observable_signals = self._extract_observable_signals(recent_episodes, primary_pattern)
+        burnout_signal, burnout_context = self._detect_burnout_signal()
+        if burnout_signal:
+            observable_signals.append(
+                "BURNOUT_PROBABLE"
+                f": trust_drop={burnout_context.get('trust_drop', 0.0):.3f}"
+                f", window_minutes={burnout_context.get('window_minutes', 0)}"
+            )
 
         # Generate recommendation
         recommendation = self._generate_recommendation(primary_pattern, risk_level, drift_prob)
@@ -530,6 +558,84 @@ class DriftReflectionEngine:
             observable_signals=observable_signals,
             recent_episode_count=len(recent_episodes)
         )
+
+    def _detect_burnout_signal(self) -> Tuple[bool, Dict[str, Any]]:
+        """Flag burnout when trust credit drops >20% within 2h of high-complexity activity."""
+        timed_entries: List[Tuple[datetime, Dict[str, Any]]] = []
+        for entry in self._ledger_entries:
+            recorded_at = self._parse_ledger_timestamp(entry)
+            if recorded_at is None:
+                continue
+            timed_entries.append((recorded_at, entry))
+
+        if not timed_entries:
+            return False, {}
+
+        timed_entries.sort(key=lambda item: item[0])
+        for index, (start_at, start_entry) in enumerate(timed_entries):
+            if not self._is_high_complexity_activity(start_entry):
+                continue
+
+            start_credit = self._extract_trust_credit(start_entry)
+            if start_credit <= 0.0:
+                continue
+
+            window_end = start_at + self.burnout_window
+            min_credit = start_credit
+            for probe_at, probe_entry in timed_entries[index:]:
+                if probe_at > window_end:
+                    break
+                probe_credit = self._extract_trust_credit(probe_entry)
+                if probe_credit <= 0.0:
+                    continue
+                min_credit = min(min_credit, probe_credit)
+
+            drop_ratio = (start_credit - min_credit) / max(start_credit, 1e-9)
+            if drop_ratio > self.burnout_trust_drop_threshold:
+                return True, {
+                    "trust_drop": round(drop_ratio, 3),
+                    "window_minutes": int(self.burnout_window.total_seconds() // 60),
+                    "start_credit": round(start_credit, 3),
+                    "min_credit": round(min_credit, 3),
+                }
+
+        return False, {}
+
+    @staticmethod
+    def _extract_trust_credit(entry: Dict[str, Any]) -> float:
+        behavioral = entry.get("behavioral_ledger")
+        if isinstance(behavioral, dict):
+            value = behavioral.get("trust_credit")
+            try:
+                return max(0.0, min(1.0, float(value)))
+            except (TypeError, ValueError):
+                pass
+
+        for key in ("trust_credit_after", "trust_credit_before"):
+            value = entry.get(key)
+            try:
+                return max(0.0, min(1.0, float(value)))
+            except (TypeError, ValueError):
+                continue
+        return 0.0
+
+    @staticmethod
+    def _is_high_complexity_activity(entry: Dict[str, Any]) -> bool:
+        explicit_complexity = str(
+            entry.get("complexity")
+            or entry.get("planner_complexity")
+            or entry.get("turn_complexity")
+            or ""
+        ).strip().lower()
+        if explicit_complexity in {"complex", "high", "very_high"}:
+            return True
+
+        active_goals = entry.get("active_goals")
+        if isinstance(active_goals, list) and len(active_goals) >= 3:
+            return True
+
+        excerpt = str(entry.get("user_input_excerpt") or "")
+        return len(excerpt) >= 180
 
     # ============ Helper Methods ============
 
