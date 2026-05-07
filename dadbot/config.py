@@ -144,6 +144,8 @@ class DadRuntimeConfig:
     dual_control_enabled: bool = False
     dual_control_approvals_required: int = 2
     rtbf_proof_enabled: bool = True
+    goal_alignment_guard_enabled: bool = True
+    primary_identity_log_filenames: tuple[str, ...] = ("relational_ledger.jsonl",)
 
     cadence_defaults: dict[str, int] = field(
         default_factory=lambda: {
@@ -257,6 +259,7 @@ class DadRuntimeConfig:
 class DadBotConfig:
     model_name: str = "llama3.2"
     fallback_models: tuple[str, ...] = (
+        "llama3.1:8b",
         "phi4:mini",
         "qwen3.5:4b",
         "gemma3:4b",
@@ -351,6 +354,11 @@ class DadBotConfig:
         self.rtbf_proof_enabled = bool(
             self.runtime_config.rtbf_proof_enabled and env_truthy("DADBOT_RTBF_PROOF_ENABLED", default=True),
         )
+        self.goal_alignment_guard_enabled = bool(
+            self.runtime_config.goal_alignment_guard_enabled
+            and env_truthy("DADBOT_GOAL_ALIGNMENT_GUARD_ENABLED", default=True),
+        )
+        self.primary_identity_log_filenames = tuple(self.runtime_config.primary_identity_log_filenames)
         self._approval_workflow = None
 
     def apply_profile_llm_settings(self, provider: str, model: str) -> None:

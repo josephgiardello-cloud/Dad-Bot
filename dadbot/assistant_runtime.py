@@ -110,6 +110,59 @@ class AssistantRuntime:
 
         return {"task_id": tid, "status": "unknown"}
 
+    def run_heartbeat(self, *, force: bool = True) -> dict[str, Any]:
+        maintenance = getattr(self.kernel, "maintenance_scheduler", None)
+        if maintenance is None or not callable(getattr(maintenance, "run_proactive_heartbeat", None)):
+            raise RuntimeError("maintenance_scheduler is not available")
+        return dict(maintenance.run_proactive_heartbeat(force=force) or {})
+
+    def run_self_improvement(self, *, force: bool = True, background: bool = False) -> dict[str, Any]:
+        manager = getattr(self.kernel, "long_term_signals", None)
+        if manager is None:
+            raise RuntimeError("long_term_signals manager is not available")
+
+        if background and not force and callable(getattr(manager, "schedule_continuous_learning", None)):
+            task = manager.schedule_continuous_learning()
+            return {
+                "status": "queued" if task is not None else "skipped",
+                "task_id": str(getattr(task, "dadbot_task_id", "") or "") if task is not None else "",
+            }
+
+        perform_cycle = getattr(manager, "perform_continuous_learning_cycle", None)
+        if not callable(perform_cycle):
+            raise RuntimeError("continuous learning execution is not available")
+
+        if background:
+            submit = getattr(self.kernel, "submit_background_task", None)
+            if not callable(submit):
+                raise RuntimeError("submit_background_task is not available")
+            task = submit(
+                perform_cycle,
+                task_kind="continuous-learning",
+                metadata={"api_surface": "assistant", "forced": force},
+            )
+            return {"status": "queued", "task_id": str(getattr(task, "dadbot_task_id", "") or "")}
+
+        return {"status": "completed", "result": dict(perform_cycle() or {})}
+
+    def browser_status(self) -> dict[str, Any]:
+        status = getattr(self.kernel, "local_mcp_status", None)
+        if not callable(status):
+            raise RuntimeError("local_mcp_status is not available")
+        return dict(status() or {})
+
+    def start_browser_tools(self, *, restart: bool = False) -> dict[str, Any]:
+        start = getattr(self.kernel, "start_local_mcp_server_process", None)
+        if not callable(start):
+            raise RuntimeError("start_local_mcp_server_process is not available")
+        return dict(start(restart=restart) or {})
+
+    def stop_browser_tools(self) -> dict[str, Any]:
+        stop = getattr(self.kernel, "stop_local_mcp_server_process", None)
+        if not callable(stop):
+            raise RuntimeError("stop_local_mcp_server_process is not available")
+        return dict(stop() or {})
+
     def reset_session(self) -> None:
         self.kernel.reset_session_state()
 

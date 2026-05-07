@@ -58,6 +58,7 @@ FORBIDDEN_TRACE_FIELDS: frozenset[str] = frozenset(
 NON_REPLAY_EVENT_TYPES: frozenset[str] = frozenset(
     {
         "CAPABILITY_AUDIT_EVENT",
+        "PolicyTraceEvent",
     },
 )
 

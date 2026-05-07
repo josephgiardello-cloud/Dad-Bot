@@ -43,6 +43,29 @@ streamlit run dad_streamlit.py
 
 Open [http://localhost:8501](http://localhost:8501) in your browser.
 
+### Story Mode Security Setup
+
+Story Mode changes long-term Dad personalization behavior, so activation is password-gated.
+
+1. Set a password before launch:
+
+```powershell
+$env:DADBOT_STORY_MODE_PASSWORD="choose-a-strong-password"
+python launch.py
+```
+
+2. In Streamlit Chat, enter the password in the Story password field and click Story Mode.
+3. In CLI mode, use:
+
+```text
+/mode story <password>
+```
+
+Protection behavior:
+- Incorrect password attempts trigger temporary lockout with backoff.
+- After repeated failures, lock duration increases exponentially (capped).
+- Family/life-event contextual learning remains active even when Story Mode is off.
+
 ### Windows Workspace Virtual Environment Note
 
 If you have similarly named folders (for example `Desktop/Dad-Bot` and `Desktop/Codes/Dad-Bot`), always use the workspace-local environment:

@@ -138,6 +138,7 @@ class UIRuntimeAPI:
         thread_id: str,
         content: str,
         attachments: list[dict] | None = None,
+        metadata: dict | None = None,
     ) -> dict:
         normalized_thread_id = str(thread_id or self._bot.active_thread_id or "default")
         if normalized_thread_id != str(self._bot.active_thread_id or ""):
@@ -157,6 +158,31 @@ class UIRuntimeAPI:
         turn_health = dict(self._bot.turn_health_state() or {})
         ux_feedback = dict(self._bot.turn_ux_feedback() or {})
         multi_agent_trace = self._multi_agent_trace_snapshot()
+        if isinstance(metadata, dict) and metadata:
+            with self._bot._session_lock:
+                self._bot.ensure_chat_thread_state(preserve_active_runtime=True)
+                snapshot = self._bot.normalize_thread_snapshot(self._bot.thread_snapshots.get(normalized_thread_id))
+                history = [dict(item) for item in list(snapshot.get("history") or []) if isinstance(item, dict)]
+                for index in range(len(history) - 1, -1, -1):
+                    message = dict(history[index] or {})
+                    if str(message.get("role") or "").strip().lower() != "user":
+                        continue
+                    existing_metadata = dict(message.get("metadata") or {})
+                    for key, value in dict(metadata).items():
+                        if key == "gateway":
+                            gateway_payload = dict(existing_metadata.get("gateway") or {})
+                            gateway_payload.update(dict(value or {}))
+                            existing_metadata["gateway"] = gateway_payload
+                        else:
+                            existing_metadata[key] = value
+                    message["metadata"] = existing_metadata
+                    history[index] = message
+                    break
+                snapshot["history"] = history
+                self._bot.thread_snapshots[normalized_thread_id] = snapshot
+                if normalized_thread_id == self._bot.active_thread_id:
+                    self._bot.apply_thread_snapshot_unlocked(snapshot)
+                self._bot.sync_active_thread_snapshot()
         return {
             "reply": str(reply or ""),
             "should_end": bool(should_end),
@@ -237,7 +263,18 @@ class UIRuntimeAPI:
 class StreamlitRuntime:
     def __init__(self, bot: DadBot) -> None:
         self.bot = bot
+        self._configure_ui_runtime_mode()
         self.api = UIRuntimeAPI(bot)
+
+    def _configure_ui_runtime_mode(self) -> None:
+        """Keep the Streamlit surface resilient when graph execution encounters transient failures."""
+        config = getattr(self.bot, "config", None)
+        if config is not None and hasattr(config, "strict_graph_mode"):
+            config.strict_graph_mode = False
+        self.bot._strict_graph_mode = False
+        orchestrator = getattr(self.bot, "_turn_orchestrator", None)
+        if orchestrator is not None and hasattr(orchestrator, "_strict"):
+            orchestrator._strict = False
 
     @classmethod
     def build(cls) -> StreamlitRuntime:
@@ -249,9 +286,11 @@ class StreamlitRuntime:
         thread_id: str,
         content: str,
         attachments: list[dict] | None = None,
+        metadata: dict | None = None,
     ) -> dict:
         return self.api.send_user_message(
             thread_id=thread_id,
             content=content,
             attachments=attachments,
+            metadata=metadata,
         )

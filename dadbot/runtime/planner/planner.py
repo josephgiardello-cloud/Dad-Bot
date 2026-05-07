@@ -161,6 +161,29 @@ class Planner:
             execution_result=execution_result,
         )
 
+    def build_ir(
+        self,
+        turn_state: dict[str, Any],
+        execution_result: dict[str, Any],
+    ) -> Any:  # Returns PlannerDecision
+        """Build PlannerIR representation (typed, immutable IR for planner output).
+
+        This is the new typed IR entrypoint for planner output. It converts the
+        untyped PlanResult into an immutable PlannerDecision IR representation.
+
+        Args:
+            turn_state: Runtime turn state dict with runtime, event, user_text, etc.
+            execution_result: Execution phase result with initial_result, etc.
+
+        Returns:
+            PlannerDecision: Immutable planner IR representation
+        """
+        from dadbot.core.planner_ir import build_planner_ir
+
+        plan_result = self.build(turn_state, execution_result)
+        turn_context = turn_state  # Pass turn_state as opaque context
+        return build_planner_ir(plan_result, turn_context)
+
     def build_legacy(
         self,
         turn_state: dict[str, Any],

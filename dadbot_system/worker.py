@@ -126,11 +126,30 @@ class DadBotTaskProcessor:
             attachments.append(payload)
         return attachments
 
+    @staticmethod
+    def _request_policy_metadata(request: ChatRequest) -> dict[str, object] | None:
+        metadata = dict(request.metadata or {})
+        service_policy = dict(metadata.get("service_policy") or {})
+        if not service_policy:
+            return None
+        principal = dict(metadata.get("auth") or {})
+        if principal:
+            service_policy.setdefault("principal", principal)
+        return service_policy
+
     async def _execute_request_async(self, bot, request: ChatRequest) -> tuple[str, bool]:
         attachments = self._build_request_attachments(request)
-        if hasattr(bot, "process_user_message_async"):
-            return await bot.process_user_message_async(request.user_input, attachments=attachments)
-        return bot.process_user_message(request.user_input, attachments=attachments)
+        request_policy = self._request_policy_metadata(request)
+        previous_policy = getattr(bot, "_service_request_policy", None)
+        if request_policy is not None:
+            setattr(bot, "_service_request_policy", request_policy)
+        try:
+            if hasattr(bot, "process_user_message_async"):
+                return await bot.process_user_message_async(request.user_input, attachments=attachments)
+            return bot.process_user_message(request.user_input, attachments=attachments)
+        finally:
+            if request_policy is not None:
+                setattr(bot, "_service_request_policy", previous_policy)
 
     def process(self, task: WorkerTask) -> WorkerResult:
         if not self._circuit.allow_request():

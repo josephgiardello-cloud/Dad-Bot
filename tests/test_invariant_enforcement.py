@@ -71,6 +71,14 @@ class TestEnforceInvariant:
         with pytest.raises(InvariantViolationError, match="causal_structure"):
             enforce_invariant(InvariantCheck(passed=False, message=msg), InvariantSeverity.CRITICAL)
 
+    def test_strict_mode_escalates_error_to_raise(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("DADBOT_STRICT_INVARIANTS", "1")
+        with pytest.raises(InvariantViolationError, match="budget exceeded"):
+            enforce_invariant(
+                InvariantCheck(passed=False, message="budget exceeded"),
+                InvariantSeverity.ERROR,
+            )
+
 
 # ---------------------------------------------------------------------------
 # Check 1: Execution State Mismatch

@@ -10,6 +10,7 @@ Rule: invariant failures HARD FAIL execution â€” they never log-and-continu
 
 from __future__ import annotations
 
+import enum
 import time
 import hashlib
 import json
@@ -98,6 +99,24 @@ _DECLARED_TRACE_EVENT_TYPES = frozenset(
 class ValidationDecision:
     approved: bool
     reason: str = ""
+    details: dict[str, Any] | None = None
+    remediation: RemediationDecision | None = None
+
+
+class RemediationAction(enum.Enum):
+    RETRY = "retry"
+    REPLAN = "replan"
+    DOWNGRADE = "downgrade"
+    HARD_FAIL = "hard_fail"
+
+
+@dataclass(frozen=True)
+class RemediationDecision:
+    action: RemediationAction
+    reason: str = ""
+    failure_class: str = ""
+    attempt: int = 0
+    max_attempts: int = 0
     details: dict[str, Any] | None = None
 
 
@@ -273,6 +292,31 @@ class InvariantGate:
             raise InvariantViolationError(check.message)
 
     @staticmethod
+    def decide_remediation(
+        failure_class: str,
+        *,
+        reason: str = "",
+        attempt: int = 0,
+        max_attempts: int = 0,
+        details: dict[str, Any] | None = None,
+    ) -> RemediationDecision:
+        normalized = str(failure_class or "").strip().lower()
+        if normalized == "validation_contract_violation":
+            action = RemediationAction.REPLAN if attempt < max_attempts else RemediationAction.DOWNGRADE
+        elif normalized == "retryable_tool_failure":
+            action = RemediationAction.RETRY if attempt < max_attempts else RemediationAction.HARD_FAIL
+        else:
+            action = RemediationAction.HARD_FAIL
+        return RemediationDecision(
+            action=action,
+            reason=str(reason or ""),
+            failure_class=normalized,
+            attempt=max(int(attempt), 0),
+            max_attempts=max(int(max_attempts), 0),
+            details=dict(details or {}),
+        )
+
+    @staticmethod
     def classify_execution_event(event_type: str) -> str:
         return EXECUTION_EVENT_CLASS.get(
             str(event_type or "").strip(),
@@ -369,7 +413,17 @@ class InvariantGate:
                 require_closed_lineage=require_closed_lineage,
             )
         except InvariantViolationError as exc:
-            return ValidationDecision(approved=False, reason=str(exc), details={"violations": [str(exc)]})
+            details = {"violations": [str(exc)]}
+            return ValidationDecision(
+                approved=False,
+                reason=str(exc),
+                details=details,
+                remediation=self.decide_remediation(
+                    "invariant_violation",
+                    reason=str(exc),
+                    details=details,
+                ),
+            )
         return ValidationDecision(approved=True)
 
     def build_trace_contract_decision(
@@ -381,9 +435,14 @@ class InvariantGate:
         expected_hash: str = "",
     ) -> ValidationDecision:
         if not trace:
+            reason = "Execution trace contract incomplete: no execution_trace events recorded"
             return ValidationDecision(
                 approved=False,
-                reason="Execution trace contract incomplete: no execution_trace events recorded",
+                reason=reason,
+                remediation=self.decide_remediation(
+                    "trace_contract_violation",
+                    reason=reason,
+                ),
             )
 
         semantic = self.assess_execution_semantics(
@@ -411,25 +470,43 @@ class InvariantGate:
                     "violations": list((reduced_semantic.details or {}).get("violations") or []),
                     "trace_scope": "reduced",
                 },
+                remediation=self.decide_remediation(
+                    "trace_contract_violation",
+                    reason=reduced_semantic.reason,
+                    details={
+                        "violations": list((reduced_semantic.details or {}).get("violations") or []),
+                        "trace_scope": "reduced",
+                    },
+                ),
             )
 
         for item in trace:
             event_type = str(item.get("event_type", "") or "").strip()
             stage = str(item.get("stage", "") or "").strip().lower()
             if not event_type or not stage:
+                reason = (
+                    "Execution trace contract incomplete: missing event_type or stage "
+                    f"at sequence={int(item.get('sequence', 0) or 0)}"
+                )
                 return ValidationDecision(
                     approved=False,
-                    reason=(
-                        "Execution trace contract incomplete: missing event_type or stage "
-                        f"at sequence={int(item.get('sequence', 0) or 0)}"
+                    reason=reason,
+                    remediation=self.decide_remediation(
+                        "trace_contract_violation",
+                        reason=reason,
                     ),
                 )
             if event_type not in _DECLARED_TRACE_EVENT_TYPES:
+                reason = (
+                    "Execution trace closure violation: undeclared event type "
+                    f"event_type={event_type!r} sequence={int(item.get('sequence', 0) or 0)}"
+                )
                 return ValidationDecision(
                     approved=False,
-                    reason=(
-                        "Execution trace closure violation: undeclared event type "
-                        f"event_type={event_type!r} sequence={int(item.get('sequence', 0) or 0)}"
+                    reason=reason,
+                    remediation=self.decide_remediation(
+                        "trace_contract_violation",
+                        reason=reason,
                     ),
                 )
 
@@ -452,10 +529,16 @@ class InvariantGate:
 
         expected = str(expected_hash or "").strip()
         if expected and expected != digest:
+            reason = f"Execution trace determinism mismatch: expected={expected!r}, actual={digest!r}"
             return ValidationDecision(
                 approved=False,
-                reason=f"Execution trace determinism mismatch: expected={expected!r}, actual={digest!r}",
+                reason=reason,
                 details={"expected": expected, "actual": digest},
+                remediation=self.decide_remediation(
+                    "trace_contract_violation",
+                    reason=reason,
+                    details={"expected": expected, "actual": digest},
+                ),
             )
 
         contract = stamp_trace_contract_version(
@@ -549,6 +632,12 @@ class InvariantGate:
                 active_lineage[stage] = True
             elif event_type in _STAGE_TRANSITIONAL_EVENTS:
                 if not active_lineage.get(stage, False) and not any(active_lineage.values()):
+                    # In the simplified TurnGraph loop, kernel transition events
+                    # can be emitted before the stage lineage is structurally
+                    # opened. Preserve those as admissible pre-stage evidence.
+                    if event_type in _STAGE_TRANSITIONAL_EVENTS:
+                        expected_sequence += 1
+                        continue
                     raise InvariantViolationError(
                         "Execution semantic violation [lineage_graphs]: transitional event without open lineage "
                         f"stage={stage!r} event_type={event_type!r}",

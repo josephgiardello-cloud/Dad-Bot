@@ -65,26 +65,47 @@ PREDICATE_STATUS_OK = "status_ok"
 PREDICATE_HAS_GOALS = "has_goals"
 
 
-def _eval_builtin_predicate(predicate_key: str, source_output: Any) -> bool:
-    if predicate_key == PREDICATE_ALWAYS_TRUE:
-        return True
-    if predicate_key == PREDICATE_RESULT_NONEMPTY:
-        if source_output is None:
-            return False
-        if isinstance(source_output, (list, dict, str, tuple)):
-            return bool(source_output)
-        return True
-    if predicate_key == PREDICATE_STATUS_OK:
-        if isinstance(source_output, dict):
-            return str(source_output.get("status", "ok")).lower() == "ok"
-        return source_output is not None
-    if predicate_key == PREDICATE_HAS_GOALS:
-        if isinstance(source_output, dict):
-            goals = source_output.get("goals", [])
-            return bool(goals)
-        if isinstance(source_output, list):
-            return bool(source_output)
+def _predicate_always_true(_source_output: Any) -> bool:
+    return True
+
+
+def _predicate_result_nonempty(source_output: Any) -> bool:
+    if source_output is None:
         return False
+    if isinstance(source_output, (list, dict, str, tuple)):
+        return bool(source_output)
+    return True
+
+
+def _predicate_status_ok(source_output: Any) -> bool:
+    if isinstance(source_output, dict):
+        return str(source_output.get("status", "ok")).lower() in _OK_STATUSES
+    return source_output is not None
+
+
+def _predicate_has_goals(source_output: Any) -> bool:
+    if isinstance(source_output, dict):
+        goals = source_output.get("goals", [])
+        return bool(goals)
+    if isinstance(source_output, list):
+        return bool(source_output)
+    return False
+
+
+_PREDICATE_HANDLERS: dict[str, Any] = {
+    PREDICATE_ALWAYS_TRUE: _predicate_always_true,
+    PREDICATE_RESULT_NONEMPTY: _predicate_result_nonempty,
+    PREDICATE_STATUS_OK: _predicate_status_ok,
+    PREDICATE_HAS_GOALS: _predicate_has_goals,
+}
+
+_OK_STATUSES: frozenset[str] = frozenset({"ok"})
+
+
+def _eval_builtin_predicate(predicate_key: str, source_output: Any) -> bool:
+    handler = _PREDICATE_HANDLERS.get(str(predicate_key or "").strip())
+    if callable(handler):
+        return bool(handler(source_output))
     # Unknown predicate key → default True (non-blocking).
     return True
 

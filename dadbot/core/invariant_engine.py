@@ -24,11 +24,16 @@ import enum
 import hashlib
 import json
 import logging
+import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 _log = logging.getLogger(__name__)
+
+
+def _strict_invariant_mode() -> bool:
+    return str(os.environ.get("DADBOT_STRICT_INVARIANTS", "")).strip() == "1"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -196,6 +201,11 @@ def enforce_invariant(check: InvariantCheck, severity: InvariantSeverity) -> Non
     from dadbot.core.invariant_gate import InvariantViolationError  # noqa: PLC0415
     if severity == InvariantSeverity.CRITICAL:
         raise InvariantViolationError(check.message)
+    if _strict_invariant_mode() and severity in {
+        InvariantSeverity.ERROR,
+        InvariantSeverity.IMPORTANT,
+    }:
+        raise InvariantViolationError(check.message)
     _log.warning("Invariant warning [%s]: %s", severity.value, check.message)
 
 
@@ -262,7 +272,10 @@ def _DAG_ACYCLIC(state: ExecutionState) -> bool:
     is_acyclic = getattr(state.dag, "is_acyclic", None)
     if callable(is_acyclic):
         return bool(is_acyclic())
-    # Fallback: structural hash is defined → assume valid.
+    # In strict mode, unknown DAG shape is a validation failure.
+    if _strict_invariant_mode() and state.dag is not None:
+        return False
+    # Legacy fallback: unknown DAG implementations are treated as valid.
     return True
 
 
@@ -274,8 +287,9 @@ def _TOOL_EVENTS_HAVE_TYPE(state: ExecutionState) -> bool:
 
 
 def _MEMORY_ENTRIES_HAVE_TEXT(state: ExecutionState) -> bool:
+    required_keys = frozenset({"text", "content", "value"})
     for entry in state.memory_entries:
-        if "text" not in entry and "content" not in entry and "value" not in entry:
+        if not (required_keys & set(entry.keys())):
             return False
     return True
 

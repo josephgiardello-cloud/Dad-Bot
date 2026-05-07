@@ -4,7 +4,9 @@ import atexit
 import json
 import os
 import pathlib
+import webbrowser
 from typing import Any
+from urllib.parse import urlparse
 
 from Dad import DadBot
 
@@ -15,6 +17,26 @@ except ImportError:  # pragma: no cover - optional dependency
 
 
 _BOT: DadBot | None = None
+_LOCAL_MCP_TOOL_NAMES = [
+    "runtime_health_snapshot",
+    "maintenance_snapshot",
+    "workshop_snapshot",
+    "memory_snapshot",
+    "memory_search",
+    "add_reminder",
+    "list_reminders",
+    "add_calendar_event",
+    "list_calendar_events",
+    "draft_email",
+    "read_local_state",
+    "write_local_state",
+    "heritage_cross_link_query",
+    "browser_capabilities",
+    "browser_open_url",
+    "computer_list_directory",
+    "computer_read_text_file",
+    "computer_write_text_file",
+]
 
 
 def mcp_available() -> bool:
@@ -60,9 +82,28 @@ def local_mcp_status(bot: DadBot | None = None) -> dict[str, Any]:
         "available": mcp_available(),
         "configured": mcp_available(),
         "server_name": "dadbot-local-services",
-        "tool_count": 13,
+        "tool_count": len(_LOCAL_MCP_TOOL_NAMES),
+        "tool_names": list(_LOCAL_MCP_TOOL_NAMES),
+        "capabilities": ["memory", "calendar", "email", "browser", "filesystem"],
         "local_state_entries": len(local_store),
     }
+
+
+def _project_root() -> pathlib.Path:
+    return pathlib.Path(__file__).resolve().parent.parent
+
+
+def _resolve_workspace_path(path: str, *, allow_create: bool = False) -> pathlib.Path:
+    candidate = pathlib.Path(str(path or "").strip() or ".")
+    root = _project_root()
+    resolved = (root / candidate).resolve() if not candidate.is_absolute() else candidate.resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("path must stay within the Dad-Bot workspace") from exc
+    if allow_create:
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+    return resolved
 
 
 def build_server(bot: DadBot | None = None):
@@ -165,6 +206,77 @@ def build_server(bot: DadBot | None = None):
                 str(context or ""), max_links=max(1, int(max_links or 3))
             )
         )
+
+    @server.tool()
+    def browser_capabilities() -> dict[str, Any]:
+        """Describe DadBot's local browser/computer-use capabilities."""
+        payload = dict(local_mcp_status(_get_bot(bot)) or {})
+        payload["workspace_root"] = str(_project_root())
+        payload["browser_actions"] = ["open_url"]
+        payload["computer_actions"] = ["list_directory", "read_text_file", "write_text_file"]
+        return _json_safe(payload)
+
+    @server.tool()
+    def browser_open_url(url: str) -> dict[str, Any]:
+        """Open a browser URL using the local machine default browser."""
+        normalized_url = str(url or "").strip()
+        parsed = urlparse(normalized_url)
+        if parsed.scheme not in {"http", "https", "file"}:
+            raise ValueError("url must use http, https, or file scheme")
+        opened = bool(webbrowser.open(normalized_url, new=2))
+        runtime = _get_bot(bot)
+        runtime.mutate_memory_store(
+            mcp_local_store={
+                **dict(runtime.MEMORY_STORE.get("mcp_local_store") or {}),
+                "last_browser_action": {"url": normalized_url, "opened": opened},
+            }
+        )
+        return {"url": normalized_url, "opened": opened}
+
+    @server.tool()
+    def computer_list_directory(path: str = ".", limit: int = 40) -> dict[str, Any]:
+        """List files inside the Dad-Bot workspace."""
+        target = _resolve_workspace_path(path)
+        if not target.exists() or not target.is_dir():
+            raise ValueError("path must resolve to an existing directory inside the workspace")
+        entries = []
+        for item in sorted(target.iterdir(), key=lambda value: value.name.lower())[: max(1, int(limit or 1))]:
+            entry = {
+                "name": item.name,
+                "path": str(item.relative_to(_project_root())),
+                "kind": "directory" if item.is_dir() else "file",
+            }
+            if item.is_file():
+                entry["size"] = item.stat().st_size
+            entries.append(entry)
+        return {"path": str(target.relative_to(_project_root())), "entries": entries}
+
+    @server.tool()
+    def computer_read_text_file(path: str, max_chars: int = 4000) -> dict[str, Any]:
+        """Read a UTF-8 text file from the Dad-Bot workspace."""
+        target = _resolve_workspace_path(path)
+        if not target.exists() or not target.is_file():
+            raise ValueError("path must resolve to an existing file inside the workspace")
+        content = target.read_text(encoding="utf-8")
+        clipped = content[: max(1, int(max_chars or 1))]
+        return {
+            "path": str(target.relative_to(_project_root())),
+            "content": clipped,
+            "truncated": len(clipped) < len(content),
+        }
+
+    @server.tool()
+    def computer_write_text_file(path: str, content: str, append: bool = False) -> dict[str, Any]:
+        """Write a UTF-8 text file inside the Dad-Bot workspace."""
+        target = _resolve_workspace_path(path, allow_create=True)
+        mode = "a" if append else "w"
+        with target.open(mode, encoding="utf-8") as handle:
+            handle.write(str(content or ""))
+        return {
+            "path": str(target.relative_to(_project_root())),
+            "bytes_written": len(str(content or "").encode("utf-8")),
+            "appended": bool(append),
+        }
 
     if hasattr(server, "resource"):
 

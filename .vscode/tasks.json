@@ -97,8 +97,16 @@
 			"type": "shell",
 			"command": "c:/Users/josep/OneDrive/Desktop/Dad-Bot/.venv/Scripts/python.exe",
 			"args": [
-				"Dad.py"
+				"Dad.py",
+				"--model",
+				"llama3.2:latest"
 			],
+			"options": {
+				"env": {
+					"DADBOT_STORY_MODE_PASSWORD": "4825",
+					"DADBOT_LLM_MODEL": "llama3.2:latest"
+				}
+			},
 			"isBackground": true,
 			"group": "build"
 		},

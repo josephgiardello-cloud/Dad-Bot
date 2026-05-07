@@ -397,6 +397,7 @@ class DadBotBootMixin:
         self,
         model_name: str = "llama3.2",
         fallback_models: tuple[str, ...] = (
+            "llama3.1:8b",
             "phi4:mini",
             "qwen3.5:4b",
             "gemma3:4b",

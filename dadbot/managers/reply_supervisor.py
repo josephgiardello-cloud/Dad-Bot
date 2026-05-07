@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 import time
 
@@ -12,6 +11,7 @@ from dadbot.models import (
     SupervisorDecisionState,
     SupervisorJudgment,
 )
+from dadbot.services.llm_parser import call_json_object_async, call_json_object_sync
 from dadbot.utils import json_dumps
 
 
@@ -141,21 +141,22 @@ class ReplySupervisorManager:
 
     def _finalize_supervisor_response(
         self,
-        content: str,
+        payload: dict[str, object],
         candidate_reply: str,
         *,
         stage: str,
         started_at: float,
     ) -> str:
-        try:
-            judgment = self.bot.parse_model_json_content(content)
-        except (json.JSONDecodeError, TypeError):
+        judgment_model = self._coerce_supervisor_judgment(payload, stage=stage)
+        if judgment_model is None:
             self.bot._last_reply_supervisor = self._supervisor_state(
                 stage,
-                "invalid_json",
+                "invalid_payload",
                 duration_ms=self._elapsed_ms(started_at),
             )
             return candidate_reply
+
+        judgment = judgment_model.model_dump(mode="python")
 
         self.bot._last_reply_supervisor = {
             **dict(self.bot._last_reply_supervisor or {}),
@@ -322,8 +323,8 @@ Draft reply: {json_dumps(draft_reply)}
             )
             return candidate_reply
 
-        try:
-            response = self.bot.call_ollama_chat(
+        parsed = call_json_object_sync(
+            call_llm=lambda: self.bot.call_ollama_chat(
                 messages=self._supervisor_messages(
                     user_input,
                     candidate_reply,
@@ -332,24 +333,30 @@ Draft reply: {json_dumps(draft_reply)}
                 options={"temperature": 0.0},
                 response_format="json",
                 purpose="reply supervisor",
-            )
-            content = self.bot.extract_ollama_message_content(response)
-        except (RuntimeError, KeyError, TypeError) as exc:
-            self.bot.record_runtime_issue(
-                "reply supervisor",
-                "keeping the draft reply without supervisor refinement",
-                exc,
-                level=logging.INFO,
-            )
-            self._record_supervisor_failure(stage, "error", started_at)
+            ),
+            extract_content=self.bot.extract_ollama_message_content,
+            parse_json=self.bot.parse_model_json_content,
+            max_attempts=2,
+        )
+        if parsed is None:
+            self._record_supervisor_failure(stage, "invalid_json", started_at)
             return candidate_reply
 
-        return self._finalize_supervisor_response(
-            content,
-            candidate_reply,
-            stage=stage,
-            started_at=started_at,
-        )
+        for _attempt in range(2):
+            refined = self._finalize_supervisor_response(
+                parsed,
+                candidate_reply,
+                stage=stage,
+                started_at=started_at,
+            )
+            if refined != candidate_reply:
+                return refined
+            state = dict(self.bot._last_reply_supervisor or {})
+            if str(state.get("source") or "") not in {"invalid_json", "invalid_payload"}:
+                return refined
+
+        self._record_supervisor_failure(stage, "invalid_json", started_at)
+        return candidate_reply
 
     async def run_reply_supervisor_async(
         self,
@@ -367,8 +374,8 @@ Draft reply: {json_dumps(draft_reply)}
             )
             return candidate_reply
 
-        try:
-            response = await self.bot.call_ollama_chat_async(
+        parsed = await call_json_object_async(
+            call_llm=lambda: self.bot.call_ollama_chat_async(
                 messages=self._supervisor_messages(
                     user_input,
                     candidate_reply,
@@ -377,24 +384,30 @@ Draft reply: {json_dumps(draft_reply)}
                 options={"temperature": 0.0},
                 response_format="json",
                 purpose="reply supervisor",
-            )
-            content = self.bot.extract_ollama_message_content(response)
-        except (RuntimeError, KeyError, TypeError) as exc:
-            self.bot.record_runtime_issue(
-                "reply supervisor",
-                "keeping the draft reply without supervisor refinement",
-                exc,
-                level=logging.INFO,
-            )
-            self._record_supervisor_failure(stage, "error", started_at)
+            ),
+            extract_content=self.bot.extract_ollama_message_content,
+            parse_json=self.bot.parse_model_json_content,
+            max_attempts=2,
+        )
+        if parsed is None:
+            self._record_supervisor_failure(stage, "invalid_json", started_at)
             return candidate_reply
 
-        return self._finalize_supervisor_response(
-            content,
-            candidate_reply,
-            stage=stage,
-            started_at=started_at,
-        )
+        for _attempt in range(2):
+            refined = self._finalize_supervisor_response(
+                parsed,
+                candidate_reply,
+                stage=stage,
+                started_at=started_at,
+            )
+            if refined != candidate_reply:
+                return refined
+            state = dict(self.bot._last_reply_supervisor or {})
+            if str(state.get("source") or "") not in {"invalid_json", "invalid_payload"}:
+                return refined
+
+        self._record_supervisor_failure(stage, "invalid_json", started_at)
+        return candidate_reply
 
     def build_reply_supervisor_context(self, current_mood):
         relationship = self.bot.relationship.snapshot()

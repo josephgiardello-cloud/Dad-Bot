@@ -39,6 +39,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from evaluation.coherence_engine import CoherenceEngine
 from tests.scenario_suite import SCENARIOS, Scenario
 from tests.scoring_engine import CapabilityScore, ScoringEngine
 from tests.trace_schema import NormalizedTrace
@@ -110,6 +111,7 @@ class BenchmarkRunner:
     """
 
     _scoring_engine = ScoringEngine()
+    _coherence_engine = CoherenceEngine()
 
     def __init__(
         self,
@@ -171,9 +173,160 @@ class BenchmarkRunner:
         )
 
     @staticmethod
-    def _condense_capability_score(capability_score: dict[str, Any] | None) -> dict[str, Any] | None:
+    def _extract_planner_diagnostics(
+        normalized: NormalizedTrace | None,
+        scenario: Scenario | None = None,
+    ) -> dict[str, float]:
+        planner = getattr(normalized, "planner", None) if normalized is not None else None
+        if planner is None:
+            return {
+                "plan_length": 0.0,
+                "branching_factor": 0.0,
+                "revision_count": 0.0,
+                "dependency_correctness": 0.0,
+            }
+
+        plan_length = float(max(int(getattr(planner, "step_count", 0) or 0), 0))
+        branching_factor = float(max(getattr(planner, "branching_factor", lambda: 0.0)() or 0.0, 0.0))
+        revision_count = float(max(int(getattr(planner, "replan_count", 0) or 0), 0))
+
+        deps = list(getattr(planner, "dependencies", []) or [])
+        dep_count = len(deps)
+        if plan_length <= 0:
+            dependency_correctness = 0.0
+        else:
+            max_edges = max((int(plan_length) * max(int(plan_length) - 1, 0)) / 2.0, 1.0)
+            structure_score = 1.0 if dep_count <= max_edges else max(0.0, 1.0 - ((dep_count - max_edges) / max_edges))
+
+            expects_dependencies = False
+            if scenario is not None:
+                caps = [str(item or "").lower() for item in list(getattr(scenario, "expected_capabilities", []) or [])]
+                expects_dependencies = any("dependenc" in item for item in caps)
+            if expects_dependencies and dep_count == 0:
+                dependency_correctness = 0.0
+            elif not expects_dependencies and dep_count == 0:
+                dependency_correctness = 1.0
+            else:
+                dependency_correctness = float(max(0.0, min(1.0, structure_score)))
+
+        return {
+            "plan_length": plan_length,
+            "branching_factor": round(branching_factor, 4),
+            "revision_count": revision_count,
+            "dependency_correctness": round(dependency_correctness, 4),
+        }
+
+    def _extract_phase45_diagnostics(
+        self,
+        normalized: NormalizedTrace | None,
+        scenario: Scenario | None = None,
+    ) -> dict[str, Any]:
+        raw_state = dict(getattr(normalized, "raw_state", {}) or {}) if normalized is not None else {}
+        coherence = self._coherence_engine.score(raw_state)
+
+        ux = dict(raw_state.get("ux_trace") or raw_state.get("ux_feedback") or {})
+        memory_causal = dict(raw_state.get("memory_causal_trace") or {})
+        tool_failure_semantics = [
+            item
+            for item in list(raw_state.get("tool_failure_semantics") or [])
+            if isinstance(item, dict)
+        ]
+
+        wrong_tool_count = 0
+        for item in tool_failure_semantics:
+            failure_class = str(item.get("failure_class") or "").strip().lower()
+            if failure_class == "wrong_tool":
+                wrong_tool_count += 1
+
+        expected_tool_use = True
+        min_tool_calls = 0
+        if scenario is not None:
+            spec = dict(getattr(scenario, "behavioral_spec", {}) or {})
+            expected_tool_use = bool(spec.get("expected_tool_use", True))
+            min_tool_calls = max(int(spec.get("min_tool_calls") or 0), 0)
+
+        tool_count = len(list(getattr(normalized, "tools", []) or [])) if normalized is not None else 0
+        semantic_total = len(tool_failure_semantics)
+
+        optimality = 1.0
+        if expected_tool_use and tool_count == 0:
+            optimality = 0.0
+        elif (not expected_tool_use) and tool_count > 0:
+            optimality = 0.6
+
+        if min_tool_calls > 0 and tool_count < min_tool_calls:
+            optimality *= tool_count / float(min_tool_calls)
+
+        if semantic_total > 0:
+            optimality *= max(0.0, 1.0 - (wrong_tool_count / float(semantic_total)))
+
+        contradiction_count = 0
+        contradictions_seen: set[str] = set()
+
+        for item in list(raw_state.get("memory_contradictions") or []):
+            if isinstance(item, dict):
+                key = str(item.get("reason") or item.get("message") or item)
+            else:
+                key = str(item)
+            key = key.strip()
+            if key:
+                contradictions_seen.add(key)
+
+        for item in list(raw_state.get("contradictions") or []):
+            key = str(item or "").strip()
+            if key:
+                contradictions_seen.add(key)
+
+        memory_structured = dict(raw_state.get("memory_structured") or {})
+        for value in memory_structured.values():
+            if not isinstance(value, dict):
+                continue
+            for item in list(value.get("contradictions") or []):
+                key = str(item or "").strip()
+                if key:
+                    contradictions_seen.add(key)
+
+        for penalty in list(coherence.penalties or []):
+            key = str(penalty or "").strip().lower()
+            if "contradiction" in key:
+                contradictions_seen.add(key)
+
+        contradiction_count = len(contradictions_seen)
+        contradiction_detected = contradiction_count > 0
+        user_confusion_detected = bool(ux.get("user_confusion_detected", False))
+
+        if not contradiction_detected:
+            contradiction_resolution = 1.0
+        elif user_confusion_detected:
+            contradiction_resolution = 0.3
+        elif bool(memory_causal.get("influenced_final_response", False)):
+            contradiction_resolution = 1.0
+        else:
+            contradiction_resolution = 0.7
+
+        return {
+            "coherence_score": round(float(coherence.score), 4),
+            "coherence_penalty_count": int(len(list(coherence.penalties or []))),
+            "contradiction_detected": bool(contradiction_detected),
+            "contradiction_count": int(contradiction_count),
+            "contradiction_resolution": round(float(contradiction_resolution), 4),
+            "tool_selection_optimality": round(max(0.0, min(1.0, float(optimality))), 4),
+        }
+
+    @staticmethod
+    def _condense_capability_score(
+        capability_score: dict[str, Any] | None,
+        *,
+        scenario: Scenario | None = None,
+        execution_steps: int = 0,
+        execution_error_class: str = "none",
+        planner_diagnostics: dict[str, float] | None = None,
+        phase45_diagnostics: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
         if not isinstance(capability_score, dict):
             return None
+
+        subsystem_names = ("planning", "tools", "memory", "ux", "robustness")
 
         def _subsystem_value(name: str) -> float:
             section = capability_score.get(name)
@@ -181,13 +334,83 @@ class BenchmarkRunner:
                 return float(section.get("score") or 0.0)
             return 0.0
 
+        def _subsystem_partial_success(name: str) -> float:
+            section = capability_score.get(name)
+            if isinstance(section, dict):
+                return 1.0 if bool(section.get("partial_success")) else 0.0
+            return 0.0
+
+        def _signal_value(name: str, signal_name: str) -> float | None:
+            section = capability_score.get(name)
+            if not isinstance(section, dict):
+                return None
+            for item in list(section.get("signals") or []):
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("name") or "").strip() != signal_name:
+                    continue
+                value = item.get("value")
+                if value is None:
+                    continue
+                return float(value)
+            return None
+
+        max_steps = 0
+        quality_threshold = 0.0
+        if scenario is not None:
+            spec = dict(getattr(scenario, "behavioral_spec", {}) or {})
+            max_steps = max(int(spec.get("max_steps") or 0), 0)
+            quality_threshold = max(float(spec.get("quality_threshold") or 0.0), 0.0)
+
+        actual_steps = max(int(execution_steps), 0)
+        if max_steps <= 0:
+            step_efficiency = 1.0
+        elif actual_steps <= 0:
+            step_efficiency = 0.0
+        elif actual_steps <= max_steps:
+            step_efficiency = 1.0
+        else:
+            step_efficiency = max(0.0, min(1.0, max_steps / float(actual_steps)))
+
+        partial_success_values = [_subsystem_partial_success(name) for name in subsystem_names]
+        partial_success = sum(partial_success_values) / max(len(partial_success_values), 1)
+
+        tool_correctness = _signal_value("tools", "tool_success_rate")
+        if tool_correctness is None:
+            tool_correctness = _subsystem_value("tools")
+
+        subsystem_coverage = (
+            sum(1.0 for name in subsystem_names if isinstance(capability_score.get(name), dict))
+            / float(len(subsystem_names))
+        )
+
+        overall = float(capability_score.get("overall") or 0.0)
+        quality_threshold_met = True if quality_threshold <= 0.0 else overall >= quality_threshold
+
         return {
-            "overall": float(capability_score.get("overall") or 0.0),
+            "overall": overall,
             "planning": _subsystem_value("planning"),
             "tools": _subsystem_value("tools"),
             "memory": _subsystem_value("memory"),
             "ux": _subsystem_value("ux"),
             "robustness": _subsystem_value("robustness"),
+            "partial_success": round(partial_success, 4),
+            "tool_correctness": round(float(tool_correctness), 4),
+            "step_efficiency": round(step_efficiency, 4),
+            "failure_type": str(execution_error_class or "none"),
+            "quality_threshold": round(quality_threshold, 4),
+            "quality_threshold_met": bool(quality_threshold_met),
+            "subsystem_coverage": round(subsystem_coverage, 4),
+            "plan_length": float((planner_diagnostics or {}).get("plan_length") or 0.0),
+            "branching_factor": float((planner_diagnostics or {}).get("branching_factor") or 0.0),
+            "revision_count": float((planner_diagnostics or {}).get("revision_count") or 0.0),
+            "dependency_correctness": float((planner_diagnostics or {}).get("dependency_correctness") or 0.0),
+            "coherence_score": float((phase45_diagnostics or {}).get("coherence_score") or 0.0),
+            "coherence_penalty_count": int((phase45_diagnostics or {}).get("coherence_penalty_count") or 0),
+            "contradiction_detected": bool((phase45_diagnostics or {}).get("contradiction_detected") or False),
+            "contradiction_count": int((phase45_diagnostics or {}).get("contradiction_count") or 0),
+            "contradiction_resolution": float((phase45_diagnostics or {}).get("contradiction_resolution") or 0.0),
+            "tool_selection_optimality": float((phase45_diagnostics or {}).get("tool_selection_optimality") or 0.0),
         }
 
     def _ensure_orchestrator_sandbox(self) -> None:
@@ -439,7 +662,16 @@ class BenchmarkRunner:
             error=trace.error,
             trace_available=normalized is not None,
         )
-        condensed_capability_score = self._condense_capability_score(capability_score)
+        planner_diagnostics = self._extract_planner_diagnostics(normalized, scenario)
+        phase45_diagnostics = self._extract_phase45_diagnostics(normalized, scenario)
+        condensed_capability_score = self._condense_capability_score(
+            capability_score,
+            scenario=scenario,
+            execution_steps=trace.steps,
+            execution_error_class=execution_result.execution_error_class,
+            planner_diagnostics=planner_diagnostics,
+            phase45_diagnostics=phase45_diagnostics,
+        )
 
         return {
             "scenario": scenario.name,
@@ -536,7 +768,16 @@ class BenchmarkRunner:
             error=trace.error,
             trace_available=True,
         )
-        condensed_capability_score = self._condense_capability_score(capability_score)
+        planner_diagnostics = self._extract_planner_diagnostics(normalized, scenario)
+        phase45_diagnostics = self._extract_phase45_diagnostics(normalized, scenario)
+        condensed_capability_score = self._condense_capability_score(
+            capability_score,
+            scenario=scenario,
+            execution_steps=trace.steps,
+            execution_error_class=execution_result.execution_error_class,
+            planner_diagnostics=planner_diagnostics,
+            phase45_diagnostics=phase45_diagnostics,
+        )
 
         return {
             "scenario": scenario.name,

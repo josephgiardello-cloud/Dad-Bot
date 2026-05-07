@@ -23,6 +23,7 @@ llm = [
     "litellm>=1.50.0",
 ]
 service = [
+    "cryptography>=43.0",
     "fastapi>=0.116",
     "uvicorn>=0.35",
     "redis>=6.0",

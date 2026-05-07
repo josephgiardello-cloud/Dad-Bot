@@ -14,6 +14,15 @@ _WEB_SEARCH_ONLY_TOOL_NAME = "web_search"
 class DadBotActionMixin:
     """Convenience actions layered on top of the manager-owned runtime surface."""
 
+    @staticmethod
+    def _service_allowed_tools(policy: Any) -> set[str] | None:
+        if not isinstance(policy, dict):
+            return None
+        raw_tools = policy.get("allowed_tools")
+        if raw_tools is None:
+            return None
+        return {str(tool_name or "").strip() for tool_name in list(raw_tools or []) if str(tool_name or "").strip()}
+
     def authorize_tool_execution(self, tool_name: str) -> bool:
         """Single authority for whether a named tool may be executed.
 
@@ -21,7 +30,14 @@ class DadBotActionMixin:
         this method.  The service layer MUST NOT maintain its own tool
         allowlists — this is the only decision point.
         """
-        return str(tool_name or "").strip() in _AUTHORIZED_TOOL_NAMES
+        normalized_tool_name = str(tool_name or "").strip()
+        if normalized_tool_name not in _AUTHORIZED_TOOL_NAMES:
+            return False
+        service_policy = getattr(self, "_service_request_policy", None)
+        allowed_tools = self._service_allowed_tools(service_policy)
+        if allowed_tools is None:
+            return True
+        return normalized_tool_name in allowed_tools
 
     def authorize_tool_execution_for_bias(self, tool_name: str, tool_bias: str) -> bool:
         """Bias-aware tool authorization owned by the runtime contract.

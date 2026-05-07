@@ -89,6 +89,7 @@ class LedgerMutationOp(StrEnum):
     SCHEDULE_MAINTENANCE = "schedule_maintenance"
     HEALTH_SNAPSHOT = "health_snapshot"
     CAPABILITY_AUDIT_EVENT = "capability_audit_event"
+    POLICY_TRACE_EVENT = "policy_trace_event"
 
 
 class GoalMutationOp(StrEnum):

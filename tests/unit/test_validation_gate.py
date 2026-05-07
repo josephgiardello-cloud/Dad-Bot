@@ -120,6 +120,9 @@ def test_repair_loop_succeeds_when_planner_fixes_args():
     ), f"Expected repaired request in tool_ir; got: {remaining}"
     # No extra stripping record should exist
     assert "validation_gate" not in ctx.state["tool_ir"]
+    repair = dict(ctx.state.get("_validation_gate_repair") or {})
+    remediation = dict(repair.get("remediation") or {})
+    assert remediation.get("action") == "replan"
 
 
 def test_current_time_no_required_args_passes():
@@ -149,11 +152,11 @@ def test_empty_tool_ir_is_noop():
 
 def test_memory_lookup_contract_result_on_missing_query():
     """Direct dispatch: memory_lookup with no query returns ToolContractResult(CONTRACT_VIOLATION)."""
-    from dadbot.core.nodes import _dispatch_builtin_tool
+    from dadbot.core.nodes import dispatch_registered_tool
     from dadbot.core.tool_ir import ToolContractResult, ToolStatus
 
     ctx = TurnContext(user_input="test")
-    result = _dispatch_builtin_tool("memory_lookup", {}, ctx)
+    result = dispatch_registered_tool("memory_lookup", {}, ctx)
 
     assert isinstance(result, ToolContractResult)
     assert result.status == ToolStatus.CONTRACT_VIOLATION
@@ -163,13 +166,34 @@ def test_memory_lookup_contract_result_on_missing_query():
 
 def test_memory_lookup_contract_result_on_valid_query():
     """Direct dispatch: memory_lookup with query returns ToolContractResult(SUCCESS)."""
-    from dadbot.core.nodes import _dispatch_builtin_tool
+    from dadbot.core.nodes import dispatch_registered_tool
     from dadbot.core.tool_ir import ToolContractResult, ToolStatus
 
     ctx = TurnContext(user_input="test")
     ctx.state["memories"] = [{"text": "some memory"}]
-    result = _dispatch_builtin_tool("memory_lookup", {"query": "find goals"}, ctx)
+    result = dispatch_registered_tool("memory_lookup", {"query": "find goals"}, ctx)
 
     assert isinstance(result, ToolContractResult)
     assert result.status == ToolStatus.SUCCESS
     assert result.data is not None
+
+
+def test_missing_required_arg_records_downgrade_after_repair_exhaustion():
+    ctx = _make_ctx([{"tool_name": "memory_lookup", "args": {}}])
+    node = ValidationGateNode()
+
+    async def _planner_noop(self, turn_context):
+        pass
+
+    import dadbot.core.graph_pipeline_nodes as gpn
+    original_run = gpn.PlannerNode.run
+    gpn.PlannerNode.run = _planner_noop
+    try:
+        asyncio.run(node.execute(None, ctx))
+    finally:
+        gpn.PlannerNode.run = original_run
+
+    gate_record = dict(ctx.state["tool_ir"].get("validation_gate") or {})
+    remediation = dict(gate_record.get("remediation") or {})
+    assert remediation.get("action") == "downgrade"
+    assert remediation.get("failure_class") == "validation_contract_violation"

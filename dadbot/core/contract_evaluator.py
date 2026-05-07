@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+from collections.abc import Mapping
 from typing import Any, Callable, Literal, Protocol, TypeAlias
 
 from pydantic import BaseModel, Field
@@ -95,7 +96,7 @@ class TurnResponse(BaseModel):
     tools_invoked: list[ToolRecord] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
-    def as_result(self) -> dict[str, Any]:
+    def as_result(self) -> Mapping[str, Any]:
         """Materialize response for external consumption."""
         return {
             "response": self.response_text,
@@ -174,7 +175,7 @@ CAPABILITY_CONTRACTS: dict[str, dict[str, Any]] = {
 }
 
 
-def capability_contracts() -> dict[str, dict[str, Any]]:
+def capability_contracts() -> Mapping[str, Mapping[str, Any]]:
     """Get the capability contract registry."""
     return CAPABILITY_CONTRACTS.copy()
 
@@ -238,7 +239,7 @@ def get_evaluation_contract() -> EvaluationContract:
     )
 
 
-def evaluation_contract_payload() -> dict[str, Any]:
+def evaluation_contract_payload() -> Mapping[str, Any]:
     """Get contract payload for serialization."""
     contract = get_evaluation_contract()
     return {

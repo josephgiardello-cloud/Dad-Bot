@@ -5,6 +5,7 @@ import logging
 import re
 
 from dadbot.models import OutputModerationDecision
+from dadbot.services.llm_parser import call_json_object_async, call_json_object_sync
 
 logger = logging.getLogger(__name__)
 
@@ -354,8 +355,8 @@ Reply: {json.dumps(str(candidate_reply or ""))}
             self.bot._last_output_moderation = decision
             return candidate_reply
 
-        try:
-            response = self.bot.call_ollama_chat(
+        parsed = call_json_object_sync(
+            call_llm=lambda: self.bot.call_ollama_chat(
                 messages=[
                     {
                         "role": "user",
@@ -369,10 +370,14 @@ Reply: {json.dumps(str(candidate_reply or ""))}
                 options={"temperature": 0.0},
                 response_format="json",
                 purpose="output moderation",
-            )
-            content = self.bot.extract_ollama_message_content(response)
-            parsed = self.bot.parse_model_json_content(content)
-        except Exception as exc:
+            ),
+            extract_content=self.bot.extract_ollama_message_content,
+            parse_json=self.bot.parse_model_json_content,
+            max_attempts=2,
+        )
+
+        if parsed is None:
+            exc = RuntimeError("output moderation failed")
             decision = self._normalize_moderation_decision(
                 {
                     "approved": True,
@@ -389,21 +394,6 @@ Reply: {json.dumps(str(candidate_reply or ""))}
                 "keeping reply after moderation failure",
                 exc,
                 level=logging.INFO,
-            )
-            self.bot._last_output_moderation = decision
-            return candidate_reply
-
-        if not isinstance(parsed, dict):
-            decision = self._normalize_moderation_decision(
-                {
-                    "approved": True,
-                    "action": "allow",
-                    "category": "invalid_payload",
-                    "source": "llm",
-                    "reason": "Moderation returned an unexpected payload.",
-                    "revised_reply": candidate_reply,
-                },
-                default_reply=candidate_reply,
             )
             self.bot._last_output_moderation = decision
             return candidate_reply
@@ -486,8 +476,8 @@ Reply: {json.dumps(str(candidate_reply or ""))}
             self.bot._last_output_moderation = decision
             return candidate_reply
 
-        try:
-            response = await self.bot.call_ollama_chat_async(
+        parsed = await call_json_object_async(
+            call_llm=lambda: self.bot.call_ollama_chat_async(
                 messages=[
                     {
                         "role": "user",
@@ -501,10 +491,14 @@ Reply: {json.dumps(str(candidate_reply or ""))}
                 options={"temperature": 0.0},
                 response_format="json",
                 purpose="output moderation",
-            )
-            content = self.bot.extract_ollama_message_content(response)
-            parsed = self.bot.parse_model_json_content(content)
-        except Exception as exc:
+            ),
+            extract_content=self.bot.extract_ollama_message_content,
+            parse_json=self.bot.parse_model_json_content,
+            max_attempts=2,
+        )
+
+        if parsed is None:
+            exc = RuntimeError("output moderation failed")
             decision = self._normalize_moderation_decision(
                 {
                     "approved": True,
@@ -521,21 +515,6 @@ Reply: {json.dumps(str(candidate_reply or ""))}
                 "keeping reply after moderation failure",
                 exc,
                 level=logging.INFO,
-            )
-            self.bot._last_output_moderation = decision
-            return candidate_reply
-
-        if not isinstance(parsed, dict):
-            decision = self._normalize_moderation_decision(
-                {
-                    "approved": True,
-                    "action": "allow",
-                    "category": "invalid_payload",
-                    "source": "llm",
-                    "reason": "Moderation returned an unexpected payload.",
-                    "revised_reply": candidate_reply,
-                },
-                default_reply=candidate_reply,
             )
             self.bot._last_output_moderation = decision
             return candidate_reply

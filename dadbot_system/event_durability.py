@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
 
+from .security import EncryptedJsonCodec
+
 
 def _utc_now_iso() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
@@ -43,10 +45,21 @@ class SQLiteEventDurabilityStore:
     - recovery replays persisted history, not recomputed heuristics
     """
 
-    def __init__(self, db_path: str | Path):
+    def __init__(self, db_path: str | Path, *, encryption_key: str = ""):
         self.db_path = str(db_path)
+        self._codec = EncryptedJsonCodec(encryption_key) if str(encryption_key or "").strip() else None
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self._init_schema()
+
+    def _encode_payload(self, payload: dict[str, Any]) -> str:
+        if self._codec is None:
+            return json.dumps(payload, sort_keys=True, default=str)
+        return self._codec.encode(payload)
+
+    def _decode_payload(self, payload_json: str) -> dict[str, Any]:
+        if self._codec is None:
+            return dict(json.loads(str(payload_json)))
+        return self._codec.decode(str(payload_json))
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
@@ -140,15 +153,14 @@ class SQLiteEventDurabilityStore:
         ).fetchone()
         return str(row[0] if row and row[0] is not None else "")
 
-    @staticmethod
-    def _row_to_event(row: sqlite3.Row) -> DurableEvent:
+    def _row_to_event(self, row: sqlite3.Row) -> DurableEvent:
         return DurableEvent(
             sequence_id=int(row["sequence_id"]),
             event_id=str(row["event_id"] or ""),
             run_id=str(row["run_id"]),
             event_type=str(row["event_type"]),
             event_time=str(row["event_time"]),
-            payload=dict(json.loads(str(row["payload_json"]))),
+            payload=self._decode_payload(str(row["payload_json"] or "")),
             payload_hash=str(row["payload_hash"]),
             previous_event_hash=str(row["previous_event_hash"] or ""),
             event_hash=str(row["event_hash"] or ""),
@@ -239,7 +251,7 @@ class SQLiteEventDurabilityStore:
                     str(run_id),
                     str(event_type),
                     ts,
-                    json.dumps(encoded_payload, sort_keys=True, default=str),
+                    self._encode_payload(encoded_payload),
                     payload_hash,
                     previous_event_hash,
                     event_hash,
@@ -335,7 +347,7 @@ class SQLiteEventDurabilityStore:
                 (
                     str(run_id),
                     int(event_sequence_id),
-                    json.dumps(serialized_state, sort_keys=True, default=str),
+                    self._encode_payload(serialized_state),
                     resolved_state_hash,
                     _utc_now_iso(),
                 ),
@@ -361,7 +373,7 @@ class SQLiteEventDurabilityStore:
             "checkpoint_id": int(row["checkpoint_id"]),
             "run_id": str(row["run_id"]),
             "event_sequence_id": int(row["event_sequence_id"]),
-            "state": dict(json.loads(str(row["state_json"]))),
+            "state": self._decode_payload(str(row["state_json"] or "")),
             "state_hash": str(row["state_hash"]),
             "created_at": str(row["created_at"]),
         }

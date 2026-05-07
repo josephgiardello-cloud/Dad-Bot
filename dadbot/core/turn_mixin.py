@@ -647,8 +647,8 @@ class DadBotTurnMixin:
                     if last_ctx is not None:
                         mood = str(getattr(last_ctx, "state", {}).get("mood") or "neutral")
                     dad_reply = blend_daily_checkin_reply(dad_reply, mood)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Daily check-in blend failed (non-fatal): %s", exc)
                 if not isinstance(dad_reply, str):
                     dad_reply = None if dad_reply is None else str(dad_reply)
         return cast(str | None, dad_reply), should_end

@@ -93,6 +93,12 @@ def deterministic_tool_id(tool_name: str, args: dict[str, Any]) -> str:
 def normalize_tool_results(
     values: list[ToolResult | dict[str, Any]],
 ) -> list[dict[str, Any]]:
+    """Normalize tool results with runtime type safety.
+    
+    FIX: Added explicit type checking to prevent dict() constructor
+    from accidentally receiving non-dict types (e.g., strings) which
+    would raise ValueError at runtime.
+    """
     normalized: list[dict[str, Any]] = []
     for value in list(values or []):
         if isinstance(value, ToolResult):
@@ -105,6 +111,13 @@ def normalize_tool_results(
                 },
             )
             continue
+        
+        # Runtime type safety: ensure value is a dict before conversion
+        if not isinstance(value, dict):
+            raise TypeError(
+                f"normalize_tool_results: expected dict or ToolResult, got {type(value).__name__}: {value!r}"
+            )
+        
         item = dict(value or {})
         normalized.append(
             {
@@ -124,12 +137,39 @@ def build_execution_event(
     status: str,
     started_at: float,
 ) -> ToolExecution:
+    """Build execution event record with latency calculation.
+    
+    SAFETY: Detects clock drift by checking if started_at appears to be
+    wall-clock time (epoch ~1.7e9) vs perf_counter (~1e5). If detected,
+    raises ValueError instead of silently masking as 0.0 latency.
+    
+    Args:
+        started_at: Must be time.perf_counter() (not time.time())
+    """
     input_hash = stable_tool_input_hash(tool_name, args)
+    
+    # Detect clock drift: started_at should be perf_counter (small number)
+    # If it looks like epoch time (large number > 1e9), raise error
+    if float(started_at) > 1e9:
+        raise ValueError(
+            f"build_execution_event: started_at={started_at} looks like wall-clock time (time.time()). "
+            "Must use time.perf_counter() for deterministic latency."
+        )
+    
+    latency_raw = time.perf_counter() - float(started_at)
+    # Only use max(..., 0.0) if latency is actually negative (small clock skew)
+    # If latency is massively negative, it's an error, not silent fallback
+    if latency_raw < -0.1:
+        raise ValueError(
+            f"build_execution_event: latency={latency_raw} seconds (clock skew > 100ms). "
+            "Check system clock stability."
+        )
+    
     return ToolExecution(
         tool_name=str(tool_name or ""),
         input_hash=input_hash,
         output=output,
-        latency=round(max(time.perf_counter() - float(started_at), 0.0), 6),
+        latency=round(max(latency_raw, 0.0), 6),
         status=str(status or "ok"),
         deterministic_id=input_hash[:24],
     )
@@ -278,32 +318,35 @@ def reduce_events_to_results(log: ToolEventLog) -> list[dict[str, Any]]:
     ToolExecutor is a reducer over events — this is the pure reduction function.
     Only EXECUTED and FAILED events contribute to the output state.
     Events are processed in sequence order for determinism.
+    
+    FIX: Properly reduces by tool_id, keeping only the LATEST terminal state
+    for each tool. Removes duplicate state entries (e.g., failed attempt #1
+    overwritten by successful retry attempt #2).
     """
     ordered = sorted(log.events, key=lambda e: e.sequence)
-    results: list[dict[str, Any]] = []
+    results_by_tool_id: dict[str, dict[str, Any]] = {}
+    
     for event in ordered:
         if event.event_type == ToolEventType.EXECUTED:
-            results.append(
-                {
-                    "tool_id": event.tool_id,
-                    "tool_name": str(event.payload.get("tool_name") or ""),
-                    "status": str(event.payload.get("status") or "ok"),
-                    "output": event.payload.get("output"),
-                    "input_hash": event.input_hash,
-                    "output_hash": event.output_hash,
-                    "sequence": event.sequence,
-                },
-            )
+            results_by_tool_id[event.tool_id] = {
+                "tool_id": event.tool_id,
+                "tool_name": str(event.payload.get("tool_name") or ""),
+                "status": str(event.payload.get("status") or "ok"),
+                "output": event.payload.get("output"),
+                "input_hash": event.input_hash,
+                "output_hash": event.output_hash,
+                "sequence": event.sequence,
+            }
         elif event.event_type == ToolEventType.FAILED:
-            results.append(
-                {
-                    "tool_id": event.tool_id,
-                    "tool_name": str(event.payload.get("tool_name") or ""),
-                    "status": "error",
-                    "output": str(event.payload.get("error") or ""),
-                    "input_hash": event.input_hash,
-                    "output_hash": event.output_hash,
-                    "sequence": event.sequence,
-                },
-            )
-    return results
+            results_by_tool_id[event.tool_id] = {
+                "tool_id": event.tool_id,
+                "tool_name": str(event.payload.get("tool_name") or ""),
+                "status": "error",
+                "output": str(event.payload.get("error") or ""),
+                "input_hash": event.input_hash,
+                "output_hash": event.output_hash,
+                "sequence": event.sequence,
+            }
+    
+    # Return in sequence order of final terminal states
+    return sorted(results_by_tool_id.values(), key=lambda r: r["sequence"])

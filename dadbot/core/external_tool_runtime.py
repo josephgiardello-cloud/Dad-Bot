@@ -24,6 +24,16 @@ from typing import Any, Protocol
 from dadbot.core.kernel_locks import KernelToolIdempotencyRegistry
 
 
+_IDEMPOTENCY_POLICY_KEYS: frozenset[str] = frozenset(
+    {
+        "approval_granted",
+        "enforce_hitl",
+        "enforce_permissions",
+        "session_permissions",
+    },
+)
+
+
 class ToolExecutionStatus(str, Enum):
     OK = "ok"
     ERROR = "error"
@@ -420,6 +430,28 @@ def classify_network_failure(
     return NetworkFailureKind.UNKNOWN
 
 
+def _extract_idempotency_policy_context(payload: dict[str, Any]) -> dict[str, Any]:
+    """Extract policy-relevant context so idempotency cannot cross policy boundaries."""
+    source = dict(payload or {})
+    context: dict[str, Any] = {}
+    for key in _IDEMPOTENCY_POLICY_KEYS:
+        if key in source:
+            context[key] = source.get(key)
+
+    nested = source.get("policy_context")
+    if not isinstance(nested, dict):
+        nested = source.get("_policy_context")
+    if isinstance(nested, dict):
+        for key in _IDEMPOTENCY_POLICY_KEYS:
+            if key in nested and key not in context:
+                context[key] = nested.get(key)
+
+    permissions = context.get("session_permissions")
+    if isinstance(permissions, (list, tuple, set)):
+        context["session_permissions"] = sorted(str(item) for item in permissions)
+    return context
+
+
 class ExternalToolRuntime:
     """Failure-aware runtime executor for external tools.
 
@@ -560,9 +592,13 @@ class ExternalToolRuntime:
         normalized_name = str(tool_name).strip().lower()
         idempotency_key = str(payload.get("_idempotency_key") or "").strip()
         if not idempotency_key:
+            keyed_payload = dict(payload)
+            policy_context = _extract_idempotency_policy_context(payload)
+            if policy_context:
+                keyed_payload["_policy_context_fingerprint"] = policy_context
             idempotency_key = KernelToolIdempotencyRegistry.deterministic_key(
                 tool_name=normalized_name,
-                payload=dict(payload),
+                payload=keyed_payload,
                 scope="external_tool_runtime",
             )
         cached = KernelToolIdempotencyRegistry.get(idempotency_key)

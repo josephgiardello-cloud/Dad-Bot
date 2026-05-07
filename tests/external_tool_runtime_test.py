@@ -361,6 +361,84 @@ def test_retry_policy_delay_increases_monotonically_without_jitter():
     assert delays[0] < delays[1] < delays[2]
 
 
+def test_idempotency_key_includes_policy_context_for_runtime():
+    registry = DynamicToolRegistry()
+    calls = {"count": 0}
+
+    def handler(payload: dict) -> ToolExecutionResult:
+        calls["count"] += 1
+        return ToolExecutionResult(
+            tool_name="policy_tool",
+            status=ToolExecutionStatus.OK,
+            output={"echo": dict(payload)},
+            confidence=0.99,
+        )
+
+    _register_tool(
+        registry,
+        name="policy_tool",
+        version="1.0.0",
+        intent="policy_lookup",
+        cost=1.0,
+        latency=25,
+        reliability=0.95,
+        handler=handler,
+    )
+
+    runtime = ExternalToolRuntime(registry)
+    payload_common = {"query": "schedule"}
+
+    first = runtime.execute(
+        "policy_tool",
+        {**payload_common, "approval_granted": False, "session_permissions": ["read"]},
+    )
+    second = runtime.execute(
+        "policy_tool",
+        {**payload_common, "approval_granted": True, "session_permissions": ["read"]},
+    )
+
+    # Different policy context must produce distinct idempotency keys and execute twice.
+    assert first.status == ToolExecutionStatus.OK
+    assert second.status == ToolExecutionStatus.OK
+    assert calls["count"] == 2
+
+
+def test_idempotency_key_still_dedupes_same_policy_context():
+    registry = DynamicToolRegistry()
+    calls = {"count": 0}
+
+    def handler(payload: dict) -> ToolExecutionResult:
+        calls["count"] += 1
+        return ToolExecutionResult(
+            tool_name="policy_tool",
+            status=ToolExecutionStatus.OK,
+            output={"echo": dict(payload)},
+            confidence=0.99,
+        )
+
+    _register_tool(
+        registry,
+        name="policy_tool",
+        version="1.0.0",
+        intent="policy_lookup",
+        cost=1.0,
+        latency=25,
+        reliability=0.95,
+        handler=handler,
+    )
+
+    runtime = ExternalToolRuntime(registry)
+    payload = {"query": "schedule", "approval_granted": True, "session_permissions": ["read", "write"]}
+
+    first = runtime.execute("policy_tool", payload)
+    second = runtime.execute("policy_tool", payload)
+
+    assert first.status == ToolExecutionStatus.OK
+    assert second.status == ToolExecutionStatus.SKIPPED
+    assert str(second.error or "") == "idempotent_replay"
+    assert calls["count"] == 1
+
+
 def test_partial_output_degraded_when_capability_disables_partial():
     registry = DynamicToolRegistry()
 

@@ -30,6 +30,9 @@ from dadbot.core.job_builder import JobBuilder
 from dadbot.core.persistence.base import CheckpointNotFoundError
 from dadbot.core.execution_binder import TraceBinder
 from dadbot.core.execution_terminal_state import build_execution_terminal_state
+from dadbot.core.reflection_ir import DriftReflectionEngine
+from dadbot.core.composite_friction import CompositeFrictionEngine, FrictionSignals
+from dadbot.core.goal_resynthesis import GoalRecalibrationEngine
 from dadbot.registry import ServiceRegistry, boot_registry
 
 logger = logging.getLogger(__name__)
@@ -105,6 +108,144 @@ class DadBotOrchestrator:
             enable_observability=self._enable_observability,
         )
         self.session_registry = self.control_plane.registry
+        self._reflection_engine = DriftReflectionEngine()  # Lazy initialization; ledger path set per-session
+        self._friction_engine = CompositeFrictionEngine()
+        self._goal_recalibration_engine = GoalRecalibrationEngine()
+
+    def _goal_alignment_guard_enabled(self) -> bool:
+        config = getattr(self.bot, "config", None)
+        if config is not None:
+            explicit = getattr(config, "goal_alignment_guard_enabled", None)
+            if explicit is not None:
+                return bool(explicit)
+            runtime_config = getattr(config, "runtime_config", None)
+            if runtime_config is not None:
+                runtime_flag = getattr(runtime_config, "goal_alignment_guard_enabled", None)
+                if runtime_flag is not None:
+                    return bool(runtime_flag)
+        return bool(str(os.environ.get("DADBOT_GOAL_ALIGNMENT_GUARD_ENABLED", "1")).strip().lower() not in {"0", "false", "no", "off"})
+
+    def _resolve_ledger_path(self, session_id: str) -> str | None:
+        """
+        Resolve the path to relational_ledger.jsonl for the given session.
+        
+        Returns:
+            Full path to ledger, or None if session log directory cannot be resolved.
+        """
+        try:
+            # Try to get session log dir from bot
+            if self.bot is not None:
+                session_log_dir = getattr(self.bot, "SESSION_LOG_DIR", None)
+                if session_log_dir is not None:
+                    import pathlib
+                    ledger_path = pathlib.Path(session_log_dir) / "relational_ledger.jsonl"
+                    return str(ledger_path)
+        except Exception as exc:
+            logger.debug("Failed to resolve ledger path: %s", exc)
+        return None
+
+    def _analyze_behavioral_reflection(self, session_id: str, context: TurnContext) -> None:
+        """
+        Analyze behavioral patterns from the relational ledger and attach reflection summary to context.
+        
+        This enriches context.state with reflection data for use in HUD rendering and adaptive interventions.
+        """
+        ledger_path = self._resolve_ledger_path(session_id)
+        if ledger_path is None:
+            # Ledger not available; reflection summary remains unavailable
+            return
+
+        try:
+            self._reflection_engine.ledger_path = ledger_path
+            reflection_summary = self._reflection_engine.analyze_ledger()
+            evidence_graph = self._reflection_engine.get_evidence_graph_snapshot(max_edges=12)
+            
+            # Store reflection summary in context for downstream use
+            context.state["reflection_summary"] = {
+                "current_risk_level": reflection_summary.current_risk_level,
+                "predicted_drift_probability": reflection_summary.predicted_drift_probability,
+                "likely_trigger_category": reflection_summary.likely_trigger_category,
+                "recommended_intervention": reflection_summary.recommended_intervention,
+                "intervention_justification": reflection_summary.intervention_justification,
+                "confidence_score": reflection_summary.confidence_score,
+                "observable_signals": reflection_summary.observable_signals,
+                "recent_episode_count": reflection_summary.recent_episode_count,
+                "primary_pattern_name": reflection_summary.primary_pattern.pattern_name if reflection_summary.primary_pattern else None,
+                "primary_pattern_confidence": reflection_summary.primary_pattern.confidence if reflection_summary.primary_pattern else 0.0,
+                "evidence_graph": evidence_graph,
+            }
+        except Exception as exc:
+            logger.debug("Behavioral reflection analysis failed (non-fatal): %s", exc)
+
+    def _analyze_composite_friction(self, context: TurnContext) -> None:
+        """Compute friction signals and attach goal re-synthesis guidance to context."""
+        try:
+            state = context.state if isinstance(context.state, dict) else {}
+            reflection = dict(state.get("reflection_summary") or {})
+            temporal_budget = dict(state.get("temporal_budget") or {})
+            session_turn_count = int(temporal_budget.get("turn_index") or 0)
+
+            halt_streak = int(state.get("goal_alignment_diversion_streak") or 0)
+            if bool(state.get("goal_alignment_mandatory_halt", False)) and halt_streak < 3:
+                halt_streak = 3
+
+            risk_level = str(reflection.get("current_risk_level") or "moderate").strip().lower()
+            recovery_success_defaults = {
+                "critical": 0.20,
+                "high": 0.40,
+                "moderate": 0.65,
+                "low": 0.85,
+            }
+            recovery_success_rate = float(recovery_success_defaults.get(risk_level, 0.65))
+
+            topic_drift_frequency = float(reflection.get("predicted_drift_probability") or 0.0)
+            recent_episodes = int(reflection.get("recent_episode_count") or 0)
+            recurring_topic_patterns = max(0, min(3, recent_episodes // 2))
+            if reflection.get("primary_pattern_name"):
+                recurring_topic_patterns = max(recurring_topic_patterns, 1)
+
+            goals_raw = state.get("session_goals")
+            if not isinstance(goals_raw, list):
+                goals_raw = state.get("goals")
+            unresolved_objectives_count = 0
+            for item in list(goals_raw or []):
+                if not isinstance(item, dict):
+                    continue
+                status = str(item.get("status") or "").strip().lower()
+                if status not in {"done", "completed", "closed"}:
+                    unresolved_objectives_count += 1
+
+            checkpoint_stability = 1.0 if bool(getattr(context, "last_checkpoint_hash", "")) else 0.65
+            signals = FrictionSignals(
+                halt_streak=halt_streak,
+                recovery_success_rate=recovery_success_rate,
+                topic_drift_frequency=topic_drift_frequency,
+                recurring_topic_patterns=recurring_topic_patterns,
+                session_turn_count=session_turn_count,
+                unresolved_objectives_count=unresolved_objectives_count,
+                checkpoint_stability=checkpoint_stability,
+            )
+            friction = self._friction_engine.compute_friction(signals)
+            friction_payload = {
+                "composite_score": friction.composite_score,
+                "risk_level": friction.risk_level,
+                "should_trigger_re_synthesis": friction.should_trigger_re_synthesis,
+                "individual_signals": dict(friction.individual_signals),
+                "confidence": friction.confidence,
+                "primary_friction_factor": friction.primary_friction_factor,
+                "recommended_intervention": friction.recommended_intervention,
+            }
+            state["friction_analysis"] = friction_payload
+
+            goals = [dict(item) for item in list(goals_raw or []) if isinstance(item, dict)]
+            resynthesis = self._goal_recalibration_engine.synthesize(
+                goals=goals,
+                friction_analysis=friction_payload,
+                reflection_summary=reflection or None,
+            )
+            state["goal_resynthesis"] = self._goal_recalibration_engine.to_context_payload(resynthesis)
+        except Exception as exc:
+            logger.debug("Composite friction analysis failed (non-fatal): %s", exc)
 
     def _build_turn_graph(self) -> TurnGraph:
         llm = self.registry.get("llm", optional=True)
@@ -279,6 +420,16 @@ class DadBotOrchestrator:
         typed_state["last_memory_full_history_id"] = str(context.state.get("memory_full_history_id") or "")
         typed_state["last_checkpoint_hash"] = str(getattr(context, "last_checkpoint_hash", "") or "")
         typed_state["prev_checkpoint_hash"] = str(getattr(context, "prev_checkpoint_hash", "") or "")
+        typed_state["goal_alignment_guard_enabled"] = bool(context.state.get("goal_alignment_guard_enabled", False))
+        typed_state["goal_alignment_diversion_streak"] = int(context.state.get("goal_alignment_diversion_streak") or 0)
+        typed_state["goal_alignment_mandatory_halt"] = bool(context.state.get("goal_alignment_mandatory_halt", False))
+        # Persist reflection summary if available
+        if "reflection_summary" in context.state:
+            typed_state["last_reflection_summary"] = dict(context.state["reflection_summary"])
+        if "friction_analysis" in context.state:
+            typed_state["last_friction_analysis"] = dict(context.state["friction_analysis"])
+        if "goal_resynthesis" in context.state:
+            typed_state["last_goal_resynthesis"] = dict(context.state["goal_resynthesis"])
 
     async def _execute_job(
         self,
@@ -296,6 +447,9 @@ class DadBotOrchestrator:
             session_goals = session_state.get("goals")
             if isinstance(session_goals, list):
                 context.state["session_goals"] = list(session_goals)
+            context.state["goal_alignment_diversion_streak"] = int(session_state.get("goal_alignment_diversion_streak") or 0)
+            context.state["goal_alignment_mandatory_halt"] = bool(session_state.get("goal_alignment_mandatory_halt", False))
+        context.state["goal_alignment_guard_enabled"] = self._goal_alignment_guard_enabled()
         if not context.trace_id:
             raise RuntimeError("TurnContext.trace_id must be non-empty")
 
@@ -309,6 +463,10 @@ class DadBotOrchestrator:
             context.prev_checkpoint_hash = str(loaded_checkpoint.get("prev_checkpoint_hash") or "")
 
         self._stamp_determinism_metadata(context, job, manifest)
+
+        # Analyze behavioral reflection patterns from relational ledger
+        self._analyze_behavioral_reflection(str(job.session_id or "default"), context)
+        self._analyze_composite_friction(context)
 
         async def _run() -> FinalizedTurnResult:
             result = await self.graph.execute(context)
@@ -346,8 +504,8 @@ class DadBotOrchestrator:
                     event_count=len(_stage_traces),
                     latency_ms=_latency_ms,
                 )
-            except Exception:  # noqa: BLE001
-                pass  # shadow mode must never affect the caller
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Shadow mode logging failed (non-fatal): %s", exc)
 
         return result
 

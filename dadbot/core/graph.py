@@ -89,6 +89,7 @@ from dadbot.core.graph_pipeline_nodes import (  # re-export pipeline node stubs
     HealthNode,
     InferenceNode,
     MemoryNode,
+    RecoveryNode,
     ReflectionNode,
     SafetyNode,
     SaveNode,
@@ -116,6 +117,10 @@ _NODE_STAGE_CONTRACTS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
         ("candidate",),
         ("safe_result",),
     ),
+    "recovery": (
+        ("safe_result", "safety_policy_decision"),
+        ("recovery_decision",),
+    ),
     "save": (
         ("safe_result",),
         (),
@@ -136,6 +141,7 @@ _NODE_STAGE_CONTRACTS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
 _NODE_INPUT_PREREQUISITES: dict[str, str] = {
     "inference": "context_builder",
     "safety": "inference",
+    "recovery": "safety",
     "save": "safety",
 }
 
@@ -164,6 +170,7 @@ class TurnGraph:
             ValidationGateNode(),
             InferenceNode(),
             SafetyNode(),
+            RecoveryNode(),
             ReflectionNode(),
             SaveNode(),
         ]
@@ -337,15 +344,13 @@ class TurnGraph:
         detail: dict[str, Any] | None,
     ) -> None:
         """Validate execution transitions via invariant gate.
-        
-        In the simplified loop architecture, this is lenient to prevent
-        cascading failures from old orchestration assumptions.
         """
         trace = list(turn_context.state.get("execution_trace") or [])
         if not trace:
             # No trace yet; invariant validation not ready
             return
-            
+
+        lenient = bool(turn_context.metadata.get("invariant_gate_lenient", False))
         try:
             latest = dict(trace[-1])
             sequence = int(latest.get("sequence") or 0)
@@ -374,16 +379,40 @@ class TurnGraph:
                 trace,
                 pipeline_stage_names=pipeline_names,
             )
+            turn_context.state["invariant_gate"] = {
+                "approved": decision.approved,
+                "reason": decision.reason,
+                "details": dict(decision.details or {}),
+                "remediation": {
+                    "action": decision.remediation.action.value,
+                    "failure_class": decision.remediation.failure_class,
+                    "attempt": decision.remediation.attempt,
+                    "max_attempts": decision.remediation.max_attempts,
+                    "reason": decision.remediation.reason,
+                } if decision.remediation is not None else None,
+            }
             if not decision.approved:
+                if lenient:
+                    logger.debug(
+                        "Invariant gate decision deferred by lenient mode: %s",
+                        decision.reason,
+                    )
+                    return
+                raise InvariantViolationError(decision.reason)
+        except InvariantViolationError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            if lenient:
                 logger.debug(
-                    "Invariant gate decision: %s (non-fatal in simplified loop)",
-                    decision.reason,
+                    "Invariant gate validation deferred by lenient mode: %s",
+                    exc,
                 )
-        except Exception as exc:  # noqa: BLE001 — simplified loop allows invariant validation to gracefully degrade
+                return
             logger.debug(
-                "Invariant gate validation deferred (simplified architecture): %s",
+                "Invariant gate validation failure promoted to hard fail: %s",
                 exc,
             )
+            raise InvariantViolationError(f"Invariant gate validation failed: {exc}") from exc
 
     def _validate_persistence_service_contract(
         self,
@@ -673,7 +702,8 @@ class TurnGraph:
             for key in ("persistence", "persistence_service"):
                 try:
                     persistence_service = self.registry.get(key)
-                except Exception:
+                except Exception as exc:
+                    logger.debug("TurnGraph persistence lookup failed for key=%s: %s", key, exc)
                     persistence_service = None
                 if persistence_service is not None:
                     break
@@ -742,8 +772,13 @@ class TurnGraph:
             if _persistence_is_lightweight and callable(save_graph_checkpoint):
                 try:
                     save_graph_checkpoint(checkpoint_payload)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning(
+                        "TurnGraph lightweight checkpoint persistence failed at stage=%s status=%s: %s",
+                        stage_name,
+                        status,
+                        exc,
+                    )
             _emit_turn_event(
                 "graph_checkpoint",
                 {

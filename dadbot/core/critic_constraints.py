@@ -184,6 +184,13 @@ _EMPATHY_TOKENS = frozenset(
     },
 )
 
+_EMPATHY_STRATEGIES = frozenset({"empathy_first"})
+_QUESTION_INTENTS = frozenset({"question"})
+_BREVITY_COMPLEXITIES = frozenset({"moderate", "complex"})
+_TOOL_REQUIRED_INTENTS = frozenset({"question", "goal_oriented", "multi_step"})
+_TOOL_REQUIRED_STRATEGIES = frozenset({"goal_track", "task_plan"})
+_TOOL_SUCCESS_STATUSES = frozenset({"ok"})
+
 
 def _is_empty_reply(reply: str, _u: str, _p: dict, _t: dict, _r: list) -> bool:
     return len(reply.strip()) < 5
@@ -194,7 +201,7 @@ def _is_fallback(reply: str, _u: str, _p: dict, _t: dict, _r: list) -> bool:
 
 
 def _missing_empathy(reply: str, _u: str, plan: dict, _t: dict, _r: list) -> bool:
-    if str(plan.get("strategy") or "") != "empathy_first":
+    if str(plan.get("strategy") or "") not in _EMPATHY_STRATEGIES:
         return False
     tokens = set(re.split(r"\W+", reply.lower()))
     return not (tokens & _EMPATHY_TOKENS)
@@ -207,7 +214,7 @@ def _missing_question_coverage(
     _t: dict,
     _r: list,
 ) -> bool:
-    if str(plan.get("intent_type") or "") != "question":
+    if str(plan.get("intent_type") or "") not in _QUESTION_INTENTS:
         return False
     q_tokens = {
         t
@@ -219,17 +226,13 @@ def _missing_question_coverage(
 
 
 def _brevity_violation(reply: str, _u: str, plan: dict, _t: dict, _r: list) -> bool:
-    return str(plan.get("complexity") or "") in ("moderate", "complex") and len(reply.strip()) < 15
+    return str(plan.get("complexity") or "") in _BREVITY_COMPLEXITIES and len(reply.strip()) < 15
 
 
 def _tool_omission(reply: str, user: str, plan: dict, tool_ir: dict, _r: list) -> bool:
     intent_type = str(plan.get("intent_type") or "")
     strategy = str(plan.get("strategy") or "")
-    tool_needed = intent_type in {
-        "question",
-        "goal_oriented",
-        "multi_step",
-    } or strategy in {"goal_track", "task_plan"}
+    tool_needed = intent_type in _TOOL_REQUIRED_INTENTS or strategy in _TOOL_REQUIRED_STRATEGIES
     planned = list(tool_ir.get("execution_plan") or [])
     return bool(tool_needed and not planned)
 
@@ -243,11 +246,7 @@ def _tool_redundancy(
 ) -> bool:
     intent_type = str(plan.get("intent_type") or "")
     strategy = str(plan.get("strategy") or "")
-    tool_needed = intent_type in {
-        "question",
-        "goal_oriented",
-        "multi_step",
-    } or strategy in {"goal_track", "task_plan"}
+    tool_needed = intent_type in _TOOL_REQUIRED_INTENTS or strategy in _TOOL_REQUIRED_STRATEGIES
     planned = list(tool_ir.get("execution_plan") or [])
     return bool((not tool_needed) and planned)
 
@@ -282,7 +281,7 @@ def _tool_correctness_failure(
     _t: dict,
     results: list,
 ) -> bool:
-    return any(str(item.get("status") or "").lower() != "ok" for item in results)
+    return any(str(item.get("status") or "").lower() not in _TOOL_SUCCESS_STATUSES for item in results)
 
 
 # ---------------------------------------------------------------------------

@@ -136,6 +136,28 @@ class DadBotHealthMixin:
     def replay_turn_events(self, trace_id: str) -> dict[str, Any]:
         return self.conversation_persistence.replay_turn_events(trace_id=trace_id)
 
+    def list_policy_trace_events(
+        self,
+        *,
+        trace_id: str = "",
+        limit: int = 0,
+    ) -> list[dict[str, Any]]:
+        return self.conversation_persistence.list_policy_trace_events(
+            trace_id=trace_id,
+            limit=limit,
+        )
+
+    def summarize_policy_trace_events(
+        self,
+        *,
+        trace_id: str = "",
+        limit: int = 0,
+    ) -> dict[str, Any]:
+        return self.conversation_persistence.summarize_policy_trace_events(
+            trace_id=trace_id,
+            limit=limit,
+        )
+
     def validate_replay_determinism(
         self,
         trace_id: str,

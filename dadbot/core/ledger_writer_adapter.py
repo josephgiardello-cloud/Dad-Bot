@@ -54,5 +54,8 @@ class LedgerWriterAdapter:
             session_id=session_id,
         )
 
+    def write_event(self, **kwargs: Any) -> dict[str, Any]:
+        return self._writer.write_event(**kwargs)
+
 
 __all__ = ["LedgerWriterAdapter"]

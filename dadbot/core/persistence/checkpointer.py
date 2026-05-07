@@ -15,6 +15,7 @@ import hashlib
 import json
 import logging
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -58,6 +59,9 @@ class SQLiteCheckpointer(AbstractCheckpointer):
         auto_migrate: bool = True,
         prune_every: int = 10,
         default_keep_count: int = 10,
+        default_keep_write_logs: int = 200,
+        write_log_retention_days: int | None = 30,
+        startup_consistency_check: bool = True,
     ):
         raw_db_path = str(db_path or "").strip()
         self._db_uri = raw_db_path.startswith("file:")
@@ -67,9 +71,19 @@ class SQLiteCheckpointer(AbstractCheckpointer):
             self.db_path = str(Path(db_path))
         self.prune_every = int(prune_every or 0)
         self.default_keep_count = int(default_keep_count or 10)
+        self.default_keep_write_logs = max(int(default_keep_write_logs or 0), 0)
+        self.write_log_retention_days = (
+            int(write_log_retention_days)
+            if write_log_retention_days is not None
+            else None
+        )
+        self.startup_consistency_check = bool(startup_consistency_check)
         self._save_counter = 0
+        self._io_lock = threading.RLock()
         if auto_migrate:
             self.migrate()
+        if self.startup_consistency_check:
+            self.validate_consistency(strict=True)
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=10.0, uri=self._db_uri)
@@ -159,9 +173,10 @@ class SQLiteCheckpointer(AbstractCheckpointer):
         now_ts = time.time()
 
         try:
-            with contextlib.closing(self._connect()) as conn:
-                conn.execute("BEGIN")
-                conn.execute(
+            with self._io_lock:
+                with contextlib.closing(self._connect()) as conn:
+                    conn.execute("BEGIN")
+                    conn.execute(
                     """
                     INSERT OR REPLACE INTO checkpoints(
                         session_id, trace_id, checkpoint_hash, prev_checkpoint_hash,
@@ -178,7 +193,7 @@ class SQLiteCheckpointer(AbstractCheckpointer):
                         now_ts,
                     ),
                 )
-                conn.execute(
+                    conn.execute(
                     """
                     INSERT INTO checkpoint_writes(
                         session_id, trace_id, checkpoint_hash, status, error, created_at
@@ -193,7 +208,12 @@ class SQLiteCheckpointer(AbstractCheckpointer):
                         now_ts,
                     ),
                 )
-                conn.commit()
+                    conn.commit()
+            self._verify_post_write(
+                session_id=session_id,
+                trace_id=trace_id,
+                checkpoint_hash=checkpoint_hash,
+            )
         except sqlite3.Error as exc:
             self._log_write_failure(
                 session_id=session_id,
@@ -201,6 +221,13 @@ class SQLiteCheckpointer(AbstractCheckpointer):
                 error=str(exc),
             )
             raise CheckpointError(f"Failed to save checkpoint: {exc}") from exc
+        except CheckpointIntegrityError:
+            self._log_write_failure(
+                session_id=session_id,
+                trace_id=trace_id,
+                error="post-write consistency check failed",
+            )
+            raise
 
         self._save_counter += 1
         if self.prune_every > 0 and self._save_counter % self.prune_every == 0:
@@ -209,21 +236,54 @@ class SQLiteCheckpointer(AbstractCheckpointer):
                     session_id,
                     keep_count=self.default_keep_count,
                 )
+                self.prune_checkpoint_write_logs(
+                    session_id,
+                    keep_count=self.default_keep_write_logs,
+                    older_than_days=self.write_log_retention_days,
+                )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Checkpoint prune failed (non-fatal): %s", exc)
         return True
 
+    def _verify_post_write(
+        self,
+        *,
+        session_id: str,
+        trace_id: str,
+        checkpoint_hash: str,
+    ) -> None:
+        with self._io_lock:
+            with contextlib.closing(self._connect()) as conn:
+                row = conn.execute(
+                    """
+                    SELECT checkpoint_hash FROM checkpoints
+                    WHERE session_id = ? AND trace_id = ?
+                    LIMIT 1
+                    """,
+                    (session_id, trace_id),
+                ).fetchone()
+                if row is None:
+                    raise CheckpointIntegrityError(
+                        "Post-write consistency failure: checkpoint row missing immediately after write",
+                    )
+                stored_hash = str(row["checkpoint_hash"] or "").strip()
+                if stored_hash != str(checkpoint_hash or "").strip():
+                    raise CheckpointIntegrityError(
+                        f"Post-write consistency failure: stored hash {stored_hash!r} != expected {checkpoint_hash!r}",
+                    )
+
     def _log_write_failure(self, *, session_id: str, trace_id: str, error: str) -> None:
         try:
-            with contextlib.closing(self._connect()) as conn:
-                conn.execute(
-                    """
-                    INSERT INTO checkpoint_writes(session_id, trace_id, checkpoint_hash, status, error, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    (session_id, trace_id, "", "error", str(error or ""), time.time()),
-                )
-                conn.commit()
+            with self._io_lock:
+                with contextlib.closing(self._connect()) as conn:
+                    conn.execute(
+                        """
+                        INSERT INTO checkpoint_writes(session_id, trace_id, checkpoint_hash, status, error, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (session_id, trace_id, "", "error", str(error or ""), time.time()),
+                    )
+                    conn.commit()
         except Exception:  # noqa: BLE001
             logger.debug("Checkpoint write failure logging skipped", exc_info=True)
 
@@ -240,46 +300,47 @@ class SQLiteCheckpointer(AbstractCheckpointer):
             raise CheckpointNotFoundError("session_id is required")
 
         try:
-            with contextlib.closing(self._connect()) as conn:
-                if trace_id:
-                    cursor = conn.execute(
-                        """
-                        SELECT * FROM checkpoints
-                        WHERE session_id = ? AND trace_id = ?
-                        LIMIT 1
-                        """,
-                        (session_id, str(trace_id)),
-                    )
-                else:
-                    cursor = conn.execute(
-                        """
-                        SELECT * FROM checkpoints
-                        WHERE session_id = ?
-                        ORDER BY created_at DESC
-                        LIMIT 1
-                        """,
-                        (session_id,),
-                    )
-                row = cursor.fetchone()
-                if row is None:
-                    raise CheckpointNotFoundError(
-                        f"No checkpoint found for session_id={session_id!r}, trace_id={trace_id!r}",
+            with self._io_lock:
+                with contextlib.closing(self._connect()) as conn:
+                    if trace_id:
+                        cursor = conn.execute(
+                            """
+                            SELECT * FROM checkpoints
+                            WHERE session_id = ? AND trace_id = ?
+                            LIMIT 1
+                            """,
+                            (session_id, str(trace_id)),
+                        )
+                    else:
+                        cursor = conn.execute(
+                            """
+                            SELECT * FROM checkpoints
+                            WHERE session_id = ?
+                            ORDER BY created_at DESC
+                            LIMIT 1
+                            """,
+                            (session_id,),
+                        )
+                    row = cursor.fetchone()
+                    if row is None:
+                        raise CheckpointNotFoundError(
+                            f"No checkpoint found for session_id={session_id!r}, trace_id={trace_id!r}",
+                        )
+
+                    payload = json.loads(str(row["payload"] or "{}"))
+                    loaded = LoadedCheckpoint(
+                        checkpoint=dict(payload.get("checkpoint") or {}),
+                        manifest=dict(payload.get("manifest") or {}),
                     )
 
-                payload = json.loads(str(row["payload"] or "{}"))
-                loaded = LoadedCheckpoint(
-                    checkpoint=dict(payload.get("checkpoint") or {}),
-                    manifest=dict(payload.get("manifest") or {}),
-                )
+                    self._verify_checkpoint_row(row, loaded.checkpoint)
+                    self._verify_prev_link(conn, row)
+                    self._verify_manifest(loaded.manifest, current_manifest, strict=strict)
 
-                self._verify_checkpoint_row(row, loaded.checkpoint)
-                self._verify_prev_link(conn, row)
-                self._verify_manifest(loaded.manifest, current_manifest, strict=strict)
-
-                result = dict(loaded.checkpoint)
-                result["manifest"] = dict(loaded.manifest)
-                result["manifest_hash"] = str(row["manifest_hash"] or "")
-                return result
+                    result = dict(loaded.checkpoint)
+                    result["manifest"] = dict(loaded.manifest)
+                    result["manifest_hash"] = str(row["manifest_hash"] or "")
+                    return result
         except CheckpointNotFoundError:
             raise
         except CheckpointIntegrityError:
@@ -322,6 +383,18 @@ class SQLiteCheckpointer(AbstractCheckpointer):
             (str(row["session_id"]), float(row["created_at"])),
         ).fetchone()
         if prior is None:
+            # Same trace_id writes can replace a checkpoint row in-place while
+            # preserving chain continuity via checkpoint_writes evidence.
+            evidence = conn.execute(
+                """
+                SELECT 1 FROM checkpoint_writes
+                WHERE session_id = ? AND checkpoint_hash = ? AND status = 'ok'
+                LIMIT 1
+                """,
+                (str(row["session_id"]), prev_hash),
+            ).fetchone()
+            if evidence is not None:
+                return
             raise CheckpointIntegrityError(
                 "Checkpoint hash-chain broken: prev_checkpoint_hash present but no previous checkpoint exists",
             )
@@ -369,55 +442,142 @@ class SQLiteCheckpointer(AbstractCheckpointer):
         keep_count = max(int(keep_count or 0), 0)
         deleted = 0
         try:
-            with contextlib.closing(self._connect()) as conn:
-                ids_to_delete: list[int] = []
-                if keep_count > 0:
-                    rows = conn.execute(
-                        """
-                        SELECT id FROM checkpoints
-                        WHERE session_id = ?
-                        ORDER BY created_at DESC
-                        LIMIT -1 OFFSET ?
-                        """,
-                        (session_id, keep_count),
-                    ).fetchall()
-                    ids_to_delete.extend([int(r["id"]) for r in rows])
+            with self._io_lock:
+                with contextlib.closing(self._connect()) as conn:
+                    ids_to_delete: list[int] = []
+                    if keep_count > 0:
+                        rows = conn.execute(
+                            """
+                            SELECT id FROM checkpoints
+                            WHERE session_id = ?
+                            ORDER BY created_at DESC
+                            LIMIT -1 OFFSET ?
+                            """,
+                            (session_id, keep_count),
+                        ).fetchall()
+                        ids_to_delete.extend([int(r["id"]) for r in rows])
 
-                if older_than_days is not None and int(older_than_days) >= 0:
-                    cutoff = time.time() - (int(older_than_days) * 86400)
-                    rows = conn.execute(
-                        """
-                        SELECT id FROM checkpoints
-                        WHERE session_id = ? AND created_at < ?
-                        """,
-                        (session_id, float(cutoff)),
-                    ).fetchall()
-                    ids_to_delete.extend([int(r["id"]) for r in rows])
+                    if older_than_days is not None and int(older_than_days) >= 0:
+                        cutoff = time.time() - (int(older_than_days) * 86400)
+                        rows = conn.execute(
+                            """
+                            SELECT id FROM checkpoints
+                            WHERE session_id = ? AND created_at < ?
+                            """,
+                            (session_id, float(cutoff)),
+                        ).fetchall()
+                        ids_to_delete.extend([int(r["id"]) for r in rows])
 
-                ids_to_delete = sorted(set(ids_to_delete))
-                if ids_to_delete:
-                    placeholders = ",".join("?" for _ in ids_to_delete)
-                    conn.execute(
-                        f"DELETE FROM checkpoints WHERE id IN ({placeholders})",
-                        tuple(ids_to_delete),
-                    )
-                    conn.commit()
-                    deleted = len(ids_to_delete)
+                    ids_to_delete = sorted(set(ids_to_delete))
+                    if ids_to_delete:
+                        placeholders = ",".join("?" for _ in ids_to_delete)
+                        conn.execute(
+                            f"DELETE FROM checkpoints WHERE id IN ({placeholders})",
+                            tuple(ids_to_delete),
+                        )
+                        conn.commit()
+                        deleted = len(ids_to_delete)
             return deleted
         except sqlite3.Error as exc:
             raise CheckpointError(f"Failed to prune checkpoints: {exc}") from exc
 
+    def prune_checkpoint_write_logs(
+        self,
+        session_id: str,
+        keep_count: int = 200,
+        older_than_days: int | None = None,
+    ) -> int:
+        session_id = str(session_id or "").strip()
+        keep_count = max(int(keep_count or 0), 0)
+        deleted = 0
+        try:
+            with self._io_lock:
+                with contextlib.closing(self._connect()) as conn:
+                    ids_to_delete: list[int] = []
+                    if keep_count > 0:
+                        rows = conn.execute(
+                            """
+                            SELECT id FROM checkpoint_writes
+                            WHERE session_id = ?
+                            ORDER BY created_at DESC
+                            LIMIT -1 OFFSET ?
+                            """,
+                            (session_id, keep_count),
+                        ).fetchall()
+                        ids_to_delete.extend([int(r["id"]) for r in rows])
+
+                    if older_than_days is not None and int(older_than_days) >= 0:
+                        cutoff = time.time() - (int(older_than_days) * 86400)
+                        rows = conn.execute(
+                            """
+                            SELECT id FROM checkpoint_writes
+                            WHERE session_id = ? AND created_at < ?
+                            """,
+                            (session_id, float(cutoff)),
+                        ).fetchall()
+                        ids_to_delete.extend([int(r["id"]) for r in rows])
+
+                    ids_to_delete = sorted(set(ids_to_delete))
+                    if ids_to_delete:
+                        placeholders = ",".join("?" for _ in ids_to_delete)
+                        conn.execute(
+                            f"DELETE FROM checkpoint_writes WHERE id IN ({placeholders})",
+                            tuple(ids_to_delete),
+                        )
+                        conn.commit()
+                        deleted = len(ids_to_delete)
+            return deleted
+        except sqlite3.Error as exc:
+            raise CheckpointError(f"Failed to prune checkpoint write logs: {exc}") from exc
+
+    def validate_consistency(self, *, strict: bool = True) -> dict[str, Any]:
+        issues: list[str] = []
+        try:
+            with self._io_lock:
+                with contextlib.closing(self._connect()) as conn:
+                    quick_check_row = conn.execute("PRAGMA quick_check").fetchone()
+                    quick_check = str(quick_check_row[0] if quick_check_row is not None else "ok").strip().lower()
+                    if quick_check != "ok":
+                        issues.append(f"sqlite_quick_check_failed:{quick_check}")
+
+                    orphan_row = conn.execute(
+                        """
+                        SELECT COUNT(*) AS n
+                        FROM checkpoint_writes w
+                        LEFT JOIN checkpoints c
+                          ON w.session_id = c.session_id AND w.trace_id = c.trace_id
+                        WHERE w.status = 'ok' AND c.id IS NULL
+                        """,
+                    ).fetchone()
+                    orphan_count = int((orphan_row["n"] if orphan_row is not None else 0) or 0)
+                    if orphan_count > 0:
+                        issues.append(f"orphan_ok_write_rows:{orphan_count}")
+        except sqlite3.Error as exc:
+            issues.append(f"consistency_check_sqlite_error:{exc}")
+
+        result = {"ok": len(issues) == 0, "issues": issues}
+        if strict and not result["ok"]:
+            raise CheckpointIntegrityError(
+                f"Checkpoint consistency check failed: {issues}",
+            )
+        return result
+
     def delete_session(self, session_id: str) -> int:
         session_id = str(session_id or "").strip()
         try:
-            with contextlib.closing(self._connect()) as conn:
-                cursor = conn.execute(
-                    "DELETE FROM checkpoints WHERE session_id = ?",
-                    (session_id,),
-                )
-                deleted = int(cursor.rowcount or 0)
-                conn.commit()
-                return deleted
+            with self._io_lock:
+                with contextlib.closing(self._connect()) as conn:
+                    cursor = conn.execute(
+                        "DELETE FROM checkpoints WHERE session_id = ?",
+                        (session_id,),
+                    )
+                    deleted = int(cursor.rowcount or 0)
+                    conn.execute(
+                        "DELETE FROM checkpoint_writes WHERE session_id = ?",
+                        (session_id,),
+                    )
+                    conn.commit()
+                    return deleted
         except sqlite3.Error as exc:
             raise CheckpointError(
                 f"Failed to delete session checkpoints: {exc}",

@@ -1,0 +1,4238 @@
+{
+  "file_count_scored": 213,
+  "manual_review_queue": [],
+  "min_score": 1,
+  "ranked": [
+    {
+      "details": {
+        "any_param_count": 6,
+        "any_return_count": 2,
+        "class_names": [
+          "ExecutionTraceContext",
+          "ExecutionTraceRecorder",
+          "ExternalSystemCallGraph",
+          "RuntimeTraceViolation",
+          "ToolCallRecord",
+          "ToolExecutionTraceNode"
+        ],
+        "compile_like_name_count": 3,
+        "compile_like_without_ir_count": 0,
+        "core_focus": true,
+        "dict_return_count": 8,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "_build_execution_dag",
+          "_build_execution_snapshot",
+          "_drop_ignored_fields",
+          "_json_clone",
+          "_normalize_determinism_contract",
+          "_normalize_time_token",
+          "_normalized_steps",
+          "_require_execution_context_contract",
+          "_stable_sha256",
+          "_step_input_payload",
+          "_step_output_payload",
+          "active_execution_trace",
+          "bind_execution_trace",
+          "build_execution_trace_context",
+          "build_external_system_call_graph",
+          "build_tool_invocation_projection",
+          "canonicalize_execution_trace_context",
+          "derive_execution_trace_hash",
+          "ensure_execution_trace_root",
+          "record_execution_step",
+          "record_external_system_call",
+          "require_execution_trace"
+        ],
+        "getattr_count": 7,
+        "hasattr_count": 0,
+        "high_if_function_count": 0,
+        "missing_return_annotation_count": 2,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 4
+      },
+      "file": "dadbot/core/execution_context.py",
+      "flags": [
+        "dict_return_contracts",
+        "introspection_heavy",
+        "string_dispatch",
+        "uses_any_param",
+        "uses_any_return"
+      ],
+      "score": 11
+    },
+    {
+      "details": {
+        "any_param_count": 5,
+        "any_return_count": 4,
+        "class_names": [
+          "InvariantGate",
+          "InvariantViolationError",
+          "RemediationAction",
+          "RemediationDecision",
+          "ValidationDecision"
+        ],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": true,
+        "dict_return_count": 0,
+        "early_return_loop_function_count": 1,
+        "function_names": [
+          "_invariant_kernel_lineage_non_empty",
+          "_invariant_non_empty_session_id",
+          "_invariant_non_empty_type",
+          "_invariant_non_future_timestamp",
+          "_invariant_payload_is_dict_or_absent",
+          "_invariant_required_envelope_fields",
+          "_job_invariant_job_id_non_empty",
+          "_job_invariant_session_id_non_empty",
+          "_job_invariant_session_not_terminated",
+          "causal_structure_check",
+          "execution_state_check",
+          "lease_ownership_check",
+          "ledger_lifecycle_check"
+        ],
+        "getattr_count": 7,
+        "hasattr_count": 0,
+        "high_if_function_count": 0,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 3
+      },
+      "file": "dadbot/core/invariant_gate.py",
+      "flags": [
+        "early_return_in_loop",
+        "introspection_heavy",
+        "string_dispatch",
+        "uses_any_param",
+        "uses_any_return"
+      ],
+      "score": 11
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 0,
+        "class_names": [
+          "Finding",
+          "_ParentAwareVisitor"
+        ],
+        "compile_like_name_count": 1,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 2,
+        "early_return_loop_function_count": 1,
+        "function_names": [
+          "_ancestor_class_name",
+          "_call_name",
+          "_call_target_repr",
+          "_is_excluded",
+          "_is_temporal_allowed",
+          "_iter_python_files",
+          "_line_at",
+          "build_quarantine_registry",
+          "main",
+          "run_scan"
+        ],
+        "getattr_count": 2,
+        "hasattr_count": 0,
+        "high_if_function_count": 1,
+        "missing_return_annotation_count": 1,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 3
+      },
+      "file": "tools/phase4_legacy_integrity_scan.py",
+      "flags": [
+        "dict_return_contracts",
+        "early_return_in_loop",
+        "high_if_density",
+        "introspection_heavy",
+        "string_dispatch"
+      ],
+      "score": 10
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 0,
+        "class_names": [],
+        "compile_like_name_count": 2,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 0,
+        "early_return_loop_function_count": 1,
+        "function_names": [
+          "_resolve_graph_config_path",
+          "build_customer_document_store",
+          "build_service_state_store",
+          "check_dependencies",
+          "check_system_resources",
+          "ensure_streamlit_app_file",
+          "env_truthy",
+          "initialize_startup_logging",
+          "launch_api_service",
+          "launch_streamlit_app",
+          "main",
+          "minimal_streamlit_stub_source",
+          "parse_args",
+          "stop_streamlit_app"
+        ],
+        "getattr_count": 3,
+        "hasattr_count": 0,
+        "high_if_function_count": 5,
+        "missing_return_annotation_count": 13,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 3
+      },
+      "file": "dadbot/app_runtime.py",
+      "flags": [
+        "early_return_in_loop",
+        "high_if_density",
+        "introspection_heavy",
+        "many_missing_return_annotations",
+        "string_dispatch"
+      ],
+      "score": 9
+    },
+    {
+      "details": {
+        "any_param_count": 1,
+        "any_return_count": 1,
+        "class_names": [
+          "AllowedTransformations",
+          "ExecutionEquivalenceDecision",
+          "ExecutionState"
+        ],
+        "compile_like_name_count": 1,
+        "compile_like_without_ir_count": 0,
+        "core_focus": true,
+        "dict_return_count": 0,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "_invariants_preserved",
+          "_normalize_text",
+          "_normalize_value",
+          "_semantic_actions",
+          "_semantic_equivalent",
+          "_structural_equivalent",
+          "build_execution_state",
+          "execution_equivalence_relation"
+        ],
+        "getattr_count": 0,
+        "hasattr_count": 0,
+        "high_if_function_count": 1,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 2
+      },
+      "file": "dadbot/core/execution_semantics.py",
+      "flags": [
+        "high_if_density",
+        "string_dispatch",
+        "uses_any_param",
+        "uses_any_return"
+      ],
+      "score": 9
+    },
+    {
+      "details": {
+        "any_param_count": 3,
+        "any_return_count": 1,
+        "class_names": [
+          "ContextBuilderNode",
+          "HealthNode",
+          "InferenceNode",
+          "ReflectionNode",
+          "SafetyNode",
+          "SaveNode",
+          "TemporalNode",
+          "ToolExecutorNode",
+          "ToolRegistration",
+          "ToolRouterNode"
+        ],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": true,
+        "dict_return_count": 1,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "_builtin_current_time",
+          "_builtin_echo",
+          "_builtin_memory_lookup",
+          "_stable_sha256",
+          "_validate_tool_output",
+          "dispatch_registered_tool",
+          "get_registered_tool",
+          "get_registered_tool_names",
+          "get_tool_required_args",
+          "register_tool"
+        ],
+        "getattr_count": 20,
+        "hasattr_count": 0,
+        "high_if_function_count": 0,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 1
+      },
+      "file": "dadbot/core/nodes.py",
+      "flags": [
+        "introspection_heavy",
+        "string_dispatch",
+        "uses_any_param",
+        "uses_any_return"
+      ],
+      "score": 9
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 0,
+        "class_names": [],
+        "compile_like_name_count": 1,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 0,
+        "early_return_loop_function_count": 1,
+        "function_names": [
+          "_clip",
+          "_decode_email_snippet",
+          "_normalize_uploaded_bytes",
+          "_parse_json_memories",
+          "_parse_mbox_memories",
+          "_parse_photo_memory",
+          "_parse_text_memories",
+          "_safe_text",
+          "build_heritage_memories"
+        ],
+        "getattr_count": 1,
+        "hasattr_count": 2,
+        "high_if_function_count": 2,
+        "missing_return_annotation_count": 7,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 1
+      },
+      "file": "dadbot/heritage_import.py",
+      "flags": [
+        "early_return_in_loop",
+        "high_if_density",
+        "introspection_heavy",
+        "many_missing_return_annotations",
+        "string_dispatch"
+      ],
+      "score": 9
+    },
+    {
+      "details": {
+        "any_param_count": 3,
+        "any_return_count": 1,
+        "class_names": [
+          "FactEntry",
+          "FakeAgentService",
+          "FakeContextService",
+          "FakeGraphManager",
+          "FakeGraphStoreBackend",
+          "FakeHealthService",
+          "FakeMemoryCoordinator",
+          "FakeMemoryManager",
+          "FakeReflectionService",
+          "FakeRelationshipManager",
+          "FakeRuntime",
+          "FakeSafetyService",
+          "FakeTurnService",
+          "RecordingPersistenceManager"
+        ],
+        "compile_like_name_count": 3,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 5,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "build_graph",
+          "build_input_batch",
+          "build_turn_context",
+          "canonical_bytes",
+          "compare_runs",
+          "graph_invariant_checks",
+          "ledger_lock_checks",
+          "main",
+          "run_batch_once",
+          "sanitize_volatile",
+          "sha256_hex",
+          "stage_order_checks"
+        ],
+        "getattr_count": 5,
+        "hasattr_count": 0,
+        "high_if_function_count": 0,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 1
+      },
+      "file": "tools/phase4_deterministic_replay_gate.py",
+      "flags": [
+        "dict_return_contracts",
+        "introspection_heavy",
+        "string_dispatch",
+        "uses_any_param",
+        "uses_any_return"
+      ],
+      "score": 9
+    },
+    {
+      "details": {
+        "any_param_count": 1,
+        "any_return_count": 0,
+        "class_names": [],
+        "compile_like_name_count": 1,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 2,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "build_50_turn_batch",
+          "canonical_bytes",
+          "duplicate_entity_count",
+          "graph_invariants",
+          "isolated_runtime_paths",
+          "main",
+          "normalize_text",
+          "run_simulation",
+          "wrap_services_for_delay_markers"
+        ],
+        "getattr_count": 3,
+        "hasattr_count": 0,
+        "high_if_function_count": 1,
+        "missing_return_annotation_count": 1,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 2
+      },
+      "file": "tools/phase4_launch_readiness_simulation.py",
+      "flags": [
+        "dict_return_contracts",
+        "high_if_density",
+        "introspection_heavy",
+        "string_dispatch",
+        "uses_any_param"
+      ],
+      "score": 9
+    },
+    {
+      "details": {
+        "any_param_count": 3,
+        "any_return_count": 0,
+        "class_names": [
+          "ExecutionTraceContext",
+          "ExecutionTraceRecorder",
+          "ExternalSystemCallGraph",
+          "RuntimeTraceViolation",
+          "ToolExecutionTraceNode"
+        ],
+        "compile_like_name_count": 2,
+        "compile_like_without_ir_count": 0,
+        "core_focus": true,
+        "dict_return_count": 7,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "_build_execution_dag",
+          "_build_execution_snapshot",
+          "_normalize_time_token",
+          "_normalized_steps",
+          "_require_execution_context_contract",
+          "_stable_sha256",
+          "_step_input_payload",
+          "_step_output_payload",
+          "active_execution_trace",
+          "bind_execution_trace",
+          "build_execution_trace_context",
+          "build_external_system_call_graph",
+          "canonicalize_execution_trace_context",
+          "derive_execution_trace_hash",
+          "ensure_execution_trace_root",
+          "record_execution_step",
+          "record_external_system_call",
+          "require_execution_trace"
+        ],
+        "getattr_count": 7,
+        "hasattr_count": 0,
+        "high_if_function_count": 0,
+        "missing_return_annotation_count": 2,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 3
+      },
+      "file": "dadbot/core/execution_trace_context.py",
+      "flags": [
+        "dict_return_contracts",
+        "introspection_heavy",
+        "string_dispatch",
+        "uses_any_param"
+      ],
+      "score": 8
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 0,
+        "class_names": [],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 0,
+        "early_return_loop_function_count": 2,
+        "function_names": [
+          "apply_power_mode",
+          "apply_ui_preferences",
+          "export_bundle_payload",
+          "fetch_ical_events",
+          "find_available_image_model",
+          "heritage_files_with_limits",
+          "local_stt_backend_status",
+          "local_tts_backend_status",
+          "render_voice_dependency_help",
+          "voice_profile_catalog"
+        ],
+        "getattr_count": 3,
+        "hasattr_count": 0,
+        "high_if_function_count": 1,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 3
+      },
+      "file": "dadbot/ui/helpers.py",
+      "flags": [
+        "early_return_in_loop",
+        "high_if_density",
+        "introspection_heavy",
+        "string_dispatch"
+      ],
+      "score": 8
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 0,
+        "class_names": [],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 0,
+        "early_return_loop_function_count": 1,
+        "function_names": [
+          "extract_ollama_message_content",
+          "extract_ollama_message_payload",
+          "parse_model_json_content",
+          "transcript_from_messages"
+        ],
+        "getattr_count": 5,
+        "hasattr_count": 2,
+        "high_if_function_count": 1,
+        "missing_return_annotation_count": 1,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 3
+      },
+      "file": "dadbot/utils/llm.py",
+      "flags": [
+        "early_return_in_loop",
+        "high_if_density",
+        "introspection_heavy",
+        "string_dispatch"
+      ],
+      "score": 8
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 0,
+        "class_names": [],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 0,
+        "early_return_loop_function_count": 1,
+        "function_names": [
+          "create_api_app"
+        ],
+        "getattr_count": 1,
+        "hasattr_count": 3,
+        "high_if_function_count": 1,
+        "missing_return_annotation_count": 1,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 1
+      },
+      "file": "dadbot_system/api.py",
+      "flags": [
+        "early_return_in_loop",
+        "high_if_density",
+        "introspection_heavy",
+        "string_dispatch"
+      ],
+      "score": 8
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 0,
+        "class_names": [
+          "CertificationFailure"
+        ],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 2,
+        "early_return_loop_function_count": 2,
+        "function_names": [
+          "_bind_shadow_log_path",
+          "_build_prompts",
+          "_canonical_checkpoint_log_path",
+          "_canonicalize_path",
+          "_count_existing_samples",
+          "_detect_deterministic_violations",
+          "_extract_merkle_root",
+          "_extract_parent_hash",
+          "_extract_state_snapshot",
+          "_load_checkpoint",
+          "_read_last_json_record",
+          "_read_last_two_json_records",
+          "_save_checkpoint",
+          "main",
+          "run"
+        ],
+        "getattr_count": 0,
+        "hasattr_count": 0,
+        "high_if_function_count": 2,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 1
+      },
+      "file": "tools/collect_extended_shadow_batch.py",
+      "flags": [
+        "dict_return_contracts",
+        "early_return_in_loop",
+        "high_if_density",
+        "string_dispatch"
+      ],
+      "score": 8
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 0,
+        "class_names": [
+          "RuntimeCheckResult",
+          "StaticScanResult",
+          "StructuralCheckResult",
+          "_GraphExecuteDeterminismVisitor",
+          "_MockAgentService",
+          "_MockContextService",
+          "_MockMaintenanceService",
+          "_MockPersistenceService",
+          "_MockReflectionService",
+          "_MockRegistry",
+          "_MockSafetyService"
+        ],
+        "compile_like_name_count": 1,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 5,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "_build_protocol_metadata",
+          "_build_runtime_trace_artifact",
+          "_build_subsystem_scores",
+          "_canonical_json_bytes",
+          "_iter_python_files",
+          "_load_or_generate_runtime_trace",
+          "_normalize_runtime_trace_artifact",
+          "_resolve_signing_key",
+          "_run_gate",
+          "_run_static_mode",
+          "_safe_read",
+          "_score_bool",
+          "_sign_payload",
+          "_stable_execution_trace_hash",
+          "_stable_identity_fingerprint",
+          "_static_violations",
+          "_verify_mode",
+          "_verify_signed_report",
+          "build_certification_hash",
+          "main",
+          "runtime_check",
+          "static_scan",
+          "structural_check"
+        ],
+        "getattr_count": 4,
+        "hasattr_count": 0,
+        "high_if_function_count": 3,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 6
+      },
+      "file": "tools/phase4_certify.py",
+      "flags": [
+        "dict_return_contracts",
+        "high_if_density",
+        "introspection_heavy",
+        "string_dispatch"
+      ],
+      "score": 8
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 0,
+        "class_names": [],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 4,
+        "early_return_loop_function_count": 3,
+        "function_names": [
+          "_candidate_entrypoints",
+          "_class_method_names",
+          "_drift_for_key",
+          "_extract_literal_string",
+          "_extract_literal_tuple_strings",
+          "_list_diff",
+          "_normalize_service_entries",
+          "_parse_args",
+          "_print_human_report",
+          "_read_ast",
+          "collect_current_surface",
+          "evaluate_freeze",
+          "main"
+        ],
+        "getattr_count": 0,
+        "hasattr_count": 0,
+        "high_if_function_count": 2,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 1
+      },
+      "file": "tools/turn_surface_freeze.py",
+      "flags": [
+        "dict_return_contracts",
+        "early_return_in_loop",
+        "high_if_density",
+        "string_dispatch"
+      ],
+      "score": 8
+    },
+    {
+      "details": {
+        "any_param_count": 11,
+        "any_return_count": 0,
+        "class_names": [],
+        "compile_like_name_count": 1,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 10,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "_event_job_id",
+          "_event_type",
+          "_extract_registry_aliases_from_orchestrator",
+          "_format_exc",
+          "_registry_get_optional",
+          "_unused_import_symbols_in_orchestrator",
+          "build_wiring_map",
+          "check_causality",
+          "check_exporter",
+          "check_ledger",
+          "check_mid_execution",
+          "check_observability",
+          "check_retry",
+          "check_runtime_activation",
+          "check_wiring_integrity",
+          "full_module_activation_scan"
+        ],
+        "getattr_count": 16,
+        "hasattr_count": 6,
+        "high_if_function_count": 0,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 3
+      },
+      "file": "audit_runners.py",
+      "flags": [
+        "dict_return_contracts",
+        "introspection_heavy",
+        "string_dispatch",
+        "uses_any_param"
+      ],
+      "score": 7
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 0,
+        "class_names": [],
+        "compile_like_name_count": 1,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 0,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "_collect_webrtc_audio_bytes",
+          "_persist_known_devices",
+          "_render_voice_capture_layer",
+          "_runtime_rejection_payload",
+          "_voice_known_devices",
+          "bot_messages_for_thread",
+          "build_chat_attachments_from_uploads",
+          "create_new_thread",
+          "default_thread_messages",
+          "emit_generated_photo_message",
+          "emit_voice_runtime_ledger_event",
+          "first_run_wizard",
+          "generate_dad_photo",
+          "get_chat_event_api",
+          "get_runtime",
+          "get_voice_session_controller",
+          "initialize_session",
+          "inject_custom_css",
+          "inject_pwa_metadata",
+          "load_faster_whisper_model",
+          "load_openai_whisper_model",
+          "load_ui_stylesheet",
+          "main",
+          "optimize_runtime_for_hardware",
+          "persist_voice_profile_if_changed",
+          "process_prompt_via_runtime",
+          "purge_session_context",
+          "pwa_asset_status",
+          "pwa_asset_url",
+          "record_runtime_rejection",
+          "record_turn_inspector_from_runtime_result",
+          "record_turn_timeline_event",
+          "render_agentic_trace",
+          "render_ambient_voice_listener",
+          "render_chat_tab",
+          "render_companion_toolbar",
+          "render_hero",
+          "render_mobile_bottom_navigation",
+          "render_mobile_tab",
+          "render_realtime_voice_call",
+          "render_reply_tts",
+          "render_runtime_guardrails_card",
+          "render_runtime_rejection_banner",
+          "render_runtime_semantic_strip",
+          "render_sidebar",
+          "render_status_strip",
+          "render_status_tab",
+          "render_turn_inspector",
+          "render_voice_controls",
+          "render_workshop_tab",
+          "require_pin",
+          "resolve_tts_voice_id",
+          "runtime_guardrail_severity",
+          "runtime_guardrail_view_from_session",
+          "runtime_rule_fix_hint",
+          "runtime_semantic_signal_snapshot",
+          "runtime_turn_timeline",
+          "summarize_document_attachment",
+          "switch_active_thread",
+          "synthesize_piper_audio",
+          "synthesize_tts_audio",
+          "theme_palette",
+          "transcribe_audio_bytes",
+          "ui_shell_snapshot",
+          "update_ui_mood",
+          "voice_profile_payload"
+        ],
+        "getattr_count": 18,
+        "hasattr_count": 0,
+        "high_if_function_count": 16,
+        "missing_return_annotation_count": 38,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 18
+      },
+      "file": "dad_streamlit.py",
+      "flags": [
+        "high_if_density",
+        "introspection_heavy",
+        "many_missing_return_annotations",
+        "string_dispatch"
+      ],
+      "score": 7
+    },
+    {
+      "details": {
+        "any_param_count": 2,
+        "any_return_count": 1,
+        "class_names": [
+          "ContextBuilderNode",
+          "GraphNode",
+          "HealthNode",
+          "InferenceNode",
+          "ReflectionNode",
+          "SafetyNode",
+          "SaveNode",
+          "TemporalNode",
+          "ValidationGateNode",
+          "_NodeContractMixin"
+        ],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": true,
+        "dict_return_count": 0,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "_invoke_node_run_compat"
+        ],
+        "getattr_count": 15,
+        "hasattr_count": 0,
+        "high_if_function_count": 0,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 0
+      },
+      "file": "dadbot/core/graph_pipeline_nodes.py",
+      "flags": [
+        "introspection_heavy",
+        "uses_any_param",
+        "uses_any_return"
+      ],
+      "score": 7
+    },
+    {
+      "details": {
+        "any_param_count": 1,
+        "any_return_count": 1,
+        "class_names": [
+          "SideEffectAdapter"
+        ],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": true,
+        "dict_return_count": 0,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "_json_safe"
+        ],
+        "getattr_count": 3,
+        "hasattr_count": 0,
+        "high_if_function_count": 0,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 0
+      },
+      "file": "dadbot/core/side_effect_adapter.py",
+      "flags": [
+        "introspection_heavy",
+        "uses_any_param",
+        "uses_any_return"
+      ],
+      "score": 7
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 0,
+        "class_names": [],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 0,
+        "early_return_loop_function_count": 1,
+        "function_names": [
+          "dispatch_runtime_mode",
+          "launch_api_service",
+          "launch_streamlit_app",
+          "resolve_runtime_class",
+          "stop_streamlit_app"
+        ],
+        "getattr_count": 1,
+        "hasattr_count": 0,
+        "high_if_function_count": 4,
+        "missing_return_annotation_count": 5,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 1
+      },
+      "file": "dadbot/runtime/launcher.py",
+      "flags": [
+        "early_return_in_loop",
+        "high_if_density",
+        "many_missing_return_annotations",
+        "string_dispatch"
+      ],
+      "score": 7
+    },
+    {
+      "details": {
+        "any_param_count": 2,
+        "any_return_count": 1,
+        "class_names": [],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 2,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "_capture_runtime_behavior",
+          "_dependency_lock",
+          "_git_commit_hash",
+          "_json_default",
+          "_runtime_config_dump",
+          "_stable_json_dump",
+          "main"
+        ],
+        "getattr_count": 9,
+        "hasattr_count": 2,
+        "high_if_function_count": 0,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 0
+      },
+      "file": "tools/create_system_snapshot_v0.py",
+      "flags": [
+        "dict_return_contracts",
+        "introspection_heavy",
+        "uses_any_param",
+        "uses_any_return"
+      ],
+      "score": 7
+    },
+    {
+      "details": {
+        "any_param_count": 2,
+        "any_return_count": 1,
+        "class_names": [],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 8,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "_build_audit_payload",
+          "_canonical_envelope_detail",
+          "_canonicalize",
+          "_evaluate_envelope_divergence",
+          "_instrumentation_envelope_divergence",
+          "_normalize_envelope_projection",
+          "_orchestrator_determinism_identical_inputs",
+          "_run_one_orchestrator_turn",
+          "_sha256",
+          "_temporary_env_var",
+          "_trace_fingerprint_stability",
+          "main"
+        ],
+        "getattr_count": 0,
+        "hasattr_count": 0,
+        "high_if_function_count": 0,
+        "missing_return_annotation_count": 1,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 1
+      },
+      "file": "tools/execution_invariance_audit.py",
+      "flags": [
+        "dict_return_contracts",
+        "string_dispatch",
+        "uses_any_param",
+        "uses_any_return"
+      ],
+      "score": 7
+    },
+    {
+      "details": {
+        "any_param_count": 1,
+        "any_return_count": 0,
+        "class_names": [
+          "CapabilityAuditReport",
+          "CapabilityCheck"
+        ],
+        "compile_like_name_count": 3,
+        "compile_like_without_ir_count": 0,
+        "core_focus": true,
+        "dict_return_count": 2,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "build_capability_audit_event_payload",
+          "build_capability_coverage_matrix",
+          "build_runtime_capability_audit_report"
+        ],
+        "getattr_count": 1,
+        "hasattr_count": 0,
+        "high_if_function_count": 0,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 2
+      },
+      "file": "dadbot/core/capability_audit_runner.py",
+      "flags": [
+        "dict_return_contracts",
+        "string_dispatch",
+        "uses_any_param"
+      ],
+      "score": 6
+    },
+    {
+      "details": {
+        "any_param_count": 3,
+        "any_return_count": 0,
+        "class_names": [
+          "CapabilityRegistry",
+          "CapabilitySnapshot",
+          "CapabilityViolationError",
+          "EnforcementMode",
+          "NodeCapabilityRequirement"
+        ],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": true,
+        "dict_return_count": 0,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "enforce_node_entry",
+          "freeze_capabilities",
+          "get_capability_snapshot",
+          "verify_capability_freeze"
+        ],
+        "getattr_count": 3,
+        "hasattr_count": 0,
+        "high_if_function_count": 1,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 0
+      },
+      "file": "dadbot/core/capability_registry.py",
+      "flags": [
+        "high_if_density",
+        "introspection_heavy",
+        "uses_any_param"
+      ],
+      "score": 6
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 0,
+        "class_names": [
+          "ApiKeyAuth",
+          "AuthStrategy",
+          "BearerTokenAuth",
+          "CostAwareToolRouter",
+          "DynamicToolRegistry",
+          "ExternalToolRuntime",
+          "HttpRequest",
+          "HttpResponse",
+          "HttpTransport",
+          "IsolationGuard",
+          "IsolationProfile",
+          "NetworkFailureKind",
+          "NoAuth",
+          "RateLimitPolicy",
+          "ResourceEstimate",
+          "ResourceLimits",
+          "RetryPolicy",
+          "RouterWeights",
+          "SlidingWindowRateLimiter",
+          "ToolCapability",
+          "ToolExecutionResult",
+          "ToolExecutionStatus"
+        ],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": true,
+        "dict_return_count": 0,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "_parse_version",
+          "classify_network_failure"
+        ],
+        "getattr_count": 2,
+        "hasattr_count": 0,
+        "high_if_function_count": 1,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 1
+      },
+      "file": "dadbot/core/external_tool_runtime.py",
+      "flags": [
+        "high_if_density",
+        "introspection_heavy",
+        "string_dispatch"
+      ],
+      "score": 6
+    },
+    {
+      "details": {
+        "any_param_count": 1,
+        "any_return_count": 0,
+        "class_names": [
+          "ExecutionState",
+          "GlobalInvariantEngine",
+          "GlobalValidationReport",
+          "InvariantCategory",
+          "InvariantCheck",
+          "InvariantSeverity",
+          "InvariantViolation",
+          "SystemInvariant"
+        ],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": true,
+        "dict_return_count": 0,
+        "early_return_loop_function_count": 2,
+        "function_names": [
+          "_DAG_ACYCLIC",
+          "_DAG_NOT_EMPTY_WHEN_TOOLS_PLANNED",
+          "_EVENT_LOG_MONOTONIC",
+          "_MEMORY_ENTRIES_HAVE_TEXT",
+          "_PLANNER_INTENT_PRESENT",
+          "_PLANNER_STRATEGY_PRESENT",
+          "_RESOURCE_WITHIN_BUDGET",
+          "_SCHEMA_VERSIONS_PRESENT",
+          "_TOOL_EVENTS_HAVE_TYPE",
+          "_sha256",
+          "enforce_invariant"
+        ],
+        "getattr_count": 2,
+        "hasattr_count": 0,
+        "high_if_function_count": 0,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [
+            "engine",
+            "planner"
+          ],
+          "file": "dadbot/core/invariant_engine.py",
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 0
+      },
+      "file": "dadbot/core/invariant_engine.py",
+      "flags": [
+        "early_return_in_loop",
+        "introspection_heavy",
+        "uses_any_param"
+      ],
+      "score": 6
+    },
+    {
+      "details": {
+        "any_param_count": 1,
+        "any_return_count": 0,
+        "class_names": [
+          "KernelStepResult",
+          "KernelViolation",
+          "PolicyDecision",
+          "TurnKernel"
+        ],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": true,
+        "dict_return_count": 0,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "bayesian_policy_gate"
+        ],
+        "getattr_count": 2,
+        "hasattr_count": 0,
+        "high_if_function_count": 0,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 1
+      },
+      "file": "dadbot/core/kernel.py",
+      "flags": [
+        "introspection_heavy",
+        "string_dispatch",
+        "uses_any_param"
+      ],
+      "score": 6
+    },
+    {
+      "details": {
+        "any_param_count": 1,
+        "any_return_count": 0,
+        "class_names": [],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": true,
+        "dict_return_count": 1,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "_build_runtime_fingerprint",
+          "_check_and_increment_daily_counter",
+          "_classify_divergence",
+          "_compute_input_hash",
+          "_compute_replay_hash",
+          "_counter_path",
+          "_daily_cap",
+          "_emit",
+          "_log_path",
+          "_sample_rate",
+          "_should_sample",
+          "_stable_sha256",
+          "_today_str",
+          "is_enabled",
+          "shadow_log"
+        ],
+        "getattr_count": 0,
+        "hasattr_count": 0,
+        "high_if_function_count": 1,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 2
+      },
+      "file": "dadbot/core/shadow_mode.py",
+      "flags": [
+        "high_if_density",
+        "string_dispatch",
+        "uses_any_param"
+      ],
+      "score": 6
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 0,
+        "class_names": [],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 0,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "collect_webrtc_audio_bytes",
+          "persist_known_devices",
+          "render_voice_capture_layer",
+          "voice_known_devices"
+        ],
+        "getattr_count": 3,
+        "hasattr_count": 0,
+        "high_if_function_count": 2,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 2
+      },
+      "file": "dadbot/ui/media/webrtc.py",
+      "flags": [
+        "high_if_density",
+        "introspection_heavy",
+        "string_dispatch"
+      ],
+      "score": 6
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 0,
+        "class_names": [],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 0,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "_render_avatar_studio_section",
+          "_render_col1_display_voice",
+          "_render_col2_llm_tools_audio",
+          "_render_persona_section",
+          "_render_preferences_form",
+          "_save_preferences",
+          "render_preferences_tab"
+        ],
+        "getattr_count": 2,
+        "hasattr_count": 0,
+        "high_if_function_count": 2,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 2
+      },
+      "file": "dadbot/ui/preferences.py",
+      "flags": [
+        "high_if_density",
+        "introspection_heavy",
+        "string_dispatch"
+      ],
+      "score": 6
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 0,
+        "class_names": [
+          "GraphMetrics"
+        ],
+        "compile_like_name_count": 1,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 3,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "_build_graph",
+          "_coverage_ratio",
+          "_imports_in",
+          "_metrics_for_module",
+          "_module_name",
+          "_python_files",
+          "_reachable_count",
+          "_reverse_graph",
+          "_tarjan_scc",
+          "build_subsystem_health",
+          "detect_cycles",
+          "find_forbidden_cycles",
+          "subsystem_health_map",
+          "subsystem_risk_heatmap"
+        ],
+        "getattr_count": 0,
+        "hasattr_count": 0,
+        "high_if_function_count": 1,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 2
+      },
+      "file": "dadbot/uril/architecture.py",
+      "flags": [
+        "dict_return_contracts",
+        "high_if_density",
+        "string_dispatch"
+      ],
+      "score": 6
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 0,
+        "class_names": [],
+        "compile_like_name_count": 1,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 4,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "_path_or_none",
+          "_pct",
+          "_phase4_completion",
+          "_progress_summary",
+          "_proven_aspects",
+          "build_uril_report",
+          "delta_compare",
+          "main",
+          "parse_args"
+        ],
+        "getattr_count": 0,
+        "hasattr_count": 0,
+        "high_if_function_count": 1,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 3
+      },
+      "file": "dadbot/uril/report.py",
+      "flags": [
+        "dict_return_contracts",
+        "high_if_density",
+        "string_dispatch"
+      ],
+      "score": 6
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 0,
+        "class_names": [],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 0,
+        "early_return_loop_function_count": 1,
+        "function_names": [
+          "_attribute_accesses",
+          "_call_names",
+          "_cohesion_score",
+          "_defined_names",
+          "_func_param_names",
+          "_grep_identifier",
+          "_is_execution_path",
+          "_method_names_of_class",
+          "_parse_args",
+          "_parse_tree",
+          "_print_section",
+          "_read_source",
+          "_rel",
+          "check_interface_completeness",
+          "check_missing_modules",
+          "check_orphan_expectations",
+          "check_param_propagation",
+          "check_subsystem_coverage",
+          "compute_completeness_score",
+          "main"
+        ],
+        "getattr_count": 0,
+        "hasattr_count": 0,
+        "high_if_function_count": 2,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 1
+      },
+      "file": "tools/arch_completeness_audit.py",
+      "flags": [
+        "early_return_in_loop",
+        "high_if_density",
+        "string_dispatch"
+      ],
+      "score": 6
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 0,
+        "class_names": [
+          "FileAudit"
+        ],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 4,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "_build_arg_parser",
+          "_build_manual_review_queue",
+          "_function_metrics",
+          "_is_core_focus",
+          "_iter_py_files",
+          "_module_metrics",
+          "_name_reality_mismatch",
+          "_score_metrics",
+          "analyze_file",
+          "audit_repo",
+          "main"
+        ],
+        "getattr_count": 0,
+        "hasattr_count": 0,
+        "high_if_function_count": 2,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 1
+      },
+      "file": "tools/architectural_shallow_audit.py",
+      "flags": [
+        "dict_return_contracts",
+        "high_if_density",
+        "string_dispatch"
+      ],
+      "score": 6
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 0,
+        "class_names": [],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 1,
+        "early_return_loop_function_count": 1,
+        "function_names": [
+          "_collect_db_sizes",
+          "_count_tests_from_junit_xml",
+          "_derive_lane_timeout",
+          "_extract_summary_counts",
+          "_extract_top_slowest",
+          "_flatten_slowest",
+          "_lane_order",
+          "_latest_baseline_record",
+          "_run_cold_start_probe",
+          "_run_lane",
+          "_select_lanes",
+          "_slug",
+          "main",
+          "parse_args"
+        ],
+        "getattr_count": 0,
+        "hasattr_count": 0,
+        "high_if_function_count": 3,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 4
+      },
+      "file": "tools/cert_baseline_capture.py",
+      "flags": [
+        "early_return_in_loop",
+        "high_if_density",
+        "string_dispatch"
+      ],
+      "score": 6
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 0,
+        "class_names": [],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 1,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "_decision_points",
+          "_load_migration_allowlist",
+          "_loc",
+          "_metrics",
+          "_parse_args",
+          "main"
+        ],
+        "getattr_count": 2,
+        "hasattr_count": 0,
+        "high_if_function_count": 1,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 1
+      },
+      "file": "tools/complexity_diff_gate.py",
+      "flags": [
+        "high_if_density",
+        "introspection_heavy",
+        "string_dispatch"
+      ],
+      "score": 6
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 0,
+        "class_names": [],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 0,
+        "early_return_loop_function_count": 1,
+        "function_names": [
+          "_closure_rows",
+          "_honesty_rows",
+          "_list_top_level",
+          "_run_has_passes",
+          "_run_is_clean",
+          "_safe_count_files",
+          "_walk_tree",
+          "create_snapshot",
+          "run_command"
+        ],
+        "getattr_count": 0,
+        "hasattr_count": 0,
+        "high_if_function_count": 1,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 3
+      },
+      "file": "tools/generate_full_system_snapshot.py",
+      "flags": [
+        "early_return_in_loop",
+        "high_if_density",
+        "string_dispatch"
+      ],
+      "score": 6
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 0,
+        "class_names": [],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 0,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "_cc_max",
+          "_cc_total",
+          "_check_file",
+          "_count_decision_points",
+          "_count_loc",
+          "_load_migration_allowlist",
+          "_parse_args",
+          "main",
+          "measure_file"
+        ],
+        "getattr_count": 2,
+        "hasattr_count": 0,
+        "high_if_function_count": 1,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 2
+      },
+      "file": "tools/god_class_audit.py",
+      "flags": [
+        "high_if_density",
+        "introspection_heavy",
+        "string_dispatch"
+      ],
+      "score": 6
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 0,
+        "class_names": [],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 0,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "main"
+        ],
+        "getattr_count": 2,
+        "hasattr_count": 0,
+        "high_if_function_count": 1,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 1
+      },
+      "file": "tools/run_phase4_firewall_gate.py",
+      "flags": [
+        "high_if_density",
+        "introspection_heavy",
+        "string_dispatch"
+      ],
+      "score": 6
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 0,
+        "class_names": [],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 3,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "_hash_variance_score",
+          "_kernel_rejection_drift",
+          "_load_records",
+          "_pct",
+          "_replay_divergence",
+          "main",
+          "report"
+        ],
+        "getattr_count": 0,
+        "hasattr_count": 0,
+        "high_if_function_count": 1,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 1
+      },
+      "file": "tools/shadow_drift_report.py",
+      "flags": [
+        "dict_return_contracts",
+        "high_if_density",
+        "string_dispatch"
+      ],
+      "score": 6
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 0,
+        "class_names": [],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 0,
+        "early_return_loop_function_count": 1,
+        "function_names": [
+          "_extract_snapshot_id",
+          "_read_text",
+          "_require",
+          "verify"
+        ],
+        "getattr_count": 0,
+        "hasattr_count": 0,
+        "high_if_function_count": 1,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 2
+      },
+      "file": "tools/verify_latest_snapshot_canonical.py",
+      "flags": [
+        "early_return_in_loop",
+        "high_if_density",
+        "string_dispatch"
+      ],
+      "score": 6
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 0,
+        "class_names": [],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 0,
+        "early_return_loop_function_count": 2,
+        "function_names": [
+          "imports_from",
+          "module_to_path",
+          "path_to_mod",
+          "read_safe"
+        ],
+        "getattr_count": 0,
+        "hasattr_count": 0,
+        "high_if_function_count": 0,
+        "missing_return_annotation_count": 4,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 1
+      },
+      "file": "_dead_v3.py",
+      "flags": [
+        "early_return_in_loop",
+        "many_missing_return_annotations",
+        "string_dispatch"
+      ],
+      "score": 5
+    },
+    {
+      "details": {
+        "any_param_count": 2,
+        "any_return_count": 1,
+        "class_names": [],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": true,
+        "dict_return_count": 1,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "_strip_non_canonical",
+          "canonicalize_event_payload",
+          "validate_trace"
+        ],
+        "getattr_count": 0,
+        "hasattr_count": 0,
+        "high_if_function_count": 0,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 0
+      },
+      "file": "dadbot/core/canonical_event.py",
+      "flags": [
+        "uses_any_param",
+        "uses_any_return"
+      ],
+      "score": 5
+    },
+    {
+      "details": {
+        "any_param_count": 1,
+        "any_return_count": 1,
+        "class_names": [
+          "ExecutionTraceEvent",
+          "GoalMutationOp",
+          "LedgerMutationOp",
+          "MemoryMutationOp",
+          "MutationKind",
+          "MutationTransactionRecord",
+          "MutationTransactionStatus",
+          "NodeType",
+          "RelationshipMutationOp",
+          "StageTrace"
+        ],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": true,
+        "dict_return_count": 0,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "_json_safe"
+        ],
+        "getattr_count": 0,
+        "hasattr_count": 0,
+        "high_if_function_count": 0,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 0
+      },
+      "file": "dadbot/core/graph_types.py",
+      "flags": [
+        "uses_any_param",
+        "uses_any_return"
+      ],
+      "score": 5
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 1,
+        "class_names": [
+          "LangGraphTopologyProvider"
+        ],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": true,
+        "dict_return_count": 0,
+        "early_return_loop_function_count": 1,
+        "function_names": [
+          "_build_turn_pipeline",
+          "_route_after_stage",
+          "create_topology_provider"
+        ],
+        "getattr_count": 0,
+        "hasattr_count": 0,
+        "high_if_function_count": 0,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 0
+      },
+      "file": "dadbot/core/lg_topology.py",
+      "flags": [
+        "early_return_in_loop",
+        "uses_any_return"
+      ],
+      "score": 5
+    },
+    {
+      "details": {
+        "any_param_count": 1,
+        "any_return_count": 1,
+        "class_names": [
+          "OfflineReplayValidator",
+          "ReplayValidationReport"
+        ],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": true,
+        "dict_return_count": 0,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "_json_safe_offline",
+          "_recompute_identity_fingerprint",
+          "_recompute_trace_hash"
+        ],
+        "getattr_count": 0,
+        "hasattr_count": 0,
+        "high_if_function_count": 0,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 0
+      },
+      "file": "dadbot/core/offline_replay_validator.py",
+      "flags": [
+        "uses_any_param",
+        "uses_any_return"
+      ],
+      "score": 5
+    },
+    {
+      "details": {
+        "any_param_count": 5,
+        "any_return_count": 2,
+        "class_names": [
+          "DadBotServiceContainer",
+          "ServiceDescriptor",
+          "ServiceRegistry"
+        ],
+        "compile_like_name_count": 1,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 0,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "_instantiate",
+          "_invariance_contract_api",
+          "_resolve_attr",
+          "_topo_sort_descriptors",
+          "_wire_from_descriptors",
+          "boot_registry",
+          "build_manager_registry",
+          "wire_bootstrap_managers",
+          "wire_bot_managers",
+          "wire_runtime_managers"
+        ],
+        "getattr_count": 14,
+        "hasattr_count": 0,
+        "high_if_function_count": 0,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 0
+      },
+      "file": "dadbot/registry.py",
+      "flags": [
+        "introspection_heavy",
+        "uses_any_param",
+        "uses_any_return"
+      ],
+      "score": 5
+    },
+    {
+      "details": {
+        "any_param_count": 3,
+        "any_return_count": 1,
+        "class_names": [],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 0,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "bot_messages_for_thread",
+          "create_new_thread",
+          "default_thread_messages",
+          "emit_generated_photo_message",
+          "emit_voice_runtime_ledger_event",
+          "generate_dad_photo",
+          "get_chat_event_api",
+          "get_runtime",
+          "initialize_session",
+          "optimize_runtime_for_hardware",
+          "process_prompt_via_runtime",
+          "purge_session_context",
+          "switch_active_thread",
+          "ui_shell_snapshot"
+        ],
+        "getattr_count": 0,
+        "hasattr_count": 0,
+        "high_if_function_count": 0,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 2
+      },
+      "file": "dadbot/ui/interaction_controller.py",
+      "flags": [
+        "string_dispatch",
+        "uses_any_param",
+        "uses_any_return"
+      ],
+      "score": 5
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 0,
+        "class_names": [],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 0,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "ambient_fragment",
+          "enabled_label",
+          "filter_memory_entries",
+          "maybe_fragment",
+          "option_index",
+          "titleize_token"
+        ],
+        "getattr_count": 2,
+        "hasattr_count": 0,
+        "high_if_function_count": 0,
+        "missing_return_annotation_count": 5,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 1
+      },
+      "file": "dadbot/ui/utils.py",
+      "flags": [
+        "introspection_heavy",
+        "many_missing_return_annotations",
+        "string_dispatch"
+      ],
+      "score": 5
+    }
+  ],
+  "rewrite_candidates": [
+    {
+      "details": {
+        "any_param_count": 6,
+        "any_return_count": 2,
+        "class_names": [
+          "ExecutionTraceContext",
+          "ExecutionTraceRecorder",
+          "ExternalSystemCallGraph",
+          "RuntimeTraceViolation",
+          "ToolCallRecord",
+          "ToolExecutionTraceNode"
+        ],
+        "compile_like_name_count": 3,
+        "compile_like_without_ir_count": 0,
+        "core_focus": true,
+        "dict_return_count": 8,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "_build_execution_dag",
+          "_build_execution_snapshot",
+          "_drop_ignored_fields",
+          "_json_clone",
+          "_normalize_determinism_contract",
+          "_normalize_time_token",
+          "_normalized_steps",
+          "_require_execution_context_contract",
+          "_stable_sha256",
+          "_step_input_payload",
+          "_step_output_payload",
+          "active_execution_trace",
+          "bind_execution_trace",
+          "build_execution_trace_context",
+          "build_external_system_call_graph",
+          "build_tool_invocation_projection",
+          "canonicalize_execution_trace_context",
+          "derive_execution_trace_hash",
+          "ensure_execution_trace_root",
+          "record_execution_step",
+          "record_external_system_call",
+          "require_execution_trace"
+        ],
+        "getattr_count": 7,
+        "hasattr_count": 0,
+        "high_if_function_count": 0,
+        "missing_return_annotation_count": 2,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 4
+      },
+      "file": "dadbot/core/execution_context.py",
+      "flags": [
+        "dict_return_contracts",
+        "introspection_heavy",
+        "string_dispatch",
+        "uses_any_param",
+        "uses_any_return"
+      ],
+      "score": 11
+    },
+    {
+      "details": {
+        "any_param_count": 5,
+        "any_return_count": 4,
+        "class_names": [
+          "InvariantGate",
+          "InvariantViolationError",
+          "RemediationAction",
+          "RemediationDecision",
+          "ValidationDecision"
+        ],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": true,
+        "dict_return_count": 0,
+        "early_return_loop_function_count": 1,
+        "function_names": [
+          "_invariant_kernel_lineage_non_empty",
+          "_invariant_non_empty_session_id",
+          "_invariant_non_empty_type",
+          "_invariant_non_future_timestamp",
+          "_invariant_payload_is_dict_or_absent",
+          "_invariant_required_envelope_fields",
+          "_job_invariant_job_id_non_empty",
+          "_job_invariant_session_id_non_empty",
+          "_job_invariant_session_not_terminated",
+          "causal_structure_check",
+          "execution_state_check",
+          "lease_ownership_check",
+          "ledger_lifecycle_check"
+        ],
+        "getattr_count": 7,
+        "hasattr_count": 0,
+        "high_if_function_count": 0,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 3
+      },
+      "file": "dadbot/core/invariant_gate.py",
+      "flags": [
+        "early_return_in_loop",
+        "introspection_heavy",
+        "string_dispatch",
+        "uses_any_param",
+        "uses_any_return"
+      ],
+      "score": 11
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 0,
+        "class_names": [
+          "Finding",
+          "_ParentAwareVisitor"
+        ],
+        "compile_like_name_count": 1,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 2,
+        "early_return_loop_function_count": 1,
+        "function_names": [
+          "_ancestor_class_name",
+          "_call_name",
+          "_call_target_repr",
+          "_is_excluded",
+          "_is_temporal_allowed",
+          "_iter_python_files",
+          "_line_at",
+          "build_quarantine_registry",
+          "main",
+          "run_scan"
+        ],
+        "getattr_count": 2,
+        "hasattr_count": 0,
+        "high_if_function_count": 1,
+        "missing_return_annotation_count": 1,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 3
+      },
+      "file": "tools/phase4_legacy_integrity_scan.py",
+      "flags": [
+        "dict_return_contracts",
+        "early_return_in_loop",
+        "high_if_density",
+        "introspection_heavy",
+        "string_dispatch"
+      ],
+      "score": 10
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 0,
+        "class_names": [],
+        "compile_like_name_count": 2,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 0,
+        "early_return_loop_function_count": 1,
+        "function_names": [
+          "_resolve_graph_config_path",
+          "build_customer_document_store",
+          "build_service_state_store",
+          "check_dependencies",
+          "check_system_resources",
+          "ensure_streamlit_app_file",
+          "env_truthy",
+          "initialize_startup_logging",
+          "launch_api_service",
+          "launch_streamlit_app",
+          "main",
+          "minimal_streamlit_stub_source",
+          "parse_args",
+          "stop_streamlit_app"
+        ],
+        "getattr_count": 3,
+        "hasattr_count": 0,
+        "high_if_function_count": 5,
+        "missing_return_annotation_count": 13,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 3
+      },
+      "file": "dadbot/app_runtime.py",
+      "flags": [
+        "early_return_in_loop",
+        "high_if_density",
+        "introspection_heavy",
+        "many_missing_return_annotations",
+        "string_dispatch"
+      ],
+      "score": 9
+    },
+    {
+      "details": {
+        "any_param_count": 1,
+        "any_return_count": 1,
+        "class_names": [
+          "AllowedTransformations",
+          "ExecutionEquivalenceDecision",
+          "ExecutionState"
+        ],
+        "compile_like_name_count": 1,
+        "compile_like_without_ir_count": 0,
+        "core_focus": true,
+        "dict_return_count": 0,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "_invariants_preserved",
+          "_normalize_text",
+          "_normalize_value",
+          "_semantic_actions",
+          "_semantic_equivalent",
+          "_structural_equivalent",
+          "build_execution_state",
+          "execution_equivalence_relation"
+        ],
+        "getattr_count": 0,
+        "hasattr_count": 0,
+        "high_if_function_count": 1,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 2
+      },
+      "file": "dadbot/core/execution_semantics.py",
+      "flags": [
+        "high_if_density",
+        "string_dispatch",
+        "uses_any_param",
+        "uses_any_return"
+      ],
+      "score": 9
+    },
+    {
+      "details": {
+        "any_param_count": 3,
+        "any_return_count": 1,
+        "class_names": [
+          "ContextBuilderNode",
+          "HealthNode",
+          "InferenceNode",
+          "ReflectionNode",
+          "SafetyNode",
+          "SaveNode",
+          "TemporalNode",
+          "ToolExecutorNode",
+          "ToolRegistration",
+          "ToolRouterNode"
+        ],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": true,
+        "dict_return_count": 1,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "_builtin_current_time",
+          "_builtin_echo",
+          "_builtin_memory_lookup",
+          "_stable_sha256",
+          "_validate_tool_output",
+          "dispatch_registered_tool",
+          "get_registered_tool",
+          "get_registered_tool_names",
+          "get_tool_required_args",
+          "register_tool"
+        ],
+        "getattr_count": 20,
+        "hasattr_count": 0,
+        "high_if_function_count": 0,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 1
+      },
+      "file": "dadbot/core/nodes.py",
+      "flags": [
+        "introspection_heavy",
+        "string_dispatch",
+        "uses_any_param",
+        "uses_any_return"
+      ],
+      "score": 9
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 0,
+        "class_names": [],
+        "compile_like_name_count": 1,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 0,
+        "early_return_loop_function_count": 1,
+        "function_names": [
+          "_clip",
+          "_decode_email_snippet",
+          "_normalize_uploaded_bytes",
+          "_parse_json_memories",
+          "_parse_mbox_memories",
+          "_parse_photo_memory",
+          "_parse_text_memories",
+          "_safe_text",
+          "build_heritage_memories"
+        ],
+        "getattr_count": 1,
+        "hasattr_count": 2,
+        "high_if_function_count": 2,
+        "missing_return_annotation_count": 7,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 1
+      },
+      "file": "dadbot/heritage_import.py",
+      "flags": [
+        "early_return_in_loop",
+        "high_if_density",
+        "introspection_heavy",
+        "many_missing_return_annotations",
+        "string_dispatch"
+      ],
+      "score": 9
+    },
+    {
+      "details": {
+        "any_param_count": 3,
+        "any_return_count": 1,
+        "class_names": [
+          "FactEntry",
+          "FakeAgentService",
+          "FakeContextService",
+          "FakeGraphManager",
+          "FakeGraphStoreBackend",
+          "FakeHealthService",
+          "FakeMemoryCoordinator",
+          "FakeMemoryManager",
+          "FakeReflectionService",
+          "FakeRelationshipManager",
+          "FakeRuntime",
+          "FakeSafetyService",
+          "FakeTurnService",
+          "RecordingPersistenceManager"
+        ],
+        "compile_like_name_count": 3,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 5,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "build_graph",
+          "build_input_batch",
+          "build_turn_context",
+          "canonical_bytes",
+          "compare_runs",
+          "graph_invariant_checks",
+          "ledger_lock_checks",
+          "main",
+          "run_batch_once",
+          "sanitize_volatile",
+          "sha256_hex",
+          "stage_order_checks"
+        ],
+        "getattr_count": 5,
+        "hasattr_count": 0,
+        "high_if_function_count": 0,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 1
+      },
+      "file": "tools/phase4_deterministic_replay_gate.py",
+      "flags": [
+        "dict_return_contracts",
+        "introspection_heavy",
+        "string_dispatch",
+        "uses_any_param",
+        "uses_any_return"
+      ],
+      "score": 9
+    },
+    {
+      "details": {
+        "any_param_count": 1,
+        "any_return_count": 0,
+        "class_names": [],
+        "compile_like_name_count": 1,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 2,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "build_50_turn_batch",
+          "canonical_bytes",
+          "duplicate_entity_count",
+          "graph_invariants",
+          "isolated_runtime_paths",
+          "main",
+          "normalize_text",
+          "run_simulation",
+          "wrap_services_for_delay_markers"
+        ],
+        "getattr_count": 3,
+        "hasattr_count": 0,
+        "high_if_function_count": 1,
+        "missing_return_annotation_count": 1,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 2
+      },
+      "file": "tools/phase4_launch_readiness_simulation.py",
+      "flags": [
+        "dict_return_contracts",
+        "high_if_density",
+        "introspection_heavy",
+        "string_dispatch",
+        "uses_any_param"
+      ],
+      "score": 9
+    },
+    {
+      "details": {
+        "any_param_count": 3,
+        "any_return_count": 0,
+        "class_names": [
+          "ExecutionTraceContext",
+          "ExecutionTraceRecorder",
+          "ExternalSystemCallGraph",
+          "RuntimeTraceViolation",
+          "ToolExecutionTraceNode"
+        ],
+        "compile_like_name_count": 2,
+        "compile_like_without_ir_count": 0,
+        "core_focus": true,
+        "dict_return_count": 7,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "_build_execution_dag",
+          "_build_execution_snapshot",
+          "_normalize_time_token",
+          "_normalized_steps",
+          "_require_execution_context_contract",
+          "_stable_sha256",
+          "_step_input_payload",
+          "_step_output_payload",
+          "active_execution_trace",
+          "bind_execution_trace",
+          "build_execution_trace_context",
+          "build_external_system_call_graph",
+          "canonicalize_execution_trace_context",
+          "derive_execution_trace_hash",
+          "ensure_execution_trace_root",
+          "record_execution_step",
+          "record_external_system_call",
+          "require_execution_trace"
+        ],
+        "getattr_count": 7,
+        "hasattr_count": 0,
+        "high_if_function_count": 0,
+        "missing_return_annotation_count": 2,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 3
+      },
+      "file": "dadbot/core/execution_trace_context.py",
+      "flags": [
+        "dict_return_contracts",
+        "introspection_heavy",
+        "string_dispatch",
+        "uses_any_param"
+      ],
+      "score": 8
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 0,
+        "class_names": [],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 0,
+        "early_return_loop_function_count": 2,
+        "function_names": [
+          "apply_power_mode",
+          "apply_ui_preferences",
+          "export_bundle_payload",
+          "fetch_ical_events",
+          "find_available_image_model",
+          "heritage_files_with_limits",
+          "local_stt_backend_status",
+          "local_tts_backend_status",
+          "render_voice_dependency_help",
+          "voice_profile_catalog"
+        ],
+        "getattr_count": 3,
+        "hasattr_count": 0,
+        "high_if_function_count": 1,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 3
+      },
+      "file": "dadbot/ui/helpers.py",
+      "flags": [
+        "early_return_in_loop",
+        "high_if_density",
+        "introspection_heavy",
+        "string_dispatch"
+      ],
+      "score": 8
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 0,
+        "class_names": [],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 0,
+        "early_return_loop_function_count": 1,
+        "function_names": [
+          "extract_ollama_message_content",
+          "extract_ollama_message_payload",
+          "parse_model_json_content",
+          "transcript_from_messages"
+        ],
+        "getattr_count": 5,
+        "hasattr_count": 2,
+        "high_if_function_count": 1,
+        "missing_return_annotation_count": 1,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 3
+      },
+      "file": "dadbot/utils/llm.py",
+      "flags": [
+        "early_return_in_loop",
+        "high_if_density",
+        "introspection_heavy",
+        "string_dispatch"
+      ],
+      "score": 8
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 0,
+        "class_names": [],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 0,
+        "early_return_loop_function_count": 1,
+        "function_names": [
+          "create_api_app"
+        ],
+        "getattr_count": 1,
+        "hasattr_count": 3,
+        "high_if_function_count": 1,
+        "missing_return_annotation_count": 1,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 1
+      },
+      "file": "dadbot_system/api.py",
+      "flags": [
+        "early_return_in_loop",
+        "high_if_density",
+        "introspection_heavy",
+        "string_dispatch"
+      ],
+      "score": 8
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 0,
+        "class_names": [
+          "CertificationFailure"
+        ],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 2,
+        "early_return_loop_function_count": 2,
+        "function_names": [
+          "_bind_shadow_log_path",
+          "_build_prompts",
+          "_canonical_checkpoint_log_path",
+          "_canonicalize_path",
+          "_count_existing_samples",
+          "_detect_deterministic_violations",
+          "_extract_merkle_root",
+          "_extract_parent_hash",
+          "_extract_state_snapshot",
+          "_load_checkpoint",
+          "_read_last_json_record",
+          "_read_last_two_json_records",
+          "_save_checkpoint",
+          "main",
+          "run"
+        ],
+        "getattr_count": 0,
+        "hasattr_count": 0,
+        "high_if_function_count": 2,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 1
+      },
+      "file": "tools/collect_extended_shadow_batch.py",
+      "flags": [
+        "dict_return_contracts",
+        "early_return_in_loop",
+        "high_if_density",
+        "string_dispatch"
+      ],
+      "score": 8
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 0,
+        "class_names": [
+          "RuntimeCheckResult",
+          "StaticScanResult",
+          "StructuralCheckResult",
+          "_GraphExecuteDeterminismVisitor",
+          "_MockAgentService",
+          "_MockContextService",
+          "_MockMaintenanceService",
+          "_MockPersistenceService",
+          "_MockReflectionService",
+          "_MockRegistry",
+          "_MockSafetyService"
+        ],
+        "compile_like_name_count": 1,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 5,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "_build_protocol_metadata",
+          "_build_runtime_trace_artifact",
+          "_build_subsystem_scores",
+          "_canonical_json_bytes",
+          "_iter_python_files",
+          "_load_or_generate_runtime_trace",
+          "_normalize_runtime_trace_artifact",
+          "_resolve_signing_key",
+          "_run_gate",
+          "_run_static_mode",
+          "_safe_read",
+          "_score_bool",
+          "_sign_payload",
+          "_stable_execution_trace_hash",
+          "_stable_identity_fingerprint",
+          "_static_violations",
+          "_verify_mode",
+          "_verify_signed_report",
+          "build_certification_hash",
+          "main",
+          "runtime_check",
+          "static_scan",
+          "structural_check"
+        ],
+        "getattr_count": 4,
+        "hasattr_count": 0,
+        "high_if_function_count": 3,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 6
+      },
+      "file": "tools/phase4_certify.py",
+      "flags": [
+        "dict_return_contracts",
+        "high_if_density",
+        "introspection_heavy",
+        "string_dispatch"
+      ],
+      "score": 8
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 0,
+        "class_names": [],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 4,
+        "early_return_loop_function_count": 3,
+        "function_names": [
+          "_candidate_entrypoints",
+          "_class_method_names",
+          "_drift_for_key",
+          "_extract_literal_string",
+          "_extract_literal_tuple_strings",
+          "_list_diff",
+          "_normalize_service_entries",
+          "_parse_args",
+          "_print_human_report",
+          "_read_ast",
+          "collect_current_surface",
+          "evaluate_freeze",
+          "main"
+        ],
+        "getattr_count": 0,
+        "hasattr_count": 0,
+        "high_if_function_count": 2,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 1
+      },
+      "file": "tools/turn_surface_freeze.py",
+      "flags": [
+        "dict_return_contracts",
+        "early_return_in_loop",
+        "high_if_density",
+        "string_dispatch"
+      ],
+      "score": 8
+    },
+    {
+      "details": {
+        "any_param_count": 11,
+        "any_return_count": 0,
+        "class_names": [],
+        "compile_like_name_count": 1,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 10,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "_event_job_id",
+          "_event_type",
+          "_extract_registry_aliases_from_orchestrator",
+          "_format_exc",
+          "_registry_get_optional",
+          "_unused_import_symbols_in_orchestrator",
+          "build_wiring_map",
+          "check_causality",
+          "check_exporter",
+          "check_ledger",
+          "check_mid_execution",
+          "check_observability",
+          "check_retry",
+          "check_runtime_activation",
+          "check_wiring_integrity",
+          "full_module_activation_scan"
+        ],
+        "getattr_count": 16,
+        "hasattr_count": 6,
+        "high_if_function_count": 0,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 3
+      },
+      "file": "audit_runners.py",
+      "flags": [
+        "dict_return_contracts",
+        "introspection_heavy",
+        "string_dispatch",
+        "uses_any_param"
+      ],
+      "score": 7
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 0,
+        "class_names": [],
+        "compile_like_name_count": 1,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 0,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "_collect_webrtc_audio_bytes",
+          "_persist_known_devices",
+          "_render_voice_capture_layer",
+          "_runtime_rejection_payload",
+          "_voice_known_devices",
+          "bot_messages_for_thread",
+          "build_chat_attachments_from_uploads",
+          "create_new_thread",
+          "default_thread_messages",
+          "emit_generated_photo_message",
+          "emit_voice_runtime_ledger_event",
+          "first_run_wizard",
+          "generate_dad_photo",
+          "get_chat_event_api",
+          "get_runtime",
+          "get_voice_session_controller",
+          "initialize_session",
+          "inject_custom_css",
+          "inject_pwa_metadata",
+          "load_faster_whisper_model",
+          "load_openai_whisper_model",
+          "load_ui_stylesheet",
+          "main",
+          "optimize_runtime_for_hardware",
+          "persist_voice_profile_if_changed",
+          "process_prompt_via_runtime",
+          "purge_session_context",
+          "pwa_asset_status",
+          "pwa_asset_url",
+          "record_runtime_rejection",
+          "record_turn_inspector_from_runtime_result",
+          "record_turn_timeline_event",
+          "render_agentic_trace",
+          "render_ambient_voice_listener",
+          "render_chat_tab",
+          "render_companion_toolbar",
+          "render_hero",
+          "render_mobile_bottom_navigation",
+          "render_mobile_tab",
+          "render_realtime_voice_call",
+          "render_reply_tts",
+          "render_runtime_guardrails_card",
+          "render_runtime_rejection_banner",
+          "render_runtime_semantic_strip",
+          "render_sidebar",
+          "render_status_strip",
+          "render_status_tab",
+          "render_turn_inspector",
+          "render_voice_controls",
+          "render_workshop_tab",
+          "require_pin",
+          "resolve_tts_voice_id",
+          "runtime_guardrail_severity",
+          "runtime_guardrail_view_from_session",
+          "runtime_rule_fix_hint",
+          "runtime_semantic_signal_snapshot",
+          "runtime_turn_timeline",
+          "summarize_document_attachment",
+          "switch_active_thread",
+          "synthesize_piper_audio",
+          "synthesize_tts_audio",
+          "theme_palette",
+          "transcribe_audio_bytes",
+          "ui_shell_snapshot",
+          "update_ui_mood",
+          "voice_profile_payload"
+        ],
+        "getattr_count": 18,
+        "hasattr_count": 0,
+        "high_if_function_count": 16,
+        "missing_return_annotation_count": 38,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 18
+      },
+      "file": "dad_streamlit.py",
+      "flags": [
+        "high_if_density",
+        "introspection_heavy",
+        "many_missing_return_annotations",
+        "string_dispatch"
+      ],
+      "score": 7
+    },
+    {
+      "details": {
+        "any_param_count": 2,
+        "any_return_count": 1,
+        "class_names": [
+          "ContextBuilderNode",
+          "GraphNode",
+          "HealthNode",
+          "InferenceNode",
+          "ReflectionNode",
+          "SafetyNode",
+          "SaveNode",
+          "TemporalNode",
+          "ValidationGateNode",
+          "_NodeContractMixin"
+        ],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": true,
+        "dict_return_count": 0,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "_invoke_node_run_compat"
+        ],
+        "getattr_count": 15,
+        "hasattr_count": 0,
+        "high_if_function_count": 0,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 0
+      },
+      "file": "dadbot/core/graph_pipeline_nodes.py",
+      "flags": [
+        "introspection_heavy",
+        "uses_any_param",
+        "uses_any_return"
+      ],
+      "score": 7
+    },
+    {
+      "details": {
+        "any_param_count": 1,
+        "any_return_count": 1,
+        "class_names": [
+          "SideEffectAdapter"
+        ],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": true,
+        "dict_return_count": 0,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "_json_safe"
+        ],
+        "getattr_count": 3,
+        "hasattr_count": 0,
+        "high_if_function_count": 0,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 0
+      },
+      "file": "dadbot/core/side_effect_adapter.py",
+      "flags": [
+        "introspection_heavy",
+        "uses_any_param",
+        "uses_any_return"
+      ],
+      "score": 7
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 0,
+        "class_names": [],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 0,
+        "early_return_loop_function_count": 1,
+        "function_names": [
+          "dispatch_runtime_mode",
+          "launch_api_service",
+          "launch_streamlit_app",
+          "resolve_runtime_class",
+          "stop_streamlit_app"
+        ],
+        "getattr_count": 1,
+        "hasattr_count": 0,
+        "high_if_function_count": 4,
+        "missing_return_annotation_count": 5,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 1
+      },
+      "file": "dadbot/runtime/launcher.py",
+      "flags": [
+        "early_return_in_loop",
+        "high_if_density",
+        "many_missing_return_annotations",
+        "string_dispatch"
+      ],
+      "score": 7
+    },
+    {
+      "details": {
+        "any_param_count": 2,
+        "any_return_count": 1,
+        "class_names": [],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 2,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "_capture_runtime_behavior",
+          "_dependency_lock",
+          "_git_commit_hash",
+          "_json_default",
+          "_runtime_config_dump",
+          "_stable_json_dump",
+          "main"
+        ],
+        "getattr_count": 9,
+        "hasattr_count": 2,
+        "high_if_function_count": 0,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 0
+      },
+      "file": "tools/create_system_snapshot_v0.py",
+      "flags": [
+        "dict_return_contracts",
+        "introspection_heavy",
+        "uses_any_param",
+        "uses_any_return"
+      ],
+      "score": 7
+    },
+    {
+      "details": {
+        "any_param_count": 2,
+        "any_return_count": 1,
+        "class_names": [],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 8,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "_build_audit_payload",
+          "_canonical_envelope_detail",
+          "_canonicalize",
+          "_evaluate_envelope_divergence",
+          "_instrumentation_envelope_divergence",
+          "_normalize_envelope_projection",
+          "_orchestrator_determinism_identical_inputs",
+          "_run_one_orchestrator_turn",
+          "_sha256",
+          "_temporary_env_var",
+          "_trace_fingerprint_stability",
+          "main"
+        ],
+        "getattr_count": 0,
+        "hasattr_count": 0,
+        "high_if_function_count": 0,
+        "missing_return_annotation_count": 1,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 1
+      },
+      "file": "tools/execution_invariance_audit.py",
+      "flags": [
+        "dict_return_contracts",
+        "string_dispatch",
+        "uses_any_param",
+        "uses_any_return"
+      ],
+      "score": 7
+    },
+    {
+      "details": {
+        "any_param_count": 1,
+        "any_return_count": 0,
+        "class_names": [
+          "CapabilityAuditReport",
+          "CapabilityCheck"
+        ],
+        "compile_like_name_count": 3,
+        "compile_like_without_ir_count": 0,
+        "core_focus": true,
+        "dict_return_count": 2,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "build_capability_audit_event_payload",
+          "build_capability_coverage_matrix",
+          "build_runtime_capability_audit_report"
+        ],
+        "getattr_count": 1,
+        "hasattr_count": 0,
+        "high_if_function_count": 0,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 2
+      },
+      "file": "dadbot/core/capability_audit_runner.py",
+      "flags": [
+        "dict_return_contracts",
+        "string_dispatch",
+        "uses_any_param"
+      ],
+      "score": 6
+    },
+    {
+      "details": {
+        "any_param_count": 3,
+        "any_return_count": 0,
+        "class_names": [
+          "CapabilityRegistry",
+          "CapabilitySnapshot",
+          "CapabilityViolationError",
+          "EnforcementMode",
+          "NodeCapabilityRequirement"
+        ],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": true,
+        "dict_return_count": 0,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "enforce_node_entry",
+          "freeze_capabilities",
+          "get_capability_snapshot",
+          "verify_capability_freeze"
+        ],
+        "getattr_count": 3,
+        "hasattr_count": 0,
+        "high_if_function_count": 1,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 0
+      },
+      "file": "dadbot/core/capability_registry.py",
+      "flags": [
+        "high_if_density",
+        "introspection_heavy",
+        "uses_any_param"
+      ],
+      "score": 6
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 0,
+        "class_names": [
+          "ApiKeyAuth",
+          "AuthStrategy",
+          "BearerTokenAuth",
+          "CostAwareToolRouter",
+          "DynamicToolRegistry",
+          "ExternalToolRuntime",
+          "HttpRequest",
+          "HttpResponse",
+          "HttpTransport",
+          "IsolationGuard",
+          "IsolationProfile",
+          "NetworkFailureKind",
+          "NoAuth",
+          "RateLimitPolicy",
+          "ResourceEstimate",
+          "ResourceLimits",
+          "RetryPolicy",
+          "RouterWeights",
+          "SlidingWindowRateLimiter",
+          "ToolCapability",
+          "ToolExecutionResult",
+          "ToolExecutionStatus"
+        ],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": true,
+        "dict_return_count": 0,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "_parse_version",
+          "classify_network_failure"
+        ],
+        "getattr_count": 2,
+        "hasattr_count": 0,
+        "high_if_function_count": 1,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 1
+      },
+      "file": "dadbot/core/external_tool_runtime.py",
+      "flags": [
+        "high_if_density",
+        "introspection_heavy",
+        "string_dispatch"
+      ],
+      "score": 6
+    },
+    {
+      "details": {
+        "any_param_count": 1,
+        "any_return_count": 0,
+        "class_names": [
+          "ExecutionState",
+          "GlobalInvariantEngine",
+          "GlobalValidationReport",
+          "InvariantCategory",
+          "InvariantCheck",
+          "InvariantSeverity",
+          "InvariantViolation",
+          "SystemInvariant"
+        ],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": true,
+        "dict_return_count": 0,
+        "early_return_loop_function_count": 2,
+        "function_names": [
+          "_DAG_ACYCLIC",
+          "_DAG_NOT_EMPTY_WHEN_TOOLS_PLANNED",
+          "_EVENT_LOG_MONOTONIC",
+          "_MEMORY_ENTRIES_HAVE_TEXT",
+          "_PLANNER_INTENT_PRESENT",
+          "_PLANNER_STRATEGY_PRESENT",
+          "_RESOURCE_WITHIN_BUDGET",
+          "_SCHEMA_VERSIONS_PRESENT",
+          "_TOOL_EVENTS_HAVE_TYPE",
+          "_sha256",
+          "enforce_invariant"
+        ],
+        "getattr_count": 2,
+        "hasattr_count": 0,
+        "high_if_function_count": 0,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [
+            "engine",
+            "planner"
+          ],
+          "file": "dadbot/core/invariant_engine.py",
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 0
+      },
+      "file": "dadbot/core/invariant_engine.py",
+      "flags": [
+        "early_return_in_loop",
+        "introspection_heavy",
+        "uses_any_param"
+      ],
+      "score": 6
+    },
+    {
+      "details": {
+        "any_param_count": 1,
+        "any_return_count": 0,
+        "class_names": [
+          "KernelStepResult",
+          "KernelViolation",
+          "PolicyDecision",
+          "TurnKernel"
+        ],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": true,
+        "dict_return_count": 0,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "bayesian_policy_gate"
+        ],
+        "getattr_count": 2,
+        "hasattr_count": 0,
+        "high_if_function_count": 0,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 1
+      },
+      "file": "dadbot/core/kernel.py",
+      "flags": [
+        "introspection_heavy",
+        "string_dispatch",
+        "uses_any_param"
+      ],
+      "score": 6
+    },
+    {
+      "details": {
+        "any_param_count": 1,
+        "any_return_count": 0,
+        "class_names": [],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": true,
+        "dict_return_count": 1,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "_build_runtime_fingerprint",
+          "_check_and_increment_daily_counter",
+          "_classify_divergence",
+          "_compute_input_hash",
+          "_compute_replay_hash",
+          "_counter_path",
+          "_daily_cap",
+          "_emit",
+          "_log_path",
+          "_sample_rate",
+          "_should_sample",
+          "_stable_sha256",
+          "_today_str",
+          "is_enabled",
+          "shadow_log"
+        ],
+        "getattr_count": 0,
+        "hasattr_count": 0,
+        "high_if_function_count": 1,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 2
+      },
+      "file": "dadbot/core/shadow_mode.py",
+      "flags": [
+        "high_if_density",
+        "string_dispatch",
+        "uses_any_param"
+      ],
+      "score": 6
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 0,
+        "class_names": [],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 0,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "collect_webrtc_audio_bytes",
+          "persist_known_devices",
+          "render_voice_capture_layer",
+          "voice_known_devices"
+        ],
+        "getattr_count": 3,
+        "hasattr_count": 0,
+        "high_if_function_count": 2,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 2
+      },
+      "file": "dadbot/ui/media/webrtc.py",
+      "flags": [
+        "high_if_density",
+        "introspection_heavy",
+        "string_dispatch"
+      ],
+      "score": 6
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 0,
+        "class_names": [],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 0,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "_render_avatar_studio_section",
+          "_render_col1_display_voice",
+          "_render_col2_llm_tools_audio",
+          "_render_persona_section",
+          "_render_preferences_form",
+          "_save_preferences",
+          "render_preferences_tab"
+        ],
+        "getattr_count": 2,
+        "hasattr_count": 0,
+        "high_if_function_count": 2,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 2
+      },
+      "file": "dadbot/ui/preferences.py",
+      "flags": [
+        "high_if_density",
+        "introspection_heavy",
+        "string_dispatch"
+      ],
+      "score": 6
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 0,
+        "class_names": [
+          "GraphMetrics"
+        ],
+        "compile_like_name_count": 1,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 3,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "_build_graph",
+          "_coverage_ratio",
+          "_imports_in",
+          "_metrics_for_module",
+          "_module_name",
+          "_python_files",
+          "_reachable_count",
+          "_reverse_graph",
+          "_tarjan_scc",
+          "build_subsystem_health",
+          "detect_cycles",
+          "find_forbidden_cycles",
+          "subsystem_health_map",
+          "subsystem_risk_heatmap"
+        ],
+        "getattr_count": 0,
+        "hasattr_count": 0,
+        "high_if_function_count": 1,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 2
+      },
+      "file": "dadbot/uril/architecture.py",
+      "flags": [
+        "dict_return_contracts",
+        "high_if_density",
+        "string_dispatch"
+      ],
+      "score": 6
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 0,
+        "class_names": [],
+        "compile_like_name_count": 1,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 4,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "_path_or_none",
+          "_pct",
+          "_phase4_completion",
+          "_progress_summary",
+          "_proven_aspects",
+          "build_uril_report",
+          "delta_compare",
+          "main",
+          "parse_args"
+        ],
+        "getattr_count": 0,
+        "hasattr_count": 0,
+        "high_if_function_count": 1,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 3
+      },
+      "file": "dadbot/uril/report.py",
+      "flags": [
+        "dict_return_contracts",
+        "high_if_density",
+        "string_dispatch"
+      ],
+      "score": 6
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 0,
+        "class_names": [],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 0,
+        "early_return_loop_function_count": 1,
+        "function_names": [
+          "_attribute_accesses",
+          "_call_names",
+          "_cohesion_score",
+          "_defined_names",
+          "_func_param_names",
+          "_grep_identifier",
+          "_is_execution_path",
+          "_method_names_of_class",
+          "_parse_args",
+          "_parse_tree",
+          "_print_section",
+          "_read_source",
+          "_rel",
+          "check_interface_completeness",
+          "check_missing_modules",
+          "check_orphan_expectations",
+          "check_param_propagation",
+          "check_subsystem_coverage",
+          "compute_completeness_score",
+          "main"
+        ],
+        "getattr_count": 0,
+        "hasattr_count": 0,
+        "high_if_function_count": 2,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 1
+      },
+      "file": "tools/arch_completeness_audit.py",
+      "flags": [
+        "early_return_in_loop",
+        "high_if_density",
+        "string_dispatch"
+      ],
+      "score": 6
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 0,
+        "class_names": [
+          "FileAudit"
+        ],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 4,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "_build_arg_parser",
+          "_build_manual_review_queue",
+          "_function_metrics",
+          "_is_core_focus",
+          "_iter_py_files",
+          "_module_metrics",
+          "_name_reality_mismatch",
+          "_score_metrics",
+          "analyze_file",
+          "audit_repo",
+          "main"
+        ],
+        "getattr_count": 0,
+        "hasattr_count": 0,
+        "high_if_function_count": 2,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 1
+      },
+      "file": "tools/architectural_shallow_audit.py",
+      "flags": [
+        "dict_return_contracts",
+        "high_if_density",
+        "string_dispatch"
+      ],
+      "score": 6
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 0,
+        "class_names": [],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 1,
+        "early_return_loop_function_count": 1,
+        "function_names": [
+          "_collect_db_sizes",
+          "_count_tests_from_junit_xml",
+          "_derive_lane_timeout",
+          "_extract_summary_counts",
+          "_extract_top_slowest",
+          "_flatten_slowest",
+          "_lane_order",
+          "_latest_baseline_record",
+          "_run_cold_start_probe",
+          "_run_lane",
+          "_select_lanes",
+          "_slug",
+          "main",
+          "parse_args"
+        ],
+        "getattr_count": 0,
+        "hasattr_count": 0,
+        "high_if_function_count": 3,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 4
+      },
+      "file": "tools/cert_baseline_capture.py",
+      "flags": [
+        "early_return_in_loop",
+        "high_if_density",
+        "string_dispatch"
+      ],
+      "score": 6
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 0,
+        "class_names": [],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 1,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "_decision_points",
+          "_load_migration_allowlist",
+          "_loc",
+          "_metrics",
+          "_parse_args",
+          "main"
+        ],
+        "getattr_count": 2,
+        "hasattr_count": 0,
+        "high_if_function_count": 1,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 1
+      },
+      "file": "tools/complexity_diff_gate.py",
+      "flags": [
+        "high_if_density",
+        "introspection_heavy",
+        "string_dispatch"
+      ],
+      "score": 6
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 0,
+        "class_names": [],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 0,
+        "early_return_loop_function_count": 1,
+        "function_names": [
+          "_closure_rows",
+          "_honesty_rows",
+          "_list_top_level",
+          "_run_has_passes",
+          "_run_is_clean",
+          "_safe_count_files",
+          "_walk_tree",
+          "create_snapshot",
+          "run_command"
+        ],
+        "getattr_count": 0,
+        "hasattr_count": 0,
+        "high_if_function_count": 1,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 3
+      },
+      "file": "tools/generate_full_system_snapshot.py",
+      "flags": [
+        "early_return_in_loop",
+        "high_if_density",
+        "string_dispatch"
+      ],
+      "score": 6
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 0,
+        "class_names": [],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 0,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "_cc_max",
+          "_cc_total",
+          "_check_file",
+          "_count_decision_points",
+          "_count_loc",
+          "_load_migration_allowlist",
+          "_parse_args",
+          "main",
+          "measure_file"
+        ],
+        "getattr_count": 2,
+        "hasattr_count": 0,
+        "high_if_function_count": 1,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 2
+      },
+      "file": "tools/god_class_audit.py",
+      "flags": [
+        "high_if_density",
+        "introspection_heavy",
+        "string_dispatch"
+      ],
+      "score": 6
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 0,
+        "class_names": [],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 0,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "main"
+        ],
+        "getattr_count": 2,
+        "hasattr_count": 0,
+        "high_if_function_count": 1,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 1
+      },
+      "file": "tools/run_phase4_firewall_gate.py",
+      "flags": [
+        "high_if_density",
+        "introspection_heavy",
+        "string_dispatch"
+      ],
+      "score": 6
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 0,
+        "class_names": [],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 3,
+        "early_return_loop_function_count": 0,
+        "function_names": [
+          "_hash_variance_score",
+          "_kernel_rejection_drift",
+          "_load_records",
+          "_pct",
+          "_replay_divergence",
+          "main",
+          "report"
+        ],
+        "getattr_count": 0,
+        "hasattr_count": 0,
+        "high_if_function_count": 1,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 1
+      },
+      "file": "tools/shadow_drift_report.py",
+      "flags": [
+        "dict_return_contracts",
+        "high_if_density",
+        "string_dispatch"
+      ],
+      "score": 6
+    },
+    {
+      "details": {
+        "any_param_count": 0,
+        "any_return_count": 0,
+        "class_names": [],
+        "compile_like_name_count": 0,
+        "compile_like_without_ir_count": 0,
+        "core_focus": false,
+        "dict_return_count": 0,
+        "early_return_loop_function_count": 1,
+        "function_names": [
+          "_extract_snapshot_id",
+          "_read_text",
+          "_require",
+          "verify"
+        ],
+        "getattr_count": 0,
+        "hasattr_count": 0,
+        "high_if_function_count": 1,
+        "missing_return_annotation_count": 0,
+        "name_reality": {
+          "claims": [],
+          "mismatch": false,
+          "mismatch_score": 0,
+          "reasons": []
+        },
+        "string_dispatch_function_count": 2
+      },
+      "file": "tools/verify_latest_snapshot_canonical.py",
+      "flags": [
+        "early_return_in_loop",
+        "high_if_density",
+        "string_dispatch"
+      ],
+      "score": 6
+    }
+  ],
+  "root": "C:/Users/josep/OneDrive/Desktop/Dad-Bot",
+  "threshold_rewrite": 6,
+  "top_n": 50
+}

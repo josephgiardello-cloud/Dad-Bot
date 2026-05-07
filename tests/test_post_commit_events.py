@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from dadbot.core.post_commit_events import POST_COMMIT_READY, PostCommitEvent
-from dadbot.services.persistence import PersistenceService
+from dadbot.services.persistence import PersistenceService, StateDivergenceError
 from dadbot.services.post_commit_worker import PostCommitWorker
 from dadbot_system.events import InMemoryEventBus
 
@@ -13,8 +13,33 @@ pytestmark = pytest.mark.unit
 
 
 class _PersistenceManagerStub:
+    def __init__(
+        self,
+        *,
+        tamper_session_state: dict | None = None,
+        tamper_checkpoint_state: dict | None = None,
+    ):
+        self._latest_checkpoint: dict | None = None
+        self._tamper_session_state = dict(tamper_session_state or {}) if tamper_session_state is not None else None
+        self._tamper_checkpoint_state = dict(tamper_checkpoint_state or {}) if tamper_checkpoint_state is not None else None
+
     def persist_turn_event(self, event):
         return None
+
+    def persist_graph_checkpoint(self, checkpoint, _skip_turn_event: bool = False):
+        _ = _skip_turn_event
+        self._latest_checkpoint = dict(checkpoint or {})
+
+    def load_latest_graph_checkpoint(self, trace_id: str = ""):
+        _ = trace_id
+        if not isinstance(self._latest_checkpoint, dict):
+            return {}
+        payload = dict(self._latest_checkpoint)
+        if self._tamper_checkpoint_state is not None:
+            payload["state"] = dict(self._tamper_checkpoint_state)
+        if self._tamper_session_state is not None:
+            payload["session_state"] = dict(self._tamper_session_state)
+        return payload
 
 
 class _RelationshipManagerStub:
@@ -118,6 +143,20 @@ def _make_turn_context(*, trace_id: str = "trace-123", session_id: str = "sessio
     )
 
 
+def _checkpoint_snapshot_factory(*, trace_id: str) -> object:
+    def _snapshot(*, stage: str, status: str, error: str | None = None):
+        return {
+            "trace_id": trace_id,
+            "stage": str(stage or "save"),
+            "status": str(status or "atomic_finalize"),
+            "error": str(error or ""),
+            "state": {"safe_result": ("done", False)},
+            "metadata": {"determinism": {"lock_hash": "lock-xyz"}},
+        }
+
+    return _snapshot
+
+
 def test_finalize_turn_emits_post_commit_event_once_on_success():
     runtime, event_bus, _memory_coordinator, relationship_manager, graph_manager, _memory_runtime = _make_runtime()
     service = PersistenceService(_PersistenceManagerStub(), turn_service=_TurnServiceStub(runtime))
@@ -179,3 +218,41 @@ def test_emitted_post_commit_event_can_be_replayed_from_retained_bus_history():
     summary = dict(turn_context.state.get("memory_delta_summary") or {})
     assert str(summary.get("version") or "") == "1.0"
     assert int(summary.get("intent_count") or 0) == len(intents)
+
+
+def test_finalize_turn_allows_commit_when_memory_authority_matches():
+    runtime, event_bus, _memory_coordinator, _relationship_manager, _graph_manager, _memory_runtime = _make_runtime()
+    runtime.snapshot_session_state = lambda: {}
+    persistence = _PersistenceManagerStub()
+    service = PersistenceService(persistence, turn_service=_TurnServiceStub(runtime))
+    turn_context = _make_turn_context(trace_id="trace-authority-ok")
+    turn_context.checkpoint_snapshot = _checkpoint_snapshot_factory(trace_id="trace-authority-ok")
+
+    result = service.finalize_turn(turn_context, ("done", False))
+
+    assert result == ("done", False)
+    check = dict(turn_context.state.get("memory_authority_check") or {})
+    assert check.get("consistent") is True
+    assert str(check.get("projected_hash") or "")
+    assert str(check.get("event_sourced_hash") or "")
+    assert len(event_bus.events()) == 1
+
+
+def test_finalize_turn_blocks_commit_on_memory_authority_divergence():
+    runtime, event_bus, _memory_coordinator, _relationship_manager, _graph_manager, _memory_runtime = _make_runtime()
+    runtime.snapshot_session_state = lambda: {}
+    persistence = _PersistenceManagerStub(
+        tamper_checkpoint_state={"safe_result": ("tampered", False)},
+    )
+    service = PersistenceService(persistence, turn_service=_TurnServiceStub(runtime))
+    turn_context = _make_turn_context(trace_id="trace-authority-bad")
+    turn_context.checkpoint_snapshot = _checkpoint_snapshot_factory(trace_id="trace-authority-bad")
+
+    with pytest.raises(StateDivergenceError, match="commit blocked") as exc_info:
+        service.finalize_turn(turn_context, ("done", False))
+
+    report = dict(getattr(exc_info.value, "report", {}) or {})
+    assert report.get("consistent") is False
+    assert int(report.get("difference_count") or 0) >= 1
+    assert any("checkpoint.state" in str(item.get("path") or "") for item in list(report.get("differences") or []))
+    assert event_bus.events() == []

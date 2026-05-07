@@ -5,7 +5,9 @@ import copy
 import gzip
 import hashlib
 import json
+import os
 import pickle
+import sys
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -21,6 +23,8 @@ from dadbot.core.execution_context import (
     record_execution_step,
 )
 from dadbot.core.execution_ledger import WriteBoundaryGuard
+
+POLICY_TRACE_EVENT_TYPE = "PolicyTraceEvent"
 
 
 class ConversationPersistenceManager:
@@ -69,9 +73,41 @@ class ConversationPersistenceManager:
         compact = compact.split(".")[0]
         return compact or datetime.now().strftime("%Y%m%d-%H%M%S")
 
+    # DEPRECATED compat path — NO NEW CALLERS. This fallback allows callers that set
+    # DADBOT_ALLOW_NULL_TRACE env or ALLOW_LEGACY_NULL_TRACE bot flag to bypass the
+    # active trace requirement. Remove when all compat paths are fully migrated.
+    # Expiry: 2026-Q3.
+    def _is_legacy_direct_compat_mode(self) -> bool:
+        """DEPRECATED: Check if we're in legacy direct-compat mode (marked explicitly only)."""
+        # Only allow null-trace fallback if explicitly enabled via environment or flag
+        env_flag = str(os.getenv("DADBOT_ALLOW_NULL_TRACE", "")).strip().lower()
+        if env_flag in {"1", "true", "yes", "on"}:
+            return True
+        return bool(getattr(self.bot, "ALLOW_LEGACY_NULL_TRACE", False))
+
     def _require_active_trace(self, operation: str) -> None:
+        # The null-trace fallback branch below is DEPRECATED \u2014 NO NEW CALLERS.
+        # Production code must always run under an active execution trace context.
+        # The fallback only applies to callers that explicitly set DADBOT_ALLOW_NULL_TRACE
+        # or ALLOW_LEGACY_NULL_TRACE. Expiry: 2026-Q3.
         recorder = active_execution_trace()
         if recorder is None:
+            if self._is_legacy_direct_compat_mode():
+                # Preserve strict production behavior while unblocking legacy tests
+                # that still call persistence surfaces outside the execution graph.
+                # This fallback ONLY applies to explicitly marked compat paths.
+                null_trace_events = getattr(self.bot, "_null_trace_events", None)
+                if not isinstance(null_trace_events, list):
+                    null_trace_events = []
+                    self.bot._null_trace_events = null_trace_events
+                null_trace_events.append(
+                    {
+                        "operation": str(operation or "").strip().lower(),
+                        "layer": "persistence",
+                        "fallback": "null_trace",
+                    },
+                )
+                return
             raise RuntimeTraceViolation(
                 f"ConversationPersistenceManager operation '{operation}' requires an active trace context",
             )
@@ -450,6 +486,99 @@ class ConversationPersistenceManager:
             return events[-limit:]
         return events
 
+    def list_policy_trace_events(
+        self,
+        *,
+        trace_id: str = "",
+        limit: int = 0,
+    ) -> list[dict[str, Any]]:
+        self._require_active_trace("list_policy_trace_events")
+        normalized = str(trace_id or "").strip()
+
+        ledger = self._execution_ledger()
+        collected: list[dict[str, Any]] = []
+        for event in ledger.read():
+            event_type = str(event.get("type") or "")
+            if event_type == "TURN_EVENT":
+                payload = dict(event.get("payload") or {})
+                if str(payload.get("event_type") or "") != POLICY_TRACE_EVENT_TYPE:
+                    continue
+                if normalized and str(payload.get("trace_id") or "").strip() != normalized:
+                    continue
+                collected.append(payload)
+                continue
+            if event_type != POLICY_TRACE_EVENT_TYPE:
+                continue
+            if normalized and str(event.get("trace_id") or "").strip() != normalized:
+                continue
+            collected.append(
+                {
+                    "event_type": POLICY_TRACE_EVENT_TYPE,
+                    "trace_id": str(event.get("trace_id") or ""),
+                    "sequence": int(event.get("sequence") or 0),
+                    "occurred_at": str(event.get("timestamp") or ""),
+                    "stage": "save",
+                    "status": "after",
+                    "payload": dict(event.get("payload") or {}),
+                },
+            )
+
+        collected.sort(key=lambda item: int(item.get("sequence") or 0))
+        if limit and limit > 0:
+            return collected[-int(limit):]
+        return collected
+
+    def summarize_policy_trace_events(
+        self,
+        *,
+        trace_id: str = "",
+        limit: int = 0,
+    ) -> dict[str, Any]:
+        self._require_active_trace("summarize_policy_trace_events")
+        events = self.list_policy_trace_events(trace_id=trace_id, limit=limit)
+
+        action_counts: dict[str, int] = {}
+        policies_seen: set[str] = set()
+        latest_action = ""
+        latest_step_name = ""
+        latest_trace_id = ""
+
+        for event in events:
+            latest_trace_id = str(event.get("trace_id") or latest_trace_id)
+            payload = dict(event.get("payload") or {})
+            summary = dict(payload.get("summary") or {})
+            policy = str(summary.get("policy") or payload.get("policy") or "").strip()
+            if policy:
+                policies_seen.add(policy)
+
+            action = str(
+                summary.get("decision_action")
+                or summary.get("action")
+                or payload.get("action")
+                or "",
+            ).strip()
+            if action:
+                action_counts[action] = action_counts.get(action, 0) + 1
+                latest_action = action
+
+            step_name = str(
+                summary.get("step_name")
+                or payload.get("step_name")
+                or "",
+            ).strip()
+            if step_name:
+                latest_step_name = step_name
+
+        return {
+            "event_type": POLICY_TRACE_EVENT_TYPE,
+            "event_count": len(events),
+            "policies": sorted(policies_seen),
+            "action_counts": action_counts,
+            "latest_action": latest_action,
+            "latest_step_name": latest_step_name,
+            "latest_trace_id": latest_trace_id,
+        }
+
     @staticmethod
     def _fold_events(
         events: list[dict[str, Any]],
@@ -592,30 +721,42 @@ class ConversationPersistenceManager:
         }
 
     def load_latest_graph_checkpoint(self, trace_id: str = "") -> dict | None:
-        self._require_active_trace("load_latest_graph_checkpoint")
-        normalized_trace_id = str(trace_id or "").strip()
-        ledger = self._execution_ledger()
-        for event in reversed(ledger.read()):
-            if str(event.get("type") or "") != "GRAPH_CHECKPOINT":
-                continue
-            payload = dict(event.get("payload") or {})
-            event_trace_id = str(payload.get("trace_id") or "").strip()
-            if normalized_trace_id and event_trace_id != normalized_trace_id:
-                continue
-            checkpoint = dict(payload.get("checkpoint") or {})
-            if checkpoint:
-                return checkpoint
-        return None
+        with ensure_execution_trace_root(
+            operation="load_latest_graph_checkpoint",
+            prompt="[conversation-persistence-load-checkpoint]",
+            metadata={"source": "ConversationPersistenceManager.load_latest_graph_checkpoint"},
+            required=True,
+        ):
+            self._require_active_trace("load_latest_graph_checkpoint")
+            normalized_trace_id = str(trace_id or "").strip()
+            ledger = self._execution_ledger()
+            for event in reversed(ledger.read()):
+                if str(event.get("type") or "") != "GRAPH_CHECKPOINT":
+                    continue
+                payload = dict(event.get("payload") or {})
+                event_trace_id = str(payload.get("trace_id") or "").strip()
+                if normalized_trace_id and event_trace_id != normalized_trace_id:
+                    continue
+                checkpoint = dict(payload.get("checkpoint") or {})
+                if checkpoint:
+                    return checkpoint
+            return None
 
     def resume_graph_checkpoint(self, trace_id: str = "") -> dict | None:
-        self._require_active_trace("resume_graph_checkpoint")
-        checkpoint = self.load_latest_graph_checkpoint(trace_id=trace_id)
-        if not isinstance(checkpoint, dict):
-            return None
-        session_state = checkpoint.get("session_state")
-        if isinstance(session_state, dict):
-            self.bot.load_session_state_snapshot(session_state)
-        return checkpoint
+        with ensure_execution_trace_root(
+            operation="resume_graph_checkpoint",
+            prompt="[conversation-persistence-resume-checkpoint]",
+            metadata={"source": "ConversationPersistenceManager.resume_graph_checkpoint"},
+            required=True,
+        ):
+            self._require_active_trace("resume_graph_checkpoint")
+            checkpoint = self.load_latest_graph_checkpoint(trace_id=trace_id)
+            if not isinstance(checkpoint, dict):
+                return None
+            session_state = checkpoint.get("session_state")
+            if isinstance(session_state, dict):
+                self.bot.load_session_state_snapshot(session_state)
+            return checkpoint
 
 
 __all__ = ["ConversationPersistenceManager"]

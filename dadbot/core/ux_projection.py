@@ -160,6 +160,38 @@ class TurnUxProjector:
             or graph_sync_ms >= self._degraded_graph_sync_threshold_ms,
         )
         mood_hint = str(state.get("mood") or "neutral")
+        reflection_summary = dict(state.get("reflection_summary") or {})
+        evidence_graph = dict(reflection_summary.get("evidence_graph") or {})
+        evidence_edges = list(evidence_graph.get("edges") or [])
+        evidence_digest = None
+        if evidence_edges:
+            top_edges: list[dict[str, Any]] = []
+            chain_preview: list[str] = []
+            for edge in evidence_edges[:3]:
+                if not isinstance(edge, dict):
+                    continue
+                source = str(edge.get("source") or "")
+                target = str(edge.get("target") or "")
+                weight = round(float(edge.get("weight") or 0.0), 3)
+                observations = int(edge.get("observations") or 0)
+                top_edges.append(
+                    {
+                        "source": source,
+                        "target": target,
+                        "weight": weight,
+                        "observations": observations,
+                    }
+                )
+                if source and target:
+                    chain_preview.append(f"{source} -> {target}")
+            if top_edges:
+                evidence_digest = {
+                    "node_count": int(evidence_graph.get("node_count") or 0),
+                    "edge_count": int(evidence_graph.get("edge_count") or len(evidence_edges)),
+                    "top_edges": top_edges,
+                    "chain_preview": chain_preview,
+                }
+
         ux_feedback = {
             "dad_is_thinking": bool(thinking),
             "message": "Dad is thinking..." if thinking else "",
@@ -168,6 +200,8 @@ class TurnUxProjector:
             "mood_hint": mood_hint,
             "status": status,
         }
+        if evidence_digest is not None:
+            ux_feedback["evidence_graph_digest"] = evidence_digest
 
         turn_context.turn_health = health
         state["turn_health_state"] = health_payload

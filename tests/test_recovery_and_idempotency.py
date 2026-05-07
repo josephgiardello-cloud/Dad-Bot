@@ -303,3 +303,49 @@ def test_capability_audit_event_is_excluded_from_replay_hash():
 
     assert left.replay_hash() == right.replay_hash()
     assert verifier.trace_hash(left.read()) == verifier.trace_hash(right.read())
+
+
+def test_policy_trace_event_is_excluded_from_replay_hash():
+    left = InMemoryExecutionLedger()
+    right = InMemoryExecutionLedger()
+    verifier = ReplayVerifier()
+
+    baseline = {
+        "type": "JOB_COMPLETED",
+        "session_id": "s-policy-replay",
+        "trace_id": "tr-policy-replay",
+        "timestamp": 1.0,
+        "kernel_step_id": "scheduler.execute.complete",
+        "payload": {
+            "result": "ok",
+            "metadata": {"quality": "stable"},
+        },
+    }
+    left.write(dict(baseline))
+    right.write(dict(baseline))
+
+    right.write(
+        {
+            "type": "PolicyTraceEvent",
+            "session_id": "s-policy-replay",
+            "trace_id": "tr-policy-replay",
+            "timestamp": 2.0,
+            "kernel_step_id": "save_node.policy_trace",
+            "payload": {
+                "summary": {
+                    "policy": "safety",
+                    "decision_action": "handled",
+                    "decision_step": "validate",
+                },
+                "policy_trace": {
+                    "event_type": "policy_decision",
+                    "trace": {
+                        "final_action": {"action": "handled", "step_name": "validate"},
+                    },
+                },
+            },
+        }
+    )
+
+    assert left.replay_hash() == right.replay_hash()
+    assert verifier.trace_hash(left.read()) == verifier.trace_hash(right.read())

@@ -629,6 +629,12 @@ def launch_api_service(args, *, dadbot_cls=None):
     broker = LocalMultiprocessBroker(max_queue_size=config.queue.max_queue_size)
     event_bus = InMemoryEventBus()
     state_store = build_service_state_store(config)
+    runtime_bot = resolved_dadbot_cls(
+        model_name=args.model or config.default_model,
+        append_signoff=not args.no_signoff,
+        light_mode=args.light,
+        tenant_id=args.tenant_id,
+    )
     orchestrator = DadBotOrchestrator(
         broker,
         state_store=state_store,
@@ -637,7 +643,7 @@ def launch_api_service(args, *, dadbot_cls=None):
     )
     worker_manager = WorkerProcessManager(broker, config)
     worker_manager.start()
-    app = create_api_app(orchestrator, worker_manager=worker_manager, config=config)
+    app = create_api_app(orchestrator, worker_manager=worker_manager, config=config, runtime_bot=runtime_bot)
     try:
         uvicorn.run(
             app,

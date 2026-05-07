@@ -160,5 +160,52 @@ class RuntimeStorageManager:
         )
         return validated.model_dump(mode="python")
 
+    def session_log_rotation_candidates(self) -> list[Path]:
+        """Return rotatable session log files while preserving primary identity artifacts."""
+        raw_log_dir = getattr(self.bot, "SESSION_LOG_DIR", None)
+        if raw_log_dir in (None, ""):
+            return []
+        log_dir = Path(raw_log_dir)
+        try:
+            log_dir = log_dir.resolve()
+        except OSError:
+            return []
+        if not log_dir.exists():
+            return []
+
+        protected = set()
+        config = getattr(self.bot, "config", None)
+        if config is not None:
+            protected_names = getattr(config, "primary_identity_log_filenames", ())
+            if isinstance(protected_names, (tuple, list, set)):
+                protected = {str(name).strip() for name in protected_names if str(name).strip()}
+
+        candidates: list[Path] = []
+        for child in log_dir.iterdir():
+            if not child.is_file():
+                continue
+            if child.name in protected:
+                continue
+            if child.suffix.lower() not in {".log", ".jsonl", ".txt", ".out"}:
+                continue
+            candidates.append(child)
+        candidates.sort(key=lambda path: path.stat().st_mtime)
+        return candidates
+
+    def prune_session_logs(self, *, max_files: int = 200) -> list[Path]:
+        """Delete oldest rotatable session logs, excluding protected identity logs."""
+        limit = max(0, int(max_files or 0))
+        candidates = self.session_log_rotation_candidates()
+        if len(candidates) <= limit:
+            return []
+        removed: list[Path] = []
+        for path in candidates[: len(candidates) - limit]:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                continue
+            removed.append(path)
+        return removed
+
 
 __all__ = ["RuntimeStorageManager"]

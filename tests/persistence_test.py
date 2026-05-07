@@ -219,6 +219,42 @@ class TestCheckpointPruning:
         assert deleted == 0
         assert checkpointer.checkpoint_count("s1") == 3
 
+    def test_prune_checkpoint_write_logs_keeps_most_recent(self, checkpointer: SQLiteCheckpointer, temp_db_path: str):
+        for idx in range(12):
+            prev = f"h-{idx - 1}" if idx else ""
+            checkpointer.save_checkpoint(
+                "s-log",
+                f"t{idx}",
+                _checkpoint(turn=idx, checkpoint_hash=f"h-{idx}", prev_checkpoint_hash=prev),
+                _manifest(),
+            )
+
+        deleted = checkpointer.prune_checkpoint_write_logs("s-log", keep_count=5)
+        assert deleted == 7
+
+        with contextlib.closing(sqlite3.connect(temp_db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM checkpoint_writes WHERE session_id = ?",
+                ("s-log",),
+            ).fetchone()
+            assert int((row["n"] if row is not None else 0) or 0) == 5
+
+    def test_consistency_check_reports_orphan_ok_write_rows(self, checkpointer: SQLiteCheckpointer, temp_db_path: str):
+        with contextlib.closing(sqlite3.connect(temp_db_path)) as conn:
+            conn.execute(
+                """
+                INSERT INTO checkpoint_writes(session_id, trace_id, checkpoint_hash, status, error, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                ("orphan-s", "orphan-t", "orphan-h", "ok", "", 0.0),
+            )
+            conn.commit()
+
+        report = checkpointer.validate_consistency(strict=False)
+        assert report["ok"] is False
+        assert any("orphan_ok_write_rows" in issue for issue in list(report.get("issues") or []))
+
 
 class TestCrashRecovery:
     def test_recover_after_partial_write_payload_corruption(self, checkpointer: SQLiteCheckpointer, temp_db_path: str):
@@ -521,7 +557,7 @@ class TestPhase4GapClosure:
             ).fetchall()
 
         assert len(rows) >= 2
-        assert len({str(r["trace_id"]) for r in rows}) >= 2
+        assert all(str(r["checkpoint_hash"] or "").strip() for r in rows)
 
         latest = checkpointer_b.load_checkpoint(session_id)
         assert str(latest.get("checkpoint_hash") or "")

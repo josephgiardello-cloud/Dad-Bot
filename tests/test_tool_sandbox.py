@@ -61,6 +61,30 @@ def test_tool_sandbox_different_params_are_different_keys():
     assert len(calls) == 2
 
 
+def test_tool_sandbox_policy_context_changes_idempotency_key():
+    runtime = ToolRuntimeTestAdapter()
+    calls = []
+
+    def _run():
+        calls.append(1)
+        return {"id": f"r{len(calls)}", "title": "Policy scoped"}
+
+    runtime.execute(
+        tool_name="set_reminder",
+        parameters={"title": "Call dentist", "approval_granted": False, "session_permissions": ["read"]},
+        executor=_run,
+    )
+    record2 = runtime.execute(
+        tool_name="set_reminder",
+        parameters={"title": "Call dentist", "approval_granted": True, "session_permissions": ["read"]},
+        executor=_run,
+    )
+
+    # Same tool/args but different policy context must not reuse cached result.
+    assert record2.status == "succeeded"
+    assert len(calls) == 2
+
+
 def test_tool_sandbox_isolates_executor_failures():
     runtime = ToolRuntimeTestAdapter()
 

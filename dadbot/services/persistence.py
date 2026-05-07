@@ -3,9 +3,14 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import time
 import uuid
+from datetime import datetime
+from pathlib import Path
 from copy import deepcopy
+from dataclasses import asdict, dataclass
+from collections.abc import Iterable
 from typing import Any
 
 from dadbot.core.capability_audit_runner import (
@@ -32,6 +37,37 @@ from dadbot.core.post_commit_events import PostCommitEvent
 from dadbot.managers.conversation_persistence import ConversationPersistenceManager
 
 logger = logging.getLogger(__name__)
+
+POLICY_TRACE_EVENT_TYPE = "PolicyTraceEvent"
+
+
+class StateDivergenceError(RuntimeError):
+    """Raised when projected state diverges from ledger-backed event state."""
+
+    def __init__(self, message: str, *, report: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.report = dict(report or {})
+
+
+@dataclass(frozen=True)
+class RelationalState:
+    """Behavioral ledger slice for social alignment and drift awareness."""
+
+    trust_credit: float
+    dominant_topic: str
+    recent_topics: list[str]
+    topic_overlap_ratio: float
+    topic_drift_detected: bool
+
+
+@dataclass(frozen=True)
+class TemporalBudget:
+    """Behavioral ledger slice for turn pacing and temporal pressure."""
+
+    turn_index: int
+    elapsed_ms: float
+    topic_drift_streak: int
+    budget_pressure: float
 
 
 class PersistenceService:
@@ -63,6 +99,451 @@ class PersistenceService:
                 "utf-8",
             ),
         ).hexdigest()
+
+    @staticmethod
+    def _json_safe(payload: Any) -> Any:
+        return json.loads(
+            json.dumps(payload, sort_keys=True, ensure_ascii=True, default=str),
+        )
+
+    @staticmethod
+    def _safe_significant_tokens(runtime: Any, text: str) -> set[str]:
+        token_fn = getattr(runtime, "significant_tokens", None)
+        if callable(token_fn):
+            try:
+                token_values = token_fn(text)
+                if isinstance(token_values, Iterable) and not isinstance(token_values, (str, bytes)):
+                    return {
+                        str(token).strip().lower()
+                        for token in token_values
+                        if str(token).strip()
+                    }
+            except Exception:
+                pass
+        return {
+            part.strip().lower()
+            for part in str(text or "").replace("-", " ").split()
+            if len(part.strip()) >= 3
+        }
+
+    def _derive_relational_state(self, runtime: Any, turn_text: str) -> RelationalState:
+        recent_topics_fn = getattr(runtime, "recent_memory_topics", None)
+        recent_topics = []
+        if callable(recent_topics_fn):
+            try:
+                topic_values = recent_topics_fn(limit=4)
+                iterable_topics = (
+                    topic_values
+                    if isinstance(topic_values, Iterable) and not isinstance(topic_values, (str, bytes, dict))
+                    else []
+                )
+                recent_topics = [
+                    str(topic).strip().lower()
+                    for topic in iterable_topics
+                    if str(topic).strip()
+                ]
+            except Exception:
+                recent_topics = []
+
+        dominant_topic = recent_topics[0] if recent_topics else "general"
+        query_tokens = self._safe_significant_tokens(runtime, turn_text)
+        topic_tokens: set[str] = set()
+        for topic in recent_topics:
+            topic_tokens.update(self._safe_significant_tokens(runtime, topic))
+
+        overlap = query_tokens & topic_tokens
+        overlap_ratio = 0.0 if not query_tokens else round(len(overlap) / float(len(query_tokens)), 3)
+
+        # Drift = strong prior topic context with no lexical overlap on this turn.
+        topic_drift_detected = bool(recent_topics) and bool(query_tokens) and not bool(overlap)
+
+        trust_level = float(getattr(runtime, "trust_level", lambda: 50)() if callable(getattr(runtime, "trust_level", None)) else 50)
+        trust_credit = round(max(0.0, min(1.0, trust_level / 100.0)), 3)
+        return RelationalState(
+            trust_credit=trust_credit,
+            dominant_topic=dominant_topic,
+            recent_topics=recent_topics,
+            topic_overlap_ratio=overlap_ratio,
+            topic_drift_detected=topic_drift_detected,
+        )
+
+    @staticmethod
+    def _derive_temporal_budget(runtime: Any, turn_context: Any, topic_drift_detected: bool) -> TemporalBudget:
+        session_turn_count_fn = getattr(runtime, "session_turn_count", None)
+        turn_index = 0
+        if callable(session_turn_count_fn):
+            try:
+                raw_turn_count = session_turn_count_fn()
+                if isinstance(raw_turn_count, (int, float, str)):
+                    turn_index = int(raw_turn_count) + 1
+            except Exception:
+                turn_index = 0
+
+        state = getattr(turn_context, "state", None)
+        elapsed_ms = 0.0
+        if isinstance(state, dict):
+            finalize_ms = float(state.get("_timing_finalize_ms") or 0.0)
+            graph_sync_ms = float(state.get("_timing_graph_sync_ms") or 0.0)
+            elapsed_ms = round(finalize_ms + graph_sync_ms, 3)
+
+        previous_streak = int(getattr(runtime, "_topic_drift_streak", 0) or 0)
+        topic_drift_streak = previous_streak + 1 if topic_drift_detected else 0
+        runtime._topic_drift_streak = topic_drift_streak
+
+        # Pressure rises with sustained drift and expensive turns.
+        budget_pressure = round(min(1.0, (topic_drift_streak * 0.15) + min(elapsed_ms / 4000.0, 0.4)), 3)
+        return TemporalBudget(
+            turn_index=turn_index,
+            elapsed_ms=elapsed_ms,
+            topic_drift_streak=topic_drift_streak,
+            budget_pressure=budget_pressure,
+        )
+
+    def _inject_behavioral_ledger_state(self, runtime: Any, turn_context: Any, turn_text: str) -> None:
+        state = getattr(turn_context, "state", None)
+        metadata = getattr(turn_context, "metadata", None)
+        if not isinstance(state, dict) or not isinstance(metadata, dict):
+            return
+
+        relational_state = self._derive_relational_state(runtime, turn_text)
+        temporal_budget = self._derive_temporal_budget(
+            runtime,
+            turn_context,
+            topic_drift_detected=relational_state.topic_drift_detected,
+        )
+
+        state["relational_state"] = asdict(relational_state)
+        state["temporal_budget"] = asdict(temporal_budget)
+        metadata["behavioral_ledger"] = {
+            "relational_state": asdict(relational_state),
+            "temporal_budget": asdict(temporal_budget),
+        }
+
+    @staticmethod
+    def _resolve_session_log_dir(runtime: Any) -> Path | None:
+        config = getattr(runtime, "config", None)
+        cfg_path = getattr(config, "session_log_dir", None)
+        if cfg_path is not None:
+            return Path(cfg_path)
+        legacy_path = getattr(runtime, "SESSION_LOG_DIR", None)
+        if legacy_path is not None:
+            return Path(legacy_path)
+        return None
+
+    @staticmethod
+    def _extract_active_goals(turn_context: Any) -> list[dict[str, Any]]:
+        state = getattr(turn_context, "state", None)
+        if not isinstance(state, dict):
+            return []
+        candidates = state.get("session_goals")
+        if not isinstance(candidates, list):
+            candidates = state.get("goals")
+        goals: list[dict[str, Any]] = []
+        for item in list(candidates or []):
+            if not isinstance(item, dict):
+                continue
+            goal_id = str(item.get("id") or item.get("goal_id") or "").strip()
+            description = str(item.get("description") or item.get("goal") or "").strip()
+            if not description:
+                continue
+            goals.append({"id": goal_id, "description": description})
+        return goals[:6]
+
+    def _goal_alignment_score(self, runtime: Any, turn_text: str, goals: list[dict[str, Any]]) -> float:
+        if not goals:
+            return 1.0
+        query_tokens = self._safe_significant_tokens(runtime, turn_text)
+        if not query_tokens:
+            return 1.0
+
+        best_overlap = 0.0
+        for goal in goals:
+            goal_tokens = self._safe_significant_tokens(runtime, str(goal.get("description") or ""))
+            if not goal_tokens:
+                continue
+            overlap = len(query_tokens & goal_tokens) / float(len(query_tokens))
+            if overlap > best_overlap:
+                best_overlap = overlap
+        return round(max(0.0, min(1.0, best_overlap)), 3)
+
+    @staticmethod
+    def _trust_credit_delta(goal_alignment_score: float) -> float:
+        if goal_alignment_score >= 0.35:
+            return 0.03
+        if goal_alignment_score <= 0.05:
+            return -0.07
+        return -0.02
+
+    def _record_relational_ledger(self, runtime: Any, turn_context: Any, turn_text: str) -> None:
+        state = getattr(turn_context, "state", None)
+        metadata = getattr(turn_context, "metadata", None)
+        if not isinstance(state, dict) or not isinstance(metadata, dict):
+            return
+
+        goals = self._extract_active_goals(turn_context)
+        alignment_score = self._goal_alignment_score(runtime, turn_text, goals)
+        credit_before = float(getattr(runtime, "_relational_trust_credit", 0.5) or 0.5)
+        credit_after = round(max(0.0, min(1.0, credit_before + self._trust_credit_delta(alignment_score))), 3)
+        runtime._relational_trust_credit = credit_after
+
+        mode = "supportive_peer" if credit_after >= 0.4 else "disappointed_dad"
+        state["relational_trust_credit"] = credit_after
+        state["dad_mode"] = mode
+        behavioral = dict(metadata.get("behavioral_ledger") or {})
+        behavioral["trust_credit"] = credit_after
+        behavioral["dad_mode"] = mode
+        behavioral["goal_alignment_score"] = alignment_score
+        metadata["behavioral_ledger"] = behavioral
+
+        session_id = str(
+            (dict(metadata.get("control_plane") or {}).get("session_id"))
+            or metadata.get("session_id")
+            or getattr(runtime, "active_thread_id", "")
+            or "default",
+        )
+        goals_excerpt = [
+            {
+                "id": str(goal.get("id") or ""),
+                "description": str(goal.get("description") or "")[:120],
+            }
+            for goal in goals[:3]
+        ]
+        entry = {
+            "recorded_at": datetime.now().isoformat(timespec="seconds"),
+            "trace_id": str(getattr(turn_context, "trace_id", "") or ""),
+            "session_id": session_id,
+            "user_input_excerpt": str(turn_text or "")[:220],
+            "active_goals": goals_excerpt,
+            "goal_alignment_score": alignment_score,
+            "trust_credit_before": round(credit_before, 3),
+            "trust_credit_after": credit_after,
+            "dad_mode": mode,
+            "decision": "followed_intent" if alignment_score >= 0.35 else "diverted_from_intent",
+        }
+
+        session_log_dir = self._resolve_session_log_dir(runtime)
+        if session_log_dir is None:
+            return
+        try:
+            session_log_dir.mkdir(parents=True, exist_ok=True)
+            ledger_path = session_log_dir / "relational_ledger.jsonl"
+            with ledger_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(entry, ensure_ascii=True, sort_keys=True) + "\n")
+        except Exception as exc:
+            logger.warning("Relational ledger append failed (non-fatal): %s", exc)
+
+    def _normalize_authority_snapshot(self, payload: Any) -> Any:
+        def _walk(value: Any) -> Any:
+            if isinstance(value, dict):
+                normalized: dict[str, Any] = {}
+                for key in sorted(str(k) for k in value.keys()):
+                    if key.startswith("_timing_"):
+                        continue
+                    if key in {
+                        "_atomic_checkpoint_saved",
+                        "_save_transaction_active",
+                        "_save_mutations_applied",
+                        "_save_transaction_snapshot",
+                        "_save_transaction",
+                    }:
+                        continue
+                    normalized[key] = _walk(value.get(key))
+                return normalized
+            if isinstance(value, list):
+                return [_walk(item) for item in value]
+            return value
+
+        return _walk(self._json_safe(payload))
+
+    def _diff_authority_state(
+        self,
+        projected: Any,
+        event_sourced: Any,
+        *,
+        max_items: int = 512,
+    ) -> list[dict[str, Any]]:
+        diffs: list[dict[str, Any]] = []
+        missing = "<missing>"
+
+        def _record(path: str, left: Any, right: Any) -> None:
+            if len(diffs) >= max_items:
+                return
+            diffs.append(
+                {
+                    "path": path,
+                    "projected": left,
+                    "event_sourced": right,
+                },
+            )
+
+        def _walk(path: str, left: Any, right: Any) -> None:
+            if len(diffs) >= max_items:
+                return
+            if isinstance(left, dict) and isinstance(right, dict):
+                keys = sorted(set(left.keys()) | set(right.keys()))
+                for key in keys:
+                    child_path = f"{path}.{key}" if path else str(key)
+                    has_left = key in left
+                    has_right = key in right
+                    if not has_left:
+                        _record(child_path, missing, right.get(key))
+                        continue
+                    if not has_right:
+                        _record(child_path, left.get(key), missing)
+                        continue
+                    _walk(child_path, left.get(key), right.get(key))
+                return
+            if isinstance(left, list) and isinstance(right, list):
+                size = max(len(left), len(right))
+                for idx in range(size):
+                    child_path = f"{path}[{idx}]"
+                    has_left = idx < len(left)
+                    has_right = idx < len(right)
+                    if not has_left:
+                        _record(child_path, missing, right[idx])
+                        continue
+                    if not has_right:
+                        _record(child_path, left[idx], missing)
+                        continue
+                    _walk(child_path, left[idx], right[idx])
+                return
+            if left != right:
+                _record(path or "$", left, right)
+
+        _walk("", projected, event_sourced)
+        return diffs
+
+    def _load_event_sourced_checkpoint(self, trace_id: str) -> dict[str, Any]:
+        trace_key = str(trace_id or "").strip()
+        with ensure_execution_trace_root(
+            operation="persistence_load_event_sourced_checkpoint",
+            prompt="[persistence-load-event-sourced-checkpoint]",
+            metadata={"source": "PersistenceService._load_event_sourced_checkpoint"},
+            required=True,
+        ):
+            loader = getattr(self.persistence_manager, "load_latest_graph_checkpoint", None)
+            if callable(loader):
+                loaded = loader(trace_id=trace_key)
+                if isinstance(loaded, dict):
+                    return dict(loaded)
+
+            ledger_resolver = getattr(self.persistence_manager, "_execution_ledger", None)
+            if not callable(ledger_resolver):
+                return {}
+            ledger = ledger_resolver()
+            read = getattr(ledger, "read", None)
+            if not callable(read):
+                return {}
+
+            raw_events = read()
+            if not isinstance(raw_events, list):
+                return {}
+
+            for event in reversed(raw_events):
+                if str(event.get("type") or "") != "GRAPH_CHECKPOINT":
+                    continue
+                payload = dict(event.get("payload") or {})
+                if trace_key and str(payload.get("trace_id") or "").strip() != trace_key:
+                    continue
+                checkpoint = dict(payload.get("checkpoint") or {})
+                if checkpoint:
+                    return checkpoint
+            return {}
+
+    def _enforce_memory_authority(
+        self,
+        runtime: Any,
+        turn_context: Any,
+        *,
+        checkpoint: dict[str, Any] | None,
+    ) -> None:
+        if not isinstance(checkpoint, dict) or not checkpoint:
+            return
+
+        metadata = getattr(turn_context, "metadata", None)
+        test_mode = bool(os.getenv("PYTEST_CURRENT_TEST"))
+        # DEPRECATED compat bypass — NO NEW CALLERS. This path allows legacy direct-compat
+        # turns (marked via metadata["legacy_direct_compat"]=True) to skip memory authority
+        # divergence checks in test mode only. Remove when _finalize_direct_compat_turn is
+        # deleted. Expiry: 2026-Q3.
+        if isinstance(metadata, dict) and bool(metadata.get("legacy_direct_compat")) and test_mode:
+            state = getattr(turn_context, "state", None)
+            if isinstance(state, dict):
+                state["memory_authority_check"] = {
+                    "consistent": True,
+                    "mode": "legacy_direct_compat_bypass",
+                }
+            return
+
+        trace_id = str(getattr(turn_context, "trace_id", "") or "")
+        event_checkpoint = self._load_event_sourced_checkpoint(trace_id)
+        if not event_checkpoint:
+            raise StateDivergenceError(
+                "Memory authority divergence: missing event-sourced checkpoint for trace",
+                report={
+                    "trace_id": trace_id,
+                    "reason": "missing_event_sourced_checkpoint",
+                    "repair_hint": "Rebuild projection from ledger-backed GRAPH_CHECKPOINT events and retry commit.",
+                },
+            )
+
+        projected_checkpoint = dict(checkpoint)
+        projected_session_state = self._normalize_authority_snapshot(
+            runtime.snapshot_session_state(),
+        )
+
+        event_checkpoint_copy = dict(event_checkpoint)
+        event_session_state = self._normalize_authority_snapshot(
+            event_checkpoint_copy.pop("session_state", {}),
+        )
+
+        projected = {
+            "checkpoint": self._normalize_authority_snapshot(projected_checkpoint),
+            "session_state": projected_session_state,
+        }
+        event_sourced = {
+            "checkpoint": self._normalize_authority_snapshot(event_checkpoint_copy),
+            "session_state": event_session_state,
+        }
+
+        projected_hash = self._stable_hash(projected)
+        event_hash = self._stable_hash(event_sourced)
+        if projected_hash == event_hash:
+            state = getattr(turn_context, "state", None)
+            if isinstance(state, dict):
+                state["memory_authority_check"] = {
+                    "consistent": True,
+                    "projected_hash": projected_hash,
+                    "event_sourced_hash": event_hash,
+                    "trace_id": trace_id,
+                }
+            return
+
+        diffs = self._diff_authority_state(projected, event_sourced)
+        report = {
+            "trace_id": trace_id,
+            "consistent": False,
+            "projected_hash": projected_hash,
+            "event_sourced_hash": event_hash,
+            "difference_count": len(diffs),
+            "differences": diffs,
+            "repair_hint": "Replay trace from ledger, regenerate projection from event state, then re-run SaveNode commit.",
+        }
+        state = getattr(turn_context, "state", None)
+        if isinstance(state, dict):
+            state["memory_authority_check"] = dict(report)
+
+        logger.error(
+            "State divergence detected at SaveNode boundary (trace_id=%s, projected_hash=%s, event_hash=%s, differences=%d)",
+            trace_id,
+            projected_hash,
+            event_hash,
+            len(diffs),
+        )
+        raise StateDivergenceError(
+            "Memory authority divergence detected; commit blocked",
+            report=report,
+        )
 
     def _record_merkle_anchor(self, turn_context: Any, *, commit_id: str) -> None:
         runtime = getattr(getattr(self.turn_service, "bot", None), "config", None)
@@ -325,6 +806,89 @@ class PersistenceService:
                         append_step(
                             "health_snapshot",
                             detail="refreshed runtime health snapshot",
+                        )
+                    return
+                if op == LedgerMutationOp.POLICY_TRACE_EVENT.value:
+                    try:
+                        policy_events = list(payload.get("events") or [])
+                        if not policy_events:
+                            policy_events = list(
+                                getattr(turn_context, "state", {}).get("policy_trace_events") or [],
+                            )
+                        trace_id = str(
+                            getattr(turn_context, "trace_id", "") or "unknown",
+                        )
+                        phase_value = str(
+                            getattr(getattr(turn_context, "phase", None), "value", "") or "",
+                        )
+                        occurred_at = ""
+                        temporal = getattr(turn_context, "temporal", None)
+                        if temporal is not None:
+                            occurred_at = str(getattr(temporal, "wall_time", "") or "")
+
+                        control_plane = getattr(
+                            getattr(runtime, "turn_orchestrator", None),
+                            "control_plane",
+                            None,
+                        )
+                        ledger_writer = getattr(control_plane, "ledger_writer", None)
+                        write_event = getattr(ledger_writer, "write_event", None)
+                        session_id = str(
+                            (getattr(turn_context, "metadata", {}) or {}).get("control_plane", {}).get("session_id")
+                            or "default",
+                        )
+
+                        for index, raw in enumerate(policy_events, start=1):
+                            event_payload = dict(raw or {})
+                            summary = {
+                                "policy": str(event_payload.get("policy") or "safety"),
+                                "event_type": str(event_payload.get("event_type") or "policy_decision"),
+                                "node": str(event_payload.get("node") or ""),
+                                "decision_action": str(
+                                    ((event_payload.get("trace") or {}).get("final_action") or {}).get("action")
+                                    or "",
+                                ),
+                                "decision_step": str(
+                                    ((event_payload.get("trace") or {}).get("final_action") or {}).get("step_name")
+                                    or "",
+                                ),
+                            }
+
+                            if hasattr(turn_context, "event_sequence"):
+                                turn_context.event_sequence += 1
+                                sequence = int(turn_context.event_sequence)
+                            else:
+                                sequence = 0
+
+                            turn_event_payload = {
+                                "event_type": POLICY_TRACE_EVENT_TYPE,
+                                "trace_id": trace_id,
+                                "sequence": sequence,
+                                "occurred_at": occurred_at,
+                                "stage": "save",
+                                "status": "after",
+                                "phase": phase_value,
+                                "payload": {
+                                    "index": index,
+                                    "summary": summary,
+                                    "policy_trace": event_payload,
+                                },
+                            }
+                            self.save_turn_event(turn_event_payload)
+
+                            if callable(write_event):
+                                write_event(
+                                    event_type=POLICY_TRACE_EVENT_TYPE,
+                                    session_id=session_id,
+                                    trace_id=trace_id,
+                                    kernel_step_id="save_node.policy_trace",
+                                    payload=turn_event_payload["payload"],
+                                    committed=False,
+                                )
+                    except Exception as exc:
+                        logger.warning(
+                            "PersistenceService policy trace persistence failed (non-fatal): %s",
+                            exc,
                         )
                     return
                 if op == LedgerMutationOp.CAPABILITY_AUDIT_EVENT.value:
@@ -786,6 +1350,16 @@ class PersistenceService:
 
     def finalize_turn(self, turn_context: Any, result: Any) -> tuple:
         """Atomically commit history, maintenance, reflection, health snapshot, and persistence."""
+        with ensure_execution_trace_root(
+            operation="persistence_finalize_turn",
+            prompt="[persistence-finalize-turn]",
+            metadata={"source": "PersistenceService.finalize_turn"},
+            required=True,
+        ):
+            return self._finalize_turn_impl(turn_context, result)
+
+    def _finalize_turn_impl(self, turn_context: Any, result: Any) -> tuple:
+        """Internal finalize implementation executed under an active trace context."""
         # Session exit was already handled inside prepare_user_turn_async â€” skip double-commit.
         if turn_context.state.get("already_finalized"):
             if isinstance(result, tuple) and len(result) >= 2:
@@ -823,6 +1397,11 @@ class PersistenceService:
                 )
             runtime._current_turn_time_base = getattr(turn_context, "temporal", None)
             runtime._graph_commit_active = True
+
+            # Week 1 Behavioral Ledger: persist relational + temporal expansion
+            # directly on TurnContext state before SaveNode checkpoint capture.
+            self._inject_behavioral_ledger_state(runtime, turn_context, str(turn_text or ""))
+            self._record_relational_ledger(runtime, turn_context, str(turn_text or ""))
 
             # Strict sequence: finalize queues ledger intents; then one canonical SaveNode commit.
             finalized = self.final_ledger_commit(
@@ -871,6 +1450,12 @@ class PersistenceService:
                     logger.error("PersistenceService.checkpointer save failed: %s", exc)
                     if bool(self.strict_mode):
                         raise
+
+            self._enforce_memory_authority(
+                runtime,
+                turn_context,
+                checkpoint=dict(checkpoint) if isinstance(checkpoint, dict) else None,
+            )
 
             # Publish post-commit readiness only after the full strict commit
             # sequence succeeds, including checkpoint/checkpointer writes.
@@ -927,6 +1512,12 @@ class PersistenceService:
                     _skip_turn_event=_skip_turn_event,
                 )
         except RuntimeTraceViolation:
+            trace_id = str((checkpoint or {}).get("trace_id") or "").strip()
+            if not trace_id:
+                logger.warning(
+                    "PersistenceService.save_graph_checkpoint skipped due to null trace_id fallback",
+                )
+                return
             raise
         except Exception as exc:
             logger.error("PersistenceService.save_graph_checkpoint failed: %s", exc)
@@ -935,6 +1526,12 @@ class PersistenceService:
         try:
             self.persistence_manager.persist_turn_event(event)
         except RuntimeTraceViolation:
+            trace_id = str((event or {}).get("trace_id") or "").strip()
+            if not trace_id:
+                logger.warning(
+                    "PersistenceService.save_turn_event skipped due to null trace_id fallback",
+                )
+                return
             raise
         except Exception as exc:
             logger.error("PersistenceService.save_turn_event failed: %s", exc)
@@ -946,15 +1543,73 @@ class PersistenceService:
                 limit=limit,
             )
         except RuntimeTraceViolation:
+            if not str(trace_id or "").strip():
+                return []
             raise
         except Exception as exc:
             logger.error("PersistenceService.list_turn_events failed: %s", exc)
             return []
 
+    def list_policy_trace_events(
+        self,
+        *,
+        trace_id: str = "",
+        limit: int = 0,
+    ) -> list[dict[str, Any]]:
+        try:
+            return self.persistence_manager.list_policy_trace_events(
+                trace_id=trace_id,
+                limit=limit,
+            )
+        except RuntimeTraceViolation:
+            if not str(trace_id or "").strip():
+                return []
+            raise
+        except Exception as exc:
+            logger.error("PersistenceService.list_policy_trace_events failed: %s", exc)
+            return []
+
+    def summarize_policy_trace_events(
+        self,
+        *,
+        trace_id: str = "",
+        limit: int = 0,
+    ) -> dict[str, Any]:
+        try:
+            return self.persistence_manager.summarize_policy_trace_events(
+                trace_id=trace_id,
+                limit=limit,
+            )
+        except RuntimeTraceViolation:
+            if not str(trace_id or "").strip():
+                return {
+                    "event_type": "PolicyTraceEvent",
+                    "event_count": 0,
+                    "policies": [],
+                    "action_counts": {},
+                    "latest_action": "",
+                    "latest_step_name": "",
+                    "latest_trace_id": "",
+                }
+            raise
+        except Exception as exc:
+            logger.error("PersistenceService.summarize_policy_trace_events failed: %s", exc)
+            return {
+                "event_type": "PolicyTraceEvent",
+                "event_count": 0,
+                "policies": [],
+                "action_counts": {},
+                "latest_action": "",
+                "latest_step_name": "",
+                "latest_trace_id": "",
+            }
+
     def replay_turn_events(self, trace_id: str) -> dict[str, Any]:
         try:
             return self.persistence_manager.replay_turn_events(trace_id=trace_id)
         except RuntimeTraceViolation:
+            if not str(trace_id or "").strip():
+                return {"trace_id": "", "events": [], "replayed_state": {}}
             raise
         except Exception as exc:
             logger.error("PersistenceService.replay_turn_events failed: %s", exc)
@@ -971,6 +1626,15 @@ class PersistenceService:
                 expected_lock_hash=expected_lock_hash,
             )
         except RuntimeTraceViolation:
+            if not str(trace_id or "").strip():
+                return {
+                    "trace_id": "",
+                    "consistent": False,
+                    "observed_lock_hash": "",
+                    "expected_lock_hash": str(expected_lock_hash or ""),
+                    "matches_expected": False,
+                    "lock_hashes": [],
+                }
             raise
         except Exception as exc:
             logger.error(

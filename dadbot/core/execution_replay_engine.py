@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import builtins
 import json
+from collections.abc import Mapping
 from typing import Any
 
 from dadbot.core.canonical_execution_reducer import reduce_official_execution_state
@@ -12,6 +13,8 @@ from dadbot.core.execution_context import (
     canonicalize_execution_trace_context,
     derive_execution_trace_hash,
 )
+
+_MODEL_OUTPUT_OPERATIONS = frozenset({"model_output"})
 
 
 def _stable_sha256(payload: Any) -> str:
@@ -24,7 +27,7 @@ def _model_output_hashes(execution_trace_context: dict[str, Any]) -> list[str]:
     steps = list(execution_trace_context.get("steps") or [])
     hashes: list[str] = []
     for step in steps:
-        if str(step.get("operation") or "") != "model_output":
+        if str(step.get("operation") or "") not in _MODEL_OUTPUT_OPERATIONS:
             continue
         payload = dict(step.get("payload") or {})
         output_hash = str(payload.get("output_hash") or "").strip()
@@ -107,7 +110,7 @@ def reconstruct_terminal_state_from_trace(
     memory_view_override: dict[str, Any] | None = None,
     policy_snapshot_override: dict[str, Any] | None = None,
     live_tool_mode: bool = False,
-) -> dict[str, Any]:
+) -> Mapping[str, Any]:
     seed = dict(terminal_state_seed or {})
     trace = dict(execution_trace_context or {})
     canonical_trace = canonicalize_execution_trace_context(trace)
@@ -147,7 +150,7 @@ def verify_terminal_state_replay_equivalence(
     policy_snapshot_override: dict[str, Any] | None = None,
     enforce_dag_equivalence: bool = True,
     live_tool_mode: bool = False,
-) -> dict[str, Any]:
+) -> Mapping[str, Any]:
     expected = dict(terminal_state_seed or {})
     replayed = reconstruct_terminal_state_from_trace(
         terminal_state_seed=expected,

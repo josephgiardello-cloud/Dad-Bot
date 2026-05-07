@@ -4,6 +4,7 @@ from .maintenance_service import MaintenanceService
 from .persistence import PersistenceService
 from .runtime_service import RuntimeService
 from .safety_service import SafetyService
+from .tool_runtime_service import ToolRuntimeService
 
 __all__ = [
     "AgentService",
@@ -12,4 +13,5 @@ __all__ = [
     "PersistenceService",
     "RuntimeService",
     "SafetyService",
+    "ToolRuntimeService",
 ]

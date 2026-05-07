@@ -19,9 +19,44 @@ from dadbot.core.kernel_locks import KernelToolIdempotencyRegistry
 logger = logging.getLogger(__name__)
 
 
+_IDEMPOTENCY_POLICY_KEYS: frozenset[str] = frozenset(
+    {
+        "approval_granted",
+        "enforce_hitl",
+        "enforce_permissions",
+        "session_permissions",
+    },
+)
+
+
+def _extract_idempotency_policy_context(parameters: dict[str, Any]) -> dict[str, Any]:
+    source = dict(parameters or {})
+    context: dict[str, Any] = {}
+    for key in _IDEMPOTENCY_POLICY_KEYS:
+        if key in source:
+            context[key] = source.get(key)
+
+    nested = source.get("policy_context")
+    if not isinstance(nested, dict):
+        nested = source.get("_policy_context")
+    if isinstance(nested, dict):
+        for key in _IDEMPOTENCY_POLICY_KEYS:
+            if key in nested and key not in context:
+                context[key] = nested.get(key)
+
+    permissions = context.get("session_permissions")
+    if isinstance(permissions, (list, tuple, set)):
+        context["session_permissions"] = sorted(str(item) for item in permissions)
+    return context
+
+
 def _idempotency_key(tool_name: str, parameters: dict[str, Any]) -> str:
+    keyed_parameters = dict(parameters or {})
+    policy_context = _extract_idempotency_policy_context(keyed_parameters)
+    if policy_context:
+        keyed_parameters["_policy_context_fingerprint"] = policy_context
     payload = json.dumps(
-        {"tool": str(tool_name or ""), "parameters": dict(parameters or {})},
+        {"tool": str(tool_name or ""), "parameters": keyed_parameters},
         sort_keys=True,
         default=str,
     ).encode("utf-8")

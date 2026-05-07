@@ -3,9 +3,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import warnings
 from typing import Any, cast
 
-from pydantic import ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from dadbot.contracts import (
     AttachmentList,
@@ -22,6 +23,7 @@ from dadbot.core.graph import (
     TurnContext,
 )
 from dadbot.core.tool_executor import execute_tool
+from dadbot.core.execution_context import ensure_execution_trace_root
 from dadbot.managers.reply_generation import ReplyGenerationManager
 from dadbot.models import AgenticToolPlan
 from dadbot.services.llm_call_adapter import LLMCallAdapter
@@ -32,9 +34,32 @@ from dadbot.core.turn_coherence import mark_turn_coherence, reset_turn_coherence
 # while the implementation moves from managers/ to services/.
 logger = logging.getLogger("dadbot.managers.turn_processing")
 
+_EVENT_LOOP_CLOSED_ERROR = "Event loop is closed"
+_SET_REMINDER_TOOL = "set_reminder"
+_WEB_SEARCH_TOOL = "web_search"
+_TOOL_VISIBILITY_SETTINGS = {
+    _SET_REMINDER_TOOL: "auto_reminders",
+    _WEB_SEARCH_TOOL: "auto_web_lookup",
+}
+_REMINDER_TOOL_NAMES = frozenset({_SET_REMINDER_TOOL})
+_DEFER_TOOL_BIASES = frozenset({"defer_tools_unless_explicit"})
+
+
+class _ReflectionDecision(BaseModel):
+    sufficient: bool
+    refined_query: str | None = None
+    reason: str = ""
+
+
+class _PlannerDecision(BaseModel):
+    needs_tool: bool
+    tool: str | None = None
+    parameters: dict[str, object] | None = None
+    reason: str = ""
+
 
 def _is_event_loop_closed_error(exc: BaseException) -> bool:
-    return isinstance(exc, RuntimeError) and "Event loop is closed" in str(exc)
+    return isinstance(exc, RuntimeError) and str(exc).find(_EVENT_LOOP_CLOSED_ERROR) != -1
 
 
 class TurnService:
@@ -199,9 +224,8 @@ class TurnService:
         tools = []
         for tool in self.bot.get_available_tools():
             name = str(tool.get("function", {}).get("name") or "").strip()
-            if name == "set_reminder" and not settings["auto_reminders"]:
-                continue
-            if name == "web_search" and not settings["auto_web_lookup"]:
+            setting_key = _TOOL_VISIBILITY_SETTINGS.get(name)
+            if setting_key and not bool(settings.get(setting_key)):
                 continue
             tools.append(tool)
         return tools
@@ -225,6 +249,105 @@ Return ONLY valid JSON (no extra text):
 }}
 """.strip()
 
+    def _parse_structured_json(
+        self,
+        *,
+        content: str,
+        schema: type[BaseModel],
+        failure_status: str,
+        failure_reason: str,
+    ) -> BaseModel | None:
+        try:
+            payload = self.bot.parse_model_json_content(content)
+        except (TypeError, json.JSONDecodeError, KeyError):
+            self.bot.update_planner_debug(
+                planner_status=failure_status,
+                planner_reason=failure_reason,
+            )
+            return None
+        if not isinstance(payload, dict):
+            self.bot.update_planner_debug(
+                planner_status=failure_status,
+                planner_reason=failure_reason,
+            )
+            return None
+        try:
+            return schema.model_validate(payload)
+        except ValidationError:
+            self.bot.update_planner_debug(
+                planner_status=failure_status,
+                planner_reason=failure_reason,
+            )
+            return None
+
+    def _call_json_with_validation_sync(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        purpose: str,
+        schema: type[BaseModel],
+        max_parse_attempts: int = 2,
+    ) -> BaseModel | None:
+        for parse_attempt in range(max(1, int(max_parse_attempts))):
+            try:
+                response = self._llm_adapter.call(
+                    messages=messages,
+                    options={"temperature": 0.1},
+                    response_format="json",
+                    purpose=purpose,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Structured LLM call failed (%s, attempt %d): %s",
+                    purpose,
+                    parse_attempt + 1,
+                    exc,
+                )
+                continue
+            parsed = self._parse_structured_json(
+                content=str(response.get("message", {}).get("content") or ""),
+                schema=schema,
+                failure_status="fallback",
+                failure_reason="Model returned invalid structured JSON.",
+            )
+            if parsed is not None:
+                return parsed
+        return None
+
+    async def _call_json_with_validation_async(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        purpose: str,
+        schema: type[BaseModel],
+        max_parse_attempts: int = 2,
+    ) -> BaseModel | None:
+        for parse_attempt in range(max(1, int(max_parse_attempts))):
+            try:
+                response = await self._llm_adapter.call_async(
+                    messages=messages,
+                    options={"temperature": 0.1},
+                    response_format="json",
+                    purpose=purpose,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Structured LLM call failed (%s, attempt %d): %s",
+                    purpose,
+                    parse_attempt + 1,
+                    exc,
+                )
+                continue
+            parsed = self._parse_structured_json(
+                content=str(response.get("message", {}).get("content") or ""),
+                schema=schema,
+                failure_status="fallback",
+                failure_reason="Model returned invalid structured JSON.",
+            )
+            if parsed is not None:
+                return parsed
+        return None
+
     def _reflect_on_web_observation(
         self,
         original_input: str,
@@ -240,37 +363,24 @@ Return ONLY valid JSON (no extra text):
 
         for attempt in range(max_retries):
             attempts_used = attempt + 1
-            try:
-                response = self._llm_adapter.call(
-                    messages=[
-                        {
-                            "role": "user",
-                            "content": self._reflection_prompt(
-                                original_input,
-                                current_query,
-                                current_observation,
-                            ),
-                        },
-                    ],
-                    options={"temperature": 0.1},
-                    response_format="json",
-                    purpose="agentic reflection",
-                )
-                reflection = self.bot.parse_model_json_content(
-                    response["message"]["content"],
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Agentic reflection call failed (attempt %d): %s",
-                    attempt + 1,
-                    exc,
-                )
+            reflection = self._call_json_with_validation_sync(
+                messages=[
+                    {
+                        "role": "user",
+                        "content": self._reflection_prompt(
+                            original_input,
+                            current_query,
+                            current_observation,
+                        ),
+                    },
+                ],
+                purpose="agentic reflection",
+                schema=_ReflectionDecision,
+            )
+            if reflection is None:
                 break
 
-            if not isinstance(reflection, dict):
-                break
-
-            if reflection.get("sufficient"):
+            if reflection.sufficient:
                 logger.info(
                     "Agentic web reflection accepted observation on attempt %d/%d",
                     attempt + 1,
@@ -278,17 +388,17 @@ Return ONLY valid JSON (no extra text):
                 )
                 self.bot.update_planner_debug(
                     planner_status="reflected",
-                    planner_reason=f"Reflection pass {attempt + 1}: observation accepted. {reflection.get('reason', '')}",
+                    planner_reason=f"Reflection pass {attempt + 1}: observation accepted. {reflection.reason}",
                 )
                 break
 
-            refined_query = str(reflection.get("refined_query") or "").strip()
+            refined_query = str(reflection.refined_query or "").strip()
             if not refined_query or refined_query == current_query:
                 break
 
             self.bot.update_planner_debug(
                 planner_status="refining",
-                planner_reason=f"Reflection pass {attempt + 1}: refining query. {reflection.get('reason', '')}",
+                planner_reason=f"Reflection pass {attempt + 1}: refining query. {reflection.reason}",
                 planner_parameters={"query": refined_query},
             )
             retry_count += 1
@@ -337,37 +447,24 @@ Return ONLY valid JSON (no extra text):
 
         for attempt in range(max_retries):
             attempts_used = attempt + 1
-            try:
-                response = await self._llm_adapter.call_async(
-                    messages=[
-                        {
-                            "role": "user",
-                            "content": self._reflection_prompt(
-                                original_input,
-                                current_query,
-                                current_observation,
-                            ),
-                        },
-                    ],
-                    options={"temperature": 0.1},
-                    response_format="json",
-                    purpose="agentic reflection",
-                )
-                reflection = self.bot.parse_model_json_content(
-                    response["message"]["content"],
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Agentic reflection call failed (attempt %d): %s",
-                    attempt + 1,
-                    exc,
-                )
+            reflection = await self._call_json_with_validation_async(
+                messages=[
+                    {
+                        "role": "user",
+                        "content": self._reflection_prompt(
+                            original_input,
+                            current_query,
+                            current_observation,
+                        ),
+                    },
+                ],
+                purpose="agentic reflection",
+                schema=_ReflectionDecision,
+            )
+            if reflection is None:
                 break
 
-            if not isinstance(reflection, dict):
-                break
-
-            if reflection.get("sufficient"):
+            if reflection.sufficient:
                 logger.info(
                     "Agentic web reflection accepted observation on attempt %d/%d",
                     attempt + 1,
@@ -375,17 +472,17 @@ Return ONLY valid JSON (no extra text):
                 )
                 self.bot.update_planner_debug(
                     planner_status="reflected",
-                    planner_reason=f"Reflection pass {attempt + 1}: observation accepted. {reflection.get('reason', '')}",
+                    planner_reason=f"Reflection pass {attempt + 1}: observation accepted. {reflection.reason}",
                 )
                 break
 
-            refined_query = str(reflection.get("refined_query") or "").strip()
+            refined_query = str(reflection.refined_query or "").strip()
             if not refined_query or refined_query == current_query:
                 break
 
             self.bot.update_planner_debug(
                 planner_status="refining",
-                planner_reason=f"Reflection pass {attempt + 1}: refining query. {reflection.get('reason', '')}",
+                planner_reason=f"Reflection pass {attempt + 1}: refining query. {reflection.reason}",
                 planner_parameters={"query": refined_query},
             )
             retry_count += 1
@@ -454,27 +551,21 @@ Return ONLY valid JSON (no extra text):
 """.strip()
 
     def _parse_agentic_tool_plan(self, content: str) -> AgenticToolPlan | None:
-        try:
-            plan = self.bot.parse_model_json_content(content)
-        except (TypeError, json.JSONDecodeError, KeyError):
-            self.bot.update_planner_debug(
-                planner_status="fallback",
-                planner_reason="Planner returned invalid JSON, so heuristic fallback stayed available.",
-            )
-            return None
-        if not isinstance(plan, dict):
-            self.bot.update_planner_debug(
-                planner_status="fallback",
-                planner_reason="Planner returned an unexpected payload shape, so heuristic fallback stayed available.",
-            )
+        parsed = self._parse_structured_json(
+            content=content,
+            schema=_PlannerDecision,
+            failure_status="fallback",
+            failure_reason="Planner returned invalid JSON, so heuristic fallback stayed available.",
+        )
+        if parsed is None:
             return None
 
-        tool_name = str(plan.get("tool") or "").strip()
+        tool_name = str(parsed.tool or "").strip()
         payload = {
-            "needs_tool": bool(plan.get("needs_tool")),
+            "needs_tool": bool(parsed.needs_tool),
             "tool": tool_name if self.bot.authorize_tool_execution(tool_name) else None,
-            "parameters": dict(plan.get("parameters") or {}) if isinstance(plan.get("parameters"), dict) else {},
-            "reason": str(plan.get("reason") or "").strip(),
+            "parameters": dict(parsed.parameters or {}),
+            "reason": str(parsed.reason or "").strip(),
         }
         try:
             return AgenticToolPlan.model_validate(payload)
@@ -722,12 +813,12 @@ Return ONLY valid JSON (no extra text):
         plan_reason: str,
     ) -> tuple[str | None, str | None]:
         executors = {
-            "set_reminder": self._execute_set_reminder_tool_sync,
-            "web_search": self._execute_web_search_tool_sync,
+            _SET_REMINDER_TOOL: self._execute_set_reminder_tool_sync,
+            _WEB_SEARCH_TOOL: self._execute_web_search_tool_sync,
         }
         enabled = {
-            "set_reminder": bool(settings.get("auto_reminders")),
-            "web_search": bool(settings.get("auto_web_lookup")),
+            _SET_REMINDER_TOOL: bool(settings.get("auto_reminders")),
+            _WEB_SEARCH_TOOL: bool(settings.get("auto_web_lookup")),
         }
         executor = executors.get(tool_name)
         if executor is None:
@@ -744,7 +835,7 @@ Return ONLY valid JSON (no extra text):
                 planner_parameters=params,
             )
             return None, None
-        if tool_name == "set_reminder":
+        if tool_name in _REMINDER_TOOL_NAMES:
             return executor(
                 params=params,
                 stripped_input=stripped_input,
@@ -769,12 +860,12 @@ Return ONLY valid JSON (no extra text):
         plan_reason: str,
     ) -> tuple[str | None, str | None]:
         executors = {
-            "set_reminder": self._execute_set_reminder_tool_async,
-            "web_search": self._execute_web_search_tool_async,
+            _SET_REMINDER_TOOL: self._execute_set_reminder_tool_async,
+            _WEB_SEARCH_TOOL: self._execute_web_search_tool_async,
         }
         enabled = {
-            "set_reminder": bool(settings.get("auto_reminders")),
-            "web_search": bool(settings.get("auto_web_lookup")),
+            _SET_REMINDER_TOOL: bool(settings.get("auto_reminders")),
+            _WEB_SEARCH_TOOL: bool(settings.get("auto_web_lookup")),
         }
         executor = executors.get(tool_name)
         if executor is None:
@@ -791,7 +882,7 @@ Return ONLY valid JSON (no extra text):
                 planner_parameters=params,
             )
             return None, None
-        if tool_name == "set_reminder":
+        if tool_name in _REMINDER_TOOL_NAMES:
             return await executor(
                 params=params,
                 stripped_input=stripped_input,
@@ -815,7 +906,7 @@ Return ONLY valid JSON (no extra text):
         """Return (allowed, reason) using runtime-owned Bayesian policy."""
         normalized_tool_name = str(tool_name or "").strip()
         normalized_tool_bias = str(tool_bias or "planner_default").strip() or "planner_default"
-        if normalized_tool_bias == "defer_tools_unless_explicit":
+        if normalized_tool_bias in _DEFER_TOOL_BIASES:
             return False, (
                 f"Bayesian policy '{normalized_tool_bias}' blocks all tools; "
                 "tool selection overridden by governing Bayesian authority."
@@ -1434,6 +1525,19 @@ Return ONLY valid JSON (no extra text):
                 source="turn_service.finalize_user_turn.health_snapshot",
             ),
         )
+        policy_trace_events = list(getattr(turn_context, "state", {}).get("policy_trace_events") or [])
+        if policy_trace_events:
+            mutation_queue.queue(
+                MutationIntent(
+                    type=MutationKind.LEDGER,
+                    payload={
+                        "op": LedgerMutationOp.POLICY_TRACE_EVENT.value,
+                        "events": policy_trace_events,
+                    },
+                    requires_temporal=False,
+                    source="turn_service.finalize_user_turn.policy_trace_event",
+                ),
+            )
         if bool(getattr(turn_context, "metadata", {}).get("audit_mode", False)):
             mutation_queue.queue(
                 MutationIntent(
@@ -1491,6 +1595,10 @@ Return ONLY valid JSON (no extra text):
     ) -> TurnContext:
         return TurnContext(user_input=user_input, attachments=attachments)
 
+    # DEPRECATED — NO NEW CALLERS. This compat shim bridges legacy direct-call
+    # surfaces that bypass the TurnGraph execution context. Target removal once
+    # all callers are migrated to the graph pipeline. Expiry: 2026-Q3.
+    # All callers must be migrated to process_user_message() or graph.execute().
     def _finalize_direct_compat_turn(
         self,
         stripped_input: str,
@@ -1500,12 +1608,27 @@ Return ONLY valid JSON (no extra text):
         *,
         turn_context: TurnContext | None = None,
     ) -> FinalizedTurnResult:
+        warnings.warn(
+            "_finalize_direct_compat_turn is a legacy compat shim scheduled for removal in 2026-Q3. "
+            "Migrate callers to process_user_message() or the TurnGraph pipeline.",
+            DeprecationWarning,
+            stacklevel=3,
+        )
         context = turn_context or self._compat_turn_context(stripped_input, attachments)
+        metadata = getattr(context, "metadata", None)
+        if isinstance(metadata, dict):
+            metadata.setdefault("legacy_direct_compat", True)
         context.state["turn_text"] = stripped_input
         context.state["mood"] = current_mood or "neutral"
         context.state["norm_attachments"] = attachments or []
         persistence_service = self._resolve_persistence_service()
-        return persistence_service.finalize_turn(context, (dad_reply, False))
+        with ensure_execution_trace_root(
+            operation="turn_service_finalize_direct_compat_turn",
+            prompt="[turn-service-direct-compat-finalize]",
+            metadata={"source": "TurnService._finalize_direct_compat_turn"},
+            required=True,
+        ):
+            return persistence_service.finalize_turn(context, (dad_reply, False))
 
     def _run_orchestrator_sync(
         self,
