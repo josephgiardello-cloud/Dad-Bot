@@ -3345,7 +3345,11 @@ def render_chat_tab(bot: DadBot, active_thread: dict):
                             attachments=pending_attachments,
                             gateway=gateway_context,
                         )
-                        st.warning("Connection unstable. Message queued; showing cached fallback reply.")
+                        last_error = str(st.session_state.get("runtime_last_error") or "").strip()
+                        warning_msg = "Connection unstable. Message queued; showing cached fallback reply."
+                        if last_error:
+                            warning_msg += f"\n\nRuntime error: `{last_error[:300]}`"
+                        st.warning(warning_msg)
                     if bool(runtime_result.get("photo_requested", False)):
                         photo = generate_dad_photo()
                         if photo:
