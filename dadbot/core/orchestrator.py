@@ -551,13 +551,40 @@ class DadBotOrchestrator:
         attachments: AttachmentList | None = None,
         *,
         session_id: str = "default",
+        confluence_key: str | None = None,
         timeout_seconds: float | None = None,
     ) -> FinalizedTurnResult:
+        confluence_mode = str(os.environ.get("DADBOT_GLOBAL_CONFLUENCE_MODE", "enforce")).strip().lower()
+        if confluence_mode not in {"off", "audit", "enforce"}:
+            confluence_mode = "enforce"
+        explicit_key = str(confluence_key or "").strip()
+        allow_legacy = str(os.environ.get("DADBOT_ALLOW_LEGACY_CONFLUENCE_KEY", "0")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        if confluence_mode == "enforce" and not explicit_key:
+            if not allow_legacy:
+                raise InvariantViolation(
+                    "Missing explicit confluence key in enforce mode.",
+                    context={"session_id": str(session_id or "default")},
+                )
+            legacy_payload = {
+                "session_id": str(session_id or "default"),
+                "user_input": str(user_input or ""),
+                "attachments": list(attachments or []),
+            }
+            explicit_key = f"legacy:{_stable_sha256(legacy_payload)}"
+            logger.warning("Using legacy confluence fallback key because DADBOT_ALLOW_LEGACY_CONFLUENCE_KEY is enabled")
+        metadata: dict[str, Any] = {"confluence_mode": confluence_mode}
+        if explicit_key:
+            metadata["confluence_key"] = explicit_key
         return await self.control_plane.submit_turn(
             session_id=session_id,
             user_input=user_input,
             attachments=attachments,
-            metadata={},
+            metadata=metadata,
             timeout_seconds=timeout_seconds,
         )
 
@@ -567,6 +594,7 @@ class DadBotOrchestrator:
         attachments: AttachmentList | None = None,
         *,
         session_id: str = "default",
+        confluence_key: str | None = None,
         timeout_seconds: float | None = None,
     ) -> FinalizedTurnResult:
         """Canonical async turn entry-point: all paths converge through control plane.
@@ -579,6 +607,7 @@ class DadBotOrchestrator:
                 user_input,
                 attachments=attachments,
                 session_id=session_id,
+                confluence_key=confluence_key,
                 timeout_seconds=timeout_seconds,
             )
         except TimeoutError:
@@ -592,13 +621,15 @@ class DadBotOrchestrator:
         self,
         user_input: str,
         attachments: AttachmentList | None = None,
+        *,
+        confluence_key: str | None = None,
     ) -> FinalizedTurnResult:
         """Synchronous turn entry-point: delegates to canonical async path."""
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             loop = None
-        coro = self.handle_turn(user_input, attachments=attachments)
+        coro = self.handle_turn(user_input, attachments=attachments, confluence_key=confluence_key)
         if loop is not None and loop.is_running():
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                 return pool.submit(asyncio.run, coro).result()  # type: ignore[arg-type]
@@ -608,6 +639,8 @@ class DadBotOrchestrator:
         self,
         user_input: str,
         attachments: AttachmentList | None = None,
+        *,
+        confluence_key: str | None = None,
     ) -> FinalizedTurnResult:
         """Async variant of run(): delegates to canonical handle_turn()."""
-        return await self.handle_turn(user_input, attachments=attachments)
+        return await self.handle_turn(user_input, attachments=attachments, confluence_key=confluence_key)

@@ -240,6 +240,7 @@ class MutationQueue:
                 int(getattr(m, "priority", 0) or 0),
                 int(getattr(m, "turn_index", 0) or 0),
                 int(getattr(m, "sequence_id", 0) or 0),
+                str(getattr(m, "payload_hash", "") or ""),
             ),
         )
         self._queue.clear()

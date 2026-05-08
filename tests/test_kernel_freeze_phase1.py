@@ -72,7 +72,7 @@ def test_terminal_state_persisted_for_turn(bot, monkeypatch) -> None:
 
     monkeypatch.setattr(orchestrator.graph, "execute", _fake_execute)
 
-    asyncio.run(orchestrator.handle_turn("hello dad"))
+    asyncio.run(orchestrator.handle_turn("hello dad", confluence_key="test-terminal-state-freeze"))
 
     session = orchestrator.session_registry.get_or_create("default")
     session_state = dict(session.get("state") or {})
