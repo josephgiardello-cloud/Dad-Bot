@@ -20,6 +20,7 @@ import pytest
 from dadbot.core.graph import TurnContext
 from dadbot.core.orchestrator import DadBotOrchestrator, DeterminismViolation
 from dadbot.core.persistence import SQLiteCheckpointer
+from tests.harness.graph_runner import confluence_key_for_turn
 
 MAX_TURNS = int(os.getenv("DADBOT_MAX_TEST_TURNS", "80") or "80")
 MAX_CONCURRENCY = int(os.getenv("DADBOT_MAX_CONCURRENCY", "12") or "12")
@@ -70,7 +71,11 @@ async def _run_and_capture_context(
     *,
     session_id: str = "default",
 ) -> tuple[tuple[str | None, bool], TurnContext]:
-    result = await orchestrator.handle_turn(user_input, session_id=session_id)
+    result = await orchestrator.handle_turn(
+        user_input,
+        session_id=session_id,
+        confluence_key=confluence_key_for_turn(session_id, user_input),
+    )
     context = getattr(orchestrator, "_last_turn_context", None)
     assert isinstance(context, TurnContext), "TurnContext capture hook did not run"
     return result, context
@@ -122,7 +127,11 @@ class TestDadBotPhase4Properties:
 
         for i in range(turns):
             start = time.perf_counter()
-            await orchestrator.handle_turn(f"Turn {i} test message", session_id="pv-latency")
+            await orchestrator.handle_turn(
+                f"Turn {i} test message",
+                session_id="pv-latency",
+                confluence_key=confluence_key_for_turn("pv-latency", f"Turn {i} test message"),
+            )
             latencies_ms.append((time.perf_counter() - start) * 1000)
 
             if i > 100 and i % 50 == 0:
@@ -170,7 +179,11 @@ class TestDadBotPhase4Properties:
         # instance would race on the same history snapshot producing collisions.
         full_history_ids: list[str] = []
         for sid in session_ids:
-            await orchestrator.handle_turn(f"{sid} unique fact", session_id=sid)
+            await orchestrator.handle_turn(
+                f"{sid} unique fact",
+                session_id=sid,
+                confluence_key=confluence_key_for_turn(sid, f"{sid} unique fact"),
+            )
             session = orchestrator.session_registry.get(sid)
             state = dict((session or {}).get("state") or {})
             full_history_ids.append(str(state.get("last_memory_full_history_id") or ""))

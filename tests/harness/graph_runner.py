@@ -8,11 +8,23 @@ persistence artifacts recorded during the run.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
 from dadbot.core.graph import TurnContext, TurnFidelity, TurnGraph
+
+
+def confluence_key_for_turn(session_id: str, user_input: str, *, prefix: str = "test") -> str:
+    """Generate a deterministic confluence key for test turns.
+
+    Mirrors the pattern used in production stress tests.  The prefix identifies
+    the test context; session_id + user_input provides semantic uniqueness so
+    every distinct turn carries an explicit, policy-compliant key.
+    """
+    digest = hashlib.sha256(f"{session_id}:{user_input}".encode()).hexdigest()[:24]
+    return f"{prefix}:{digest}"
 
 
 @dataclass
@@ -27,6 +39,8 @@ class RunResult:
     mutation_snapshot: dict[str, Any]
     checkpoints: list[dict[str, Any]] = field(default_factory=list)
     events: list[dict[str, Any]] = field(default_factory=list)
+    composition_contract: dict[str, Any] = field(default_factory=dict)
+    confluence_report: dict[str, Any] = field(default_factory=dict)
 
     @property
     def succeeded(self) -> bool:
@@ -97,9 +111,15 @@ class GraphRunner:
         # Pull persistence artifacts from registry if available
         checkpoints: list[dict[str, Any]] = []
         events: list[dict[str, Any]] = []
+        composition_contract: dict[str, Any] = {}
+        confluence_report: dict[str, Any] = {}
         if registry is not None and hasattr(registry, "persistence"):
             checkpoints = list(registry.persistence.checkpoints)
             events = list(registry.persistence.events)
+        state = getattr(ctx, "state", None)
+        if isinstance(state, dict):
+            composition_contract = dict(state.get("last_execution_composition_contract") or {})
+            confluence_report = dict(state.get("last_execution_confluence_report") or {})
 
         return RunResult(
             result=result,
@@ -110,4 +130,6 @@ class GraphRunner:
             mutation_snapshot=ctx.mutation_queue.snapshot(),
             checkpoints=checkpoints,
             events=events,
+            composition_contract=composition_contract,
+            confluence_report=confluence_report,
         )

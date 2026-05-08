@@ -43,6 +43,7 @@ from evaluation.coherence_engine import CoherenceEngine
 from tests.scenario_suite import SCENARIOS, Scenario
 from tests.scoring_engine import CapabilityScore, ScoringEngine
 from tests.trace_schema import NormalizedTrace
+from tests.harness.graph_runner import confluence_key_for_turn
 
 logger = logging.getLogger(__name__)
 
@@ -602,6 +603,7 @@ class BenchmarkRunner:
                 user_input=scenario.input_text,
                 session_id=self._session_id,
                 timeout_seconds=15.0,
+                confluence_key=confluence_key_for_turn(self._session_id, scenario.input_text),
             )
 
             trace.completed = success

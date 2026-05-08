@@ -15,6 +15,7 @@ from typing import Any
 from dadbot.core.graph import TurnContext
 from dadbot.core.orchestrator import DadBotOrchestrator
 from tests.scenario_suite import SCENARIOS, Scenario
+from tests.harness.graph_runner import confluence_key_for_turn
 
 logger = logging.getLogger(__name__)
 
@@ -209,6 +210,7 @@ class OrchestratorIntegrationLayer:
                 user_input=scenario.input_text,
                 session_id=self._session_id,
                 timeout_seconds=15.0,
+                confluence_key=confluence_key_for_turn(self._session_id, scenario.input_text),
             )
 
             # Capture execution trace
