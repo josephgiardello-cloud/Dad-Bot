@@ -22,6 +22,18 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e .[dev,service]
 
+      - name: Layer 1 - Ruff Hot-Path Gate (Blocking)
+        run: |
+          python -m pip install ruff
+          ruff check \
+            tests/distribution_readiness/run_all.py \
+            tests/unit/test_control_plane_ledger_bounds.py \
+            tests/unit/test_runtime_contract_alignment.py
+
+      - name: Layer 1 - Production Confluence Flags Gate (Blocking)
+        run: |
+          python ci/production_confluence_flags_check.py
+
       - name: Canonical Snapshot Truth Path Guard
         run: |
           python tools/generate_full_system_snapshot.py
@@ -90,7 +102,6 @@ jobs:
   layer3-stress-adversarial:
     needs: layer2-replay-correctness
     runs-on: ubuntu-latest
-    continue-on-error: true
 
     steps:
       - name: Checkout
@@ -106,12 +117,12 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e .[dev,service]
 
-      - name: Layer 3 - Adversarial Suite (Non-Blocking)
+      - name: Layer 3 - Adversarial Suite (Blocking)
         run: |
           python -m pytest -q -p no:randomly --runxfail --tb=short --timeout=60 \
             tests/test_phase4a_adversarial_collapse.py
 
-      - name: Layer 3 - Stress Suite (Non-Blocking)
+      - name: Layer 3 - Stress Suite (Blocking)
         run: |
           python -m pytest -q -p no:randomly --tb=short --timeout=60 \
             tests/stress/test_full_execution_trace.py
@@ -119,5 +130,5 @@ jobs:
       - name: Layer 3 - Summary
         if: always()
         run: |
-          echo "### Layer 3: Stress/Adversarial (Non-Blocking)" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Adversarial and stress suites are advisory only." >> "$GITHUB_STEP_SUMMARY"
+          echo "### Layer 3: Stress/Adversarial (Blocking)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Adversarial and stress suites are gating signals for promotion." >> "$GITHUB_STEP_SUMMARY"

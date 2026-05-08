@@ -1,8 +1,8 @@
 """Distribution Readiness Gate — master CI entrypoint.
 
 Tier 1: HARD FAIL (exits 1 if any test fails)
-Tier 2: WARN ONLY (non-blocking, results reported)
-Tier 3: ADVISORY ONLY (results reported, no fail)
+Tier 2: HARD FAIL (exits 1 if any test fails)
+Tier 3: HARD FAIL (exits 1 if any test fails)
 """
 from __future__ import annotations
 
@@ -23,24 +23,30 @@ def run() -> None:
         print("\n\u274c Tier 1 FAILED: kernel not distribution-ready")
         sys.exit(1)
 
-    # Tier 2 — WARN: reliability (non-blocking)
+    # Tier 2 — HARD FAIL: reliability
     tier2 = pytest.main([
         "tests/distribution_readiness/tier2_reliability",
         "-q",
         "--tb=short",
     ])
+    if tier2 != 0:
+        print("\n❌ Tier 2 FAILED: reliability gate not distribution-ready")
+        sys.exit(1)
 
-    # Tier 3 — ADVISORY: long-term evolution signals
+    # Tier 3 — HARD FAIL: long-term evolution signals
     tier3 = pytest.main([
         "tests/distribution_readiness/tier3_advisory",
         "-q",
         "--tb=short",
     ])
+    if tier3 != 0:
+        print("\n❌ Tier 3 FAILED: advisory gate is now blocking")
+        sys.exit(1)
 
     print("\n=== DISTRIBUTION READINESS REPORT ===")
     print("Tier 1 (kernel):      PASS")
-    print(f"Tier 2 (reliability): {'PASS' if tier2 == 0 else 'WARN'} (exit={tier2})")
-    print(f"Tier 3 (advisory):    {'PASS' if tier3 == 0 else 'ADVISORY'} (exit={tier3})")
+    print("Tier 2 (reliability): PASS")
+    print("Tier 3 (advisory):    PASS")
     sys.exit(0)
 
 
