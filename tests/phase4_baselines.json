@@ -761,6 +761,180 @@
         "[INTEGRATION] 1.01s call     tests/test_phase4a.py::TestPhase4AToolDeterminismAcrossRestarts::test_tool_trace_hash_changes_with_different_inputs",
         "[INTEGRATION] 1.00s call     tests/test_phase4a.py::TestPhase4AToolDeterminismAcrossRestarts::test_tool_trace_hash_stable_across_independent_sessions"
       ]
+    },
+    {
+      "baseline_store": "tests/phase4_baselines.json",
+      "cold_start": {
+        "dadbot_class_import_s": 0.438965,
+        "dadbot_import_s": 0.122617,
+        "dadbot_init_s": 3.214262,
+        "total_s": 3.775844
+      },
+      "db_sizes_bytes": {
+        "dad_memory_graph.sqlite3": 77824,
+        "dad_memory_semantic.sqlite3": 69632
+      },
+      "generated_at": "2026-05-08T00:28:41+00:00",
+      "lanes": {
+        "DEV": {
+          "command": "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\.venv\\Scripts\\python.exe -m pytest -m unit --durations=20 -q -p no:randomly --junitxml=C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\session_logs\\cert_baseline_20260508T002841+0000\\lane_dev.junit.xml",
+          "elapsed_s": 19.01,
+          "exit_code": 0,
+          "result": "pass",
+          "summary": {
+            "errors": 0,
+            "failed": 0,
+            "passed": 0,
+            "skipped": 0,
+            "xfailed": 0,
+            "xpassed": 0
+          },
+          "tests": 909,
+          "timed_out": false,
+          "top_slowest": [
+            "2.60s call     tests/test_tool_sandbox_isolation.py::test_private_tool_sandbox_imports_are_repo_isolated",
+            "0.31s call     tests/test_cross_system_load_invariants.py::TestMixedSessionCompletion::test_100_turns_complete_without_exception"
+          ]
+        },
+        "DURABILITY_P4": {
+          "command": "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\.venv\\Scripts\\python.exe -m pytest -m durability or phase4_cert --durations=20 -q -p no:randomly --junitxml=C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\session_logs\\cert_baseline_20260508T002841+0000\\lane_durability_p4.junit.xml",
+          "elapsed_s": 111.041,
+          "exit_code": 0,
+          "result": "pass",
+          "summary": {
+            "errors": 0,
+            "failed": 0,
+            "passed": 0,
+            "skipped": 0,
+            "xfailed": 0,
+            "xpassed": 0
+          },
+          "tests": 52,
+          "timed_out": false,
+          "top_slowest": [
+            "52.96s call     tests/system_validation/test_drift_monitor.py::TestBoundaryGateRuntimeInvariant::test_boundary_gate_is_reproducible",
+            "26.39s call     tests/system_validation/test_drift_monitor.py::TestBoundaryGateRuntimeInvariant::test_boundary_gate_exits_zero",
+            "8.22s call     tests/test_phase4a.py::TestPhase4ATrueProcessRestart::test_checkpoint_survives_real_process_boundary",
+            "1.72s call     tests/system_validation/test_adversarial_scale.py::TestLongChainReplay::test_invariants_hold_across_long_chain",
+            "1.36s call     tests/test_phase4a.py::TestPhase4AToolDeterminismAcrossRestarts::test_tool_trace_hash_stable_across_independent_sessions",
+            "1.28s call     tests/test_phase4a.py::TestPhase4AToolDeterminismAcrossRestarts::test_tool_trace_hash_changes_with_different_inputs",
+            "1.28s call     tests/test_phase4a.py::TestPhase4ARealCheckpointing::test_orchestrator_restores_state_after_simulated_restart",
+            "1.24s call     tests/test_phase4a.py::TestPhase4ARealCheckpointing::test_manifest_drift_warning_in_lenient_mode",
+            "1.23s call     tests/test_phase4a.py::TestPhase4ADeterminismVerification::test_lock_hash_stable_across_identical_inputs",
+            "1.08s call     tests/test_phase4a.py::TestPhase4ADeterminismVerification::test_persistence_metrics_are_observable_per_session"
+          ]
+        },
+        "FULL_CERT": {
+          "command": "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\.venv\\Scripts\\python.exe -m pytest --durations=20 -q -p no:randomly --junitxml=C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\session_logs\\cert_baseline_20260508T002841+0000\\lane_full_cert.junit.xml",
+          "elapsed_s": 411.142,
+          "exit_code": 0,
+          "result": "pass",
+          "summary": {
+            "errors": 0,
+            "failed": 0,
+            "passed": 0,
+            "skipped": 0,
+            "xfailed": 0,
+            "xpassed": 0
+          },
+          "tests": 2321,
+          "timed_out": false,
+          "top_slowest": [
+            "54.05s call     tests/system_validation/test_drift_monitor.py::TestBoundaryGateRuntimeInvariant::test_boundary_gate_is_reproducible",
+            "27.10s call     tests/system_validation/test_drift_monitor.py::TestBoundaryGateRuntimeInvariant::test_boundary_gate_exits_zero",
+            "15.62s call     tests/test_phase4a.py::TestPhase4AScaleAndPruning::test_pruning_enforced_after_hundred_turns",
+            "15.04s call     tests/test_service_api_integration.py::test_api_event_stream_websocket_replays_and_streams_tenant_events",
+            "9.89s call     tests/test_phase4a.py::TestPhase4AScaleAndPruning::test_concurrent_sessions_remain_isolated",
+            "8.69s call     tests/test_streamlit_smoke.py::test_sidebar_and_button_surface_accessible",
+            "8.16s call     tests/test_phase4a.py::TestPhase4ATrueProcessRestart::test_checkpoint_survives_real_process_boundary",
+            "7.48s call     tests/test_streamlit_smoke.py::test_preferences_tab_shows_detected_cloud_llm_api_key_hint",
+            "7.03s call     tests/test_streamlit_smoke.py::test_dad_streamlit_app_starts_without_streamlit_exceptions",
+            "3.50s call     tests/uril/test_uril_core.py::test_mock_vs_real_divergence_signal"
+          ]
+        },
+        "INTEGRATION": {
+          "command": "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\.venv\\Scripts\\python.exe -m pytest -m integration --durations=20 -q -p no:randomly --junitxml=C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\session_logs\\cert_baseline_20260508T002841+0000\\lane_integration.junit.xml",
+          "elapsed_s": 42.016,
+          "exit_code": 0,
+          "result": "pass",
+          "summary": {
+            "errors": 0,
+            "failed": 0,
+            "passed": 0,
+            "skipped": 0,
+            "xfailed": 0,
+            "xpassed": 0
+          },
+          "tests": 37,
+          "timed_out": false,
+          "top_slowest": [
+            "15.04s call     tests/test_service_api_integration.py::test_api_event_stream_websocket_replays_and_streams_tenant_events",
+            "8.22s call     tests/test_phase4a.py::TestPhase4ATrueProcessRestart::test_checkpoint_survives_real_process_boundary",
+            "1.22s call     tests/test_phase4a.py::TestPhase4AToolDeterminismAcrossRestarts::test_tool_trace_hash_stable_across_independent_sessions",
+            "1.17s call     tests/test_phase4a.py::TestPhase4ADeterminismVerification::test_lock_hash_stable_across_identical_inputs",
+            "1.17s call     tests/test_phase4a.py::TestPhase4AToolDeterminismAcrossRestarts::test_tool_trace_hash_changes_with_different_inputs",
+            "1.16s call     tests/test_phase4a.py::TestPhase4ARealCheckpointing::test_manifest_drift_warning_in_lenient_mode",
+            "1.10s call     tests/test_phase4a.py::TestPhase4ARealCheckpointing::test_orchestrator_restores_state_after_simulated_restart",
+            "0.93s call     tests/test_phase4a.py::TestPhase4ADeterminismVerification::test_persistence_metrics_are_observable_per_session",
+            "0.68s call     tests/test_phase4a.py::TestPhase4ADeterminismVerification::test_checkpoint_chain_integrity_after_two_real_turns",
+            "0.67s call     tests/test_phase4a.py::TestPhase4ARealCheckpointing::test_orchestrator_saves_checkpoint_after_real_turn"
+          ]
+        },
+        "SOAK": {
+          "command": "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\.venv\\Scripts\\python.exe -m pytest -m soak --durations=20 -q -p no:randomly --junitxml=C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\session_logs\\cert_baseline_20260508T002841+0000\\lane_soak.junit.xml",
+          "elapsed_s": 45.018,
+          "exit_code": 0,
+          "result": "pass",
+          "summary": {
+            "errors": 0,
+            "failed": 0,
+            "passed": 0,
+            "skipped": 0,
+            "xfailed": 0,
+            "xpassed": 0
+          },
+          "tests": 4,
+          "timed_out": false,
+          "top_slowest": [
+            "19.35s call     tests/test_phase4a.py::TestPhase4AScaleAndPruning::test_pruning_enforced_after_hundred_turns",
+            "11.46s call     tests/test_phase4a.py::TestPhase4AScaleAndPruning::test_concurrent_sessions_remain_isolated",
+            "3.74s call     tests/test_phase4a.py::TestPhase4AScaleAndPruning::test_prune_returns_correct_deleted_count"
+          ]
+        },
+        "UI": {
+          "command": "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\.venv\\Scripts\\python.exe -m pytest -m ui --durations=20 -q -p no:randomly --junitxml=C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\session_logs\\cert_baseline_20260508T002841+0000\\lane_ui.junit.xml",
+          "elapsed_s": 29.012,
+          "exit_code": 0,
+          "result": "pass",
+          "summary": {
+            "errors": 0,
+            "failed": 0,
+            "passed": 0,
+            "skipped": 0,
+            "xfailed": 0,
+            "xpassed": 0
+          },
+          "tests": 5,
+          "timed_out": false,
+          "top_slowest": [
+            "8.44s call     tests/test_streamlit_smoke.py::test_sidebar_and_button_surface_accessible",
+            "7.75s call     tests/test_streamlit_smoke.py::test_dad_streamlit_app_starts_without_streamlit_exceptions",
+            "7.35s call     tests/test_streamlit_smoke.py::test_preferences_tab_shows_detected_cloud_llm_api_key_hint"
+          ]
+        }
+      },
+      "top_slowest_tests": [
+        "[DEV] 2.60s call     tests/test_tool_sandbox_isolation.py::test_private_tool_sandbox_imports_are_repo_isolated",
+        "[DEV] 0.31s call     tests/test_cross_system_load_invariants.py::TestMixedSessionCompletion::test_100_turns_complete_without_exception",
+        "[INTEGRATION] 15.04s call     tests/test_service_api_integration.py::test_api_event_stream_websocket_replays_and_streams_tenant_events",
+        "[INTEGRATION] 8.22s call     tests/test_phase4a.py::TestPhase4ATrueProcessRestart::test_checkpoint_survives_real_process_boundary",
+        "[INTEGRATION] 1.22s call     tests/test_phase4a.py::TestPhase4AToolDeterminismAcrossRestarts::test_tool_trace_hash_stable_across_independent_sessions",
+        "[INTEGRATION] 1.17s call     tests/test_phase4a.py::TestPhase4ADeterminismVerification::test_lock_hash_stable_across_identical_inputs",
+        "[INTEGRATION] 1.17s call     tests/test_phase4a.py::TestPhase4AToolDeterminismAcrossRestarts::test_tool_trace_hash_changes_with_different_inputs",
+        "[INTEGRATION] 1.16s call     tests/test_phase4a.py::TestPhase4ARealCheckpointing::test_manifest_drift_warning_in_lenient_mode",
+        "[INTEGRATION] 1.10s call     tests/test_phase4a.py::TestPhase4ARealCheckpointing::test_orchestrator_restores_state_after_simulated_restart",
+        "[INTEGRATION] 0.93s call     tests/test_phase4a.py::TestPhase4ADeterminismVerification::test_persistence_metrics_are_observable_per_session"
+      ]
     }
   ],
   "schema_version": 1
