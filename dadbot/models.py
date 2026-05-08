@@ -396,6 +396,22 @@ class GraphFallbackStatusSnapshot(DadBotModel):
     message: str = ""
 
 
+class ConfluenceStatusSnapshot(DadBotModel):
+    mode: str = "off"
+    strict_legacy_disabled: bool = False
+    enforced: bool = False
+    action: str = ""
+    key: str = ""
+    observed_hash: str = ""
+    expected_hash: str = ""
+    attempted: int = Field(0, ge=0)
+    matched: int = Field(0, ge=0)
+    mismatch: int = Field(0, ge=0)
+    bound_first_observation: int = Field(0, ge=0)
+    enforced_blocked: int = Field(0, ge=0)
+    enforcement_rate: float = Field(0.0, ge=0.0, le=1.0)
+
+
 class PromptGuardStatusSnapshot(DadBotModel):
     trim_count: int = Field(0, ge=0)
     trimmed_tokens_total: int = Field(0, ge=0)
@@ -498,6 +514,7 @@ class DashboardStatusSnapshot(DadBotModel):
     graph_fallback: GraphFallbackStatusSnapshot = Field(
         default_factory=GraphFallbackStatusSnapshot,
     )
+    confluence: ConfluenceStatusSnapshot = Field(default_factory=ConfluenceStatusSnapshot)
     maintenance: dict[str, Any] = Field(default_factory=dict)
     supervisor: ReplySupervisorSnapshot = Field(default_factory=ReplySupervisorSnapshot)
     living: dict[str, Any] = Field(default_factory=dict)

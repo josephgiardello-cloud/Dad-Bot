@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import os
+
 from dadbot.contracts import DadBotContext, SupportsDadBotAccess
 from dadbot.models import (
     ActiveThreadSnapshot,
     BackgroundTaskOverview,
     CircuitBreakerStatusSnapshot,
+    ConfluenceStatusSnapshot,
     DashboardStatusSnapshot,
     GraphFallbackStatusSnapshot,
     MemoryContextStatusSnapshot,
@@ -39,8 +42,14 @@ class StatusReportingManager:
             return "Graph turn orchestration is healthy."
         mode_label = str(degraded_mode or "legacy").replace("_", " ")
         if event_count == 1:
-            return f"Graph orchestration degraded once and switched to {mode_label}. Replies continue through legacy turn processing."
-        return f"Graph orchestration degraded {event_count} times and switched to {mode_label}. Replies continue through legacy turn processing."
+            return (
+                f"Graph orchestration degraded once and switched to {mode_label}. "
+                "Replies continue through legacy turn processing."
+            )
+        return (
+            f"Graph orchestration degraded {event_count} times and switched to {mode_label}. "
+            "Replies continue through legacy turn processing."
+        )
 
     def graph_fallback_snapshot(self) -> dict:
         issues = list(self.bot.recent_runtime_issues(limit=12) or [])
@@ -66,7 +75,7 @@ class StatusReportingManager:
     def _reputation_score(relationship: dict) -> int:
         trust = int(relationship.get("trust_level", 0) or 0)
         openness = int(relationship.get("openness_level", 0) or 0)
-        return max(0, min(100, int(round((trust + openness) / 2))))
+        return max(0, min(100, round((trust + openness) / 2)))
 
     def circuit_breaker_snapshot(
         self,
@@ -237,6 +246,38 @@ class StatusReportingManager:
             for item in self.bot.recent_runtime_issues(limit=3)
         ]
         graph_fallback = self.graph_fallback_snapshot()
+        orchestrator = getattr(self.bot, "turn_orchestrator", None)
+        control_plane = getattr(orchestrator, "control_plane", None)
+        last_confluence = dict(getattr(control_plane, "_last_confluence_report", {}) or {})
+        confluence_metrics = dict(getattr(control_plane, "_confluence_metrics", {}) or {})
+        raw_mode = str(os.environ.get("DADBOT_GLOBAL_CONFLUENCE_MODE", "off")).strip().lower()
+        confluence_mode = raw_mode if raw_mode in {"off", "audit", "enforce"} else "off"
+        allow_legacy = str(os.environ.get("DADBOT_ALLOW_LEGACY_CONFLUENCE_KEY", "0")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        attempted = int(confluence_metrics.get("attempted", 0) or 0)
+        matched = int(confluence_metrics.get("matched", 0) or 0)
+        enforcement_rate = float(matched / attempted) if attempted > 0 else 0.0
+        confluence = ConfluenceStatusSnapshot.model_validate(
+            {
+                "mode": confluence_mode,
+                "strict_legacy_disabled": not allow_legacy,
+                "enforced": bool(last_confluence.get("enforced", False)),
+                "action": str(last_confluence.get("action") or ""),
+                "key": str(last_confluence.get("key") or ""),
+                "observed_hash": str(last_confluence.get("observed_hash") or ""),
+                "expected_hash": str(last_confluence.get("expected_hash") or ""),
+                "attempted": attempted,
+                "matched": matched,
+                "mismatch": int(confluence_metrics.get("mismatch", 0) or 0),
+                "bound_first_observation": int(confluence_metrics.get("bound_first_observation", 0) or 0),
+                "enforced_blocked": int(confluence_metrics.get("enforced_blocked", 0) or 0),
+                "enforcement_rate": max(0.0, min(1.0, enforcement_rate)),
+            },
+        ).model_dump(mode="python")
         memory_context = MemoryContextStatusSnapshot.model_validate(
             self.bot.memory_context_stats(),
         ).model_dump(mode="python")
@@ -346,6 +387,7 @@ class StatusReportingManager:
                 "health_history": health_history,
                 "recent_runtime_issues": recent_runtime_issues,
                 "graph_fallback": graph_fallback,
+                "confluence": confluence,
                 "maintenance": dict(maintenance or {}),
                 "supervisor": dict(supervisor or {}),
                 "living": dict(living or {}),
@@ -450,7 +492,9 @@ class StatusReportingManager:
             f"pending proactive={snapshot['pending_proactive']}, trust={snapshot['trust_level']}/100, "
             f"openness={snapshot['openness_level']}/100, momentum={snapshot['emotional_momentum']}, "
             f"last mood={snapshot['last_mood']}, top traits={trait_text}, "
-            f"memory context={memory_context.get('tokens', 0)}/{memory_context.get('budget_tokens', 0)} ({memory_pruned}), "
+            "memory context="
+            f"{memory_context.get('tokens', 0)}/{memory_context.get('budget_tokens', 0)} "
+            f"({memory_pruned}), "
             f"prompt guard trims={prompt_guard.get('trim_count', 0)}, "
             f"recent degradations={len(self.bot.recent_runtime_issues(limit=3))}, "
             f"graph fallback={graph_fallback.get('degraded_mode', 'none')} ({graph_fallback.get('event_count', 0)}), "
@@ -468,7 +512,11 @@ class StatusReportingManager:
         top_topics = relationship.get("top_topics", []) or []
         if persona_trait_entries:
             trait_text = "; ".join(
-                f"{entry.get('trait', '')} (strength={self.bot.long_term_signals.decayed_trait_strength(entry):.2f}, impact={self.bot.long_term_signals.trait_impact(entry):.2f})"
+                (
+                    f"{entry.get('trait', '')} "
+                    f"(strength={self.bot.long_term_signals.decayed_trait_strength(entry):.2f}, "
+                    f"impact={self.bot.long_term_signals.trait_impact(entry):.2f})"
+                )
                 for entry in persona_trait_entries
                 if entry.get("trait")
             )

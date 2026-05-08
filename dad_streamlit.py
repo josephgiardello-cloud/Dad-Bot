@@ -47,6 +47,7 @@ from dadbot.ui.prefs_state import (
     ui_preferences,
     voice_preferences,
 )
+from dadbot.ui.status import render_confluence_status_card
 from dadbot.ui.utils import (
     ambient_fragment,
     maybe_fragment,
@@ -3477,6 +3478,7 @@ def render_status_tab(bot: DadBot):
     memory_context = dashboard.get("memory_context", {})
     prompt_guard = dashboard.get("prompt_guard", {})
     graph_fallback = dict(dashboard.get("graph_fallback") or {})
+    confluence = dict(dashboard.get("confluence") or {})
 
     render_runtime_rejection_banner(dismiss_key="dismiss-runtime-rejection-status")
     render_runtime_guardrails_card(dismiss_key="dismiss-runtime-guardrails-status")
@@ -3618,6 +3620,8 @@ def render_status_tab(bot: DadBot):
                         st.error(f"Stop failed (code {_stop}). Restart aborted.")
                 except Exception as _e:
                     st.error(f"Restart failed: {_e}")
+
+    render_confluence_status_card(confluence)
 
     with st.container(border=True):
         st.subheader("Dad's Internal State")
