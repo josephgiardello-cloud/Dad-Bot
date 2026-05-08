@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
 import hashlib
 import json
 import logging
+import os
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Protocol, cast
 
 from dadbot.contracts import AttachmentList, FinalizedTurnResult
@@ -14,6 +17,9 @@ from dadbot.core.execution_boundary import ControlPlaneExecutionBoundary
 from dadbot.core.execution_lease import ExecutionLease, LeaseConflictError
 from dadbot.core.execution_ledger import ExecutionLedger
 from dadbot.core.execution_ledger_memory import InMemoryExecutionLedger
+from dadbot.core.kernel_gateway import KernelGateway
+from dadbot.core.semantic_primitives import hash as semantic_hash
+from dadbot.core.compaction import ArchiveTier, CompactionPolicy, EventCompactor
 from dadbot.core.ledger_reader import LedgerReader
 from dadbot.core.ledger_writer_adapter import LedgerWriterAdapter
 from dadbot.core.kernel_signals import get_exporter, get_metrics, get_tracer
@@ -317,7 +323,10 @@ class ExecutionControlPlane:
         token_seed = f"{resolved_options.worker_id}|{resolved_options.max_inflight_jobs}|{int(bool(resolved_options.enable_observability))}"
         self.execution_token = f"exec-{hashlib.sha256(token_seed.encode('utf-8')).hexdigest()[:20]}"
         self.ledger = resolved_options.ledger or InMemoryExecutionLedger()
-        self.ledger_writer = LedgerWriterAdapter(self.ledger)
+        self._ledger_writer = LedgerWriterAdapter(
+            self.ledger,
+            scope_validator=KernelGateway.assert_scope,
+        )
         self.ledger_reader = LedgerReader(self.ledger)
         self.execution_lease = resolved_options.execution_lease or ExecutionLease()
         scheduler_options = SchedulerOptions(
@@ -327,16 +336,419 @@ class ExecutionControlPlane:
             enable_observability=resolved_options.enable_observability,
             execution_lease=self.execution_lease,
         )
-        self.scheduler = resolved_options.scheduler or Scheduler(
+        self._scheduler = resolved_options.scheduler or Scheduler(
             registry,
             reader=self.ledger_reader,
-            writer=self.ledger_writer,
+            writer=self._ledger_writer,
             options=scheduler_options,
         )
         self.recovery = RecoveryManager(ledger=self.ledger)
         self._inflight_by_request: dict[tuple[str, str], asyncio.Future[FinalizedTurnResult]] = {}
         self._inflight_lock = asyncio.Lock()
         self.graph = graph
+        self._ledger_compactor: EventCompactor | None = None
+        self._last_compaction_report: dict[str, Any] = {"compacted": False, "reason": "not_run"}
+        self._global_confluence_contracts: dict[str, str] = {}
+        self._last_confluence_report: dict[str, Any] = {"enforced": False, "reason": "not_run"}
+        self._confluence_metrics: dict[str, int] = {
+            "attempted": 0,
+            "bound_first_observation": 0,
+            "matched": 0,
+            "mismatch": 0,
+            "enforced_blocked": 0,
+        }
+        self.kernel_gateway = KernelGateway(self)
+
+    @property
+    def scheduler(self) -> Scheduler:
+        KernelGateway.assert_scope("control_plane.scheduler")
+        return self._scheduler
+
+    @property
+    def ledger_writer(self) -> LedgerWriterAdapter:
+        KernelGateway.assert_scope("control_plane.ledger_writer")
+        return self._ledger_writer
+
+    @staticmethod
+    def _stable_hash(payload: Any) -> str:
+        return semantic_hash(payload)
+
+    def _job_trace_events(self, job: ExecutionJob) -> list[dict[str, Any]]:
+        events = list(self.ledger.read())
+        trace_id = str(job.trace_id or "").strip()
+        job_id = str(job.job_id or "").strip()
+        filtered = [
+            dict(event)
+            for event in events
+            if (
+                str(event.get("trace_id") or "").strip() == trace_id
+                or str(dict(event.get("payload") or {}).get("job_id") or "").strip() == job_id
+            )
+        ]
+        return sorted(filtered, key=lambda item: int(item.get("sequence") or 0))
+
+    @staticmethod
+    def _event_stream_digest(events: list[dict[str, Any]]) -> str:
+        canonical = [
+            {
+                "sequence": int(event.get("sequence") or 0),
+                "type": str(event.get("type") or ""),
+                "trace_id": str(event.get("trace_id") or ""),
+                "session_id": str(event.get("session_id") or ""),
+                "kernel_step_id": str(event.get("kernel_step_id") or ""),
+                "payload_hash": hashlib.sha256(
+                    json.dumps(dict(event.get("payload") or {}), sort_keys=True, default=str).encode("utf-8"),
+                ).hexdigest(),
+            }
+            for event in list(events or [])
+        ]
+        return hashlib.sha256(
+            json.dumps(canonical, sort_keys=True, default=str).encode("utf-8"),
+        ).hexdigest()
+
+    @staticmethod
+    def _event_semantic_digest(events: list[dict[str, Any]]) -> str:
+        canonical = [
+            {
+                "type": str(event.get("type") or ""),
+                "kernel_step_id": str(event.get("kernel_step_id") or ""),
+            }
+            for event in list(events or [])
+        ]
+        canonical.sort(key=lambda item: (str(item.get("type") or ""), str(item.get("kernel_step_id") or "")))
+        return hashlib.sha256(
+            json.dumps(canonical, sort_keys=True, default=str).encode("utf-8"),
+        ).hexdigest()
+
+    @staticmethod
+    def _confluence_mode(metadata: dict[str, Any]) -> str:
+        override = str(dict(metadata or {}).get("confluence_mode") or "").strip().lower()
+        if override in {"off", "audit", "enforce"}:
+            return override
+        raw = str(os.environ.get("DADBOT_GLOBAL_CONFLUENCE_MODE", "off")).strip().lower()
+        if raw in {"off", "audit", "enforce"}:
+            return raw
+        return "off"
+
+    def _derive_confluence_key(
+        self,
+        *,
+        user_input: str,
+        attachments: AttachmentList | None,
+        metadata: dict[str, Any],
+    ) -> str:
+        explicit = str(dict(metadata or {}).get("confluence_key") or "").strip()
+        if explicit:
+            return explicit
+        namespace = str(dict(metadata or {}).get("confluence_namespace") or "global").strip() or "global"
+        payload = {
+            "namespace": namespace,
+            "user_input": str(user_input or ""),
+            "attachments": list(attachments or []),
+            "semantic_eval_input_hash": str(dict(metadata or {}).get("semantic_eval_input_hash") or ""),
+        }
+        return f"auto:{self._stable_hash(payload)}"
+
+    def _prepare_global_confluence_law(
+        self,
+        *,
+        user_input: str,
+        attachments: AttachmentList | None,
+        metadata: dict[str, Any],
+    ) -> None:
+        mode = self._confluence_mode(metadata)
+        if mode == "off":
+            return
+        explicit_key = str(dict(metadata or {}).get("confluence_key") or "").strip()
+        if mode == "enforce" and not explicit_key:
+            allow_legacy = str(os.environ.get("DADBOT_ALLOW_LEGACY_CONFLUENCE_KEY", "0")).strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+            if not allow_legacy:
+                raise RuntimeError(
+                    "Missing explicit confluence_key in enforce mode. "
+                    "Set metadata['confluence_key'] at orchestrator boundary.",
+                )
+        key = self._derive_confluence_key(
+            user_input=user_input,
+            attachments=attachments,
+            metadata=metadata,
+        )
+        known = str(self._global_confluence_contracts.get(key) or "")
+        metadata["_global_confluence_mode"] = mode
+        metadata["_global_confluence_key"] = key
+        if known:
+            metadata.setdefault("expected_execution_confluence_hash", known)
+
+    def _assert_lifecycle_order(self, trace_events: list[dict[str, Any]]) -> None:
+        event_types = [str(event.get("type") or "") for event in list(trace_events or [])]
+        required = ["JOB_SUBMITTED", "SESSION_BOUND", "JOB_QUEUED", "JOB_STARTED", "JOB_COMPLETED"]
+        positions: dict[str, int] = {}
+        for event_type in required:
+            if event_type not in event_types:
+                raise RuntimeError(
+                    f"Control-plane lifecycle invariant violated: missing event {event_type!r}",
+                )
+            positions[event_type] = int(event_types.index(event_type))
+        ordered = [positions[name] for name in required]
+        if ordered != sorted(ordered):
+            raise RuntimeError(
+                "Control-plane lifecycle invariant violated: event order is non-monotonic",
+            )
+
+    def _record_turn_composition_contract(
+        self,
+        *,
+        session: dict[str, Any],
+        job: ExecutionJob,
+        result: FinalizedTurnResult,
+        state_before_hash: str,
+    ) -> dict[str, Any]:
+        state = dict(session.get("state") or {})
+        state_after_hash = self._stable_hash(state)
+        terminal_state = dict(state.get("last_terminal_state") or {})
+        trace_events = self._job_trace_events(job)
+        if any(str(event.get("type") or "").strip() for event in list(trace_events or [])):
+            self._assert_lifecycle_order(trace_events)
+
+        event_log_hash = self._event_stream_digest(trace_events)
+        output_payload = {
+            "response": str(result[0] if isinstance(result, tuple) and len(result) >= 1 else ""),
+            "should_end": bool(result[1] if isinstance(result, tuple) and len(result) >= 2 else False),
+        }
+        state_delta_hash = self._stable_hash(
+            {
+                "before": str(state_before_hash or ""),
+                "after": str(state_after_hash or ""),
+            },
+        )
+        composition_payload = {
+            "contract_version": "turn-composition-v1",
+            "context_input_hash": self._stable_hash(
+                {
+                    "session_id": str(job.session_id or ""),
+                    "trace_id": str(job.trace_id or ""),
+                    "user_input": str(job.user_input or ""),
+                    "attachments": list(job.attachments or []),
+                    "metadata": dict(job.metadata or {}),
+                },
+            ),
+            "execution_dag_hash": str(terminal_state.get("execution_dag_hash") or ""),
+            "policy_hash": str(terminal_state.get("policy_hash") or ""),
+            "state_delta_hash": state_delta_hash,
+            "event_log_hash": event_log_hash,
+            "output_hash": self._stable_hash(output_payload),
+            "mutation_effects_hash": str(terminal_state.get("post_commit_mutation_effects_hash") or ""),
+            "determinism_closure_hash": str(terminal_state.get("determinism_closure_hash") or ""),
+        }
+        composition_hash = self._stable_hash(composition_payload)
+        confluence_payload = {
+            "contract_version": "turn-confluence-v1",
+            "semantic_input_hash": self._stable_hash(
+                {
+                    "user_input": str(job.user_input or ""),
+                    "attachments": list(job.attachments or []),
+                    "semantic_eval_input_hash": str(dict(job.metadata or {}).get("semantic_eval_input_hash") or ""),
+                },
+            ),
+            "execution_dag_hash": str(terminal_state.get("execution_dag_hash") or ""),
+            "policy_hash": str(terminal_state.get("policy_hash") or ""),
+            "output_hash": self._stable_hash(output_payload),
+            "mutation_effects_hash": str(terminal_state.get("post_commit_mutation_effects_hash") or ""),
+            "determinism_closure_hash": str(terminal_state.get("determinism_closure_hash") or ""),
+            "event_semantic_hash": self._event_semantic_digest(trace_events),
+        }
+        confluence_class_hash = self._stable_hash(confluence_payload)
+        contract = dict(composition_payload)
+        contract["composition_hash"] = composition_hash
+        contract["confluence_class_hash"] = confluence_class_hash
+
+        expected = str(dict(job.metadata or {}).get("expected_execution_composition_hash") or "").strip()
+        if expected and expected != composition_hash:
+            raise RuntimeError(
+                f"Execution composition mismatch: expected={expected!r}, actual={composition_hash!r}",
+            )
+        expected_confluence = str(dict(job.metadata or {}).get("expected_execution_confluence_hash") or "").strip()
+        if expected_confluence and expected_confluence != confluence_class_hash:
+            raise RuntimeError(
+                f"Execution confluence mismatch: expected={expected_confluence!r}, actual={confluence_class_hash!r}",
+            )
+
+        confluence_key = str(dict(job.metadata or {}).get("_global_confluence_key") or "").strip()
+        confluence_mode = str(dict(job.metadata or {}).get("_global_confluence_mode") or "off").strip().lower()
+        confluence_report = {
+            "enforced": False,
+            "mode": confluence_mode,
+            "key": confluence_key,
+            "observed_hash": confluence_class_hash,
+            "expected_hash": expected_confluence,
+            "contract_version": "turn-confluence-v1",
+        }
+        if confluence_key and confluence_mode != "off":
+            self._confluence_metrics["attempted"] = int(self._confluence_metrics.get("attempted", 0)) + 1
+            known = str(self._global_confluence_contracts.get(confluence_key) or "")
+            if not known:
+                self._global_confluence_contracts[confluence_key] = confluence_class_hash
+                confluence_report["enforced"] = True
+                confluence_report["action"] = "bound_first_observation"
+                self._confluence_metrics["bound_first_observation"] = int(
+                    self._confluence_metrics.get("bound_first_observation", 0),
+                ) + 1
+            elif known != confluence_class_hash:
+                confluence_report["enforced"] = True
+                confluence_report["expected_hash"] = known
+                confluence_report["action"] = "mismatch"
+                self._last_confluence_report = dict(confluence_report)
+                self._confluence_metrics["mismatch"] = int(self._confluence_metrics.get("mismatch", 0)) + 1
+                fail_mode = str(
+                    os.environ.get("DADBOT_CONFLUENCE_VIOLATION_MODE", "fail"),
+                ).strip().lower()
+                if fail_mode != "audit":
+                    self._confluence_metrics["enforced_blocked"] = int(
+                        self._confluence_metrics.get("enforced_blocked", 0),
+                    ) + 1
+                    raise RuntimeError(
+                        f"Global confluence law violated for key={confluence_key!r}: expected={known!r}, actual={confluence_class_hash!r}",
+                    )
+                logger.warning(
+                    "Global confluence law mismatch (audit override): key=%s expected=%s actual=%s",
+                    confluence_key,
+                    known,
+                    confluence_class_hash,
+                )
+            else:
+                confluence_report["enforced"] = True
+                confluence_report["expected_hash"] = known
+                confluence_report["action"] = "matched"
+                self._confluence_metrics["matched"] = int(self._confluence_metrics.get("matched", 0)) + 1
+        self._last_confluence_report = dict(confluence_report)
+
+        state_mut = session.setdefault("state", {})
+        if isinstance(state_mut, dict):
+            state_mut["last_execution_composition_contract"] = dict(contract)
+            state_mut["last_execution_confluence_report"] = dict(confluence_report)
+        return contract
+
+    @staticmethod
+    def _load_archived_events(archive_path: str) -> list[dict[str, Any]]:
+        events: list[dict[str, Any]] = []
+        if not archive_path:
+            return events
+        with gzip.open(archive_path, "rt", encoding="utf-8") as handle:
+            for line in handle:
+                stripped = str(line or "").strip()
+                if not stripped:
+                    continue
+                try:
+                    parsed = json.loads(stripped)
+                    if isinstance(parsed, dict):
+                        events.append(parsed)
+                except json.JSONDecodeError:
+                    continue
+        return events
+
+    def _compaction_losslessness_proof(
+        self,
+        *,
+        pre_events: list[dict[str, Any]],
+        post_events: list[dict[str, Any]],
+        archive_path: str,
+    ) -> dict[str, Any]:
+        archived_events = self._load_archived_events(archive_path)
+        reconstructed = sorted(
+            [dict(event) for event in list(archived_events or [])] + [dict(event) for event in list(post_events or [])],
+            key=lambda item: int(item.get("sequence") or 0),
+        )
+        pre_digest = self._event_stream_digest(list(pre_events or []))
+        reconstructed_digest = self._event_stream_digest(reconstructed)
+        sequence_equivalent = [
+            int(item.get("sequence") or 0) for item in list(pre_events or [])
+        ] == [
+            int(item.get("sequence") or 0) for item in reconstructed
+        ]
+        return {
+            "contract_version": "ledger-compaction-lossless-v1",
+            "equivalent": bool(pre_digest == reconstructed_digest and sequence_equivalent),
+            "pre_digest": pre_digest,
+            "reconstructed_digest": reconstructed_digest,
+            "archived_event_count": int(len(archived_events)),
+            "reconstructed_event_count": int(len(reconstructed)),
+            "sequence_equivalent": bool(sequence_equivalent),
+        }
+
+    @staticmethod
+    def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
+        raw = str(os.environ.get(name, str(default))).strip()
+        value = int(raw) if raw.isdigit() else int(default)
+        return max(int(minimum), value)
+
+    def _ensure_compactor(self) -> EventCompactor:
+        if self._ledger_compactor is None:
+            max_events = self._env_int("DADBOT_LEDGER_MAX_EVENTS", 10000, minimum=100)
+            max_age_seconds = float(self._env_int("DADBOT_LEDGER_MAX_AGE_SECONDS", 86400, minimum=60))
+            min_snapshot_distance = self._env_int("DADBOT_LEDGER_MIN_SNAPSHOT_DISTANCE", 200, minimum=0)
+            archive_dir = Path(str(os.environ.get("DADBOT_LEDGER_ARCHIVE_DIR", "runtime/archives")).strip() or "runtime/archives")
+            self._ledger_compactor = EventCompactor(
+                policy=CompactionPolicy(
+                    max_events=max_events,
+                    max_age_seconds=max_age_seconds,
+                    min_snapshot_distance=min_snapshot_distance,
+                ),
+                archive=ArchiveTier(archive_dir),
+            )
+        return self._ledger_compactor
+
+    def _partition_summary(self, events: list[dict[str, Any]]) -> dict[str, Any]:
+        by_session: dict[str, int] = {}
+        for event in list(events or []):
+            sid = str(event.get("session_id") or "").strip() or "unknown"
+            by_session[sid] = int(by_session.get(sid, 0)) + 1
+        top_sessions = sorted(by_session.items(), key=lambda item: (-int(item[1]), str(item[0])))[:8]
+        return {
+            "partition_count": int(len(by_session)),
+            "top_partitions": [{"session_id": sid, "event_count": int(count)} for sid, count in top_sessions],
+        }
+
+    def _maybe_compact_ledger(self) -> dict[str, Any]:
+        hard_max = self._env_int("DADBOT_LEDGER_HARD_LIMIT_EVENTS", 50000, minimum=500)
+        pre_events = list(self.ledger.read())
+        event_count = int(len(pre_events))
+
+        if event_count <= 0:
+            return {"compacted": False, "reason": "empty", "event_count": 0, **self._partition_summary(pre_events)}
+
+        force = bool(event_count >= hard_max)
+        compactor = self._ensure_compactor()
+        snapshot = {"head_sequence": event_count}
+        report = dict(compactor.compact(ledger=self.ledger, snapshot=snapshot, force=force) or {})
+        post_events = list(self.ledger.read())
+        lossless_proof = {
+            "contract_version": "ledger-compaction-lossless-v1",
+            "equivalent": True,
+            "pre_digest": self._event_stream_digest(pre_events),
+            "reconstructed_digest": self._event_stream_digest(post_events),
+            "archived_event_count": 0,
+            "reconstructed_event_count": int(len(post_events)),
+            "sequence_equivalent": True,
+        }
+        archive_path = str(report.get("archive_path") or "")
+        if bool(report.get("compacted", False)) and archive_path:
+            lossless_proof = self._compaction_losslessness_proof(
+                pre_events=pre_events,
+                post_events=post_events,
+                archive_path=archive_path,
+            )
+            if not bool(lossless_proof.get("equivalent", False)):
+                raise RuntimeError("Ledger compaction losslessness invariant violated")
+        report.setdefault("event_count", event_count)
+        report.setdefault("forced", force)
+        report["lossless_proof"] = dict(lossless_proof)
+        report.update(self._partition_summary(post_events))
+        self._last_compaction_report = report
+        return report
 
     @staticmethod
     def _resolve_options(
@@ -364,7 +776,7 @@ class ExecutionControlPlane:
     def terminate_session(self, session_id: str) -> None:
         self.registry.terminate_session(session_id)
 
-    async def submit_turn(
+    async def _submit_turn_kernel(
         self,
         *,
         session_id: str,
@@ -406,6 +818,11 @@ class ExecutionControlPlane:
             trace_id = f"tr-{hashlib.sha256(trace_blob.encode('utf-8')).hexdigest()[:20]}"
         md["trace_id"] = trace_id
         assert trace_id, "Missing trace_id at control plane entry"
+        self._prepare_global_confluence_law(
+            user_input=str(user_input or ""),
+            attachments=attachments,
+            metadata=md,
+        )
 
         job = ExecutionJob(
             session_id=session_key,
@@ -423,6 +840,8 @@ class ExecutionControlPlane:
             kernel_step_id="control_plane.bind_session",
         )
         future = await self.scheduler.register(job)
+        session_before = self.registry.get_or_create(session_key)
+        before_state_hash = self._stable_hash(dict(session_before.get("state") or {}))
         max_wait_seconds = timeout_seconds or 30.0
         deadline = time.time() + max_wait_seconds
         try:
@@ -433,7 +852,9 @@ class ExecutionControlPlane:
                 if not drained:
                     await asyncio.sleep(0.01)
             result = await future
-            self._validate_trace_invariant(job, result)
+            session_after = self.registry.get_or_create(session_key)
+            self._validate_trace_invariant(job, result, session=session_after, state_before_hash=before_state_hash)
+            self._maybe_compact_ledger()
             if dedupe_future is not None and not dedupe_future.done():
                 dedupe_future.set_result(result)
             return result
@@ -447,10 +868,35 @@ class ExecutionControlPlane:
                     if self._inflight_by_request.get(dedupe_key) is dedupe_future:
                         self._inflight_by_request.pop(dedupe_key, None)
 
+    async def submit_turn(
+        self,
+        *,
+        session_id: str,
+        user_input: str,
+        attachments: AttachmentList | None = None,
+        metadata: dict[str, Any] | None = None,
+        timeout_seconds: float | None = None,
+    ) -> FinalizedTurnResult:
+        # _validate_trace_invariant is executed in _submit_turn_kernel after job completion.
+        return await self.kernel_gateway.submit_turn(
+            session_id=session_id,
+            user_input=user_input,
+            attachments=attachments,
+            metadata=metadata,
+            timeout_seconds=timeout_seconds,
+        )
+
     def ledger_events(self) -> list[dict[str, Any]]:
         return self.ledger.read()
 
-    def _validate_trace_invariant(self, job: ExecutionJob, result: FinalizedTurnResult) -> None:
+    def _validate_trace_invariant(
+        self,
+        job: ExecutionJob,
+        result: FinalizedTurnResult,
+        *,
+        session: dict[str, Any] | None = None,
+        state_before_hash: str = "",
+    ) -> None:
         """Validate execution trace invariants: trace_id, complete nodes, exactly one commit boundary.
         
         Ensures:
@@ -466,8 +912,7 @@ class ExecutionControlPlane:
             return
 
         # Query ledger for events matching this trace
-        events = self.ledger.read()
-        trace_events = [e for e in events if e.get("trace_id") == trace_id or e.get("job_id") == job.job_id]
+        trace_events = self._job_trace_events(job)
         
         if not trace_events:
             logger.warning("Trace invariant violation: no events recorded for trace %s", trace_id)
@@ -484,6 +929,14 @@ class ExecutionControlPlane:
                 commit_count,
                 trace_id,
             )
+        if session is None:
+            return
+        self._record_turn_composition_contract(
+            session=session,
+            job=job,
+            result=result,
+            state_before_hash=str(state_before_hash or ""),
+        )
 
     def boot_reconcile(self) -> dict[str, Any]:
         """Phase 3: boot reconciliation is now ledger-only via direct replay."""
@@ -498,6 +951,10 @@ class ExecutionControlPlane:
             "replay_hash": self.ledger.replay_hash(),
             "session_count": len(dict(snap.get("sessions") or {})),
             "session_snapshot_version": int(snap.get("version") or 0),
+            "ledger_partitioning": self._partition_summary(events),
+            "ledger_compaction": dict(self._last_compaction_report or {}),
+            "execution_confluence": dict(self._last_confluence_report or {}),
+            "execution_confluence_metrics": dict(self._confluence_metrics),
             "ok": True,
         }
 

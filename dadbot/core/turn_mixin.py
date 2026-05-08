@@ -10,7 +10,9 @@ Extracted from the DadBot god-class. Owns:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
+import json
 import logging
 from collections.abc import Awaitable, Iterable, Mapping
 from typing import Any, cast
@@ -69,6 +71,23 @@ class DadBotTurnMixin:
     # Graph turn execution
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _derive_confluence_key(
+        *,
+        session_id: str,
+        user_input: str,
+        attachments: AttachmentList | None,
+    ) -> str:
+        payload = {
+            "session_id": str(session_id or "default"),
+            "user_input": str(user_input or ""),
+            "attachments": list(attachments or []),
+        }
+        digest = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, ensure_ascii=True, default=str).encode("utf-8"),
+        ).hexdigest()[:24]
+        return f"turn:{digest}"
+
     async def _run_graph_turn_async(
         self,
         user_input: str,
@@ -79,6 +98,11 @@ class DadBotTurnMixin:
         session_id = str(getattr(self, "_execute_turn_session_id", "") or "").strip() or str(
             getattr(self, "active_thread_id", "") or "default",
         )
+        confluence_key = self._derive_confluence_key(
+            session_id=session_id,
+            user_input=str(user_input or ""),
+            attachments=attachments,
+        )
         submit_turn = getattr(orchestrator, "_submit_turn_via_control_plane", None)
         if callable(submit_turn):
             return await cast(
@@ -87,13 +111,14 @@ class DadBotTurnMixin:
                     user_input,
                     attachments=attachments,
                     session_id=session_id,
+                    confluence_key=confluence_key,
                 ),
             )
         return await orchestrator.control_plane.submit_turn(
             session_id=session_id,
             user_input=user_input,
             attachments=attachments,
-            metadata={},
+            metadata={"confluence_mode": "enforce", "confluence_key": confluence_key},
         )
 
     @staticmethod

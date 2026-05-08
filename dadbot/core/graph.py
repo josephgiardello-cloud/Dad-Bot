@@ -1307,6 +1307,7 @@ class TurnGraph:
             self._validate_persistence_service_contract(turn_context, persistence_service)
         self._stamp_contract_version(turn_context)
         self._initialize_unified_turn_trace(turn_context)
+        turn_context.metadata["audit_mode"] = bool(audit_mode)
 
         with contextlib.suppress(Exception):
             self._record_execution_trace(

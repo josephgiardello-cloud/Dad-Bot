@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from dadbot.core.execution_ledger import ExecutionLedger
@@ -9,22 +10,37 @@ from dadbot.core.ledger_writer import LedgerWriter
 class LedgerWriterAdapter:
     """Single gateway for writing execution lifecycle events to the ledger."""
 
-    def __init__(self, ledger: ExecutionLedger) -> None:
+    def __init__(
+        self,
+        ledger: ExecutionLedger,
+        *,
+        scope_validator: Callable[[str], None] | None = None,
+    ) -> None:
         self._writer = LedgerWriter(ledger)
+        self._scope_validator = scope_validator
+
+    def _guard(self, op: str) -> None:
+        if callable(self._scope_validator):
+            self._scope_validator(op)
 
     def append_job_submitted(self, job: Any) -> dict[str, Any]:
+        self._guard("ledger.append_job_submitted")
         return self._writer.append_job_submitted(job)
 
     def append_job_queued(self, job: Any) -> dict[str, Any]:
+        self._guard("ledger.append_job_queued")
         return self._writer.append_job_queued(job)
 
     def append_job_started(self, job: Any) -> dict[str, Any]:
+        self._guard("ledger.append_job_started")
         return self._writer.append_job_started(job)
 
     def append_job_completed(self, job: Any, result: Any) -> dict[str, Any]:
+        self._guard("ledger.append_job_completed")
         return self._writer.append_job_completed(job, result)
 
     def append_job_failed(self, job: Any, error: str) -> dict[str, Any]:
+        self._guard("ledger.append_job_failed")
         return self._writer.append_job_failed(job, error)
 
     def append_session_bound(
@@ -35,6 +51,7 @@ class LedgerWriterAdapter:
         trace_id: str = "",
         kernel_step_id: str = "control_plane.bind_session",
     ) -> dict[str, Any]:
+        self._guard("ledger.append_session_bound")
         return self._writer.append_session_bound(
             session_id,
             job_id,
@@ -48,6 +65,7 @@ class LedgerWriterAdapter:
         trace_id: str = "",
         session_id: str = "",
     ) -> dict[str, Any]:
+        self._guard("ledger.append_runtime_witness")
         return self._writer.append_runtime_witness(
             component,
             trace_id=trace_id,
@@ -55,6 +73,7 @@ class LedgerWriterAdapter:
         )
 
     def write_event(self, **kwargs: Any) -> dict[str, Any]:
+        self._guard("ledger.write_event")
         return self._writer.write_event(**kwargs)
 
 
