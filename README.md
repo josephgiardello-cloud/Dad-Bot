@@ -99,7 +99,7 @@ Primary runtime entrypoints:
 
 ### Prerequisites
 
-- Python 3.10+
+- Python 3.13+
 - [Ollama](https://ollama.com) installed and running
 - Recommended model: `ollama pull llama3.2` (and `nomic-embed-text` for semantic memory)
 
@@ -138,6 +138,7 @@ This means current work is in system hardening and validation mode rather than g
 - Explicit execution model: `docs/explicit-execution-model.md`
 - End-to-end explainability: `docs/system-level-explainability.md`
 - Failure/degradation/divergence model: `docs/failure-model.md`
+- Confluence law and failure semantics: `docs/confluence-law.md`
 
 ## Status/Dashboard Observability
 

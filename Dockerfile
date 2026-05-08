@@ -32,6 +32,8 @@ ENV DADBOT_PROFILE_PATH=/var/lib/dadbot/dad_profile.json \
     DADBOT_API_HOST=0.0.0.0 \
     DADBOT_API_PORT=8010 \
     DADBOT_API_WORKERS=2 \
+    DADBOT_GLOBAL_CONFLUENCE_MODE=enforce \
+    DADBOT_ALLOW_LEGACY_CONFLUENCE_KEY=0 \
     DADBOT_JSON_LOGS=true \
     # Set to "streamlit" to run the UI instead of the API
     DADBOT_MODE=api
