@@ -279,7 +279,13 @@ def build_dadbot_contract_map() -> ContractPropagationMap:
             description="Determinism boundary — deterministic_replay + temporal_ordering",
             validator_fn=lambda: _validate_capability(
                 CAPABILITY_CONTRACTS,
-                ["deterministic_replay", "temporal_ordering"],
+                [
+                    "deterministic_replay",
+                    "temporal_ordering",
+                    "policy_view_bijection",
+                    "policy_fast_full_equivalence",
+                    "async_checkpoint_ordering",
+                ],
             ),
         ),
     )

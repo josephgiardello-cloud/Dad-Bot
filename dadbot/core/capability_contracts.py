@@ -29,6 +29,21 @@ CAPABILITY_CONTRACTS: dict[str, dict[str, Any]] = {
         "runtime_enforcement": True,
         "test_enforcement": True,
     },
+    "policy_view_bijection": {
+        "rule": "PolicyView must be a bijective reduction of policy-relevant state",
+        "runtime_enforcement": True,
+        "test_enforcement": True,
+    },
+    "policy_fast_full_equivalence": {
+        "rule": "Fast and full policy evaluation must produce equivalent outputs when proof mode is enabled",
+        "runtime_enforcement": True,
+        "test_enforcement": True,
+    },
+    "async_checkpoint_ordering": {
+        "rule": "Async checkpoint writes must preserve monotonic enqueue/drain order",
+        "runtime_enforcement": True,
+        "test_enforcement": True,
+    },
 }
 
 
