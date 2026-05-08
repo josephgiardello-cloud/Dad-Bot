@@ -36,7 +36,7 @@ def _make_bot(temp_path: Path) -> DadBot:
     _bind_bot_snapshot_scope(bot, temp_path)
     setattr(bot, "MEMORY_STORE", bot.default_memory_store())
     bot.save_memory_store()
-    setattr(bot.memory, "export_memory_store", lambda _path: None)
+    bot.memory.export_memory_store = lambda _path: None
     return bot
 
 

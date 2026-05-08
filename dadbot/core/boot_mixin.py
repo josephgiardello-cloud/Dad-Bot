@@ -10,6 +10,7 @@ Extracted from DadBot to reduce the god-class surface. Contains:
 
 from __future__ import annotations
 
+import asyncio
 import atexit
 import json
 import os
@@ -472,6 +473,7 @@ class DadBotBootMixin:
         return "PYTEST_CURRENT_TEST" not in os.environ
 
     def shutdown(self) -> None:
+        self._shutdown_ollama_async_client()
         self._lifecycle_state = DadBotLifecycleState.SHUTDOWN
         background_tasks = getattr(self, "background_tasks", None)
         try:
@@ -489,6 +491,38 @@ class DadBotBootMixin:
                         "Final memory store flush during shutdown failed: %s",
                         exc,
                     )
+
+    def _shutdown_ollama_async_client(self) -> None:
+        """Best-effort close for cached async Ollama clients.
+
+        Some unit lanes create an ``ollama.AsyncClient`` and rely on process
+        teardown, which can leave sockets pending and emit ``ResourceWarning``.
+        Uses the canonical cleanup helper from runtime_client.
+        """
+        client = getattr(self, "_ollama_async_client", None)
+        self._ollama_async_client = None
+        self._ollama_async_client_loop_id = None
+        if client is None:
+            return
+
+        # Use canonical async close from runtime_client module
+        try:
+            from dadbot.managers.runtime_client import safe_close_ollama_async
+
+            async def _do_close() -> None:
+                await safe_close_ollama_async(client)
+
+            try:
+                running_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                running_loop = None
+
+            if running_loop is not None and running_loop.is_running():
+                running_loop.create_task(_do_close())
+            else:
+                asyncio.run(_do_close())
+        except Exception:
+            pass
 
     def _run_proactive_heartbeat_loop(self) -> None:
         interval_seconds = max(

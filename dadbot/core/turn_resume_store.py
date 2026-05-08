@@ -106,7 +106,7 @@ class TurnResumeStore:
     def _append_ledger_payload(self, payload: dict[str, Any]) -> None:
         envelope = {
             "type": _RESUME_EVENT_TYPE,
-            "session_id": f"resume:{str(payload.get('turn_id') or '')}",
+            "session_id": f"resume:{payload.get('turn_id') or ''!s}",
             "trace_id": str(payload.get("turn_id") or ""),
             "timestamp": float(time.time()),
             "kernel_step_id": "resume-store",

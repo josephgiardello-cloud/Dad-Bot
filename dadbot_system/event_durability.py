@@ -3,10 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from collections.abc import Callable
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 from uuid import uuid4
 
 from .security import EncryptedJsonCodec
@@ -67,7 +69,7 @@ class SQLiteEventDurabilityStore:
         return conn
 
     def _init_schema(self) -> None:
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute(
                 """
@@ -117,6 +119,7 @@ class SQLiteEventDurabilityStore:
             self._ensure_column(conn, "events", "previous_event_hash", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(conn, "events", "event_hash", "TEXT")
             conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_events_event_id ON events(event_id)")
+            conn.commit()
 
     @staticmethod
     def _ensure_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
@@ -177,7 +180,7 @@ class SQLiteEventDurabilityStore:
     ) -> str:
         now = _utc_now_iso()
         resolved_run_id = str(run_id or uuid4().hex)
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             conn.execute(
                 """
                 INSERT INTO runs (run_id, session_id, tenant_id, status, contract_version, created_at, updated_at)
@@ -193,6 +196,7 @@ class SQLiteEventDurabilityStore:
                     now,
                 ),
             )
+            conn.commit()
         return resolved_run_id
 
     def append_event(
@@ -209,7 +213,7 @@ class SQLiteEventDurabilityStore:
         payload_hash = _stable_hash(encoded_payload)
         ts = str(event_time or _utc_now_iso())
         resolved_event_id = str(event_id or uuid4().hex)
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             existing = conn.execute(
                 """
                 SELECT sequence_id, event_id, run_id, event_type, event_time, payload_json, payload_hash,
@@ -259,6 +263,7 @@ class SQLiteEventDurabilityStore:
                 ),
             )
             sequence_id = int(cursor.lastrowid)
+            conn.commit()
         return DurableEvent(
             sequence_id=sequence_id,
             event_id=resolved_event_id,
@@ -302,7 +307,7 @@ class SQLiteEventDurabilityStore:
         }
 
     def list_events(self, run_id: str) -> list[DurableEvent]:
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             rows = conn.execute(
                 "SELECT sequence_id, event_id, run_id, event_type, event_time, payload_json, payload_hash, "
                 "previous_event_hash, event_hash, excluded_from_hash "
@@ -312,7 +317,7 @@ class SQLiteEventDurabilityStore:
         return [self._row_to_event(row) for row in rows]
 
     def list_events_after(self, run_id: str, sequence_id: int) -> list[DurableEvent]:
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             rows = conn.execute(
                 "SELECT sequence_id, event_id, run_id, event_type, event_time, payload_json, payload_hash, "
                 "previous_event_hash, event_hash, excluded_from_hash "
@@ -331,7 +336,7 @@ class SQLiteEventDurabilityStore:
     ) -> int:
         serialized_state = dict(state or {})
         resolved_state_hash = str(state_hash or "").strip() or _stable_hash(serialized_state)
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             if event_sequence_id is None:
                 row = conn.execute(
                     "SELECT COALESCE(MAX(sequence_id), 0) AS max_sequence_id FROM events WHERE run_id = ?",
@@ -353,10 +358,11 @@ class SQLiteEventDurabilityStore:
                 ),
             )
             checkpoint_id = int(cursor.lastrowid)
+            conn.commit()
         return checkpoint_id
 
     def latest_checkpoint(self, run_id: str) -> dict[str, Any] | None:
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             row = conn.execute(
                 """
                 SELECT checkpoint_id, run_id, event_sequence_id, state_json, state_hash, created_at

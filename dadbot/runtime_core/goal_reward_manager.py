@@ -30,7 +30,7 @@ class GoalAndRewardManager:
         user_text: str,
         thread_state: Any,
     ) -> list[dict[str, Any]]:
-        return [{"goal_id": f"inferred_goal_0", "description": (user_text or "")[:80]}]
+        return [{"goal_id": "inferred_goal_0", "description": (user_text or "")[:80]}]
 
     def _retire_or_promote_goals(
         self,

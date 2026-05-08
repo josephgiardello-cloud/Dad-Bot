@@ -17,7 +17,6 @@ from dadbot.core.canonical_event import (
 from dadbot.core.event_schema import get_migrator, stamp_schema_version
 from dadbot.core.ledger_backend import InMemoryLedgerBackend, SequenceValidator
 
-
 _TAIL_LIMIT = 256
 
 
@@ -85,7 +84,7 @@ def _event_sha256(event: dict[str, Any]) -> str:
 
 def _chain_hash(prev_chain_hash: str, event_sha256: str) -> str:
     return hashlib.sha256(
-        f"{str(prev_chain_hash or '')}:{str(event_sha256 or '')}".encode("utf-8"),
+        f"{prev_chain_hash or ''!s}:{event_sha256 or ''!s}".encode(),
     ).hexdigest()
 
 
@@ -176,7 +175,7 @@ class ExecutionLedger:
                 "sequence_counter": int(self._cache.get("sequence_counter") or 0),
                 "event_count": int(self._cache.get("event_count") or 0),
                 "cache_rebuild_count": int(self._cache.get("cache_rebuild_count") or 0),
-                "tail_size": int(len(self._cache.get("recent_tail") or [])),
+                "tail_size": len(self._cache.get("recent_tail") or []),
                 "version": int(self._cache.get("version") or 0),
             }
 

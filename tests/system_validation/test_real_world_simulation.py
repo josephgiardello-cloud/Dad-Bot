@@ -33,7 +33,7 @@ import pytest
 from harness.deterministic_seeds import CHAOS_BASE, MUTATION_FUZZ, PARALLEL_MERGE
 from harness.graph_runner import GraphRunner
 from harness.invariant_checker import InvariantChecker, InvariantViolation
-from harness.kernel_mock import MockPersistenceService, MockRegistry
+from harness.kernel_mock import MockRegistry
 from harness.mutation_fuzzer import MutationFuzzer
 from harness.turn_factory import TurnFactory
 
@@ -315,7 +315,7 @@ class TestPartialFailureRecoveryStress:
 
             try:
                 checker.validate(retry_ctx, retry_result, expect_save=True, expect_temporal=True)
-            except InvariantViolation as exc:
+            except InvariantViolation:
                 retry_failures.append(seed)
 
         assert not retry_failures, (

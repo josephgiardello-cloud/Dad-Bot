@@ -28,6 +28,7 @@ try:
 except ImportError:  # pragma: no cover
     ollama = None  # type: ignore[assignment]
 
+from dadbot.assistant_runtime import AssistantRuntime
 from dadbot.core.action_mixin import DadBotActionMixin
 from dadbot.core.boot_mixin import DadBotBootMixin
 from dadbot.core.compat_mixin import DadBotCompatMixin
@@ -41,7 +42,6 @@ from dadbot.core.mcp_mixin import DadBotMcpMixin
 from dadbot.core.turn_mixin import DadBotTurnMixin
 from dadbot.core.ux_projection_gateway import TurnUxProjectionGateway
 from dadbot.runtime.model import ModelPort
-from dadbot.assistant_runtime import AssistantRuntime
 
 if ollama is None:
     logging.getLogger(__name__).warning(

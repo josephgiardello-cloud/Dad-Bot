@@ -8,8 +8,8 @@ Design goal: non-invasive adapter layer.
 
 from __future__ import annotations
 
-import logging
 import importlib
+import logging
 from typing import Any
 
 from dadbot.core.kernel_signals import EventStreamExporter, MetricsSink

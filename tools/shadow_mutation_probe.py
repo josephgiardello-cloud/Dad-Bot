@@ -108,9 +108,10 @@ def _canonical_hash(snapshot: dict[str, Any]) -> str:
 
 
 def run(n: int, log_path: Path) -> None:
-    from dadbot.core.dadbot import DadBot
-    from dadbot.core.contract_evaluator import live_turn_request, TurnDelivery, TurnResponse
     from typing import cast
+
+    from dadbot.core.contract_evaluator import TurnDelivery, TurnResponse, live_turn_request
+    from dadbot.core.dadbot import DadBot
 
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -213,11 +214,11 @@ def run(n: int, log_path: Path) -> None:
             f"  {counts['err']:>5}  {div_pct:>8.1f}%"
         )
     print(f"{'='*62}")
-    print(f"\nExpected outcomes:")
-    print(f"  field_addition   → pass (non-canonical fields ignored by hash)")
-    print(f"  schema_version_shift → pass (non-canonical field ignored)")
-    print(f"  field_removal    → FAIL (canonical field removed = hash changes)")
-    print(f"  pipeline_reorder → FAIL (stage_traces order changes hash)")
+    print("\nExpected outcomes:")
+    print("  field_addition   → pass (non-canonical fields ignored by hash)")
+    print("  schema_version_shift → pass (non-canonical field ignored)")
+    print("  field_removal    → FAIL (canonical field removed = hash changes)")
+    print("  pipeline_reorder → FAIL (stage_traces order changes hash)")
     print(f"\nLog written: {log_path}")
 
 

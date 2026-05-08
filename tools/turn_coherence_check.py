@@ -4,7 +4,6 @@ import ast
 import json
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 TURN_SERVICE_PATH = ROOT / "dadbot" / "services" / "turn_service.py"
 PROMPT_ASSEMBLY_PATH = ROOT / "dadbot" / "managers" / "prompt_assembly.py"

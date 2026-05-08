@@ -31,7 +31,6 @@ from dadbot.core.runtime_types import (
     ToolStatus,
 )
 
-
 # ============================================================================
 # BEFORE: Implicit dict-based contracts (current state)
 # ============================================================================

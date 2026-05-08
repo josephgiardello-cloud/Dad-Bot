@@ -195,8 +195,8 @@ class MemoryStorageBackend:
             "dadbot.core.transaction_coordinator",
             fromlist=["TransactionContext", "TransactionCoordinator"],
         )
-        transaction_context_cls = getattr(tx_module, "TransactionContext")
-        transaction_coordinator_cls = getattr(tx_module, "TransactionCoordinator")
+        transaction_context_cls = tx_module.TransactionContext
+        transaction_coordinator_cls = tx_module.TransactionCoordinator
 
         after_store = deepcopy(dict(self._manager.memory_store or {}))
         changed_keys = set((changes or {}).keys())

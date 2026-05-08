@@ -5,9 +5,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from dadbot.managers.memory_commands import MemoryCommandManager
 
-import pytest
 pytestmark = pytest.mark.unit
 
 

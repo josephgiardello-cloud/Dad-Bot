@@ -23,7 +23,6 @@ from typing import Any, Protocol
 
 from dadbot.core.kernel_locks import KernelToolIdempotencyRegistry
 
-
 _IDEMPOTENCY_POLICY_KEYS: frozenset[str] = frozenset(
     {
         "approval_granted",

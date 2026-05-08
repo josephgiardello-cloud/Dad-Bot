@@ -13,13 +13,14 @@ coupling has been introduced into the architecture.
 
 from __future__ import annotations
 
+import pytest
+
 from dadbot.uril.architecture import (
     FORBIDDEN_IMPORT_EDGES,
     detect_cycles,
     find_forbidden_cycles,
 )
 
-import pytest
 pytestmark = pytest.mark.unit
 
 # ---------------------------------------------------------------------------

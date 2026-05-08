@@ -1,10 +1,11 @@
+import pytest
+
 from dadbot.core.dadbot import DadBot
 from dadbot_system.contracts import ChatRequest, ChatResponse, ServiceConfig, WorkerResult, WorkerTask
 from dadbot_system.orchestration import DadBotOrchestrator
 from dadbot_system.state import InMemoryStateStore
 from dadbot_system.worker import DadBotTaskProcessor
 
-import pytest
 pytestmark = pytest.mark.integration
 
 

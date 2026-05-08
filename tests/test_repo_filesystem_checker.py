@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from tools.repo_filesystem_checker import build_repo_filesystem_report
 
-import pytest
 pytestmark = pytest.mark.unit
 
 

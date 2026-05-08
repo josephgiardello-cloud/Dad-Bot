@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from dadbot.core.observability import (
     EventStreamExporter,
     TraceLevel,
@@ -10,7 +12,6 @@ from dadbot.core.observability import (
     set_trace_level,
 )
 
-import pytest
 pytestmark = pytest.mark.unit
 
 

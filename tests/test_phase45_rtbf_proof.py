@@ -3,9 +3,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from dadbot.core.rtbf_proof import record_rtbf_receipt
 
-import pytest
 pytestmark = pytest.mark.phase4
 
 

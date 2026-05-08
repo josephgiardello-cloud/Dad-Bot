@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from harness.deterministic_seeds import BASELINE, MUTATION_FUZZ
 from harness.graph_runner import GraphRunner
 from harness.kernel_mock import MockRegistry
@@ -20,7 +21,6 @@ from dadbot.core.graph import (
     TurnGraph,
 )
 
-import pytest
 pytestmark = pytest.mark.integration
 
 _T = {"wall_time": "2026-01-01T00:00:00", "wall_date": "2026-01-01"}

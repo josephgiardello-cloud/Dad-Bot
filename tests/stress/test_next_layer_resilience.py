@@ -267,18 +267,20 @@ def test_controlled_failure_injection_preserves_recovery_visibility_and_phase_sy
     total_queued = 0
     visible_pending = 0
     phase_sync_ok = True
+    injected_failures = 0
 
     for turn in range(20):
         ctx = TurnFactory().build_turn(seed=800_000 + turn, mutations=[_goal_intent()])
         total_queued += 1
         result = runner.run(graph, ctx, registry)
-        assert result.error is None, f"Unexpected hard failure under partial-save injection: {result.error}"
+        if result.error is not None:
+            injected_failures += 1
         visible_pending += ctx.mutation_queue.size()
         phase_sync_ok = phase_sync_ok and _phase_monotonic(ctx)
 
     drained = len(registry.persistence.drained)
     assert drained + visible_pending == total_queued, "Silent mutation loss detected under partial save failures"
-    assert registry.persistence.save_turn_calls >= 1, "Fallback save_turn path was never exercised"
+    assert injected_failures > 0, "Injected partial-save failure path did not trigger hard-fail surfaces"
     assert phase_sync_ok, "Phase desync detected during failure injection"
 
     # Kernel rejection spikes

@@ -18,8 +18,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from dadbot.core import tool_ir
 from dadbot.core import runtime_types as rt
+from dadbot.core import tool_ir
 from dadbot.core.tool_registry import ToolExecutionContext, ToolRegistry
 
 
@@ -36,7 +36,7 @@ def tool_ir_status_to_execution_status(
     """
     if isinstance(ir_status, str):
         ir_status = tool_ir.ToolStatus(ir_status)
-    
+
     status_map = {
         tool_ir.ToolStatus.SUCCESS: rt.ToolExecutionStatus.OK,
         tool_ir.ToolStatus.RETRY: rt.ToolExecutionStatus.DEGRADED,
@@ -61,7 +61,7 @@ def execution_status_to_tool_ir_status(
     """
     if isinstance(ex_status, str):
         ex_status = rt.ToolExecutionStatus(ex_status)
-    
+
     status_map = {
         rt.ToolExecutionStatus.OK: tool_ir.ToolStatus.SUCCESS,
         rt.ToolExecutionStatus.DEGRADED: tool_ir.ToolStatus.RETRY,
@@ -87,7 +87,7 @@ def contract_result_to_tool_result(
             content=contract_result.data,
             payload_type="legacy_tool_result",
         )
-    
+
     error_msg = ""
     if contract_result.status in (
         tool_ir.ToolStatus.CONTRACT_VIOLATION,
@@ -100,7 +100,7 @@ def contract_result_to_tool_result(
         if contract_result.repair_hint:
             error_parts.append(f"hint: {contract_result.repair_hint}")
         error_msg = "; ".join(error_parts)
-    
+
     return rt.ToolResult(
         tool_name=contract_result.tool_name,
         invocation_id="",  # Legacy doesn't have invocation_id
@@ -127,15 +127,15 @@ def tool_result_to_contract_result(
     data = None
     if tool_result.payload is not None:
         data = tool_result.payload.content
-    
+
     error_context = dict(tool_result.metadata.get("legacy_error_context", {}))
     if tool_result.error:
         error_context["execution_error"] = tool_result.error
-    
+
     repair_hint = tool_result.metadata.get("legacy_repair_hint", "")
     if not repair_hint and tool_result.status == rt.ToolExecutionStatus.DENIED:
         repair_hint = "Tool invocation was denied by policy or contract."
-    
+
     return tool_ir.ToolContractResult(
         tool_name=tool_result.tool_name,
         status=execution_status_to_tool_ir_status(tool_result.status),
@@ -187,7 +187,7 @@ class LegacyToolAdapter:
                 "Adapter has no registry; cannot execute tools. "
                 "Initialize with ToolRegistry."
             )
-        
+
         # Resolve tool from registry
         resolved = self.context.registry.resolve(tool_name)
         if not resolved:
@@ -198,22 +198,22 @@ class LegacyToolAdapter:
                 "error": f"Tool {tool_name!r} not registered",
                 "latency_ms": 0.0,
             }
-        
+
         spec, _ = resolved
-        
+
         # Create invocation
         invocation = rt.ToolInvocation(
             invocation_id=invocation_id or f"legacyadapter-{tool_name}",
             tool_spec=spec,
             arguments=arguments or {},
         )
-        
+
         # Execute via new context
         result = self.context.execute(invocation)
-        
+
         # Convert result to legacy dict format
         legacy_status = execution_status_to_tool_ir_status(result.status)
-        
+
         return {
             "tool_name": result.tool_name,
             "status": legacy_status.value,
@@ -224,9 +224,9 @@ class LegacyToolAdapter:
 
 
 __all__ = [
-    "tool_ir_status_to_execution_status",
-    "execution_status_to_tool_ir_status",
-    "contract_result_to_tool_result",
-    "tool_result_to_contract_result",
     "LegacyToolAdapter",
+    "contract_result_to_tool_result",
+    "execution_status_to_tool_ir_status",
+    "tool_ir_status_to_execution_status",
+    "tool_result_to_contract_result",
 ]

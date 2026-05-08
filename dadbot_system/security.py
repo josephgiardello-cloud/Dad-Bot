@@ -120,7 +120,7 @@ class ServiceTokenManager:
             "iat": now,
             "exp": now + max(1.0, float(ttl_seconds)),
             "iss": self._issuer,
-            "jti": str(token_id or hashlib.sha256(f"{now}:{subject}:{tenant_id}".encode("utf-8")).hexdigest()[:16]),
+            "jti": str(token_id or hashlib.sha256(f"{now}:{subject}:{tenant_id}".encode()).hexdigest()[:16]),
         }
         payload_bytes = _stable_json(payload)
         signature = hmac.new(self._key, payload_bytes, self.ALGORITHM).hexdigest()

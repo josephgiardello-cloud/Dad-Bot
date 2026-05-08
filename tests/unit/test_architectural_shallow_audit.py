@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+
 from tools import architectural_shallow_audit as audit
 
 pytestmark = pytest.mark.unit

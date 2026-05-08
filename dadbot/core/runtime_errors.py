@@ -43,9 +43,9 @@ NON_FATAL_RUNTIME_EXCEPTIONS = (
 
 
 __all__ = [
+    "NON_FATAL_RUNTIME_EXCEPTIONS",
     "ExecutionStageError",
     "InvariantViolation",
-    "NON_FATAL_RUNTIME_EXCEPTIONS",
     "PersistenceFailure",
     "ProjectionMismatch",
     "RuntimeErrorBase",

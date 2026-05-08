@@ -22,7 +22,6 @@ from dadbot.core.graph import TurnContext
 from dadbot.core.graph_pipeline_nodes import ValidationGateNode
 from dadbot.core.tool_ir import ToolStatus
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -153,7 +152,7 @@ def test_empty_tool_ir_is_noop():
 def test_memory_lookup_contract_result_on_missing_query():
     """Direct dispatch: memory_lookup with no query returns ToolContractResult(CONTRACT_VIOLATION)."""
     from dadbot.core.nodes import dispatch_registered_tool
-    from dadbot.core.tool_ir import ToolContractResult, ToolStatus
+    from dadbot.core.tool_ir import ToolContractResult
 
     ctx = TurnContext(user_input="test")
     result = dispatch_registered_tool("memory_lookup", {}, ctx)
@@ -167,7 +166,7 @@ def test_memory_lookup_contract_result_on_missing_query():
 def test_memory_lookup_contract_result_on_valid_query():
     """Direct dispatch: memory_lookup with query returns ToolContractResult(SUCCESS)."""
     from dadbot.core.nodes import dispatch_registered_tool
-    from dadbot.core.tool_ir import ToolContractResult, ToolStatus
+    from dadbot.core.tool_ir import ToolContractResult
 
     ctx = TurnContext(user_input="test")
     ctx.state["memories"] = [{"text": "some memory"}]

@@ -25,8 +25,8 @@ from dadbot.core.invariant_gate import (
     InvariantViolationError,
     causal_structure_check,
     execution_state_check,
-    ledger_lifecycle_check,
     lease_ownership_check,
+    ledger_lifecycle_check,
 )
 
 pytestmark = pytest.mark.unit

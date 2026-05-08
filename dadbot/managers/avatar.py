@@ -89,10 +89,10 @@ class AvatarManager:
         """Build a mood-aware prompt by incorporating mood modifiers."""
         if base_prompt:
             return base_prompt
-        
+
         mood_str = str(mood or "neutral").lower().strip()
         mood_mod = self.MOOD_PROMPT_MODIFIERS.get(mood_str, "warm and approachable")
-        
+
         return (
             f"Photorealistic portrait of a friendly 56-year-old father with kind eyes, "
             f"short neatly trimmed graying hair, {mood_mod}, wearing a soft flannel shirt, "
@@ -114,7 +114,7 @@ class AvatarManager:
             mood: Current mood to incorporate into prompt (positive, neutral, sad, frustrated, tired)
         """
         prompt = (custom_prompt or "").strip() or self._build_prompt_for_mood(custom_prompt, mood)
-        
+
         if not model:
             for candidate in [
                 "flux",

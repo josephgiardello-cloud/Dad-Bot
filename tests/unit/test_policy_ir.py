@@ -13,15 +13,14 @@ from __future__ import annotations
 import pytest
 
 from dadbot.core.policy_ir import (
+    AUDIT_RULE_LOG_ERRORS,
+    SAFETY_RULE_DENY_UNSAFE_TOOLS,
     PolicyCompilerIR,
     PolicyCondition,
     PolicyDecisionIR,
     PolicyEvaluator,
     PolicyRule,
     PolicyRuleCondition,
-    AUDIT_RULE_LOG_ERRORS,
-    AUDIT_RULE_LOG_LARGE_OUTPUT,
-    SAFETY_RULE_DENY_UNSAFE_TOOLS,
     default_effect_synthesizer,
 )
 from dadbot.core.runtime_types import (

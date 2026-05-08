@@ -398,8 +398,8 @@ class RuntimeInterfaceManager:
                 print()
 
         print(f"{white}Recommended next step:{reset}")
-        print(f"  • Return to active task")
-        print(f"  • Or initiate goal recalibration via 'recalibrate' command")
+        print("  • Return to active task")
+        print("  • Or initiate goal recalibration via 'recalibrate' command")
         print()
         print(f"{dim}Enter realignment phrase to resume or 'recalibrate' to adjust goals.{reset}")
         print(f"{bold_red}{'=' * 80}{reset}")
@@ -423,12 +423,12 @@ class RuntimeInterfaceManager:
         if Console is None or Panel is None:
             return False
         console = Console()
-        
+
         # If in halt mode, render alert state instead of normal HUD
         if mandatory_halt:
             alert_body = (
-                f"[bold red]ALIGNMENT INTERRUPT[/bold red]\n\n"
-                f"Current action appears inconsistent with declared goal trajectory.\n"
+                "[bold red]ALIGNMENT INTERRUPT[/bold red]\n\n"
+                "Current action appears inconsistent with declared goal trajectory.\n"
             )
             if reflection_summary:
                 pattern = reflection_summary.get("primary_pattern_name", "")
@@ -438,13 +438,13 @@ class RuntimeInterfaceManager:
                     alert_body += f"\n[yellow]Pattern:[/yellow] {pattern}\n"
                 alert_body += f"[yellow]Trigger:[/yellow] {category}  [yellow]Recent:[/yellow] {episodes}\n"
             alert_body += (
-                f"\n[bold]Recommended next step:[/bold]\n"
-                f"  • Return to active task\n"
-                f"  • Or initiate goal recalibration via 'recalibrate' command\n"
+                "\n[bold]Recommended next step:[/bold]\n"
+                "  • Return to active task\n"
+                "  • Or initiate goal recalibration via 'recalibrate' command\n"
             )
             console.print(Panel(alert_body, border_style="red", title="[bold red]INTERRUPT[/bold red]"))
             return True
-        
+
         authority_ok = bool(checkpoint_hash)
         authority_state = "LOCKED" if authority_ok else "UNSEALED"
         authority_spin = self._authority_glyph(turn_index)

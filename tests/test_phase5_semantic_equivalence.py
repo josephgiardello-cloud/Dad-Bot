@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import pytest
+
 from dadbot.core.execution_equivalence_oracle import ExecutionEquivalenceOracle
 from dadbot.core.execution_replay_engine import reconstruct_terminal_state_from_trace
 
-import pytest
 pytestmark = pytest.mark.unit
 
 

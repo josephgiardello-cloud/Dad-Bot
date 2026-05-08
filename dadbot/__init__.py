@@ -11,11 +11,11 @@ from .config import (
 from .prompts import DadPrompts
 
 __all__ = [
-    "AssistantRuntime",
     "MOOD_ALIASES",
     "MOOD_CATEGORIES",
     "MOOD_TONE_GUIDANCE",
     "PERSONA_PRESETS",
+    "AssistantRuntime",
     "DadPrompts",
     "DadRuntimeConfig",
 ]

@@ -26,15 +26,13 @@ Exit codes:
 
 from __future__ import annotations
 
-import ast
 import argparse
+import ast
 import json
 import re
 import sys
-from collections import defaultdict
 from pathlib import Path
 from typing import Any
-
 
 ROOT = Path(__file__).parent.parent
 DEFAULT_MANIFEST = ROOT / "audit" / "spec" / "architecture_manifest.json"

@@ -20,7 +20,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-
 DEFAULT_BASELINE = Path("tools/turn_surface_freeze_baseline.json")
 CONTRACT_MODULE = Path("dadbot/core/_contract_freeze.py")
 TURN_MIXIN_MODULE = Path("dadbot/core/turn_mixin.py")

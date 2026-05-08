@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import ast
 import json
-import os
 import re
 import subprocess
 import sys
@@ -14,11 +13,8 @@ from typing import Any
 import pytest
 
 import tools.arch_completeness_audit as arch_audit
-import tools.contract_guard as contract_guard
 import tools.enforce_no_bypass as no_bypass
-import tools.turn_coherence_check as turn_coherence_check
-import tools.turn_surface_freeze as turn_surface_freeze
-
+from tools import contract_guard, turn_coherence_check, turn_surface_freeze
 
 ROOT = Path(__file__).resolve().parents[2]
 CORE_DIR = ROOT / "dadbot" / "core"

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import pytest
 
+from dadbot.core.testing.tool_runtime_test_adapter import ToolRuntimeTestAdapter
 from dadbot.core.tool_algebra import (
     ToolFailure,
     ToolFailureLog,
@@ -33,7 +34,6 @@ from dadbot.core.tool_ir import (
     stable_tool_input_hash,
 )
 from dadbot.core.tool_scheduler import ToolScheduler
-from dadbot.core.testing.tool_runtime_test_adapter import ToolRuntimeTestAdapter
 
 # ===========================================================================
 # A — TestToolDAGValidity

@@ -6,10 +6,9 @@ from __future__ import annotations
 
 import pytest
 
-from dadbot.core.graph import TurnGraph, _NODE_STAGE_CONTRACTS
-from dadbot.core.graph_context import TurnContext, TurnContextContractViolation
 from dadbot.core.execution_context import _require_execution_context_contract
-
+from dadbot.core.graph import _NODE_STAGE_CONTRACTS, TurnGraph
+from dadbot.core.graph_context import TurnContext, TurnContextContractViolation
 
 pytestmark = pytest.mark.unit
 

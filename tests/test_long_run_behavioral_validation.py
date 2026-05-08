@@ -16,7 +16,7 @@ import json
 
 import pytest
 
-from dadbot.core.graph import TurnGraph, _NODE_STAGE_CONTRACTS
+from dadbot.core.graph import _NODE_STAGE_CONTRACTS, TurnGraph
 from dadbot.core.graph_context import TurnContext
 from dadbot.core.graph_pipeline_nodes import (
     ContextBuilderNode,
@@ -403,8 +403,8 @@ class TestMemoryPersonalityBoundary:
 
     def test_build_mood_context_is_pure_config_lookup(self):
         """build_mood_context returns a non-empty string from config only — no I/O."""
-        from dadbot.tone import ToneContextBuilder
         from dadbot.config import MOOD_TONE_GUIDANCE
+        from dadbot.tone import ToneContextBuilder
 
         class _MinimalBot:
             def normalize_mood(self, mood: str) -> str:
@@ -420,7 +420,6 @@ class TestMemoryPersonalityBoundary:
     def test_build_personality_context_delegates_only_to_tone(self):
         """build_personality_context calls build_mood_context and nothing else memory-related."""
         from dadbot.managers.personality_service import PersonalityServiceManager
-        from dadbot.config import MOOD_TONE_GUIDANCE
 
         calls = []
 

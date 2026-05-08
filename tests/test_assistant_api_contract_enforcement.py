@@ -9,12 +9,13 @@ Tests verify:
     4. Method signatures remain immutable
     5. Package-level exports are stable
 """
-import sys
-from unittest.mock import MagicMock
 import inspect
+from unittest.mock import MagicMock
+
 import pytest
-from dadbot import AssistantRuntime
+
 import dadbot
+from dadbot import AssistantRuntime
 
 pytestmark = pytest.mark.unit
 
@@ -113,7 +114,7 @@ class TestAssistantAPIContractEnforcement:
         """Guard: chat() response must have only documented keys."""
         bot = AssistantRuntime(mock_kernel)
         result = bot.chat("test", debug=False)
-        
+
         expected_keys = {"response", "memory_updates", "tool_calls"}
         actual_keys = set(result.keys())
         assert actual_keys == expected_keys, (
@@ -123,11 +124,11 @@ class TestAssistantAPIContractEnforcement:
     def test_debug_mode_properly_gated(self, mock_kernel):
         """Guard: debug=True must exist and gate internal metadata."""
         bot = AssistantRuntime(mock_kernel)
-        
+
         # Call with debug=False
         result_normal = bot.chat("test", debug=False)
         assert "debug" not in result_normal, "debug=False should not include debug key"
-        
+
         # Call with debug=True
         result_debug = bot.chat("test", debug=True)
         assert isinstance(result_debug, dict), "debug=True should return dict"
@@ -146,7 +147,7 @@ class TestAssistantAPIContractEnforcement:
         """Guard: Response dictionaries must not contain kernel objects."""
         bot = AssistantRuntime(mock_kernel)
         result = bot.chat("test", debug=False)
-        
+
         # Recursively check that response contains only JSON-serializable types
         def is_json_safe(obj):
             """Check if object is JSON-serializable (no kernel objects)."""
@@ -161,7 +162,7 @@ class TestAssistantAPIContractEnforcement:
                 )
             # Any other type (objects, etc.) is not JSON-safe
             return False
-        
+
         assert is_json_safe(result), (
             f"Response contains non-JSON-serializable objects: {result}. "
             "Kernel internals must not leak into public responses."
@@ -170,7 +171,7 @@ class TestAssistantAPIContractEnforcement:
     def test_no_kernel_attributes_exposed(self, mock_kernel):
         """Guard: AssistantRuntime instance should not expose kernel internals."""
         bot = AssistantRuntime(mock_kernel)
-        
+
         forbidden_patterns = [
             "graph",
             "orchestrator",
@@ -182,7 +183,7 @@ class TestAssistantAPIContractEnforcement:
             "replay_",
             "policy",
         ]
-        
+
         for attr in dir(bot):
             if attr.startswith("_"):
                 continue
@@ -196,21 +197,21 @@ class TestAssistantAPIContractEnforcement:
         """Guard: Each method returns documented types."""
         mock_kernel.reset_session = MagicMock(return_value=None)
         mock_kernel.memory_manager.find_memory_matches.return_value = []
-        
+
         bot = AssistantRuntime(mock_kernel)
-        
+
         # chat() -> dict
         result = bot.chat("test", debug=False)
         assert isinstance(result, dict), "chat() must return dict"
-        
+
         # run_task() -> str (task_id)
         task_id = bot.run_task("test")
         assert isinstance(task_id, str), "run_task() must return str (task_id)"
-        
+
         # reset_session() -> None
         result = bot.reset_session()
         assert result is None, "reset_session() must return None"
-        
+
         # memory() -> list[dict]
         result = bot.memory("test", limit=5)
         assert isinstance(result, list), "memory() must return list"
@@ -222,11 +223,11 @@ class TestAssistantAPIContractEnforcement:
     def test_no_monkey_patches_on_runtime(self):
         """Guard: The public facade must not be dynamically modified post-creation."""
         initial_methods = set(dir(AssistantRuntime))
-        
+
         # Simulate accidental monkey-patching (should fail)
         def new_method(self):
             pass
-        
+
         # Try to add a method
         try:
             AssistantRuntime.new_method = new_method
@@ -264,9 +265,9 @@ class TestContractDocumentation:
             "docs",
             "assistant_api_contract.md"
         )
-        with open(contract_path, "r", encoding="utf-8") as f:
+        with open(contract_path, encoding="utf-8") as f:
             content = f.read().lower()
-        
+
         methods = ["chat", "run_task", "get_state", "reset_session", "memory"]
         for method in methods:
             assert method in content, (
@@ -283,9 +284,9 @@ class TestContractDocumentation:
             "docs",
             "assistant_api_contract.md"
         )
-        with open(contract_path, "r", encoding="utf-8") as f:
+        with open(contract_path, encoding="utf-8") as f:
             content = f.read().lower()
-        
+
         assert "immutable" in content or "locked" in content, (
             "Contract must explicitly state that the API surface is immutable/locked"
         )

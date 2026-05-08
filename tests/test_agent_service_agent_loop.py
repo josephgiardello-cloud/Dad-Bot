@@ -1,9 +1,10 @@
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from dadbot.services.agent_service import AgentService
 
-import pytest
 pytestmark = pytest.mark.integration
 
 

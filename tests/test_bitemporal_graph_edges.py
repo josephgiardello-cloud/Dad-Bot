@@ -10,9 +10,10 @@ Covers:
 
 from __future__ import annotations
 
+import pytest
+
 from dadbot.memory.graph_manager import MemoryGraphManager
 
-import pytest
 pytestmark = pytest.mark.unit
 
 # ---------------------------------------------------------------------------

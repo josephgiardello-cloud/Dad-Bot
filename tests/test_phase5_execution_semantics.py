@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from dadbot.core.execution_replay_engine import reconstruct_terminal_state_from_trace
 from dadbot.core.execution_semantics import (
     AllowedTransformations,
@@ -7,7 +9,6 @@ from dadbot.core.execution_semantics import (
     execution_equivalence_relation,
 )
 
-import pytest
 pytestmark = pytest.mark.phase4
 
 

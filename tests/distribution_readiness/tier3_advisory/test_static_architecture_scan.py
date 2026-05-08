@@ -9,7 +9,6 @@ import inspect
 
 import pytest
 
-
 pytestmark = pytest.mark.unit
 
 # Advisory: method count thresholds per class
@@ -44,12 +43,14 @@ class TestStaticArchitectureScan:
     def test_turn_context_is_dataclass(self):
         """TurnContext must be a dataclass — structural invariant for field consistency."""
         import dataclasses
+
         from dadbot.core.graph_context import TurnContext
         assert dataclasses.is_dataclass(TurnContext)
 
     def test_execution_trace_context_is_dataclass(self):
         """ExecutionTraceContext must be a dataclass — structural invariant."""
         import dataclasses
+
         from dadbot.core.execution_context import ExecutionTraceContext
         assert dataclasses.is_dataclass(ExecutionTraceContext)
 

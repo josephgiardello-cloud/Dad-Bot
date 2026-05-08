@@ -16,7 +16,6 @@ import pytest
 
 from dadbot.core.graph_context import TurnContext
 
-
 pytestmark = pytest.mark.unit
 
 _SUITE_PATH = Path(__file__).parent / "golden_turn_suite.json"

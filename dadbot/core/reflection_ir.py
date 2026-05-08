@@ -17,13 +17,14 @@ Principles:
 - Support executive coherence, not enforce obedience
 """
 
-from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Tuple, Any, Iterator
-from datetime import datetime, timedelta
-from collections import defaultdict
 import json
 import math
 import re
+from collections import defaultdict
+from collections.abc import Iterator
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from typing import Any
 
 
 @dataclass
@@ -45,15 +46,15 @@ class DriftEpisode:
         burnout_probability: Estimated likelihood this is fatigue-driven (0.0-1.0)
     """
     start_turn: int
-    end_turn: Optional[int]
+    end_turn: int | None
     duration: int
-    trigger_topic: Optional[str]
-    trigger_time_bucket: Optional[str]  # "11_PM" or "Wednesday" format
-    emotional_signature: Optional[str]  # e.g., "fatigue", "frustration", "avoidance"
-    recovery_method: Optional[str]  # e.g., "break", "realignment_phrase", "context_shift"
+    trigger_topic: str | None
+    trigger_time_bucket: str | None  # "11_PM" or "Wednesday" format
+    emotional_signature: str | None  # e.g., "fatigue", "frustration", "avoidance"
+    recovery_method: str | None  # e.g., "break", "realignment_phrase", "context_shift"
     halt_count: int
     resumed_successfully: bool
-    recovery_time_minutes: Optional[int] = None
+    recovery_time_minutes: int | None = None
     burnout_probability: float = 0.0
 
 
@@ -85,10 +86,10 @@ class BehavioralPattern:
     pattern_name: str
     frequency: int = 0
     confidence: float = 0.0
-    correlated_times: List[str] = field(default_factory=list)
-    correlated_topics: List[str] = field(default_factory=list)
+    correlated_times: list[str] = field(default_factory=list)
+    correlated_topics: list[str] = field(default_factory=list)
     average_episode_duration: float = 0.0
-    average_recovery_time: Optional[float] = None
+    average_recovery_time: float | None = None
     success_after_intervention: float = 0.0  # Percentage
     last_observed_turn: int = 0
     evidence_weight: float = 0.0
@@ -114,12 +115,12 @@ class ReflectionSummary:
     current_risk_level: str
     predicted_drift_probability: float
     likely_trigger_category: str
-    primary_pattern: Optional[BehavioralPattern]
-    secondary_patterns: List[BehavioralPattern] = field(default_factory=list)
+    primary_pattern: BehavioralPattern | None
+    secondary_patterns: list[BehavioralPattern] = field(default_factory=list)
     recommended_intervention: str = ""
     intervention_justification: str = ""
     confidence_score: float = 0.0
-    observable_signals: List[str] = field(default_factory=list)
+    observable_signals: list[str] = field(default_factory=list)
     recent_episode_count: int = 0
 
 
@@ -137,7 +138,7 @@ class EvidenceEdge:
 class EvidenceGraph:
     """Event -> Episode -> Pattern -> Outcome evidence scaffold."""
 
-    edges: Dict[Tuple[str, str], EvidenceEdge] = field(default_factory=dict)
+    edges: dict[tuple[str, str], EvidenceEdge] = field(default_factory=dict)
 
     def add_observation(self, source: str, target: str, weight: float = 1.0) -> None:
         key = (source, target)
@@ -167,7 +168,7 @@ class DriftReflectionEngine:
     - Support executive coherence, not enforce obedience
     """
 
-    def __init__(self, ledger_path: Optional[str] = None):
+    def __init__(self, ledger_path: str | None = None):
         """
         Initialize the reflection engine.
         
@@ -175,12 +176,12 @@ class DriftReflectionEngine:
             ledger_path: Path to relational_ledger.jsonl. If None, engine is ready but inactive.
         """
         self.ledger_path = ledger_path
-        self.drift_episodes: List[DriftEpisode] = []
-        self.behavioral_patterns: Dict[str, BehavioralPattern] = {}
-        self.turn_alignment_history: List[Tuple[int, bool, Optional[str], Optional[datetime]]] = []  # (turn, is_aligned, goal, occurred_at)
-        self.turn_halt_history: Dict[int, bool] = {}
-        self.turn_topic_labels: Dict[int, str] = {}
-        self._reflection_entries: List[Dict[str, Any]] = []
+        self.drift_episodes: list[DriftEpisode] = []
+        self.behavioral_patterns: dict[str, BehavioralPattern] = {}
+        self.turn_alignment_history: list[tuple[int, bool, str | None, datetime | None]] = []  # (turn, is_aligned, goal, occurred_at)
+        self.turn_halt_history: dict[int, bool] = {}
+        self.turn_topic_labels: dict[int, str] = {}
+        self._reflection_entries: list[dict[str, Any]] = []
         self.evidence_graph = EvidenceGraph()
         self.session_start_time = datetime.now()
         self.min_pattern_frequency = 2  # Confidence requires at least 2 observations
@@ -216,7 +217,7 @@ class DriftReflectionEngine:
                 likely_trigger_category="unknown",
                 primary_pattern=None,
                 confidence_score=0.0,
-                observable_signals=[f"ledger_read_error: {str(e)}"]
+                observable_signals=[f"ledger_read_error: {e!s}"]
             )
 
         # Detect drift episodes and patterns
@@ -274,12 +275,12 @@ class DriftReflectionEngine:
             # Ledger doesn't exist yet; engine remains initialized but empty
             pass
 
-    def _stream_ledger_entries(self, *, max_entries: int = 4096) -> Iterator[Dict[str, Any]]:
+    def _stream_ledger_entries(self, *, max_entries: int = 4096) -> Iterator[dict[str, Any]]:
         """Yield ledger entries incrementally to avoid full-buffer blocking reads."""
         if not self.ledger_path:
             return
         emitted = 0
-        with open(self.ledger_path, "r", encoding="utf-8") as handle:
+        with open(self.ledger_path, encoding="utf-8") as handle:
             for raw_line in handle:
                 if emitted >= max(1, int(max_entries)):
                     break
@@ -315,36 +316,35 @@ class DriftReflectionEngine:
                     # Start new episode
                     episode_start = turn_num
                     episode_topic = self.turn_topic_labels.get(turn_num) or goal
-            else:
-                if episode_start is not None:
-                    # End episode
-                    duration = turn_num - episode_start
-                    halt_count = sum(
-                        1
-                        for index in range(episode_start, turn_num)
-                        if self.turn_halt_history.get(index, False)
-                    )
-                    time_bucket = self._infer_time_bucket(episode_start)
-                    episode = DriftEpisode(
-                        start_turn=episode_start,
-                        end_turn=turn_num - 1,
+            elif episode_start is not None:
+                # End episode
+                duration = turn_num - episode_start
+                halt_count = sum(
+                    1
+                    for index in range(episode_start, turn_num)
+                    if self.turn_halt_history.get(index, False)
+                )
+                time_bucket = self._infer_time_bucket(episode_start)
+                episode = DriftEpisode(
+                    start_turn=episode_start,
+                    end_turn=turn_num - 1,
+                    duration=duration,
+                    trigger_topic=episode_topic,
+                    trigger_time_bucket=time_bucket,
+                    emotional_signature=None,
+                    recovery_method=None,
+                    halt_count=halt_count,
+                    resumed_successfully=True,
+                    burnout_probability=self._estimate_burnout_probability(
                         duration=duration,
-                        trigger_topic=episode_topic,
-                        trigger_time_bucket=time_bucket,
-                        emotional_signature=None,
-                        recovery_method=None,
                         halt_count=halt_count,
-                        resumed_successfully=True,
-                        burnout_probability=self._estimate_burnout_probability(
-                            duration=duration,
-                            halt_count=halt_count,
-                            time_bucket=time_bucket,
-                            recovered=True,
-                        ),
-                    )
-                    self.drift_episodes.append(episode)
-                    episode_start = None
-                    episode_topic = None
+                        time_bucket=time_bucket,
+                        recovered=True,
+                    ),
+                )
+                self.drift_episodes.append(episode)
+                episode_start = None
+                episode_topic = None
 
         # Handle ongoing episode
         if episode_start is not None:
@@ -381,7 +381,7 @@ class DriftReflectionEngine:
         
         Creates or updates BehavioralPattern for time-based drifts.
         """
-        time_buckets: Dict[str, List[DriftEpisode]] = defaultdict(list)
+        time_buckets: dict[str, list[DriftEpisode]] = defaultdict(list)
 
         # Group episodes by observed time buckets from parsed ledger timestamps.
         for episode in self.drift_episodes:
@@ -411,7 +411,7 @@ class DriftReflectionEngine:
         
         Creates patterns for repeated distractions or avoidance of specific goals.
         """
-        topic_clusters: Dict[str, List[DriftEpisode]] = defaultdict(list)
+        topic_clusters: dict[str, list[DriftEpisode]] = defaultdict(list)
 
         for episode in self.drift_episodes:
             topic = episode.trigger_topic or "unknown"
@@ -559,9 +559,9 @@ class DriftReflectionEngine:
             recent_episode_count=len(recent_episodes)
         )
 
-    def _detect_burnout_signal(self) -> Tuple[bool, Dict[str, Any]]:
+    def _detect_burnout_signal(self) -> tuple[bool, dict[str, Any]]:
         """Flag burnout when trust credit drops >20% within 2h of high-complexity activity."""
-        timed_entries: List[Tuple[datetime, Dict[str, Any]]] = []
+        timed_entries: list[tuple[datetime, dict[str, Any]]] = []
         for entry in self._reflection_entries:
             recorded_at = self._parse_ledger_timestamp(entry)
             if recorded_at is None:
@@ -602,7 +602,7 @@ class DriftReflectionEngine:
         return False, {}
 
     @staticmethod
-    def _extract_trust_credit(entry: Dict[str, Any]) -> float:
+    def _extract_trust_credit(entry: dict[str, Any]) -> float:
         behavioral = entry.get("behavioral_ledger")
         if isinstance(behavioral, dict):
             value = behavioral.get("trust_credit")
@@ -620,7 +620,7 @@ class DriftReflectionEngine:
         return 0.0
 
     @staticmethod
-    def _is_high_complexity_activity(entry: Dict[str, Any]) -> bool:
+    def _is_high_complexity_activity(entry: dict[str, Any]) -> bool:
         explicit_complexity = str(
             entry.get("complexity")
             or entry.get("planner_complexity")
@@ -639,7 +639,7 @@ class DriftReflectionEngine:
 
     # ============ Helper Methods ============
 
-    def _infer_time_bucket(self, turn_num: int) -> Optional[str]:
+    def _infer_time_bucket(self, turn_num: int) -> str | None:
         """Infer weekday/hour bucket from parsed ledger timestamp."""
         for history_turn, _aligned, _goal, occurred_at in self.turn_alignment_history:
             if history_turn != turn_num:
@@ -689,7 +689,7 @@ class DriftReflectionEngine:
         lower_bound = latest_turn - self.recent_window_turns
         return sum(1 for t, _, _, _ in self.turn_alignment_history if t > lower_bound)
 
-    def _estimate_drift_probability(self, recent_episodes: List[DriftEpisode]) -> float:
+    def _estimate_drift_probability(self, recent_episodes: list[DriftEpisode]) -> float:
         """Estimate drift probability using posterior and recovery pressure signals."""
         if not self.turn_alignment_history:
             return 0.0
@@ -728,7 +728,7 @@ class DriftReflectionEngine:
         *,
         duration: int,
         halt_count: int,
-        time_bucket: Optional[str],
+        time_bucket: str | None,
         recovered: bool,
     ) -> float:
         """Estimate burnout pressure from episode-level evidence."""
@@ -747,7 +747,7 @@ class DriftReflectionEngine:
         return max(0.0, min(1.0, burnout))
 
     @staticmethod
-    def _extract_goal_label(entry: Dict[str, Any]) -> str:
+    def _extract_goal_label(entry: dict[str, Any]) -> str:
         goals = entry.get("session_goals")
         if isinstance(goals, list) and goals:
             return str(goals[0])
@@ -761,7 +761,7 @@ class DriftReflectionEngine:
         return "unknown"
 
     @staticmethod
-    def _extract_topic_label(entry: Dict[str, Any], fallback: str) -> str:
+    def _extract_topic_label(entry: dict[str, Any], fallback: str) -> str:
         excerpt = str(entry.get("user_input_excerpt") or "").strip().lower()
         if not excerpt:
             return str(fallback or "unknown")
@@ -771,7 +771,7 @@ class DriftReflectionEngine:
         return " ".join(tokens[:3])
 
     @staticmethod
-    def _parse_ledger_timestamp(entry: Dict[str, Any]) -> Optional[datetime]:
+    def _parse_ledger_timestamp(entry: dict[str, Any]) -> datetime | None:
         for key in ("recorded_at", "occurred_at", "wall_time", "created_at", "timestamp"):
             value = entry.get(key)
             if value is None:
@@ -792,7 +792,7 @@ class DriftReflectionEngine:
                     continue
         return None
 
-    def _infer_trigger_category(self, pattern: Optional[BehavioralPattern], episodes: List[DriftEpisode]) -> str:
+    def _infer_trigger_category(self, pattern: BehavioralPattern | None, episodes: list[DriftEpisode]) -> str:
         """
         Infer primary trigger category: fatigue, avoidance, distraction, or unknown.
         """
@@ -809,7 +809,7 @@ class DriftReflectionEngine:
 
         return "unknown"
 
-    def _extract_observable_signals(self, episodes: List[DriftEpisode], pattern: Optional[BehavioralPattern]) -> List[str]:
+    def _extract_observable_signals(self, episodes: list[DriftEpisode], pattern: BehavioralPattern | None) -> list[str]:
         """Extract observable behavioral signals to monitor."""
         signals = []
         if episodes:
@@ -825,7 +825,7 @@ class DriftReflectionEngine:
 
         return signals
 
-    def _generate_recommendation(self, pattern: Optional[BehavioralPattern], risk_level: str, drift_prob: float) -> str:
+    def _generate_recommendation(self, pattern: BehavioralPattern | None, risk_level: str, drift_prob: float) -> str:
         """Generate specific, actionable recommendation."""
         if risk_level == "high":
             if pattern:
@@ -838,7 +838,7 @@ class DriftReflectionEngine:
         else:
             return "No immediate intervention needed. Stay aligned with declared goals."
 
-    def _generate_justification(self, pattern: Optional[BehavioralPattern], category: str) -> str:
+    def _generate_justification(self, pattern: BehavioralPattern | None, category: str) -> str:
         """Generate justification for recommendation."""
         if not pattern:
             return "Pattern confidence too low for specific recommendation."
@@ -846,7 +846,7 @@ class DriftReflectionEngine:
         return f"Pattern '{pattern.pattern_name}' observed {pattern.frequency} times with {pattern.confidence * 100:.0f}% confidence. " \
                f"Trigger category: {category}. Success rate: {pattern.success_after_intervention:.0f}%."
 
-    def get_pattern_summary(self) -> Dict[str, Any]:
+    def get_pattern_summary(self) -> dict[str, Any]:
         """Return a summary of detected patterns for debugging/analysis."""
         return {
             "total_episodes": len(self.drift_episodes),
@@ -864,7 +864,7 @@ class DriftReflectionEngine:
             ]
         }
 
-    def get_evidence_graph_snapshot(self, max_edges: int = 20) -> Dict[str, Any]:
+    def get_evidence_graph_snapshot(self, max_edges: int = 20) -> dict[str, Any]:
         """Return a bounded, JSON-safe evidence graph snapshot for session state."""
         try:
             limit = max(0, int(max_edges))

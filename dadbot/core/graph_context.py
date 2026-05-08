@@ -16,10 +16,10 @@ from dadbot.core.determinism import DeterminismBoundary
 from dadbot.core.determinism_seal import DEFAULT_SEAL as _DETERMINISM_SEAL
 from dadbot.core.graph_mutation import MutationQueue
 from dadbot.core.graph_temporal import (
+    _PHASE_ORDER,
     TurnPhase,
     TurnTemporalAxis,
     VirtualClock,
-    _PHASE_ORDER,
 )
 from dadbot.core.graph_types import StageTrace, _json_safe
 from dadbot.core.ux_projection import TurnHealthState

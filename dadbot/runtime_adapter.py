@@ -3,11 +3,11 @@ from __future__ import annotations
 import inspect
 from typing import Protocol
 
-from dadbot.core.execution_contract import TurnRequest
 from dadbot.core.execution_boundary import (
     canonical_execution_kernel,
     enforce_execution_role,
 )
+from dadbot.core.execution_contract import TurnRequest
 
 EXECUTION_ROLE = "disabled"
 

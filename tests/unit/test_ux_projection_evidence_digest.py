@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import pytest
+
 from dadbot.core.graph_context import TurnContext
 from dadbot.core.ux_projection import TurnUxProjector
 
-import pytest
 pytestmark = pytest.mark.unit
 
 

@@ -1,6 +1,7 @@
+import pytest
+
 from dadbot_system.client import DadServiceClient, ServiceChatResult, ServiceClientConfig
 
-import pytest
 pytestmark = pytest.mark.integration
 
 

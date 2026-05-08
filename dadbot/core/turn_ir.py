@@ -111,24 +111,24 @@ def _obj_to_dict(obj: Any) -> dict[str, Any]:
     """
     if obj is None:
         return {}
-    
+
     if isinstance(obj, dict):
         return dict(obj)
-    
+
     # Try Pydantic model_dump() (v2)
     if hasattr(obj, "model_dump"):
         try:
             return dict(obj.model_dump())
         except Exception:
             pass
-    
+
     # Try Pydantic dict() (v1)
     if hasattr(obj, "dict"):
         try:
             return dict(obj.dict())
         except Exception:
             pass
-    
+
     # Try dataclass conversion
     if hasattr(obj, "__dataclass_fields__"):
         try:
@@ -136,14 +136,14 @@ def _obj_to_dict(obj: Any) -> dict[str, Any]:
             return dict(asdict(obj))
         except Exception:
             pass
-    
+
     # Try __dict__ (standard Python objects)
     if hasattr(obj, "__dict__"):
         try:
             return {k: v for k, v in obj.__dict__.items() if not k.startswith("_")}
         except Exception:
             pass
-    
+
     # Fallback: return empty dict and log warning
     import logging
     logging.warning(
@@ -174,7 +174,7 @@ def _policy_relevant_projection(state_mapping: dict[str, Any]) -> dict[str, Any]
     return {
         "intent_type": str(turn_plan.get("intent_type") or ""),
         "strategy": str(turn_plan.get("strategy") or ""),
-        "tool_request_count": int(len(requests)),
+        "tool_request_count": len(requests),
     }
 
 
@@ -184,7 +184,7 @@ def _semantic_eval_input_from_state(state_mapping: dict[str, Any], turn_context:
     return SemanticEvalInput(
         intent_hash=hash_json(dict(turn_plan or {})),
         policy_view_hash=hash_json(policy_view_projection),
-        tool_request_count=int(len(requests)),
+        tool_request_count=len(requests),
         session_id=str(getattr(turn_context, "session_id", "") or "default"),
         mode=str(getattr(turn_context, "mode", "") or "live"),
     )
@@ -311,8 +311,8 @@ def build_policy_input(policy_name: str, turn_context: Any, candidate: Any) -> P
 __all__ = [
     "ExecutionContext",
     "PolicyInput",
-    "PolicyView",
     "PolicyReductionProof",
+    "PolicyView",
     "ProjectionCache",
     "SemanticEvalInput",
     "TurnIntent",

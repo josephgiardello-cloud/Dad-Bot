@@ -25,9 +25,9 @@ import hashlib
 import json
 import logging
 import time
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from enum import Enum
-from typing import Any, Literal
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -57,34 +57,34 @@ class NodeStatus(str, Enum):
 @dataclass(slots=True)
 class ExecutionNode:
     """Single node execution in turn graph."""
-    
+
     node_type: NodeType | str
     node_id: str
     status: NodeStatus | str = "init"
     start_time: float = 0.0
     end_time: float = 0.0
     duration_ms: float = 0.0
-    
+
     # Node-specific outputs
     output: Any = None
-    
+
     # Side effects and mutations
     tools_invoked: list[str] = field(default_factory=list)
     memory_events: list[str] = field(default_factory=list)
-    
+
     # Error context
     error: str | None = None
     error_type: str | None = None
-    
+
     # Invariant checks
     pre_invariants: dict[str, Any] = field(default_factory=dict)
     post_invariants: dict[str, Any] = field(default_factory=dict)
     invariant_violations: list[str] = field(default_factory=list)
-    
+
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict."""
         return asdict(self)
-    
+
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ExecutionNode:
         """Deserialize from dict."""
@@ -94,13 +94,13 @@ class ExecutionNode:
 @dataclass(slots=True)
 class TurnInput:
     """Normalized turn input envelope."""
-    
+
     text: str
     attachments: list[str] = field(default_factory=list)
     session_id: str = "default"
     metadata: dict[str, Any] = field(default_factory=dict)
     timestamp: float = 0.0
-    
+
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict."""
         return asdict(self)
@@ -109,12 +109,12 @@ class TurnInput:
 @dataclass(slots=True)
 class TurnOutput:
     """Turn execution result."""
-    
+
     response: str | None
     should_end: bool
     confidence: float = 1.0  # 0.0 = uncertain, 1.0 = confident
     recovery_fallback: bool = False
-    
+
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict."""
         return asdict(self)
@@ -127,74 +127,74 @@ class TurnTrace:
     Complete immutable record of a single turn execution.
     Every field is populated and validated before turn completes.
     """
-    
+
     # Identity
     trace_id: str
     turn_id: str = ""
     session_id: str = "default"
-    
+
     # Contract versioning
     schema_version: str = TURN_TRACE_SCHEMA_VERSION
-    
+
     # Timing
     start_time: float = 0.0
     end_time: float = 0.0
     duration_ms: float = 0.0
-    
+
     # Input and output
     input: TurnInput = field(default_factory=lambda: TurnInput(text=""))
     output: TurnOutput = field(default_factory=lambda: TurnOutput(response=None, should_end=False))
-    
+
     # Execution nodes in order
     nodes: list[ExecutionNode] = field(default_factory=list)
-    
+
     # Events recorded during turn execution
     trace_events: list[dict[str, Any]] = field(default_factory=list)
-    
+
     # Trace integrity
     checksum: str = ""
     commit_boundary_count: int = 0
-    
+
     # Metadata
     metadata: dict[str, Any] = field(default_factory=dict)
-    
+
     # Status
     completed: bool = False
     error: str | None = None
-    
+
     def record_node(self, node: ExecutionNode) -> None:
         """Record a node execution in trace."""
         if self.completed:
             logger.warning("Cannot record node: trace already completed")
             return
         self.nodes.append(node)
-    
+
     def record_event(self, event: dict[str, Any]) -> None:
         """Record a turn execution event."""
         if self.completed:
             logger.warning("Cannot record event: trace already completed")
             return
         self.trace_events.append(dict(event))
-    
+
     def finalize(self) -> None:
         """Mark trace as complete and compute integrity checks."""
         self.end_time = time.time()
         self.duration_ms = (self.end_time - self.start_time) * 1000
-        
+
         # Validate trace integrity
         save_nodes = [n for n in self.nodes if n.node_type == NodeType.SAVE or n.node_type == "save"]
         self.commit_boundary_count = len(save_nodes)
-        
+
         if self.commit_boundary_count != 1:
             logger.warning(
                 "Trace invariant violation: expected 1 commit boundary, found %d",
                 self.commit_boundary_count,
             )
-        
+
         # Compute trace checksum
         self._compute_checksum()
         self.completed = True
-    
+
     def _compute_checksum(self) -> None:
         """Compute trace integrity checksum."""
         trace_data = {
@@ -207,7 +207,7 @@ class TurnTrace:
         content = json.dumps(trace_data, sort_keys=True, default=str)
         digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
         self.checksum = f"chk-{digest[:32]}"
-    
+
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict."""
         return {
@@ -228,11 +228,11 @@ class TurnTrace:
             "completed": self.completed,
             "error": self.error,
         }
-    
+
     def to_json(self, indent: int = 2) -> str:
         """Serialize to JSON string."""
         return json.dumps(self.to_dict(), indent=indent, default=str)
-    
+
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> TurnTrace:
         """Deserialize from dict."""
@@ -249,7 +249,7 @@ class TurnTrace:
             completed=bool(data.get("completed", False)),
             error=data.get("error"),
         )
-        
+
         # Deserialize input
         if "input" in data:
             input_data = data["input"]
@@ -260,7 +260,7 @@ class TurnTrace:
                 metadata=input_data.get("metadata", {}),
                 timestamp=float(input_data.get("timestamp", 0.0)),
             )
-        
+
         # Deserialize output
         if "output" in data:
             output_data = data["output"]
@@ -270,17 +270,17 @@ class TurnTrace:
                 confidence=float(output_data.get("confidence", 1.0)),
                 recovery_fallback=bool(output_data.get("recovery_fallback", False)),
             )
-        
+
         # Deserialize nodes
         for node_data in data.get("nodes", []):
             trace.nodes.append(ExecutionNode.from_dict(node_data))
-        
+
         # Deserialize ledger events
         trace.trace_events = list(data.get("trace_events", []))
-        
+
         # Deserialize metadata
         trace.metadata = dict(data.get("metadata", {}))
-        
+
         return trace
 
 

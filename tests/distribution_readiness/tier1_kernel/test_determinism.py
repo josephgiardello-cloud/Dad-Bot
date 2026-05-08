@@ -14,7 +14,6 @@ from dadbot.core.execution_context import (
 )
 from tests.test_execution_snapshot_dag import _fake_context
 
-
 pytestmark = pytest.mark.unit
 
 

@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import pytest
+
 from dadbot.core.semantic_graph_validator import (
     GraphSemanticValidator,
     NodeIntentContract,
     build_dadbot_semantic_validator,
 )
 
-import pytest
 pytestmark = pytest.mark.phase4
 
 # ---------------------------------------------------------------------------

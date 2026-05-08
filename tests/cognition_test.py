@@ -30,6 +30,7 @@ from dadbot.core.planner import (
     ReplyStrategy,
     TurnPlan,
 )
+from tests.harness.graph_runner import confluence_key_for_turn
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -700,7 +701,11 @@ def fast_deterministic_agent(orchestrator: DadBotOrchestrator, monkeypatch):
 
 
 async def _run(orch: DadBotOrchestrator, user_input: str, *, session_id: str = "default"):
-    result = await orch.handle_turn(user_input, session_id=session_id)
+    result = await orch.handle_turn(
+        user_input,
+        session_id=session_id,
+        confluence_key=confluence_key_for_turn(session_id, user_input),
+    )
     ctx = getattr(orch, "_last_turn_context", None)
     return result, ctx
 

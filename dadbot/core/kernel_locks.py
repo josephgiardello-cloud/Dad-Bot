@@ -111,7 +111,7 @@ class KernelReplaySequenceLock:
         sequence = int(item.get("sequence") or item.get("sequence_id") or 0)
         event_type = str(item.get("event_type") or item.get("type") or "").strip()
         stage = str(item.get("stage") or "").strip()
-        expected_event_id = hashlib.sha256(f"{trace_id}:{sequence}".encode("utf-8")).hexdigest()[:16]
+        expected_event_id = hashlib.sha256(f"{trace_id}:{sequence}".encode()).hexdigest()[:16]
         observed_event_id = str(item.get("event_id") or "").strip()
         if observed_event_id and observed_event_id != expected_event_id:
             raise RuntimeError(

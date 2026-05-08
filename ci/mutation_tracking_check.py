@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import ast
+import sys
 from dataclasses import dataclass
 from pathlib import Path
-import sys
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -113,19 +113,19 @@ class SharedMutableVisitor(ast.NodeVisitor):
         self.violations: list[tuple[int, str]] = []
         self._arg_stack: list[set[str]] = []
 
-    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: N802
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         args = {arg.arg for arg in node.args.args}
         self._arg_stack.append(args)
         self.generic_visit(node)
         self._arg_stack.pop()
 
-    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:  # noqa: N802
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
         args = {arg.arg for arg in node.args.args}
         self._arg_stack.append(args)
         self.generic_visit(node)
         self._arg_stack.pop()
 
-    def visit_Assign(self, node: ast.Assign) -> None:  # noqa: N802
+    def visit_Assign(self, node: ast.Assign) -> None:
         current_args = self._arg_stack[-1] if self._arg_stack else set()
         for target in node.targets:
             if isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name):
@@ -136,7 +136,7 @@ class SharedMutableVisitor(ast.NodeVisitor):
                     self.violations.append((int(node.lineno), f"subscript mutation on function arg '{target.value.id}'"))
         self.generic_visit(node)
 
-    def visit_Call(self, node: ast.Call) -> None:  # noqa: N802
+    def visit_Call(self, node: ast.Call) -> None:
         current_args = self._arg_stack[-1] if self._arg_stack else set()
         if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
             base = node.func.value.id

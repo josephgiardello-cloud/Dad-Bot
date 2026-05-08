@@ -14,10 +14,10 @@ All contract decisions flow through this module.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
-from collections.abc import Mapping
-from typing import Any, Callable, Literal, Protocol, TypeAlias
+from typing import Any, Literal, Protocol, TypeAlias
 
 from pydantic import BaseModel, Field
 
@@ -373,7 +373,7 @@ class ContractPropagationMap:
             try:
                 violations = node.validator_fn()
             except Exception as e:
-                violations = [f"Validator error: {str(e)}"]
+                violations = [f"Validator error: {e!s}"]
 
         result = ContractValidationResult(
             contract_id=node.contract_id,

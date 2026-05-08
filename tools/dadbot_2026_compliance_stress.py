@@ -5,7 +5,7 @@ import asyncio
 import json
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace
@@ -357,7 +357,7 @@ def run_suite() -> dict[str, Any]:
     overall = "PASS" if all(item.status == "PASS" for item in scenarios) else "FAIL"
     return {
         "suite": "DadBot_2026_Compliance_Stress_Test",
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": datetime.now(UTC).isoformat(),
         "overall_status": overall,
         "results": [
             {

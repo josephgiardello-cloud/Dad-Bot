@@ -29,7 +29,7 @@ import sys
 from pathlib import Path
 
 try:
-    from radon.complexity import cc_visit, SCORE
+    from radon.complexity import SCORE, cc_visit
     from radon.metrics import mi_visit
 except ImportError:
     print("ERROR: radon is required. Install with: pip install radon", file=sys.stderr)
@@ -240,7 +240,7 @@ def main(argv: list[str] | None = None) -> int:
             print("\n[complexity_gate] VIOLATIONS:")
             for v in violations:
                 print(v)
-            print(f"\n  → complexity gate FAILED\n")
+            print("\n  → complexity gate FAILED\n")
             return 1
         else:
             print("\n[complexity_gate] OK - Complexity within baseline, gate passed\n")

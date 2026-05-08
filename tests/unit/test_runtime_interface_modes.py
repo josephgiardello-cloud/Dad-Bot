@@ -7,7 +7,6 @@ import pytest
 from dadbot.managers import runtime_interface as runtime_interface_module
 from dadbot.managers.runtime_interface import ChatInsight, ChatTurn, RuntimeInterfaceManager
 
-
 pytestmark = pytest.mark.unit
 
 

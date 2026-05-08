@@ -155,11 +155,11 @@ class TestLegacyAdapterWithRealTools:
         """
         # Create registry and bootstrap from legacy _TOOL_REGISTRY
         registry = ToolRegistry()
-        
+
         # Register the real memory_lookup tool from nodes.py
         legacy_registration = nodes.get_registered_tool("memory_lookup")
         assert legacy_registration is not None
-        
+
         spec = ToolSpec(
             name="memory_lookup",
             version="1.0.0",
@@ -167,7 +167,7 @@ class TestLegacyAdapterWithRealTools:
             side_effect_class=ToolSideEffectClass.PURE,
             required_permissions=frozenset(),
         )
-        
+
         # Create a wrapper executor that calls the legacy handler
         def executor(invocation: ToolInvocation) -> ToolResult:
             # Call legacy handler
@@ -175,11 +175,11 @@ class TestLegacyAdapterWithRealTools:
                 invocation.arguments,
                 context=None,  # In real test, would be TurnContext
             )
-            
+
             # Convert if needed
             if isinstance(legacy_result, tool_ir.ToolContractResult):
                 return contract_result_to_tool_result(legacy_result)
-            
+
             # Assume success
             return ToolResult(
                 tool_name=invocation.tool_spec.name,
@@ -189,19 +189,19 @@ class TestLegacyAdapterWithRealTools:
                 latency_ms=5.0,
                 replay_safe=True,
             )
-        
+
         registry.register(spec, executor)
-        
+
         # Create adapter
         adapter = LegacyToolAdapter(registry)
-        
+
         # Execute via old interface
         result_dict = adapter.execute_tool(
             "memory_lookup",
             arguments={"query": "test query"},
             invocation_id="test-inv-1",
         )
-        
+
         # Validate old interface
         assert "status" in result_dict
         assert "output" in result_dict
@@ -211,7 +211,7 @@ class TestLegacyAdapterWithRealTools:
     def test_legacy_tool_registry_list(self):
         """Verify actual tools registered in nodes.py."""
         tools = nodes.get_registered_tool_names()
-        
+
         # Should have at least the 3 basic tools
         assert "memory_lookup" in tools
         assert "echo" in tools
@@ -220,14 +220,14 @@ class TestLegacyAdapterWithRealTools:
     def test_legacy_echo_tool_has_required_args(self):
         """Verify echo tool requires 'message' arg."""
         tool_info = nodes.get_tool_required_args()
-        
+
         assert "echo" in tool_info
         assert "message" in tool_info["echo"]
 
     def test_legacy_current_time_has_no_required_args(self):
         """Verify current_time tool needs no args."""
         tool_info = nodes.get_tool_required_args()
-        
+
         assert "current_time" in tool_info
         assert len(tool_info["current_time"]) == 0
 
@@ -238,19 +238,19 @@ class TestAdapterErrorHandling:
     def test_adapter_returns_error_for_unregistered_tool(self):
         registry = ToolRegistry()
         adapter = LegacyToolAdapter(registry)
-        
+
         result_dict = adapter.execute_tool(
             "nonexistent_tool",
             arguments={},
         )
-        
+
         assert result_dict["status"] == tool_ir.ToolStatus.FATAL.value
         assert "not registered" in result_dict["error"]
         assert result_dict["output"] is None
 
     def test_adapter_requires_registry(self):
         adapter = LegacyToolAdapter(registry=None)
-        
+
         with pytest.raises(RuntimeError, match="no registry"):
             adapter.execute_tool("any_tool", arguments={})
 
@@ -268,7 +268,7 @@ class TestCompatibilityLayerMetadata:
         )
 
         result = contract_result_to_tool_result(contract_result)
-        
+
         assert result.metadata["legacy_error_context"] == {
             "http_status": 500,
             "retry_after": 60,
@@ -277,7 +277,7 @@ class TestCompatibilityLayerMetadata:
 
     def test_roundtrip_preserves_error_context(self):
         original_context = {"code": "NETWORK_TIMEOUT", "retries": 3}
-        
+
         contract = tool_ir.ToolContractResult(
             tool_name="api_call",
             status=tool_ir.ToolStatus.RETRY,
@@ -289,6 +289,6 @@ class TestCompatibilityLayerMetadata:
         # Convert: legacy → new → legacy
         as_new = contract_result_to_tool_result(contract)
         back_to_legacy = tool_result_to_contract_result(as_new)
-        
+
         # Error context should be preserved (in new metadata)
         assert back_to_legacy.error_context.get("code") == "NETWORK_TIMEOUT"

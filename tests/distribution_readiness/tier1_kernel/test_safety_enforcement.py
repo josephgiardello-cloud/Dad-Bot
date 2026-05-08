@@ -8,7 +8,6 @@ import pytest
 
 from dadbot.core.graph_context import TurnContext
 
-
 pytestmark = pytest.mark.unit
 
 

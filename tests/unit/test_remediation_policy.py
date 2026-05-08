@@ -4,7 +4,6 @@ import pytest
 
 from dadbot.core.invariant_gate import InvariantGate, RemediationAction
 
-
 pytestmark = pytest.mark.unit
 
 

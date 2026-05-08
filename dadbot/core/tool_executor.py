@@ -14,7 +14,8 @@ the instantiation decision; callers see only the ``execute_tool`` interface.
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from dadbot.core._tool_sandbox import ToolExecutionRecord, _ToolSandbox
 

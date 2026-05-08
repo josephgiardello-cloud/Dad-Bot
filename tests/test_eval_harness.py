@@ -22,9 +22,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+import pytest
+
 from Dad import DadBot
 
-import pytest
 pytestmark = pytest.mark.unit
 
 # ---------------------------------------------------------------------------

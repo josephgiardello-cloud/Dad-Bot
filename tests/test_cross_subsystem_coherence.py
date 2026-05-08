@@ -1,10 +1,11 @@
 from dataclasses import dataclass, field
 
+import pytest
+
 from evaluation.coherence_engine import CoherenceEngine
 from tests.scoring_engine import ScoringEngine
 from tests.trace_schema import NormalizedTrace, PlannerTrace
 
-import pytest
 pytestmark = pytest.mark.unit
 
 

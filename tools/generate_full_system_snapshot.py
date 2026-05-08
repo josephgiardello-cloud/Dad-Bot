@@ -10,9 +10,9 @@ Usage:
 from __future__ import annotations
 
 import datetime
-import re
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -636,7 +636,7 @@ SNAPSHOT CONTENTS
     zip_path = SNAPSHOT_ROOT / f"system_snapshot_{TIMESTAMP}"
     shutil.make_archive(str(zip_path), "zip", snapshot_dir)
 
-    print(f"\n✅ Snapshot complete!")
+    print("\n✅ Snapshot complete!")
     print(f"   Folder : {snapshot_dir}")
     print(f"   Zip    : {zip_path}.zip")
     return snapshot_dir

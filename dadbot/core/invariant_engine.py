@@ -198,7 +198,7 @@ def enforce_invariant(check: InvariantCheck, severity: InvariantSeverity) -> Non
         return
     # Local import avoids module-level circularity; invariant_gate does not
     # import invariant_engine at the top level.
-    from dadbot.core.invariant_gate import InvariantViolationError  # noqa: PLC0415
+    from dadbot.core.invariant_gate import InvariantViolationError
     if severity == InvariantSeverity.CRITICAL:
         raise InvariantViolationError(check.message)
     if _strict_invariant_mode() and severity in {

@@ -21,10 +21,11 @@ from __future__ import annotations
 import hashlib
 import json
 
+import pytest
+
 from dadbot.core.execution_receipt import ExecutionReceipt, ReceiptChain, ReceiptSigner
 from dadbot.uril.truth_binding import compute_receipt_chain_hash
 
-import pytest
 pytestmark = pytest.mark.unit
 
 # ---------------------------------------------------------------------------

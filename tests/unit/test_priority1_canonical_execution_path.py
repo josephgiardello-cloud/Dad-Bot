@@ -10,14 +10,13 @@ Invariants validated:
 4. No requests bypass the control plane
 """
 
-import asyncio
-import pytest
-from unittest.mock import AsyncMock, MagicMock, patch, call, PropertyMock
 from inspect import iscoroutinefunction
+from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
+from dadbot.core.control_plane import ExecutionControlPlane, ExecutionJob
 from dadbot.core.orchestrator import DadBotOrchestrator
-from dadbot.core.control_plane import ExecutionJob, ExecutionControlPlane
-from dadbot.contracts import FinalizedTurnResult
 
 pytestmark = pytest.mark.unit
 
@@ -34,9 +33,9 @@ class TestCanonicalExecutionPathStructure:
     def test_handle_turn_signature_correct(self):
         """Verify handle_turn() has correct signature without delegation logic."""
         import inspect
-        
+
         source = inspect.getsource(DadBotOrchestrator.handle_turn)
-        
+
         # Should not reference direct delegation shortcuts
         assert "execute_turn" not in source
         assert "TurnDelivery.ASYNC" not in source
@@ -47,9 +46,9 @@ class TestCanonicalExecutionPathStructure:
     def test_run_method_delegates_to_handle_turn(self):
         """Verify run() delegates to handle_turn() instead of duplicating logic."""
         import inspect
-        
+
         source = inspect.getsource(DadBotOrchestrator.run)
-        
+
         # Should not have delegation shortcuts
         assert "execute_turn" not in source
         assert "TurnDelivery.SYNC" not in source
@@ -59,9 +58,9 @@ class TestCanonicalExecutionPathStructure:
     def test_run_async_method_delegates_to_handle_turn(self):
         """Verify run_async() delegates to handle_turn() instead of duplicating logic."""
         import inspect
-        
+
         source = inspect.getsource(DadBotOrchestrator.run_async)
-        
+
         # Should not have delegation shortcuts
         assert "execute_turn" not in source
         assert "TurnDelivery.ASYNC" not in source
@@ -132,7 +131,7 @@ class TestTraceInvariants:
             user_input="test",
             metadata={"trace_id": "tr-12345"},
         )
-        
+
         # Mock multiple save (commit) events
         control_plane_with_ledger.ledger.read.return_value = [
             {"trace_id": "tr-12345", "event_type": "node_completed", "node_type": "save"},
@@ -151,7 +150,7 @@ class TestTraceInvariants:
             user_input="test",
             metadata={"trace_id": "tr-12345"},
         )
-        
+
         # Mock events with no save node
         control_plane_with_ledger.ledger.read.return_value = [
             {"trace_id": "tr-12345", "event_type": "node_completed", "node_type": "planner"},
@@ -166,11 +165,12 @@ class TestTraceInvariants:
     def test_validate_trace_invariant_called_after_execution(self):
         """Verify _validate_trace_invariant() is called in submit_turn flow."""
         import inspect
+
         from dadbot.core.control_plane import ExecutionControlPlane
 
-        
+
         source = inspect.getsource(ExecutionControlPlane.submit_turn)
-        
+
         # Should call _validate_trace_invariant after job completes
         assert "_validate_trace_invariant" in source
 
@@ -185,7 +185,7 @@ class TestExecutionJobTraceId:
             session_id="test_session",
             user_input="test input",
         )
-        
+
         # Should have assigned a trace_id
         assert job.trace_id
         assert job.trace_id.startswith("tr-")
@@ -199,7 +199,7 @@ class TestExecutionJobTraceId:
             user_input="test input",
             trace_id=provided_trace_id,
         )
-        
+
         assert job.trace_id == provided_trace_id
         assert job.metadata["trace_id"] == provided_trace_id
 
@@ -211,7 +211,7 @@ class TestExecutionJobTraceId:
             user_input="test input",
             metadata={"trace_id": provided_trace_id},
         )
-        
+
         assert job.trace_id == provided_trace_id
 
 

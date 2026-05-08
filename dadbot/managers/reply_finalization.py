@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dadbot.managers.advice_audit import ShadowAuditManager
 from dadbot.core.turn_coherence import assert_personality_applied_exactly_once, mark_turn_coherence
+from dadbot.managers.advice_audit import ShadowAuditManager
 
 
 class ReplyFinalizationManager:

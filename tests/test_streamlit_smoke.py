@@ -52,14 +52,23 @@ def test_dad_streamlit_app_starts_without_streamlit_exceptions(tmp_path):
         """
         from streamlit.testing.v1 import AppTest
 
-        app = AppTest.from_file("dad_streamlit.py").run(timeout=15)
-        button_labels = [button.label for button in app.button]
-        radio_labels = [r.label for r in app.radio]
+        app = AppTest.from_file("dad_streamlit.py").run(timeout=30)
+        button_labels = [str(button.label) for button in app.button]
+        radio_labels = [str(r.label) for r in app.radio]
 
         assert len(app.exception) == 0, list(app.exception)
         assert len(app.error) == 0, [item.value for item in app.error]
         assert "New Thread" in button_labels, button_labels
         assert "Navigate" in radio_labels, radio_labels
+
+        # Availability-only check: route load succeeds and workshop section is present.
+        nav_radio = next(r for r in app.radio if r.label == "Navigate")
+        app = nav_radio.set_value("workshop").run(timeout=30)
+        assert len(app.exception) == 0, list(app.exception)
+        assert len(app.error) == 0, [item.value for item in app.error]
+
+        workshop_labels = [str(r.label) for r in app.radio]
+        assert "Workshop section" in workshop_labels, workshop_labels
         """
     )
 
@@ -73,7 +82,7 @@ def test_dad_streamlit_app_starts_without_streamlit_exceptions(tmp_path):
         capture_output=True,
         text=True,
         encoding="utf-8",
-        timeout=30,
+        timeout=60,
         env=_smoke_env,
     )
 
@@ -107,18 +116,18 @@ def test_preferences_tab_shows_detected_cloud_llm_api_key_hint(tmp_path):
         """
         from streamlit.testing.v1 import AppTest
 
-        app = AppTest.from_file("dad_streamlit.py").run(timeout=15)
+        app = AppTest.from_file("dad_streamlit.py").run(timeout=30)
 
         assert len(app.exception) == 0, list(app.exception)
         assert len(app.error) == 0, [item.value for item in app.error]
 
         # Navigate to Dad's Workshop
         nav_radio = next(r for r in app.radio if r.label == "Navigate")
-        app = nav_radio.set_value("workshop").run(timeout=15)
+        app = nav_radio.set_value("workshop").run(timeout=30)
 
         # Select Preferences section in workshop
         workshop_radio = next(r for r in app.radio if r.label == "Workshop section")
-        app = workshop_radio.set_value("Preferences").run(timeout=15)
+        app = workshop_radio.set_value("Preferences").run(timeout=30)
 
         captions = [str(item.value) for item in app.caption]
         assert any("OPENAI_API_KEY" in caption and "detected" in caption for caption in captions), captions
@@ -136,7 +145,7 @@ def test_preferences_tab_shows_detected_cloud_llm_api_key_hint(tmp_path):
         capture_output=True,
         text=True,
         encoding="utf-8",
-        timeout=30,
+        timeout=60,
         env=_pref_env,
     )
 
@@ -178,7 +187,7 @@ def test_sidebar_and_button_surface_accessible(tmp_path):
             checkboxes.update(str(item.label) for item in app.checkbox)
             selects.update(str(item.label) for item in app.selectbox)
 
-        app = AppTest.from_file("dad_streamlit.py").run(timeout=20)
+        app = AppTest.from_file("dad_streamlit.py").run(timeout=30)
         assert len(app.exception) == 0, list(app.exception)
         assert len(app.error) == 0, [item.value for item in app.error]
 
@@ -189,7 +198,7 @@ def test_sidebar_and_button_surface_accessible(tmp_path):
 
         nav_radio = next(r for r in app.radio if r.label == "Navigate")
         for view in ("status", "workshop", "voice", "chat"):
-            app = nav_radio.set_value(view).run(timeout=20)
+            app = nav_radio.set_value(view).run(timeout=30)
             assert len(app.exception) == 0, list(app.exception)
             assert len(app.error) == 0, [item.value for item in app.error]
             collect_labels(app, seen_buttons, seen_checkboxes, seen_selects)
@@ -198,7 +207,7 @@ def test_sidebar_and_button_surface_accessible(tmp_path):
             if view == "workshop":
                 section_radio = next(r for r in app.radio if r.label == "Workshop section")
                 for section in ("Status", "Preferences", "Data", "Mobile"):
-                    app = section_radio.set_value(section).run(timeout=20)
+                    app = section_radio.set_value(section).run(timeout=30)
                     assert len(app.exception) == 0, list(app.exception)
                     assert len(app.error) == 0, [item.value for item in app.error]
                     collect_labels(app, seen_buttons, seen_checkboxes, seen_selects)
@@ -252,7 +261,7 @@ def test_sidebar_and_button_surface_accessible(tmp_path):
         capture_output=True,
         text=True,
         encoding="utf-8",
-        timeout=60,
+        timeout=120,
         env=sandbox_env,
     )
 

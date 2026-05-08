@@ -11,13 +11,13 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import ollama
+import pytest
 
 from Dad import DadBot
 from dadbot.core.execution_trace_context import ExecutionTraceRecorder, bind_execution_trace
 from dadbot.core.graph import LedgerMutationOp, TurnContext
 from dadbot_system.state import InMemoryStateStore
 
-import pytest
 pytestmark = pytest.mark.integration
 
 

@@ -5,7 +5,6 @@ import json
 import sys
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 SNAPSHOT_ROOT = ROOT / "SYSTEM_SNAPSHOT"
 LATEST_INDEX = SNAPSHOT_ROOT / "LATEST_SNAPSHOT.json"
@@ -79,6 +78,6 @@ def verify() -> None:
 if __name__ == "__main__":
     try:
         verify()
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         print(f"Canonical snapshot guard FAILED: {exc}")
         sys.exit(1)

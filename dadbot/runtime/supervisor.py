@@ -18,9 +18,8 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import time
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Literal
 
@@ -32,22 +31,22 @@ RuntimeLifecycleState = Literal["INIT", "RUNNING", "DEGRADED", "SHUTDOWN"]
 @dataclass(slots=True)
 class RuntimeLock:
     """Single runtime ownership lock contract."""
-    
+
     pid: int                           # Process ID claiming ownership
     port: int                          # Port being served
     timestamp: float                   # Lock acquisition timestamp
     state: RuntimeLifecycleState       # Current lifecycle state
     command_hash: str                  # SHA256 of command fingerprint
     owner_id: str                      # Unique owner identifier
-    
+
     def is_stale(self, timeout_seconds: int = 60) -> bool:
         """Check if lock has exceeded maximum age."""
         return (time.time() - self.timestamp) > timeout_seconds
-    
+
     def to_dict(self) -> dict[str, Any]:
         """Serialize to JSON-compatible dict."""
         return asdict(self)
-    
+
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> RuntimeLock:
         """Deserialize from dict."""
@@ -63,11 +62,11 @@ class RuntimeLock:
 
 class RuntimeSupervisor:
     """Manages single runtime instance with lifecycle control."""
-    
+
     DEFAULT_LOCK_DIR = Path.home() / ".dadbot"
     DEFAULT_LOCK_FILE = DEFAULT_LOCK_DIR / "runtime.lock"
     STALE_LOCK_TIMEOUT = 60  # seconds
-    
+
     def __init__(
         self,
         lock_file: Path | None = None,
@@ -77,19 +76,19 @@ class RuntimeSupervisor:
         self.stale_timeout = stale_timeout_seconds
         self._current_lock: RuntimeLock | None = None
         self._lock_dir = self.lock_file.parent
-    
+
     def _ensure_lock_dir(self) -> None:
         """Ensure lock directory exists."""
         try:
             self._lock_dir.mkdir(parents=True, exist_ok=True)
         except Exception as exc:
             logger.warning("Failed to create lock directory %s: %s", self._lock_dir, exc)
-    
+
     def _compute_command_hash(self) -> str:
         """Compute fingerprint of current process command."""
         import hashlib
         import sys
-        
+
         command_parts = [
             str(sys.executable),
             " ".join(sys.argv),
@@ -97,12 +96,12 @@ class RuntimeSupervisor:
         command_str = "|".join(command_parts)
         digest = hashlib.sha256(command_str.encode("utf-8")).hexdigest()
         return f"cmd-{digest[:20]}"
-    
+
     def _read_lock(self) -> RuntimeLock | None:
         """Read existing lock from file, return None if not found or invalid."""
         if not self.lock_file.exists():
             return None
-        
+
         try:
             content = self.lock_file.read_text()
             data = json.loads(content)
@@ -110,11 +109,11 @@ class RuntimeSupervisor:
         except Exception as exc:
             logger.debug("Failed to read lock file %s: %s", self.lock_file, exc)
             return None
-    
+
     def _write_lock(self, lock: RuntimeLock) -> bool:
         """Atomically write lock to file."""
         self._ensure_lock_dir()
-        
+
         try:
             # Write to temporary file first, then rename (atomic)
             temp_file = self.lock_file.with_suffix(".tmp")
@@ -126,12 +125,12 @@ class RuntimeSupervisor:
         except Exception as exc:
             logger.error("Failed to write lock file %s: %s", self.lock_file, exc)
             return False
-    
+
     def _delete_lock(self) -> bool:
         """Delete lock file."""
         if not self.lock_file.exists():
             return True
-        
+
         try:
             self.lock_file.unlink()
             self._current_lock = None
@@ -139,7 +138,7 @@ class RuntimeSupervisor:
         except Exception as exc:
             logger.error("Failed to delete lock file %s: %s", self.lock_file, exc)
             return False
-    
+
     def acquire_lock(
         self,
         pid: int,
@@ -159,7 +158,7 @@ class RuntimeSupervisor:
         5. Transition to RUNNING
         """
         existing_lock = self._read_lock()
-        
+
         if existing_lock is not None and not existing_lock.is_stale(self.stale_timeout):
             msg = (
                 f"Runtime already locked by PID {existing_lock.pid} on port {existing_lock.port}. "
@@ -168,7 +167,7 @@ class RuntimeSupervisor:
             )
             logger.warning(msg)
             return False, msg
-        
+
         if existing_lock is not None and existing_lock.is_stale(self.stale_timeout):
             logger.info(
                 "Stale lock detected (PID %d, age %ds). Removing.",
@@ -176,7 +175,7 @@ class RuntimeSupervisor:
                 int(time.time() - existing_lock.timestamp),
             )
             self._delete_lock()
-        
+
         # Create new lock with INIT state
         new_lock = RuntimeLock(
             pid=pid,
@@ -186,44 +185,44 @@ class RuntimeSupervisor:
             command_hash=self._compute_command_hash(),
             owner_id=owner_id,
         )
-        
+
         if not self._write_lock(new_lock):
             return False, "Failed to write lock file"
-        
+
         # Transition to RUNNING
         if not self.set_state("RUNNING"):
             return False, "Failed to transition to RUNNING state"
-        
+
         logger.info("Runtime lock acquired: PID %d, port %d, owner %s", pid, port, owner_id)
         return True, "Lock acquired successfully"
-    
+
     def release_lock(self) -> bool:
         """Release runtime lock (called on shutdown)."""
         if not self._delete_lock():
             logger.warning("Failed to clean up lock file on shutdown")
             return False
-        
+
         logger.info("Runtime lock released")
         return True
-    
+
     def set_state(self, new_state: RuntimeLifecycleState) -> bool:
         """Update lifecycle state of current lock."""
         lock = self._read_lock()
         if lock is None:
             logger.warning("Cannot set state: no active lock")
             return False
-        
+
         lock.state = new_state
         if not self._write_lock(lock):
             return False
-        
+
         logger.debug("Runtime state transitioned to %s", new_state)
         return True
-    
+
     def get_status(self) -> dict[str, Any]:
         """Get current runtime status and lock information."""
         lock = self._read_lock()
-        
+
         if lock is None:
             return {
                 "status": "no_lock",
@@ -234,10 +233,10 @@ class RuntimeSupervisor:
                 "stale": None,
                 "age_seconds": None,
             }
-        
+
         age = time.time() - lock.timestamp
         is_stale = lock.is_stale(self.stale_timeout)
-        
+
         return {
             "status": "locked",
             "message": f"Runtime locked by PID {lock.pid} on port {lock.port}, state: {lock.state}",
@@ -249,7 +248,7 @@ class RuntimeSupervisor:
             "owner_id": lock.owner_id,
             "command_hash": lock.command_hash,
         }
-    
+
     def preflight_check(self) -> tuple[bool, list[str]]:
         """Run startup preflight checks.
         
@@ -262,7 +261,7 @@ class RuntimeSupervisor:
         3. Stale process detection
         """
         issues = []
-        
+
         existing_lock = self._read_lock()
         if existing_lock is not None:
             if existing_lock.is_stale(self.stale_timeout):
@@ -275,15 +274,15 @@ class RuntimeSupervisor:
                 issues.append(
                     f"Active lock conflict: PID {existing_lock.pid} on port {existing_lock.port}"
                 )
-        
+
         # Check for port binding conflicts (platform-specific)
         if self._is_port_in_use(existing_lock.port if existing_lock else 8501):
             issues.append(
                 f"Port {existing_lock.port if existing_lock else 8501} already in use"
             )
-        
+
         return len(issues) == 0, issues
-    
+
     @staticmethod
     def _is_port_in_use(port: int) -> bool:
         """Check if port is already bound."""

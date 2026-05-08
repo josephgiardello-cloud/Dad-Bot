@@ -6,7 +6,7 @@ import logging
 import warnings
 from typing import Any, cast
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ValidationError
 
 from dadbot.contracts import (
     AttachmentList,
@@ -16,6 +16,7 @@ from dadbot.contracts import (
     PreparedTurnResult,
     SupportsTurnProcessingRuntime,
 )
+from dadbot.core.execution_context import ensure_execution_trace_root
 from dadbot.core.graph import (
     LedgerMutationOp,
     MutationIntent,
@@ -23,12 +24,11 @@ from dadbot.core.graph import (
     TurnContext,
 )
 from dadbot.core.tool_executor import execute_tool
-from dadbot.core.execution_context import ensure_execution_trace_root
+from dadbot.core.turn_coherence import mark_turn_coherence, reset_turn_coherence
 from dadbot.managers.reply_generation import ReplyGenerationManager
 from dadbot.models import AgenticToolPlan
 from dadbot.services.llm_call_adapter import LLMCallAdapter
 from dadbot.services.turn_state_mutator import TurnStateMutator
-from dadbot.core.turn_coherence import mark_turn_coherence, reset_turn_coherence
 
 # Keep the historic logger name so existing tests and log pipelines remain stable
 # while the implementation moves from managers/ to services/.
@@ -1576,8 +1576,8 @@ Return ONLY valid JSON (no extra text):
             from dadbot.managers.conversation_persistence import (
                 ConversationPersistenceManager,
             )
-            from dadbot.services.post_commit_worker import PostCommitWorker
             from dadbot.services.persistence import PersistenceService
+            from dadbot.services.post_commit_worker import PostCommitWorker
 
             persistence_service = PersistenceService(
                 ConversationPersistenceManager(self.bot),

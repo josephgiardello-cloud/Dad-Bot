@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Awaitable, Callable
 from enum import Enum
-from typing import Any, Awaitable, Callable, Protocol, TypeAlias
+from typing import Any, Protocol, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field
-
 
 ChunkCallback: TypeAlias = Callable[[str], Any]
 TurnResult: TypeAlias = tuple[str | None, bool]

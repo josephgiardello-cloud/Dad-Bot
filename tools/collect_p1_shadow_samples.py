@@ -80,9 +80,10 @@ def _count_existing_samples(log_path: Path) -> int:
 
 
 def run(n: int) -> None:
-    from dadbot.core.dadbot import DadBot
-    from dadbot.core.contract_evaluator import live_turn_request, TurnDelivery, TurnResponse
     from typing import cast
+
+    from dadbot.core.contract_evaluator import TurnDelivery, TurnResponse, live_turn_request
+    from dadbot.core.dadbot import DadBot
 
     log_path = ROOT / "session_logs" / "shadow_mode.jsonl"
     before = _count_existing_samples(log_path)

@@ -8,7 +8,6 @@ import pytest
 
 from dadbot.core.graph_context import TurnContext
 
-
 pytestmark = pytest.mark.unit
 
 
@@ -40,6 +39,7 @@ class TestTransactionalIntegrity:
     def test_save_failure_does_not_silently_succeed(self):
         """A failing persistence layer must propagate — SaveNode must not swallow errors."""
         import asyncio
+
         from dadbot.core.graph_pipeline_nodes import SaveNode
 
         node = SaveNode()

@@ -1,4 +1,5 @@
 import pytest
+
 pytestmark = pytest.mark.unit
 
 def test_tool_registry_parses_calendar_and_email_commands(bot):

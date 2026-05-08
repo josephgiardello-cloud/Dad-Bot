@@ -175,7 +175,7 @@ def report(log_path: Path, window: int, top_n: int, out_path: Path | None) -> st
         f"  multi_variant_inputs     : {hv['multi_variant_inputs']}  (same input → different snapshots per context)",
         f"  max_variants_per_input   : {hv['max_variants_per_input']}",
         f"  avg_variants_per_input   : {hv['avg_variants_per_input']}",
-        f"  NOTE: multi-variant is EXPECTED for a stateful bot. True drift = metric 2.",
+        "  NOTE: multi-variant is EXPECTED for a stateful bot. True drift = metric 2.",
     ]
     lines += [
         "",

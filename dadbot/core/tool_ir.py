@@ -111,13 +111,13 @@ def normalize_tool_results(
                 },
             )
             continue
-        
+
         # Runtime type safety: ensure value is a dict before conversion
         if not isinstance(value, dict):
             raise TypeError(
                 f"normalize_tool_results: expected dict or ToolResult, got {type(value).__name__}: {value!r}"
             )
-        
+
         item = dict(value or {})
         normalized.append(
             {
@@ -147,7 +147,7 @@ def build_execution_event(
         started_at: Must be time.perf_counter() (not time.time())
     """
     input_hash = stable_tool_input_hash(tool_name, args)
-    
+
     # Detect clock drift: started_at should be perf_counter (small number)
     # If it looks like epoch time (large number > 1e9), raise error
     if float(started_at) > 1e9:
@@ -155,7 +155,7 @@ def build_execution_event(
             f"build_execution_event: started_at={started_at} looks like wall-clock time (time.time()). "
             "Must use time.perf_counter() for deterministic latency."
         )
-    
+
     latency_raw = time.perf_counter() - float(started_at)
     # Only use max(..., 0.0) if latency is actually negative (small clock skew)
     # If latency is massively negative, it's an error, not silent fallback
@@ -164,7 +164,7 @@ def build_execution_event(
             f"build_execution_event: latency={latency_raw} seconds (clock skew > 100ms). "
             "Check system clock stability."
         )
-    
+
     return ToolExecution(
         tool_name=str(tool_name or ""),
         input_hash=input_hash,
@@ -325,7 +325,7 @@ def reduce_events_to_results(log: ToolEventLog) -> list[dict[str, Any]]:
     """
     ordered = sorted(log.events, key=lambda e: e.sequence)
     results_by_tool_id: dict[str, dict[str, Any]] = {}
-    
+
     for event in ordered:
         if event.event_type == ToolEventType.EXECUTED:
             results_by_tool_id[event.tool_id] = {
@@ -347,6 +347,6 @@ def reduce_events_to_results(log: ToolEventLog) -> list[dict[str, Any]]:
                 "output_hash": event.output_hash,
                 "sequence": event.sequence,
             }
-    
+
     # Return in sequence order of final terminal states
     return sorted(results_by_tool_id.values(), key=lambda r: r["sequence"])

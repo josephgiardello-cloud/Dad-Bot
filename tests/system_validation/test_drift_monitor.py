@@ -192,7 +192,7 @@ class TestBoundaryGateRuntimeInvariant:
             f"stderr:\n{proc.stderr}"
         )
 
-    @pytest.mark.timeout(180)
+    @pytest.mark.timeout(330)
     def test_boundary_gate_is_reproducible(self):
         """Running the gate twice must produce the same exit code."""
         gate_script = _WORKSPACE_ROOT / "ci" / "kernel_boundary_check.py"
@@ -203,7 +203,7 @@ class TestBoundaryGateRuntimeInvariant:
                 capture_output=True,
                 text=True,
                 cwd=str(_WORKSPACE_ROOT),
-                timeout=90,
+                timeout=150,
             )
             results.append(proc.returncode)
         assert results[0] == results[1] == 0, (

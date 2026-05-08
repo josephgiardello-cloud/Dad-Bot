@@ -28,6 +28,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from dadbot.uril.truth_binding import (
     ClaimBindingResult,
     ClaimEvidenceValidator,
@@ -37,7 +39,6 @@ from dadbot.uril.truth_binding import (
     compute_receipt_chain_hash,
 )
 
-import pytest
 pytestmark = pytest.mark.unit
 
 # ---------------------------------------------------------------------------

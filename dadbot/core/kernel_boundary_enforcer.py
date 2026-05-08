@@ -52,7 +52,7 @@ ALLOWED_IMPORTS_TO_KERNEL = {
 
 class BoundaryViolation:
     """Single boundary violation record."""
-    
+
     def __init__(
         self,
         file_path: Path,
@@ -66,7 +66,7 @@ class BoundaryViolation:
         self.import_statement = import_statement
         self.violating_module = violating_module
         self.reason = reason
-    
+
     def __str__(self) -> str:
         return (
             f"{self.file_path}:{self.line_number}: "
@@ -77,33 +77,33 @@ class BoundaryViolation:
 
 class KernelBoundaryChecker(ast.NodeVisitor):
     """AST visitor to detect boundary violations in Python files."""
-    
+
     def __init__(self, file_path: Path, is_kernel_module: bool):
         self.file_path = file_path
         self.is_kernel_module = is_kernel_module
         self.violations: list[BoundaryViolation] = []
-    
+
     def visit_Import(self, node: ast.Import) -> None:
         """Check 'import x' statements."""
         if not self.is_kernel_module:
             return
-        
+
         for alias in node.names:
             module_name = alias.name
             self._check_import(module_name, node.lineno, f"import {module_name}")
-    
+
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         """Check 'from x import y' statements."""
         if not self.is_kernel_module:
             return
-        
+
         if node.module:
             module_name = node.module
             import_spec = f"from {module_name} import " + ", ".join(
                 alias.name for alias in node.names
             )
             self._check_import(module_name, node.lineno, import_spec)
-    
+
     def _check_import(self, module_name: str, lineno: int, import_statement: str) -> None:
         """Validate import against boundary rules."""
         # Check if this import violates kernel boundary
@@ -124,14 +124,14 @@ def check_file(file_path: Path) -> list[BoundaryViolation]:
     """Check single file for boundary violations."""
     if not file_path.exists():
         return []
-    
+
     # Determine if this is a kernel module
     relative_path = str(file_path).replace("\\", "/")
     is_kernel = any(relative_path.startswith(km.replace("\\", "/")) for km in KERNEL_MODULES)
-    
+
     if not is_kernel:
         return []
-    
+
     try:
         source = file_path.read_text()
         tree = ast.parse(source)
@@ -150,18 +150,18 @@ def check_workspace(workspace_root: Path) -> tuple[bool, list[BoundaryViolation]
         (all_ok: bool, violations: list[BoundaryViolation])
     """
     all_violations: list[BoundaryViolation] = []
-    
+
     # Find all Python files in dadbot/core and dadbot/runtime
     python_files = list(workspace_root.glob("dadbot/core/**/*.py"))
     python_files.extend(workspace_root.glob("dadbot/runtime/**/*.py"))
     python_files.extend(workspace_root.glob("dadbot_system/**/*.py"))
     python_files.append(workspace_root / "dadbot" / "contracts.py")
-    
+
     for py_file in python_files:
         if py_file.is_file():
             violations = check_file(py_file)
             all_violations.extend(violations)
-    
+
     all_ok = len(all_violations) == 0
     return all_ok, all_violations
 
@@ -170,11 +170,11 @@ def format_report(violations: list[BoundaryViolation]) -> str:
     """Format violations as readable report."""
     if not violations:
         return "✓ Kernel boundary check passed: no violations found"
-    
+
     lines = [f"✗ Kernel boundary check failed: {len(violations)} violation(s) found\n"]
     for i, violation in enumerate(violations, 1):
         lines.append(f"\n{i}. {violation}")
-    
+
     return "\n".join(lines)
 
 
@@ -189,10 +189,10 @@ def pytest_configure(config: Any) -> None:
 def pytest_collection_modifyitems(config: Any, items: Any) -> None:
     """Enforce boundary checks during pytest collection."""
     from pathlib import Path
-    
+
     workspace = Path.cwd()
     all_ok, violations = check_workspace(workspace)
-    
+
     if not all_ok:
         logger.error("Kernel boundary violations detected during pytest collection:")
         logger.error(format_report(violations))

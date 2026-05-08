@@ -4,10 +4,11 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
+
 from dadbot.uril.report import build_uril_report
 from dadbot.uril.signal_bus import SignalCollectionOptions
 
-import pytest
 pytestmark = pytest.mark.unit
 
 

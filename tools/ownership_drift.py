@@ -23,14 +23,12 @@ Exit codes:
 
 from __future__ import annotations
 
-import ast
 import argparse
+import ast
 import json
 import sys
-from collections import defaultdict
 from pathlib import Path
 from typing import NamedTuple
-
 
 # ── Responsibility keyword taxonomy ──────────────────────────────────────────
 
@@ -43,7 +41,7 @@ _MUTATION_KEYWORDS = frozenset({
 # "Policy/Decision" keywords: function/method names that signal policy logic
 _POLICY_KEYWORDS = frozenset({
     "retry", "backoff", "ratelimit", "rate_limit", "throttle",
-    "authorize", "authorize", "validate", "enforce", "classify",
+    "authorize", "validate", "enforce", "classify",
     "reject", "approve", "gate", "check_policy", "decide",
 })
 

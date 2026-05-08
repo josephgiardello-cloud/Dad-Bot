@@ -254,9 +254,9 @@ class RecoveryChain:
 
 
 __all__ = [
-    "RecoveryStrategy",
-    "RecoveryDecision",
-    "RecoveryContext",
-    "RecoverySelector",
     "RecoveryChain",
+    "RecoveryContext",
+    "RecoveryDecision",
+    "RecoverySelector",
+    "RecoveryStrategy",
 ]

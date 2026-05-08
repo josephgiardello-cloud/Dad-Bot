@@ -4,9 +4,10 @@ import asyncio
 import random
 import time
 
+import pytest
+
 from dadbot.core.replay_verifier import ReplayVerifier
 
-import pytest
 pytestmark = pytest.mark.unit
 
 

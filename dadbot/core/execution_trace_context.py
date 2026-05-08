@@ -590,12 +590,28 @@ def _build_execution_dag(
 
 from dadbot.core.execution_context import (  # noqa: E402
     ExecutionTraceRecorder as ExecutionTraceRecorder,
+)
+from dadbot.core.execution_context import (
     RuntimeTraceViolation as RuntimeTraceViolation,
+)
+from dadbot.core.execution_context import (
     active_execution_trace as active_execution_trace,
-    build_external_system_call_graph as build_external_system_call_graph,
+)
+from dadbot.core.execution_context import (
     bind_execution_trace as bind_execution_trace,
+)
+from dadbot.core.execution_context import (
+    build_external_system_call_graph as build_external_system_call_graph,
+)
+from dadbot.core.execution_context import (
     ensure_execution_trace_root as ensure_execution_trace_root,
-    record_external_system_call as record_external_system_call,
+)
+from dadbot.core.execution_context import (
     record_execution_step as record_execution_step,
+)
+from dadbot.core.execution_context import (
+    record_external_system_call as record_external_system_call,
+)
+from dadbot.core.execution_context import (
     require_execution_trace as require_execution_trace,
 )

@@ -687,7 +687,7 @@ Rules:
         if should_archive and not force:
             memory_category = str(memory.get("category", "general") or "general").strip().lower()
             if (
-                memory_count >= 49
+                49 <= memory_count < 120
                 and memory_category == "general"
                 and memory_importance <= 0.12
                 and memory_access_count == 0
@@ -697,6 +697,10 @@ Rules:
 
         if should_archive and contradiction_count > 0 and not forced_low_signal_conflict_archive:
             if memory_importance >= 0.16:
+                should_archive = False
+
+        if should_archive and not force:
+            if memory_importance >= 0.7 and memory_access_count >= 5 and contradiction_count == 0:
                 should_archive = False
 
         if force and decay_score > 0.0:

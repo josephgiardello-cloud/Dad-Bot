@@ -24,14 +24,13 @@ Three properties under test:
 
 from __future__ import annotations
 
-import asyncio
 import os
 import random
 from typing import Any
 
 import pytest
 from harness.deterministic_seeds import CHAOS_BASE, MUTATION_FUZZ
-from harness.graph_runner import GraphRunner, RunResult
+from harness.graph_runner import GraphRunner
 from harness.invariant_checker import InvariantChecker, InvariantViolation
 from harness.kernel_mock import MockRegistry
 from harness.mutation_fuzzer import MutationFuzzer

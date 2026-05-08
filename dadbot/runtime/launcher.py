@@ -53,7 +53,7 @@ def launch_streamlit_app(
     # Run startup preflight checks
     supervisor = get_runtime_supervisor()
     ok, issues = supervisor.preflight_check()
-    
+
     if not ok:
         logger.error("Startup preflight check failed:")
         for issue in issues:
@@ -65,7 +65,7 @@ def launch_streamlit_app(
             supervisor._delete_lock()
         else:
             raise RuntimeError(f"Startup preflight failed: {'; '.join(issues)}")
-    
+
     def required_streamlit_port():
         configured_port = os.environ.get("DADBOT_STREAMLIT_PORT", "8501")
         try:
@@ -136,7 +136,7 @@ def launch_streamlit_app(
         "--server.port",
         str(chosen_port),
     ]
-    
+
     # Acquire runtime lock before starting process
     lock_acquired, lock_msg = supervisor.acquire_lock(
         pid=os.getpid(),
@@ -145,7 +145,7 @@ def launch_streamlit_app(
     )
     if not lock_acquired:
         raise RuntimeError(f"Failed to acquire runtime lock: {lock_msg}")
-    
+
     process = subprocess.Popen(command, cwd=str(workspace_path), env=command_env)
     try:
         if wait_for_streamlit(local_url, process):

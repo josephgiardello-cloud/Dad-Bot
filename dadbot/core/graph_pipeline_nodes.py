@@ -11,16 +11,16 @@ from __future__ import annotations
 
 import inspect
 import logging
-import os
 from typing import Any, Protocol
 
+from dadbot.core.cognition_event import CognitionEnvelope, emit_cognition
 from dadbot.core.critic import CritiqueEngine
 from dadbot.core.graph_context import TurnContext
 from dadbot.core.graph_types import NodeType
 from dadbot.core.invariant_gate import InvariantGate
-from dadbot.core.policy_ir import PolicyDecisionIR
-from dadbot.core.policy_compiler import PolicyCompiler
 from dadbot.core.planner import PlannerNode
+from dadbot.core.policy_compiler import PolicyCompiler
+from dadbot.core.policy_ir import PolicyDecisionIR
 from dadbot.core.reasoning_ir import (
     ReasoningAction,
     ReasoningActionType,
@@ -34,7 +34,6 @@ from dadbot.core.recovery_ir import (
     RecoveryStrategy,
 )
 from dadbot.core.runtime_types import CanonicalPayload, ToolExecutionStatus, ToolResult
-from dadbot.core.cognition_event import CognitionEnvelope, emit_cognition
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +54,7 @@ class _NodeContractMixin:
         return ()
 
     async def run(self, registry: Any, ctx: TurnContext) -> None:
-        execute_method = getattr(self, "execute")
+        execute_method = self.execute
         execute_params = inspect.signature(execute_method).parameters
         result = execute_method(registry, ctx) if len(execute_params) >= 2 else execute_method(ctx)
         if inspect.isawaitable(result):
@@ -148,7 +147,7 @@ class ValidationGateNode(_NodeContractMixin):
         requests = list(tool_ir.get("requests") or [])
         required_args_by_tool: dict[str, frozenset[str]] = {}
         try:
-            from dadbot.core.nodes import get_tool_required_args  # noqa: PLC0415
+            from dadbot.core.nodes import get_tool_required_args
 
             required_args_by_tool = dict(get_tool_required_args())
         except Exception:
@@ -672,7 +671,7 @@ class SaveNode(_NodeContractMixin):
                     save_checkpoint(checkpoint, _skip_turn_event=True)
                 turn_context.fidelity.save = True
                 return
-            except Exception as exc:  # noqa: BLE001 — SaveNode optimistic path; non-fatal
+            except Exception as exc:
                 logger.debug("SaveNode finalize_turn failed: %s", exc)
                 raise
         service.save_turn(turn_context, result)

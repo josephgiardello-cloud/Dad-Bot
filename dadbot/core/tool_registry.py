@@ -10,10 +10,9 @@ extensible registry that enables:
 
 from __future__ import annotations
 
-from typing import Any, Callable, Protocol
+from typing import Any, Protocol
 
 from dadbot.core.runtime_types import (
-    CanonicalPayload,
     ToolDeterminismClass,
     ToolExecutionStatus,
     ToolInvocation,

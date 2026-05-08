@@ -1,8 +1,9 @@
+import pytest
+
 from tests.benchmark_runner import BenchmarkRunner
 from tests.scenario_suite import Scenario
 from tests.trace_schema import NormalizedTrace, PlannerTrace
 
-import pytest
 pytestmark = pytest.mark.unit
 
 

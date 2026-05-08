@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
+
+import pytest
 
 from dadbot_system.event_durability import SQLiteEventDurabilityStore
 
-import pytest
 pytestmark = pytest.mark.durability
 
 
@@ -20,7 +22,7 @@ def test_event_durability_encrypts_payloads_and_checkpoints(tmp_path):
     )
     store.append_checkpoint(run_id=run_id, state={"reply": "classified"})
 
-    with sqlite3.connect(db_path) as conn:
+    with closing(sqlite3.connect(db_path)) as conn:
         payload_json = str(conn.execute("SELECT payload_json FROM events").fetchone()[0])
         state_json = str(conn.execute("SELECT state_json FROM checkpoints").fetchone()[0])
 

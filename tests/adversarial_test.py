@@ -18,6 +18,7 @@ import pytest
 
 from dadbot.core.graph import TurnContext
 from dadbot.core.orchestrator import DadBotOrchestrator
+from tests.harness.graph_runner import confluence_key_for_turn
 
 
 @pytest.fixture
@@ -54,7 +55,11 @@ def _fast_stub(orchestrator: DadBotOrchestrator, monkeypatch):
 
 
 async def _run(orchestrator: DadBotOrchestrator, user_input: str, session_id: str = "adv-default"):
-    result = await orchestrator.handle_turn(user_input, session_id=session_id)
+    result = await orchestrator.handle_turn(
+        user_input,
+        session_id=session_id,
+        confluence_key=confluence_key_for_turn(session_id, user_input),
+    )
     context = getattr(orchestrator, "_last_turn_context", None)
     return result, context
 

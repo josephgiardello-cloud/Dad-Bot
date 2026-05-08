@@ -199,7 +199,7 @@ def create_api_app(
         return resolved_payload
 
     async def _http_principal(
-        request: Any,
+        request: Request,
         authorization: str | None = Header(default=None),
         x_dadbot_token: str | None = Header(default=None),
     ) -> ServicePrincipal:

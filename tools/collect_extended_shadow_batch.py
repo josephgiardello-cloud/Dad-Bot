@@ -373,9 +373,10 @@ def run(
     checkpoint_every: int,
     gc_every: int,
 ) -> None:
-    from dadbot.core.dadbot import DadBot
-    from dadbot.core.contract_evaluator import live_turn_request, TurnDelivery, TurnResponse
     from typing import cast
+
+    from dadbot.core.contract_evaluator import TurnDelivery, TurnResponse, live_turn_request
+    from dadbot.core.dadbot import DadBot
 
     log_path = _canonicalize_path(log_path)
     checkpoint_path = _canonicalize_path(checkpoint_path)

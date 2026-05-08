@@ -5,10 +5,8 @@ Advisory only: findings are reported as warnings, not failures.
 from __future__ import annotations
 
 import importlib
-import inspect
 
 import pytest
-
 
 pytestmark = pytest.mark.unit
 
@@ -41,7 +39,7 @@ class TestCouplingAnalysis:
             source_text = fh.read()
 
         # Extract the leaf module name for the import check
-        forbidden_leaf = forbidden_dep.split(".")[-1]
+        forbidden_leaf = forbidden_dep.rsplit(".", maxsplit=1)[-1]
         forbidden_full = forbidden_dep.replace(".", "/")
 
         coupling_detected = (

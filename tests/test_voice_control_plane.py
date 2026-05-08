@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import pytest
+
 from dadbot.ui.voice_control_plane import VoiceSessionController
 
-import pytest
 pytestmark = pytest.mark.unit
 
 

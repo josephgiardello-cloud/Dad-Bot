@@ -6,7 +6,6 @@ import pytest
 
 from dadbot.core.runtime_types import (
     CanonicalPayload,
-    ExecutionIdentity,
     ToolDeterminismClass,
     ToolExecutionStatus,
     ToolInvocation,

@@ -15,22 +15,36 @@ import tempfile
 import time
 import uuid
 import webbrowser
-from urllib import error as urllib_error
-from urllib import request as urllib_request
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 from urllib.parse import urlencode
 
-import ollama
-import streamlit as st
-import streamlit.components.v1 as components
-from PIL import Image, ImageDraw, ImageFont
+try:
+    import ollama  # pyright: ignore[reportMissingImports]
+except Exception:  # pragma: no cover - optional dependency
+    ollama = cast(Any, None)
+
+try:
+    import streamlit as st  # pyright: ignore[reportMissingImports]
+    import streamlit.components.v1 as components  # pyright: ignore[reportMissingImports]
+except Exception:  # pragma: no cover - optional dependency
+    st = cast(Any, None)
+    components = cast(Any, None)
+
+try:
+    from PIL import Image, ImageDraw, ImageFont  # pyright: ignore[reportMissingImports]
+except Exception:  # pragma: no cover - optional dependency
+    Image = cast(Any, None)
+    ImageDraw = cast(Any, None)
+    ImageFont = cast(Any, None)
 
 from dadbot.consumers.streamlit import load_thread_projection
+from dadbot.runtime.supervisor import get_runtime_supervisor
 from dadbot.runtime_core import ThreadView, UIRuntimeAPI
 from dadbot.runtime_core.streamlit_runtime import StreamlitRuntime
-from dadbot.runtime.supervisor import get_runtime_supervisor
 from dadbot.ui import interaction_controller, state_manager
 from dadbot.ui.data import render_data_tab
 from dadbot.ui.helpers import (
@@ -71,7 +85,7 @@ EVENT_TO_UI_SIGNAL = state_manager.EVENT_TO_UI_SIGNAL
 SIGNAL_PRIORITY = state_manager.SIGNAL_PRIORITY
 
 try:
-    from faster_whisper import WhisperModel
+    from faster_whisper import WhisperModel  # pyright: ignore[reportMissingImports]
 except Exception:  # pragma: no cover - optional dependency
     WhisperModel = None
 
@@ -86,12 +100,15 @@ except Exception:  # pragma: no cover - optional dependency
     pyttsx3 = None
 
 try:
-    from streamlit_webrtc import RTCConfiguration as WebRtcRTCConfiguration
-    from streamlit_webrtc import WebRtcMode, webrtc_streamer
+    from streamlit_webrtc import RTCConfiguration as WebRtcRTCConfiguration  # pyright: ignore[reportMissingImports]
+    from streamlit_webrtc import WebRtcMode, webrtc_streamer  # pyright: ignore[reportMissingImports]
 
     _WEBRTC_AVAILABLE = True
 except Exception:  # pragma: no cover - optional dependency
     _WEBRTC_AVAILABLE = False
+    WebRtcRTCConfiguration = cast(Any, None)
+    WebRtcMode = cast(Any, None)
+    webrtc_streamer = cast(Any, None)
 
 STATIC_DIR = Path("static")
 DAD_AVATAR_PATH = STATIC_DIR / "dad_avatar.png"
@@ -1314,13 +1331,17 @@ def render_realtime_voice_call(bot: DadBot):
     if str(selected_device or "default") != "default":
         media_audio = {"deviceId": {"exact": str(selected_device)}}
 
-    webrtc_ctx = webrtc_streamer(
-        key="dadbot-voice-call",
-        mode=WebRtcMode.SENDRECV,
-        rtc_configuration=rtc_config,
-        media_stream_constraints={"video": False, "audio": media_audio},
-        async_processing=True,
-    )
+    try:
+        webrtc_ctx = webrtc_streamer(
+            key="dadbot-voice-call",
+            mode=WebRtcMode.SENDRECV,
+            rtc_configuration=rtc_config,
+            media_stream_constraints={"video": False, "audio": media_audio},
+            async_processing=True,
+        )
+    except Exception:
+        st.caption("WebRTC runtime unavailable in this environment; using audio input fallback.")
+        return
 
     if not (webrtc_ctx and webrtc_ctx.state.playing):
         st.caption("Click **START** above, allow microphone access, then speak naturally.")
@@ -2556,44 +2577,44 @@ def _create_placeholder_dad_image() -> bytes:
         # Create a warm, welcoming image with a color gradient
         img = Image.new("RGB", (400, 500), color=(220, 180, 140))  # Warm beige background
         draw = ImageDraw.Draw(img)
-        
+
         # Try to use a default font, fall back to default if unavailable
         try:
             title_font = ImageFont.truetype("arial.ttf", 36)
             subtitle_font = ImageFont.truetype("arial.ttf", 20)
-        except (IOError, OSError):
+        except OSError:
             title_font = ImageFont.load_default()
             subtitle_font = ImageFont.load_default()
-        
+
         # Draw a simple face representation
         # Head circle
         draw.ellipse([(80, 80), (320, 320)], fill=(240, 200, 160), outline=(200, 140, 80), width=3)
-        
+
         # Eyes
         draw.ellipse([(120, 140), (160, 180)], fill=(100, 100, 100))  # Left eye
         draw.ellipse([(240, 140), (280, 180)], fill=(100, 100, 100))  # Right eye
         draw.ellipse([(130, 150), (150, 170)], fill=(255, 255, 255))  # Left pupil highlight
         draw.ellipse([(250, 150), (270, 170)], fill=(255, 255, 255))  # Right pupil highlight
-        
+
         # Smile (arc-like)
         draw.arc([(140, 180), (260, 260)], 0, 180, fill=(100, 80, 60), width=4)
-        
+
         # Add text below
         text = "Dad's Photo"
         bbox = draw.textbbox((0, 0), text, font=title_font)
         text_width = bbox[2] - bbox[0]
         draw.text(((400 - text_width) // 2, 360), text, fill=(80, 60, 40), font=title_font)
-        
+
         subtitle = "(Ollama model needed for AI photo)"
         bbox = draw.textbbox((0, 0), subtitle, font=subtitle_font)
         text_width = bbox[2] - bbox[0]
         draw.text(((400 - text_width) // 2, 420), subtitle, fill=(120, 100, 80), font=subtitle_font)
-        
+
         # Convert to bytes
         buf = io.BytesIO()
         img.save(buf, format="PNG")
         return buf.getvalue()
-    except Exception as exc:
+    except Exception:
         logger.exception("Failed to create placeholder image")
         # Return a minimal valid 1x1 PNG as final fallback
         return base64.b64decode(
@@ -2606,7 +2627,7 @@ def generate_dad_photo():
         try:
             candidates = ["flux", "flux-dev", "flux-schnell", "sdxl", "stable-diffusion"]
             model = find_available_image_model(tuple(candidates))
-            if not model:
+            if not model or ollama is None:
                 st.info("📷 Using fallback image (install Ollama and pull 'flux' or 'sdxl' for AI-generated photos)")
                 return _create_placeholder_dad_image()
             response = ollama.generate(
@@ -3019,17 +3040,16 @@ def render_chat_tab(bot: DadBot, active_thread: dict):
         )
     if story_mode:
         story_col3.caption("Story mode is on: Dad will actively learn and correct personal facts as you talk.")
+    elif not story_password:
+        story_col3.caption(
+            "Story mode is locked until password setup. Set DADBOT_STORY_MODE_PASSWORD, restart app, then enter it here.",
+        )
+    elif lockout_remaining > 0:
+        story_col3.caption(
+            f"Story mode is temporarily locked for {lockout_remaining}s. Family/life-event learning stays active either way.",
+        )
     else:
-        if not story_password:
-            story_col3.caption(
-                "Story mode is locked until password setup. Set DADBOT_STORY_MODE_PASSWORD, restart app, then enter it here.",
-            )
-        elif lockout_remaining > 0:
-            story_col3.caption(
-                f"Story mode is temporarily locked for {lockout_remaining}s. Family/life-event learning stays active either way.",
-            )
-        else:
-            story_col3.caption("Story mode requires password activation. Family/life-event learning stays active either way.")
+        story_col3.caption("Story mode requires password activation. Family/life-event learning stays active either way.")
     dashboard = api.dashboard_status_snapshot()
     graph_fallback = dict(dashboard.get("graph_fallback") or {})
     if graph_fallback.get("active"):
@@ -3298,7 +3318,7 @@ def render_chat_tab(bot: DadBot, active_thread: dict):
             record_turn_timeline_event(
                 thread_id=str(active_thread.get("thread_id") or api.active_thread_id or "default"),
                 event_type="decision_event",
-                summary=f"gateway ingress via {str(gateway_context.get('channel') or 'chat')}",
+                summary=f"gateway ingress via {gateway_context.get('channel') or 'chat'!s}",
                 payload={"gateway": gateway_context},
             )
         policy_violation = evaluate_tool_policy_violation(controlled_prompt, allowed_tools)
@@ -3342,7 +3362,6 @@ def render_chat_tab(bot: DadBot, active_thread: dict):
                     should_end = bool(runtime_result.get("should_end", False))
                     degraded_mode = str(runtime_result.get("degraded_mode") or "normal")
                     assistant_attachments = []
-                    mood = str(runtime_result.get("mood") or "neutral")
                     thread_id = str(active_thread.get("thread_id") or api.active_thread_id or "default")
                     st.caption(
                         f"Mode: {active_mode} | Tools: {', '.join(allowed_tools) or 'none'} | Retries: {int(runtime_result.get('retry_count', 0) or 0)}"
@@ -3474,7 +3493,6 @@ def render_status_tab(bot: DadBot):
     shell = ui_shell_snapshot(bot)
     health = dashboard.get("health", {})
     relationship = dashboard.get("relationship", {})
-    living = dashboard.get("living", {})
     memory_context = dashboard.get("memory_context", {})
     prompt_guard = dashboard.get("prompt_guard", {})
     graph_fallback = dict(dashboard.get("graph_fallback") or {})
@@ -3781,7 +3799,7 @@ def render_status_tab(bot: DadBot):
 @maybe_fragment
 def render_sidebar(bot: DadBot):
     api = get_chat_event_api()
-    
+
     # Avatar section with mood-aware styling
     shell = ui_shell_snapshot(bot)
     current_mood = str(shell.get("last_mood") or "neutral").lower()
@@ -3794,7 +3812,7 @@ def render_sidebar(bot: DadBot):
         "tired": "#f39c12",
     }
     mood_color = mood_colors.get(current_mood, "#95a5a6")
-    
+
     st.markdown(
         f"<div style='text-align:center; padding:0.5rem; border-radius:12px; "
         f"background:linear-gradient(135deg, rgba({int(mood_color[1:3], 16)}, {int(mood_color[3:5], 16)}, {int(mood_color[5:7], 16)}, 0.1)); "
@@ -3802,7 +3820,7 @@ def render_sidebar(bot: DadBot):
         f"<style>@keyframes pulse {{ 0%, 100% {{ opacity:1; }} 50% {{ opacity:0.9; }} }}</style>",
         unsafe_allow_html=True,
     )
-    
+
     avatar_col, gen_col = st.columns([3, 1])
     with avatar_col:
         if DAD_AVATAR_PATH.exists():
@@ -3813,7 +3831,7 @@ def render_sidebar(bot: DadBot):
                 f"filter: drop-shadow(0 0 8px {mood_color});'>🧔</div>",
                 unsafe_allow_html=True,
             )
-    
+
     with gen_col:
         if st.button("🎨", help="Generate a new AI avatar", key="sidebar-regen-avatar", use_container_width=True):
             with st.spinner("📸"):
@@ -3829,7 +3847,7 @@ def render_sidebar(bot: DadBot):
                 DAD_AVATAR_PATH.write_bytes(_create_placeholder_dad_image())
                 st.info("Using local fallback avatar")
                 st.rerun()
-    
+
     st.markdown("</div>", unsafe_allow_html=True)
     st.caption(f"Dad is always here for you, Tony. (Currently {mood_display.lower()})")
 
@@ -4080,9 +4098,8 @@ def set_screen_mode(mode: str) -> None:
     try:
         if target == "chat":
             st.query_params["screen"] = "chat"
-        else:
-            if "screen" in st.query_params:
-                del st.query_params["screen"]
+        elif "screen" in st.query_params:
+            del st.query_params["screen"]
     except Exception:
         # Session state routing remains authoritative even if URL sync fails.
         return

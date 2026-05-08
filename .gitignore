@@ -46,6 +46,8 @@ dad_run_stderr.log
 _tmp_pytest_*.py
 .pytest_slice_output.txt
 .unittest_regression_verbose.log
+_full_suite_enforce_latest.txt
+_full_suite_enforce_verbose_latest.txt
 
 # Secrets / env
 .env

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import pytest
+
 from dadbot.core.execution_ledger import ExecutionLedger
 from dadbot.core.ledger_reader import LedgerReader
 from dadbot.core.ledger_writer import LedgerWriter
 
-import pytest
 pytestmark = pytest.mark.unit
 
 

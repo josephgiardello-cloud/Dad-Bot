@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from dadbot.uril.truth_binding import ClaimEvidenceValidator, build_synthetic_state
 from dadbot.ux_overlay import (
     ConversationContinuityEngine,
@@ -14,7 +16,6 @@ from dadbot.ux_overlay import (
     UXControlAPI,
 )
 
-import pytest
 pytestmark = pytest.mark.unit
 
 

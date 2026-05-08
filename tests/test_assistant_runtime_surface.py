@@ -3,9 +3,10 @@ from __future__ import annotations
 from datetime import datetime
 from types import SimpleNamespace
 
+import pytest
+
 from dadbot.assistant_runtime import AssistantRuntime
 
-import pytest
 pytestmark = pytest.mark.unit
 
 

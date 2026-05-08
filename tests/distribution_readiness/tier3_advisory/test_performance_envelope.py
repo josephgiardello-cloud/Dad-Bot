@@ -11,7 +11,6 @@ import pytest
 from dadbot.core.execution_context import ExecutionTraceRecorder, bind_execution_trace
 from dadbot.core.graph_context import TurnContext
 
-
 pytestmark = pytest.mark.unit
 
 # Advisory thresholds (ms) — failures here are never CI-blocking

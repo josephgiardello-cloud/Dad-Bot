@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from dadbot.core.merkle_anchor import append_leaf_and_anchor, verify_inclusion_proof
 from dadbot.services.persistence import PersistenceService
 
-import pytest
 pytestmark = pytest.mark.phase4
 
 

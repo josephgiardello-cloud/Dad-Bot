@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import pytest
+
 from dadbot.core.dadbot import DadBot
 from dadbot.core.observability import CorrelationContext
 
-import pytest
 pytestmark = pytest.mark.unit
 
 

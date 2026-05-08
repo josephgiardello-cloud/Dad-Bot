@@ -2,10 +2,11 @@ import asyncio
 import time
 from types import SimpleNamespace
 
+import pytest
+
 from dadbot.core.graph import TurnContext, TurnGraph
 from dadbot.core.nodes import TemporalNode
 
-import pytest
 pytestmark = pytest.mark.integration
 
 

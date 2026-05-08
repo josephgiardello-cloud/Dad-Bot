@@ -14,8 +14,8 @@ from pathlib import Path
 from socket import AF_INET, SO_REUSEADDR, SOCK_STREAM, SOL_SOCKET, socket
 from urllib.request import urlopen
 
-from dadbot.runtime_adapter import runtime_contract_errors
 from dadbot.runtime.supervisor import get_runtime_supervisor
+from dadbot.runtime_adapter import runtime_contract_errors
 from dadbot_system import (
     CompositeStateStore,
     DadBotOrchestrator,

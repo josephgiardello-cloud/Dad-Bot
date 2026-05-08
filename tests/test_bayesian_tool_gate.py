@@ -2,10 +2,11 @@
 
 from types import SimpleNamespace
 
+import pytest
+
 from dadbot.core.action_mixin import DadBotActionMixin
 from dadbot.services.turn_service import TurnService
 
-import pytest
 pytestmark = pytest.mark.unit
 
 

@@ -3,13 +3,14 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from dadbot.core.execution_context import ExecutionTraceRecorder, bind_execution_trace
 from dadbot.core.execution_ledger import ExecutionLedger
 from dadbot.core.ledger_writer import LedgerWriter
 from dadbot.core.session_store import SessionStore
 from dadbot.managers.conversation_persistence import ConversationPersistenceManager
 
-import pytest
 pytestmark = pytest.mark.unit
 
 

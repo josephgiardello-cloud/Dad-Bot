@@ -31,7 +31,8 @@ EXPECTED_TEST_FILES = [
 
 def _line_count(path: Path) -> int:
     try:
-        return sum(1 for _ in path.open("r", encoding="utf-8", errors="replace"))
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            return sum(1 for _ in handle)
     except Exception:
         return 0
 

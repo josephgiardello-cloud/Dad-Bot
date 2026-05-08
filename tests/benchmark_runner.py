@@ -40,10 +40,10 @@ from pathlib import Path
 from typing import Any, Literal
 
 from evaluation.coherence_engine import CoherenceEngine
+from tests.harness.graph_runner import confluence_key_for_turn
 from tests.scenario_suite import SCENARIOS, Scenario
 from tests.scoring_engine import CapabilityScore, ScoringEngine
 from tests.trace_schema import NormalizedTrace
-from tests.harness.graph_runner import confluence_key_for_turn
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +144,22 @@ class BenchmarkRunner:
         if mode == "orchestrator" and orchestrator is None:
             logger.warning("⚠️  Orchestrator mode selected but no orchestrator provided. Falling back to mock mode.")
             self.mode = "mock"
+
+    def close(self) -> None:
+        sandbox_tmp = self._sandbox_tmp
+        self._sandbox_tmp = None
+        if sandbox_tmp is None:
+            return
+        try:
+            sandbox_tmp.cleanup()
+        except Exception:
+            logger.debug("Failed to cleanup benchmark sandbox temporary directory", exc_info=True)
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
 
     @staticmethod
     def _classify_execution_error(error: str | None) -> str:
@@ -307,7 +323,7 @@ class BenchmarkRunner:
 
         return {
             "coherence_score": round(float(coherence.score), 4),
-            "coherence_penalty_count": int(len(list(coherence.penalties or []))),
+            "coherence_penalty_count": len(list(coherence.penalties or [])),
             "contradiction_detected": bool(contradiction_detected),
             "contradiction_count": int(contradiction_count),
             "contradiction_resolution": round(float(contradiction_resolution), 4),

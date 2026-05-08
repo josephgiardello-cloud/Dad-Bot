@@ -396,7 +396,7 @@ class MemoryQueryManager:
             "recent_turn_context": recent_turns,
             "personality_state": personality_state,
             "semantic_scores": semantic_scores,
-            "query_tokens": self.bot.significant_tokens(f"{str(user_input or '')} {recent_turns}"),
+            "query_tokens": self.bot.significant_tokens(f"{user_input or ''!s} {recent_turns}"),
             "graph_boost_tokens": graph_boost_tokens,
         }
 

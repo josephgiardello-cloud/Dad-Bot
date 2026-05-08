@@ -17,7 +17,7 @@ import json
 import subprocess
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -219,7 +219,7 @@ def _write_lock(lock_path: Path, grouped: dict[str, list[dict[str, str]]], repor
 
     payload.setdefault("locked_artifacts", {})["reconciliation_report"] = report_rel
     payload["reconciliation"] = {
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": datetime.now(UTC).isoformat(),
         "migration_inflation_allowlist": [
             {
                 "source": item["source"],
@@ -248,7 +248,7 @@ def main(argv: list[str] | None = None) -> int:
     grouped = _group(findings)
 
     output_payload = {
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": datetime.now(UTC).isoformat(),
         "bucket_labels": {
             "A": "real_regression",
             "B": "migration_inflation",

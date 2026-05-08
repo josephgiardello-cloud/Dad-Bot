@@ -19,13 +19,14 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from dadbot.uril.architecture import build_subsystem_health, subsystem_risk_heatmap
 from dadbot.uril.models import RepoSignal, RepoSignalBus
 from dadbot.uril.report import build_uril_report, delta_compare
 from dadbot.uril.signal_bus import SignalCollectionOptions
 from dadbot.uril.truth_binding import ClaimEvidenceValidator, build_synthetic_state, compute_receipt_chain_hash
 
-import pytest
 pytestmark = pytest.mark.unit
 
 # ---------------------------------------------------------------------------

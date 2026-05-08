@@ -26,7 +26,7 @@ class RecoveryManager:
             store.rebuild_from_ledger(events)
             snapshot = store.snapshot()
             pending = list(store.pending_jobs())
-        except Exception as exc:  # noqa: BLE001 - recovery boundary
+        except Exception as exc:
             raise StartupReconciliationError(str(exc)) from exc
 
         return {

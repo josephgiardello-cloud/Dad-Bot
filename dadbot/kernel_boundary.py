@@ -3,7 +3,6 @@ from __future__ import annotations
 from contextlib import contextmanager
 from contextvars import ContextVar
 
-
 _KERNEL_SCOPE: ContextVar[bool] = ContextVar("dadbot_kernel_scope", default=False)
 
 

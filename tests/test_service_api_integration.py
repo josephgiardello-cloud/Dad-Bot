@@ -22,7 +22,6 @@ from dadbot_system import (
 from dadbot_system.contracts import ChatResponse, WorkerResult
 from dadbot_system.security import ServiceTokenManager
 
-
 SERVICE_TOKEN_SECRET = "integration-service-token-secret"
 
 
@@ -109,6 +108,44 @@ class ImmediateResultBroker:
         return self.results.pop(0)
 
 
+class MandatoryHaltBroker(ImmediateResultBroker):
+    def enqueue(self, task):
+        self.results.append(
+            WorkerResult(
+                task_id=task.task_id,
+                session_id=task.session_id,
+                request_id=task.request.request_id,
+                status="completed",
+                session_state={
+                    "history": [{"role": "assistant", "content": "unsafe raw output"}],
+                    "planner_debug": planner_debug_factory(),
+                    "memory_store": {},
+                    "goal_alignment_mandatory_halt": True,
+                    "last_reflection_summary": {
+                        "current_risk_level": "critical",
+                        "predicted_drift_probability": 1.0,
+                    },
+                },
+                response=ChatResponse(
+                    session_id=task.session_id,
+                    request_id=task.request.request_id,
+                    reply="unsafe raw output",
+                    active_model=task.request.requested_model or "llama3.2",
+                ),
+            )
+        )
+
+
+class CountingBroker(ImmediateResultBroker):
+    def __init__(self):
+        super().__init__()
+        self.enqueue_count = 0
+
+    def enqueue(self, task):
+        self.enqueue_count += 1
+        super().enqueue(task)
+
+
 class FakeRuntimeBot:
     def __init__(self) -> None:
         self.MEMORY_STORE = {
@@ -151,6 +188,19 @@ class FakeRuntimeBot:
 
     def shutdown(self):
         return None
+
+
+class RuntimeSafetyConfiguredBot(FakeRuntimeBot):
+    def __init__(self) -> None:
+        super().__init__()
+        self.safety_support = type(
+            "SafetySupport",
+            (),
+            {
+                "settings": lambda _self: {"high_risk_phrases": ["custom crisis keyword"]},
+                "has_negated_reassurance": lambda _self, text: "not custom crisis keyword" in str(text or ""),
+            },
+        )()
 
 
 def reserve_free_port():
@@ -276,6 +326,145 @@ def test_api_turn_endpoint_blocks_until_response():
     assert payload["task"]["status"] == "completed"
     assert payload["response"]["reply"] == "Dad heard: hello from turn endpoint"
     assert payload["task"]["tenant_id"] == "family-a"
+
+
+def test_api_turn_endpoint_veto_proxy_blocks_mandatory_halt_response_and_records_intervention():
+    from fastapi.testclient import TestClient
+
+    broker = MandatoryHaltBroker()
+    orchestrator = DadBotOrchestrator(
+        broker,
+        state_store=InMemoryStateStore(),
+        planner_debug_factory=planner_debug_factory,
+    )
+    app = create_api_app(orchestrator, config=service_config())
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/sessions/veto-session/turn",
+            json={"user_input": "trigger veto", "tenant_id": "family-a", "timeout_seconds": 3},
+            headers=auth_headers(),
+        )
+
+        replay = client.get(
+            "/v1/sessions/veto-session/replay?tenant_id=family-a&event_type=hard_stop.intervention&limit=10",
+            headers=auth_headers(),
+        )
+
+    payload = response.json()
+    replay_payload = replay.json()
+    assert response.status_code == 200
+    assert payload["response"]["status"] == "blocked"
+    assert "HARD_STOP_INTERVENTION" in payload["response"]["reply"]
+    assert payload["response"]["metadata"]["service_veto_proxy"]["blocked"] is True
+    assert payload["response"]["metadata"]["service_intervention"]["reason"] == "goal_alignment_mandatory_halt"
+    assert any(
+        event["event_type"] == "hard_stop.intervention"
+        for event in payload["task"]["session_state"]["event_log"]
+    )
+    assert replay.status_code == 200
+    assert replay_payload["event_count"] == 1
+    assert replay_payload["events"][0]["event_type"] == "hard_stop.intervention"
+
+
+def test_api_turn_endpoint_sb243_safe_mode_short_circuits_crisis_registry_before_orchestration():
+    from fastapi.testclient import TestClient
+
+    broker = CountingBroker()
+    orchestrator = DadBotOrchestrator(
+        broker,
+        state_store=InMemoryStateStore(),
+        planner_debug_factory=planner_debug_factory,
+    )
+    app = create_api_app(orchestrator, config=service_config())
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/sessions/sb243-session/turn",
+            json={
+                "user_input": "I want to kill myself tonight.",
+                "tenant_id": "family-a",
+                "timeout_seconds": 3,
+            },
+            headers=auth_headers(),
+        )
+        replay = client.get(
+            "/v1/sessions/sb243-session/replay?tenant_id=family-a&event_type=hard_stop.intervention&limit=10",
+            headers=auth_headers(),
+        )
+
+    payload = response.json()
+    replay_payload = replay.json()
+    assert response.status_code == 200
+    assert payload["task"]["status"] == "blocked"
+    assert payload["response"]["status"] == "blocked"
+    assert payload["response"]["metadata"]["service_intervention"]["reason"] == "sb243_crisis_registry"
+    assert payload["response"]["metadata"]["service_intervention"]["safe_mode"] == "sb243"
+    assert "HARD_STOP_INTERVENTION" in payload["response"]["reply"]
+    assert broker.enqueue_count == 0
+    assert replay.status_code == 200
+    assert replay_payload["event_count"] == 1
+    assert replay_payload["events"][0]["event_type"] == "hard_stop.intervention"
+
+
+def test_api_turn_endpoint_sb243_safe_mode_allows_negated_reassurance_and_executes_normally():
+    from fastapi.testclient import TestClient
+
+    broker = CountingBroker()
+    orchestrator = DadBotOrchestrator(
+        broker,
+        state_store=InMemoryStateStore(),
+        planner_debug_factory=planner_debug_factory,
+    )
+    app = create_api_app(orchestrator, config=service_config())
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/sessions/sb243-negated/turn",
+            json={
+                "user_input": "I'm not suicidal, just exhausted and overwhelmed.",
+                "tenant_id": "family-a",
+                "timeout_seconds": 3,
+            },
+            headers=auth_headers(),
+        )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["task"]["status"] == "completed"
+    assert payload["response"]["status"] == "completed"
+    assert payload["response"]["reply"] == "Dad heard: I'm not suicidal, just exhausted and overwhelmed."
+    assert broker.enqueue_count == 1
+
+
+def test_api_turn_endpoint_sb243_uses_runtime_safety_configured_crisis_terms():
+    from fastapi.testclient import TestClient
+
+    broker = CountingBroker()
+    orchestrator = DadBotOrchestrator(
+        broker,
+        state_store=InMemoryStateStore(),
+        planner_debug_factory=planner_debug_factory,
+    )
+    app = create_api_app(orchestrator, config=service_config(), runtime_bot=RuntimeSafetyConfiguredBot())
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/sessions/sb243-runtime/turn",
+            json={
+                "user_input": "custom crisis keyword",
+                "tenant_id": "family-a",
+                "timeout_seconds": 3,
+            },
+            headers=auth_headers(),
+        )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["task"]["status"] == "blocked"
+    assert payload["response"]["metadata"]["service_intervention"]["reason"] == "sb243_crisis_registry"
+    assert payload["response"]["metadata"]["service_intervention"]["matched_term"] == "custom crisis keyword"
+    assert broker.enqueue_count == 0
 
 
 def test_api_replay_endpoint_returns_session_event_log():

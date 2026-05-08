@@ -1,14 +1,13 @@
 from __future__ import annotations
 
+import logging
 import uuid
 from collections import Counter
 from concurrent.futures import Future
-import logging
 
 from dadbot.contracts import DadBotContext, SupportsDadBotAccess
 from dadbot.models import BackgroundTaskRecord
 from dadbot_system import EventType
-
 
 logger = logging.getLogger(__name__)
 

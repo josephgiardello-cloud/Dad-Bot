@@ -4,7 +4,6 @@ import pytest
 
 from ci.ast_invariant_check import check_tool_sandbox_isolation
 
-
 pytestmark = pytest.mark.unit
 
 

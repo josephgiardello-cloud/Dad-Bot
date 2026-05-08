@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
-from dadbot.core._tool_sandbox import _ToolSandbox, _ToolTransaction, ToolSandboxSnapshot
+from dadbot.core._tool_sandbox import ToolSandboxSnapshot, _ToolSandbox, _ToolTransaction
 from dadbot.core.action_mixin import DadBotActionMixin
 from dadbot.core.kernel_locks import KernelToolIdempotencyRegistry
 

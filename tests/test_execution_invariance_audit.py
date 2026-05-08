@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import pytest
+
 from dadbot.core.contract_evaluator import evaluation_contract_payload
 from tools import execution_invariance_audit as audit
 
-import pytest
 pytestmark = pytest.mark.unit
 
 

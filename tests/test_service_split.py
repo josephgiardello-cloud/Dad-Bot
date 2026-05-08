@@ -3,6 +3,8 @@ import re
 from concurrent.futures import Future
 from pathlib import Path
 
+import pytest
+
 import Dad
 from Dad import DadBot
 from dadbot.core.execution_boundary import (
@@ -15,7 +17,6 @@ from dadbot.ux_overlay.runtime_entrypoint import UxOverlayRuntimeAdapter
 from dadbot_system import InMemoryEventBus, InMemoryStateStore
 from dadbot_system.state import AppStateContainer
 
-import pytest
 pytestmark = pytest.mark.integration
 
 

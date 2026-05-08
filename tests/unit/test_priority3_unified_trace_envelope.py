@@ -4,25 +4,23 @@ Tests for canonical TurnTrace object and integration.
 """
 
 import json
-import pytest
 import time
-from unittest.mock import MagicMock, patch
+
+import pytest
 
 from dadbot.core.turn_trace import (
-
-
-    TurnTrace,
+    TURN_TRACE_SCHEMA_VERSION,
     ExecutionNode,
+    NodeStatus,
+    NodeType,
     TurnInput,
     TurnOutput,
-    NodeType,
-    NodeStatus,
+    TurnTrace,
     create_turn_trace,
-    set_current_trace,
     get_current_trace,
-    record_node_to_current_trace,
     record_event_to_current_trace,
-    TURN_TRACE_SCHEMA_VERSION,
+    record_node_to_current_trace,
+    set_current_trace,
 )
 
 pytestmark = pytest.mark.unit
@@ -39,7 +37,7 @@ class TestExecutionNode:
             node_id="planner-1",
             status=NodeStatus.SUCCESS,
         )
-        
+
         assert node.node_type == NodeType.PLANNER
         assert node.node_id == "planner-1"
         assert node.status == NodeStatus.SUCCESS
@@ -53,9 +51,9 @@ class TestExecutionNode:
             duration_ms=1234.5,
             output="test response",
         )
-        
+
         data = node.to_dict()
-        
+
         assert isinstance(data, dict)
         assert data["node_type"] == "inference"
         assert data["node_id"] == "inference-1"
@@ -68,7 +66,7 @@ class TestExecutionNode:
             node_id="inference-1",
             tools_invoked=["tool_a", "tool_b"],
         )
-        
+
         assert len(node.tools_invoked) == 2
         assert "tool_a" in node.tools_invoked
 
@@ -81,7 +79,7 @@ class TestExecutionNode:
             error="Safety violation detected",
             error_type="SafetyException",
         )
-        
+
         assert node.error == "Safety violation detected"
         assert node.error_type == "SafetyException"
 
@@ -96,7 +94,7 @@ class TestTurnInput:
             text="test input",
             session_id="test-session",
         )
-        
+
         assert inp.text == "test input"
         assert inp.session_id == "test-session"
 
@@ -108,9 +106,9 @@ class TestTurnInput:
             session_id="session-1",
             metadata={"key": "value"},
         )
-        
+
         data = inp.to_dict()
-        
+
         assert data["text"] == "test"
         assert len(data["attachments"]) == 1
         assert data["metadata"]["key"] == "value"
@@ -127,7 +125,7 @@ class TestTurnOutput:
             should_end=False,
             confidence=0.95,
         )
-        
+
         assert out.response == "test response"
         assert out.should_end is False
         assert out.confidence == 0.95
@@ -139,7 +137,7 @@ class TestTurnOutput:
             should_end=False,
             recovery_fallback=True,
         )
-        
+
         assert out.recovery_fallback is True
 
 
@@ -153,7 +151,7 @@ class TestTurnTrace:
             trace_id="tr-123",
             session_id="session-1",
         )
-        
+
         assert trace.trace_id == "tr-123"
         assert trace.session_id == "session-1"
         assert not trace.completed
@@ -162,13 +160,13 @@ class TestTurnTrace:
     def test_trace_record_node(self):
         """Verify trace can record nodes."""
         trace = TurnTrace(trace_id="tr-1", session_id="s1")
-        
+
         node1 = ExecutionNode(node_type=NodeType.PLANNER, node_id="p1")
         node2 = ExecutionNode(node_type=NodeType.INFERENCE, node_id="i1")
-        
+
         trace.record_node(node1)
         trace.record_node(node2)
-        
+
         assert len(trace.nodes) == 2
         assert trace.nodes[0].node_id == "p1"
         assert trace.nodes[1].node_id == "i1"
@@ -176,13 +174,13 @@ class TestTurnTrace:
     def test_trace_record_event(self):
         """Verify trace can record events."""
         trace = TurnTrace(trace_id="tr-1")
-        
+
         event1 = {"type": "memory_updated", "key": "test"}
         event2 = {"type": "tool_invoked", "tool": "test_tool"}
-        
+
         trace.record_event(event1)
         trace.record_event(event2)
-        
+
         assert len(trace.trace_events) == 2
 
     def test_trace_finalize_computes_checksum(self):
@@ -192,13 +190,13 @@ class TestTurnTrace:
             session_id="s1",
             start_time=time.time(),
         )
-        
+
         node = ExecutionNode(node_type=NodeType.SAVE, node_id="save-1")
         trace.record_node(node)
         trace.output = TurnOutput(response="test", should_end=False)
-        
+
         trace.finalize()
-        
+
         assert trace.completed
         assert trace.checksum.startswith("chk-")
         assert len(trace.checksum) > 10
@@ -206,13 +204,13 @@ class TestTurnTrace:
     def test_trace_validates_commit_boundary(self):
         """Verify trace validates single commit boundary."""
         trace = TurnTrace(trace_id="tr-1")
-        
+
         # Add multiple save nodes
         trace.record_node(ExecutionNode(node_type=NodeType.SAVE, node_id="save-1"))
         trace.record_node(ExecutionNode(node_type=NodeType.SAVE, node_id="save-2"))
-        
+
         trace.finalize()
-        
+
         assert trace.commit_boundary_count == 2
         # Should log warning about invariant violation
 
@@ -226,10 +224,10 @@ class TestTurnTrace:
         )
         original.record_node(ExecutionNode(node_type=NodeType.PLANNER, node_id="p1"))
         original.finalize()
-        
+
         data = original.to_dict()
         restored = TurnTrace.from_dict(data)
-        
+
         assert restored.trace_id == original.trace_id
         assert restored.session_id == original.session_id
         assert restored.input.text == original.input.text
@@ -243,9 +241,9 @@ class TestTurnTrace:
             session_id="s-json",
             input=TurnInput(text="test"),
         )
-        
+
         json_str = trace.to_json()
-        
+
         assert isinstance(json_str, str)
         data = json.loads(json_str)
         assert data["trace_id"] == "tr-json"
@@ -254,12 +252,12 @@ class TestTurnTrace:
         """Verify trace is immutable after finalize."""
         trace = TurnTrace(trace_id="tr-1", start_time=time.time())
         trace.finalize()
-        
+
         node = ExecutionNode(node_type=NodeType.PLANNER, node_id="p1")
-        
+
         # Should log warning, not crash
         trace.record_node(node)
-        
+
         # Nodes should not be added
         assert len(trace.nodes) == 0
 
@@ -276,7 +274,7 @@ class TestTurnTraceFactory:
             user_input="test input",
             metadata={"key": "value"},
         )
-        
+
         assert trace.trace_id == "tr-factory"
         assert trace.session_id == "s-factory"
         assert trace.input.text == "test input"
@@ -291,36 +289,36 @@ class TestTraceContextManagement:
     def test_set_and_get_current_trace(self):
         """Verify current trace context works."""
         trace = TurnTrace(trace_id="tr-ctx")
-        
+
         set_current_trace(trace)
         retrieved = get_current_trace()
-        
+
         assert retrieved is trace
 
     def test_record_node_to_current_trace(self):
         """Verify recording to current trace context."""
         trace = TurnTrace(trace_id="tr-ctx")
         set_current_trace(trace)
-        
+
         node = ExecutionNode(node_type=NodeType.PLANNER, node_id="p1")
         record_node_to_current_trace(node)
-        
+
         assert len(trace.nodes) == 1
 
     def test_record_event_to_current_trace(self):
         """Verify recording events to current trace context."""
         trace = TurnTrace(trace_id="tr-ctx")
         set_current_trace(trace)
-        
+
         event = {"type": "test_event"}
         record_event_to_current_trace(event)
-        
+
         assert len(trace.trace_events) == 1
 
     def test_record_with_no_current_trace(self):
         """Verify recording when no trace is set doesn't crash."""
         set_current_trace(None)
-        
+
         # Should not raise
         record_node_to_current_trace(ExecutionNode(node_type=NodeType.PLANNER, node_id="p1"))
         record_event_to_current_trace({"type": "test"})
@@ -334,12 +332,12 @@ class TestTraceIntegrity:
         """Verify trace duration is computed on finalize."""
         start = time.time()
         trace = TurnTrace(trace_id="tr-1", start_time=start)
-        
+
         # Wait a bit
         time.sleep(0.01)
-        
+
         trace.finalize()
-        
+
         assert trace.duration_ms > 0
         assert trace.end_time > trace.start_time
 
@@ -349,12 +347,12 @@ class TestTraceIntegrity:
         trace1.output = TurnOutput(response="response1", should_end=False)
         trace1.finalize()
         checksum1 = trace1.checksum
-        
+
         trace2 = TurnTrace(trace_id="tr-1")
         trace2.output = TurnOutput(response="response2", should_end=False)
         trace2.finalize()
         checksum2 = trace2.checksum
-        
+
         assert checksum1 != checksum2
 
 

@@ -4,9 +4,10 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from dadbot_system.semantic_index import SQLiteSemanticIndex
 
-import pytest
 pytestmark = pytest.mark.unit
 
 

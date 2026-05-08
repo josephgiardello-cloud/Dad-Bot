@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from dadbot.config import DadBotConfig
 from dadbot.core.config_approval import ConfigApprovalWorkflow
 
-import pytest
 pytestmark = pytest.mark.phase4
 
 

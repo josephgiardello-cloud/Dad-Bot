@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from dadbot.agentic import AgenticHandler, ToolRegistry
 from dadbot.core.egress_policy import evaluate_url
 
-import pytest
 pytestmark = pytest.mark.phase4
 
 

@@ -4,8 +4,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from dadbot.contracts import AttachmentList, FinalizedTurnResult
-from dadbot.kernel_boundary import KernelBoundary
 from dadbot.core.semantic_primitives import hash as semantic_hash
+from dadbot.kernel_boundary import KernelBoundary
 
 if TYPE_CHECKING:
     from dadbot.core.control_plane import ExecutionControlPlane

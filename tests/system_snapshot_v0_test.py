@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from dadbot.core.system_identity import compute_system_snapshot_v0_hash
+from tests.harness.graph_runner import confluence_key_for_turn
 
 SNAPSHOT_DIR = Path(__file__).resolve().parents[1] / "snapshots" / "system_snapshot_v0"
 
@@ -37,7 +38,11 @@ async def test_system_snapshot_v0_gold_traces_replay(bot, monkeypatch):
     for item in traces:
         prompt = str(item.get("prompt") or "")
         expected_output = str(item.get("expected_output") or "")
-        result = await orchestrator.handle_turn(prompt, session_id="system-snapshot-v0-regression")
+        result = await orchestrator.handle_turn(
+            prompt,
+            session_id="system-snapshot-v0-regression",
+            confluence_key=confluence_key_for_turn("system-snapshot-v0-regression", prompt),
+        )
         assert str(result[0] or "") == expected_output
 
         context = getattr(orchestrator, "_last_turn_context", None)

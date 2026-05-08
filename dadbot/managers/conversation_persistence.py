@@ -8,7 +8,6 @@ import hashlib
 import json
 import os
 import pickle
-import sys
 import threading
 import time
 from datetime import datetime
@@ -16,8 +15,6 @@ from pathlib import Path
 from typing import Any
 
 from dadbot.contracts import DadBotContext, SupportsDadBotAccess
-from dadbot.core.kernel_locks import KernelReplaySequenceLock
-from dadbot.core.execution_replay_engine import verify_terminal_state_replay_equivalence
 from dadbot.core.execution_context import (
     RuntimeTraceViolation,
     active_execution_trace,
@@ -25,6 +22,8 @@ from dadbot.core.execution_context import (
     record_execution_step,
 )
 from dadbot.core.execution_ledger import WriteBoundaryGuard
+from dadbot.core.execution_replay_engine import verify_terminal_state_replay_equivalence
+from dadbot.core.kernel_locks import KernelReplaySequenceLock
 
 POLICY_TRACE_EVENT_TYPE = "PolicyTraceEvent"
 _WRITE_P95_SLO_MS = 15.0

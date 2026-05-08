@@ -191,8 +191,8 @@ def run(log_path: Path, modes: list[str], seed: int, out_path: Path) -> None:
             f"{r.get('hash_diversity_index', 'n/a'):>9}"
         )
     print(f"{'='*72}")
-    print(f"\nconsistent = snapshot_hash == replay_hash (the canonical hash fix predicate)")
-    print(f"diversity  = unique snapshot_hashes / n (higher = more stateful variation)")
+    print("\nconsistent = snapshot_hash == replay_hash (the canonical hash fix predicate)")
+    print("diversity  = unique snapshot_hashes / n (higher = more stateful variation)")
 
     # --- write json ---
     out_path.parent.mkdir(parents=True, exist_ok=True)

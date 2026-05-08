@@ -8,10 +8,10 @@ if __package__ in (None, ""):
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from ci.ast_invariant_check import run_checks as run_ast_invariant_checks
 from ci.filesystem_enforcement import run_checks as run_filesystem_checks
 from ci.import_graph_check import run_checks as run_import_graph_checks
 from ci.mutation_tracking_check import run_checks as run_mutation_checks
-from ci.ast_invariant_check import run_checks as run_ast_invariant_checks
 
 
 @dataclass(frozen=True)

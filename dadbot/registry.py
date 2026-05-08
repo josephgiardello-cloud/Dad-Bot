@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import cache
 from importlib import import_module
-from typing import Any, Callable
+from typing import Any
+
 from dadbot.kernel_boundary import KernelBoundary
 from dadbot.models import BoundaryComplianceDeclaration
 
@@ -12,10 +14,10 @@ from dadbot.models import BoundaryComplianceDeclaration
 def _invariance_contract_api() -> tuple[Any, Any, Any, Any]:
     module = import_module("dadbot.core.invariance_contract")
     return (
-        getattr(module, "build_boundary_compliance"),
-        getattr(module, "get_evaluation_contract"),
-        getattr(module, "resolve_boundary_declaration"),
-        getattr(module, "serialize_boundary_declarations"),
+        module.build_boundary_compliance,
+        module.get_evaluation_contract,
+        module.resolve_boundary_declaration,
+        module.serialize_boundary_declarations,
     )
 
 # ---------------------------------------------------------------------------

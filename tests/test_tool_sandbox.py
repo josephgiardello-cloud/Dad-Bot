@@ -1,8 +1,9 @@
 """Tests for the tool runtime test adapter: idempotency and rollback semantics."""
 
+import pytest
+
 from dadbot.core.testing.tool_runtime_test_adapter import ToolRuntimeTestAdapter
 
-import pytest
 pytestmark = pytest.mark.unit
 
 

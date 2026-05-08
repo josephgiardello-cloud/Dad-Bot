@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import pytest
+
 from dadbot.core.execution_replay_engine import (
     reconstruct_terminal_state_from_trace,
     verify_terminal_state_replay_equivalence,
 )
 
-import pytest
 pytestmark = pytest.mark.integration
 
 

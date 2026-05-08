@@ -10,12 +10,11 @@ Validates:
 """
 
 import pytest
+
 from dadbot.core.composite_friction import (
-
-
-    FrictionSignals,
-    FrictionAnalysis,
     CompositeFrictionEngine,
+    FrictionAnalysis,
+    FrictionSignals,
 )
 
 pytestmark = pytest.mark.unit
@@ -264,10 +263,10 @@ class TestConfidenceEstimation:
         engine = CompositeFrictionEngine()
         signals_weak = FrictionSignals(halt_streak=0)
         signals_strong = FrictionSignals(halt_streak=4)
-        
+
         conf_weak = engine._estimate_confidence(3, signals_weak)
         conf_strong = engine._estimate_confidence(3, signals_strong)
-        
+
         assert conf_strong > conf_weak
 
 
@@ -373,7 +372,7 @@ class TestInterventionRecommendations:
             checkpoint_stability=0.6,
         )
         analysis = engine.compute_friction(signals)
-        
+
         # With composite score high enough, recommendations should be provided
         # The engine will recommend specific interventions
         recommendation_lower = analysis.recommended_intervention.lower()
@@ -397,7 +396,7 @@ class TestFullComputationWorkflow:
             checkpoint_stability=0.95
         )
         analysis = engine.compute_friction(signals)
-        
+
         assert analysis.composite_score < 0.25
         assert analysis.risk_level == "low"
         assert analysis.should_trigger_re_synthesis is False
@@ -415,7 +414,7 @@ class TestFullComputationWorkflow:
             checkpoint_stability=0.35
         )
         analysis = engine.compute_friction(signals)
-        
+
         assert analysis.composite_score > 0.60
         assert analysis.risk_level in ["high", "critical"]
         assert analysis.should_trigger_re_synthesis is True

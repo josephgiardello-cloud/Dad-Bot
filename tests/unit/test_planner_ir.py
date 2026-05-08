@@ -3,8 +3,6 @@
 import pytest
 
 from dadbot.core.planner_ir import (
-
-
     CandidateIR,
     PlannerDecision,
     build_planner_ir,

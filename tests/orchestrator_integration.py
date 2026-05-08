@@ -14,8 +14,8 @@ from typing import Any
 
 from dadbot.core.graph import TurnContext
 from dadbot.core.orchestrator import DadBotOrchestrator
-from tests.scenario_suite import SCENARIOS, Scenario
 from tests.harness.graph_runner import confluence_key_for_turn
+from tests.scenario_suite import SCENARIOS, Scenario
 
 logger = logging.getLogger(__name__)
 

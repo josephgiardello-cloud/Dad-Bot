@@ -68,7 +68,7 @@ def _apply_model_override(bot: Any, target_model: str) -> tuple[bool, str]:
         if config is not None and hasattr(config, "apply_profile_llm_settings"):
             provider = str(getattr(config, "llm_provider", "") or getattr(bot, "LLM_PROVIDER", "ollama"))
             config.apply_profile_llm_settings(provider, target_model)
-        setattr(bot, "LLM_MODEL", target_model)
+        bot.LLM_MODEL = target_model
         model_overridden = True
     except Exception:
         logger.debug("Could not apply model override %s", target_model, exc_info=True)
@@ -84,7 +84,7 @@ def _restore_model_override(bot: Any, previous_model: str, model_overridden: boo
         if config is not None and hasattr(config, "apply_profile_llm_settings"):
             provider = str(getattr(config, "llm_provider", "") or getattr(bot, "LLM_PROVIDER", "ollama"))
             config.apply_profile_llm_settings(provider, previous_model)
-        setattr(bot, "LLM_MODEL", previous_model)
+        bot.LLM_MODEL = previous_model
     except Exception:
         logger.debug("Could not restore previous model %s", previous_model, exc_info=True)
 

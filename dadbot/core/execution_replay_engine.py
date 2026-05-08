@@ -1,18 +1,18 @@
 from __future__ import annotations
 
-import hashlib
 import builtins
+import hashlib
 import json
 from collections.abc import Mapping
 from typing import Any
 
 from dadbot.core.canonical_execution_reducer import reduce_official_execution_state
-from dadbot.core.execution_memory_view import ExecutionMemoryView
 from dadbot.core.execution_context import (
     build_tool_invocation_projection,
     canonicalize_execution_trace_context,
     derive_execution_trace_hash,
 )
+from dadbot.core.execution_memory_view import ExecutionMemoryView
 
 _MODEL_OUTPUT_OPERATIONS = frozenset({"model_output"})
 

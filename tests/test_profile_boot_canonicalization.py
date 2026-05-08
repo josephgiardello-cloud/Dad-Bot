@@ -3,9 +3,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from dadbot.core.boot_mixin import DadBotBootMixin
 
-import pytest
 pytestmark = pytest.mark.unit
 
 

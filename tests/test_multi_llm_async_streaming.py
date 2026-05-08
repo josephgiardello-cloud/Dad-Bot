@@ -1,8 +1,9 @@
 import asyncio
 
+import pytest
+
 import dadbot.managers.runtime_client as runtime_client_module
 
-import pytest
 pytestmark = pytest.mark.integration
 
 

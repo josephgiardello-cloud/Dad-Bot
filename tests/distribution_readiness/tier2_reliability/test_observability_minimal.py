@@ -8,11 +8,10 @@ import pytest
 
 from dadbot.core.execution_context import (
     ExecutionTraceRecorder,
-    bind_execution_trace,
     active_execution_trace,
+    bind_execution_trace,
     record_execution_step,
 )
-
 
 pytestmark = pytest.mark.unit
 

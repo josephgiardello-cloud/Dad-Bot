@@ -4,9 +4,10 @@ import io
 import json
 from contextlib import redirect_stdout
 
+import pytest
+
 from tools import repo_phase4_auditor
 
-import pytest
 pytestmark = pytest.mark.phase4
 
 

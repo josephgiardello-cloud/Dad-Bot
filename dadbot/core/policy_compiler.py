@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 from dadbot.core.semantic_primitives import evaluate_policy
 from dadbot.core.semantic_primitives import hash as semantic_hash
@@ -69,11 +70,11 @@ class SemanticDecision:
     degraded: bool = False
 
     @staticmethod
-    def allow(*, degraded: bool = False) -> "SemanticDecision":
+    def allow(*, degraded: bool = False) -> SemanticDecision:
         return SemanticDecision(action="allow", reason="allow", degraded=bool(degraded))
 
     @staticmethod
-    def deny(reason: str) -> "SemanticDecision":
+    def deny(reason: str) -> SemanticDecision:
         return SemanticDecision(action="deny", reason=str(reason or "policy_block"), degraded=False)
 
 
@@ -555,13 +556,13 @@ class PolicyCompiler:
 
 
 __all__ = [
-    "PolicyCompiler",
     "PolicyCompilationError",
+    "PolicyCompiler",
     "PolicyDecision",
     "PolicyEquivalenceProof",
-    "SemanticDecision",
     "PolicyIntentGraph",
     "PolicyPlan",
     "PolicyRuleEvaluation",
     "PolicyStep",
+    "SemanticDecision",
 ]

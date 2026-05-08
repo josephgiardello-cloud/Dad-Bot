@@ -6,7 +6,6 @@ import pytest
 
 from dadbot.managers.runtime_interface import RuntimeInterfaceManager
 
-
 pytestmark = pytest.mark.unit
 
 

@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import pytest
+
 from dadbot.core.contract_evaluator import (
     ContractNode,
     ContractPropagationMap,
     build_dadbot_contract_map,
 )
 
-import pytest
 pytestmark = pytest.mark.phase4
 
 # ---------------------------------------------------------------------------

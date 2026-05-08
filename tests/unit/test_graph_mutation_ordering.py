@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import pytest
+
 from dadbot.core.graph_mutation import MutationIntent, MutationQueue
 
-import pytest
 pytestmark = pytest.mark.unit
 
 

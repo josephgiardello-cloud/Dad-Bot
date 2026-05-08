@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+
 from dadbot.core.execution_ledger import ExecutionLedger
 
 pytestmark = pytest.mark.unit

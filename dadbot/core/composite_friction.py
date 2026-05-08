@@ -19,8 +19,6 @@ Design Principle:
 """
 
 from dataclasses import dataclass, field
-from typing import Optional
-from datetime import datetime
 
 
 @dataclass
@@ -55,7 +53,7 @@ class FrictionAnalysis:
     should_trigger_re_synthesis: bool = False
     individual_signals: dict = field(default_factory=dict)
     confidence: float = 0.0
-    primary_friction_factor: Optional[str] = None
+    primary_friction_factor: str | None = None
     recommended_intervention: str = ""
 
 
@@ -188,7 +186,7 @@ class CompositeFrictionEngine:
 
     # ============ Signal Scoring Methods ============
 
-    def _score_halt_streak(self, streak: int) -> Optional[float]:
+    def _score_halt_streak(self, streak: int) -> float | None:
         """
         Score halt streak: 1-2 halts is normal, >3 is friction.
         
@@ -202,7 +200,7 @@ class CompositeFrictionEngine:
             return 0.6  # 3-4 halts: moderate-high friction
         return 1.0  # 5+ halts: critical friction
 
-    def _score_recovery_effectiveness(self, success_rate: float) -> Optional[float]:
+    def _score_recovery_effectiveness(self, success_rate: float) -> float | None:
         """
         Score recovery effectiveness: high success rate is good.
         
@@ -217,7 +215,7 @@ class CompositeFrictionEngine:
             return 0.7  # 40-60%: high friction
         return 1.0  # <40%: critical friction
 
-    def _score_topic_drift_frequency(self, drift_freq: float) -> Optional[float]:
+    def _score_topic_drift_frequency(self, drift_freq: float) -> float | None:
         """
         Score topic drift frequency against baseline.
         
@@ -234,7 +232,7 @@ class CompositeFrictionEngine:
             return 0.7  # Elevated: high friction
         return 1.0  # Very high: critical friction
 
-    def _score_session_exhaustion(self, turn_count: int) -> Optional[float]:
+    def _score_session_exhaustion(self, turn_count: int) -> float | None:
         """
         Score session exhaustion: very long sessions accumulate fatigue.
         
@@ -249,7 +247,7 @@ class CompositeFrictionEngine:
             return 0.7  # Significant exhaustion
         return 1.0  # Severe exhaustion
 
-    def _score_pattern_recurrence(self, pattern_count: int) -> Optional[float]:
+    def _score_pattern_recurrence(self, pattern_count: int) -> float | None:
         """
         Score recurring drift patterns.
         
@@ -264,7 +262,7 @@ class CompositeFrictionEngine:
             return 0.6  # Two patterns: fragmented friction
         return 1.0  # 3+ patterns: complex friction environment
 
-    def _score_checkpoint_stability(self, stability: float) -> Optional[float]:
+    def _score_checkpoint_stability(self, stability: float) -> float | None:
         """
         Score checkpoint stability: unstable state = higher friction.
         
@@ -337,7 +335,7 @@ class CompositeFrictionEngine:
     def _recommend_intervention(
         self,
         composite_score: float,
-        primary_factor: Optional[str],
+        primary_factor: str | None,
         signals: FrictionSignals,
     ) -> str:
         """

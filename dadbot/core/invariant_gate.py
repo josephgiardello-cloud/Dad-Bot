@@ -11,9 +11,9 @@ Rule: invariant failures HARD FAIL execution â€” they never log-and-continu
 from __future__ import annotations
 
 import enum
-import time
 import hashlib
 import json
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -679,7 +679,7 @@ def execution_state_check(decision: Any) -> Any:
     Returns a failed InvariantCheck if post-execution states are not equivalent.
     Wire with: enforce_invariant(execution_state_check(decision), InvariantSeverity.CRITICAL)
     """
-    from dadbot.core.invariant_engine import InvariantCheck  # noqa: PLC0415
+    from dadbot.core.invariant_engine import InvariantCheck
     if getattr(decision, "equivalent", True):
         return InvariantCheck(passed=True)
     violations = list(getattr(decision, "violations", []) or [])
@@ -695,7 +695,7 @@ def causal_structure_check(decision: Any) -> Any:
     Returns a failed InvariantCheck if 'causal_structure' appears in violations.
     Wire with: enforce_invariant(causal_structure_check(decision), InvariantSeverity.CRITICAL)
     """
-    from dadbot.core.invariant_engine import InvariantCheck  # noqa: PLC0415
+    from dadbot.core.invariant_engine import InvariantCheck
     violations = list(getattr(decision, "violations", []) or [])
     if "causal_structure" not in violations:
         return InvariantCheck(passed=True)
@@ -711,7 +711,7 @@ def ledger_lifecycle_check(events: list[dict[str, Any]]) -> Any:
     Validates job_started → job_completed ordering and no duplicate terminal states.
     Wire with: enforce_invariant(ledger_lifecycle_check(events), InvariantSeverity.CRITICAL)
     """
-    from dadbot.core.invariant_engine import InvariantCheck  # noqa: PLC0415
+    from dadbot.core.invariant_engine import InvariantCheck
     started: set[str] = set()
     terminal: set[str] = set()
     for event in events:
@@ -750,7 +750,7 @@ def lease_ownership_check(
     Returns a failed InvariantCheck if a different owner holds the lease.
     Wire with: enforce_invariant(lease_ownership_check(...), InvariantSeverity.CRITICAL)
     """
-    from dadbot.core.invariant_engine import InvariantCheck  # noqa: PLC0415
+    from dadbot.core.invariant_engine import InvariantCheck
     if actual_owner is None or actual_owner == str(requested_owner or ""):
         return InvariantCheck(passed=True)
     return InvariantCheck(

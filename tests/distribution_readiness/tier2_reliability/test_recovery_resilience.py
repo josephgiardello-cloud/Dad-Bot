@@ -9,7 +9,6 @@ import pytest
 from dadbot.core.graph_context import TurnContext
 from dadbot.core.graph_types import StageTrace
 
-
 pytestmark = pytest.mark.unit
 
 

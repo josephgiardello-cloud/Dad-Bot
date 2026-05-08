@@ -19,8 +19,8 @@ from .contracts import (
     WorkerTask,
     normalize_tenant_id,
 )
-from .state import AppStateContainer, InMemoryStateStore, NamespacedStateStore, StateStore
 from .runtime_signals import start_span
+from .state import AppStateContainer, InMemoryStateStore, NamespacedStateStore, StateStore
 
 logger = logging.getLogger(__name__)
 

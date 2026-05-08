@@ -9,19 +9,18 @@ Validates:
 - ReflectionSummary synthesis
 """
 
-import pytest
-import tempfile
 import json
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
+import pytest
+
 from dadbot.core.reflection_ir import (
-
-
-    DriftEpisode,
     BehavioralPattern,
-    ReflectionSummary,
+    DriftEpisode,
     DriftReflectionEngine,
+    ReflectionSummary,
 )
 
 pytestmark = pytest.mark.unit
@@ -127,7 +126,7 @@ class TestDriftReflectionEngineNoLedger:
         """Test engine initialization without ledger."""
         engine = DriftReflectionEngine(ledger_path=None)
         summary = engine.analyze_ledger()
-        
+
         assert summary.current_risk_level == "low"
         assert summary.predicted_drift_probability == 0.0
         assert summary.confidence_score == 0.0
@@ -136,7 +135,7 @@ class TestDriftReflectionEngineNoLedger:
         """Test engine gracefully handles missing ledger file."""
         engine = DriftReflectionEngine(ledger_path="/nonexistent/path/ledger.jsonl")
         summary = engine.analyze_ledger()
-        
+
         assert summary.current_risk_level == "low"
         assert summary.confidence_score == 0.1
 
@@ -407,7 +406,7 @@ class TestPatternSummary:
     def test_get_pattern_summary(self):
         """Test pattern summary generation."""
         engine = DriftReflectionEngine()
-        
+
         # Add some patterns
         pattern1 = BehavioralPattern(
             pattern_id="pattern1",

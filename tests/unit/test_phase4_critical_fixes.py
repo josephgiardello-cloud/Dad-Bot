@@ -11,30 +11,28 @@ This module validates fixes for:
 All tests should pass with the applied fixes.
 """
 
-import pytest
 import time
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from unittest.mock import Mock
-from typing import Any
+
+import pytest
 
 from dadbot.core.policy_compiler import PolicyCompiler, PolicyIntentGraph, PolicyStep
 from dadbot.core.tool_ir import (
-    build_execution_event,
-    reduce_events_to_results,
-    normalize_tool_results,
-    ToolEventLog,
     ToolEvent,
+    ToolEventLog,
     ToolEventType,
+    build_execution_event,
+    normalize_tool_results,
+    reduce_events_to_results,
 )
 from dadbot.core.turn_ir import (
-
-
+    _obj_to_dict,
     build_policy_input,
     build_policy_view,
     hash_eval_input,
-    prove_policy_view_bijection,
     projection_cache,
-    _obj_to_dict,
+    prove_policy_view_bijection,
 )
 
 pytestmark = pytest.mark.unit

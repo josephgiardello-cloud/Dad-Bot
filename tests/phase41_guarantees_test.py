@@ -23,6 +23,7 @@ from dadbot.core.nodes import (
     dispatch_registered_tool,
 )
 from dadbot.core.orchestrator import DadBotOrchestrator
+from tests.harness.graph_runner import confluence_key_for_turn
 
 
 @pytest.fixture
@@ -58,7 +59,11 @@ def _fast_stubs(orchestrator: DadBotOrchestrator, monkeypatch):
 
 
 async def _run(orchestrator: DadBotOrchestrator, text: str, sid: str) -> tuple[tuple[str | None, bool], TurnContext]:
-    result = await orchestrator.handle_turn(text, session_id=sid)
+    result = await orchestrator.handle_turn(
+        text,
+        session_id=sid,
+        confluence_key=confluence_key_for_turn(sid, text),
+    )
     ctx = getattr(orchestrator, "_last_turn_context", None)
     assert isinstance(ctx, TurnContext)
     return result, ctx
@@ -154,7 +159,7 @@ def test_deterministic_arbitration_resolution_stable(orchestrator: DadBotOrchest
         return
     # Current runtime path may not materialize delegation arbitration metadata;
     # retain determinism coverage by requiring stable final output identity.
-    assert str((c1.state.get("safe_result") or "")) == str((c2.state.get("safe_result") or ""))
+    assert str(c1.state.get("safe_result") or "") == str(c2.state.get("safe_result") or "")
 
 
 def test_depth_guard_propagates_in_nested_delegation(orchestrator: DadBotOrchestrator, monkeypatch):

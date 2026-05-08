@@ -5,9 +5,10 @@ from __future__ import annotations
 from datetime import date, datetime
 from types import SimpleNamespace
 
+import pytest
+
 from dadbot.managers.memory_coordination import MemoryCoordinator
 
-import pytest
 pytestmark = pytest.mark.unit
 
 

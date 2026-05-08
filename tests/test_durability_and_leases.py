@@ -274,7 +274,7 @@ class TestBootReconcile:
         cp.save(label="corrupted")
         with cp._lock:
             cp._checkpoints[-1]["replay_hash"] = "corrupted-hash"
-        
+
         # assert_resume_at_head should detect corruption
         with pytest.raises(Exception):
             cp.assert_resume_at_head()
@@ -326,8 +326,6 @@ class TestLeaseSchedulerIntegration:
     def test_lease_conflict_requeues_and_eventually_executes(self):
         """If lease is held by another worker, job is re-queued and retried."""
         from dadbot.core.control_plane import (
-
-
             ExecutionControlPlane,
             SessionRegistry,
         )
