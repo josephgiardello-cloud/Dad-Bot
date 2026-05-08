@@ -155,12 +155,52 @@ class TestLiveArchitectureCycleEnforcement:
             f"  {src} → {dst}" for src, dst in violations
         )
 
-    def test_live_graph_loads_without_error(self):
-        """_build_graph must complete without throwing."""
-        cycles = detect_cycles()  # triggers _build_graph() internally
-        # We don't assert zero cycles (complex software may have allowed ones)
-        # We just assert the function completes and returns a list
-        assert isinstance(cycles, list)
+    def test_no_new_cycles_beyond_known_set(self):
+        """detect_cycles must return only documented cycles — never new ones.
+
+        Each entry in KNOWN_MODULE_CYCLES is a frozenset of module names that
+        form a tracked mutual-import cycle.  If detect_cycles() returns a cycle
+        that is not a subset of any known entry, a new undocumented cycle was
+        introduced and must be either resolved or explicitly added here.
+        """
+        # Documented intra-package cycles — tracked but not yet resolved.
+        # Add new entries here only after a deliberate architectural decision.
+        KNOWN_MODULE_CYCLES: frozenset[frozenset[str]] = frozenset(
+            {
+                frozenset(
+                    {"dadbot.core.invariant_engine", "dadbot.core.invariant_gate"}
+                ),
+                frozenset(
+                    {"dadbot.core.policy_compiler", "dadbot.core.semantic_primitives"}
+                ),
+                frozenset(
+                    {"dadbot.core.control_plane", "dadbot.core.kernel_gateway"}
+                ),
+                frozenset(
+                    {
+                        "dadbot.core.graph",
+                        "dadbot.core.graph_pipeline_nodes",
+                        "dadbot.core.nodes",
+                    }
+                ),
+                frozenset(
+                    {"dadbot.memory.graph_manager", "dadbot.memory.manager"}
+                ),
+            }
+        )
+
+        cycles = detect_cycles()
+        new_cycles = [
+            sorted(cycle)
+            for cycle in cycles
+            if not any(frozenset(cycle) <= known for known in KNOWN_MODULE_CYCLES)
+        ]
+
+        assert new_cycles == [], (
+            "New undocumented cycles detected in live architecture:\n"
+            + "\n".join(f"  {' <-> '.join(c)}" for c in new_cycles)
+            + "\n\nTo accept these cycles, add them to KNOWN_MODULE_CYCLES above."
+        )
 
     def test_forbidden_edge_list_is_defined(self):
         assert isinstance(FORBIDDEN_IMPORT_EDGES, list)
