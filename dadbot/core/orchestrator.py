@@ -8,17 +8,19 @@ import logging
 import os
 import platform
 from importlib import metadata as importlib_metadata
-from collections.abc import Awaitable
 from typing import Any, cast
 
 from dadbot.contracts import AttachmentList, FinalizedTurnResult
 from dadbot.core import shadow_mode as _shadow_mode
+from dadbot.core.composite_friction import CompositeFrictionEngine, FrictionSignals
 from dadbot.core.control_plane import (
     ExecutionControlPlane,
     ExecutionJob,
     SessionRegistry,
 )
-from dadbot.core.execution_contract import TurnDelivery, TurnResponse, live_turn_request
+from dadbot.core.execution_binder import TraceBinder
+from dadbot.core.execution_terminal_state import build_execution_terminal_state
+from dadbot.core.goal_resynthesis import GoalRecalibrationEngine
 from dadbot.core.graph import TurnGraph
 from dadbot.core.graph_context import TurnContext
 from dadbot.core.interfaces import (
@@ -28,24 +30,22 @@ from dadbot.core.interfaces import (
 )
 from dadbot.core.job_builder import JobBuilder
 from dadbot.core.persistence.base import CheckpointNotFoundError
-from dadbot.core.execution_binder import TraceBinder
-from dadbot.core.execution_terminal_state import build_execution_terminal_state
 from dadbot.core.reflection_ir import DriftReflectionEngine
-from dadbot.core.composite_friction import CompositeFrictionEngine, FrictionSignals
-from dadbot.core.goal_resynthesis import GoalRecalibrationEngine
 from dadbot.core.runtime_errors import (
+    NON_FATAL_RUNTIME_EXCEPTIONS,
     ExecutionStageError,
     InvariantViolation,
-    NON_FATAL_RUNTIME_EXCEPTIONS,
-    RuntimeExecutionError,
 )
 from dadbot.registry import ServiceRegistry, boot_registry
 
 logger = logging.getLogger(__name__)
 
 
-class DeterminismViolation(RuntimeError):
+class DeterminismViolationError(RuntimeError):
     """Retained for import compatibility with existing test files."""
+
+
+DeterminismViolation = DeterminismViolationError
 
 
 def _stable_sha256(payload: dict[str, Any]) -> str:
@@ -133,12 +133,15 @@ class DadBotOrchestrator:
                 runtime_flag = getattr(runtime_config, "goal_alignment_guard_enabled", None)
                 if runtime_flag is not None:
                     return bool(runtime_flag)
-        return bool(str(os.environ.get("DADBOT_GOAL_ALIGNMENT_GUARD_ENABLED", "1")).strip().lower() not in {"0", "false", "no", "off"})
+        return bool(
+            str(os.environ.get("DADBOT_GOAL_ALIGNMENT_GUARD_ENABLED", "1")).strip().lower()
+            not in {"0", "false", "no", "off"}
+        )
 
     def _resolve_ledger_path(self, session_id: str) -> str | None:
         """
         Resolve the path to relational_ledger.jsonl for the given session.
-        
+
         Returns:
             Full path to ledger, or None if session log directory cannot be resolved.
         """
@@ -157,7 +160,7 @@ class DadBotOrchestrator:
     def _analyze_behavioral_reflection(self, session_id: str, context: TurnContext) -> None:
         """
         Analyze behavioral patterns from the relational ledger and attach reflection summary to context.
-        
+
         This enriches context.state with reflection data for use in HUD rendering and adaptive interventions.
         """
         ledger_path = self._resolve_ledger_path(session_id)
@@ -169,7 +172,7 @@ class DadBotOrchestrator:
             self._reflection_engine.ledger_path = ledger_path
             reflection_summary = self._reflection_engine.analyze_ledger()
             evidence_graph = self._reflection_engine.get_evidence_graph_snapshot(max_edges=12)
-            
+
             # Store reflection summary in context for downstream use
             context.state["reflection_summary"] = {
                 "current_risk_level": reflection_summary.current_risk_level,
@@ -180,8 +183,16 @@ class DadBotOrchestrator:
                 "confidence_score": reflection_summary.confidence_score,
                 "observable_signals": reflection_summary.observable_signals,
                 "recent_episode_count": reflection_summary.recent_episode_count,
-                "primary_pattern_name": reflection_summary.primary_pattern.pattern_name if reflection_summary.primary_pattern else None,
-                "primary_pattern_confidence": reflection_summary.primary_pattern.confidence if reflection_summary.primary_pattern else 0.0,
+                "primary_pattern_name": (
+                    reflection_summary.primary_pattern.pattern_name
+                    if reflection_summary.primary_pattern
+                    else None
+                ),
+                "primary_pattern_confidence": (
+                    reflection_summary.primary_pattern.confidence
+                    if reflection_summary.primary_pattern
+                    else 0.0
+                ),
                 "evidence_graph": evidence_graph,
             }
         except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
@@ -382,7 +393,7 @@ class DadBotOrchestrator:
         context.metadata["determinism"] = determinism
         context.metadata["determinism_manifest"] = dict(manifest)
 
-    def _update_session_state_after_turn(
+    def _update_session_state_after_turn(  # noqa: C901
         self,
         session: dict[str, Any],
         context: TurnContext,
@@ -418,7 +429,6 @@ class DadBotOrchestrator:
                     if goal_id:
                         seen_ids.add(goal_id)
         typed_state["goals"] = persisted_goals
-        final_output = str(result[0] if isinstance(result, tuple) else result or "")
         terminal_state = build_execution_terminal_state(
             context,
             finalized_result=result,
@@ -482,8 +492,12 @@ class DadBotOrchestrator:
             session_goals = session_state.get("goals")
             if isinstance(session_goals, list):
                 context.state["session_goals"] = list(session_goals)
-            context.state["goal_alignment_diversion_streak"] = int(session_state.get("goal_alignment_diversion_streak") or 0)
-            context.state["goal_alignment_mandatory_halt"] = bool(session_state.get("goal_alignment_mandatory_halt", False))
+            context.state["goal_alignment_diversion_streak"] = int(
+                session_state.get("goal_alignment_diversion_streak") or 0
+            )
+            context.state["goal_alignment_mandatory_halt"] = bool(
+                session_state.get("goal_alignment_mandatory_halt", False)
+            )
         context.state["goal_alignment_guard_enabled"] = self._goal_alignment_guard_enabled()
         if not context.trace_id:
             raise InvariantViolation("TurnContext.trace_id must be non-empty")
@@ -598,7 +612,7 @@ class DadBotOrchestrator:
         timeout_seconds: float | None = None,
     ) -> FinalizedTurnResult:
         """Canonical async turn entry-point: all paths converge through control plane.
-        
+
         This is the single authoritative execution path. No shortcuts or delegation branches.
         Every request produces: (1) complete ordered trace, (2) exactly one commit boundary.
         """

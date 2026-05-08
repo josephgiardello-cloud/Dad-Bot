@@ -121,12 +121,12 @@ class FileWALLedgerBackend(LedgerBackend):
                 return []
             events: list[dict[str, Any]] = []
             with open(self._path, encoding="utf-8") as handle:
-                for line_number, raw in enumerate(handle, start=1):
-                    raw = raw.strip()
-                    if not raw:
+                for line_number, raw_line in enumerate(handle, start=1):
+                    line = raw_line.strip()
+                    if not line:
                         continue
                     try:
-                        events.append(json.loads(raw))
+                        events.append(json.loads(line))
                     except json.JSONDecodeError as exc:
                         # Tolerate a partial write at the tail â€” skip and continue.
                         import warnings

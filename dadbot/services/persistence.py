@@ -1,18 +1,18 @@
 from __future__ import annotations
 
-import contextlib
 import concurrent.futures
+import contextlib
 import hashlib
 import json
 import logging
 import os
 import time
 import uuid
-from datetime import datetime
-from pathlib import Path
+from collections.abc import Iterable
 from copy import deepcopy
 from dataclasses import asdict, dataclass
-from collections.abc import Iterable
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from dadbot.core.capability_audit_runner import (
@@ -24,22 +24,21 @@ from dadbot.core.execution_context import (
     RuntimeTraceViolation,
     ensure_execution_trace_root,
 )
-from dadbot.core.kernel_locks import KernelEventTotalityLock
-from dadbot.core.kernel_mutation_gate import apply_event, emit_event
 from dadbot.core.graph import (
     FatalTurnError,
     LedgerMutationOp,
-    MemoryMutationOp,
     MutationIntent,
     MutationKind,
 )
+from dadbot.core.kernel_locks import KernelEventTotalityLock
+from dadbot.core.kernel_mutation_gate import apply_event, emit_event
 from dadbot.core.merkle_anchor import append_leaf_and_anchor
 from dadbot.core.persistence import AbstractCheckpointer
 from dadbot.core.post_commit_events import PostCommitEvent
 from dadbot.core.runtime_errors import (
+    NON_FATAL_RUNTIME_EXCEPTIONS,
     ExecutionStageError,
     InvariantViolation,
-    NON_FATAL_RUNTIME_EXCEPTIONS,
     PersistenceFailure,
 )
 from dadbot.managers.conversation_persistence import ConversationPersistenceManager
@@ -246,7 +245,11 @@ class PersistenceService:
         # Drift = strong prior topic context with no lexical overlap on this turn.
         topic_drift_detected = bool(recent_topics) and bool(query_tokens) and not bool(overlap)
 
-        trust_level = float(getattr(runtime, "trust_level", lambda: 50)() if callable(getattr(runtime, "trust_level", None)) else 50)
+        trust_level = float(
+            getattr(runtime, "trust_level", lambda: 50)()
+            if callable(getattr(runtime, "trust_level", None))
+            else 50
+        )
         trust_credit = round(max(0.0, min(1.0, trust_level / 100.0)), 3)
         return RelationalState(
             trust_credit=trust_credit,
@@ -352,8 +355,7 @@ class PersistenceService:
             if not goal_tokens:
                 continue
             overlap = len(query_tokens & goal_tokens) / float(len(query_tokens))
-            if overlap > best_overlap:
-                best_overlap = overlap
+            best_overlap = max(best_overlap, overlap)
         return round(max(0.0, min(1.0, best_overlap)), 3)
 
     @staticmethod
@@ -482,7 +484,7 @@ class PersistenceService:
             },
         )
 
-    def _walk_authority_state_diff(
+    def _walk_authority_state_diff(  # noqa: PLR0913
         self,
         path: str,
         projected: Any,
@@ -523,7 +525,7 @@ class PersistenceService:
                 event_sourced=event_sourced,
             )
 
-    def _walk_authority_state_dict(
+    def _walk_authority_state_dict(  # noqa: PLR0913
         self,
         path: str,
         projected: dict[Any, Any],
@@ -567,7 +569,7 @@ class PersistenceService:
                 missing=missing,
             )
 
-    def _walk_authority_state_list(
+    def _walk_authority_state_list(  # noqa: PLR0913
         self,
         path: str,
         projected: list[Any],
@@ -725,14 +727,18 @@ class PersistenceService:
             "event_sourced_hash": event_hash,
             "difference_count": len(diffs),
             "differences": diffs,
-            "repair_hint": "Replay trace from ledger, regenerate projection from event state, then re-run SaveNode commit.",
+            "repair_hint": (
+                "Replay trace from ledger, regenerate projection from event state, "
+                "then re-run SaveNode commit."
+            ),
         }
         state = getattr(turn_context, "state", None)
         if isinstance(state, dict):
             state["memory_authority_check"] = dict(report)
 
         logger.error(
-            "State divergence detected at SaveNode boundary (trace_id=%s, projected_hash=%s, event_hash=%s, differences=%d)",
+            "State divergence detected at SaveNode boundary "
+            "(trace_id=%s, projected_hash=%s, event_hash=%s, differences=%d)",
             trace_id,
             projected_hash,
             event_hash,
@@ -1147,7 +1153,14 @@ class PersistenceService:
                 exc,
             )
 
-    def _dispatch_graph_mutation_intent(self, runtime: Any, turn_context: Any, *, payload: dict[str, Any], source: str) -> None:
+    def _dispatch_graph_mutation_intent(
+        self,
+        runtime: Any,
+        turn_context: Any,
+        *,
+        payload: dict[str, Any],
+        source: str,
+    ) -> None:
         memory_manager = getattr(runtime, "memory_manager", None)
         graph_manager = getattr(memory_manager, "graph_manager", None) if memory_manager else None
         if graph_manager is None:
@@ -1177,10 +1190,22 @@ class PersistenceService:
             LedgerMutationOp.RECORD_TURN_STATE.value: lambda: self._ledger_op_record_turn_state(runtime, payload),
             LedgerMutationOp.SYNC_THREAD_SNAPSHOT.value: lambda: self._ledger_op_sync_thread_snapshot(runtime, payload),
             LedgerMutationOp.CLEAR_TURN_CONTEXT.value: lambda: self._ledger_op_clear_turn_context(runtime, payload),
-            LedgerMutationOp.SCHEDULE_MAINTENANCE.value: lambda: self._ledger_op_schedule_maintenance(runtime, payload, service),
+            LedgerMutationOp.SCHEDULE_MAINTENANCE.value: lambda: self._ledger_op_schedule_maintenance(
+                runtime,
+                payload,
+                service,
+            ),
             LedgerMutationOp.HEALTH_SNAPSHOT.value: lambda: self._ledger_op_health_snapshot(runtime, service),
-            LedgerMutationOp.POLICY_TRACE_EVENT.value: lambda: self._ledger_op_policy_trace_event(runtime, turn_context, payload),
-            LedgerMutationOp.CAPABILITY_AUDIT_EVENT.value: lambda: self._ledger_op_capability_audit_event(runtime, turn_context, payload),
+            LedgerMutationOp.POLICY_TRACE_EVENT.value: lambda: self._ledger_op_policy_trace_event(
+                runtime,
+                turn_context,
+                payload,
+            ),
+            LedgerMutationOp.CAPABILITY_AUDIT_EVENT.value: lambda: self._ledger_op_capability_audit_event(
+                runtime,
+                turn_context,
+                payload,
+            ),
         }
         handler = handlers.get(op)
         if handler is None:
@@ -1236,12 +1261,13 @@ class PersistenceService:
             return
 
         service = self.turn_service
-        dispatch = lambda intent: self._dispatch_mutation_intent(
-            runtime,
-            turn_context,
-            service,
-            intent,
-        )
+        def dispatch(intent: Any) -> None:
+            self._dispatch_mutation_intent(
+                runtime,
+                turn_context,
+                service,
+                intent,
+            )
 
         try:
             mutation_queue.drain(
@@ -1514,7 +1540,7 @@ class PersistenceService:
                 state["_save_transaction_snapshot"] = self._capture_transaction_snapshot(runtime, turn_context)
             trace_id = str(getattr(turn_context, "trace_id", "") or "")
             if trace_id:
-                commit_seed = f"{trace_id}:{str(getattr(turn_context, 'user_input', '') or '')}"
+                commit_seed = f"{trace_id}:{getattr(turn_context, 'user_input', '') or ''!s}"
                 commit_id = hashlib.sha256(commit_seed.encode("utf-8")).hexdigest()[:32]
             else:
                 commit_id = uuid.uuid4().hex
@@ -1669,7 +1695,7 @@ class PersistenceService:
         self._inject_behavioral_ledger_state(runtime, turn_context, turn_text)
         self._record_relational_ledger(runtime, turn_context, turn_text)
 
-    def _finalize_apply_ledger_commit(
+    def _finalize_apply_ledger_commit(  # noqa: PLR0913
         self,
         runtime: Any,
         turn_context: Any,

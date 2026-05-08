@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+import time
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -87,6 +88,122 @@ class ExecutionJob:
     priority: int = 0
     # Resolved by Scheduler once kernel_execute_fn completes.
     _result_future: asyncio.Future | None = field(default=None, repr=False, compare=False)
+
+
+@dataclass
+class KernelTask:
+    """Registered async task tracked by the kernel task manager."""
+
+    task_id: str
+    name: str
+    task: asyncio.Task[Any]
+    session_id: str | None = None
+    created_at: float = field(default_factory=time.time)
+
+
+class KernelTaskManager:
+    """Tracks background asyncio tasks and ingests completion/failure outcomes.
+
+    This prevents silent "Future exception was never retrieved" leaks by ensuring
+    all task outcomes are observed and recorded through a deterministic manager.
+    """
+
+    def __init__(self, registry: SessionRegistry) -> None:
+        self._registry = registry
+        self._tasks: dict[str, KernelTask] = {}
+        self._counter = 0
+
+    def register(
+        self,
+        *,
+        name: str,
+        coro: Coroutine[Any, Any, Any],
+        session_id: str | None = None,
+    ) -> asyncio.Task[Any]:
+        """Create and register a task; completion is always observed via callback."""
+        self._counter += 1
+        task_id = f"kt-{self._counter:08d}"
+        task = asyncio.create_task(coro)
+        record = KernelTask(
+            task_id=task_id,
+            name=str(name or "unnamed"),
+            task=task,
+            session_id=str(session_id).strip() if session_id else None,
+        )
+        self._tasks[task_id] = record
+        self._append_event(record, status="submitted")
+
+        def _on_done(done_task: asyncio.Task[Any], *, _task_id: str = task_id) -> None:
+            current = self._tasks.get(_task_id)
+            if current is None:
+                return
+            try:
+                if done_task.cancelled():
+                    self._append_event(current, status="cancelled")
+                else:
+                    exc = done_task.exception()
+                    if exc is None:
+                        self._append_event(current, status="completed")
+                    else:
+                        self._append_event(current, status="failed", error=str(exc))
+            except Exception as callback_exc:  # noqa: BLE001  # pragma: no cover - defensive callback guard
+                self._append_event(current, status="failed", error=f"callback-error: {callback_exc}")
+            finally:
+                self._tasks.pop(_task_id, None)
+
+        task.add_done_callback(_on_done)
+        return task
+
+    async def await_all(self) -> list[Any]:
+        """Await currently registered tasks and ingest all exceptions."""
+        pending = [item.task for item in list(self._tasks.values()) if not item.task.done()]
+        if not pending:
+            return []
+        # Gather with return_exceptions=True ensures all failures are retrieved.
+        return await asyncio.gather(*pending, return_exceptions=True)
+
+    async def await_session(self, session_id: str) -> list[Any]:
+        """Await pending tasks registered for one session only."""
+        session_key = str(session_id or "").strip()
+        if not session_key:
+            return []
+        pending = [
+            item.task
+            for item in list(self._tasks.values())
+            if item.session_id == session_key and not item.task.done()
+        ]
+        if not pending:
+            return []
+        return await asyncio.gather(*pending, return_exceptions=True)
+
+    async def shutdown(self, *, cancel_pending: bool = True) -> None:
+        """Stop all tracked tasks deterministically and ingest their outcomes."""
+        if cancel_pending:
+            for item in list(self._tasks.values()):
+                if not item.task.done():
+                    item.task.cancel()
+        await self.await_all()
+
+    @property
+    def pending_count(self) -> int:
+        return sum(1 for item in self._tasks.values() if not item.task.done())
+
+    def _append_event(self, task: KernelTask, *, status: str, error: str | None = None) -> None:
+        payload = {
+            "event": "kernel_task",
+            "task_id": task.task_id,
+            "name": task.name,
+            "session_id": task.session_id,
+            "status": status,
+            "error": str(error or ""),
+            "created_at": float(task.created_at),
+            "recorded_at": time.time(),
+        }
+        logger.debug("Kernel task event: %s", payload)
+        if task.session_id:
+            session = self._registry.get(task.session_id)
+            if session is not None:
+                session.setdefault("event_log", []).append(payload)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -170,9 +287,10 @@ class ControlPlane:
     the job.  The API endpoint awaits the future (with its own timeout).
     """
 
-    def __init__(self, scheduler: Scheduler, registry: SessionRegistry) -> None:
+    def __init__(self, scheduler: Scheduler, registry: SessionRegistry, task_manager: KernelTaskManager) -> None:
         self.scheduler = scheduler
         self.registry = registry
+        self.task_manager = task_manager
 
     async def create_session(self, session_id: str) -> dict[str, Any]:
         return self.registry.create(session_id)
@@ -205,4 +323,5 @@ def build_control_plane() -> ControlPlane:
     """Return a ready-to-use ControlPlane backed by a fresh SessionRegistry."""
     registry = SessionRegistry()
     scheduler = Scheduler(registry)
-    return ControlPlane(scheduler=scheduler, registry=registry)
+    task_manager = KernelTaskManager(registry)
+    return ControlPlane(scheduler=scheduler, registry=registry, task_manager=task_manager)

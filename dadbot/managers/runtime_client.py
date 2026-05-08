@@ -1,18 +1,66 @@
 from __future__ import annotations
 
+# ruff: noqa: C901, PLR0913
 import asyncio
+import atexit
 import importlib
+import importlib.util
 import inspect
 import logging
 import time
 
-import ollama
+import ollama  # type: ignore[reportMissingImports]
 
 from dadbot.contracts import DadBotContext, SupportsDadBotAccess
 from dadbot.core.execution_boundary import ModelGatewayScope, enforce_model_gateway
 
 logger = logging.getLogger(__name__)
 litellm = importlib.import_module("litellm") if importlib.util.find_spec("litellm") else None
+
+
+def _close_ollama_module_http_client() -> None:
+    module_client = getattr(ollama, "_client", None)
+    http_client = getattr(module_client, "_client", None)
+    close = getattr(http_client, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception:  # noqa: BLE001 - shutdown path must not propagate transport errors.
+            return
+
+
+atexit.register(_close_ollama_module_http_client)
+
+
+async def safe_close_ollama_async(client) -> None:
+    """Canonical async cleanup for Ollama AsyncClient.
+
+    Handles the internal httpx.AsyncClient (_client attribute) which is
+    the actual resource holder. Uses robust introspection to handle
+    library API changes gracefully.
+    """
+    if client is None:
+        return
+
+    # Ollama.AsyncClient wraps httpx.AsyncClient in _client; that's the resource.
+    close_target = getattr(client, "_client", None) or client
+
+    aclose = getattr(close_target, "aclose", None)
+    if callable(aclose):
+        try:
+            close_result = aclose()
+            if inspect.isawaitable(close_result):
+                await close_result
+        except Exception:  # noqa: BLE001 - cleanup should remain best-effort.
+            pass
+        return
+
+    close = getattr(close_target, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception:  # noqa: BLE001 - cleanup should remain best-effort.
+            pass
 
 
 class RuntimeClientManager:
@@ -26,6 +74,15 @@ class RuntimeClientManager:
     def _is_event_loop_closed_error(exc: BaseException) -> bool:
         return isinstance(exc, RuntimeError) and "Event loop is closed" in str(exc)
 
+    @staticmethod
+    def _resolve_close_target(client):
+        if client is None:
+            return None
+        nested_http_client = getattr(client, "_client", None)
+        if nested_http_client is not None:
+            return nested_http_client
+        return client
+
     def _ensure_event_loop_context(self):
         try:
             loop = asyncio.get_running_loop()
@@ -36,6 +93,46 @@ class RuntimeClientManager:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
         return loop
+
+    def _close_cached_ollama_async_client(self) -> None:
+        shutdown_cached_client = getattr(self.bot, "_shutdown_ollama_async_client", None)
+        if callable(shutdown_cached_client):
+            shutdown_cached_client()
+            return
+
+        client = getattr(self.bot, "_ollama_async_client", None)
+        self.bot._ollama_async_client = None
+        self.bot._ollama_async_client_loop_id = None
+        if client is None:
+            return
+
+        close_target = self._resolve_close_target(client)
+
+        aclose = getattr(close_target, "aclose", None)
+        if callable(aclose):
+            close_result = aclose()
+            if inspect.isawaitable(close_result):
+                async def _await_close_result() -> None:
+                    await close_result
+
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    loop = None
+                if loop is not None and loop.is_running():
+                    loop.create_task(_await_close_result())
+                else:
+                    asyncio.run(_await_close_result())
+            return
+
+        close = getattr(close_target, "close", None)
+        if callable(close):
+            close()
+
+    @staticmethod
+    async def _close_ollama_async_client_instance(client) -> None:
+        """Close an async Ollama client instance using canonical cleanup."""
+        await safe_close_ollama_async(client)
 
     @staticmethod
     def _call_supports_kwarg(func, name: str) -> bool:
@@ -143,7 +240,7 @@ class RuntimeClientManager:
                 return "".join(full_content).strip()
 
             return litellm.completion(**litellm_kwargs)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - provider exceptions are intentionally normalized.
             logger.warning(
                 "LiteLLM call failed (%s/%s): %s",
                 provider,
@@ -243,7 +340,7 @@ class RuntimeClientManager:
                 return "".join(full_content).strip()
 
             return await litellm.acompletion(**litellm_kwargs)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - provider exceptions are intentionally normalized.
             logger.warning(
                 "Async LiteLLM call failed (%s/%s): %s",
                 provider,
@@ -269,20 +366,10 @@ class RuntimeClientManager:
             )
 
     def ollama_async_client(self):
-        loop = self._ensure_event_loop_context()
-        loop_id = id(loop)
-        client = getattr(self.bot, "_ollama_async_client", None)
-        client_loop_id = getattr(self.bot, "_ollama_async_client_loop_id", None)
-        if client is None or client_loop_id != loop_id:
-            if hasattr(ollama, "AsyncClient"):
-                client = ollama.AsyncClient()
-                self.bot._ollama_async_client = client
-                self.bot._ollama_async_client_loop_id = loop_id
-            else:
-                client = None
-                self.bot._ollama_async_client = None
-                self.bot._ollama_async_client_loop_id = None
-        return client
+        self._ensure_event_loop_context()
+        if hasattr(ollama, "AsyncClient"):
+            return ollama.AsyncClient()
+        return None
 
     def call_ollama_chat(
         self,
@@ -373,16 +460,10 @@ class RuntimeClientManager:
                     except RuntimeError as exc:
                         if not self._is_event_loop_closed_error(exc):
                             raise
-                        logger.info(
-                            "Recreating async Ollama client after closed event loop",
-                        )
-                        self.bot._ollama_async_client = None
-                        self.bot._ollama_async_client_loop_id = None
-                        refreshed_client = self.ollama_async_client()
-                        if refreshed_client is None:
-                            response = await asyncio.to_thread(ollama.chat, **kwargs)
-                        else:
-                            response = await refreshed_client.chat(**kwargs)
+                        logger.info("Falling back to sync Ollama call after closed event loop")
+                        response = await asyncio.to_thread(ollama.chat, **kwargs)
+                    finally:
+                        await self._close_ollama_async_client_instance(client)
                 self.bot.ACTIVE_MODEL = candidate
                 return response
             except self.bot.ollama_retryable_errors() as exc:
@@ -534,9 +615,13 @@ class RuntimeClientManager:
                     logger.warning("Stopping %s stream after %s characters", purpose, self.bot.STREAM_MAX_CHARS)
                     truncated = True
                     break
-        except Exception as exc:  # noqa: BLE001 - preserve partial stream content on interruption
+        except Exception as exc:
             if chunks:
-                logger.warning("%s stream interrupted after partial output: %s", purpose, self.bot.ollama_error_summary(exc))
+                logger.warning(
+                    "%s stream interrupted after partial output: %s",
+                    purpose,
+                    self.bot.ollama_error_summary(exc),
+                )
                 truncated = True
             else:
                 raise
@@ -580,7 +665,7 @@ class RuntimeClientManager:
                     logger.warning("Stopping %s stream after %s characters", purpose, self.bot.STREAM_MAX_CHARS)
                     truncated = True
                     break
-        except Exception as exc:  # noqa: BLE001 - preserve partial stream content on interruption
+        except Exception as exc:
             if chunks:
                 logger.warning(
                     "%s async stream interrupted after partial output: %s",
@@ -615,50 +700,57 @@ class RuntimeClientManager:
                 chunk_callback,
             )
 
-        for candidate in [
-            self.bot.ACTIVE_MODEL,
-            *[model for model in self.bot.model_candidates() if model != self.bot.ACTIVE_MODEL],
-        ]:
-            chunks: list[str] = []
-            try:
-                kwargs = {"model": candidate, "messages": messages, "stream": True}
-                if options is not None:
-                    kwargs["options"] = options
-                stream = await client.chat(**kwargs)
-                chunks, truncated = await self._collect_stream_chunks_async(stream, purpose=purpose, chunk_callback=chunk_callback)
-                final_reply = "".join(chunks).strip()
-                if final_reply and truncated:
-                    final_reply = final_reply.rstrip(" ,.;:") + "..."
-                if final_reply:
-                    self.bot.ACTIVE_MODEL = candidate
-                    return final_reply
-                last_error = RuntimeError(f"Ollama {purpose} stream on {candidate} produced no content")
-            except self.bot.ollama_retryable_errors() as exc:
-                if chunks:
-                    partial_reply = "".join(chunks).strip().rstrip(" ,.;:")
-                    if partial_reply:
-                        logger.warning(
-                            "Ollama %s stream on %s ended early after partial content: %s",
-                            purpose,
-                            candidate,
-                            self.bot.ollama_error_summary(exc),
-                        )
+        try:
+            for candidate in [
+                self.bot.ACTIVE_MODEL,
+                *[model for model in self.bot.model_candidates() if model != self.bot.ACTIVE_MODEL],
+            ]:
+                chunks: list[str] = []
+                try:
+                    kwargs = {"model": candidate, "messages": messages, "stream": True}
+                    if options is not None:
+                        kwargs["options"] = options
+                    stream = await client.chat(**kwargs)
+                    chunks, truncated = await self._collect_stream_chunks_async(
+                        stream,
+                        purpose=purpose,
+                        chunk_callback=chunk_callback,
+                    )
+                    final_reply = "".join(chunks).strip()
+                    if final_reply and truncated:
+                        final_reply = final_reply.rstrip(" ,.;:") + "..."
+                    if final_reply:
                         self.bot.ACTIVE_MODEL = candidate
-                        return partial_reply + "..."
-                last_error = exc
-            except Exception as exc:  # noqa: BLE001 - async stream iterators may raise non-retryable transport errors
-                if chunks:
-                    partial_reply = "".join(chunks).strip().rstrip(" ,.;:")
-                    if partial_reply:
-                        logger.warning(
-                            "Ollama %s async stream on %s aborted after partial content: %s",
-                            purpose,
-                            candidate,
-                            self.bot.ollama_error_summary(exc),
-                        )
-                        self.bot.ACTIVE_MODEL = candidate
-                        return partial_reply + "..."
-                last_error = exc
+                        return final_reply
+                    last_error = RuntimeError(f"Ollama {purpose} stream on {candidate} produced no content")
+                except self.bot.ollama_retryable_errors() as exc:
+                    if chunks:
+                        partial_reply = "".join(chunks).strip().rstrip(" ,.;:")
+                        if partial_reply:
+                            logger.warning(
+                                "Ollama %s stream on %s ended early after partial content: %s",
+                                purpose,
+                                candidate,
+                                self.bot.ollama_error_summary(exc),
+                            )
+                            self.bot.ACTIVE_MODEL = candidate
+                            return partial_reply + "..."
+                    last_error = exc
+                except Exception as exc:  # noqa: BLE001 - async stream iterators may raise non-retryable transport errors
+                    if chunks:
+                        partial_reply = "".join(chunks).strip().rstrip(" ,.;:")
+                        if partial_reply:
+                            logger.warning(
+                                "Ollama %s async stream on %s aborted after partial content: %s",
+                                purpose,
+                                candidate,
+                                self.bot.ollama_error_summary(exc),
+                            )
+                            self.bot.ACTIVE_MODEL = candidate
+                            return partial_reply + "..."
+                    last_error = exc
+        finally:
+            await self._close_ollama_async_client_instance(client)
 
         error_summary = self.bot.ollama_error_summary(last_error)
         raise RuntimeError(

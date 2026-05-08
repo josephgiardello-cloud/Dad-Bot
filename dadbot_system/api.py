@@ -1,9 +1,21 @@
 from __future__ import annotations
 
+# ruff: noqa: B008, C901, PLR0913, PLR0915
 import asyncio
+import os
+import re
 from contextlib import asynccontextmanager
+from typing import Any, cast
 
-from .contracts import DEFAULT_TENANT_ID, ChatRequest, HealthResponse, ServiceConfig, normalize_channel_name
+from .contracts import (
+    DEFAULT_TENANT_ID,
+    ChatRequest,
+    EventEnvelope,
+    EventType,
+    HealthResponse,
+    ServiceConfig,
+    normalize_channel_name,
+)
 from .kernel import ControlPlane, build_control_plane
 from .security import (
     AuthenticationError,
@@ -12,24 +24,46 @@ from .security import (
     ServiceTokenManager,
     SlidingWindowRateLimiter,
 )
+from .state import NamespacedStateStore
 
 try:
-    from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
-    from fastapi.middleware.cors import CORSMiddleware
+    from fastapi import (  # type: ignore[reportMissingImports]
+        APIRouter,
+        Depends,
+        FastAPI,
+        Header,
+        HTTPException,
+        Request,
+        WebSocket,
+        WebSocketDisconnect,
+    )
+    from fastapi.middleware.cors import CORSMiddleware  # type: ignore[reportMissingImports]
 except ImportError:
-    APIRouter = None
-    Depends = None
-    FastAPI = None
-    Header = None
-    HTTPException = None
-    Request = None
-    CORSMiddleware = None
+    APIRouter = cast(Any, None)
+    Depends = cast(Any, None)
+    FastAPI = cast(Any, None)
+    Header = cast(Any, None)
+    HTTPException = cast(Any, None)
+    Request = cast(Any, None)
+    CORSMiddleware = cast(Any, None)
 
     class WebSocket:  # pragma: no cover - fallback only when FastAPI is missing.
+        headers: dict[str, str]
+        query_params: dict[str, str]
+
+        async def close(self, *, code: int = 1000) -> None:
+            _ = code
+
+        async def accept(self) -> None:
+            return
+
+        async def send_json(self, payload: dict[str, Any]) -> None:
+            _ = payload
+
+    class WebSocketDisconnectError(Exception):
         pass
 
-    class WebSocketDisconnect(Exception):
-        pass
+    WebSocketDisconnect = WebSocketDisconnectError
 
 
 def create_api_app(
@@ -48,6 +82,42 @@ def create_api_app(
 
     service_config = config or ServiceConfig()
     security_config = service_config.security
+    veto_proxy_enabled = str(os.environ.get("DADBOT_VETO_PROXY_ENABLED", "1")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    try:
+        veto_drift_threshold = float(os.environ.get("DADBOT_VETO_DRIFT_THRESHOLD", "0.98"))
+    except ValueError:
+        veto_drift_threshold = 0.98
+    veto_drift_threshold = max(0.0, min(veto_drift_threshold, 1.0))
+    sb243_safe_mode_enabled = str(os.environ.get("DADBOT_SB243_SAFE_MODE_ENABLED", "1")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    sb243_crisis_terms_raw = str(
+        os.environ.get(
+            "DADBOT_SB243_CRISIS_TERMS",
+            "kill myself,killing myself,end my life,want to die,don't want to live,do not want to live,"
+            "hurt myself,harm myself,suicidal,suicide,self harm,self-harm,overdose",
+        )
+    )
+    sb243_crisis_terms = [term.strip().lower() for term in sb243_crisis_terms_raw.split(",") if term.strip()]
+    sb243_negation_patterns: tuple[str, ...] = (
+        r"\bnot suicidal\b",
+        r"\bi am not suicidal\b",
+        r"\bi'm not suicidal\b",
+        r"\bnot going to hurt myself\b",
+        r"\bnot going to harm myself\b",
+        r"\bi won't hurt myself\b",
+        r"\bi wont hurt myself\b",
+        r"\bdon't want to hurt myself\b",
+        r"\bdo not want to hurt myself\b",
+    )
     if security_config.auth_required and not security_config.token_secret:
         raise RuntimeError("DADBOT_API_TOKEN_SECRET is required when API authentication is enabled")
 
@@ -129,7 +199,7 @@ def create_api_app(
         return resolved_payload
 
     async def _http_principal(
-        request: Request,
+        request: Any,
         authorization: str | None = Header(default=None),
         x_dadbot_token: str | None = Header(default=None),
     ) -> ServicePrincipal:
@@ -152,16 +222,17 @@ def create_api_app(
                 "execution_graph": task.execution_graph.to_dict() if task.execution_graph is not None else None,
             }
 
-        _scheduler_task = asyncio.create_task(_control_plane.scheduler.run(_kernel_execute))
+        _scheduler_task = _control_plane.task_manager.register(
+            name="scheduler.run",
+            coro=_control_plane.scheduler.run(_kernel_execute),
+        )
         try:
             yield
         finally:
             _control_plane.scheduler.stop()
-            _scheduler_task.cancel()
-            try:
-                await _scheduler_task
-            except asyncio.CancelledError:
-                pass
+            if not _scheduler_task.done():
+                _scheduler_task.cancel()
+            await _control_plane.task_manager.shutdown(cancel_pending=True)
             if worker_manager is not None:
                 worker_manager.shutdown()
             if runtime_bot is not None and callable(getattr(runtime_bot, "shutdown", None)):
@@ -177,7 +248,7 @@ def create_api_app(
     )
 
     @app.middleware("http")
-    async def _security_headers(request: Request, call_next):
+    async def _security_headers(request: Any, call_next):
         response = await call_next(request)
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("X-Frame-Options", "DENY")
@@ -204,6 +275,259 @@ def create_api_app(
         if bot is None:
             raise HTTPException(status_code=503, detail="Runtime bot is not available for automation controls")
         return bot
+
+    def _publish_service_intervention_event(
+        *,
+        session_id: str,
+        tenant_id: str,
+        task_id: str,
+        request_id: str,
+        intervention: dict,
+    ) -> dict:
+        envelope = EventEnvelope(
+            session_id=session_id,
+            event_type=EventType.HARD_STOP_INTERVENTION,
+            tenant_id=tenant_id,
+            payload={
+                "task_id": task_id,
+                "request_id": request_id,
+                "intervention": dict(intervention or {}),
+            },
+        )
+        scoped_store = NamespacedStateStore(orchestrator.state_store, orchestrator.tenant_namespace(tenant_id))
+        serialized = envelope.to_dict()
+        scoped_store.append_event(session_id, serialized)
+        event_bus = getattr(orchestrator, "event_bus", None)
+        if event_bus is not None and callable(getattr(event_bus, "publish", None)):
+            event_bus.publish(envelope)
+        return serialized
+
+    def _build_blocked_turn_payload(
+        *,
+        task_payload: dict,
+        response_payload: dict,
+        intervention_payload: dict,
+        blocked_reply: str,
+        task_error: str = "",
+        enforce_mandatory_halt: bool = False,
+    ) -> tuple[dict, dict, dict]:
+        task_data = dict(task_payload or {})
+        response_data = dict(response_payload or {})
+
+        task_id = str(task_data.get("task_id") or "")
+        session_id = str(task_data.get("session_id") or response_data.get("session_id") or "")
+        request_id = str(response_data.get("request_id") or task_data.get("request_id") or "")
+        tenant_id = str(task_data.get("tenant_id") or response_data.get("tenant_id") or DEFAULT_TENANT_ID)
+
+        intervention_event = _publish_service_intervention_event(
+            session_id=session_id,
+            tenant_id=tenant_id,
+            task_id=task_id,
+            request_id=request_id,
+            intervention=intervention_payload,
+        )
+
+        session_state = dict(task_data.get("session_state") or {})
+        if enforce_mandatory_halt:
+            session_state["goal_alignment_mandatory_halt"] = True
+
+        intervention_log = list(session_state.get("service_interventions") or [])
+        intervention_log.append(intervention_event)
+        session_state["service_interventions"] = intervention_log
+
+        event_log = list(session_state.get("event_log") or [])
+        event_log.append(intervention_event)
+        session_state["event_log"] = event_log
+
+        task_data["session_state"] = session_state
+        task_data["status"] = "blocked"
+        if task_error:
+            task_data["error"] = task_error
+
+        response_metadata = dict(response_data.get("metadata") or {})
+        response_metadata["service_veto_proxy"] = {
+            "blocked": True,
+            "event_id": intervention_event.get("event_id"),
+            "reason": intervention_payload.get("reason"),
+            "severity": intervention_payload.get("severity"),
+        }
+        response_metadata["service_intervention"] = intervention_payload
+
+        response_data = {
+            **response_data,
+            "session_id": session_id,
+            "request_id": request_id,
+            "tenant_id": tenant_id,
+            "reply": blocked_reply,
+            "should_end": True,
+            "status": "blocked",
+            "metadata": response_metadata,
+        }
+
+        if task_id:
+            orchestrator.state_store.save_task(task_id, task_data)
+            orchestrator.state_store.save_response(task_id, response_data)
+
+        return task_data, response_data, intervention_event
+
+    def _evaluate_veto_proxy(*, task_status: dict | None, response: dict | None) -> dict | None:
+        if not veto_proxy_enabled:
+            return None
+
+        task_payload = dict(task_status or {})
+        response_payload = dict(response or {})
+        session_state = dict(task_payload.get("session_state") or {})
+        reflection = dict(session_state.get("last_reflection_summary") or {})
+
+        if bool(session_state.get("goal_alignment_mandatory_halt", False)):
+            return {
+                "reason": "goal_alignment_mandatory_halt",
+                "severity": "critical",
+                "recommended_action": "HARD_STOP_INTERVENTION",
+            }
+
+        risk_level = str(reflection.get("current_risk_level") or "").strip().lower()
+        if risk_level in {"critical", "severe"}:
+            return {
+                "reason": "reflection_risk_level",
+                "severity": risk_level,
+                "recommended_action": "HARD_STOP_INTERVENTION",
+                "risk_level": risk_level,
+            }
+
+        drift_probability = float(reflection.get("predicted_drift_probability") or 0.0)
+        if drift_probability >= veto_drift_threshold:
+            return {
+                "reason": "predicted_drift_probability",
+                "severity": "high",
+                "recommended_action": "HARD_STOP_INTERVENTION",
+                "drift_probability": drift_probability,
+                "threshold": veto_drift_threshold,
+            }
+
+        response_metadata = dict(response_payload.get("metadata") or {})
+        if bool(response_metadata.get("service_hard_stop_required", False)):
+            return {
+                "reason": "response_metadata.service_hard_stop_required",
+                "severity": "critical",
+                "recommended_action": "HARD_STOP_INTERVENTION",
+            }
+        return None
+
+    def _apply_veto_proxy_to_turn_payload(result: dict) -> dict:
+        task_status = dict(result.get("task") or {})
+        response = dict(result.get("response") or {})
+        intervention = _evaluate_veto_proxy(task_status=task_status, response=response)
+        if intervention is None or not task_status or not response:
+            return result
+
+        intervention_payload = {
+            "type": "HARD_STOP_INTERVENTION",
+            "source": "dadbot_system.api.veto_proxy",
+            **dict(intervention),
+        }
+        task_status, response, _ = _build_blocked_turn_payload(
+            task_payload=task_status,
+            response_payload=response,
+            intervention_payload=intervention_payload,
+            blocked_reply="HARD_STOP_INTERVENTION: output withheld by service veto proxy.",
+        )
+
+        return {
+            **result,
+            "task": task_status,
+            "response": response,
+            "interventions": [*(result.get("interventions") or []), intervention_payload],
+        }
+
+    def _detect_sb243_crisis_signal(user_input: str) -> str:
+        def _runtime_crisis_terms() -> list[str]:
+            bot = runtime_bot if runtime_bot is not None else getattr(orchestrator, "runtime_bot", None)
+            safety = getattr(bot, "safety_support", None) if bot is not None else None
+            settings = safety.settings() if safety is not None and callable(getattr(safety, "settings", None)) else {}
+            values = settings.get("high_risk_phrases") if isinstance(settings, dict) else []
+            if not isinstance(values, list):
+                return []
+            return [str(item).strip().lower() for item in values if str(item).strip()]
+
+        def _has_negated_reassurance(normalized_text: str) -> bool:
+            bot = runtime_bot if runtime_bot is not None else getattr(orchestrator, "runtime_bot", None)
+            safety = getattr(bot, "safety_support", None) if bot is not None else None
+            check = getattr(safety, "has_negated_reassurance", None) if safety is not None else None
+            if callable(check):
+                try:
+                    return bool(check(normalized_text))
+                except Exception:  # noqa: BLE001 - runtime safety adapters may raise domain-specific exceptions.
+                    pass
+            return any(re.search(pattern, normalized_text) for pattern in sb243_negation_patterns)
+
+        normalized = str(user_input or "").strip().lower()
+        if not normalized:
+            return ""
+        if _has_negated_reassurance(normalized):
+            return ""
+        terms = _runtime_crisis_terms() or list(sb243_crisis_terms)
+        for term in terms:
+            if term and term in normalized:
+                return term
+        return ""
+
+    def _build_sb243_safe_mode_turn_payload(
+        *,
+        session_id: str,
+        tenant_id: str,
+        request_id: str,
+        matched_term: str,
+    ) -> dict:
+        task_id = f"sb243-{request_id}"
+        intervention_payload = {
+            "type": "HARD_STOP_INTERVENTION",
+            "source": "dadbot_system.api.sb243",
+            "reason": "sb243_crisis_registry",
+            "severity": "critical",
+            "recommended_action": "SAFE_MODE_LEGAL_BYPASS",
+            "safe_mode": "sb243",
+            "matched_term": matched_term,
+        }
+        task_payload = {
+            "task_id": task_id,
+            "request_id": request_id,
+            "session_id": session_id,
+            "tenant_id": tenant_id,
+            "status": "blocked",
+            "session_state": {},
+            "error": "SB243 safe-mode bypass activated",
+        }
+        response_payload = {
+            "session_id": session_id,
+            "request_id": request_id,
+            "tenant_id": tenant_id,
+            "reply": (
+                "HARD_STOP_INTERVENTION: I cannot continue this turn normally. "
+                "If you might hurt yourself or you're in immediate danger, call or text 988 right now "
+                "if you're in the U.S. or Canada, or call your local emergency number now."
+            ),
+            "should_end": True,
+            "active_model": "",
+            "mood": "critical",
+            "status": "blocked",
+            "error": "",
+            "metadata": {},
+        }
+        task_payload, response_payload, _ = _build_blocked_turn_payload(
+            task_payload=task_payload,
+            response_payload=response_payload,
+            intervention_payload=intervention_payload,
+            blocked_reply=response_payload["reply"],
+            task_error="SB243 safe-mode bypass activated",
+            enforce_mandatory_halt=True,
+        )
+        return {
+            "task": task_payload,
+            "response": response_payload,
+            "execution_graph": None,
+            "interventions": [intervention_payload],
+        }
 
     def _gateway_capabilities() -> dict:
         version_prefix = _version_prefix()
@@ -239,7 +563,8 @@ def create_api_app(
         _enforce_scope(principal, "write")
         _enforce_rate_limit(principal, "write")
         tenant_id = _resolve_tenant(principal, payload.get("tenant_id"))
-        request = ChatRequest.from_dict(_apply_request_identity(payload, principal, tenant_id=tenant_id), session_id=session_id)
+        request_payload = _apply_request_identity(payload, principal, tenant_id=tenant_id)
+        request = ChatRequest.from_dict(request_payload, session_id=session_id)
         if not request.user_input and not request.attachments:
             raise HTTPException(status_code=400, detail="user_input or attachments are required")
         task = orchestrator.submit_chat(request)
@@ -295,6 +620,16 @@ def create_api_app(
         if not check_request.user_input and not check_request.attachments:
             raise HTTPException(status_code=400, detail="user_input or attachments are required")
 
+        if sb243_safe_mode_enabled:
+            matched_term = _detect_sb243_crisis_signal(check_request.user_input)
+            if matched_term:
+                return _build_sb243_safe_mode_turn_payload(
+                    session_id=session_id,
+                    tenant_id=tenant_id,
+                    request_id=check_request.request_id,
+                    matched_term=matched_term,
+                )
+
         timeout_seconds = float(resolved_payload.get("timeout_seconds") or 60.0)
         job_payload = {**resolved_payload, "_session_id": session_id}
         result_future = await _control_plane.submit_turn(session_id, job_payload)
@@ -304,6 +639,11 @@ def create_api_app(
         except TimeoutError as exc:
             raise HTTPException(status_code=504, detail="Timed out waiting for turn completion") from exc
 
+        task_outcomes = await _control_plane.task_manager.await_session(session_id)
+        for outcome in task_outcomes:
+            if isinstance(outcome, Exception):
+                raise HTTPException(status_code=500, detail=f"Kernel background task failure: {outcome}")
+
         task_status = result.get("task")
         response = result.get("response")
 
@@ -312,14 +652,15 @@ def create_api_app(
         if response is None and str((task_status or {}).get("status") or "").strip().lower() != "failed":
             raise HTTPException(status_code=504, detail="Timed out waiting for turn completion")
 
-        return result
+        return _apply_veto_proxy_to_turn_payload(result)
 
     @router.post("/sessions/{session_id}/stream")
     async def submit_stream(session_id: str, payload: dict, principal: ServicePrincipal = Depends(_http_principal)):
         _enforce_scope(principal, "write")
         _enforce_rate_limit(principal, "write")
         tenant_id = _resolve_tenant(principal, payload.get("tenant_id"))
-        request = ChatRequest.from_dict(_apply_request_identity(payload, principal, tenant_id=tenant_id), session_id=session_id)
+        request_payload = _apply_request_identity(payload, principal, tenant_id=tenant_id)
+        request = ChatRequest.from_dict(request_payload, session_id=session_id)
         if not request.user_input and not request.attachments:
             raise HTTPException(status_code=400, detail="user_input or attachments are required")
 

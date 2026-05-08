@@ -10,22 +10,21 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Any, Protocol
 
 from dadbot.contracts import AttachmentList, FinalizedTurnResult
+from dadbot.core.compaction import ArchiveTier, CompactionPolicy, EventCompactor
 from dadbot.core.execution_boundary import ControlPlaneExecutionBoundary
 from dadbot.core.execution_lease import ExecutionLease, LeaseConflictError
 from dadbot.core.execution_ledger import ExecutionLedger
 from dadbot.core.execution_ledger_memory import InMemoryExecutionLedger
 from dadbot.core.kernel_gateway import KernelGateway
-from dadbot.core.semantic_primitives import hash as semantic_hash
-from dadbot.core.compaction import ArchiveTier, CompactionPolicy, EventCompactor
+from dadbot.core.kernel_signals import get_exporter, get_metrics, get_tracer
 from dadbot.core.ledger_reader import LedgerReader
 from dadbot.core.ledger_writer_adapter import LedgerWriterAdapter
-from dadbot.core.kernel_signals import get_exporter, get_metrics, get_tracer
 from dadbot.core.recovery_manager import RecoveryManager
+from dadbot.core.semantic_primitives import hash as semantic_hash
 from dadbot.core.session_store import SessionStore
-from dadbot.core.turn_resume_store import TurnResumeStore
 
 logger = logging.getLogger(__name__)
 
@@ -320,7 +319,11 @@ class ExecutionControlPlane:
         resolved_options = self._resolve_options(options, legacy_options)
         self.registry = registry
         self.kernel_executor = kernel_executor
-        token_seed = f"{resolved_options.worker_id}|{resolved_options.max_inflight_jobs}|{int(bool(resolved_options.enable_observability))}"
+        token_seed = (
+            f"{resolved_options.worker_id}|"
+            f"{resolved_options.max_inflight_jobs}|"
+            f"{int(bool(resolved_options.enable_observability))}"
+        )
         self.execution_token = f"exec-{hashlib.sha256(token_seed.encode('utf-8')).hexdigest()[:20]}"
         self.ledger = resolved_options.ledger or InMemoryExecutionLedger()
         self._ledger_writer = LedgerWriterAdapter(
@@ -499,7 +502,7 @@ class ExecutionControlPlane:
                 "Control-plane lifecycle invariant violated: event order is non-monotonic",
             )
 
-    def _record_turn_composition_contract(
+    def _record_turn_composition_contract(  # noqa: PLR0915
         self,
         *,
         session: dict[str, Any],
@@ -611,7 +614,9 @@ class ExecutionControlPlane:
                         self._confluence_metrics.get("enforced_blocked", 0),
                     ) + 1
                     raise RuntimeError(
-                        f"Global confluence law violated for key={confluence_key!r}: expected={known!r}, actual={confluence_class_hash!r}",
+                        "Global confluence law violated for key="
+                        f"{confluence_key!r}: expected={known!r}, "
+                        f"actual={confluence_class_hash!r}",
                     )
                 logger.warning(
                     "Global confluence law mismatch (audit override): key=%s expected=%s actual=%s",
@@ -674,8 +679,8 @@ class ExecutionControlPlane:
             "equivalent": bool(pre_digest == reconstructed_digest and sequence_equivalent),
             "pre_digest": pre_digest,
             "reconstructed_digest": reconstructed_digest,
-            "archived_event_count": int(len(archived_events)),
-            "reconstructed_event_count": int(len(reconstructed)),
+            "archived_event_count": len(archived_events),
+            "reconstructed_event_count": len(reconstructed),
             "sequence_equivalent": bool(sequence_equivalent),
         }
 
@@ -690,7 +695,10 @@ class ExecutionControlPlane:
             max_events = self._env_int("DADBOT_LEDGER_MAX_EVENTS", 10000, minimum=100)
             max_age_seconds = float(self._env_int("DADBOT_LEDGER_MAX_AGE_SECONDS", 86400, minimum=60))
             min_snapshot_distance = self._env_int("DADBOT_LEDGER_MIN_SNAPSHOT_DISTANCE", 200, minimum=0)
-            archive_dir = Path(str(os.environ.get("DADBOT_LEDGER_ARCHIVE_DIR", "runtime/archives")).strip() or "runtime/archives")
+            archive_dir = Path(
+                str(os.environ.get("DADBOT_LEDGER_ARCHIVE_DIR", "runtime/archives")).strip()
+                or "runtime/archives"
+            )
             self._ledger_compactor = EventCompactor(
                 policy=CompactionPolicy(
                     max_events=max_events,
@@ -708,14 +716,14 @@ class ExecutionControlPlane:
             by_session[sid] = int(by_session.get(sid, 0)) + 1
         top_sessions = sorted(by_session.items(), key=lambda item: (-int(item[1]), str(item[0])))[:8]
         return {
-            "partition_count": int(len(by_session)),
+            "partition_count": len(by_session),
             "top_partitions": [{"session_id": sid, "event_count": int(count)} for sid, count in top_sessions],
         }
 
     def _maybe_compact_ledger(self) -> dict[str, Any]:
         hard_max = self._env_int("DADBOT_LEDGER_HARD_LIMIT_EVENTS", 50000, minimum=500)
         pre_events = list(self.ledger.read())
-        event_count = int(len(pre_events))
+        event_count = len(pre_events)
 
         if event_count <= 0:
             return {"compacted": False, "reason": "empty", "event_count": 0, **self._partition_summary(pre_events)}
@@ -731,7 +739,7 @@ class ExecutionControlPlane:
             "pre_digest": self._event_stream_digest(pre_events),
             "reconstructed_digest": self._event_stream_digest(post_events),
             "archived_event_count": 0,
-            "reconstructed_event_count": int(len(post_events)),
+            "reconstructed_event_count": len(post_events),
             "sequence_equivalent": True,
         }
         archive_path = str(report.get("archive_path") or "")
@@ -776,7 +784,7 @@ class ExecutionControlPlane:
     def terminate_session(self, session_id: str) -> None:
         self.registry.terminate_session(session_id)
 
-    async def _submit_turn_kernel(
+    async def _submit_turn_kernel(  # noqa: C901, PLR0912, PLR0915
         self,
         *,
         session_id: str,
@@ -898,12 +906,12 @@ class ExecutionControlPlane:
         state_before_hash: str = "",
     ) -> None:
         """Validate execution trace invariants: trace_id, complete nodes, exactly one commit boundary.
-        
+
         Ensures:
         1. trace_id is present in job metadata
         2. Execution produced ordered trace nodes
         3. Exactly one commit boundary (save node) exists
-        
+
         This is a defensive check to catch execution path deviations early.
         """
         trace_id = job.metadata.get("trace_id") or ""
@@ -913,7 +921,7 @@ class ExecutionControlPlane:
 
         # Query ledger for events matching this trace
         trace_events = self._job_trace_events(job)
-        
+
         if not trace_events:
             logger.warning("Trace invariant violation: no events recorded for trace %s", trace_id)
             return

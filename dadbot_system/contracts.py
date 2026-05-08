@@ -4,7 +4,7 @@ import os
 import re
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 from uuid import uuid4
 
@@ -38,7 +38,9 @@ def extract_gateway_metadata(payload: dict[str, Any], *, channel_name: str | Non
         gateway.get("conversation_id") or payload.get("conversation_id") or payload.get("channel_thread_id") or ""
     ).strip()
     received_at = str(gateway.get("received_at") or payload.get("received_at") or "").strip()
-    delivery_mode = str(gateway.get("delivery_mode") or payload.get("delivery_mode") or "sync").strip().lower() or "sync"
+    delivery_mode = (
+        str(gateway.get("delivery_mode") or payload.get("delivery_mode") or "sync").strip().lower() or "sync"
+    )
 
     resolved = {"channel": channel, "delivery_mode": delivery_mode}
     if message_id:
@@ -83,7 +85,7 @@ def env_csv(name: str, default: list[str]) -> list[str]:
     return [item for item in values if item]
 
 
-class EventType(str, Enum):
+class EventType(StrEnum):
     REQUEST_ACCEPTED = "request.accepted"
     REQUEST_DISPATCHED = "request.dispatched"
     STATE_UPDATED = "state.updated"
@@ -92,6 +94,7 @@ class EventType(str, Enum):
     WORKER_STARTED = "worker.started"
     WORKER_STOPPED = "worker.stopped"
     CIRCUIT_OPENED = "circuit.opened"
+    HARD_STOP_INTERVENTION = "hard_stop.intervention"
 
 
 @dataclass(slots=True)

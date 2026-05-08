@@ -36,40 +36,11 @@ from dadbot.core.execution_receipt import (
 from dadbot.core.execution_receipt import (
     ReceiptSigner,
 )
-from dadbot.core.graph_side_effects import GraphSideEffectsOrchestrator
-from dadbot.core.invariant_gate import InvariantGate, InvariantViolationError
-from dadbot.core.invariant_registry import InvariantRegistry
-from dadbot.core.runtime_errors import (
-    ExecutionStageError,
-    InvariantViolation as RuntimeInvariantViolation,
-    NON_FATAL_RUNTIME_EXCEPTIONS,
-    ProjectionMismatch,
-    RuntimeExecutionError,
-)
-from dadbot.core.persistence_event_adapter import (
-    GraphPersistenceEventAdapter,
-)  # re-export
-from dadbot.core.side_effect_adapter import SideEffectAdapter
-from dadbot.core.turn_resume_store import TurnResumeStore
-from dadbot.core.ux_projection import TurnUxProjector  # re-export
-from dadbot.core.graph_temporal import (  # re-export temporal types
-    TurnPhase,
-    TurnTemporalAxis,
-    VirtualClock,
-)
-from dadbot.core.graph_types import (  # re-export trace/op types
-    LedgerMutationOp,
-    MemoryMutationOp,
-    MutationKind,
-    NodeType,
-    StageTrace,
-    _json_safe,
-)
-from dadbot.core.graph_mutation import MutationGuard, MutationIntent, MutationQueue
 from dadbot.core.graph_context import (  # re-export turn-scoped state
     TurnContext,
     TurnFidelity,
 )
+from dadbot.core.graph_mutation import MutationGuard, MutationIntent, MutationQueue
 from dadbot.core.graph_pipeline_nodes import (  # re-export pipeline node stubs
     ContextBuilderNode,
     GraphNode,
@@ -83,11 +54,45 @@ from dadbot.core.graph_pipeline_nodes import (  # re-export pipeline node stubs
     ValidationGateNode,
     _invoke_node_run_compat,
 )
+from dadbot.core.graph_side_effects import GraphSideEffectsOrchestrator
+from dadbot.core.graph_temporal import (  # re-export temporal types
+    TurnPhase,
+    TurnTemporalAxis,
+    VirtualClock,
+)
+from dadbot.core.graph_types import (  # re-export trace/op types
+    LedgerMutationOp,
+    MemoryMutationOp,
+    MutationKind,
+    NodeType,
+    StageTrace,
+    _json_safe,
+)
+from dadbot.core.invariant_gate import InvariantGate, InvariantViolationError
+from dadbot.core.invariant_registry import InvariantRegistry
+from dadbot.core.persistence_event_adapter import (
+    GraphPersistenceEventAdapter,
+)  # re-export
+from dadbot.core.runtime_errors import (
+    NON_FATAL_RUNTIME_EXCEPTIONS,
+    ExecutionStageError,
+    ProjectionMismatch,
+    RuntimeExecutionError,
+)
+from dadbot.core.runtime_errors import (
+    InvariantViolation as RuntimeInvariantViolation,
+)
+from dadbot.core.side_effect_adapter import SideEffectAdapter
+from dadbot.core.turn_resume_store import TurnResumeStore
+from dadbot.core.ux_projection import TurnUxProjector  # re-export
 
 logger = logging.getLogger(__name__)
 
-class NodeContractViolation(RuntimeError):
+class NodeContractViolationError(RuntimeError):
     """Raised when a pipeline node violates its input/output state contract."""
+
+
+NodeContractViolation = NodeContractViolationError
 
 
 # Maps stage name → (required_input_keys, required_output_keys).
@@ -139,24 +144,24 @@ _NODE_INPUT_PREREQUISITES: dict[str, str] = {
 # They are re-exported here for backward compatibility with code that imports
 # them from dadbot.core.graph.
 __all__ = [
-    "FatalTurnError",
-    "TurnFailureSeverity",
-    "KernelRejectionSemantics",
-    "PersistenceServiceContract",
     "ExecutionPolicyEngine",
-    "StagePhaseMappingPolicy",
-    "MutationKind",
-    "MemoryMutationOp",
+    "FatalTurnError",
+    "KernelRejectionSemantics",
     "LedgerMutationOp",
-    "MutationIntent",
-    "MutationQueue",
+    "MemoryMutationOp",
     "MutationGuard",
+    "MutationIntent",
+    "MutationKind",
+    "MutationQueue",
+    "NodeType",
+    "PersistenceServiceContract",
+    "StagePhaseMappingPolicy",
     "TurnContext",
+    "TurnFailureSeverity",
     "TurnFidelity",
+    "TurnPhase",
     "TurnTemporalAxis",
     "VirtualClock",
-    "TurnPhase",
-    "NodeType",
 ]
 
 
@@ -189,7 +194,7 @@ class TurnGraph:
                 self._node_map[node_name] = node
             if node_name == "save" and not hasattr(node, "mgr") and self.registry is not None:
                 with contextlib.suppress(Exception):
-                    setattr(node, "mgr", self.registry.get("persistence_service"))
+                    cast(Any, node).mgr = self.registry.get("persistence_service")
         self._kernel = None  # TurnKernel | None
         self._required_execution_token: str = ""
         self._execution_witness_emitter: Callable[[str, TurnContext], None] | None = None
@@ -368,7 +373,6 @@ class TurnGraph:
         try:
             latest = dict(trace[-1])
             sequence = int(latest.get("sequence") or 0)
-            prev = dict(trace[-2]) if len(trace) > 1 else None
 
             event_envelope = {
                 "type": event_type,
@@ -760,7 +764,14 @@ class TurnGraph:
         event.update(dict(payload or {}))
         save_turn_event(event)
 
-    def _checkpoint_payload(self, turn_context: TurnContext, *, stage_name: str, status: str, lightweight: bool) -> dict[str, Any]:
+    def _checkpoint_payload(
+        self,
+        turn_context: TurnContext,
+        *,
+        stage_name: str,
+        status: str,
+        lightweight: bool,
+    ) -> dict[str, Any]:
         if lightweight:
             with contextlib.suppress(Exception):
                 return turn_context.checkpoint_snapshot(
@@ -792,7 +803,11 @@ class TurnGraph:
             status=status,
             lightweight=persistence_is_lightweight,
         )
-        save_graph_checkpoint = getattr(persistence_service, "save_graph_checkpoint", None) if persistence_service else None
+        save_graph_checkpoint = (
+            getattr(persistence_service, "save_graph_checkpoint", None)
+            if persistence_service
+            else None
+        )
         if persistence_is_lightweight and callable(save_graph_checkpoint):
             try:
                 save_graph_checkpoint(checkpoint_payload)
@@ -804,7 +819,7 @@ class TurnGraph:
                     exc,
                 )
 
-        lock = dict((turn_context.metadata.get("determinism") or {}))
+        lock = dict(turn_context.metadata.get("determinism") or {})
         self._emit_turn_event(
             turn_context,
             event_type="graph_checkpoint",
@@ -1121,7 +1136,7 @@ class TurnGraph:
         )
         emitted_phases.add(phase)
 
-    def _record_edge_transition(
+    def _record_edge_transition(  # noqa: PLR0913
         self,
         turn_context: TurnContext,
         *,
@@ -1148,7 +1163,7 @@ class TurnGraph:
             detail={"from": stage_key, "to": next_stage_name, "index": idx},
         )
 
-    async def _run_stage(
+    async def _run_stage(  # noqa: PLR0913
         self,
         *,
         idx: int,
