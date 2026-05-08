@@ -12,6 +12,8 @@ from dadbot.core.execution_lease import ExecutionLease, LeaseConflictError
 from dadbot.core.execution_ledger import ExecutionLedger
 from dadbot.core.session_store import SessionStore
 
+pytestmark = pytest.mark.durability
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -324,6 +326,8 @@ class TestLeaseSchedulerIntegration:
     def test_lease_conflict_requeues_and_eventually_executes(self):
         """If lease is held by another worker, job is re-queued and retried."""
         from dadbot.core.control_plane import (
+
+
             ExecutionControlPlane,
             SessionRegistry,
         )

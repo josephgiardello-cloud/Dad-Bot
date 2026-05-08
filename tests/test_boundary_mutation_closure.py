@@ -7,6 +7,8 @@ import pytest
 from dadbot.core.kernel_locks import KernelReplaySequenceLock
 from dadbot.core.kernel_mutation_gate import apply_event, emit_event
 
+pytestmark = pytest.mark.unit
+
 
 def test_no_direct_state_mutation() -> None:
     state = {"count": 1}

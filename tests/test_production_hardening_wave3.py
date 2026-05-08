@@ -31,6 +31,8 @@ from dadbot.core.session_store import SessionStore
 from dadbot.core.snapshot_engine import SnapshotEngine
 from dadbot.core.system_health_checker import SystemHealthChecker
 
+pytestmark = pytest.mark.integration
+
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
@@ -549,6 +551,7 @@ class TestSnapshotEngine:
         # Add more events after snapshot.
         writer = LedgerWriter(ledger)
         from dadbot.core.control_plane import ExecutionJob
+
 
         job2 = ExecutionJob(session_id="s1", user_input="second")
         writer.append_job_submitted(job2)

@@ -10,6 +10,9 @@ from dadbot.core.observability import (
     set_trace_level,
 )
 
+import pytest
+pytestmark = pytest.mark.unit
+
 
 def test_minimal_events_are_not_sampled_out() -> None:
     sink: list[dict] = []

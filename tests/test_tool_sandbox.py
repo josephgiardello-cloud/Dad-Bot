@@ -2,6 +2,9 @@
 
 from dadbot.core.testing.tool_runtime_test_adapter import ToolRuntimeTestAdapter
 
+import pytest
+pytestmark = pytest.mark.unit
+
 
 def test_tool_sandbox_executes_and_returns_result():
     runtime = ToolRuntimeTestAdapter()

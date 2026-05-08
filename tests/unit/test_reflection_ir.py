@@ -16,11 +16,15 @@ from datetime import datetime
 from pathlib import Path
 
 from dadbot.core.reflection_ir import (
+
+
     DriftEpisode,
     BehavioralPattern,
     ReflectionSummary,
     DriftReflectionEngine,
 )
+
+pytestmark = pytest.mark.unit
 
 
 @pytest.mark.unit

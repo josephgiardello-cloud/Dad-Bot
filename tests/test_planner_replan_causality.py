@@ -3,6 +3,9 @@ from dataclasses import dataclass, field
 from tests.scoring_engine import ScoringEngine
 from tests.trace_schema import NormalizedTrace, PlannerTrace
 
+import pytest
+pytestmark = pytest.mark.unit
+
 
 @dataclass
 class _Scenario:

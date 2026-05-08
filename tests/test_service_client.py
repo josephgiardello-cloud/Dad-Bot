@@ -1,5 +1,8 @@
 from dadbot_system.client import DadServiceClient, ServiceChatResult, ServiceClientConfig
 
+import pytest
+pytestmark = pytest.mark.integration
+
 
 class StubServiceClient(DadServiceClient):
     def __init__(self):

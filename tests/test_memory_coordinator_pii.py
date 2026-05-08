@@ -7,6 +7,9 @@ from types import SimpleNamespace
 
 from dadbot.managers.memory_coordination import MemoryCoordinator
 
+import pytest
+pytestmark = pytest.mark.unit
+
 
 class DummyBot:
     def __init__(self):

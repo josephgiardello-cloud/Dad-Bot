@@ -26,7 +26,18 @@ from dadbot.core.tool_ir import (
     ToolEvent,
     ToolEventType,
 )
-from dadbot.core.turn_ir import build_policy_input, _obj_to_dict
+from dadbot.core.turn_ir import (
+
+
+    build_policy_input,
+    build_policy_view,
+    hash_eval_input,
+    prove_policy_view_bijection,
+    projection_cache,
+    _obj_to_dict,
+)
+
+pytestmark = pytest.mark.unit
 
 
 # ============================================================================
@@ -262,6 +273,177 @@ class TestDuckTypingFix:
         assert result.intent.intent_type == "question"
         assert result.intent.strategy == "research"
         assert result.intent.tool_request_count == 2
+
+    def test_build_policy_view_is_stable_for_same_semantics(self):
+        """PolicyView state hash should be stable for equivalent semantic policy inputs."""
+        turn_context_a = Mock()
+        turn_context_a.state = {
+            "turn_plan": {"intent_type": "question", "strategy": "research", "noise": "x"},
+            "tool_ir": {"requests": ["a", "b"]},
+            "other": {"ignored": True},
+        }
+
+        turn_context_b = Mock()
+        turn_context_b.state = {
+            "turn_plan": {"intent_type": "question", "strategy": "research"},
+            "tool_ir": {"requests": ["a", "b"]},
+        }
+
+        view_a = build_policy_view(turn_context_a)
+        view_b = build_policy_view(turn_context_b)
+
+        assert view_a.intent_type == view_b.intent_type == "question"
+        assert view_a.strategy == view_b.strategy == "research"
+        assert view_a.tool_request_count == view_b.tool_request_count == 2
+        assert view_a.state_hash == view_b.state_hash
+
+    def test_policy_view_bijection_proof_is_equivalent(self):
+        turn_context = Mock()
+        turn_context.state = {
+            "turn_plan": {"intent_type": "question", "strategy": "research", "extra": "ignored"},
+            "tool_ir": {"requests": ["r1"]},
+        }
+        view = build_policy_view(turn_context)
+        proof = prove_policy_view_bijection(turn_context.state, view)
+
+        assert proof.equivalent is True
+        assert proof.contract_version == "policy-view-bijection-v1"
+        assert bool(proof.projection_hash)
+        assert proof.projection_hash == proof.inverse_hash
+
+
+class TestSafetySinglePath:
+    """Validate single-path safety evaluation semantics."""
+
+    def test_fast_gate_flag_keeps_single_path_output(self):
+        service = Mock()
+        service.enforce_policies = Mock(side_effect=lambda _ctx, candidate: (str(candidate[0]).upper(), candidate[1]))
+        plan = PolicyCompiler.compile_safety(service)
+
+        turn_context = Mock()
+        turn_context.state = {
+            "turn_plan": {"intent_type": "statement", "strategy": "direct_answer"},
+            "tool_ir": {"requests": []},
+        }
+        turn_context.session_id = "session"
+        turn_context.tenant_id = "tenant"
+        turn_context.trace_id = "trace"
+        turn_context.mode = "live"
+
+        decision = PolicyCompiler.evaluate_safety(
+            plan,
+            turn_context,
+            ("hello", False),
+            fast_gate=True,
+            audit_full=True,
+        )
+
+        assert decision.output == ("HELLO", False)
+        assert decision.trace.get("truth_source") == "semantic_eval_input_v1"
+        assert decision.trace.get("metadata", {}).get("trace_schema") == "policy-decision-trace-v1"
+
+    def test_semantic_trace_declares_runtime_domain_contract(self):
+        service = Mock()
+        service.enforce_policies = Mock(side_effect=lambda _ctx, candidate: (str(candidate[0]).upper(), candidate[1]))
+        plan = PolicyCompiler.compile_safety(service)
+
+        turn_context = Mock()
+        turn_context.state = {
+            "turn_plan": {"intent_type": "statement", "strategy": "direct_answer"},
+            "tool_ir": {"requests": []},
+        }
+        turn_context.session_id = "session"
+        turn_context.tenant_id = "tenant"
+        turn_context.trace_id = "trace"
+        turn_context.mode = "live"
+
+        decision = PolicyCompiler.evaluate_safety(
+            plan,
+            turn_context,
+            ("hello", False),
+            fast_gate=True,
+            audit_full=False,
+        )
+
+        semantic = dict((decision.trace or {}).get("semantic_eval") or {})
+        domain_contract = dict(semantic.get("runtime_domain_contract") or {})
+        assert domain_contract.get("policy_semantics") == "pure_deterministic"
+        assert domain_contract.get("policy_runtime") == "single_path_compile_full"
+        assert domain_contract.get("split_execution_disabled") is True
+
+
+class TestSemanticCanonicalEvaluator:
+    def test_projection_cache_returns_stable_view_for_same_trace(self):
+        turn_context = Mock()
+        turn_context.trace_id = "trace-cache"
+        turn_context.session_id = "session"
+        turn_context.mode = "live"
+        turn_context.state = {
+            "turn_plan": {"intent_type": "question", "strategy": "research"},
+            "tool_ir": {"requests": ["a", "b"]},
+        }
+
+        cache = projection_cache()
+        cache.clear()
+        view_a = cache.get(turn_context)
+        view_b = cache.get(turn_context)
+
+        assert view_a == view_b
+        assert view_a.tool_request_count == 2
+
+    def test_semantic_decision_is_deterministic_for_identical_inputs(self):
+        service = Mock()
+        service.validate = Mock(side_effect=lambda candidate: f"validated::{candidate}")
+        plan = PolicyCompiler.compile_safety(service)
+
+        turn_context_a = Mock()
+        turn_context_a.trace_id = "trace-a"
+        turn_context_a.session_id = "session"
+        turn_context_a.tenant_id = "tenant"
+        turn_context_a.mode = "live"
+        turn_context_a.state = {
+            "turn_plan": {"intent_type": "support", "strategy": "baseline"},
+            "tool_ir": {"requests": []},
+        }
+
+        turn_context_b = Mock()
+        turn_context_b.trace_id = "trace-b"
+        turn_context_b.session_id = "session"
+        turn_context_b.tenant_id = "tenant"
+        turn_context_b.mode = "live"
+        turn_context_b.state = {
+            "turn_plan": {"intent_type": "support", "strategy": "baseline"},
+            "tool_ir": {"requests": []},
+        }
+
+        decision_a = PolicyCompiler.evaluate_safety(plan, turn_context_a, "candidate", fast_gate=True, audit_full=True)
+        decision_b = PolicyCompiler.evaluate_safety(plan, turn_context_b, "candidate", fast_gate=True, audit_full=True)
+
+        semantic_a = dict((decision_a.trace or {}).get("semantic_eval") or {})
+        semantic_b = dict((decision_b.trace or {}).get("semantic_eval") or {})
+        assert semantic_a.get("decision") == semantic_b.get("decision")
+
+    def test_eval_input_hash_is_emitted_as_replay_anchor(self):
+        service = Mock()
+        service.validate = Mock(side_effect=lambda candidate: f"validated::{candidate}")
+        plan = PolicyCompiler.compile_safety(service)
+
+        turn_context = Mock()
+        turn_context.trace_id = "trace-hash"
+        turn_context.session_id = "session"
+        turn_context.tenant_id = "tenant"
+        turn_context.mode = "live"
+        turn_context.state = {
+            "turn_plan": {"intent_type": "support", "strategy": "baseline"},
+            "tool_ir": {"requests": []},
+        }
+
+        policy_input = build_policy_input("safety", turn_context, "candidate")
+        expected_hash = hash_eval_input(policy_input.semantic_eval_input)
+
+        decision = PolicyCompiler.evaluate_safety(plan, turn_context, "candidate", fast_gate=True, audit_full=False)
+        semantic = dict((decision.trace or {}).get("semantic_eval") or {})
+        assert semantic.get("eval_input_hash") == expected_hash
 
 
 # ============================================================================

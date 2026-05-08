@@ -8,6 +8,9 @@ from dadbot.core.semantic_graph_validator import (
     build_dadbot_semantic_validator,
 )
 
+import pytest
+pytestmark = pytest.mark.phase4
+
 # ---------------------------------------------------------------------------
 # NodeIntentContract / GraphSemanticValidator unit tests
 # ---------------------------------------------------------------------------

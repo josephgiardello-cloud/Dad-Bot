@@ -15,6 +15,8 @@ from dadbot.core.policy_compiler import (
 )
 from dadbot.core.turn_ir import build_policy_input
 
+pytestmark = pytest.mark.unit
+
 
 class _SafetyService:
     def __init__(self) -> None:

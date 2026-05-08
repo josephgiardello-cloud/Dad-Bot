@@ -3,6 +3,9 @@ from types import SimpleNamespace
 
 from dadbot.services.agent_service import AgentService
 
+import pytest
+pytestmark = pytest.mark.integration
+
 
 class _TurnServiceStub:
     def __init__(self, *, mood="neutral", early_reply=None, should_end=False, turn_text="hello", attachments=None):

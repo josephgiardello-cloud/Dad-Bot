@@ -25,6 +25,9 @@ from dadbot.uril.report import build_uril_report, delta_compare
 from dadbot.uril.signal_bus import SignalCollectionOptions
 from dadbot.uril.truth_binding import ClaimEvidenceValidator, build_synthetic_state, compute_receipt_chain_hash
 
+import pytest
+pytestmark = pytest.mark.unit
+
 # ---------------------------------------------------------------------------
 # Shared fixtures
 # ---------------------------------------------------------------------------

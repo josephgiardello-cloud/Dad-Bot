@@ -2,6 +2,9 @@ from dadbot.core.execution_ledger import ExecutionLedger
 from dadbot.core.session_store import SessionStore
 from dadbot.core.system_health_checker import SystemHealthChecker
 
+import pytest
+pytestmark = pytest.mark.unit
+
 
 def test_health_checker_passes_basic_ledger_invariants():
     ledger = ExecutionLedger()

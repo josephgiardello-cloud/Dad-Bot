@@ -7,6 +7,9 @@ from dadbot.core.execution_semantics import (
     execution_equivalence_relation,
 )
 
+import pytest
+pytestmark = pytest.mark.phase4
+
 
 def _trace(order: str = "ab") -> dict:
     calls = {

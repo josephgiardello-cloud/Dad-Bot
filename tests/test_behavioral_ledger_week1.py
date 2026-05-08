@@ -5,6 +5,9 @@ from types import SimpleNamespace
 
 from dadbot.services.persistence import PersistenceService
 
+import pytest
+pytestmark = pytest.mark.unit
+
 
 class _PersistenceManagerStub:
     pass

@@ -7,6 +7,9 @@ from pathlib import Path
 from dadbot.uril.report import build_uril_report
 from dadbot.uril.signal_bus import SignalCollectionOptions
 
+import pytest
+pytestmark = pytest.mark.unit
+
 
 def _write_junit(path: Path, tests: int, failures: int, errors: int, skipped: int) -> None:
     path.write_text(

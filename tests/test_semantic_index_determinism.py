@@ -6,6 +6,9 @@ from types import SimpleNamespace
 
 from dadbot_system.semantic_index import SQLiteSemanticIndex
 
+import pytest
+pytestmark = pytest.mark.unit
+
 
 def _index(tmp_path: Path) -> SQLiteSemanticIndex:
     bot = SimpleNamespace(_io_lock=None)

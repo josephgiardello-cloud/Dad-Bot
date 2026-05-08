@@ -14,6 +14,8 @@ from dadbot.core.execution_trace_context import (
 )
 from dadbot.core.truth_system import TruthSystemViolation, enforce_authoritative_truth_system
 
+pytestmark = pytest.mark.unit
+
 
 def _trace_context() -> dict:
     return {
@@ -147,6 +149,7 @@ class TestTraceExternalCallRecorder:
     def test_record_external_system_call_returns_payload(self):
         recorder = ExecutionTraceRecorder(trace_id="trace-2", prompt="hello")
         from dadbot.core.execution_trace_context import bind_execution_trace
+
 
         with bind_execution_trace(recorder, required=False):
             step = record_external_system_call(

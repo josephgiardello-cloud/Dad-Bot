@@ -5,6 +5,8 @@ import pytest
 from dadbot.core.planner_ir import PlannerDecision
 from dadbot.runtime.planner.planner import Planner
 
+pytestmark = pytest.mark.unit
+
 
 class TestPlannerBuildIR:
     """Test Planner.build_ir() method."""

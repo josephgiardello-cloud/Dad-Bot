@@ -20,6 +20,8 @@ import pytest
 from dadbot.uril.report import build_uril_report, delta_compare
 from dadbot.uril.signal_bus import SignalCollectionOptions
 
+pytestmark = pytest.mark.unit
+
 # ---------------------------------------------------------------------------
 # Unit tests: delta_compare correctness
 # ---------------------------------------------------------------------------

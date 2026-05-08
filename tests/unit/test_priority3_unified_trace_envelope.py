@@ -9,6 +9,8 @@ import time
 from unittest.mock import MagicMock, patch
 
 from dadbot.core.turn_trace import (
+
+
     TurnTrace,
     ExecutionNode,
     TurnInput,
@@ -22,6 +24,8 @@ from dadbot.core.turn_trace import (
     record_event_to_current_trace,
     TURN_TRACE_SCHEMA_VERSION,
 )
+
+pytestmark = pytest.mark.unit
 
 
 @pytest.mark.unit

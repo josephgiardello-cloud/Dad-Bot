@@ -1,5 +1,8 @@
 from dadbot.core.goal_resynthesis import GoalRecalibrationEngine
 
+import pytest
+pytestmark = pytest.mark.unit
+
 
 def test_no_trigger_returns_monitor_state():
     engine = GoalRecalibrationEngine()

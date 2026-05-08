@@ -18,6 +18,8 @@ from dadbot.memory.decay_policy import (
     _score_entry,
 )
 
+pytestmark = pytest.mark.unit
+
 # ---------------------------------------------------------------------------
 # Minimal TurnContext stub (no real runtime needed)
 # ---------------------------------------------------------------------------
@@ -365,6 +367,7 @@ class TestPersistenceDecayBoundaryContract:
 
     def test_persistence_does_not_own_decay(self):
         from dadbot.services.persistence import PersistenceService
+
 
         class _FakePM:
             pass

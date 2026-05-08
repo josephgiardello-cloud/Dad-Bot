@@ -14,6 +14,8 @@ from dadbot.core.ledger_writer import LedgerWriter
 from dadbot.core.replay_verifier import ReplayVerifier
 from dadbot.core.session_store import SessionStore
 
+pytestmark = pytest.mark.integration
+
 
 def test_control_plane_idempotency_dedupes_concurrent_requests():
     registry = SessionRegistry()
@@ -242,6 +244,7 @@ def test_validate_trace_catches_all_forbidden_fields():
     import pytest
 
     from dadbot.core.canonical_event import FORBIDDEN_TRACE_FIELDS, validate_trace
+
 
     base_event = {
         "type": "JOB_QUEUED",

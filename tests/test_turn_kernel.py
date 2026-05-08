@@ -446,8 +446,8 @@ def test_control_plane_serializes_turns_within_same_session():
 
     async def _run():
         return await asyncio.gather(
-            control_plane.submit_turn(session_id="s1", user_input="first"),
-            control_plane.submit_turn(session_id="s1", user_input="second"),
+            control_plane.submit_turn(session_id="s1", user_input="first", metadata={"confluence_key": "test:s1-first"}),
+            control_plane.submit_turn(session_id="s1", user_input="second", metadata={"confluence_key": "test:s1-second"}),
         )
 
     results = asyncio.run(_run())
@@ -479,7 +479,7 @@ def test_control_plane_rejects_new_work_after_session_termination():
         await control_plane.create_session("s-dead")
         control_plane.terminate_session("s-dead")
         with pytest.raises(RuntimeError):
-            await control_plane.submit_turn(session_id="s-dead", user_input="hello?")
+            await control_plane.submit_turn(session_id="s-dead", user_input="hello?", metadata={"confluence_key": "test:s-dead-probe"})
 
     asyncio.run(_run())
 
@@ -505,7 +505,7 @@ def test_scheduler_consumes_jobs_from_ledger_pending_tail():
     )
 
     async def _run():
-        result = await control_plane.submit_turn(session_id="ledger-session", user_input="hello")
+        result = await control_plane.submit_turn(session_id="ledger-session", user_input="hello", metadata={"confluence_key": "test:ledger-hello"})
         return result
 
     result = asyncio.run(_run())

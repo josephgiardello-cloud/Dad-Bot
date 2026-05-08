@@ -19,6 +19,9 @@ from dadbot.uril.architecture import (
     find_forbidden_cycles,
 )
 
+import pytest
+pytestmark = pytest.mark.unit
+
 # ---------------------------------------------------------------------------
 # Unit tests for Tarjan SCC implementation
 # ---------------------------------------------------------------------------

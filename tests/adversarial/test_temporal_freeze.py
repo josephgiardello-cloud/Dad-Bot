@@ -10,6 +10,8 @@ from harness.turn_factory import TurnFactory
 
 from dadbot.core.graph import TurnTemporalAxis, VirtualClock
 
+pytestmark = pytest.mark.unit
+
 
 class TestTemporalFreeze:
     def test_temporal_axis_immutable_after_construction(self):
@@ -67,6 +69,7 @@ class TestTemporalFreeze:
         # Build minimal graph: just temporal node
         g = TurnGraph(registry=registry)
         from dadbot.core.graph import InferenceNode, ReflectionNode, SafetyNode, SaveNode
+
 
         prev = None
         for name, node in [

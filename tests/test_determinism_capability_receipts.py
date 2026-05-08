@@ -10,6 +10,8 @@ from unittest.mock import MagicMock
 import pytest
 from dadbot.core.execution_ledger import ExecutionLedger
 
+pytestmark = pytest.mark.unit
+
 # ---------------------------------------------------------------------------
 # Side-Effect Deduplication Tests (Critical Fix)
 # ---------------------------------------------------------------------------
@@ -659,6 +661,7 @@ class TestReceiptChain:
     def test_configure_receipt_signer_on_graph(self) -> None:
         from dadbot.core.execution_receipt import ReceiptSigner
         from dadbot.core.graph import TurnGraph
+
 
         graph = TurnGraph()
         signer = ReceiptSigner(secret_key=b"stable" + b"\x00" * 26)

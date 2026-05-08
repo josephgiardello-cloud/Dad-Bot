@@ -25,6 +25,8 @@ from harness.mutation_fuzzer import MutationFuzzer
 from harness.turn_factory import TurnFactory
 
 from dadbot.core.graph import (
+
+
     ContextBuilderNode,
     HealthNode,
     InferenceNode,
@@ -35,6 +37,8 @@ from dadbot.core.graph import (
     TemporalNode,
     TurnGraph,
 )
+
+pytestmark = pytest.mark.unit
 
 _DEFAULT_TURNS = 50
 _TURNS = int(os.environ.get("DADBOT_CHAOS_TURNS", _DEFAULT_TURNS))

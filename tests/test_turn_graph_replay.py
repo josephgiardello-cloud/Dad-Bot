@@ -7,6 +7,8 @@ from dadbot.core.execution_trace_context import ExecutionTraceRecorder, RuntimeT
 from dadbot.core.graph import TurnContext, TurnGraph
 from dadbot.core.nodes import TemporalNode
 
+pytestmark = pytest.mark.integration
+
 
 class _PassNode:
     def __init__(self, key, value):
@@ -71,6 +73,7 @@ def test_turn_graph_records_deterministic_phase_transitions():
 
 def test_temporal_node_exposes_canonical_turn_time_to_context_builder():
     from dadbot.core.nodes import ContextBuilderNode, TemporalNode
+
 
     class MemoryService:
         def build_context(self, context):

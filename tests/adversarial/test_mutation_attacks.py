@@ -10,6 +10,8 @@ from harness.mutation_fuzzer import MutationFuzzer
 from harness.turn_factory import TurnFactory
 
 from dadbot.core.graph import (
+
+
     ContextBuilderNode,
     HealthNode,
     InferenceNode,
@@ -22,6 +24,8 @@ from dadbot.core.graph import (
     TemporalNode,
     TurnGraph,
 )
+
+pytestmark = pytest.mark.durability
 
 _T = {"wall_time": "2026-01-01T00:00:00", "wall_date": "2026-01-01"}
 

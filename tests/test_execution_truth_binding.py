@@ -37,6 +37,9 @@ from dadbot.uril.truth_binding import (
     compute_receipt_chain_hash,
 )
 
+import pytest
+pytestmark = pytest.mark.unit
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

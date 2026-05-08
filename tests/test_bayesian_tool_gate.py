@@ -5,6 +5,9 @@ from types import SimpleNamespace
 from dadbot.core.action_mixin import DadBotActionMixin
 from dadbot.services.turn_service import TurnService
 
+import pytest
+pytestmark = pytest.mark.unit
+
 
 class _BotStub(DadBotActionMixin):
     """Minimal bot stub for TurnService Bayesian gate tests."""

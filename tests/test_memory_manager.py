@@ -3,6 +3,9 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 from types import SimpleNamespace
 
+import pytest
+pytestmark = pytest.mark.unit
+
 
 def test_normalize_memory_entry_naturalizes_summary_and_mood(bot):
     entry = bot.normalize_memory_entry(

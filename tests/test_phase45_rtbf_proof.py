@@ -5,6 +5,9 @@ from pathlib import Path
 
 from dadbot.core.rtbf_proof import record_rtbf_receipt
 
+import pytest
+pytestmark = pytest.mark.phase4
+
 
 def test_record_rtbf_receipt_writes_jsonl(tmp_path: Path) -> None:
     receipt_path = tmp_path / "rtbf_receipts.jsonl"

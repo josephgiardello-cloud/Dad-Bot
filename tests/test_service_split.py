@@ -15,6 +15,9 @@ from dadbot.ux_overlay.runtime_entrypoint import UxOverlayRuntimeAdapter
 from dadbot_system import InMemoryEventBus, InMemoryStateStore
 from dadbot_system.state import AppStateContainer
 
+import pytest
+pytestmark = pytest.mark.integration
+
 
 def test_dadbot_composes_split_services(bot):
     assert bot.config is not None

@@ -3,6 +3,9 @@ from types import SimpleNamespace
 
 from dadbot.services.context_service import ContextService
 
+import pytest
+pytestmark = pytest.mark.unit
+
 
 class StubContextBuilder:
     def build_core_persona_prompt(self):

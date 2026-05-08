@@ -5,6 +5,9 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 
+import pytest
+pytestmark = pytest.mark.unit
+
 
 def _make_bot(narratives=None, consolidated=None, archive=None):
     """Minimal bot stub for HeritageGraphManager."""

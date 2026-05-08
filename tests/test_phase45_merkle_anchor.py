@@ -5,6 +5,9 @@ from types import SimpleNamespace
 from dadbot.core.merkle_anchor import append_leaf_and_anchor, verify_inclusion_proof
 from dadbot.services.persistence import PersistenceService
 
+import pytest
+pytestmark = pytest.mark.phase4
+
 
 def test_merkle_anchor_inclusion_proof_roundtrip() -> None:
     leaves: list[str] = []

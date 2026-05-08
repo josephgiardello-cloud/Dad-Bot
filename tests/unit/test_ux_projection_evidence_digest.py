@@ -3,6 +3,9 @@ from __future__ import annotations
 from dadbot.core.graph_context import TurnContext
 from dadbot.core.ux_projection import TurnUxProjector
 
+import pytest
+pytestmark = pytest.mark.unit
+
 
 def test_ux_feedback_contains_evidence_graph_digest() -> None:
     projector = TurnUxProjector()

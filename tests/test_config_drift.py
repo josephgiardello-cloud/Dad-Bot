@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import pytest
 
+pytestmark = pytest.mark.unit
+
 
 class TestDadBotConfigAttrMapConsistency:
     """All entries in _CONFIG_ATTR_MAP must resolve to real DadBotConfig attrs."""
@@ -151,6 +153,7 @@ class TestDadBotConfigNoDriftFromMapKeys:
         from pathlib import Path
 
         from dadbot.config import DadBotConfig
+
 
         config = DadBotConfig()
         path_attr_names = {

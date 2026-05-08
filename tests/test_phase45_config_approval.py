@@ -5,6 +5,9 @@ from pathlib import Path
 from dadbot.config import DadBotConfig
 from dadbot.core.config_approval import ConfigApprovalWorkflow
 
+import pytest
+pytestmark = pytest.mark.phase4
+
 
 def test_config_approval_workflow_requires_multiple_approvals(tmp_path: Path) -> None:
     workflow = ConfigApprovalWorkflow(tmp_path / "approvals.json", approvals_required=2)

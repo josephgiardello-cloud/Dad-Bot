@@ -24,6 +24,8 @@ from dadbot.runtime.supervisor import (
     get_runtime_status,
 )
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.mark.unit
 class TestRuntimeLock:
@@ -284,6 +286,8 @@ class TestRuntimeSupervisorConvenienceFunctions:
             
             # Patch the module-level instance
             import dadbot.runtime.supervisor as sup_module
+
+
             original = sup_module._supervisor_instance
             sup_module._supervisor_instance = supervisor
             

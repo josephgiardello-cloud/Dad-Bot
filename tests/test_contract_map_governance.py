@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+pytestmark = pytest.mark.unit
+
 
 ROOT = Path(__file__).resolve().parent.parent
 CONTRACT_MAP = ROOT / "docs" / "system_contract_map.md"

@@ -3,6 +3,9 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+import pytest
+pytestmark = pytest.mark.unit
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DADBOT_ROOT = REPO_ROOT / "dadbot"
 CONSUMERS_ROOT = DADBOT_ROOT / "consumers"

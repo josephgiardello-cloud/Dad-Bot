@@ -4,6 +4,9 @@ import json
 
 from tools.repo_filesystem_checker import build_repo_filesystem_report
 
+import pytest
+pytestmark = pytest.mark.unit
+
 
 def test_repo_filesystem_checker_reports_expected_gaps_and_optimizations() -> None:
     report = build_repo_filesystem_report()

@@ -24,6 +24,9 @@ from unittest.mock import patch
 
 from Dad import DadBot
 
+import pytest
+pytestmark = pytest.mark.unit
+
 # ---------------------------------------------------------------------------
 # Shared fixture helpers
 # ---------------------------------------------------------------------------

@@ -7,6 +7,8 @@ import pytest
 from dadbot.core.graph import FatalTurnError, MutationIntent, MutationQueue, TurnContext, TurnGraph
 from dadbot.core.nodes import TemporalNode
 
+pytestmark = pytest.mark.integration
+
 
 def test_mutation_queue_retains_pending_after_failed_drain() -> None:
     queue = MutationQueue()

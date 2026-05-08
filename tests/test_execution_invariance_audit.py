@@ -3,6 +3,9 @@ from __future__ import annotations
 from dadbot.core.contract_evaluator import evaluation_contract_payload
 from tools import execution_invariance_audit as audit
 
+import pytest
+pytestmark = pytest.mark.unit
+
 
 def test_evaluation_contract_excludes_envelope_fields_from_behavioral_gate() -> None:
     contract = evaluation_contract_payload()["behavioral_invariance"]

@@ -1,5 +1,8 @@
 from dadbot.heritage_import import build_heritage_memories
 
+import pytest
+pytestmark = pytest.mark.unit
+
 
 class UploadedStub:
     def __init__(self, name, payload):

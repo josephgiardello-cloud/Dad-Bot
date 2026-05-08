@@ -5,6 +5,9 @@ from datetime import UTC, datetime
 from dadbot.uril.truth_binding import ClaimEvidenceValidator, build_synthetic_state
 from dadbot.ux_overlay import UxOverlayRuntimeAdapter
 
+import pytest
+pytestmark = pytest.mark.unit
+
 
 def test_adapter_can_toggle_ux_per_session() -> None:
     adapter = UxOverlayRuntimeAdapter()

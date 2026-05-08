@@ -8,6 +8,9 @@ from dadbot.core.contract_evaluator import (
     build_dadbot_contract_map,
 )
 
+import pytest
+pytestmark = pytest.mark.phase4
+
 # ---------------------------------------------------------------------------
 # ContractNode / ContractPropagationMap unit tests
 # ---------------------------------------------------------------------------

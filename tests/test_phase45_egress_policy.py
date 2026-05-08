@@ -5,6 +5,9 @@ from types import SimpleNamespace
 from dadbot.agentic import AgenticHandler, ToolRegistry
 from dadbot.core.egress_policy import evaluate_url
 
+import pytest
+pytestmark = pytest.mark.phase4
+
 
 def test_evaluate_url_allowlist_decision() -> None:
     allowed = evaluate_url("https://api.duckduckgo.com/?q=dad", allowlist=("api.duckduckgo.com",))

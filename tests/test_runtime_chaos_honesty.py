@@ -34,7 +34,7 @@ def test_inference_jitter_simulation_does_not_deadlock_serialized_session() -> N
             control_plane.submit_turn(
                 session_id="chaos-jitter",
                 user_input=f"turn-{idx}",
-                metadata={"request_id": f"req-{idx}", "trace_id": f"tr-{idx}"},
+                metadata={"request_id": f"req-{idx}", "trace_id": f"tr-{idx}", "confluence_key": f"test:chaos-jitter-{idx}"},
                 timeout_seconds=8.0,
             )
             for idx in range(12)

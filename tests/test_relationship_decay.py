@@ -1,5 +1,8 @@
 from datetime import date, timedelta
 
+import pytest
+pytestmark = pytest.mark.unit
+
 
 def test_decay_relationship_level_returns_clamped_score_without_date(bot):
     assert bot.decay_relationship_level(140, None) == 100

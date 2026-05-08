@@ -11,6 +11,8 @@ from dadbot.core.execution_replay_engine import (
 from dadbot.core.graph import FatalTurnError, MutationIntent, MutationKind, MutationQueue
 from dadbot.core.session_store import SessionStore
 
+pytestmark = pytest.mark.phase4
+
 
 def _baseline_trace() -> dict:
     return {

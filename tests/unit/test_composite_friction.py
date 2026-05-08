@@ -11,10 +11,14 @@ Validates:
 
 import pytest
 from dadbot.core.composite_friction import (
+
+
     FrictionSignals,
     FrictionAnalysis,
     CompositeFrictionEngine,
 )
+
+pytestmark = pytest.mark.unit
 
 
 @pytest.mark.unit

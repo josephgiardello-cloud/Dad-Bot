@@ -8,6 +8,8 @@ import pytest
 
 from Dad import DadBot
 
+pytestmark = pytest.mark.integration
+
 
 def _fake_embed_texts(texts, purpose="semantic retrieval"):
     items = [texts] if isinstance(texts, str) else list(texts)

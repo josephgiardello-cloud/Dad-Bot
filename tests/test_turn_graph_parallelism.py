@@ -5,6 +5,9 @@ from types import SimpleNamespace
 from dadbot.core.graph import TurnContext, TurnGraph
 from dadbot.core.nodes import TemporalNode
 
+import pytest
+pytestmark = pytest.mark.integration
+
 
 class SlowNode:
     def __init__(self, key, value, delay):

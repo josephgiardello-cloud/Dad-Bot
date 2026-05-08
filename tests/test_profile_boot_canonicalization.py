@@ -5,6 +5,9 @@ from pathlib import Path
 
 from dadbot.core.boot_mixin import DadBotBootMixin
 
+import pytest
+pytestmark = pytest.mark.unit
+
 
 def _canonical_profile(payload: dict) -> dict:
     style = payload.get("style") if isinstance(payload.get("style"), dict) else {}

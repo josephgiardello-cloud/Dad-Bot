@@ -10,6 +10,8 @@ from dadbot.core.execution_kernel_spec import (
 )
 from dadbot.core.invariant_registry import InvariantRegistry
 
+pytestmark = pytest.mark.unit
+
 
 class _BadKernel:
     strict = False

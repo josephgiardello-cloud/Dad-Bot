@@ -17,6 +17,9 @@ from dadbot.core.execution_trace_context import ExecutionTraceRecorder, bind_exe
 from dadbot.core.graph import LedgerMutationOp, TurnContext
 from dadbot_system.state import InMemoryStateStore
 
+import pytest
+pytestmark = pytest.mark.integration
+
 
 class DadBotRegressionTests(unittest.TestCase):
     def setUp(self):

@@ -7,6 +7,8 @@ import pytest
 from dadbot.core.coherence_metrics import OutputCoherenceTracker, ToneVector
 from dadbot.core.memory_influence import MemoryInfluenceTracker
 
+pytestmark = pytest.mark.unit
+
 
 class TestToneVector:
     """Tests for ToneVector — tone fingerprinting."""

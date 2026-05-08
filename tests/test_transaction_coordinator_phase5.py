@@ -5,6 +5,8 @@ from copy import deepcopy
 
 import pytest
 
+pytestmark = pytest.mark.unit
+
 
 def _stable_embedding_batch(texts, purpose=""):
     del purpose

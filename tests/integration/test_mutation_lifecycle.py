@@ -20,6 +20,9 @@ from dadbot.core.graph import (
     TurnGraph,
 )
 
+import pytest
+pytestmark = pytest.mark.integration
+
 _T = {"wall_time": "2026-01-01T00:00:00", "wall_date": "2026-01-01"}
 
 

@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from dadbot.ui.voice_control_plane import VoiceSessionController
 
+import pytest
+pytestmark = pytest.mark.unit
+
 
 def test_voice_controller_defaults_and_mode_transition() -> None:
     voice = {"enabled": True, "mode": "push_to_talk"}

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from dadbot.core.post_commit_events import POST_COMMIT_READY, PostCommitEvent
-from dadbot.core.runtime_errors import PersistenceFailure
+from dadbot.core.runtime_errors import InvariantViolation, PersistenceFailure
 from dadbot.services.persistence import PersistenceService, StateDivergenceError
 from dadbot.services.post_commit_worker import PostCommitWorker
 from dadbot_system.events import InMemoryEventBus
@@ -264,3 +264,18 @@ def test_finalize_turn_blocks_commit_on_memory_authority_divergence():
     assert int(report.get("difference_count") or 0) >= 1
     assert any("checkpoint.state" in str(item.get("path") or "") for item in list(report.get("differences") or []))
     assert event_bus.events() == []
+
+
+def test_async_checkpoint_ordering_contract_blocks_non_monotonic_sequence():
+    runtime, _event_bus, _memory_coordinator, _relationship_manager, _graph_manager, _memory_runtime = _make_runtime()
+    service = PersistenceService(_PersistenceManagerStub(), turn_service=_TurnServiceStub(runtime))
+
+    class _DoneFuture:
+        def result(self):
+            return None
+
+    service._checkpoint_futures = [(2, _DoneFuture())]
+    service._checkpoint_drain_sequence = 0
+
+    with pytest.raises(InvariantViolation, match="ordering contract"):
+        service._drain_async_checkpoint_queue(strict_error=True)

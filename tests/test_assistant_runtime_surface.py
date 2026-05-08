@@ -5,6 +5,9 @@ from types import SimpleNamespace
 
 from dadbot.assistant_runtime import AssistantRuntime
 
+import pytest
+pytestmark = pytest.mark.unit
+
 
 class _FakeTaskStore:
     def __init__(self) -> None:

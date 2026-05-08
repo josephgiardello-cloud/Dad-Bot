@@ -5,6 +5,9 @@ from dadbot.core.execution_replay_engine import (
     verify_terminal_state_replay_equivalence,
 )
 
+import pytest
+pytestmark = pytest.mark.integration
+
 
 def _trace_context() -> dict:
     return {

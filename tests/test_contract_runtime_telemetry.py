@@ -7,6 +7,9 @@ from dadbot.core.execution_context import ExecutionTraceRecorder, bind_execution
 from dadbot.core.execution_ledger import ExecutionLedger
 from dadbot.managers.conversation_persistence import ConversationPersistenceManager
 
+import pytest
+pytestmark = pytest.mark.unit
+
 
 class _FakeBot:
     def __init__(self, ledger: ExecutionLedger, session_log_dir: Path) -> None:

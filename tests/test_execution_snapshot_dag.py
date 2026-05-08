@@ -6,6 +6,8 @@ import pytest
 
 from dadbot.core.execution_trace_context import ExecutionTraceRecorder, build_execution_trace_context
 
+pytestmark = pytest.mark.unit
+
 
 def _fake_context() -> SimpleNamespace:
     return SimpleNamespace(

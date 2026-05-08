@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from tools import architectural_shallow_audit as audit
+
+pytestmark = pytest.mark.unit
 
 
 def _write(path: Path, content: str) -> None:
@@ -121,6 +124,12 @@ def test_manual_review_queue_contains_name_reality_candidates(tmp_path: Path) ->
     root = tmp_path
     risky = """
 from typing import Any
+
+import pytest
+
+pytestmark = pytest.mark.unit
+
+pytestmark = pytest.mark.unit
 
 def build_planner(x: Any):
     for kind in ["a", "b"]:

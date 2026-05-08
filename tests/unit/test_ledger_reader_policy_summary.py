@@ -4,6 +4,9 @@ from dadbot.core.execution_ledger import ExecutionLedger
 from dadbot.core.ledger_reader import LedgerReader
 from dadbot.core.ledger_writer import LedgerWriter
 
+import pytest
+pytestmark = pytest.mark.unit
+
 
 def test_summarize_policy_events_rolls_up_actions_and_policy() -> None:
     ledger = ExecutionLedger()

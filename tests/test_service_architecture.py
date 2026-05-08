@@ -4,6 +4,9 @@ from dadbot_system.orchestration import DadBotOrchestrator
 from dadbot_system.state import InMemoryStateStore
 from dadbot_system.worker import DadBotTaskProcessor
 
+import pytest
+pytestmark = pytest.mark.integration
+
 
 class FakeBroker:
     def __init__(self):

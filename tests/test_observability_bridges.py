@@ -6,6 +6,9 @@ from dadbot.core.observability import get_metrics
 from dadbot.core.otel_bridge import OpenTelemetryEventExporter, install_otel_bridge
 from dadbot.core.prometheus_bridge import start_prometheus_exporter
 
+import pytest
+pytestmark = pytest.mark.unit
+
 
 def test_install_otel_bridge_returns_status_dict() -> None:
     status = install_otel_bridge()

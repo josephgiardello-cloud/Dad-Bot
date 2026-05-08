@@ -5,6 +5,9 @@ from __future__ import annotations
 from dadbot.core.dadbot import DadBot
 from dadbot.core.observability import CorrelationContext
 
+import pytest
+pytestmark = pytest.mark.unit
+
 
 def test_process_user_message_returns_finalized_turn_result_on_graph_failure():
     """Graph failures in strict mode must raise and never fallback."""

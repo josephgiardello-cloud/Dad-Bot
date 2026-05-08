@@ -12,6 +12,9 @@ from __future__ import annotations
 
 from dadbot.memory.graph_manager import MemoryGraphManager
 
+import pytest
+pytestmark = pytest.mark.unit
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

@@ -20,6 +20,8 @@ import inspect
 
 import pytest
 
+pytestmark = pytest.mark.integration
+
 # ---------------------------------------------------------------------------
 # Shared async executor stubs
 # ---------------------------------------------------------------------------
@@ -246,7 +248,9 @@ class TestControlPlaneWiring:
             registry=SessionRegistry(),
             kernel_executor=_noop_executor,
         )
-        assert hasattr(cp, "scheduler")
+        with pytest.raises(RuntimeError, match="Kernel boundary violation"):
+            _ = cp.scheduler
+        assert hasattr(cp, "_scheduler")
 
     def test_control_plane_exposes_recovery(self):
         from dadbot.core.control_plane import ExecutionControlPlane, SessionRegistry
@@ -913,6 +917,7 @@ class TestCrashRecovery:
         """replay_hash is deterministic: same events → same hash."""
         from dadbot.core.control_plane import ExecutionJob
         from dadbot.core.session_store import SessionStore
+
 
         ledger, writer, recovery, store = self._make_cp()
 

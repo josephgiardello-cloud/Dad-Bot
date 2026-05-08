@@ -23,6 +23,8 @@ from dadbot.core.execution_ledger import ExecutionLedger
 from dadbot.core.execution_policy import ResumabilityPolicy
 from dadbot.core.turn_resume_store import ResumePoint, TurnResumeStore
 
+pytestmark = pytest.mark.durability
+
 
 def _new_resume_store() -> TurnResumeStore:
     return TurnResumeStore(ledger=ExecutionLedger())
@@ -247,6 +249,7 @@ class TestTurnGraphConfigureResume:
 
     def test_configure_resume_store_is_noop(self, tmp_path: Path) -> None:
         from dadbot.core.graph import TurnGraph
+
 
         graph = TurnGraph()
         policy = ResumabilityPolicy(enabled=False)

@@ -14,6 +14,9 @@ from dadbot.ux_overlay import (
     UXControlAPI,
 )
 
+import pytest
+pytestmark = pytest.mark.unit
+
 
 def test_interaction_state_engine_updates_social_state_only() -> None:
     engine = InteractionStateEngine()

@@ -16,6 +16,8 @@ import pytest
 from dadbot import AssistantRuntime
 import dadbot
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.fixture
 def mock_kernel():
@@ -274,6 +276,8 @@ class TestContractDocumentation:
     def test_contract_specifies_immutability(self):
         """Guard: Contract must state the surface is locked."""
         import os
+
+
         contract_path = os.path.join(
             os.path.dirname(os.path.dirname(__file__)),
             "docs",

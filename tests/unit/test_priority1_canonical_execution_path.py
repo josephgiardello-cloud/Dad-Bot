@@ -19,6 +19,8 @@ from dadbot.core.orchestrator import DadBotOrchestrator
 from dadbot.core.control_plane import ExecutionJob, ExecutionControlPlane
 from dadbot.contracts import FinalizedTurnResult
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.mark.unit
 class TestCanonicalExecutionPathStructure:
@@ -165,6 +167,7 @@ class TestTraceInvariants:
         """Verify _validate_trace_invariant() is called in submit_turn flow."""
         import inspect
         from dadbot.core.control_plane import ExecutionControlPlane
+
         
         source = inspect.getsource(ExecutionControlPlane.submit_turn)
         

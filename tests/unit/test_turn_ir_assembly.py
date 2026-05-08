@@ -5,9 +5,13 @@ import pytest
 from dadbot.core.planner_ir import CandidateIR, PlannerDecision
 from dadbot.core.turn_ir import ExecutionContext, TurnIntent
 from dadbot.core.turn_ir_assembly import (
+
+
     TurnIRAssembly,
     assemble_turn_ir,
 )
+
+pytestmark = pytest.mark.unit
 
 
 class TestTurnIRAssembly:

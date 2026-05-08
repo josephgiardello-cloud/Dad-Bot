@@ -4,6 +4,9 @@ import sqlite3
 
 from dadbot_system.event_durability import SQLiteEventDurabilityStore
 
+import pytest
+pytestmark = pytest.mark.durability
+
 
 def test_event_durability_encrypts_payloads_and_checkpoints(tmp_path):
     db_path = tmp_path / "durable-events.sqlite3"

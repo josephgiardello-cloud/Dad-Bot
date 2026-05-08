@@ -7,6 +7,9 @@ from pathlib import Path
 
 from dadbot.managers.memory_commands import MemoryCommandManager
 
+import pytest
+pytestmark = pytest.mark.unit
+
 
 class _MemoryStore:
     def __init__(self, parent: DummyBot) -> None:

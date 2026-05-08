@@ -6,6 +6,9 @@ from contextlib import redirect_stdout
 
 from tools import repo_phase4_auditor
 
+import pytest
+pytestmark = pytest.mark.phase4
+
 
 def test_repo_phase4_auditor_subchecks_return_expected_shape() -> None:
     structural = repo_phase4_auditor._structural_checks()

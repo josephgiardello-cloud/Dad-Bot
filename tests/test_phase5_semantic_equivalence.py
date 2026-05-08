@@ -3,6 +3,9 @@ from __future__ import annotations
 from dadbot.core.execution_equivalence_oracle import ExecutionEquivalenceOracle
 from dadbot.core.execution_replay_engine import reconstruct_terminal_state_from_trace
 
+import pytest
+pytestmark = pytest.mark.unit
+
 
 def _trace(tool_output: str = "Weather: Sunny") -> dict:
     return {

@@ -1,3 +1,6 @@
+import pytest
+pytestmark = pytest.mark.soak
+
 def test_should_evolve_persona_respects_session_gap(bot):
     bot.CADENCE = {
         "persona_evolution_min_sessions": 4,

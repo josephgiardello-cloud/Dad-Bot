@@ -2,6 +2,9 @@ from tests.benchmark_runner import BenchmarkRunner
 from tests.scenario_suite import Scenario
 from tests.trace_schema import NormalizedTrace, PlannerTrace
 
+import pytest
+pytestmark = pytest.mark.unit
+
 
 def test_condense_capability_score_includes_phase4b_metrics():
     scenario = Scenario(

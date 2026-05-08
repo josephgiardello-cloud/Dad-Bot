@@ -4,6 +4,8 @@ import pytest
 
 from dadbot.core.determinism import DeterminismBoundary, DeterminismMode, DeterminismViolation
 
+pytestmark = pytest.mark.integration
+
 
 def test_record_mode_seals_value_and_returns_it():
     boundary = DeterminismBoundary()
@@ -99,6 +101,7 @@ def test_snapshot_contains_expected_fields():
 
 def test_capture_async_record_and_replay():
     import asyncio
+
 
     boundary = DeterminismBoundary()
     calls = []

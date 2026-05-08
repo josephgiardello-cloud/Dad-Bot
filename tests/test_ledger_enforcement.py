@@ -3,6 +3,8 @@ import pytest
 from dadbot.core.execution_ledger import ExecutionLedger
 from dadbot.core.ledger.enforcement import LedgerEnforcementError
 
+pytestmark = pytest.mark.unit
+
 
 def test_execution_ledger_rejects_event_without_kernel_lineage():
     ledger = ExecutionLedger()

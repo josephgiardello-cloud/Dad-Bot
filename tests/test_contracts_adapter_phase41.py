@@ -23,6 +23,8 @@ from dadbot.core.contracts_adapter import (
     FallbackRegistry,
 )
 
+pytestmark = pytest.mark.phase4
+
 # ---------------------------------------------------------------------------
 # FallbackRegistry unit tests
 # ---------------------------------------------------------------------------
@@ -211,6 +213,7 @@ def test_contract_adapter_registry_audit_fallback_usage():
     # Use a fresh isolated registry to avoid cross-test event leakage from the module-level one.
     fresh_reg = FallbackRegistry()
     from dadbot.core.contracts_adapter import _CONTEXT_BUILDER_FALLBACK_REGISTRY as _module_reg
+
 
     for name in _module_reg.declared_names():
         decl = _module_reg._declarations[name]

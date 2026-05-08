@@ -5,6 +5,8 @@ import pytest
 from dadbot import app_runtime
 from dadbot.runtime_adapter import runtime_contract_errors
 
+pytestmark = pytest.mark.unit
+
 
 class _RuntimeStub:
     @classmethod
@@ -270,6 +272,7 @@ def test_check_system_resources_warns_when_ram_low(monkeypatch, caplog):
 def test_check_system_resources_raises_when_critically_low_ram(monkeypatch):
     import sys
     import types
+
 
     fake_psutil = types.SimpleNamespace(
         virtual_memory=lambda: types.SimpleNamespace(available=1.5 * 1024**3, total=16 * 1024**3)

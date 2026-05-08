@@ -6,6 +6,9 @@ import time
 
 from dadbot.core.replay_verifier import ReplayVerifier
 
+import pytest
+pytestmark = pytest.mark.unit
+
 
 def _base_events() -> list[dict]:
     now = time.time()

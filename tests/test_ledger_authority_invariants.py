@@ -9,6 +9,9 @@ from dadbot.core.ledger_writer import LedgerWriter
 from dadbot.core.session_store import SessionStore
 from dadbot.managers.conversation_persistence import ConversationPersistenceManager
 
+import pytest
+pytestmark = pytest.mark.unit
+
 
 class _FakeBot:
     def __init__(self, ledger: ExecutionLedger, session_log_dir: Path) -> None:
