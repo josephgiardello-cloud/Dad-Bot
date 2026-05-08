@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from functools import cache
 from importlib import import_module
-from typing import Any
+from typing import Any, Callable
+from dadbot.kernel_boundary import KernelBoundary
 from dadbot.models import BoundaryComplianceDeclaration
 
 
@@ -41,6 +43,14 @@ class ServiceDescriptor:
         self.name = name
         self.factory = factory
         self.depends_on = depends_on
+
+
+@dataclass(frozen=True)
+class DependencyGraph:
+    """Declarative manager dependency graph for a wiring phase."""
+
+    name: str
+    descriptors: tuple[ServiceDescriptor, ...]
 
 
 def _topo_sort_descriptors(
@@ -96,6 +106,11 @@ def _wire_from_descriptors(bot: Any, descriptors: list[ServiceDescriptor]) -> No
     for descriptor in _topo_sort_descriptors(descriptors):
         instance = bot._resolve_dependency(descriptor.name, descriptor.factory)
         setattr(bot, descriptor.name, instance)
+
+
+def _wire_dependency_graph(bot: Any, graph: DependencyGraph) -> None:
+    """Wire a declarative dependency graph in topological order."""
+    _wire_from_descriptors(bot, list(graph.descriptors))
 
 
 _registry_logger = __import__("logging").getLogger(__name__)
@@ -354,7 +369,10 @@ def boot_registry(
 
 def wire_bootstrap_managers(bot: Any) -> None:
     """Attach managers required before profile/memory hydration."""
-    descriptors: list[ServiceDescriptor] = [
+    KernelBoundary.assert_scope("registry.wire_bootstrap_managers")
+    graph = DependencyGraph(
+        name="bootstrap",
+        descriptors=(
         ServiceDescriptor(
             "runtime_storage",
             lambda: _instantiate(
@@ -377,8 +395,9 @@ def wire_bootstrap_managers(bot: Any) -> None:
                 bot.bot_context,
             ),
         ),
-    ]
-    _wire_from_descriptors(bot, descriptors)
+        ),
+    )
+    _wire_dependency_graph(bot, graph)
 
 
 def wire_runtime_managers(bot: Any) -> None:
@@ -390,7 +409,10 @@ def wire_runtime_managers(bot: Any) -> None:
     bundle is resolved last because it has side-effects (setting private
     attrs on bot) that ``runtime_state_manager`` depends on.
     """
-    descriptors: list[ServiceDescriptor] = [
+    KernelBoundary.assert_scope("registry.wire_runtime_managers")
+    graph = DependencyGraph(
+        name="runtime",
+        descriptors=(
         # ── signal / memory helpers ─────────────────────────────────────────
         ServiceDescriptor(
             "long_term_signals",
@@ -591,8 +613,9 @@ def wire_runtime_managers(bot: Any) -> None:
                 bot.bot_context,
             ),
         ),
-    ]
-    _wire_from_descriptors(bot, descriptors)
+        ),
+    )
+    _wire_dependency_graph(bot, graph)
 
     # ── post-wire aliases (sub-attribute reads, not independent managers) ──
     # prompt_composer is a pure alias for prompt_assembly.
@@ -648,8 +671,9 @@ def build_manager_registry(bot: Any) -> ServiceRegistry:
 
 def wire_bot_managers(bot: Any) -> None:
     """Compatibility helper for callers that want full manager wiring in one call."""
-    wire_bootstrap_managers(bot)
-    wire_runtime_managers(bot)
+    with KernelBoundary.open_scope():
+        wire_bootstrap_managers(bot)
+        wire_runtime_managers(bot)
 
 
 class DadBotServiceContainer:
@@ -665,11 +689,13 @@ class DadBotServiceContainer:
         self._turn_orchestrator = None
 
     def wire_bootstrap(self) -> None:
-        wire_bootstrap_managers(self.bot)
+        with KernelBoundary.open_scope():
+            wire_bootstrap_managers(self.bot)
         self.refresh_registry()
 
     def wire_runtime(self) -> None:
-        wire_runtime_managers(self.bot)
+        with KernelBoundary.open_scope():
+            wire_runtime_managers(self.bot)
         self.refresh_registry()
 
     def refresh_registry(self) -> ServiceRegistry:

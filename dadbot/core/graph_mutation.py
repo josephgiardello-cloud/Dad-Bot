@@ -320,6 +320,21 @@ class MutationQueue:
 
     def snapshot(self) -> dict[str, Any]:
         self._assert_owner()
+        sorted_pending = sorted(
+            self._queue,
+            key=lambda m: (
+                m.priority,
+                m.turn_index,
+                m.sequence_id,
+                str(getattr(m, "payload_hash", "") or ""),
+            ),
+        )
+        canonical_pending_order_hash = hashlib.sha256(
+            json.dumps([str(m.payload_hash) for m in sorted_pending]).encode("utf-8")
+        ).hexdigest()
+        semantic_pending_multiset_hash = hashlib.sha256(
+            json.dumps(sorted(str(m.payload_hash) for m in self._queue)).encode("utf-8")
+        ).hexdigest()
         pending_ledger = sum(1 for intent in self._queue if intent.type is MutationKind.LEDGER)
         drained_ledger = sum(1 for intent in self._drained if intent.type is MutationKind.LEDGER)
         failed_ledger = sum(1 for intent, _ in self._failed if intent.type is MutationKind.LEDGER)
@@ -341,6 +356,8 @@ class MutationQueue:
             "ledger_failed": failed_ledger,
             "transactions": len(self._transactions),
             "latest_transaction": latest_tx,
+            "canonical_pending_order_hash": canonical_pending_order_hash,
+            "semantic_pending_multiset_hash": semantic_pending_multiset_hash,
         }
 
 
