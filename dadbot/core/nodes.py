@@ -306,6 +306,16 @@ class SafetyNode:
             "details": dict(decision.details or {}),
             "trace": dict(decision.trace or {}),
         }
+        semantic_trace = dict((decision.trace or {}).get("semantic_eval") or {})
+        eval_input_hash = str(semantic_trace.get("eval_input_hash") or "")
+        if eval_input_hash:
+            by_hash = dict(context.state.get("semantic_decision_by_eval_hash") or {})
+            by_hash[eval_input_hash] = {
+                "action": decision.action,
+                "step_name": decision.step_name,
+                "details": dict(decision.details or {}),
+            }
+            context.state["semantic_decision_by_eval_hash"] = by_hash
         policy_events = list(context.state.get("policy_trace_events") or [])
         policy_events.append(
             {

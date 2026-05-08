@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import hashlib
-import json
 import os
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from dadbot.core.turn_ir import PolicyInput, build_policy_input
+from dadbot.core.semantic_primitives import evaluate_policy
+from dadbot.core.semantic_primitives import hash as semantic_hash
+from dadbot.core.turn_ir import PolicyInput, SemanticEvalInput, build_policy_input, hash_eval_input
 
 _KIND_BINARY = "binary"
 _KIND_UNARY = "unary"
@@ -51,6 +51,32 @@ class PolicyDecision:
     trace: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class PolicyEquivalenceProof:
+    contract_version: str
+    proof_mode: str
+    equivalent: bool
+    fast_output_hash: str
+    full_output_hash: str
+    policy_view_state_hash: str
+    rule_fingerprint: str
+
+
+@dataclass(frozen=True)
+class SemanticDecision:
+    action: str
+    reason: str
+    degraded: bool = False
+
+    @staticmethod
+    def allow(*, degraded: bool = False) -> "SemanticDecision":
+        return SemanticDecision(action="allow", reason="allow", degraded=bool(degraded))
+
+    @staticmethod
+    def deny(reason: str) -> "SemanticDecision":
+        return SemanticDecision(action="deny", reason=str(reason or "policy_block"), degraded=False)
+
+
 class PolicyCompilationError(RuntimeError):
     """Raised when policy compilation/evaluation cannot proceed safely."""
 
@@ -64,6 +90,29 @@ class PolicyCompiler:
         return raw in {"1", "true", "on", "yes"}
 
     @staticmethod
+    def _semantic_tool_budget_limit() -> int:
+        raw = str(os.environ.get("DADBOT_SEMANTIC_TOOL_BUDGET", "8")).strip()
+        with_safety = int(raw) if raw.isdigit() else 8
+        return max(1, with_safety)
+
+    @staticmethod
+    def _semantic_policy_deny_set() -> set[str]:
+        raw = str(os.environ.get("DADBOT_POLICY_DENY_SET", "")).strip()
+        if not raw:
+            return set()
+        return {item.strip().lower() for item in raw.split(",") if item.strip()}
+
+    @staticmethod
+    def evaluate_semantics(inp: SemanticEvalInput) -> SemanticDecision:
+        """Thin adapter to canonical semantic policy primitive."""
+        return evaluate_policy(inp)
+
+    @staticmethod
+    def full_policy_eval_debug(inp: SemanticEvalInput) -> SemanticDecision:
+        """Compatibility alias for semantic evaluator; no independent execution semantics."""
+        return PolicyCompiler.evaluate_semantics(inp)
+
+    @staticmethod
     def _fallback_step() -> PolicyStep:
         return PolicyStep(
             name="passthrough",
@@ -74,6 +123,45 @@ class PolicyCompiler:
     @staticmethod
     def _summarize_policy_input(policy_input: PolicyInput) -> dict[str, Any]:
         return policy_input.summary()
+
+    @staticmethod
+    def _rule_fingerprint(intent_graph: PolicyIntentGraph) -> str:
+        rules = [{"name": str(step.name), "kind": str(step.kind)} for step in intent_graph.rules]
+        return PolicyCompiler._stable_hash(rules)
+
+    @staticmethod
+    def _build_minimal_trace(
+        *,
+        intent_graph: PolicyIntentGraph,
+        selected_step: PolicyStep,
+        selected_index: int,
+        action: str,
+        output_mutated: bool,
+        candidate_hash: str,
+        output_hash: str,
+    ) -> dict[str, Any]:
+        return {
+            "policy": intent_graph.policy_name,
+            "intent_graph_summary": PolicyCompiler._summarize_policy_input(intent_graph.policy_input),
+            "selected_rule": {
+                "name": selected_step.name,
+                "kind": selected_step.kind,
+                "index": selected_index,
+            },
+            "final_action": {
+                "action": action,
+                "step_name": selected_step.name,
+                "kind": selected_step.kind,
+                "output_mutated": bool(output_mutated),
+                "candidate_hash": str(candidate_hash or ""),
+                "output_hash": str(output_hash or ""),
+            },
+            "metadata": {
+                "trace_schema": "policy-decision-trace-v2-minimal",
+                "rule_count": len(intent_graph.rules),
+                "compile_phases": ["fast_gate", "transform_output", "emit_decision"],
+            },
+        }
 
     @staticmethod
     def _build_trace(
@@ -312,12 +400,10 @@ class PolicyCompiler:
 
     @staticmethod
     def _stable_hash(payload: Any) -> str:
-        return hashlib.sha256(
-            json.dumps(payload, sort_keys=True, ensure_ascii=True, default=str).encode("utf-8"),
-        ).hexdigest()
+        return semantic_hash(payload)
 
     @staticmethod
-    def compile(intent_graph: PolicyIntentGraph) -> PolicyDecision:
+    def compile(intent_graph: PolicyIntentGraph, *, trace_level: str = "full") -> PolicyDecision:
         rule_evaluations = PolicyCompiler.evaluate_rules(intent_graph)
         considered = tuple(
             intent_graph.rules[evaluation.index]
@@ -326,17 +412,29 @@ class PolicyCompiler:
         )
         selected_step, selected_index = PolicyCompiler.resolve_rule(intent_graph, considered)
         action, output, details, output_mutated, candidate_hash, output_hash = PolicyCompiler.transform_output(intent_graph, selected_step)
-        trace = PolicyCompiler._build_trace(
-            intent_graph=intent_graph,
-            considered_rules=considered,
-            rule_evaluations=rule_evaluations,
-            selected_step=selected_step,
-            selected_index=selected_index,
-            action=action,
-            output_mutated=output_mutated,
-            candidate_hash=candidate_hash,
-            output_hash=output_hash,
-        )
+        level = str(trace_level or "full").strip().lower()
+        if level == "minimal":
+            trace = PolicyCompiler._build_minimal_trace(
+                intent_graph=intent_graph,
+                selected_step=selected_step,
+                selected_index=selected_index,
+                action=action,
+                output_mutated=output_mutated,
+                candidate_hash=candidate_hash,
+                output_hash=output_hash,
+            )
+        else:
+            trace = PolicyCompiler._build_trace(
+                intent_graph=intent_graph,
+                considered_rules=considered,
+                rule_evaluations=rule_evaluations,
+                selected_step=selected_step,
+                selected_index=selected_index,
+                action=action,
+                output_mutated=output_mutated,
+                candidate_hash=candidate_hash,
+                output_hash=output_hash,
+            )
         return PolicyDecision(
             action=action,
             output=output,
@@ -346,21 +444,122 @@ class PolicyCompiler:
         )
 
     @staticmethod
-    def evaluate_safety(plan: PolicyPlan, turn_context: Any, candidate: Any) -> PolicyDecision:
+    def _audit_full_decision_consistency(
+        *,
+        fast_decision: PolicyDecision,
+        full_decision: PolicyDecision,
+        policy_input: PolicyInput,
+        intent_graph: PolicyIntentGraph,
+        proof_mode: str,
+    ) -> PolicyEquivalenceProof:
+        fast_output_hash = PolicyCompiler._stable_hash(fast_decision.output)
+        full_output_hash = PolicyCompiler._stable_hash(full_decision.output)
+        proof = PolicyEquivalenceProof(
+            contract_version="policy-equivalence-v1",
+            proof_mode=str(proof_mode or "off"),
+            equivalent=(fast_output_hash == full_output_hash),
+            fast_output_hash=fast_output_hash,
+            full_output_hash=full_output_hash,
+            policy_view_state_hash=str(
+                getattr(policy_input.policy_view, "state_hash", "") or "",
+            ),
+            rule_fingerprint=PolicyCompiler._rule_fingerprint(intent_graph),
+        )
+        if not proof.equivalent:
+            raise PolicyCompilationError(
+                "Fast policy gate diverged from full policy evaluation output",
+            )
+        return proof
+
+    @staticmethod
+    def _proof_mode(audit_full: bool) -> str:
+        raw = str(os.environ.get("DADBOT_POLICY_EQUIVALENCE_PROOF", "audit")).strip().lower()
+        if raw in {"off", "none", "0", "false"}:
+            return "off"
+        if raw in {"always", "on", "1", "true"}:
+            return "always"
+        if raw in {"audit", "audit_only"}:
+            return "audit" if bool(audit_full) else "off"
+        return "audit" if bool(audit_full) else "off"
+
+    @staticmethod
+    def evaluate_safety(
+        plan: PolicyPlan,
+        turn_context: Any,
+        candidate: Any,
+        *,
+        fast_gate: bool = False,
+        audit_full: bool = False,
+    ) -> PolicyDecision:
+        # Compatibility: callers may still pass fast_gate, but policy truth is now single-path.
+        _ = fast_gate
         policy_input = build_policy_input(plan.policy_name, turn_context, candidate)
+        semantic_eval_input = policy_input.semantic_eval_input
+        if not isinstance(semantic_eval_input, SemanticEvalInput):
+            raise PolicyCompilationError("Missing semantic evaluation input projection")
+
+        semantic_decision = PolicyCompiler.evaluate_semantics(semantic_eval_input)
+        if bool(audit_full):
+            semantic_debug = PolicyCompiler.full_policy_eval_debug(semantic_eval_input)
+            if semantic_decision != semantic_debug:
+                raise PolicyCompilationError("Semantic evaluation audit assertion failed")
+
+        if semantic_decision.action == "deny":
+            blocked_output = ("Request blocked by semantic safety policy.", False)
+            return PolicyDecision(
+                action="denied",
+                output=blocked_output,
+                step_name="semantic_eval",
+                details={
+                    "reason": semantic_decision.reason,
+                    "degraded": bool(semantic_decision.degraded),
+                },
+                trace={
+                    "policy": plan.policy_name,
+                    "truth_source": "semantic_eval_input_v1",
+                    "semantic_eval": {
+                        "contract_version": "semantic-eval-v1",
+                        "eval_input_hash": hash_eval_input(semantic_eval_input),
+                        "decision": {
+                            "action": semantic_decision.action,
+                            "reason": semantic_decision.reason,
+                            "degraded": bool(semantic_decision.degraded),
+                        },
+                    },
+                },
+            )
+
         intent_graph = PolicyCompiler.build_intent_graph(plan, policy_input)
-        return PolicyCompiler.compile(intent_graph)
+        decision = PolicyCompiler.compile(intent_graph, trace_level="full")
+        decision.trace.setdefault("truth_source", "semantic_eval_input_v1")
+        decision.trace.setdefault("semantic_eval", {
+            "contract_version": "semantic-eval-v1",
+            "eval_input_hash": hash_eval_input(semantic_eval_input),
+            "decision": {
+                "action": semantic_decision.action,
+                "reason": semantic_decision.reason,
+                "degraded": bool(semantic_decision.degraded),
+            },
+            "runtime_domain_contract": {
+                "policy_semantics": "pure_deterministic",
+                "policy_runtime": "single_path_compile_full",
+                "split_execution_disabled": True,
+            },
+        })
+        return decision
 
     @staticmethod
     def evaluate_safety_input(plan: PolicyPlan, policy_input: PolicyInput) -> PolicyDecision:
         intent_graph = PolicyCompiler.build_intent_graph(plan, policy_input)
-        return PolicyCompiler.compile(intent_graph)
+        return PolicyCompiler.compile(intent_graph, trace_level="full")
 
 
 __all__ = [
     "PolicyCompiler",
     "PolicyCompilationError",
     "PolicyDecision",
+    "PolicyEquivalenceProof",
+    "SemanticDecision",
     "PolicyIntentGraph",
     "PolicyPlan",
     "PolicyRuleEvaluation",

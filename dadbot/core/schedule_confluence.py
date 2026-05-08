@@ -20,6 +20,8 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from dadbot.core.semantic_primitives import hash as semantic_hash
+from dadbot.core.semantic_primitives import schedule as semantic_schedule
 from dadbot.core.tool_dag import ToolDAG
 from dadbot.core.tool_scheduler import ScheduledItem, ToolScheduler
 
@@ -29,9 +31,7 @@ from dadbot.core.tool_scheduler import ScheduledItem, ToolScheduler
 
 
 def _sha256(payload: Any) -> str:
-    return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, default=str).encode("utf-8"),
-    ).hexdigest()
+    return semantic_hash(payload)
 
 
 # ---------------------------------------------------------------------------
@@ -94,8 +94,11 @@ class ScheduleNormalizer:
 
     def normalized_dag_hash(self, dag: ToolDAG, seed: int = 0) -> str:
         """Normalize a fresh schedule from the given DAG and seed, return hash."""
-        scheduler = ToolScheduler(seed=seed)
-        items = scheduler.schedule(dag)
+        if int(seed or 0) == 0:
+            items = semantic_schedule(dag)
+        else:
+            scheduler = ToolScheduler(seed=seed)
+            items = scheduler.schedule(dag)
         return self.normalized_hash(items)
 
 

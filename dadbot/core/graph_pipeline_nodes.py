@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import os
 from typing import Any, Protocol
 
 from dadbot.core.critic import CritiqueEngine
@@ -480,7 +481,15 @@ class SafetyNode(_NodeContractMixin):
         service = registry.get("safety_service")
         candidate = turn_context.state.get("candidate")
         plan = PolicyCompiler.compile_safety(service)
-        decision = PolicyCompiler.evaluate_safety(plan, turn_context, candidate)
+        metadata = getattr(turn_context, "metadata", None)
+        audit_mode = bool((metadata or {}).get("audit_mode")) if isinstance(metadata, dict) else False
+        decision = PolicyCompiler.evaluate_safety(
+            plan,
+            turn_context,
+            candidate,
+            fast_gate=False,
+            audit_full=audit_mode,
+        )
         turn_context.state["safe_result"] = decision.output
         turn_context.state["safety_policy_decision"] = {
             "action": decision.action,
@@ -488,6 +497,16 @@ class SafetyNode(_NodeContractMixin):
             "details": dict(decision.details or {}),
             "trace": dict(decision.trace or {}),
         }
+        semantic_trace = dict((decision.trace or {}).get("semantic_eval") or {})
+        eval_input_hash = str(semantic_trace.get("eval_input_hash") or "")
+        if eval_input_hash:
+            by_hash = dict(turn_context.state.get("semantic_decision_by_eval_hash") or {})
+            by_hash[eval_input_hash] = {
+                "action": decision.action,
+                "step_name": decision.step_name,
+                "details": dict(decision.details or {}),
+            }
+            turn_context.state["semantic_decision_by_eval_hash"] = by_hash
         policy_events = list(turn_context.state.get("policy_trace_events") or [])
         policy_events.append(
             {
