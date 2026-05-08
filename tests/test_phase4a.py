@@ -31,6 +31,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from tests.benchmark_runner import BenchmarkRunner
+from tests.harness.graph_runner import confluence_key_for_turn
 from tests.scenario_suite import (
     SCENARIOS,
     get_scenarios_by_category,
@@ -533,10 +534,40 @@ class TestPhase4ARealCheckpointing:
         _assert_handle_turn_not_mocked(orchestrator, "real_checkpointing")
 
         with _stub_llm(llm):
-            await orchestrator.handle_turn("hello dad", session_id="cp-real-1")
+            await orchestrator.handle_turn(
+                "hello dad",
+                session_id="cp-real-1",
+                confluence_key=confluence_key_for_turn("cp-real-1", "hello dad"),
+            )
 
         count = checkpointer.checkpoint_count("cp-real-1")
         assert count >= 1, f"Expected at least 1 checkpoint after a real turn, got {count}"
+
+    @pytest.mark.asyncio
+    async def test_orchestrator_hard_fails_when_confluence_key_omitted_in_strict_mode(
+        self,
+        phase4a_db_path,
+        monkeypatch,
+    ):
+        """End-to-end boundary check: missing confluence key is rejected in strict mode."""
+        monkeypatch.setenv("DADBOT_GLOBAL_CONFLUENCE_MODE", "enforce")
+        monkeypatch.setenv("DADBOT_ALLOW_LEGACY_CONFLUENCE_KEY", "0")
+
+        try:
+            orchestrator, checkpointer, llm = _make_orchestrator_with_checkpointer(phase4a_db_path)
+        except Exception as exc:
+            _fail_certification_gate("orchestrator_boot", exc)
+        _assert_handle_turn_not_mocked(orchestrator, "strict_confluence_boundary")
+
+        with _stub_llm(llm):
+            response_text, success = await orchestrator.handle_turn(
+                "missing key should fail",
+                session_id="strict-missing-key",
+            )
+
+        assert success is False
+        assert "Something went wrong" in str(response_text)
+        assert checkpointer.checkpoint_count("strict-missing-key") == 0
 
     @pytest.mark.asyncio
     async def test_orchestrator_restores_state_after_simulated_restart(self, phase4a_db_path):
@@ -548,7 +579,11 @@ class TestPhase4ARealCheckpointing:
         _assert_handle_turn_not_mocked(orch1, "restart_boundary_initial")
 
         with _stub_llm(llm1):
-            await orch1.handle_turn("remember this", session_id="restart-real")
+            await orch1.handle_turn(
+                "remember this",
+                session_id="restart-real",
+                confluence_key=confluence_key_for_turn("restart-real", "remember this"),
+            )
 
         saved_hash = cp1.load_checkpoint("restart-real")["checkpoint_hash"]
         assert saved_hash, "No checkpoint_hash after turn 1"
@@ -561,7 +596,11 @@ class TestPhase4ARealCheckpointing:
         _assert_handle_turn_not_mocked(orch2, "restart_boundary_resumed")
 
         with _stub_llm(llm2):
-            await orch2.handle_turn("follow up", session_id="restart-real")
+            await orch2.handle_turn(
+                "follow up",
+                session_id="restart-real",
+                confluence_key=confluence_key_for_turn("restart-real", "follow up"),
+            )
 
         # After turn 2, two checkpoints should exist (one per turn).
         count = cp2.checkpoint_count("restart-real")
@@ -583,7 +622,11 @@ class TestPhase4ARealCheckpointing:
         _assert_handle_turn_not_mocked(orchestrator, "determinism_fields")
 
         with _stub_llm(llm):
-            await orchestrator.handle_turn("what time is it", session_id="det-fields")
+            await orchestrator.handle_turn(
+                "what time is it",
+                session_id="det-fields",
+                confluence_key=confluence_key_for_turn("det-fields", "what time is it"),
+            )
 
         loaded = checkpointer.load_checkpoint("det-fields")
         # checkpoint_snapshot() serializes context.metadata (not session.state).
@@ -598,13 +641,17 @@ class TestPhase4ARealCheckpointing:
     async def test_checkpoint_write_log_records_success_row(self, phase4a_db_path):
         """The checkpoint_writes table has a success row after each real turn."""
         try:
-            orchestrator, checkpointer, llm = _make_orchestrator_with_checkpointer(phase4a_db_path)
+            orchestrator, _checkpointer, llm = _make_orchestrator_with_checkpointer(phase4a_db_path)
         except Exception as exc:
             _fail_certification_gate("orchestrator_boot", exc)
         _assert_handle_turn_not_mocked(orchestrator, "checkpoint_write_log")
 
         with _stub_llm(llm):
-            await orchestrator.handle_turn("log this", session_id="write-log-real")
+            await orchestrator.handle_turn(
+                "log this",
+                session_id="write-log-real",
+                confluence_key=confluence_key_for_turn("write-log-real", "log this"),
+            )
 
         with contextlib.closing(sqlite3.connect(phase4a_db_path)) as conn:
             rows = conn.execute(
@@ -627,7 +674,11 @@ class TestPhase4ARealCheckpointing:
         _assert_handle_turn_not_mocked(orch1, "manifest_drift_lenient_initial")
 
         with _stub_llm(llm1):
-            await orch1.handle_turn("first turn", session_id="drift-lenient")
+            await orch1.handle_turn(
+                "first turn",
+                session_id="drift-lenient",
+                confluence_key=confluence_key_for_turn("drift-lenient", "first turn"),
+            )
 
         # Mutate the stored manifest's env_hash to simulate drift.
         loaded = cp1.load_checkpoint("drift-lenient")
@@ -644,7 +695,7 @@ class TestPhase4ARealCheckpointing:
 
         # Second orchestrator loads the mutated checkpoint; lenient mode should warn, not raise.
         try:
-            orch2, cp2, llm2 = _make_orchestrator_with_checkpointer(phase4a_db_path, strict=False)
+            orch2, _cp2, llm2 = _make_orchestrator_with_checkpointer(phase4a_db_path, strict=False)
         except Exception as exc:
             _fail_certification_gate("orchestrator_boot_restart", exc)
         _assert_handle_turn_not_mocked(orch2, "manifest_drift_lenient_resumed")
@@ -653,7 +704,11 @@ class TestPhase4ARealCheckpointing:
 
         with caplog.at_level(logging.WARNING):
             with _stub_llm(llm2):
-                await orch2.handle_turn("second turn", session_id="drift-lenient")
+                await orch2.handle_turn(
+                    "second turn",
+                    session_id="drift-lenient",
+                    confluence_key=confluence_key_for_turn("drift-lenient", "second turn"),
+                )
 
         drift_messages = [m for m in caplog.messages if "drift" in m.lower() or "env" in m.lower()]
         assert len(drift_messages) >= 1, f"Expected at least one drift warning in logs; got: {caplog.messages}"
@@ -689,9 +744,17 @@ class TestPhase4ADeterminismVerification:
         user_input = "determinism test input"
 
         with _stub_llm(llm1):
-            await orch1.handle_turn(user_input, session_id="det-a")
+            await orch1.handle_turn(
+                user_input,
+                session_id="det-a",
+                confluence_key=confluence_key_for_turn("det-a", user_input),
+            )
         with _stub_llm(llm2):
-            await orch2.handle_turn(user_input, session_id="det-b")
+            await orch2.handle_turn(
+                user_input,
+                session_id="det-b",
+                confluence_key=confluence_key_for_turn("det-b", user_input),
+            )
 
         cp1_data = cp1.load_checkpoint("det-a")
         cp2_data = cp2.load_checkpoint("det-b")
@@ -723,7 +786,11 @@ class TestPhase4ADeterminismVerification:
         _assert_handle_turn_not_mocked(orchestrator, "tool_trace_presence")
 
         with _stub_llm(llm):
-            await orchestrator.handle_turn("tool check", session_id="tool-det")
+            await orchestrator.handle_turn(
+                "tool check",
+                session_id="tool-det",
+                confluence_key=confluence_key_for_turn("tool-det", "tool check"),
+            )
 
         loaded = checkpointer.load_checkpoint("tool-det")
         # tool_trace_hash is in context.metadata["determinism"] (serialized by checkpoint_snapshot).
@@ -741,12 +808,20 @@ class TestPhase4ADeterminismVerification:
         _assert_handle_turn_not_mocked(orchestrator, "checkpoint_chain_integrity")
 
         with _stub_llm(llm):
-            await orchestrator.handle_turn("turn one", session_id="chain-real")
+            await orchestrator.handle_turn(
+                "turn one",
+                session_id="chain-real",
+                confluence_key=confluence_key_for_turn("chain-real", "turn one"),
+            )
         cp_turn1 = checkpointer.load_checkpoint("chain-real")
         hash_turn1 = cp_turn1["checkpoint_hash"]
 
         with _stub_llm(llm):
-            await orchestrator.handle_turn("turn two", session_id="chain-real")
+            await orchestrator.handle_turn(
+                "turn two",
+                session_id="chain-real",
+                confluence_key=confluence_key_for_turn("chain-real", "turn two"),
+            )
         cp_turn2 = checkpointer.load_checkpoint("chain-real")
 
         assert cp_turn2["prev_checkpoint_hash"] == hash_turn1, (
@@ -765,7 +840,11 @@ class TestPhase4ADeterminismVerification:
         n_turns = 3
         with _stub_llm(llm):
             for i in range(n_turns):
-                await orchestrator.handle_turn(f"turn {i}", session_id="metrics-obs")
+                await orchestrator.handle_turn(
+                    f"turn {i}",
+                    session_id="metrics-obs",
+                    confluence_key=confluence_key_for_turn("metrics-obs", f"turn {i}"),
+                )
 
         cp_count = checkpointer.checkpoint_count("metrics-obs")
         assert cp_count == n_turns, f"Expected {n_turns} checkpoints, got {cp_count}"
@@ -826,7 +905,7 @@ llm = orchestrator.registry.get("llm")
 async def main():
     stub = AsyncMock(return_value=("[subprocess-stub]", True))
     with patch.object(llm, "run_agent", new=stub):
-        await orchestrator.handle_turn("proc boundary test", session_id="proc-restart")
+        await orchestrator.handle_turn("proc boundary test", session_id="proc-restart", confluence_key="test:proc-boundary-001")
     cp = checkpointer.load_checkpoint("proc-restart")
     print(cp["checkpoint_hash"])
 
@@ -860,7 +939,7 @@ llm = orchestrator.registry.get("llm")
 async def main():
     stub = AsyncMock(return_value=("[subprocess-stub]", True))
     with patch.object(llm, "run_agent", new=stub):
-        await orchestrator.handle_turn("second proc turn", session_id="proc-restart")
+        await orchestrator.handle_turn("second proc turn", session_id="proc-restart", confluence_key="test:proc-boundary-002")
     latest = checkpointer.load_checkpoint("proc-restart")
     count = checkpointer.checkpoint_count("proc-restart")
     result = {{
@@ -881,6 +960,7 @@ asyncio.run(main())
             capture_output=True,
             text=True,
             timeout=60,
+            check=False,
         )
         if result1.returncode != 0:
             _fail_certification_gate(
@@ -888,7 +968,7 @@ asyncio.run(main())
                 f"returncode={result1.returncode} stderr={result1.stderr[-800:]}",
             )
 
-        lines1 = [l for l in result1.stdout.splitlines() if l.strip()]
+        lines1 = [line for line in result1.stdout.splitlines() if line.strip()]
         assert lines1, f"Process 1 produced no output; stderr: {result1.stderr[-400:]}"
         prev_hash = lines1[-1]
 
@@ -898,6 +978,7 @@ asyncio.run(main())
             capture_output=True,
             text=True,
             timeout=60,
+            check=False,
         )
         if result2.returncode != 0:
             _fail_certification_gate(
@@ -907,7 +988,7 @@ asyncio.run(main())
 
         # The subprocess may emit telemetry/ledger JSON lines before the final result.
         # Parse only the last non-empty line to avoid multi-document decode errors.
-        lines = [l for l in result2.stdout.splitlines() if l.strip()]
+        lines = [line for line in result2.stdout.splitlines() if line.strip()]
         if not lines:
             pytest.fail(f"Process 2 produced no output; stderr: {result2.stderr[-400:]}")
         try:
@@ -954,10 +1035,17 @@ class TestPhase4AToolDeterminismAcrossRestarts:
         fixed_input = "echo tool determinism probe"
         try:
             with _stub_llm(llm_a):
-                await orch_a.handle_turn(fixed_input, session_id="tool-det-a")
+                await orch_a.handle_turn(
+                    fixed_input,
+                    session_id="tool-det-a",
+                    confluence_key=confluence_key_for_turn("tool-det-a", fixed_input),
+                )
             with _stub_llm(llm_b):
-                await orch_b.handle_turn(fixed_input, session_id="tool-det-b")
-
+                await orch_b.handle_turn(
+                    fixed_input,
+                    session_id="tool-det-b",
+                    confluence_key=confluence_key_for_turn("tool-det-b", fixed_input),
+                )
             cp_a_data = cp_a.load_checkpoint("tool-det-a")
             cp_b_data = cp_b.load_checkpoint("tool-det-b")
 
@@ -987,7 +1075,11 @@ class TestPhase4AToolDeterminismAcrossRestarts:
         _assert_handle_turn_not_mocked(orchestrator, "tool_det_round_trip")
 
         with _stub_llm(llm):
-            await orchestrator.handle_turn("round trip tool hash", session_id="tool-rt")
+            await orchestrator.handle_turn(
+                "round trip tool hash",
+                session_id="tool-rt",
+                confluence_key=confluence_key_for_turn("tool-rt", "round trip tool hash"),
+            )
 
         # Capture hash at save time from context.
         loaded = checkpointer.load_checkpoint("tool-rt")
@@ -1013,9 +1105,17 @@ class TestPhase4AToolDeterminismAcrossRestarts:
 
         try:
             with _stub_llm(llm_a):
-                await orch_a.handle_turn("alpha input probe", session_id="tool-diff-a")
+                await orch_a.handle_turn(
+                    "alpha input probe",
+                    session_id="tool-diff-a",
+                    confluence_key=confluence_key_for_turn("tool-diff-a", "alpha input probe"),
+                )
             with _stub_llm(llm_b):
-                await orch_b.handle_turn("completely different beta input", session_id="tool-diff-b")
+                await orch_b.handle_turn(
+                    "completely different beta input",
+                    session_id="tool-diff-b",
+                    confluence_key=confluence_key_for_turn("tool-diff-b", "completely different beta input"),
+                )
 
             tth_a = ((cp_a.load_checkpoint("tool-diff-a").get("metadata") or {}).get("determinism") or {}).get(
                 "tool_trace_hash", ""
@@ -1077,7 +1177,11 @@ class TestPhase4AScaleAndPruning:
         n_turns = 110
         with _stub_llm(llm):
             for i in range(n_turns):
-                await orchestrator.handle_turn(f"turn {i}", session_id="prune-scale")
+                await orchestrator.handle_turn(
+                    f"turn {i}",
+                    session_id="prune-scale",
+                    confluence_key=confluence_key_for_turn("prune-scale", f"turn {i}"),
+                )
 
         final_count = checkpointer.checkpoint_count("prune-scale")
         assert final_count <= 10, (
@@ -1108,13 +1212,17 @@ class TestPhase4AScaleAndPruning:
             llm = orch.registry.get("llm")
             with _stub_llm(llm):
                 for t in range(turns_per_session):
-                    await orch.handle_turn(f"session {session_id} turn {t}", session_id=session_id)
+                    await orch.handle_turn(
+                        f"session {session_id} turn {t}",
+                        session_id=session_id,
+                        confluence_key=confluence_key_for_turn(session_id, f"session {session_id} turn {t}"),
+                    )
             return cp.checkpoint_count(session_id)
 
         session_ids = [f"concurrent-{i}" for i in range(n_sessions)]
         counts = await asyncio.gather(*[run_session(sid) for sid in session_ids])
 
-        for sid, count in zip(session_ids, counts):
+        for sid, count in zip(session_ids, counts, strict=True):
             assert count == turns_per_session, f"Session {sid!r}: expected {turns_per_session} checkpoints, got {count}"
 
     @pytest.mark.asyncio
@@ -1130,7 +1238,11 @@ class TestPhase4AScaleAndPruning:
         n_turns = 20
         with _stub_llm(llm):
             for i in range(n_turns):
-                await orchestrator.handle_turn(f"prune count turn {i}", session_id="prune-count")
+                await orchestrator.handle_turn(
+                    f"prune count turn {i}",
+                    session_id="prune-count",
+                    confluence_key=confluence_key_for_turn("prune-count", f"prune count turn {i}"),
+                )
 
         before = checkpointer.checkpoint_count("prune-count")
         keep = 5
@@ -1158,7 +1270,11 @@ async def test_pruning_small_mirror_remains_correct(phase4a_db_path):
     keep = 4
     with _stub_llm(llm):
         for i in range(n_turns):
-            await orchestrator.handle_turn(f"small mirror turn {i}", session_id="prune-small")
+            await orchestrator.handle_turn(
+                f"small mirror turn {i}",
+                session_id="prune-small",
+                confluence_key=confluence_key_for_turn("prune-small", f"small mirror turn {i}"),
+            )
 
     before = checkpointer.checkpoint_count("prune-small")
     deleted = checkpointer.prune_old_checkpoints("prune-small", keep_count=keep)
@@ -1338,7 +1454,11 @@ class TestPhase4ALargeStateCheckpoint:
         _assert_handle_turn_not_mocked(orchestrator, "large_state_preload")
 
         with _stub_llm(llm):
-            await orchestrator.handle_turn("hello after large state", session_id="large-orch")
+            await orchestrator.handle_turn(
+                "hello after large state",
+                session_id="large-orch",
+                confluence_key=confluence_key_for_turn("large-orch", "hello after large state"),
+            )
 
         # The turn should have added a second checkpoint (turn 2).
         count = checkpointer.checkpoint_count("large-orch")

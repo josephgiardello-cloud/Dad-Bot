@@ -28,6 +28,7 @@ from dadbot.core.persistence import (
     CheckpointNotFoundError,
     SQLiteCheckpointer,
 )
+from tests.harness.graph_runner import confluence_key_for_turn
 
 
 @pytest.fixture
@@ -520,7 +521,11 @@ class TestPhase4GapClosure:
         monkeypatch.setattr(orchestrator_a.registry.get("agent_service"), "run_agent", _stub_agent)
         _stub_expensive_paths()
 
-        result_a = await orchestrator_a.handle_turn(input_text, session_id=session_id)
+        result_a = await orchestrator_a.handle_turn(
+            input_text,
+            session_id=session_id,
+            confluence_key=confluence_key_for_turn(session_id, input_text),
+        )
         context_a = getattr(orchestrator_a, "_last_turn_context", None)
         assert isinstance(context_a, TurnContext)
         assert result_a[0] == f"restart-proof::{input_text}"
@@ -538,7 +543,11 @@ class TestPhase4GapClosure:
         )
         monkeypatch.setattr(orchestrator_b.registry.get("agent_service"), "run_agent", _stub_agent)
 
-        result_b = await orchestrator_b.handle_turn(input_text, session_id=session_id)
+        result_b = await orchestrator_b.handle_turn(
+            input_text,
+            session_id=session_id,
+            confluence_key=confluence_key_for_turn(session_id, input_text),
+        )
         context_b = getattr(orchestrator_b, "_last_turn_context", None)
         assert isinstance(context_b, TurnContext)
         assert result_b[0] == f"restart-proof::{input_text}"
