@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import concurrent.futures
 import hashlib
 import json
 import logging
@@ -98,6 +99,79 @@ class PersistenceService:
         self.checkpointer: AbstractCheckpointer | None = None
         self.strict_mode: bool = False
         self._merkle_session_leaves: dict[str, list[str]] = {}
+        self._async_checkpoint_pipeline_enabled: bool = (
+            str(os.environ.get("DADBOT_ASYNC_CHECKPOINT_PIPELINE", "")).strip().lower()
+            in {"1", "true", "on", "yes"}
+        )
+        self._checkpoint_executor: concurrent.futures.ThreadPoolExecutor | None = None
+        self._checkpoint_futures: list[tuple[int, concurrent.futures.Future[Any]]] = []
+        self._checkpoint_enqueue_sequence: int = 0
+        self._checkpoint_drain_sequence: int = 0
+
+    def _ensure_checkpoint_executor(self) -> concurrent.futures.ThreadPoolExecutor:
+        if self._checkpoint_executor is None:
+            self._checkpoint_executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix="dadbot-checkpoint",
+            )
+        return self._checkpoint_executor
+
+    def _drain_async_checkpoint_queue(self, *, strict_error: bool) -> None:
+        if not self._checkpoint_futures:
+            return
+        pending = list(self._checkpoint_futures)
+        self._checkpoint_futures.clear()
+        expected = int(self._checkpoint_drain_sequence) + 1
+        for sequence_id, future in pending:
+            if int(sequence_id) != int(expected):
+                raise InvariantViolation(
+                    "Async checkpoint ordering contract violated",
+                    context={
+                        "expected_sequence": int(expected),
+                        "actual_sequence": int(sequence_id),
+                    },
+                )
+            try:
+                future.result()
+                self._checkpoint_drain_sequence = int(sequence_id)
+                expected = int(sequence_id) + 1
+            except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
+                logger.error("PersistenceService async checkpoint save failed: %s", exc)
+                if strict_error:
+                    raise PersistenceFailure(
+                        "PersistenceService async checkpoint save failed",
+                        context={"error": str(exc), "sequence_id": int(sequence_id)},
+                    ) from exc
+
+    def _enqueue_async_checkpoint(
+        self,
+        *,
+        session_id: str,
+        trace_id: str,
+        checkpoint: dict[str, Any],
+        manifest: dict[str, Any],
+    ) -> None:
+        if self.checkpointer is None:
+            return
+        self._checkpoint_enqueue_sequence = int(self._checkpoint_enqueue_sequence) + 1
+        sequence_id = int(self._checkpoint_enqueue_sequence)
+        if sequence_id <= int(self._checkpoint_drain_sequence):
+            raise InvariantViolation(
+                "Async checkpoint enqueue sequence must advance monotonically",
+                context={
+                    "enqueue_sequence": sequence_id,
+                    "drain_sequence": int(self._checkpoint_drain_sequence),
+                },
+            )
+        executor = self._ensure_checkpoint_executor()
+        future = executor.submit(
+            self.checkpointer.save_checkpoint,
+            session_id=session_id,
+            trace_id=trace_id,
+            checkpoint=dict(checkpoint),
+            manifest=dict(manifest),
+        )
+        self._checkpoint_futures.append((sequence_id, future))
 
     @staticmethod
     def _stable_hash(payload: Any) -> str:
@@ -106,6 +180,13 @@ class PersistenceService:
                 "utf-8",
             ),
         ).hexdigest()
+
+    def __del__(self) -> None:
+        with contextlib.suppress(Exception):
+            self._drain_async_checkpoint_queue(strict_error=False)
+        if self._checkpoint_executor is not None:
+            with contextlib.suppress(Exception):
+                self._checkpoint_executor.shutdown(wait=False, cancel_futures=False)
 
     @staticmethod
     def _json_safe(payload: Any) -> Any:
@@ -722,6 +803,11 @@ class PersistenceService:
         )
 
     def set_checkpointer(self, checkpointer: AbstractCheckpointer | None) -> None:
+        self._drain_async_checkpoint_queue(strict_error=False)
+        if self._checkpoint_executor is not None:
+            with contextlib.suppress(Exception):
+                self._checkpoint_executor.shutdown(wait=True, cancel_futures=False)
+            self._checkpoint_executor = None
         self.checkpointer = checkpointer
 
     @staticmethod
@@ -1608,6 +1694,15 @@ class PersistenceService:
         runtime: Any,
         turn_context: Any,
     ) -> None:
+        if isinstance(getattr(turn_context, "metadata", None), dict):
+            turn_context.metadata["async_checkpoint_contract"] = {
+                "version": "async-checkpoint-order-v1",
+                "ordering_model": "single-writer-monotonic-sequence",
+                "enabled": bool(self._async_checkpoint_pipeline_enabled),
+                "enqueue_sequence": int(self._checkpoint_enqueue_sequence),
+                "drain_sequence": int(self._checkpoint_drain_sequence),
+            }
+
         # Atomic checkpoint capture inside finalize boundary.
         checkpoint = None
         checkpoint_snapshot = getattr(turn_context, "checkpoint_snapshot", None)
@@ -1632,20 +1727,30 @@ class PersistenceService:
             manifest = dict(
                 getattr(turn_context, "metadata", {}).get("determinism_manifest") or {},
             )
-            try:
-                self.checkpointer.save_checkpoint(
+            checkpoint_payload = dict(checkpoint) if isinstance(checkpoint, dict) else {}
+            async_allowed = bool(self._async_checkpoint_pipeline_enabled) and not bool(self.strict_mode)
+            if async_allowed:
+                self._enqueue_async_checkpoint(
                     session_id=session_id,
                     trace_id=trace_id,
-                    checkpoint=dict(checkpoint) if isinstance(checkpoint, dict) else {},
+                    checkpoint=checkpoint_payload,
                     manifest=manifest,
                 )
-            except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
-                logger.error("PersistenceService.checkpointer save failed: %s", exc)
-                if bool(self.strict_mode):
-                    raise PersistenceFailure(
-                        "PersistenceService.checkpointer save failed",
-                        context={"error": str(exc)},
-                    ) from exc
+            else:
+                try:
+                    self.checkpointer.save_checkpoint(
+                        session_id=session_id,
+                        trace_id=trace_id,
+                        checkpoint=checkpoint_payload,
+                        manifest=manifest,
+                    )
+                except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
+                    logger.error("PersistenceService.checkpointer save failed: %s", exc)
+                    if bool(self.strict_mode):
+                        raise PersistenceFailure(
+                            "PersistenceService.checkpointer save failed",
+                            context={"error": str(exc)},
+                        ) from exc
 
         self._enforce_memory_authority(
             runtime,
@@ -1676,6 +1781,10 @@ class PersistenceService:
         fast_path = self._finalize_fast_path_if_already_finalized(turn_context, result)
         if fast_path is not None:
             return fast_path
+
+        # Preserve deterministic commit ordering: complete prior queued checkpoint writes
+        # before starting the next SaveNode finalize boundary.
+        self._drain_async_checkpoint_queue(strict_error=bool(self.strict_mode))
 
         turn_text, mood, norm_attachments, reply = self._finalize_inputs(turn_context, result)
         service, runtime = self._finalize_validate_mutation_set(turn_context)
