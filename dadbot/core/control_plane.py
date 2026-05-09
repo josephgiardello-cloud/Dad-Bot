@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import gzip
 import hashlib
 import json
@@ -18,6 +19,20 @@ from dadbot.core.execution_boundary import ControlPlaneExecutionBoundary
 from dadbot.core.execution_lease import ExecutionLease, LeaseConflictError
 from dadbot.core.execution_ledger import ExecutionLedger
 from dadbot.core.execution_ledger_memory import InMemoryExecutionLedger
+from dadbot.core.execution_result_unified import (
+    _TERMINAL_STATUS_VALUES,
+    build_unified_execution_result,
+    ensure_unified_execution_result,
+    mark_unified_execution_failure,
+    mark_unified_execution_success,
+)
+from dadbot.core.system_state_algebra import (
+    evaluate_system_state_algebra,
+    persist_system_state_algebra,
+)
+from dadbot.core.memory_set_invariants import (
+    MemorySetInvariantViolation,
+)
 from dadbot.core.kernel_gateway import KernelGateway
 from dadbot.core.kernel_signals import get_exporter, get_metrics, get_tracer
 from dadbot.core.ledger_reader import LedgerReader
@@ -27,6 +42,94 @@ from dadbot.core.semantic_primitives import hash as semantic_hash
 from dadbot.core.session_store import SessionStore
 
 logger = logging.getLogger(__name__)
+
+
+def _classify_execution_failure(exc: BaseException) -> dict[str, Any]:
+    if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+        return {
+            "failure_class": "timeout",
+            "failure_source": "infrastructure",
+            "retryable": True,
+            "exception_type": type(exc).__name__,
+        }
+    if isinstance(exc, LeaseConflictError):
+        return {
+            "failure_class": "lease_conflict",
+            "failure_source": "scheduler",
+            "retryable": True,
+            "exception_type": type(exc).__name__,
+        }
+    if isinstance(exc, asyncio.CancelledError):
+        return {
+            "failure_class": "cancelled",
+            "failure_source": "runtime",
+            "retryable": True,
+            "exception_type": type(exc).__name__,
+        }
+    if isinstance(exc, (ValueError, TypeError)):
+        return {
+            "failure_class": "contract_violation",
+            "failure_source": "input",
+            "retryable": False,
+            "exception_type": type(exc).__name__,
+        }
+    return {
+        "failure_class": "runtime_exception",
+        "failure_source": "execution",
+        "retryable": False,
+        "exception_type": type(exc).__name__,
+    }
+
+
+def _extract_execution_degradations(metadata: dict[str, Any]) -> list[dict[str, Any]]:
+    items = metadata.get("turn_ir_degradations")
+    if not isinstance(items, list):
+        items = metadata.get("ir_degradations")
+    if not isinstance(items, list):
+        return []
+    return [dict(item) for item in items if isinstance(item, dict)]
+
+
+def _resolve_terminal_turn_truth(
+    *,
+    state: dict[str, Any],
+    job: "ExecutionJob",
+) -> dict[str, Any]:
+    """Compile terminal turn truth via canonical system-state algebra."""
+    algebra = evaluate_system_state_algebra(
+        state=state,
+        execution_result_payload=dict(job.metadata.get("execution_result") or {}),
+        trace_id=str(job.trace_id or ""),
+        context="control_plane_commit",
+    )
+    return dict(algebra)
+
+
+def _enforce_global_turn_invariant_gate(
+    *,
+    session: dict[str, Any],
+    job: "ExecutionJob",
+) -> None:
+    """Hard gate: block commit if any turn truth/invariant contract is violated."""
+    state = session.get("state")
+    if not isinstance(state, dict):
+        return
+
+    algebra = _resolve_terminal_turn_truth(state=state, job=job)
+    persist_system_state_algebra(
+        state=state,
+        algebra=algebra,
+        trace_context="control_plane_commit",
+        persist_legacy_projections=True,
+        terminal_snapshot=True,
+    )
+    gate = dict(algebra.get("projections", {}).get("control_plane_gate") or {})
+
+    if not bool(gate.get("ok", False)):
+        raise MemorySetInvariantViolation(
+            "Global invariant gate violation: "
+            + "; ".join(str(item) for item in list(gate.get("violations") or [])[:3]),
+        )
 
 
 @dataclass(slots=True)
@@ -124,7 +227,13 @@ class SchedulerWriter(Protocol):
 
     def append_job_completed(self, job: Any, result: Any) -> dict[str, Any]: ...
 
-    def append_job_failed(self, job: Any, error: str) -> dict[str, Any]: ...
+    def append_job_failed(
+        self,
+        job: Any,
+        error: Any,
+        *,
+        failure: dict[str, Any] | None = None,
+    ) -> dict[str, Any]: ...
 
 
 class Scheduler:
@@ -154,6 +263,37 @@ class Scheduler:
             tuple[ExecutionJob, asyncio.Future[FinalizedTurnResult]],
         ] = {}
         self._pending_job_ids: list[str] = []
+        self._work_event: asyncio.Event | None = None
+        self._work_event_loop: asyncio.AbstractEventLoop | None = None
+
+    def _ensure_work_event(self) -> asyncio.Event:
+        loop = asyncio.get_running_loop()
+        if self._work_event is None or self._work_event_loop is not loop:
+            self._work_event = asyncio.Event()
+            self._work_event_loop = loop
+        return self._work_event
+
+    def _notify_work_available(self) -> None:
+        self._ensure_work_event().set()
+
+    async def wait_for_work(self, *, timeout_seconds: float | None = None) -> bool:
+        if self._pending_job_ids:
+            return True
+
+        work_event = self._ensure_work_event()
+        work_event.clear()
+
+        if timeout_seconds is not None and timeout_seconds <= 0.0:
+            return bool(self._pending_job_ids)
+
+        try:
+            if timeout_seconds is None:
+                await work_event.wait()
+            else:
+                await asyncio.wait_for(work_event.wait(), timeout=timeout_seconds)
+        except TimeoutError:
+            return bool(self._pending_job_ids)
+        return bool(self._pending_job_ids)
 
     @staticmethod
     def _resolve_options(
@@ -206,6 +346,7 @@ class Scheduler:
         job: ExecutionJob,
         started_at: float,
         error: str = "",
+        failure: dict[str, Any] | None = None,
     ) -> None:
         if not self.enable_observability:
             return
@@ -215,13 +356,36 @@ class Scheduler:
             "scheduler.job.latency_ms",
             (time.perf_counter() - started_at) * 1000.0,
         )
-        payload = {
+        payload: dict[str, Any] = {
             "event": f"job.{event}",
             "job_id": job.job_id,
             "session_id": job.session_id,
         }
         if error:
             payload["error"] = error
+        execution_result = ensure_unified_execution_result(
+            dict(getattr(job, "metadata", {}).get("execution_result") or {}),
+        )
+        failure_view = dict(execution_result.get("failure") or {})
+        has_failure = bool(
+            str(failure_view.get("class") or "")
+            or str(failure_view.get("type") or "")
+            or str(failure_view.get("message") or ""),
+        )
+        if has_failure:
+            payload["failure"] = {
+                "failure_class": str(failure_view.get("class") or ""),
+                "failure_source": str(failure_view.get("source") or ""),
+                "retryable": bool(failure_view.get("retryable", False)),
+                "error_type": str(failure_view.get("type") or ""),
+                "message": str(failure_view.get("message") or ""),
+                "class": str(failure_view.get("class") or ""),
+                "source": str(failure_view.get("source") or ""),
+                "type": str(failure_view.get("type") or ""),
+            }
+        elif isinstance(failure, dict) and bool(failure):
+            # Legacy fallback for older callers; unified execution_result is authoritative.
+            payload["failure"] = dict(failure)
         get_exporter().export(payload)
 
     async def register(self, job: ExecutionJob) -> asyncio.Future[FinalizedTurnResult]:
@@ -233,6 +397,7 @@ class Scheduler:
         future: asyncio.Future[FinalizedTurnResult] = loop.create_future()
         self._jobs[job.job_id] = (job, future)
         self._pending_job_ids.append(job.job_id)
+        self._notify_work_available()
         self.writer.append_job_queued(job)
         return future
 
@@ -265,6 +430,7 @@ class Scheduler:
             lease_acquired = True
         except LeaseConflictError:
             self._pending_job_ids.append(job_id)
+            self._notify_work_available()
             return False
 
         try:
@@ -273,6 +439,16 @@ class Scheduler:
             tracer = get_tracer()
             with tracer.span("scheduler.drain_once"):
                 result = await self._execute_with_boundary(executor, session, job)
+            _enforce_global_turn_invariant_gate(session=session, job=job)
+            current_execution_result = ensure_unified_execution_result(
+                dict(job.metadata.get("execution_result") or {}),
+            )
+            current_execution_result = mark_unified_execution_success(
+                current_execution_result,
+                response=str(result[0] if isinstance(result, tuple) and len(result) >= 1 else ""),
+                should_end=bool(result[1] if isinstance(result, tuple) and len(result) >= 2 else False),
+            )
+            job.metadata["execution_result"] = current_execution_result
             self.writer.append_job_completed(job, result)
             self._resolve_future(future, result=result)
             self._record_job_observability(
@@ -282,13 +458,27 @@ class Scheduler:
             )
             return True
         except Exception as exc:
-            self.writer.append_job_failed(job, str(exc))
+            failure = _classify_execution_failure(exc)
+            # Use a fresh pending envelope — the success mark may have already
+            # been written to metadata if the exception came from a post-success
+            # step (ledger write, future resolve, observability).  Start clean.
+            current_execution_result = mark_unified_execution_failure(
+                build_unified_execution_result(),
+                failure_class=str(failure.get("failure_class") or "runtime_exception"),
+                failure_source=str(failure.get("failure_source") or "execution"),
+                retryable=bool(failure.get("retryable", False)),
+                exception_type=str(failure.get("exception_type") or type(exc).__name__),
+                message=str(exc),
+            )
+            job.metadata["execution_result"] = current_execution_result
+            self.writer.append_job_failed(job, exc, failure=failure)
             self._resolve_future(future, error=exc)
             self._record_job_observability(
                 event="failed",
                 job=job,
                 started_at=started_at,
                 error=str(exc),
+                failure=failure,
             )
             raise
         finally:
@@ -831,6 +1021,19 @@ class ExecutionControlPlane:
             attachments=attachments,
             metadata=md,
         )
+        resolved_timeout_seconds = 30.0 if timeout_seconds is None else max(0.0, float(timeout_seconds))
+        _raw_er = dict(
+            md.get("execution_result")
+            or build_unified_execution_result(
+                timeout_seconds=resolved_timeout_seconds,
+                degradation_items=_extract_execution_degradations(md),
+            ),
+        )
+        # Stamp the current resolved timeout before normalization so the
+        # canonical module owns the final sanitised form.
+        _raw_er.setdefault("timeout", {})["seconds"] = float(resolved_timeout_seconds)
+        execution_result = ensure_unified_execution_result(_raw_er)
+        md["execution_result"] = execution_result
 
         job = ExecutionJob(
             session_id=session_key,
@@ -850,7 +1053,7 @@ class ExecutionControlPlane:
         future = await self.scheduler.register(job)
         session_before = self.registry.get_or_create(session_key)
         before_state_hash = self._stable_hash(dict(session_before.get("state") or {}))
-        max_wait_seconds = timeout_seconds or 30.0
+        max_wait_seconds = resolved_timeout_seconds
         deadline = time.time() + max_wait_seconds
         try:
             while not future.done():
@@ -858,8 +1061,34 @@ class ExecutionControlPlane:
                     raise TimeoutError("submit_turn exceeded timeout")
                 drained = await self.scheduler.drain_once(self.kernel_executor)
                 if not drained:
-                    await asyncio.sleep(0.01)
+                    remaining = max(0.0, deadline - time.time())
+                    if remaining <= 0.0:
+                        raise TimeoutError("submit_turn exceeded timeout")
+                    wait_task = asyncio.create_task(
+                        self.scheduler.wait_for_work(timeout_seconds=remaining),
+                    )
+                    done, _ = await asyncio.wait(
+                        {future, wait_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if wait_task not in done:
+                        wait_task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await wait_task
             result = await future
+            current_execution_result = ensure_unified_execution_result(
+                dict(job.metadata.get("execution_result") or {}),
+            )
+            # drain_once marks success and stores it in metadata before resolving
+            # the future.  Only mark here if the envelope is still pending (e.g.
+            # if the job was fulfilled via a dedupe path that bypassed drain_once).
+            if current_execution_result.get("status") not in _TERMINAL_STATUS_VALUES:
+                current_execution_result = mark_unified_execution_success(
+                    current_execution_result,
+                    response=str(result[0] if isinstance(result, tuple) and len(result) >= 1 else ""),
+                    should_end=bool(result[1] if isinstance(result, tuple) and len(result) >= 2 else False),
+                )
+                job.metadata["execution_result"] = current_execution_result
             session_after = self.registry.get_or_create(session_key)
             self._validate_trace_invariant(job, result, session=session_after, state_before_hash=before_state_hash)
             self._maybe_compact_ledger()
@@ -867,6 +1096,22 @@ class ExecutionControlPlane:
                 dedupe_future.set_result(result)
             return result
         except Exception as exc:
+            classified = _classify_execution_failure(exc)
+            # Use a fresh pending envelope — the kernel may have already marked ok
+            # (e.g. if _validate_trace_invariant raised after marking success).
+            # A post-success exception overrides the terminal status: start clean.
+            current_execution_result = mark_unified_execution_failure(
+                build_unified_execution_result(),
+                failure_class=str(classified.get("failure_class") or "runtime_exception"),
+                failure_source=str(classified.get("failure_source") or "execution"),
+                retryable=bool(classified.get("retryable", False)),
+                exception_type=str(classified.get("exception_type") or type(exc).__name__),
+                message=str(exc),
+            )
+            job.metadata["execution_result"] = current_execution_result
+            if future.done() and not future.cancelled():
+                with contextlib.suppress(Exception):
+                    future.exception()
             if dedupe_future is not None and not dedupe_future.done():
                 dedupe_future.set_exception(exc)
             raise

@@ -17,6 +17,16 @@ from dadbot.contracts import (
     SupportsTurnProcessingRuntime,
 )
 from dadbot.core.execution_context import ensure_execution_trace_root
+from dadbot.core.execution_result_unified import get_unified_execution_result
+from dadbot.core.memory_set_invariants import (
+    assert_memory_set_invariants,
+    record_causal_step_locked,
+    MemorySetInvariantViolation,
+)
+from dadbot.core.system_state_algebra import (
+    evaluate_system_state_algebra,
+    persist_system_state_algebra,
+)
 from dadbot.core.graph import (
     LedgerMutationOp,
     MutationIntent,
@@ -27,6 +37,7 @@ from dadbot.core.tool_executor import execute_tool
 from dadbot.core.turn_coherence import mark_turn_coherence, reset_turn_coherence
 from dadbot.managers.reply_generation import ReplyGenerationManager
 from dadbot.models import AgenticToolPlan
+from dadbot.services.memory_service import MemoryService
 from dadbot.services.llm_call_adapter import LLMCallAdapter
 from dadbot.services.turn_state_mutator import TurnStateMutator
 
@@ -40,6 +51,14 @@ _WEB_SEARCH_TOOL = "web_search"
 _TOOL_VISIBILITY_SETTINGS = {
     _SET_REMINDER_TOOL: "auto_reminders",
     _WEB_SEARCH_TOOL: "auto_web_lookup",
+}
+_TOOL_NAME_ALIASES = {
+    "web_lookup": _WEB_SEARCH_TOOL,
+    "websearch": _WEB_SEARCH_TOOL,
+    "web-search": _WEB_SEARCH_TOOL,
+    "web search": _WEB_SEARCH_TOOL,
+    "set reminder": _SET_REMINDER_TOOL,
+    "set-reminder": _SET_REMINDER_TOOL,
 }
 _REMINDER_TOOL_NAMES = frozenset({_SET_REMINDER_TOOL})
 _DEFER_TOOL_BIASES = frozenset({"defer_tools_unless_explicit"})
@@ -74,6 +93,7 @@ class TurnService:
         self.bot = self.context.bot
         self.reply_generation = ReplyGenerationManager(self.context)
         self._llm_adapter = LLMCallAdapter(self.bot)
+        self._memory_service = MemoryService(self.bot)
         self._state_mutator = TurnStateMutator(self.bot)
 
     def _pipeline_timestamp(self) -> str:
@@ -404,24 +424,54 @@ class TurnService:
             )
         return contract
 
-    @staticmethod
-    def _reflection_prompt(original_input: str, query: str, observation: str) -> str:
-        return f"""
-You are Dad's internal quality checker. Tony asked: "{original_input}"
+    def resolve_turn_truth(self, turn_context: Any | None) -> dict[str, Any]:
+        """Resolve turn truth via canonical system-state algebra projections."""
+        state = getattr(turn_context, "state", None) if turn_context else None
+        if not isinstance(state, dict):
+            state = {}
 
-You searched for: "{query}"
-You got back: "{observation}"
+        execution_contract = self.build_execution_truth_contract(turn_context)
+        execution_result = get_unified_execution_result(turn_context)
+        trace_id = str(getattr(turn_context, "trace_id", "") or "") if turn_context else ""
+        algebra = evaluate_system_state_algebra(
+            state=state,
+            execution_result_payload=execution_result,
+            trace_id=trace_id,
+            context="resolve_turn_truth",
+        )
 
-Is this observation sufficient to give Tony a genuinely useful answer?
+        violations = list(algebra.get("violations") or [])
+        memory_axis = dict(algebra.get("axes", {}).get("memory") or {})
+        causal_axis = dict(algebra.get("axes", {}).get("causal") or {})
+        memory_detail = str(memory_axis.get("inline_violation") or "")
+        memory_ok = not any("memory_invariant" in str(item) for item in violations)
+        causal_ok = not any("Causal order violation" in str(item) for item in violations)
 
-Return ONLY valid JSON (no extra text):
-
-{{
-  "sufficient": true or false,
-  "refined_query": "a better search query if not sufficient, otherwise null",
-  "reason": "one sentence"
-}}
-""".strip()
+        truth = {
+            "overall_consistent": bool(algebra.get("overall_consistent", False)),
+            "execution": execution_contract,
+            "memory_invariants": {"ok": memory_ok, "detail": memory_detail},
+            "causal_order": {
+                "ok": causal_ok,
+                "detail": "" if causal_ok else "; ".join(
+                    str(item) for item in violations if "Causal order violation" in str(item)
+                ),
+                "steps": list(causal_axis.get("steps") or []),
+            },
+            "violations": violations,
+            "cognitive_authority_boundary": dict(
+                algebra.get("axes", {}).get("cognitive_authority_boundary") or {}
+            ),
+        }
+        if isinstance(state, dict):
+            persist_system_state_algebra(
+                state=state,
+                algebra=algebra,
+                trace_context="resolve_turn_truth",
+                persist_legacy_projections=True,
+                terminal_snapshot=False,
+            )
+        return truth
 
     def _parse_structured_json(
         self,
@@ -452,40 +502,6 @@ Return ONLY valid JSON (no extra text):
                 planner_status=failure_status,
                 planner_reason=failure_reason,
             )
-            return None
-
-    def _call_json_with_validation_sync(
-        self,
-        *,
-        messages: list[dict[str, str]],
-        purpose: str,
-        schema: type[BaseModel],
-        max_parse_attempts: int = 2,
-    ) -> BaseModel | None:
-        for parse_attempt in range(max(1, int(max_parse_attempts))):
-            try:
-                response = self._llm_adapter.call(
-                    messages=messages,
-                    options={"temperature": 0.1},
-                    response_format="json",
-                    purpose=purpose,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Structured LLM call failed (%s, attempt %d): %s",
-                    purpose,
-                    parse_attempt + 1,
-                    exc,
-                )
-                continue
-            parsed = self._parse_structured_json(
-                content=str(response.get("message", {}).get("content") or ""),
-                schema=schema,
-                failure_status="fallback",
-                failure_reason="Model returned invalid structured JSON.",
-            )
-            if parsed is not None:
-                return parsed
         return None
 
     async def _call_json_with_validation_async(
@@ -691,17 +707,173 @@ Return ONLY valid JSON (no extra text):
         return current_observation
 
     @staticmethod
+    def _format_retrieval_hints(retrieval_set: list[dict]) -> str:
+        fragments = []
+        for item in list(retrieval_set or [])[:5]:
+            summary = str(item.get("summary") or item.get("content") or "").strip()
+            if summary:
+                fragments.append(f"  - {summary[:120]}")
+        if not fragments:
+            return ""
+        return "\nRetrieved memory signals for this turn:\n" + "\n".join(fragments)
+
+    @staticmethod
+    def _format_memory_brief(memory_influence_brief: str | None) -> str:
+        text = str(memory_influence_brief or "").strip()
+        if not text:
+            return ""
+        return f"\n{text}"
+
+    @staticmethod
+    def _normalize_tool_name(tool_name: str | None) -> str:
+        normalized = str(tool_name or "").strip().lower()
+        return _TOOL_NAME_ALIASES.get(normalized, normalized)
+
+    def _normalize_tool_list(self, value: Any) -> set[str]:
+        if isinstance(value, str):
+            candidates = [value]
+        elif isinstance(value, (list, tuple, set, frozenset)):
+            candidates = list(value)
+        else:
+            candidates = []
+        normalized = {
+            self._normalize_tool_name(str(item or ""))
+            for item in candidates
+        }
+        return {item for item in normalized if item}
+
+    def _extract_memory_authority(self, turn_context: Any | None) -> dict[str, Any]:
+        state = getattr(turn_context, "state", None)
+        retrieval_set = list((state or {}).get("memory_retrieval_set") or [])
+        blocked_tools: set[str] = set()
+        allowed_tools: set[str] = set()
+        require_clarification = False
+        evidence: list[str] = []
+
+        for item in retrieval_set:
+            if not isinstance(item, dict):
+                continue
+            policy_blocks = [
+                item.get("tool_policy"),
+                item.get("tool_constraints"),
+                item.get("constraints"),
+                item.get("policy"),
+            ]
+            for policy in policy_blocks:
+                if not isinstance(policy, dict):
+                    continue
+                blocked_tools.update(
+                    self._normalize_tool_list(
+                        policy.get("forbid_tools")
+                        or policy.get("disallow_tools")
+                        or policy.get("blocked_tools"),
+                    ),
+                )
+                allowed_tools.update(
+                    self._normalize_tool_list(
+                        policy.get("allow_tools")
+                        or policy.get("allowed_tools")
+                        or policy.get("permitted_tools"),
+                    ),
+                )
+                if bool(
+                    policy.get("require_clarification")
+                    or policy.get("clarification_required")
+                    or policy.get("ask_clarifying_question"),
+                ):
+                    require_clarification = True
+                policy_reason = str(policy.get("reason") or "").strip()
+                if policy_reason:
+                    evidence.append(policy_reason)
+
+            text_blob = " ".join(
+                str(item.get(key) or "")
+                for key in ("summary", "content", "title", "memory_influence")
+            ).strip().lower()
+            if not text_blob:
+                continue
+            if any(token in text_blob for token in ("do not use web", "don't use web", "no web search")):
+                blocked_tools.add(_WEB_SEARCH_TOOL)
+            if any(token in text_blob for token in ("do not set reminder", "don't set reminder", "no reminder")):
+                blocked_tools.add(_SET_REMINDER_TOOL)
+
+        return {
+            "blocked_tools": sorted(blocked_tools),
+            "allowed_tools": sorted(allowed_tools),
+            "require_clarification": bool(require_clarification),
+            "evidence": evidence[:3],
+            "retrieval_count": len([item for item in retrieval_set if isinstance(item, dict)]),
+        }
+
+    def _memory_authority_decision(
+        self,
+        *,
+        turn_context: Any | None,
+        tool_name: str,
+        plan_reason: str,
+    ) -> tuple[bool, str]:
+        authority = self._extract_memory_authority(turn_context)
+        normalized_tool = self._normalize_tool_name(tool_name)
+        blocked = set(authority.get("blocked_tools") or [])
+        allowed = set(authority.get("allowed_tools") or [])
+
+        state = getattr(turn_context, "state", None)
+        if isinstance(state, dict):
+            state["memory_authority"] = {
+                **authority,
+                "selected_tool": normalized_tool,
+                "vetoed": False,
+                "veto_reason": "",
+            }
+
+        veto_reason = ""
+        if normalized_tool and normalized_tool in blocked:
+            veto_reason = (
+                f"Memory authority blocked tool '{normalized_tool}' for this turn. "
+                "Ask a clarifying question before using tools."
+            )
+        elif normalized_tool and allowed and normalized_tool not in allowed:
+            veto_reason = (
+                f"Memory authority requires tools {sorted(allowed)}, so '{normalized_tool}' is blocked. "
+                "Ask a clarifying question before using tools."
+            )
+
+        if veto_reason and isinstance(state, dict):
+            state["memory_authority"] = {
+                **dict(state.get("memory_authority") or {}),
+                "vetoed": True,
+                "veto_reason": veto_reason,
+            }
+
+        if veto_reason:
+            reason_prefix = str(plan_reason or "").strip()
+            if reason_prefix:
+                return False, f"{reason_prefix} | {veto_reason}"
+            return False, veto_reason
+
+        return True, str(plan_reason or "").strip() or "Memory authority permits tool execution."
+
+    @staticmethod
     def _planning_prompt(
         stripped_input: str,
         current_mood: str,
         tools: list[dict[str, object]],
         shared_context: str,
+        memory_influence_brief: str | None = None,
+        retrieval_set: list[dict] | None = None,
     ) -> str:
+        memory_hints = TurnService._format_retrieval_hints(retrieval_set or [])
+        memory_brief = TurnService._format_memory_brief(memory_influence_brief)
         return f"""
 You are Dad helping Tony. Think carefully about his latest message.
 
 Shared turn context used for response generation:
-{shared_context}
+{shared_context}{memory_brief}{memory_hints}
+
+Memory decision constraints:
+- Retrieved memories are active constraints, not optional decoration.
+- If a retrieved memory directly bears on the user's request, let it shape tool choice and parameters.
+- If memory and the message conflict, preserve the memory fact and ask for clarification rather than guessing.
 
 Message: "{stripped_input}"
 
@@ -750,12 +922,70 @@ Return ONLY valid JSON (no extra text):
             )
             return None
 
-    @staticmethod
-    def _reminder_confirmation_reply(reminder: dict[str, object]) -> str:
-        reply = f"I went ahead and set that reminder for you, Tony: {reminder['title']}."
-        if reminder.get("due_text"):
-            reply += f" ({reminder['due_text']})"
-        return reply
+    def _refresh_memory_retrieval_after_tool(
+        self,
+        *,
+        turn_context: Any | None,
+        user_input: str,
+        tool_feedback: str,
+    ) -> None:
+        if turn_context is None:
+            return
+        state = getattr(turn_context, "state", None)
+        if not isinstance(state, dict):
+            return
+
+        query = " ".join(
+            part
+            for part in [
+                str(user_input or "").strip(),
+                str(tool_feedback or "").strip(),
+                str(state.get("memory_influence_brief") or "").strip(),
+            ]
+            if part
+        ).strip()
+
+        refreshed = self._memory_service.retrieve_for_query(
+            query=query,
+            graph_limit=3,
+            memory_limit=5,
+        )
+
+        if not refreshed:
+            return
+
+        existing = [dict(item) for item in list(state.get("memory_retrieval_set") or []) if isinstance(item, dict)]
+        merged, reconciliation = self._memory_service.merge_retrieval_sets(
+            existing,
+            refreshed,
+            source_labels=["pre_turn", "post_tool"],
+        )
+
+        # Gap A: enforce shrink/salience invariants at every merge boundary,
+        # not only at tool-gate time.  Soft violation: log and annotate state
+        # rather than aborting the turn, since post-tool refresh is best-effort.
+        try:
+            assert_memory_set_invariants(
+                existing,
+                merged,
+                context="post_tool_refresh",
+            )
+        except MemorySetInvariantViolation as inv_exc:
+            logger.warning("Memory set invariant violation after tool refresh: %s", inv_exc)
+            state["memory_invariant_violation"] = str(inv_exc)
+
+        if not list(state.get("_causal_step_log") or []):
+            # Some test/direct-entry paths call post-tool refresh without routing
+            # through planner/tool-execution wrappers. Seed the minimal causal spine.
+            record_causal_step_locked(state, "retrieval", context="turn_service.refresh.bootstrap")
+            record_causal_step_locked(state, "planning", context="turn_service.refresh.bootstrap")
+            record_causal_step_locked(state, "tool_execution", context="turn_service.refresh.bootstrap")
+        record_causal_step_locked(state, "post_tool_refresh", context="turn_service.post_tool_refresh")
+
+        state["memory_retrieval_set"] = merged
+        state["memory_reconciliation"] = reconciliation
+        state["memory_retrieval_refined"] = True
+        state["memory_influence_brief"] = state.get("memory_influence_brief") or ""
 
     def _execute_set_reminder_tool_sync(
         self,
@@ -1015,6 +1245,11 @@ Return ONLY valid JSON (no extra text):
         plan_reason: str,
         turn_context: Any | None = None,
     ) -> tuple[str | None, str | None]:
+        # Gap C: record planning + tool_execution causal steps.
+        _tc_state = getattr(turn_context, "state", None)
+        if isinstance(_tc_state, dict):
+            record_causal_step_locked(_tc_state, "planning", context="turn_service.sync")
+            record_causal_step_locked(_tc_state, "tool_execution", context="turn_service.sync")
         executors = {
             _SET_REMINDER_TOOL: self._execute_set_reminder_tool_sync,
             _WEB_SEARCH_TOOL: self._execute_web_search_tool_sync,
@@ -1053,6 +1288,11 @@ Return ONLY valid JSON (no extra text):
         plan_reason: str,
         turn_context: Any | None = None,
     ) -> tuple[str | None, str | None]:
+        # Gap C hardening: async path must follow same causal transition graph.
+        _tc_state = getattr(turn_context, "state", None)
+        if isinstance(_tc_state, dict):
+            record_causal_step_locked(_tc_state, "planning", context="turn_service.async")
+            record_causal_step_locked(_tc_state, "tool_execution", context="turn_service.async")
         executors = {
             _SET_REMINDER_TOOL: self._execute_set_reminder_tool_async,
             _WEB_SEARCH_TOOL: self._execute_web_search_tool_async,
@@ -1268,9 +1508,27 @@ Return ONLY valid JSON (no extra text):
             deterministic_route = self._deterministic_tool_route(stripped_input)
             if deterministic_route is not None:
                 tool_name, params, route_reason = deterministic_route
+                memory_allowed, memory_reason = self._memory_authority_decision(
+                    turn_context=turn_context,
+                    tool_name=tool_name,
+                    plan_reason=route_reason,
+                )
+                if not memory_allowed:
+                    self._record_tool_decision_outcome(
+                        turn_context=turn_context,
+                        decision_outcome="no_tool_needed",
+                    )
+                    self.bot.update_planner_debug(
+                        planner_status="memory_authority_veto",
+                        planner_reason=memory_reason,
+                        planner_tool=tool_name,
+                        planner_parameters=params,
+                        final_path="memory_authority",
+                    )
+                    return None, memory_reason
                 self.bot.update_planner_debug(
                     planner_status="tool_selected",
-                    planner_reason=route_reason,
+                    planner_reason=memory_reason,
                     planner_tool=tool_name,
                     planner_parameters=params,
                 )
@@ -1284,7 +1542,7 @@ Return ONLY valid JSON (no extra text):
                     stripped_input=stripped_input,
                     current_mood=current_mood,
                     settings=settings,
-                    plan_reason=route_reason,
+                    plan_reason=memory_reason,
                     turn_context=turn_context,
                 )
 
@@ -1293,6 +1551,10 @@ Return ONLY valid JSON (no extra text):
                 current_mood,
                 attachments,
             )
+            _retrieval_set = list(
+                (getattr(turn_context, "state", None) or {}).get("memory_retrieval_set") or []
+            )
+            _memory_brief = str((getattr(turn_context, "state", None) or {}).get("memory_influence_brief") or "")
             response = self._llm_adapter.call(
                 messages=[
                     {
@@ -1302,6 +1564,8 @@ Return ONLY valid JSON (no extra text):
                             current_mood,
                             tools,
                             shared_context,
+                            memory_influence_brief=_memory_brief,
+                            retrieval_set=_retrieval_set,
                         ),
                     },
                 ],
@@ -1342,19 +1606,52 @@ Return ONLY valid JSON (no extra text):
                 planner_parameters=params,
             )
 
+            memory_allowed, memory_reason = self._memory_authority_decision(
+                turn_context=turn_context,
+                tool_name=str(plan.tool or "").strip(),
+                plan_reason=plan_reason,
+            )
+            if not memory_allowed:
+                self._record_tool_decision_outcome(
+                    turn_context=turn_context,
+                    decision_outcome="no_tool_needed",
+                )
+                self.bot.update_planner_debug(
+                    planner_status="memory_authority_veto",
+                    planner_reason=memory_reason,
+                    planner_tool=str(plan.tool or ""),
+                    planner_parameters=params,
+                    final_path="memory_authority",
+                )
+                return None, memory_reason
+
             self._record_tool_decision_outcome(
                 turn_context=turn_context,
                 decision_outcome="executed_tool",
             )
-            return self._execute_planned_tool_sync(
+            tool_reply, tool_obs = self._execute_planned_tool_sync(
                 tool_name=str(plan.tool or "").strip(),
                 params=params,
                 stripped_input=stripped_input,
                 current_mood=current_mood,
                 settings=settings,
-                plan_reason=plan_reason,
+                plan_reason=memory_reason,
                 turn_context=turn_context,
             )
+            _result_text = str(tool_obs or tool_reply or "").strip()
+            if _result_text and turn_context is not None:
+                _tc_state = getattr(turn_context, "state", None)
+                if isinstance(_tc_state, dict):
+                    _tc_state["last_tool_result"] = {
+                        "tool": str(plan.tool or ""),
+                        "text": _result_text[:500],
+                    }
+                self._refresh_memory_retrieval_after_tool(
+                    turn_context=turn_context,
+                    user_input=stripped_input,
+                    tool_feedback=_result_text,
+                )
+            return tool_reply, tool_obs
         except Exception as exc:
             if _is_event_loop_closed_error(exc):
                 self.bot.update_planner_debug(
@@ -1413,9 +1710,27 @@ Return ONLY valid JSON (no extra text):
             deterministic_route = self._deterministic_tool_route(stripped_input)
             if deterministic_route is not None:
                 tool_name, params, route_reason = deterministic_route
+                memory_allowed, memory_reason = self._memory_authority_decision(
+                    turn_context=turn_context,
+                    tool_name=tool_name,
+                    plan_reason=route_reason,
+                )
+                if not memory_allowed:
+                    self._record_tool_decision_outcome(
+                        turn_context=turn_context,
+                        decision_outcome="no_tool_needed",
+                    )
+                    self.bot.update_planner_debug(
+                        planner_status="memory_authority_veto",
+                        planner_reason=memory_reason,
+                        planner_tool=tool_name,
+                        planner_parameters=params,
+                        final_path="memory_authority",
+                    )
+                    return None, memory_reason
                 self.bot.update_planner_debug(
                     planner_status="tool_selected",
-                    planner_reason=route_reason,
+                    planner_reason=memory_reason,
                     planner_tool=tool_name,
                     planner_parameters=params,
                 )
@@ -1429,7 +1744,7 @@ Return ONLY valid JSON (no extra text):
                     stripped_input=stripped_input,
                     current_mood=current_mood,
                     settings=settings,
-                    plan_reason=route_reason,
+                    plan_reason=memory_reason,
                     turn_context=turn_context,
                 )
 
@@ -1438,6 +1753,10 @@ Return ONLY valid JSON (no extra text):
                 current_mood,
                 attachments,
             )
+            _retrieval_set = list(
+                (getattr(turn_context, "state", None) or {}).get("memory_retrieval_set") or []
+            )
+            _memory_brief = str((getattr(turn_context, "state", None) or {}).get("memory_influence_brief") or "")
             response = await self._llm_adapter.call_async(
                 messages=[
                     {
@@ -1447,6 +1766,8 @@ Return ONLY valid JSON (no extra text):
                             current_mood,
                             tools,
                             shared_context,
+                            memory_influence_brief=_memory_brief,
+                            retrieval_set=_retrieval_set,
                         ),
                     },
                 ],
@@ -1487,19 +1808,52 @@ Return ONLY valid JSON (no extra text):
                 planner_parameters=params,
             )
 
+            memory_allowed, memory_reason = self._memory_authority_decision(
+                turn_context=turn_context,
+                tool_name=str(plan.tool or "").strip(),
+                plan_reason=plan_reason,
+            )
+            if not memory_allowed:
+                self._record_tool_decision_outcome(
+                    turn_context=turn_context,
+                    decision_outcome="no_tool_needed",
+                )
+                self.bot.update_planner_debug(
+                    planner_status="memory_authority_veto",
+                    planner_reason=memory_reason,
+                    planner_tool=str(plan.tool or ""),
+                    planner_parameters=params,
+                    final_path="memory_authority",
+                )
+                return None, memory_reason
+
             self._record_tool_decision_outcome(
                 turn_context=turn_context,
                 decision_outcome="executed_tool",
             )
-            return await self._execute_planned_tool_async(
+            tool_reply, tool_obs = await self._execute_planned_tool_async(
                 tool_name=str(plan.tool or "").strip(),
                 params=params,
                 stripped_input=stripped_input,
                 current_mood=current_mood,
                 settings=settings,
-                plan_reason=plan_reason,
+                plan_reason=memory_reason,
                 turn_context=turn_context,
             )
+            _result_text = str(tool_obs or tool_reply or "").strip()
+            if _result_text and turn_context is not None:
+                _tc_state = getattr(turn_context, "state", None)
+                if isinstance(_tc_state, dict):
+                    _tc_state["last_tool_result"] = {
+                        "tool": str(plan.tool or ""),
+                        "text": _result_text[:500],
+                    }
+                self._refresh_memory_retrieval_after_tool(
+                    turn_context=turn_context,
+                    user_input=stripped_input,
+                    tool_feedback=_result_text,
+                )
+            return tool_reply, tool_obs
         except Exception as exc:
             if _is_event_loop_closed_error(exc):
                 self.bot.update_planner_debug(

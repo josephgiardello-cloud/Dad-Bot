@@ -81,11 +81,12 @@ def _semantic_actions(
         if operation in {"iteration_start", "iteration_output", "critique_iteration"}:
             continue
         payload = dict(step.get("payload") or {})
+        execution_result = dict(payload.get("metadata", {}).get("execution_result") or {})
         action = {
             "operation": operation,
             "purpose": str(payload.get("purpose") or ""),
             "system": str(payload.get("system") or ""),
-            "status": str(payload.get("status") or ""),
+            "status": str(execution_result.get("status") or payload.get("status") or ""),
         }
         actions.append(_normalize_value(action, mode=mode))
     return actions

@@ -69,6 +69,7 @@ class KernelStepResult:
     state_keys_written: list[str] = field(default_factory=list)
     policy: PolicyDecision | None = None
     error: str = ""
+    error_type: str = ""
 
 
 class KernelViolation(RuntimeError):
@@ -193,7 +194,8 @@ class TurnKernel:
                 step_name=step_name,
                 status="error",
                 policy=policy,
-                error=str(exc),
+                error=f"{type(exc).__name__}: {exc}",
+                error_type=type(exc).__name__,
             )
 
         keys_written: list[str] = sorted(frozenset(turn_context.state) - keys_before)

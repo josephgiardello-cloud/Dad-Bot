@@ -50,10 +50,11 @@ def _node_decision_sequence_hash(execution_trace_context: dict[str, Any]) -> str
     sequence: list[dict[str, Any]] = []
     for step in list(execution_trace_context.get("steps") or []):
         payload = dict(step.get("payload") or {})
+        execution_result = dict(payload.get("metadata", {}).get("execution_result") or {})
         sequence.append(
             {
                 "operation": str(step.get("operation") or ""),
-                "status": str(payload.get("status") or ""),
+                "status": str(execution_result.get("status") or payload.get("status") or ""),
                 "purpose": str(payload.get("purpose") or ""),
                 "system": str(payload.get("system") or ""),
                 "passed": bool(payload.get("passed", False)),
@@ -67,13 +68,27 @@ def _failure_recovery_transition_hash(execution_trace_context: dict[str, Any]) -
     transitions: list[dict[str, Any]] = []
     for step in list(execution_trace_context.get("steps") or []):
         payload = dict(step.get("payload") or {})
-        status = str(payload.get("status") or "")
-        if status.lower() in {"error", "failed", "retry", "recover", "recovered"}:
+        execution_result = dict(payload.get("metadata", {}).get("execution_result") or {})
+        failure_view = dict(execution_result.get("failure") or {})
+        resolved_status = str(execution_result.get("status") or payload.get("status") or "")
+        has_failure = bool(
+            str(failure_view.get("class") or "")
+            or str(failure_view.get("type") or "")
+            or str(failure_view.get("message") or ""),
+        )
+        status_signals_failure = resolved_status.lower() in {"error", "failed", "retry", "recover", "recovered"}
+        if has_failure or status_signals_failure:
             transitions.append(
                 {
                     "operation": str(step.get("operation") or ""),
-                    "status": status,
-                    "error": str(payload.get("error") or payload.get("error_type") or ""),
+                    "status": resolved_status,
+                    "error": str(
+                        failure_view.get("message")
+                        or payload.get("error")
+                        or failure_view.get("type")
+                        or payload.get("error_type")
+                        or ""
+                    ),
                 },
             )
     return _stable_sha256(transitions)

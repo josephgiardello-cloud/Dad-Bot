@@ -18,6 +18,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from dadbot.core.execution_result_unified import get_unified_execution_result
+
 
 @dataclass(frozen=True)
 class CandidateIR:
@@ -214,7 +216,7 @@ def _extract_primary_intent(turn_context: Any, metadata: dict[str, Any]) -> str:
         return metadata.get("intent_type", "")
 
     # Try extracting from turn_context.execution_result or similar
-    execution_result = getattr(turn_context, "execution_result", None) or {}
+    execution_result = get_unified_execution_result(turn_context)
     initial_result = execution_result.get("initial_result", {})
 
     for field in ("intent_type", "intent", "execution_intent"):
@@ -231,7 +233,7 @@ def _extract_primary_strategy(turn_context: Any, metadata: dict[str, Any]) -> st
         return metadata.get("strategy", "")
 
     # Try extracting from turn_context.execution_result
-    execution_result = getattr(turn_context, "execution_result", None) or {}
+    execution_result = get_unified_execution_result(turn_context)
     initial_result = execution_result.get("initial_result", {})
 
     for field in ("strategy", "execution_strategy", "plan_strategy"):

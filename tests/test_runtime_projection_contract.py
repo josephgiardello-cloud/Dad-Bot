@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+from functools import lru_cache
 from pathlib import Path
 
 import pytest
@@ -50,6 +51,7 @@ FORBIDDEN_CONSUMER_HELPERS = {
 }
 
 
+@lru_cache(maxsize=None)
 def _parse_module(path: Path) -> ast.AST:
     return ast.parse(path.read_text(encoding="utf-8-sig"), filename=str(path))
 
@@ -70,7 +72,8 @@ def _iter_imports(tree: ast.AST):
             yield module_name, {alias.name for alias in node.names}
 
 
-def _repo_python_files() -> list[Path]:
+@lru_cache(maxsize=1)
+def _repo_python_files() -> tuple[Path, ...]:
     files: list[Path] = []
     for path in REPO_ROOT.rglob("*.py"):
         relative = path.relative_to(REPO_ROOT)
@@ -79,7 +82,7 @@ def _repo_python_files() -> list[Path]:
         ):
             continue
         files.append(path)
-    return files
+    return tuple(files)
 
 
 def _is_consumer_module(path: Path) -> bool:

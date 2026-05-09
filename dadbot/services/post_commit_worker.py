@@ -23,12 +23,14 @@ class _PostCommitCapability:
     strongest available boundary short of a separate subprocess.
     """
 
-    __slots__ = ("_consolidate", "_forget")
+    __slots__ = ("_consolidate", "_forget", "_queue_semantic_index")
 
     def __init__(self, bot: Any) -> None:
         memory_coordinator = getattr(bot, "memory_coordinator", None)
         self._consolidate = getattr(memory_coordinator, "consolidate_memories", None)
         self._forget = getattr(memory_coordinator, "apply_controlled_forgetting", None)
+        memory_manager = getattr(bot, "memory_manager", None)
+        self._queue_semantic_index = getattr(memory_manager, "queue_semantic_memory_index", None)
         # bot reference is intentionally NOT stored
 
     def consolidate(self, *, turn_context: Any) -> None:
@@ -38,6 +40,25 @@ class _PostCommitCapability:
     def forget(self, *, turn_context: Any) -> None:
         if callable(self._forget):
             self._forget(turn_context=turn_context)
+
+    def index_tool_result(self, *, turn_context: Any) -> None:
+        if not callable(self._queue_semantic_index):
+            return
+        state = getattr(turn_context, "state", None)
+        if not isinstance(state, dict):
+            return
+        entry = state.get("last_tool_result")
+        if not isinstance(entry, dict):
+            return
+        result_text = str(entry.get("text") or "").strip()
+        tool_name = str(entry.get("tool") or "tool_result").strip()
+        if not result_text or len(result_text) < 10:
+            return
+        self._queue_semantic_index([{
+            "summary": result_text,
+            "category": f"tool_result:{tool_name}",
+            "mood": "neutral",
+        }])
 
 
 class PostCommitWorker:
@@ -166,3 +187,7 @@ class PostCommitWorker:
                 error=str(exc),
             )
             logger.warning("Post-commit apply_controlled_forgetting failed (non-fatal): %s", exc)
+        try:
+            self._capability.index_tool_result(turn_context=turn_context)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Post-commit index_tool_result failed (non-fatal): %s", exc)

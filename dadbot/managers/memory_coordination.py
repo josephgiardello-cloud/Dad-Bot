@@ -994,11 +994,17 @@ If none are strongly relevant, return an empty array [].
     def should_run_memory_consolidation(self, force=False, turn_context=None):
         if force:
             return True
+        current_count = len(self.bot.memory_catalog())
+        if current_count < 3:
+            return False
         if str(
             self.bot.MEMORY_STORE.get("last_consolidated_at") or "",
         ).strip() == self._turn_wall_date(turn_context):
-            return False
-        return len(self.bot.memory_catalog()) >= 3
+            # Same calendar day — allow re-consolidation only if catalog grew by >= 3
+            last_count = int(self.bot.MEMORY_STORE.get("last_consolidated_memory_count") or 0)
+            if current_count - last_count < 3:
+                return False
+        return True
 
     def build_memory_consolidation_prompt(self, memories, existing_insights):
         memory_lines = [
@@ -1390,6 +1396,7 @@ Rules:
         self.bot.mutate_memory_store(
             consolidated_memories=merged,
             last_consolidated_at=self._turn_wall_date(turn_context),
+            last_consolidated_memory_count=len(self.bot.memory_catalog()),
         )
         self.bot.mark_memory_graph_dirty()
         return merged

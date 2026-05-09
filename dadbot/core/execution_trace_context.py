@@ -112,7 +112,8 @@ def build_external_system_call_graph(steps: list[dict[str, Any]]) -> dict[str, A
         system = str(payload.get("system") or "unknown").strip().lower()
         request_hash = str(payload.get("request_hash") or "")
         response_hash = str(payload.get("response_hash") or "")
-        status = str(payload.get("status") or "ok").strip().lower() or "ok"
+        execution_result = dict(payload.get("metadata", {}).get("execution_result") or {})
+        status = str(execution_result.get("status") or payload.get("status") or "ok").strip().lower() or "ok"
         time_token = str(payload.get("time_token") or "")
         node_id = f"ext:{seq}:{system}:{request_hash[:8] or 'na'}"
         node = ToolExecutionTraceNode(

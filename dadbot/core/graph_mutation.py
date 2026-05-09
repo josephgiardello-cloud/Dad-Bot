@@ -21,6 +21,7 @@ from dadbot.core.graph_types import (
     LedgerMutationOp,
     MemoryMutationOp,
     MutationKind,
+    MutationRollbackMode,
     MutationTransactionRecord,
     MutationTransactionStatus,
     RelationshipMutationOp,
@@ -226,6 +227,7 @@ class MutationQueue:
         *,
         hard_fail_on_error: bool = True,
         transactional: bool = True,
+        rollback_mode: MutationRollbackMode | str | None = None,
     ) -> list[tuple[MutationIntent, str]]:
         """Execute all queued intents through ``executor``. Returns failures.
 
@@ -246,6 +248,10 @@ class MutationQueue:
         self._queue.clear()
 
         tx_id = uuid.uuid4().hex
+        resolved_rollback_mode = self._resolve_rollback_mode(
+            rollback_mode,
+            hard_fail_on_error=hard_fail_on_error,
+        )
         applied: list[tuple[MutationIntent, Any]] = []
         rollback_count = 0
         rollback_failures = 0
@@ -294,6 +300,7 @@ class MutationQueue:
                             rollback_count=rollback_count,
                             rollback_failures=rollback_failures,
                             trace_id=self._owner_trace_id,
+                            rollback_mode=resolved_rollback_mode,
                             error=str(exc),
                         ),
                     )
@@ -314,9 +321,24 @@ class MutationQueue:
                     rollback_count=0,
                     rollback_failures=0,
                     trace_id=self._owner_trace_id,
+                    rollback_mode=resolved_rollback_mode,
                 ),
             )
         return list(self._failed)
+
+    @staticmethod
+    def _resolve_rollback_mode(
+        rollback_mode: MutationRollbackMode | str | None,
+        *,
+        hard_fail_on_error: bool,
+    ) -> MutationRollbackMode:
+        if rollback_mode is None:
+            return (
+                MutationRollbackMode.AUDIT_CRITICAL
+                if hard_fail_on_error
+                else MutationRollbackMode.BEST_EFFORT
+            )
+        return MutationRollbackMode(str(rollback_mode))
 
     def snapshot(self) -> dict[str, Any]:
         self._assert_owner()

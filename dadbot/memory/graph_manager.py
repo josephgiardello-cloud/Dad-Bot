@@ -4,6 +4,7 @@ Extracted from MemoryManager to thin the god class.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import logging
 import os
@@ -36,6 +37,8 @@ class MemoryGraphManager:
         self._mm = memory_manager
         self._entity_resolver = GraphEntityResolver(bot)
         self._graph_store_backend = self._build_graph_store_backend()
+        self._projection_cache: dict[tuple[int, str, str], dict] = {}
+        self._llm_fact_cache: dict[tuple[str, str], list[dict]] = {}
         self._graph_prompt_compressor = GraphPromptCompressor(
             bot,
             max_tokens=bot.runtime_config.graph_context_token_budget,
@@ -331,11 +334,15 @@ class MemoryGraphManager:
         return facts
 
     def llm_typed_graph_facts(self, text, source_type):
-        if not env_truthy("DADBOT_GRAPH_ENABLE_LLM_EXTRACTION", default=False):
+        if not env_truthy("DADBOT_GRAPH_ENABLE_LLM_EXTRACTION", default=True):
             return []
         summary = str(text or "").strip()
         if not summary:
             return []
+        cache_key = (str(source_type or ""), summary)
+        cached = self._llm_fact_cache.get(cache_key)
+        if cached is not None:
+            return copy.deepcopy(cached)
         prompt = f"""
 From the text below, extract entities and typed relations as JSON.
 Return a JSON array of objects with keys:
@@ -364,7 +371,9 @@ Text: {summary}
             return []
         if not isinstance(parsed, list):
             return []
-        return [item for item in parsed if isinstance(item, dict)]
+        facts = [item for item in parsed if isinstance(item, dict)]
+        self._llm_fact_cache[cache_key] = copy.deepcopy(facts)
+        return facts
 
     # ------------------------------------------------------------------
     # Source confidence / weight
@@ -1129,6 +1138,14 @@ Text: {summary}
     def build_graph_projection(self, turn_context=None):
         temporal = self._require_turn_temporal(turn_context)
         enforce_temporal_window = turn_context is not None
+        cache_key = (
+            int(getattr(self._bot, "_memory_graph_generation", 0) or 0),
+            str(getattr(temporal, "wall_time", "") if enforce_temporal_window else ""),
+            str(getattr(temporal, "wall_date", "") if enforce_temporal_window else ""),
+        )
+        cached = self._projection_cache.get(cache_key)
+        if cached is not None:
+            return copy.deepcopy(cached)
         node_map = {}
         edge_map = {}
         self._project_consolidated_memories(
@@ -1173,7 +1190,9 @@ Text: {summary}
             value = item.get("updated_at")
             if value and (updated_at is None or str(value) > str(updated_at)):
                 updated_at = value
-        return {"nodes": nodes, "edges": edges, "updated_at": updated_at}
+        snapshot = {"nodes": nodes, "edges": edges, "updated_at": updated_at}
+        self._projection_cache[cache_key] = copy.deepcopy(snapshot)
+        return snapshot
 
     def preview_memory_graph(self, snapshot=None):
         graph = snapshot or self.graph_snapshot()
@@ -1303,7 +1322,8 @@ Text: {summary}
             )
         # Graph store is empty or unavailable: fall back to in-memory projection.
         try:
-            return self.build_graph_projection(turn_context=None)
+            snapshot = self.build_graph_projection(turn_context=None)
+            return snapshot
         except Exception as exc:
             logger.warning("In-memory graph projection failed: %s", exc)
             return {"nodes": [], "edges": [], "updated_at": None}

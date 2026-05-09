@@ -4,6 +4,7 @@ import time
 from typing import Any
 
 from dadbot.core.execution_ledger import ExecutionLedger, WriteBoundaryGuard
+from dadbot.core.execution_result_unified import ensure_unified_execution_result
 from dadbot.core.invariant_gate import InvariantGate, InvariantViolationError
 from dadbot.core.kernel_signals import get_metrics
 
@@ -185,9 +186,39 @@ class LedgerWriter:
             },
         )
 
-    def append_job_failed(self, job: Any, error: str) -> dict[str, Any]:
+    def append_job_failed(
+        self,
+        job: Any,
+        error: Any,
+        *,
+        failure: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         payload = self._job_payload(job)
         payload["error"] = str(error or "")
+        payload["error_type"] = type(error).__name__ if isinstance(error, BaseException) else ""
+        execution_result = ensure_unified_execution_result(
+            dict(payload.get("metadata", {}).get("execution_result") or {}),
+        )
+        failure_view = dict(execution_result.get("failure") or {})
+        has_failure = bool(
+            str(failure_view.get("class") or "")
+            or str(failure_view.get("type") or "")
+            or str(failure_view.get("message") or ""),
+        )
+        if has_failure:
+            payload["failure"] = {
+                "failure_class": str(failure_view.get("class") or ""),
+                "failure_source": str(failure_view.get("source") or ""),
+                "retryable": bool(failure_view.get("retryable", False)),
+                "error_type": str(failure_view.get("type") or ""),
+                "message": str(failure_view.get("message") or ""),
+                "class": str(failure_view.get("class") or ""),
+                "source": str(failure_view.get("source") or ""),
+                "type": str(failure_view.get("type") or ""),
+            }
+        elif isinstance(failure, dict) and bool(failure):
+            # Legacy fallback for older callers; unified execution_result is authoritative.
+            payload["failure"] = dict(failure)
         return self._write(
             {
                 "type": "JOB_FAILED",

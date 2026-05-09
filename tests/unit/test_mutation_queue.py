@@ -196,6 +196,7 @@ class TestMutationQueueDrainOrdering:
         snap = q.snapshot()
         latest = dict(snap.get("latest_transaction") or {})
         assert latest.get("status") in {"rolled_back", "rollback_failed"}
+        assert latest.get("rollback_mode") == "audit_critical"
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +244,7 @@ class TestMutationQueueSnapshot:
         assert int(snap.get("transactions", 0)) >= 1
         latest = dict(snap.get("latest_transaction") or {})
         assert latest.get("status") == "committed"
+        assert latest.get("rollback_mode") == "best_effort"
 
 
 # ---------------------------------------------------------------------------

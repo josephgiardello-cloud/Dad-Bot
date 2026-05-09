@@ -17,6 +17,11 @@ from typing import Any, Protocol
 from dadbot.contracts import PolicyVetoPayload, SovereignEvent, SovereignEventType, VetoReason
 from dadbot.core.cognition_event import CognitionEnvelope, emit_cognition
 from dadbot.core.critic import CritiqueEngine
+from dadbot.core.execution_result_unified import (
+    get_unified_execution_result,
+    set_unified_execution_eval_hash,
+    set_unified_execution_result,
+)
 from dadbot.core.graph_context import TurnContext
 from dadbot.core.graph_types import NodeType
 from dadbot.core.invariant_gate import InvariantGate
@@ -152,9 +157,8 @@ class ValidationGateNode(_NodeContractMixin):
             from dadbot.core.nodes import get_tool_required_args
 
             required_args_by_tool = dict(get_tool_required_args())
-        except Exception:
-            # ValidationGate stays resilient if the tool registry is unavailable.
-            pass
+        except Exception as exc:
+            raise RuntimeError("ValidationGate cannot inspect tool registry") from exc
         violations: list[dict[str, Any]] = []
         for req in requests:
             tool_name = str(req.get("tool_name") or "").strip().lower()
@@ -468,7 +472,12 @@ class InferenceNode(_NodeContractMixin):
             target_node="inference",
             confidence_score=0.5,
         ))
-        candidate = await service.run_agent(turn_context, rich_context)
+        candidate_or_awaitable = service.run_agent(turn_context, rich_context)
+        candidate = (
+            await candidate_or_awaitable
+            if inspect.isawaitable(candidate_or_awaitable)
+            else candidate_or_awaitable
+        )
         candidate = self._blend_daily_checkin_reply(service, turn_context, candidate)
         self._run_critique_check(turn_context, candidate, 0)
         turn_context.state.pop("_critique_revision_context", None)
@@ -546,6 +555,12 @@ class SafetyNode(_NodeContractMixin):
         semantic_trace = dict((decision.trace or {}).get("semantic_eval") or {})
         eval_input_hash = str(semantic_trace.get("eval_input_hash") or "")
         if eval_input_hash:
+            execution_result = get_unified_execution_result(turn_context)
+            execution_result = set_unified_execution_eval_hash(
+                execution_result,
+                eval_input_hash=eval_input_hash,
+            )
+            set_unified_execution_result(turn_context, execution_result)
             by_hash = dict(turn_context.state.get("semantic_decision_by_eval_hash") or {})
             by_hash[eval_input_hash] = {
                 "action": decision.action,

@@ -109,6 +109,11 @@ class MutationTransactionStatus(StrEnum):
     ROLLBACK_FAILED = "rollback_failed"
 
 
+class MutationRollbackMode(StrEnum):
+    AUDIT_CRITICAL = "audit_critical"
+    BEST_EFFORT = "best_effort"
+
+
 @dataclass
 class MutationTransactionRecord:
     transaction_id: str
@@ -118,6 +123,7 @@ class MutationTransactionRecord:
     rollback_count: int
     rollback_failures: int
     trace_id: str
+    rollback_mode: MutationRollbackMode
     error: str = ""
     created_at: float = field(default_factory=time.time)
 
@@ -129,6 +135,7 @@ class MutationTransactionRecord:
             "failed_count": int(self.failed_count),
             "rollback_count": int(self.rollback_count),
             "rollback_failures": int(self.rollback_failures),
+            "rollback_mode": str(self.rollback_mode.value),
             "trace_id": str(self.trace_id or ""),
             "error": str(self.error or ""),
             "created_at": float(self.created_at),

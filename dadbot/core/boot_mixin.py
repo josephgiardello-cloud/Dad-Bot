@@ -344,6 +344,7 @@ class DadBotBootMixin:
         self._semantic_index_future = None
         self._pending_semantic_index_memories = None
         self._memory_graph_dirty = True
+        self._memory_graph_generation = 0
         self._last_memory_graph_refresh_monotonic = 0.0
         self._recent_mood_detections: dict = {}
         self._recent_runtime_issues: deque = deque(maxlen=12)

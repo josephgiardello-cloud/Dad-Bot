@@ -29,6 +29,7 @@ from dadbot.core.control_plane import (
     SessionRegistry,
 )
 from dadbot.core.execution_binder import TraceBinder
+from dadbot.core.execution_result_unified import ensure_unified_execution_result
 from dadbot.core.execution_terminal_state import build_execution_terminal_state
 from dadbot.core.goal_resynthesis import GoalRecalibrationEngine
 from dadbot.core.graph import TurnGraph
@@ -105,6 +106,12 @@ def _build_determinism_manifest() -> dict[str, Any]:
     }
     manifest["manifest_hash"] = _stable_sha256(manifest)
     return manifest
+
+
+def _normalize_timeout_seconds(timeout_seconds: float | None) -> float:
+    if timeout_seconds is None:
+        return 30.0
+    return max(0.0, float(timeout_seconds))
 
 
 class DadBotOrchestrator:
@@ -460,6 +467,9 @@ class DadBotOrchestrator:
             return
         typed_state = cast("dict[str, Any]", state)
         typed_state["last_result"] = result
+        typed_state["execution_result"] = ensure_unified_execution_result(
+            dict(context.metadata.get("execution_result") or {}),
+        )
         prior_goals = typed_state.get("goals")
         persisted_goals = list(cast("list[Any]", prior_goals)) if isinstance(prior_goals, list) else []
         goals_any_raw = context.state.get("goals")
@@ -937,6 +947,7 @@ class DadBotOrchestrator:
         metadata: dict[str, Any] | None = None,
         timeout_seconds: float | None = None,
     ) -> FinalizedTurnResult:
+        normalized_timeout = _normalize_timeout_seconds(timeout_seconds)
         confluence_mode = str(os.environ.get("DADBOT_GLOBAL_CONFLUENCE_MODE", "enforce")).strip().lower()
         if confluence_mode not in {"off", "audit", "enforce"}:
             confluence_mode = "enforce"
@@ -970,7 +981,7 @@ class DadBotOrchestrator:
             user_input=user_input,
             attachments=attachments,
             metadata=outbound_metadata,
-            timeout_seconds=timeout_seconds,
+            timeout_seconds=normalized_timeout,
         )
 
     async def handle_turn(
@@ -989,16 +1000,17 @@ class DadBotOrchestrator:
         Every request produces: (1) complete ordered trace, (2) exactly one commit boundary.
         """
         try:
+            normalized_timeout = _normalize_timeout_seconds(timeout_seconds)
             return await self._submit_turn_via_control_plane(
                 user_input,
                 attachments=attachments,
                 session_id=session_id,
                 confluence_key=confluence_key,
                 metadata=metadata,
-                timeout_seconds=timeout_seconds,
+                timeout_seconds=normalized_timeout,
             )
         except TimeoutError:
-            logger.warning("Inference timed out after %ss", timeout_seconds or 30)
+            logger.warning("Inference timed out after %ss", _normalize_timeout_seconds(timeout_seconds))
             return ("Sorry, I timed out while thinking. Please try again.", False)
         except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
             logger.error("Inference failed: %s", exc)

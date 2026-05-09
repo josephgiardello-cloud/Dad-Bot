@@ -197,7 +197,8 @@ def build_external_system_call_graph(steps: list[dict[str, Any]]) -> dict[str, A
             or payload.get("response_hash")
             or "",
         )
-        status = str(payload.get("status") or "ok").strip().lower() or "ok"
+        execution_result = dict(payload.get("metadata", {}).get("execution_result") or {})
+        status = str(execution_result.get("status") or payload.get("status") or "ok").strip().lower() or "ok"
         time_token = str(
             tool_call_record.get("stable_time_token")
             or payload.get("time_token")
@@ -493,7 +494,8 @@ def build_tool_invocation_projection(
         tool_name = str(
             payload.get("system") or payload.get("tool") or payload.get("name") or "",
         )
-        status = str(payload.get("status") or "")
+        execution_result = dict(payload.get("metadata", {}).get("execution_result") or {})
+        status = str(execution_result.get("status") or payload.get("status") or "")
 
         if not live_tool_mode and isinstance(payload.get("tool_call_record"), dict):
             record = dict(payload.get("tool_call_record") or {})

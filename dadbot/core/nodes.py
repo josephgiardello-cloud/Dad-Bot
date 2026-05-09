@@ -101,13 +101,26 @@ class ContextBuilderNode:
     def __init__(self, memory_manager: Any = None, *, goal_ranker: Any = None) -> None:
         self.mgr, self._goal_ranker = memory_manager, goal_ranker
 
+    @staticmethod
+    def _normalize_memories_payload(payload: Any) -> list[Any]:
+        if payload is None:
+            return []
+        if isinstance(payload, list):
+            return list(payload)
+        if isinstance(payload, tuple | set):
+            return list(payload)
+        if isinstance(payload, dict):
+            return [dict(payload)]
+        return []
+
     async def run(self, context: TurnContext) -> TurnContext:
         query = getattr(self.mgr, "query", None)
         if callable(query):
             queried = query(context.user_input)
-            memories = await queried if inspect.isawaitable(queried) else queried
+            memories_raw = await queried if inspect.isawaitable(queried) else queried
+            memories = self._normalize_memories_payload(memories_raw)
         else:
-            memories = list(context.state.get("memories") or [])
+            memories = self._normalize_memories_payload(context.state.get("memories"))
         goals = list(context.state.get("session_goals") or [])
         if goals and self._goal_ranker is not None:
             rerank = getattr(self._goal_ranker, "rerank", None)
@@ -116,7 +129,7 @@ class ContextBuilderNode:
                     memories = rerank(memories, goals)
                 except Exception:
                     context.state["goal_ranker_failure"] = {"failure_mode": "recoverable"}
-        context.state["memories"] = list(memories or [])
+        context.state["memories"] = self._normalize_memories_payload(memories)
         context.state["rich_context"] = {
             "memories": list(context.state.get("memories") or []),
             "session_goals": goals,
@@ -401,7 +414,8 @@ class InferenceNode:
         rich_context = context.state.get("rich_context", {})
         candidate: Any = None
         for iteration in range(self._max_loop_iterations):
-            candidate = await run_agent(context, rich_context)
+            next_candidate = run_agent(context, rich_context)
+            candidate = await next_candidate if inspect.isawaitable(next_candidate) else next_candidate
             if self._run_critique_check(context, candidate, iteration):
                 break
         context.state.pop("_critique_revision_context", None)

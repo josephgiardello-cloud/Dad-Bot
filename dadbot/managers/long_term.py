@@ -550,6 +550,7 @@ Return only JSON:
 
     def mark_memory_graph_dirty(self):
         self.bot._memory_graph_dirty = True
+        self.bot._memory_graph_generation = int(getattr(self.bot, "_memory_graph_generation", 0) or 0) + 1
 
     def refresh_memory_graph(self, force=False):
         """Sync the durable graph store, then refresh the lightweight preview used by UI and diagnostics."""

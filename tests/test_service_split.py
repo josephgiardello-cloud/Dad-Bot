@@ -674,6 +674,14 @@ def test_runtime_orchestration_methods_delegate_to_manager(bot, monkeypatch):
     assert persisted == "persist-future"
 
 
+def test_runtime_orchestration_submit_background_task_handles_noop_submit(bot, monkeypatch):
+    monkeypatch.setattr(bot.background_tasks, "submit", lambda *_args, **_kwargs: None)
+
+    future = bot.runtime_orchestration.submit_background_task(lambda: "ok", task_kind="demo-noop")
+
+    assert str(getattr(future, "dadbot_task_id", "") or "")
+
+
 def test_background_task_manager_is_available_on_bot(bot):
     assert bot.background_tasks is not None
 
@@ -1593,7 +1601,7 @@ def test_plan_agentic_tools_closed_loop_falls_back_cleanly(bot, monkeypatch):
     monkeypatch.setattr(
         bot.turn_service,
         "_planning_prompt",
-        lambda user_input, mood, tools, shared_context: "planner-prompt",
+        lambda user_input, mood, tools, shared_context, memory_influence_brief=None, retrieval_set=None: "planner-prompt",
     )
     monkeypatch.setattr(bot, "get_available_tools", lambda: [{"type": "function", "function": {"name": "status"}}])
     monkeypatch.setattr(
@@ -1612,3 +1620,153 @@ def test_plan_agentic_tools_closed_loop_falls_back_cleanly(bot, monkeypatch):
     assert (tool_name, tool_args) == (None, None)
     assert planner_debug.get("planner_status") == "fallback"
     assert "event loop closed" in (planner_debug.get("planner_reason") or "").lower()
+
+
+def test_plan_agentic_tools_memory_authority_veto_blocks_execution(bot, monkeypatch):
+    bot.ENABLE_AGENTIC_TOOLS = True
+    monkeypatch.setattr(bot, "agentic_tool_settings", lambda: {"enabled": True})
+    monkeypatch.setattr(bot.turn_service, "_available_agentic_tools", lambda _settings: [{"type": "function", "function": {"name": "web_search"}}])
+    monkeypatch.setattr(bot.prompt_assembly, "build_request_system_prompt", lambda *_args, **_kwargs: "shared-context")
+    monkeypatch.setattr(bot.turn_service, "_planning_prompt", lambda *_args, **_kwargs: "planner-prompt")
+    monkeypatch.setattr(bot.turn_service, "_deterministic_tool_route", lambda _user_input: None)
+    monkeypatch.setattr(bot.turn_service._llm_adapter, "call", lambda **_kwargs: {"message": {"content": "{}"}})
+    monkeypatch.setattr(
+        bot.turn_service,
+        "_parse_agentic_tool_plan",
+        lambda _content: type(
+            "Plan",
+            (),
+            {
+                "needs_tool": True,
+                "tool": "web_search",
+                "parameters": {"query": "weather"},
+                "reason": "Need current weather.",
+            },
+        )(),
+    )
+    monkeypatch.setattr(
+        bot.turn_service,
+        "_execute_planned_tool_sync",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("tool execution should be vetoed")),
+    )
+
+    class DummyTurnContext:
+        def __init__(self):
+            self.state = {
+                "memory_retrieval_set": [
+                    {
+                        "memory_id": "m1",
+                        "summary": "No web search without clarification.",
+                        "tool_policy": {
+                            "forbid_tools": ["web_search"],
+                            "require_clarification": True,
+                            "reason": "User asked to avoid web lookups unless explicit.",
+                        },
+                    }
+                ],
+                "memory_influence_brief": "Memory has explicit lookup constraints.",
+            }
+
+    turn_context = DummyTurnContext()
+
+    tool_reply, tool_observation = bot.turn_service.plan_agentic_tools(
+        "what is the weather",
+        "steady",
+        turn_context=turn_context,
+    )
+    planner_debug = bot.planner_debug_snapshot()
+
+    assert tool_reply is None
+    assert "memory authority blocked tool" in str(tool_observation or "").lower()
+    assert planner_debug.get("planner_status") == "memory_authority_veto"
+    assert turn_context.state.get("decision_outcome") == "no_tool_needed"
+    assert bool((turn_context.state.get("memory_authority") or {}).get("vetoed")) is True
+
+
+def test_plan_agentic_tools_memory_perturbation_changes_decision_outcome(bot, monkeypatch):
+    bot.ENABLE_AGENTIC_TOOLS = True
+    monkeypatch.setattr(bot, "agentic_tool_settings", lambda: {"enabled": True})
+    monkeypatch.setattr(bot.turn_service, "_available_agentic_tools", lambda _settings: [{"type": "function", "function": {"name": "web_search"}}])
+    monkeypatch.setattr(bot.prompt_assembly, "build_request_system_prompt", lambda *_args, **_kwargs: "shared-context")
+    monkeypatch.setattr(bot.turn_service, "_planning_prompt", lambda *_args, **_kwargs: "planner-prompt")
+    monkeypatch.setattr(bot.turn_service, "_deterministic_tool_route", lambda _user_input: None)
+    monkeypatch.setattr(bot.turn_service._llm_adapter, "call", lambda **_kwargs: {"message": {"content": "{}"}})
+    monkeypatch.setattr(
+        bot.turn_service,
+        "_parse_agentic_tool_plan",
+        lambda _content: type(
+            "Plan",
+            (),
+            {
+                "needs_tool": True,
+                "tool": "web_search",
+                "parameters": {"query": "weather"},
+                "reason": "Need current weather.",
+            },
+        )(),
+    )
+    monkeypatch.setattr(bot.turn_service, "_execute_planned_tool_sync", lambda **_kwargs: ("tool-reply", "tool-observation"))
+
+    class DummyTurnContext:
+        def __init__(self):
+            self.state = {
+                "memory_retrieval_set": [],
+                "memory_influence_brief": "",
+            }
+
+    turn_context = DummyTurnContext()
+
+    tool_reply, tool_observation = bot.turn_service.plan_agentic_tools(
+        "what is the weather",
+        "steady",
+        turn_context=turn_context,
+    )
+
+    assert tool_reply == "tool-reply"
+    assert tool_observation == "tool-observation"
+    assert turn_context.state.get("decision_outcome") == "executed_tool"
+    assert bool((turn_context.state.get("memory_authority") or {}).get("vetoed")) is False
+
+
+def test_refresh_memory_retrieval_after_tool_reconciles_and_updates_state(bot, monkeypatch):
+    class DummyTurnContext:
+        def __init__(self):
+            self.state = {
+                "memory_retrieval_set": [
+                    {"memory_id": "budget_target", "summary": "Target is $3000"},
+                ],
+                "memory_influence_brief": "Track the active budget target.",
+            }
+
+    turn_context = DummyTurnContext()
+
+    monkeypatch.setattr(bot, "graph_retrieval_for_input", lambda _query, limit=3: None)
+    monkeypatch.setattr(
+        bot,
+        "relevant_memories_for_input",
+        lambda _query, limit=5, graph_result=None: [
+            {"memory_id": "budget_target", "summary": "Target is $5000"},
+            {"memory_id": "payday", "summary": "Next paycheck arrives Friday"},
+        ],
+    )
+
+    bot.turn_service._refresh_memory_retrieval_after_tool(
+        turn_context=turn_context,
+        user_input="did that update",
+        tool_feedback="budget target now 5000",
+    )
+
+    merged = list(turn_context.state.get("memory_retrieval_set") or [])
+    by_id = {
+        str(item.get("memory_id") or ""): item
+        for item in merged
+        if isinstance(item, dict)
+    }
+    reconciliation = dict(turn_context.state.get("memory_reconciliation") or {})
+
+    assert len(merged) == 2
+    assert str(by_id["budget_target"].get("summary") or "") == "Target is $5000"
+    assert str(by_id["payday"].get("summary") or "") == "Next paycheck arrives Friday"
+    assert int(reconciliation.get("merged_count") or 0) == 2
+    assert int(reconciliation.get("conflict_count") or 0) == 1
+    assert bool(turn_context.state.get("memory_retrieval_refined")) is True

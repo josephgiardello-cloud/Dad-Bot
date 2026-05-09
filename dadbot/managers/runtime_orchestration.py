@@ -4,6 +4,7 @@ import logging
 import uuid
 from collections import Counter
 from concurrent.futures import Future
+from typing import Any
 
 from dadbot.contracts import DadBotContext, SupportsDadBotAccess
 from dadbot.models import BackgroundTaskRecord
@@ -169,6 +170,12 @@ class RuntimeOrchestrationManager:
             future.set_result(payload)
             return future
 
+        def _stamped_future(task_id: str, *, payload: dict[str, Any] | None = None) -> Future:
+            stamped = _completed_future(dict(payload or {"task_id": task_id}))
+            stamped.dadbot_task_id = task_id
+            stamped.dadbot_task_kind = task_kind_name
+            return stamped
+
         if task_kind_name in self.NONCRITICAL_TASK_KINDS and self.bot.should_delay_noncritical_maintenance(health):
             task_id = uuid.uuid4().hex
             task_metadata.update(
@@ -281,6 +288,15 @@ class RuntimeOrchestrationManager:
             )
             logger.exception("Background task submission failed for %s", task_kind_name)
             raise
+        if future is None:
+            logger.warning(
+                "Background manager returned no future for %s; returning stamped completed future",
+                task_kind_name,
+            )
+            return _stamped_future(
+                task_id,
+                payload={"deferred": True, "task_id": task_id, "reason": "submit returned no future"},
+            )
         future.dadbot_task_id = task_id
         future.dadbot_task_kind = str(task_kind or "background")
         return future

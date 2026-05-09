@@ -272,6 +272,34 @@ class TestDuckTypingFix:
         assert result.intent.strategy == "research"
         assert result.intent.tool_request_count == 2
 
+    def test_build_policy_input_surfaces_typed_ir_degradation(self):
+        """Unsupported state mappings must surface typed degradation metadata."""
+
+        class BrokenState:
+            @property
+            def __dict__(self):
+                raise RuntimeError("state is unreadable")
+
+        turn_context = Mock()
+        turn_context.state = BrokenState()
+        turn_context.metadata = {}
+        turn_context.session_id = "session123"
+        turn_context.tenant_id = "tenant456"
+        turn_context.trace_id = "trace789"
+        turn_context.mode = "live"
+
+        result = build_policy_input("safety", turn_context, candidate=None)
+
+        assert int(result.ir_degradation_count) > 0
+        assert result.ir_degradations
+        first = dict(result.ir_degradations[0])
+        assert first.get("reason") in {
+            "dunder_dict_failed",
+            "unsupported_state_mapping",
+        }
+        assert int(turn_context.metadata.get("turn_ir_degradation_count", 0)) > 0
+        assert isinstance(turn_context.metadata.get("turn_ir_degradations"), list)
+
     def test_build_policy_view_is_stable_for_same_semantics(self):
         """PolicyView state hash should be stable for equivalent semantic policy inputs."""
         turn_context_a = Mock()

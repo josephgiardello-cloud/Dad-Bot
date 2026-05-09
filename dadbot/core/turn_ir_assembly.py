@@ -18,6 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from dadbot.core.execution_result_unified import get_unified_execution_result
 from dadbot.core.planner_ir import PlannerDecision, build_planner_ir
 from dadbot.core.policy_compiler import PolicyCompiler
 from dadbot.core.turn_ir import ExecutionContext, PolicyInput, TurnIntent, build_policy_input
@@ -115,7 +116,7 @@ def _extract_turn_intent(user_input: str, turn_context: Any) -> TurnIntent:
     Reconstructs intent type and strategy from execution result or turn state.
     """
     # Try to extract from execution result
-    execution_result = getattr(turn_context, "execution_result", None) or {}
+    execution_result = get_unified_execution_result(turn_context)
     initial_result = execution_result.get("initial_result", {})
 
     intent_type = str(initial_result.get("intent_type", "unspecified") or "unspecified")
@@ -123,7 +124,7 @@ def _extract_turn_intent(user_input: str, turn_context: Any) -> TurnIntent:
 
     # Fallback: inspect turn_context dict directly
     if isinstance(turn_context, dict):
-        exec_result = turn_context.get("execution_result") or {}
+        exec_result = get_unified_execution_result(turn_context)
         initial = exec_result.get("initial_result") or {}
         intent_type = str(initial.get("intent_type", intent_type))
         strategy = str(initial.get("strategy", strategy))

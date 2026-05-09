@@ -7,6 +7,15 @@ from typing import Any
 
 
 @dataclass(frozen=True)
+class IRDegradation:
+    stage: str
+    reason: str
+    source_type: str
+    exception_type: str = ""
+    message: str = ""
+
+
+@dataclass(frozen=True)
 class TurnIntent:
     intent_type: str
     strategy: str
@@ -56,6 +65,8 @@ class PolicyInput:
     policy_view: PolicyView | None = None
     reduction_proof: PolicyReductionProof | None = None
     semantic_eval_input: SemanticEvalInput | None = None
+    ir_degradation_count: int = 0
+    ir_degradations: tuple[dict[str, Any], ...] = ()
 
     @property
     def candidate_kind(self) -> str:
@@ -90,6 +101,7 @@ class PolicyInput:
                 if isinstance(self.reduction_proof, PolicyReductionProof)
                 else ""
             ),
+            "ir_degradation_count": int(self.ir_degradation_count),
         }
 
 
@@ -103,74 +115,202 @@ def hash_json(payload: Any) -> str:
     return _stable_hash(payload)
 
 
+def _degradation(
+    *,
+    stage: str,
+    reason: str,
+    source_type: str,
+    exc: Exception | None = None,
+) -> IRDegradation:
+    return IRDegradation(
+        stage=str(stage or ""),
+        reason=str(reason or "unknown"),
+        source_type=str(source_type or "unknown"),
+        exception_type=(type(exc).__name__ if exc is not None else ""),
+        message=(str(exc) if exc is not None else ""),
+    )
+
+
+def _serialize_degradations(items: list[IRDegradation]) -> list[dict[str, Any]]:
+    return [
+        {
+            "stage": item.stage,
+            "reason": item.reason,
+            "source_type": item.source_type,
+            "exception_type": item.exception_type,
+            "message": item.message,
+        }
+        for item in list(items or [])
+    ]
+
+
+def _obj_to_dict_with_degradations(
+    obj: Any,
+    *,
+    stage: str,
+) -> tuple[dict[str, Any], list[IRDegradation]]:
+    degradations: list[IRDegradation] = []
+
+    if obj is None:
+        return {}, degradations
+
+    if isinstance(obj, dict):
+        return dict(obj), degradations
+
+    source_type = type(obj).__name__
+
+    if hasattr(obj, "model_dump"):
+        try:
+            return dict(obj.model_dump()), degradations
+        except Exception as exc:
+            degradations.append(
+                _degradation(
+                    stage=stage,
+                    reason="model_dump_failed",
+                    source_type=source_type,
+                    exc=exc,
+                ),
+            )
+
+    if hasattr(obj, "dict"):
+        try:
+            return dict(obj.dict()), degradations
+        except Exception as exc:
+            degradations.append(
+                _degradation(
+                    stage=stage,
+                    reason="dict_method_failed",
+                    source_type=source_type,
+                    exc=exc,
+                ),
+            )
+
+    if hasattr(obj, "__dataclass_fields__"):
+        try:
+            from dataclasses import asdict
+
+            return dict(asdict(obj)), degradations
+        except Exception as exc:
+            degradations.append(
+                _degradation(
+                    stage=stage,
+                    reason="dataclass_asdict_failed",
+                    source_type=source_type,
+                    exc=exc,
+                ),
+            )
+
+    try:
+        raw_dict = getattr(obj, "__dict__")
+    except Exception as exc:
+        degradations.append(
+            _degradation(
+                stage=stage,
+                reason="dunder_dict_failed",
+                source_type=source_type,
+                exc=exc,
+            ),
+        )
+    else:
+        if isinstance(raw_dict, dict):
+            return {k: v for k, v in raw_dict.items() if not k.startswith("_")}, degradations
+        degradations.append(
+            _degradation(
+                stage=stage,
+                reason="dunder_dict_not_mapping",
+                source_type=source_type,
+            ),
+        )
+
+    degradations.append(
+        _degradation(
+            stage=stage,
+            reason="unsupported_state_mapping",
+            source_type=source_type,
+        ),
+    )
+    return {}, degradations
+
+
 def _obj_to_dict(obj: Any) -> dict[str, Any]:
     """Convert object to dict, supporting dicts, Pydantic, dataclasses, etc.
     
     FIX: Handles Pydantic models, dataclasses, and other objects that aren't
     plain dicts. Prevents silent data loss when turn_context.state is an object.
     """
-    if obj is None:
-        return {}
-
-    if isinstance(obj, dict):
-        return dict(obj)
-
-    # Try Pydantic model_dump() (v2)
-    if hasattr(obj, "model_dump"):
-        try:
-            return dict(obj.model_dump())
-        except Exception:
-            pass
-
-    # Try Pydantic dict() (v1)
-    if hasattr(obj, "dict"):
-        try:
-            return dict(obj.dict())
-        except Exception:
-            pass
-
-    # Try dataclass conversion
-    if hasattr(obj, "__dataclass_fields__"):
-        try:
-            from dataclasses import asdict
-            return dict(asdict(obj))
-        except Exception:
-            pass
-
-    # Try __dict__ (standard Python objects)
-    if hasattr(obj, "__dict__"):
-        try:
-            return {k: v for k, v in obj.__dict__.items() if not k.startswith("_")}
-        except Exception:
-            pass
-
-    # Fallback: return empty dict and log warning
-    import logging
-    logging.warning(
-        "_obj_to_dict: could not convert %s to dict. Falling back to {}. "
-        "Consider implementing __dict__ or model_dump().",
-        type(obj).__name__,
-    )
-    return {}
+    mapped, _degradations = _obj_to_dict_with_degradations(obj, stage="_obj_to_dict")
+    return mapped
 
 
-def _extract_plan_and_requests(state_mapping: dict[str, Any]) -> tuple[dict[str, Any], list[Any]]:
+def _apply_ir_degradations(turn_context: Any, degradations: list[IRDegradation]) -> None:
+    if not degradations:
+        return
+    serialized = _serialize_degradations(degradations)
+
+    state = getattr(turn_context, "state", None)
+    if isinstance(state, dict):
+        existing = list(state.get("turn_ir_degradations") or [])
+        existing.extend(serialized)
+        state["turn_ir_degradations"] = existing
+        state["turn_ir_degradation_count"] = int(len(existing))
+
+    metadata = getattr(turn_context, "metadata", None)
+    if isinstance(metadata, dict):
+        existing_meta = list(metadata.get("turn_ir_degradations") or [])
+        existing_meta.extend(serialized)
+        metadata["turn_ir_degradations"] = existing_meta
+        metadata["turn_ir_degradation_count"] = int(len(existing_meta))
+
+
+def _extract_plan_and_requests(
+    state_mapping: dict[str, Any],
+    *,
+    degradations: list[IRDegradation] | None = None,
+    stage_prefix: str = "state",
+) -> tuple[dict[str, Any], list[Any]]:
     turn_plan = state_mapping.get("turn_plan", {})
     if not isinstance(turn_plan, dict):
-        turn_plan = _obj_to_dict(turn_plan)
+        turn_plan, plan_degradations = _obj_to_dict_with_degradations(
+            turn_plan,
+            stage=f"{stage_prefix}.turn_plan",
+        )
+        if degradations is not None:
+            degradations.extend(plan_degradations)
 
     tool_ir = state_mapping.get("tool_ir", {})
     if not isinstance(tool_ir, dict):
-        tool_ir = _obj_to_dict(tool_ir)
+        tool_ir, ir_degradations = _obj_to_dict_with_degradations(
+            tool_ir,
+            stage=f"{stage_prefix}.tool_ir",
+        )
+        if degradations is not None:
+            degradations.extend(ir_degradations)
 
     requests = tool_ir.get("requests", [])
     if not isinstance(requests, list):
+        if degradations is not None:
+            degradations.append(
+                _degradation(
+                    stage=f"{stage_prefix}.tool_ir.requests",
+                    reason="requests_not_list",
+                    source_type=type(requests).__name__,
+                ),
+            )
         requests = []
     return turn_plan, requests
 
 
-def _policy_relevant_projection(state_mapping: dict[str, Any]) -> dict[str, Any]:
-    turn_plan, requests = _extract_plan_and_requests(state_mapping)
+def _policy_relevant_projection(
+    state_mapping: dict[str, Any],
+    *,
+    degradations: list[IRDegradation] | None = None,
+    stage_prefix: str = "state",
+) -> dict[str, Any]:
+    turn_plan, requests = _extract_plan_and_requests(
+        state_mapping,
+        degradations=degradations,
+        stage_prefix=stage_prefix,
+    )
     return {
         "intent_type": str(turn_plan.get("intent_type") or ""),
         "strategy": str(turn_plan.get("strategy") or ""),
@@ -178,9 +318,22 @@ def _policy_relevant_projection(state_mapping: dict[str, Any]) -> dict[str, Any]
     }
 
 
-def _semantic_eval_input_from_state(state_mapping: dict[str, Any], turn_context: Any) -> SemanticEvalInput:
-    turn_plan, requests = _extract_plan_and_requests(state_mapping)
-    policy_view_projection = _policy_relevant_projection(state_mapping)
+def _semantic_eval_input_from_state(
+    state_mapping: dict[str, Any],
+    turn_context: Any,
+    *,
+    degradations: list[IRDegradation] | None = None,
+) -> SemanticEvalInput:
+    turn_plan, requests = _extract_plan_and_requests(
+        state_mapping,
+        degradations=degradations,
+        stage_prefix="semantic_eval",
+    )
+    policy_view_projection = _policy_relevant_projection(
+        state_mapping,
+        degradations=degradations,
+        stage_prefix="semantic_eval",
+    )
     return SemanticEvalInput(
         intent_hash=hash_json(dict(turn_plan or {})),
         policy_view_hash=hash_json(policy_view_projection),
@@ -211,11 +364,24 @@ class ProjectionCache:
         if key and key in self._cache:
             return self._cache[key]
 
+        degradations: list[IRDegradation] = []
         state = getattr(turn_context, "state", None)
-        state_mapping = state if isinstance(state, dict) else _obj_to_dict(state)
+        if isinstance(state, dict):
+            state_mapping = state
+        else:
+            state_mapping, mapping_degradations = _obj_to_dict_with_degradations(
+                state,
+                stage="projection_cache.state",
+            )
+            degradations.extend(mapping_degradations)
         if not isinstance(state_mapping, dict):
             state_mapping = {}
-        view = _semantic_eval_input_from_state(state_mapping, turn_context)
+        view = _semantic_eval_input_from_state(
+            state_mapping,
+            turn_context,
+            degradations=degradations,
+        )
+        _apply_ir_degradations(turn_context, degradations)
 
         if key:
             self._cache[key] = view
@@ -254,12 +420,25 @@ def prove_policy_view_bijection(state_mapping: dict[str, Any], policy_view: Poli
 
 
 def build_policy_view(turn_context: Any) -> PolicyView:
+    degradations: list[IRDegradation] = []
     state = getattr(turn_context, "state", None)
-    state_mapping = state if isinstance(state, dict) else _obj_to_dict(state)
+    if isinstance(state, dict):
+        state_mapping = state
+    else:
+        state_mapping, mapping_degradations = _obj_to_dict_with_degradations(
+            state,
+            stage="build_policy_view.state",
+        )
+        degradations.extend(mapping_degradations)
     if not isinstance(state_mapping, dict):
         state_mapping = {}
 
-    policy_seed = _policy_relevant_projection(state_mapping)
+    policy_seed = _policy_relevant_projection(
+        state_mapping,
+        degradations=degradations,
+        stage_prefix="build_policy_view",
+    )
+    _apply_ir_degradations(turn_context, degradations)
     return PolicyView(
         intent_type=policy_seed["intent_type"],
         strategy=policy_seed["strategy"],
@@ -274,16 +453,41 @@ def build_policy_input(policy_name: str, turn_context: Any, candidate: Any) -> P
     FIX: Safely handles Pydantic models, dataclasses, and plain dicts.
     Prevents silent data loss from duck-typing failures.
     """
+    degradations: list[IRDegradation] = []
     state = getattr(turn_context, "state", None)
-    state_mapping = state if isinstance(state, dict) else _obj_to_dict(state)
+    if isinstance(state, dict):
+        state_mapping = state
+    else:
+        state_mapping, mapping_degradations = _obj_to_dict_with_degradations(
+            state,
+            stage="build_policy_input.state",
+        )
+        degradations.extend(mapping_degradations)
     if not isinstance(state_mapping, dict):
         state_mapping = {}
 
-    policy_view = build_policy_view(turn_context)
-    semantic_eval_input = projection_cache().get(turn_context)
+    policy_seed = _policy_relevant_projection(
+        state_mapping,
+        degradations=degradations,
+        stage_prefix="build_policy_input",
+    )
+    policy_view = PolicyView(
+        intent_type=policy_seed["intent_type"],
+        strategy=policy_seed["strategy"],
+        tool_request_count=int(policy_seed["tool_request_count"]),
+        state_hash=_stable_hash(policy_seed),
+    )
+    semantic_eval_input = _semantic_eval_input_from_state(
+        state_mapping,
+        turn_context,
+        degradations=degradations,
+    )
     reduction_proof = prove_policy_view_bijection(state_mapping, policy_view)
     if not reduction_proof.equivalent:
         raise ValueError("PolicyView reduction contract violated: policy-relevant projection mismatch")
+
+    _apply_ir_degradations(turn_context, degradations)
+    serialized_degradations = tuple(_serialize_degradations(degradations))
 
     intent = TurnIntent(
         intent_type=str(policy_view.intent_type),
@@ -305,6 +509,8 @@ def build_policy_input(policy_name: str, turn_context: Any, candidate: Any) -> P
         policy_view=policy_view,
         reduction_proof=reduction_proof,
         semantic_eval_input=semantic_eval_input,
+        ir_degradation_count=len(serialized_degradations),
+        ir_degradations=serialized_degradations,
     )
 
 

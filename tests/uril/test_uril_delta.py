@@ -13,6 +13,7 @@ The delta_compare function is in dadbot.uril.report.
 
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import Any
 
 import pytest
@@ -131,6 +132,7 @@ class TestUrilSnapshotDeltaStability:
     """Two successive URIL reports from identical no-probe options must be
     within tolerance of each other."""
 
+    @lru_cache(maxsize=1)
     def _build_report(self) -> dict[str, Any]:
         opts = SignalCollectionOptions(run_probes=False)
         return build_uril_report(opts)

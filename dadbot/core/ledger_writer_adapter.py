@@ -39,9 +39,15 @@ class LedgerWriterAdapter:
         self._guard("ledger.append_job_completed")
         return self._writer.append_job_completed(job, result)
 
-    def append_job_failed(self, job: Any, error: str) -> dict[str, Any]:
+    def append_job_failed(
+        self,
+        job: Any,
+        error: Any,
+        *,
+        failure: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         self._guard("ledger.append_job_failed")
-        return self._writer.append_job_failed(job, error)
+        return self._writer.append_job_failed(job, error, failure=failure)
 
     def append_session_bound(
         self,

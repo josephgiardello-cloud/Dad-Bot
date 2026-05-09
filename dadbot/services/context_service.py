@@ -11,6 +11,9 @@ from dadbot.core.execution_context import (
     ensure_execution_trace_root,
     record_execution_step,
 )
+from dadbot.core.execution_memory_view import merge_memory_retrieval_sets
+from dadbot.core.goal_scorer import GoalAwareRanker
+from dadbot.core.memory_set_invariants import record_causal_step_locked
 from dadbot.utils import significant_tokens as _significant_tokens
 
 logger = logging.getLogger(__name__)
@@ -35,6 +38,7 @@ class ContextService:
         self.context_builder = context_builder
         self.memory_manager = memory_manager
         self.semantic_index = semantic_index  # Optional; wired by ServiceRegistry.boot()
+        self._goal_ranker = GoalAwareRanker()
 
     def _runtime(self) -> Any:
         return getattr(self.context_builder, "bot", None)
@@ -159,6 +163,7 @@ class ContextService:
 
         budget = max(1, int(getattr(runtime, "CONTEXT_TOKEN_BUDGET", 6000) or 6000))
         threshold = max(128, int(budget * 0.75))
+        pressure_ratio = float(context_total_tokens) / float(budget)
         recent_pressure = recent_tokens >= max(80, int(threshold * 0.25))
         over_threshold = context_total_tokens >= threshold
         if not (over_threshold or recent_pressure):
@@ -169,17 +174,46 @@ class ContextService:
 
         summary_manager = getattr(runtime, "session_summary_manager", None)
         refresh = getattr(summary_manager, "refresh_session_summary", None)
+        maintenance_scheduler = getattr(runtime, "maintenance_scheduler", None)
+        run_memory_compaction = getattr(maintenance_scheduler, "run_memory_compaction", None)
+        long_term_signals = getattr(runtime, "long_term_signals", None)
+        synthesize_insights = getattr(long_term_signals, "synthesize_longitudinal_insights", None)
         background_tasks = getattr(runtime, "background_tasks", None)
         submit = getattr(background_tasks, "submit", None)
-        if not callable(refresh) or not callable(submit):
+        if not callable(submit):
             return False
 
         try:
             # Fire-and-forget scheduling only; never await in the foreground turn.
-            submit(refresh, force=True, task_kind="context-compression")
+            scheduled_kinds: list[str] = []
+            if callable(refresh):
+                submit(refresh, force=True, task_kind="context-compression")
+                scheduled_kinds.append("context-compression")
+            if callable(run_memory_compaction):
+                submit(
+                    run_memory_compaction,
+                    force=True,
+                    task_kind="memory-compaction",
+                )
+                scheduled_kinds.append("memory-compaction")
+            if callable(synthesize_insights) and pressure_ratio < 1.0:
+                submit(
+                    synthesize_insights,
+                    force=True,
+                    task_kind="longitudinal-synthesis",
+                )
+                scheduled_kinds.append("longitudinal-synthesis")
             if isinstance(metadata, dict):
                 metadata["compression_scheduled"] = True
                 metadata["compression_blocking"] = False
+                metadata["memory_evolution_scheduled"] = True
+                metadata["memory_evolution_policy"] = {
+                    "pressure_ratio": round(pressure_ratio, 3),
+                    "budget_tokens": budget,
+                    "threshold_tokens": threshold,
+                    "scheduled_kinds": scheduled_kinds,
+                    "synthesis_deferred": bool(callable(synthesize_insights) and pressure_ratio >= 1.0),
+                }
                 metadata["compression_trigger_tokens"] = context_total_tokens
             return True
         except Exception:
@@ -211,6 +245,36 @@ class ContextService:
         bot = getattr(self.context_builder, "bot", None)
         return dict(getattr(bot, "_last_hierarchical_memory_stats", {}) or {}) if bot else {}
 
+    @staticmethod
+    def _active_goals_from_state(state: Any) -> list[dict[str, Any]]:
+        if not isinstance(state, dict):
+            return []
+        raw_goals = state.get("session_goals")
+        if not isinstance(raw_goals, list):
+            raw_goals = state.get("goals")
+        if not isinstance(raw_goals, list):
+            return []
+        return [dict(goal) for goal in raw_goals if isinstance(goal, dict)]
+
+    @staticmethod
+    def _memory_influence_brief(retrieval_set: list[dict[str, Any]], goals: list[dict[str, Any]]) -> str:
+        lines: list[str] = []
+        for item in retrieval_set[:4]:
+            summary = str(item.get("summary") or item.get("content") or "").strip()
+            if summary:
+                lines.append(f"- Memory: {summary[:160]}")
+        for goal in goals[:3]:
+            description = str(goal.get("description") or goal.get("goal") or "").strip()
+            if description:
+                lines.append(f"- Goal: {description[:120]}")
+        if not lines:
+            return ""
+        return (
+            "Memory influence brief for this turn:\n"
+            "Treat these as active constraints when choosing what to do next.\n"
+            + "\n".join(lines)
+        )
+
     def _run_semantic_rag(
         self,
         user_input: str,
@@ -221,24 +285,73 @@ class ContextService:
         if self.semantic_index is None or not user_input.strip():
             return
         try:
+            active_goals = self._active_goals_from_state(state)
             tokens = _significant_tokens(user_input)
             query_embedding = None
             embed_text = getattr(self.memory_manager, "embed_text", None)
             if callable(embed_text):
                 query_embedding = embed_text(user_input)
-            hits = self.semantic_index.fetch_candidates(
+            hits = list(self.semantic_index.fetch_candidates(
                 query_embedding=query_embedding,
                 query_tokens=tokens,
                 query_category="general",
                 query_mood="neutral",
                 limit=5,
+            ) or [])
+            if hits and active_goals:
+                hits = self._goal_ranker.rerank(hits, active_goals)
+
+            refinement_seed = " ".join(
+                part
+                for part in [
+                    user_input,
+                    str((state or {}).get("planner_observation") or "").strip(),
+                    str((state or {}).get("last_tool_result") or {}).strip() if isinstance((state or {}).get("last_tool_result"), str) else "",
+                ]
+                if part
             )
+            top_summaries = " ".join(
+                str(item.get("summary") or item.get("content") or "").strip()
+                for item in hits[:3]
+                if isinstance(item, dict)
+            )
+            if refinement_seed or top_summaries or active_goals:
+                refined_query = " ".join(
+                    part
+                    for part in [
+                        refinement_seed,
+                        top_summaries,
+                        " ".join(
+                            str(goal.get("description") or goal.get("goal") or "").strip()
+                            for goal in active_goals[:3]
+                            if isinstance(goal, dict)
+                        ),
+                    ]
+                    if part
+                ).strip()
+                if refined_query and refined_query != user_input.strip():
+                    refined_tokens = _significant_tokens(refined_query)
+                    refined_embedding = None
+                    if callable(embed_text):
+                        refined_embedding = embed_text(refined_query)
+                    refined_hits = list(self.semantic_index.fetch_candidates(
+                        query_embedding=refined_embedding,
+                        query_tokens=refined_tokens,
+                        query_category="general",
+                        query_mood="neutral",
+                        limit=5,
+                    ) or [])
+                    if refined_hits:
+                        if active_goals:
+                            refined_hits = self._goal_ranker.rerank(refined_hits, active_goals)
+                        hits = hits + [item for item in refined_hits if item not in hits]
             record_execution_step(
                 "memory_retrieval",
                 payload={
                     "query_token_count": len(list(tokens or [])),
                     "has_embedding": bool(query_embedding is not None),
                     "hit_count": len(list(hits or [])),
+                    "goal_count": len(active_goals),
                 },
                 required=True,
             )
@@ -271,6 +384,7 @@ class ContextService:
                         seen.add(key)
                         merged.append(dict(item))
                     state["memory_retrieval_set"] = merged
+                    state["memory_influence_brief"] = self._memory_influence_brief(merged, active_goals)
         except Exception as exc:
             logger.debug("ContextService: semantic index query failed (non-fatal): %s", exc)
 
@@ -407,7 +521,16 @@ class ContextService:
                 for item in list(state.get("memory_retrieval_set") or [])
                 if isinstance(item, dict)
             ]
+            preserved, reconciliation = merge_memory_retrieval_sets(
+                preserved,
+                source_labels=["pre_turn"],
+            )
             state["memory_retrieval_set"] = preserved
+            state["memory_reconciliation"] = reconciliation
+            # Gap C: record the retrieval causal step.
+            record_causal_step_locked(state, "retrieval", context="context_service")
+            # Gap B: snapshot retrieval baseline for resolve_turn_truth comparison.
+            state["_retrieval_baseline"] = list(preserved)
 
         self._run_semantic_rag(user_input, ctx, state)
 
@@ -417,6 +540,11 @@ class ContextService:
             metadata = getattr(turn_context, "metadata", None)
             if isinstance(metadata, dict):
                 metadata["memory_causal_trace"] = dict(memory_causal_trace)
+            if not state.get("memory_influence_brief"):
+                state["memory_influence_brief"] = self._memory_influence_brief(
+                    list(state.get("memory_retrieval_set") or []),
+                    self._active_goals_from_state(state),
+                )
 
         context_total_tokens = sum(
             self._estimate_tokens(str(ctx.get(key) or ""))

@@ -12,6 +12,93 @@ def _stable_sha256(payload: Any) -> str:
     ).hexdigest()
 
 
+def _memory_entry_signature(item: dict[str, Any]) -> str:
+    normalized = dict(item or {})
+    memory_id = str(
+        normalized.get("memory_id")
+        or normalized.get("id")
+        or normalized.get("summary_key")
+        or normalized.get("key")
+        or "",
+    ).strip()
+    if memory_id:
+        candidate = {"memory_id": memory_id}
+    else:
+        candidate = {
+            "summary": str(normalized.get("summary") or normalized.get("title") or ""),
+            "content": str(normalized.get("content") or normalized.get("value") or ""),
+            "category": str(normalized.get("category") or normalized.get("type") or ""),
+            "source": str(normalized.get("source") or normalized.get("origin") or ""),
+            "tool": str(normalized.get("tool") or normalized.get("tool_name") or ""),
+        }
+        if not any(str(value or "").strip() for value in candidate.values()):
+            candidate["payload"] = dict(normalized)
+    return _stable_sha256(candidate)
+
+
+def merge_memory_retrieval_sets(
+    *sources: list[dict[str, Any]] | None,
+    source_labels: list[str] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Deterministically merge memory retrieval lists.
+
+    Source order is authoritative: later sources replace earlier items that
+    describe the same memory key. This gives the turn a single reconciliation
+    rule instead of three competing refresh paths.
+    """
+    labels = list(source_labels or [])
+    merged: list[dict[str, Any]] = []
+    index_by_signature: dict[str, int] = {}
+    conflicts: list[dict[str, Any]] = []
+    source_summary: list[dict[str, Any]] = []
+
+    for source_index, source in enumerate(sources):
+        label = labels[source_index] if source_index < len(labels) else f"source_{source_index + 1}"
+        normalized_source = [dict(item) for item in list(source or []) if isinstance(item, dict)]
+        source_summary.append({"label": label, "count": len(normalized_source)})
+
+        for item in normalized_source:
+            signature = _memory_entry_signature(item)
+            candidate = dict(item)
+            candidate["memory_merge_source"] = label
+            candidate["memory_merge_order"] = int(source_index)
+            if signature not in index_by_signature:
+                index_by_signature[signature] = len(merged)
+                merged.append(candidate)
+                continue
+
+            existing_index = index_by_signature[signature]
+            existing = merged[existing_index]
+            if existing != candidate:
+                conflicts.append(
+                    {
+                        "signature": signature,
+                        "kept_source": str(existing.get("memory_merge_source") or ""),
+                        "replaced_by": label,
+                        "kept_summary": str(existing.get("summary") or existing.get("content") or ""),
+                        "new_summary": str(candidate.get("summary") or candidate.get("content") or ""),
+                    },
+                )
+            merged[existing_index] = candidate
+
+    reconciliation = {
+        "reconciliation_id": _stable_sha256(
+            {
+                "sources": source_summary,
+                "signatures": [
+                    _memory_entry_signature(item)
+                    for item in merged
+                ],
+            },
+        )[:16],
+        "merged_count": len(merged),
+        "conflict_count": len(conflicts),
+        "sources": source_summary,
+        "conflicts": conflicts,
+    }
+    return merged, reconciliation
+
+
 @dataclass(frozen=True)
 class ExecutionMemoryView:
     """Execution-scoped memory snapshot used for deterministic replay."""
@@ -90,3 +177,9 @@ class ExecutionMemoryView:
             "memory_full_history_id": self.memory_full_history_id,
             "memory_retrieval_set": list(self.memory_retrieval_set),
         }
+
+
+__all__ = [
+    "ExecutionMemoryView",
+    "merge_memory_retrieval_sets",
+]
