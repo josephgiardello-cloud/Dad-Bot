@@ -205,6 +205,20 @@ def _invoke_turn(handle_turn: Any, input_text: str, *, session_id: str | None = 
         return handle_turn(user_input=input_text, **kwargs)
 
 
+def _extract_execution_truth_contract(runtime: Any) -> dict | None:
+    """Read execution_truth_contract written by TurnService into the last turn context state."""
+    last_ctx = getattr(runtime, "_last_turn_context", None)
+    if last_ctx is None:
+        return None
+    state = getattr(last_ctx, "state", None)
+    if not isinstance(state, dict):
+        return None
+    contract = state.get("execution_truth_contract")
+    if not isinstance(contract, dict):
+        return None
+    return dict(contract)
+
+
 async def arun_with_trace(input: str, runtime: Any, tool_registry: Any | None = None) -> Trace:
     collector = TraceCollector(input_text=input)
     handle_turn = getattr(runtime, "handle_turn", None) or getattr(runtime, "run", None)
@@ -232,6 +246,7 @@ async def arun_with_trace(input: str, runtime: Any, tool_registry: Any | None = 
         runtime=runtime,
         tool_call_count=len(collector.tool_calls),
     )
+    execution_truth_contract = _extract_execution_truth_contract(runtime)
     return collector.finalize(
         final_output=final_output,
         error=error,
@@ -241,6 +256,7 @@ async def arun_with_trace(input: str, runtime: Any, tool_registry: Any | None = 
         planner_status=planner_status,
         planner_tool=planner_tool,
         robustness_reason=robustness_reason,
+        execution_truth_contract=execution_truth_contract,
     )
 
 

@@ -31,6 +31,7 @@ class Trace:
     planner_status: str = ""
     planner_tool: str = ""
     robustness_reason: Optional[str] = None
+    execution_truth_contract: Optional[dict] = None
 
 
 @dataclass
@@ -56,6 +57,7 @@ class TraceCollector:
         planner_status: str = "",
         planner_tool: str = "",
         robustness_reason: Optional[str] = None,
+        execution_truth_contract: Optional[dict] = None,
     ) -> Trace:
         return Trace(
             input=self.input_text,
@@ -69,4 +71,5 @@ class TraceCollector:
             planner_status=str(planner_status or ""),
             planner_tool=str(planner_tool or ""),
             robustness_reason=(str(robustness_reason) if robustness_reason else None),
+            execution_truth_contract=execution_truth_contract,
         )

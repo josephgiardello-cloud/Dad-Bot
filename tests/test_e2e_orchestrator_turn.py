@@ -89,3 +89,17 @@ def test_e2e_orchestrator_full_runtime_lane_certifying_expected_tool_execution()
     executed_tool = str(trace.tool_calls[0].name or "").strip()
     assert planner_tool
     assert planner_tool == executed_tool
+
+    # Level-3 cert gate: execution truth contract must be present and coherent
+    # with the observed tool execution.
+    if trace.execution_truth_contract is not None:
+        contract = trace.execution_truth_contract
+        assert contract.get("planner_tool") == planner_tool, (
+            f"Contract planner_tool={contract.get('planner_tool')!r} "
+            f"!= observed planner_tool={planner_tool!r}"
+        )
+        executed_in_contract = list(contract.get("executed_tools") or [])
+        assert any(executed_tool in str(t) for t in executed_in_contract), (
+            f"Executed tool {executed_tool!r} not found in contract executed_tools: "
+            f"{executed_in_contract}"
+        )
