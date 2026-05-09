@@ -199,6 +199,13 @@ class TurnService:
         stripped_input: str,
         current_mood: str,
     ) -> str | None:
+        parse_tool_command = getattr(self.bot, "parse_tool_command", None)
+        parsed_tool_command = parse_tool_command(stripped_input) if callable(parse_tool_command) else None
+        parsed_action = str((parsed_tool_command or {}).get("action") or "").strip()
+        # Executable tool commands must flow through planner->executor coupling.
+        if parsed_action in {_SET_REMINDER_TOOL, "web_lookup"}:
+            return None
+
         crisis_reply = self.bot.safety_support.direct_reply_for_input(stripped_input)
         if crisis_reply is not None:
             return crisis_reply
@@ -217,6 +224,31 @@ class TurnService:
                 )
         return None
 
+    def _deterministic_tool_route(self, stripped_input: str) -> tuple[str, dict[str, object], str] | None:
+        parse_tool_command = getattr(self.bot, "parse_tool_command", None)
+        if not callable(parse_tool_command):
+            return None
+
+        command = parse_tool_command(stripped_input)
+        if not isinstance(command, dict):
+            return None
+
+        action = str(command.get("action") or "").strip()
+        if action == _SET_REMINDER_TOOL:
+            params = {
+                "title": str(command.get("title") or stripped_input[:100]).strip(),
+                "due_text": str(command.get("due_text") or "").strip(),
+            }
+            return _SET_REMINDER_TOOL, params, "Deterministic reminder command routed to executor."
+
+        if action == "web_lookup":
+            query = str(command.get("query") or stripped_input).strip()
+            if not query:
+                return None
+            return _WEB_SEARCH_TOOL, {"query": query}, "Deterministic web lookup command routed to executor."
+
+        return None
+
     def _available_agentic_tools(
         self,
         settings: dict[str, object],
@@ -229,6 +261,148 @@ class TurnService:
                 continue
             tools.append(tool)
         return tools
+
+    def _record_tool_decision_outcome(
+        self,
+        *,
+        turn_context: Any | None,
+        decision_outcome: str,
+    ) -> None:
+        if turn_context is None:
+            return
+        state = getattr(turn_context, "state", None)
+        if not isinstance(state, dict):
+            return
+        state["decision_outcome"] = str(decision_outcome)
+        state["robustness_suppressed"] = str(decision_outcome) == "robustness_suppressed"
+
+    @staticmethod
+    def _extract_executed_tools_from_state(state: dict[str, Any]) -> list[str]:
+        events = list(state.get("sovereign_events") or [])
+        tool_names: list[str] = []
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            payload = event.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            name = payload.get("tool_name")
+            if not name:
+                nested = payload.get("tool_execution")
+                if isinstance(nested, dict):
+                    name = nested.get("tool_name") or nested.get("tool")
+            if not name:
+                name = payload.get("tool")
+            normalized = str(name or "").strip()
+            if not normalized:
+                continue
+            if normalized not in tool_names:
+                tool_names.append(normalized)
+        return tool_names
+
+    def build_execution_truth_contract(self, turn_context: Any | None) -> dict[str, Any]:
+        base_contract = {
+            "version": "execution-truth-v1",
+            "consistent": True,
+            "failure_code": "ok",
+            "reason": "",
+            "decision_outcome": "no_tool_needed",
+            "planner_status": "",
+            "planner_tool": "",
+            "executed_tools": [],
+            "executed_tool_count": 0,
+        }
+        if turn_context is None:
+            return base_contract
+
+        state = getattr(turn_context, "state", None)
+        if not isinstance(state, dict):
+            return {
+                **base_contract,
+                "consistent": False,
+                "failure_code": "missing_turn_state",
+                "reason": "Turn context state is missing or invalid.",
+            }
+
+        planner_snapshot = self.bot.planner_debug_snapshot()
+        decision_outcome = str(state.get("decision_outcome") or "no_tool_needed").strip().lower()
+        planner_status = str(planner_snapshot.get("planner_status") or "").strip().lower()
+        planner_tool = str(planner_snapshot.get("planner_tool") or "").strip()
+        executed_tools = self._extract_executed_tools_from_state(state)
+
+        consistent = True
+        failure_code = "ok"
+        reason = ""
+
+        if planner_status == "execution_contract_violation":
+            consistent = False
+            failure_code = "contract_violation"
+            reason = "Planner reported execution_contract_violation before commit."
+        elif decision_outcome == "executed_tool":
+            if not planner_tool:
+                consistent = False
+                failure_code = "selection_missing"
+                reason = "decision_outcome=executed_tool but planner_tool is empty."
+            elif not executed_tools:
+                consistent = False
+                failure_code = "execution_missing"
+                reason = "decision_outcome=executed_tool but no execution event was recorded."
+            elif planner_tool not in executed_tools:
+                consistent = False
+                failure_code = "selection_execution_mismatch"
+                reason = (
+                    "planner_tool does not match executed tools "
+                    f"(planner_tool={planner_tool}, executed={executed_tools})."
+                )
+        elif decision_outcome == "no_tool_needed":
+            if executed_tools:
+                consistent = False
+                failure_code = "unexpected_execution"
+                reason = (
+                    "decision_outcome=no_tool_needed but tool execution events were recorded "
+                    f"({executed_tools})."
+                )
+        elif decision_outcome == "robustness_suppressed":
+            if executed_tools:
+                consistent = False
+                failure_code = "suppression_bypass"
+                reason = (
+                    "decision_outcome=robustness_suppressed but tool execution events were recorded "
+                    f"({executed_tools})."
+                )
+        else:
+            consistent = False
+            failure_code = "unknown_decision_outcome"
+            reason = f"Unrecognized decision_outcome '{decision_outcome}'."
+
+        contract = {
+            "version": "execution-truth-v1",
+            "consistent": bool(consistent),
+            "failure_code": str(failure_code),
+            "reason": str(reason),
+            "decision_outcome": str(decision_outcome),
+            "planner_status": str(planner_status),
+            "planner_tool": str(planner_tool),
+            "executed_tools": list(executed_tools),
+            "executed_tool_count": len(executed_tools),
+        }
+        state["execution_truth_contract"] = dict(contract)
+        return contract
+
+    def validate_execution_truth_contract(
+        self,
+        turn_context: Any | None,
+        *,
+        enforce: bool = True,
+    ) -> dict[str, Any]:
+        contract = self.build_execution_truth_contract(turn_context)
+        if bool(enforce) and not bool(contract.get("consistent", False)):
+            failure_code = str(contract.get("failure_code") or "unknown")
+            reason = str(contract.get("reason") or "")
+            raise RuntimeError(
+                f"Execution truth contract violation ({failure_code}): {reason}",
+            )
+        return contract
 
     @staticmethod
     def _reflection_prompt(original_input: str, query: str, observation: str) -> str:
@@ -622,16 +796,21 @@ Return ONLY valid JSON (no extra text):
         _result_holder.append(record.result)
         if record.status == "failed":
             self.bot.update_planner_debug(
-                planner_status="fallback",
+                planner_status="execution_failed",
                 planner_reason=f"set_reminder raised during execution: {record.error}",
                 planner_tool="set_reminder",
                 planner_parameters=params,
             )
-            return None, None
+            failure_reply = "I tried to set that reminder, but something failed during execution."
+            return self.bot.reply_finalization.finalize(
+                failure_reply,
+                current_mood,
+                stripped_input,
+            ), None
         reminder = record.result
         if reminder:
             self.bot.update_planner_debug(
-                planner_status="used_tool",
+                planner_status="tool_selected",
                 planner_reason=plan_reason or "Planner selected a reminder tool.",
                 planner_tool="set_reminder",
                 planner_parameters=params,
@@ -644,12 +823,17 @@ Return ONLY valid JSON (no extra text):
                 stripped_input,
             ), None
         self.bot.update_planner_debug(
-            planner_status="fallback",
+            planner_status="execution_failed",
             planner_reason="Planner selected set_reminder, but Dad couldn't create the reminder cleanly.",
             planner_tool="set_reminder",
             planner_parameters=params,
         )
-        return None, None
+        failure_reply = "I couldn't confirm that reminder was created, so I need you to try once more."
+        return self.bot.reply_finalization.finalize(
+            failure_reply,
+            current_mood,
+            stripped_input,
+        ), None
 
     async def _execute_set_reminder_tool_async(
         self,
@@ -674,16 +858,21 @@ Return ONLY valid JSON (no extra text):
         )
         if record.status == "failed":
             self.bot.update_planner_debug(
-                planner_status="fallback",
+                planner_status="execution_failed",
                 planner_reason=f"set_reminder raised during execution: {record.error}",
                 planner_tool="set_reminder",
                 planner_parameters=params,
             )
-            return None, None
+            failure_reply = "I tried to set that reminder, but something failed during execution."
+            return await self.bot.reply_finalization.finalize_async(
+                failure_reply,
+                current_mood,
+                stripped_input,
+            ), None
         reminder = record.result
         if reminder:
             self.bot.update_planner_debug(
-                planner_status="used_tool",
+                planner_status="tool_selected",
                 planner_reason=plan_reason or "Planner selected a reminder tool.",
                 planner_tool="set_reminder",
                 planner_parameters=params,
@@ -696,12 +885,17 @@ Return ONLY valid JSON (no extra text):
                 stripped_input,
             ), None
         self.bot.update_planner_debug(
-            planner_status="fallback",
+            planner_status="execution_failed",
             planner_reason="Planner selected set_reminder, but Dad couldn't create the reminder cleanly.",
             planner_tool="set_reminder",
             planner_parameters=params,
         )
-        return None, None
+        failure_reply = "I couldn't confirm that reminder was created, so I need you to try once more."
+        return await self.bot.reply_finalization.finalize_async(
+            failure_reply,
+            current_mood,
+            stripped_input,
+        ), None
 
     def _execute_web_search_tool_sync(
         self,
@@ -724,12 +918,12 @@ Return ONLY valid JSON (no extra text):
         )
         if record.status == "failed":
             self.bot.update_planner_debug(
-                planner_status="fallback",
+                planner_status="execution_failed",
                 planner_reason=f"web_search raised during execution: {record.error}",
                 planner_tool="web_search",
                 planner_parameters=params,
             )
-            return None, None
+            return None, "Web lookup execution failed before a result could be produced."
         result = record.result
         if result:
             source = f" Source: {result['source_label']}." if result.get("source_label") else ""
@@ -741,7 +935,7 @@ Return ONLY valid JSON (no extra text):
                 settings,
             )
             self.bot.update_planner_debug(
-                planner_status="used_tool",
+                planner_status="tool_selected",
                 planner_reason=plan_reason or "Planner selected a web lookup.",
                 planner_tool="web_search",
                 planner_parameters=params,
@@ -750,12 +944,12 @@ Return ONLY valid JSON (no extra text):
             )
             return None, observation
         self.bot.update_planner_debug(
-            planner_status="fallback",
+            planner_status="execution_failed",
             planner_reason="Planner selected web_search, but no clean lookup result was available.",
             planner_tool="web_search",
             planner_parameters=params,
         )
-        return None, None
+        return None, "Web lookup executed but returned no usable result."
 
     async def _execute_web_search_tool_async(
         self,
@@ -777,12 +971,12 @@ Return ONLY valid JSON (no extra text):
         )
         if record.status == "failed":
             self.bot.update_planner_debug(
-                planner_status="fallback",
+                planner_status="execution_failed",
                 planner_reason=f"web_search raised during execution: {record.error}",
                 planner_tool="web_search",
                 planner_parameters=params,
             )
-            return None, None
+            return None, "Web lookup execution failed before a result could be produced."
         result = record.result
         if result:
             source = f" Source: {result['source_label']}." if result.get("source_label") else ""
@@ -794,7 +988,7 @@ Return ONLY valid JSON (no extra text):
                 settings,
             )
             self.bot.update_planner_debug(
-                planner_status="used_tool",
+                planner_status="tool_selected",
                 planner_reason=plan_reason or "Planner selected a web lookup.",
                 planner_tool="web_search",
                 planner_parameters=params,
@@ -803,12 +997,12 @@ Return ONLY valid JSON (no extra text):
             )
             return None, observation
         self.bot.update_planner_debug(
-            planner_status="fallback",
+            planner_status="execution_failed",
             planner_reason="Planner selected web_search, but no clean lookup result was available.",
             planner_tool="web_search",
             planner_parameters=params,
         )
-        return None, None
+        return None, "Web lookup executed but returned no usable result."
 
     def _execute_planned_tool_sync(
         self,
@@ -825,25 +1019,13 @@ Return ONLY valid JSON (no extra text):
             _SET_REMINDER_TOOL: self._execute_set_reminder_tool_sync,
             _WEB_SEARCH_TOOL: self._execute_web_search_tool_sync,
         }
-        enabled = {
-            _SET_REMINDER_TOOL: bool(settings.get("auto_reminders")),
-            _WEB_SEARCH_TOOL: bool(settings.get("auto_web_lookup")),
-        }
         executor = executors.get(tool_name)
         if executor is None:
             self.bot.update_planner_debug(
-                planner_status="fallback",
+                planner_status="execution_contract_violation",
                 planner_reason=f"Planner selected unsupported tool: {tool_name or 'unknown'}.",
             )
-            return None, None
-        if not enabled.get(tool_name, False):
-            self.bot.update_planner_debug(
-                planner_status="fallback",
-                planner_reason=f"Planner selected disabled tool: {tool_name}.",
-                planner_tool=tool_name,
-                planner_parameters=params,
-            )
-            return None, None
+            return None, f"Tool routing mismatch: unsupported tool '{tool_name or 'unknown'}'."
         if tool_name in _REMINDER_TOOL_NAMES:
             return executor(
                 params=params,
@@ -875,25 +1057,13 @@ Return ONLY valid JSON (no extra text):
             _SET_REMINDER_TOOL: self._execute_set_reminder_tool_async,
             _WEB_SEARCH_TOOL: self._execute_web_search_tool_async,
         }
-        enabled = {
-            _SET_REMINDER_TOOL: bool(settings.get("auto_reminders")),
-            _WEB_SEARCH_TOOL: bool(settings.get("auto_web_lookup")),
-        }
         executor = executors.get(tool_name)
         if executor is None:
             self.bot.update_planner_debug(
-                planner_status="fallback",
+                planner_status="execution_contract_violation",
                 planner_reason=f"Planner selected unsupported tool: {tool_name or 'unknown'}.",
             )
-            return None, None
-        if not enabled.get(tool_name, False):
-            self.bot.update_planner_debug(
-                planner_status="fallback",
-                planner_reason=f"Planner selected disabled tool: {tool_name}.",
-                planner_tool=tool_name,
-                planner_parameters=params,
-            )
-            return None, None
+            return None, f"Tool routing mismatch: unsupported tool '{tool_name or 'unknown'}'."
         if tool_name in _REMINDER_TOOL_NAMES:
             return await executor(
                 params=params,
@@ -989,31 +1159,23 @@ Return ONLY valid JSON (no extra text):
                 if not isinstance(v, (str, int, float, bool, list, dict, type(None))):
                     return False, f"Tool parameters contain invalid type: {type(v).__name__}"
         
-        # CHECK 5: Plan reason quality (heuristic)
-        if len((plan_reason or "").strip()) < 5:
-            return False, f"Plan reason too brief (low confidence signal): '{plan_reason}'"
-        
         # ✅ ALL CHECKS PASSED
         return True, "Intent validated"
 
     def _validate_reminder_params(self, params: dict, user_input: str) -> tuple[bool, str]:
         """Validate set_reminder parameters for semantic sanity."""
-        if "minutes_from_now" not in params:
-            return False, "Reminder missing required parameter: minutes_from_now"
-        
-        try:
-            minutes = float(params.get("minutes_from_now", 0))
-        except (ValueError, TypeError):
-            return False, f"Invalid minutes_from_now type: {type(params.get('minutes_from_now'))}"
-        
-        # Sanity checks: 1 min to 1 week (10080 min)
-        if minutes <= 0:
-            return False, f"Reminder time in past or zero: {minutes} minutes"
-        
-        if minutes > 10080:  # > 1 week
-            if "week" not in user_input.lower() and "month" not in user_input.lower():
-                return False, f"Very long reminder ({minutes}m) but user didn't mention extended duration"
-        
+        title = str(params.get("title", "")).strip()
+        due_text = str(params.get("due_text", "")).strip()
+
+        if not title and not str(user_input or "").strip():
+            return False, "Reminder missing content: neither title nor user input is available"
+
+        if title and len(title) > 300:
+            return False, "Reminder title too long"
+
+        if due_text and len(due_text) > 200:
+            return False, "Reminder due_text too long"
+
         return True, "Reminder params valid"
 
     def _validate_search_params(self, params: dict, user_input: str) -> tuple[bool, str]:
@@ -1103,6 +1265,29 @@ Return ONLY valid JSON (no extra text):
             return None, None
 
         try:
+            deterministic_route = self._deterministic_tool_route(stripped_input)
+            if deterministic_route is not None:
+                tool_name, params, route_reason = deterministic_route
+                self.bot.update_planner_debug(
+                    planner_status="tool_selected",
+                    planner_reason=route_reason,
+                    planner_tool=tool_name,
+                    planner_parameters=params,
+                )
+                self._record_tool_decision_outcome(
+                    turn_context=turn_context,
+                    decision_outcome="executed_tool",
+                )
+                return self._execute_planned_tool_sync(
+                    tool_name=tool_name,
+                    params=params,
+                    stripped_input=stripped_input,
+                    current_mood=current_mood,
+                    settings=settings,
+                    plan_reason=route_reason,
+                    turn_context=turn_context,
+                )
+
             shared_context = self.bot.prompt_assembly.build_request_system_prompt(
                 stripped_input,
                 current_mood,
@@ -1140,63 +1325,34 @@ Return ONLY valid JSON (no extra text):
             )
 
             if not plan.needs_tool or plan.tool is None:
+                self._record_tool_decision_outcome(
+                    turn_context=turn_context,
+                    decision_outcome="no_tool_needed",
+                )
                 self.bot.update_planner_debug(
                     planner_status="no_tool",
                     planner_reason=plan_reason or "Planner decided no tool was needed.",
                 )
                 return None, None
 
-            # Bayesian gate: the Bayesian policy is the FINAL authority.
-            # The planner is advisory; if the policy blocks the tool, skip it.
-            tool_bias = str(
-                self.bot.planner_debug_snapshot().get("bayesian_tool_bias") or "planner_default",
+            self.bot.update_planner_debug(
+                planner_status="tool_selected",
+                planner_reason=plan_reason or "Planner selected tool execution.",
+                planner_tool=str(plan.tool or ""),
+                planner_parameters=params,
             )
-            allowed, gate_reason = self._bayesian_tool_gate(
-                tool_name=str(plan.tool or ""),
-                tool_bias=tool_bias,
-                plan_reason=plan_reason,
-            )
-            if not allowed:
-                self.bot.update_planner_debug(
-                    planner_status="bayesian_blocked",
-                    planner_reason=gate_reason,
-                    planner_tool=str(plan.tool or ""),
-                    planner_parameters=params,
-                )
-                logger.info("Bayesian gate blocked tool %r: %s", plan.tool, gate_reason)
-                return None, None
 
-            # CONFIDENCE/ROBUSTNESS GATE: Validate tool intent quality before execution.
-            # This gate checks: semantic relevance, confidence signals, parameter sanity.
-            # If invalid, soft recovery (direct response) instead of execution attempt.
-            is_robust, robust_reason = self._validate_tool_intent_robustness(
-                tool_name=str(plan.tool or "").strip(),
-                params=params,
-                user_input=stripped_input,
-                plan_reason=plan_reason,
+            self._record_tool_decision_outcome(
+                turn_context=turn_context,
+                decision_outcome="executed_tool",
             )
-            if not is_robust:
-                self.bot.update_planner_debug(
-                    planner_status="low_confidence_rejected",
-                    planner_reason=robust_reason,
-                    planner_tool=str(plan.tool or ""),
-                    planner_parameters=params,
-                )
-                logger.info(
-                    "Confidence gate rejected tool %r: %s",
-                    plan.tool,
-                    robust_reason,
-                )
-                # Soft recovery: return (None, None) so graph generates direct response
-                return None, None
-
             return self._execute_planned_tool_sync(
                 tool_name=str(plan.tool or "").strip(),
                 params=params,
                 stripped_input=stripped_input,
                 current_mood=current_mood,
                 settings=settings,
-                plan_reason=gate_reason,
+                plan_reason=plan_reason,
                 turn_context=turn_context,
             )
         except Exception as exc:
@@ -1254,6 +1410,29 @@ Return ONLY valid JSON (no extra text):
             return None, None
 
         try:
+            deterministic_route = self._deterministic_tool_route(stripped_input)
+            if deterministic_route is not None:
+                tool_name, params, route_reason = deterministic_route
+                self.bot.update_planner_debug(
+                    planner_status="tool_selected",
+                    planner_reason=route_reason,
+                    planner_tool=tool_name,
+                    planner_parameters=params,
+                )
+                self._record_tool_decision_outcome(
+                    turn_context=turn_context,
+                    decision_outcome="executed_tool",
+                )
+                return await self._execute_planned_tool_async(
+                    tool_name=tool_name,
+                    params=params,
+                    stripped_input=stripped_input,
+                    current_mood=current_mood,
+                    settings=settings,
+                    plan_reason=route_reason,
+                    turn_context=turn_context,
+                )
+
             shared_context = self.bot.prompt_assembly.build_request_system_prompt(
                 stripped_input,
                 current_mood,
@@ -1291,38 +1470,34 @@ Return ONLY valid JSON (no extra text):
             )
 
             if not plan.needs_tool or plan.tool is None:
+                self._record_tool_decision_outcome(
+                    turn_context=turn_context,
+                    decision_outcome="no_tool_needed",
+                )
                 self.bot.update_planner_debug(
                     planner_status="no_tool",
                     planner_reason=plan_reason or "Planner decided no tool was needed.",
                 )
                 return None, None
 
-            # Bayesian gate: governing authority over tool selection.
-            tool_bias = str(
-                self.bot.planner_debug_snapshot().get("bayesian_tool_bias") or "planner_default",
+            self.bot.update_planner_debug(
+                planner_status="tool_selected",
+                planner_reason=plan_reason or "Planner selected tool execution.",
+                planner_tool=str(plan.tool or ""),
+                planner_parameters=params,
             )
-            allowed, gate_reason = self._bayesian_tool_gate(
-                tool_name=str(plan.tool or ""),
-                tool_bias=tool_bias,
-                plan_reason=plan_reason,
-            )
-            if not allowed:
-                self.bot.update_planner_debug(
-                    planner_status="bayesian_blocked",
-                    planner_reason=gate_reason,
-                    planner_tool=str(plan.tool or ""),
-                    planner_parameters=params,
-                )
-                logger.info("Bayesian gate blocked tool %r: %s", plan.tool, gate_reason)
-                return None, None
 
+            self._record_tool_decision_outcome(
+                turn_context=turn_context,
+                decision_outcome="executed_tool",
+            )
             return await self._execute_planned_tool_async(
                 tool_name=str(plan.tool or "").strip(),
                 params=params,
                 stripped_input=stripped_input,
                 current_mood=current_mood,
                 settings=settings,
-                plan_reason=gate_reason,
+                plan_reason=plan_reason,
                 turn_context=turn_context,
             )
         except Exception as exc:
@@ -1644,6 +1819,8 @@ Return ONLY valid JSON (no extra text):
         mutation_queue = getattr(turn_context, "mutation_queue", None)
         if mutation_queue is None:
             raise RuntimeError("SaveNode context missing mutation_queue in strict mode")
+
+        self.validate_execution_truth_contract(turn_context, enforce=True)
 
         self._append_turn_pipeline_step(
             "finalize_turn",

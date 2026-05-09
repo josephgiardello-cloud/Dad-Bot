@@ -565,6 +565,25 @@ class PersistenceService(
         return service, runtime
 
     @staticmethod
+    def _finalize_enforce_execution_truth_contract(service: Any, turn_context: Any) -> None:
+        validator = getattr(service, "validate_execution_truth_contract", None)
+        if not callable(validator):
+            return
+        try:
+            contract = validator(turn_context, enforce=True)
+            state = getattr(turn_context, "state", None)
+            if isinstance(state, dict) and isinstance(contract, dict):
+                state["execution_truth_contract"] = dict(contract)
+        except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
+            raise PersistenceFailure(
+                "Execution truth contract violation at SaveNode boundary",
+                context={
+                    "trace_id": str(getattr(turn_context, "trace_id", "") or ""),
+                    "error": str(exc),
+                },
+            ) from exc
+
+    @staticmethod
     def _finalize_assert_integrity_clear(turn_context: Any) -> None:
         metadata = getattr(turn_context, "metadata", None)
         state = getattr(turn_context, "state", None)
@@ -706,6 +725,7 @@ class PersistenceService(
 
         turn_text, mood, norm_attachments, reply = self._finalize_inputs(turn_context, result)
         service, runtime = self._finalize_validate_mutation_set(turn_context)
+        self._finalize_enforce_execution_truth_contract(service, turn_context)
 
         previous_temporal = getattr(runtime, "_current_turn_time_base", None)
         previous_commit_active = bool(getattr(runtime, "_graph_commit_active", False))
