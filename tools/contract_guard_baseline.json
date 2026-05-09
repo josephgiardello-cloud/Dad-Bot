@@ -47,7 +47,7 @@
     "dadbot/core/persistence/checkpointer.py:477 load_checkpoint(trace_id)",
     "dadbot/core/session_store.py:49 apply_kernel_mutation(kernel_step_id, trace_id)",
     "dadbot/core/trace_binder.py:30 run(trace_id)",
-    "dadbot/core/turn_mixin.py:130 _emit_graph_failure_event(trace_id)",
+    "dadbot/core/graph_failure_handler.py:66 _emit_graph_failure_event(trace_id)",
     "dadbot/managers/conversation_persistence.py:305 _turn_event_path(trace_id)",
     "dadbot/managers/conversation_persistence.py:309 _snapshot_path(trace_id)",
     "dadbot/managers/conversation_persistence.py:313 _compute_next_sequence(trace_id)",

@@ -22,6 +22,10 @@ class UXTrace:
     user_confusion_detected: bool
     replan_triggered: bool
     memory_correction_written: bool
+    time_to_first_token_ms: float = 0.0  # Turn start → first output token (milliseconds)
+    time_to_resolution_ms: float = 0.0   # Turn start → final answer (milliseconds)
+    backtrack_count: int = 0             # Number of plan revisions/re-executions
+    clarity_markers: list[str] = field(default_factory=list)  # Structured output indicators
 
     @classmethod
     def from_state(cls, state: dict[str, Any]) -> UXTrace:
@@ -33,6 +37,10 @@ class UXTrace:
             user_confusion_detected=bool(payload.get("user_confusion_detected", False)),
             replan_triggered=bool(payload.get("replan_triggered", False)),
             memory_correction_written=bool(payload.get("memory_correction_written", False)),
+            time_to_first_token_ms=float(payload.get("time_to_first_token_ms", 0.0)),
+            time_to_resolution_ms=float(payload.get("time_to_resolution_ms", 0.0)),
+            backtrack_count=int(payload.get("backtrack_count", 0)),
+            clarity_markers=list(payload.get("clarity_markers", [])),
         )
 
 
