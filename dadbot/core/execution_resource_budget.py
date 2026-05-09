@@ -49,6 +49,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 logger = logging.getLogger(__name__)
+_NON_BLOCKING_ACQUIRE_TIMEOUT_SEC: float = 1e-6
 
 
 # ---------------------------------------------------------------------------
@@ -201,11 +202,14 @@ class ResourceAccounter:
         Returns ``True`` if a slot was acquired, ``False`` if the budget is at
         capacity.
         """
-        acquired = self._semaphore._value > 0  # type: ignore[attr-defined]
-        if not acquired:
+        try:
+            await asyncio.wait_for(
+                self._semaphore.acquire(),
+                timeout=_NON_BLOCKING_ACQUIRE_TIMEOUT_SEC,
+            )
+        except TimeoutError:
             self._total_rejected += 1
             return False
-        await self._semaphore.acquire()
         await self._record_inflight(trace_id=trace_id, session_id=session_id)
         return True
 
@@ -234,16 +238,16 @@ class ResourceAccounter:
                     current_inflight=self.inflight_count,
                     trace_id=trace_id,
                 ) from exc
+            await self._record_inflight(trace_id=trace_id, session_id=session_id)
         else:
-            if self._semaphore._value <= 0:  # type: ignore[attr-defined]
-                self._total_rejected += 1
+            acquired = await self.try_acquire_async(trace_id=trace_id, session_id=session_id)
+            if not acquired:
                 raise ConcurrencyBudgetExceeded(
                     max_concurrent=self._budget.max_concurrent_turns,
                     current_inflight=self.inflight_count,
                     trace_id=trace_id,
                 )
-            await self._semaphore.acquire()
-        await self._record_inflight(trace_id=trace_id, session_id=session_id)
+            return
 
     async def release_async(self, trace_id: str) -> None:
         """Release a concurrency slot for *trace_id*."""

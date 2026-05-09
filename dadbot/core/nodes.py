@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import time
 from dataclasses import dataclass
@@ -102,7 +103,11 @@ class ContextBuilderNode:
 
     async def run(self, context: TurnContext) -> TurnContext:
         query = getattr(self.mgr, "query", None)
-        memories = await query(context.user_input) if callable(query) else list(context.state.get("memories") or [])
+        if callable(query):
+            queried = query(context.user_input)
+            memories = await queried if inspect.isawaitable(queried) else queried
+        else:
+            memories = list(context.state.get("memories") or [])
         goals = list(context.state.get("session_goals") or [])
         if goals and self._goal_ranker is not None:
             rerank = getattr(self._goal_ranker, "rerank", None)

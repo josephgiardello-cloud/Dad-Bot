@@ -118,7 +118,6 @@
 			],
 			"options": {
 				"env": {
-					"DADBOT_STORY_MODE_PASSWORD": "4825",
 					"DADBOT_LLM_MODEL": "llama3.2:latest"
 				}
 			},
