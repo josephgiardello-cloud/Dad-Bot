@@ -6,6 +6,7 @@ import pytest
 from dadbot.core.execution_trace_context import ExecutionTraceRecorder, RuntimeTraceViolation, bind_execution_trace
 from dadbot.core.graph import TurnContext, TurnGraph
 from dadbot.core.nodes import TemporalNode
+from dadbot.core.runtime_errors import InvariantViolation
 
 pytestmark = pytest.mark.integration
 
@@ -85,6 +86,14 @@ def test_temporal_node_exposes_canonical_turn_time_to_context_builder():
 
     assert context.state["temporal"]["turn_started_at"] == context.temporal.turn_started_at
     assert context.state["rich_context"]["temporal"]["turn_started_at"] == context.temporal.turn_started_at
+
+
+def test_temporal_node_missing_axis_raises_runtime_invariant_violation():
+    context = TurnContext(user_input="hello")
+    context.temporal = None  # type: ignore[assignment]
+
+    with pytest.raises(InvariantViolation, match="TemporalNode missing"):
+        asyncio.run(TemporalNode().run(context))
 
 
 def test_graph_checkpoint_events_are_replayable(bot):

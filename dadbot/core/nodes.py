@@ -10,6 +10,7 @@ from typing import Any
 from dadbot.core.graph import NodeType, TurnContext
 from dadbot.core.invariant_gate import InvariantGate
 from dadbot.core.policy_compiler import PolicyCompiler
+from dadbot.core.runtime_errors import InvariantViolation
 from dadbot.core.tool_ir import ToolContractResult, ToolStatus, deterministic_tool_id
 
 _MAX_DELEGATION_DEPTH: int = 2
@@ -73,7 +74,7 @@ class TemporalNode:
 
     async def run(self, context: TurnContext) -> TurnContext:
         if getattr(context, "temporal", None) is None:
-            raise RuntimeError("TemporalNode missing - deterministic execution violated")
+            raise InvariantViolation("TemporalNode missing - deterministic execution violated")
         snap = context.temporal_snapshot() if callable(getattr(context, "temporal_snapshot", None)) else {}
         context.state.setdefault("temporal", snap)
         context.metadata.setdefault("temporal", snap)
