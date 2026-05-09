@@ -8,15 +8,10 @@ import hashlib
 import logging
 import os
 import re
-from typing import TYPE_CHECKING
-
 from dadbot.memory.graph_entity_resolver import GraphEntityResolver
 from dadbot.utils import env_truthy
 from dadbot_system.graph_compression import GraphPromptCompressor
 from dadbot_system.graph_store import PostgresGraphStore, SQLiteGraphStore
-
-if TYPE_CHECKING:
-    from dadbot.memory.manager import MemoryManager
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +31,7 @@ class MemoryGraphManager:
     GRAPH_ENTITY_TYPES = GraphEntityResolver.ENTITY_TYPES
     GRAPH_RELATION_VOCAB = GraphEntityResolver.RELATION_VOCAB
 
-    def __init__(self, bot, memory_manager: MemoryManager) -> None:
+    def __init__(self, bot, memory_manager) -> None:
         self._bot = bot
         self._mm = memory_manager
         self._entity_resolver = GraphEntityResolver(bot)

@@ -133,7 +133,7 @@ class DadBotBootMixin:
                 payload = json_load(f)
             if isinstance(payload, dict) and payload:
                 return payload
-        except Exception:  # noqa: BLE001
+        except (OSError, ValueError, KeyError):  # file-not-found, bad JSON, missing key
             pass
         # Deterministic bootstrap fallback for clean/test environments.
         return json.loads(json.dumps(DadBotBootMixin._EMBEDDED_DEFAULT_PROFILE))
@@ -518,10 +518,21 @@ class DadBotBootMixin:
                 running_loop = None
 
             if running_loop is not None and running_loop.is_running():
-                running_loop.create_task(_do_close())
+                _task = running_loop.create_task(_do_close())
+
+                def _consume_close_exc(t: asyncio.Task) -> None:
+                    exc = t.exception() if not t.cancelled() else None
+                    if exc is not None:
+                        import logging as _logging
+                        _logging.getLogger(__name__).debug(
+                            "Ollama async close error (ignored): %s", exc
+                        )
+
+                _task.add_done_callback(_consume_close_exc)
             else:
                 asyncio.run(_do_close())
-        except Exception:
+        except (ImportError, RuntimeError, OSError):
+            # Best-effort shutdown — transport / import failures are non-fatal
             pass
 
     def _run_proactive_heartbeat_loop(self) -> None:

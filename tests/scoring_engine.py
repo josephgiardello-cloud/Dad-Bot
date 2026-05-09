@@ -42,6 +42,17 @@ from tests.trace_schema import ErrorClass, NormalizedTrace
 STRICT_TRACE_CONTRACT_MODE: bool = True
 
 
+def _is_external_artifact_trace(trace: NormalizedTrace) -> bool:
+    return str(getattr(trace, "execution_mode", "")).strip().lower() == "artifact"
+
+
+def _category_to_subsystem_attr(category: str) -> str:
+    token = str(category or "").strip().lower()
+    if token == "tool":
+        return "tools"
+    return token
+
+
 # ---------------------------------------------------------------------------
 # Score building blocks
 # ---------------------------------------------------------------------------
@@ -126,7 +137,7 @@ class CapabilityScore:
     @property
     def primary(self) -> SubsystemScore | None:
         """The primary subsystem score for this scenario's category."""
-        return getattr(self, self.category, None)
+        return getattr(self, _category_to_subsystem_attr(self.category), None)
 
     def to_dict(self) -> dict:
         """Serialize to flat result dict."""
@@ -181,6 +192,10 @@ def _apply_penalties(base: float, penalties: list[Penalty]) -> float:
     return max(0.0, min(1.0, result))
 
 
+def _cap_for_external_artifact(value: float, cap: float) -> float:
+    return max(0.0, min(float(cap), float(value)))
+
+
 # ---------------------------------------------------------------------------
 # Per-subsystem scorers
 # ---------------------------------------------------------------------------
@@ -198,6 +213,48 @@ class PlanningScorer:
         # If mock: synthetic pass
         if trace.is_mock:
             return SubsystemScore.perfect("planning", "mock execution (synthetic)")
+
+        external_mode = _is_external_artifact_trace(trace)
+        if external_mode:
+            response_len = len(str(trace.final_response or "").strip())
+            has_error = trace.has_errors
+            signals.append(
+                ScoredSignal(
+                    name="turn_completed",
+                    value=1.0 if trace.completed else 0.0,
+                    weight=3.0,
+                    evidence=f"completed={trace.completed}",
+                )
+            )
+            signals.append(
+                ScoredSignal(
+                    name="response_present",
+                    value=1.0 if response_len > 0 else 0.0,
+                    weight=2.0,
+                    evidence=f"response_len={response_len}",
+                )
+            )
+            signals.append(
+                ScoredSignal(
+                    name="planning_evidence_limited",
+                    value=0.5,
+                    weight=2.0,
+                    evidence="artifact mode: detailed planning telemetry not externally verifiable",
+                )
+            )
+            if has_error:
+                penalties.append(Penalty("planning_error", 0.1, "trace contains execution errors"))
+            base = _aggregate(signals)
+            final = _cap_for_external_artifact(_apply_penalties(base, penalties), 0.65)
+            return SubsystemScore(
+                subsystem="planning",
+                score=final,
+                partial_success=0.0 < final < 1.0,
+                signals=signals,
+                penalties=penalties,
+                confidence=0.5,
+                notes=notes,
+            )
 
         planner = trace.planner
         raw_state = dict(trace.raw_state or {})
@@ -274,7 +331,7 @@ class PlanningScorer:
             )
         )
 
-        if STRICT_TRACE_CONTRACT_MODE:
+        if STRICT_TRACE_CONTRACT_MODE and not external_mode:
             has_replan_reason = bool(planner_causal.planner_replan_reason)
             has_intent_delta = len(planner_causal.intent_delta_vector) > 0
             has_dep_diff = len(planner_causal.dependency_graph_diff) > 0
@@ -332,6 +389,47 @@ class ToolScorer:
 
         if trace.is_mock:
             return SubsystemScore.perfect("tools", "mock execution (synthetic)")
+
+        external_mode = _is_external_artifact_trace(trace)
+        if external_mode:
+            has_tool_failure = ErrorClass.TOOL_FAILURE in trace.error_classes
+            signals.append(
+                ScoredSignal(
+                    name="tool_failure_absent",
+                    value=0.0 if has_tool_failure else 1.0,
+                    weight=3.0,
+                    evidence=f"tool_failure_error={has_tool_failure}",
+                )
+            )
+            signals.append(
+                ScoredSignal(
+                    name="turn_completed",
+                    value=1.0 if trace.completed else 0.0,
+                    weight=2.0,
+                    evidence=f"completed={trace.completed}",
+                )
+            )
+            signals.append(
+                ScoredSignal(
+                    name="tool_evidence_limited",
+                    value=0.45,
+                    weight=2.0,
+                    evidence="artifact mode: tool invocation telemetry is self-reported and capped",
+                )
+            )
+            if has_tool_failure:
+                penalties.append(Penalty("tool_failure_in_errors", 0.15, "TOOL_FAILURE in error log"))
+            base = _aggregate(signals)
+            final = _cap_for_external_artifact(_apply_penalties(base, penalties), 0.6)
+            return SubsystemScore(
+                subsystem="tools",
+                score=final,
+                partial_success=0.0 < final < 1.0,
+                signals=signals,
+                penalties=penalties,
+                confidence=0.45,
+                notes=notes,
+            )
 
         raw_state = dict(trace.raw_state or {})
         tool_failure_semantics = list(raw_state.get("tool_failure_semantics") or [])
@@ -423,7 +521,7 @@ class ToolScorer:
         )
 
         # Signal 5: semantic failure classification exists for failures.
-        if STRICT_TRACE_CONTRACT_MODE:
+        if STRICT_TRACE_CONTRACT_MODE and not external_mode:
             failed_tools = len(trace.tools_failed)
             classified = 0
             for entry in tool_failure_semantics:
@@ -447,6 +545,76 @@ class ToolScorer:
                     evidence=f"classified={classified}, failed_tools={failed_tools}",
                 )
             )
+
+            # Signal 6b: canonical recovery path for tool failures.
+            expects_canonical_recovery = bool(spec.get("expects_canonical_recovery", False))
+            recovery_paths = list(raw_state.get("tool_recovery_paths") or [])
+            clean_recoveries = [
+                entry
+                for entry in recovery_paths
+                if isinstance(entry, dict)
+                and str(entry.get("recovery_path") or "").strip().lower() == "clean_recovery"
+            ]
+            if expects_canonical_recovery:
+                signals.append(
+                    ScoredSignal(
+                        name="canonical_recovery_path",
+                        value=1.0 if clean_recoveries else 0.0,
+                        weight=3.0,
+                        evidence=f"clean_recoveries={len(clean_recoveries)}, recovery_paths={len(recovery_paths)}",
+                    )
+                )
+                if failed_tools > 0 and not clean_recoveries:
+                    penalties.append(
+                        Penalty(
+                            "missing_canonical_recovery",
+                            0.2,
+                            "scenario expects a clean recovery path but none was emitted",
+                        )
+                    )
+
+            # Signal 6: explicit redundant-call detection when scenario expects it.
+            expects_redundancy_detection = bool(spec.get("expects_redundancy_detection", False))
+            redundant_calls = list(raw_state.get("tool_redundant_calls") or [])
+            if expects_redundancy_detection:
+                detected = len(redundant_calls) > 0
+                signals.append(
+                    ScoredSignal(
+                        name="redundancy_detected",
+                        value=1.0 if detected else 0.0,
+                        weight=3.0,
+                        evidence=f"redundant_calls={len(redundant_calls)}",
+                    )
+                )
+                if not detected:
+                    penalties.append(
+                        Penalty(
+                            "missing_redundancy_detection",
+                            0.25,
+                            "scenario expects redundant-call detection but none was emitted",
+                        )
+                    )
+
+            # Signal 7: explicit convergence trigger when scenario expects it.
+            expects_early_convergence = bool(spec.get("expects_early_convergence", False))
+            should_converge_early = bool(raw_state.get("should_converge_early", False))
+            if expects_early_convergence:
+                signals.append(
+                    ScoredSignal(
+                        name="early_convergence_triggered",
+                        value=1.0 if should_converge_early else 0.0,
+                        weight=3.0,
+                        evidence=f"should_converge_early={should_converge_early}",
+                    )
+                )
+                if not should_converge_early:
+                    penalties.append(
+                        Penalty(
+                            "missing_early_convergence",
+                            0.25,
+                            "scenario expects early convergence trigger but flag was not set",
+                        )
+                    )
 
         # Penalty: tool failures in error log
         if ErrorClass.TOOL_FAILURE in trace.error_classes:
@@ -477,6 +645,39 @@ class MemoryScorer:
 
         if trace.is_mock:
             return SubsystemScore.perfect("memory", "mock execution (synthetic)")
+
+        external_mode = _is_external_artifact_trace(trace)
+        if external_mode:
+            response_len = len(str(trace.final_response or "").strip())
+            signals.append(
+                ScoredSignal(
+                    name="response_present",
+                    value=1.0 if response_len > 0 else 0.0,
+                    weight=2.0,
+                    evidence=f"response_len={response_len}",
+                )
+            )
+            signals.append(
+                ScoredSignal(
+                    name="memory_evidence_limited",
+                    value=0.4,
+                    weight=3.0,
+                    evidence="artifact mode: memory causality is not externally verifiable",
+                )
+            )
+            if ErrorClass.MEMORY_MISS in trace.error_classes:
+                penalties.append(Penalty("memory_miss_error", 0.15, "MEMORY_MISS in error log"))
+            base = _aggregate(signals)
+            final = _cap_for_external_artifact(_apply_penalties(base, penalties), 0.55)
+            return SubsystemScore(
+                subsystem="memory",
+                score=final,
+                partial_success=0.0 < final < 1.0,
+                signals=signals,
+                penalties=penalties,
+                confidence=0.4,
+                notes=notes,
+            )
 
         raw_state = dict(trace.raw_state or {})
         memory_causal = MemoryCausalTrace.from_state(raw_state)
@@ -516,7 +717,7 @@ class MemoryScorer:
         )
 
         # Signal 4: goal awareness (session_goals in state)
-        session_goals = list(trace.raw_state.get("session_goals") or [])
+        session_goals = list(trace.raw_state.get("session_goals") or []) if not external_mode else []
         has_goals_in_context = len(session_goals) > 0
         signals.append(
             ScoredSignal(
@@ -527,7 +728,7 @@ class MemoryScorer:
             )
         )
 
-        if STRICT_TRACE_CONTRACT_MODE:
+        if STRICT_TRACE_CONTRACT_MODE and not external_mode:
             has_linkage = bool(memory_causal.read_link_id and memory_causal.write_link_id)
             signals.append(
                 ScoredSignal(
@@ -584,8 +785,63 @@ class UXScorer:
         if trace.is_mock:
             return SubsystemScore.perfect("ux", "mock execution (synthetic)")
 
+        external_mode = _is_external_artifact_trace(trace)
         raw_state = dict(trace.raw_state or {})
+        ux_payload = dict(raw_state.get("ux_trace") or raw_state.get("ux_feedback") or {})
         ux_trace = UXTrace.from_state(raw_state)
+
+        if external_mode:
+            response_text = str(trace.final_response or "").strip()
+            response_len = len(response_text)
+            has_error = trace.has_errors
+            signals.append(
+                ScoredSignal(
+                    name="turn_completed",
+                    value=1.0 if trace.completed else 0.0,
+                    weight=3.0,
+                    evidence=f"completed={trace.completed}",
+                )
+            )
+            signals.append(
+                ScoredSignal(
+                    name="response_present",
+                    value=1.0 if response_len > 0 else 0.0,
+                    weight=2.5,
+                    evidence=f"response_len={response_len}",
+                )
+            )
+            substance = min(1.0, response_len / 120.0)
+            signals.append(
+                ScoredSignal(
+                    name="response_substance",
+                    value=substance,
+                    weight=1.5,
+                    evidence=f"response_len={response_len}, substance={substance:.3f}",
+                )
+            )
+            signals.append(
+                ScoredSignal(
+                    name="error_free_execution",
+                    value=1.0 if not has_error else 0.0,
+                    weight=3.0,
+                    evidence=f"has_errors={has_error}",
+                )
+            )
+            if has_error:
+                penalties.append(Penalty("execution_error", 0.15, "trace contains execution errors"))
+
+            base = _aggregate(signals)
+            final = _cap_for_external_artifact(_apply_penalties(base, penalties), 0.8)
+            confidence = 0.95
+            return SubsystemScore(
+                subsystem="ux",
+                score=final,
+                partial_success=0.0 < final < 1.0,
+                signals=signals,
+                penalties=penalties,
+                confidence=confidence,
+                notes=notes,
+            )
 
         if STRICT_TRACE_CONTRACT_MODE:
             signals.append(
@@ -628,6 +884,90 @@ class UXScorer:
                     evidence=f"memory_correction_written={ux_trace.memory_correction_written}",
                 )
             )
+            # Item B: UX timing + clarity signals for pass-rate optimization.
+            # Timing signals: lower is better (normalized 0-1, capped at 5s for first token, 30s for resolution).
+            has_first_token_signal = "time_to_first_token_ms" in ux_payload
+            first_token_ms = float(ux_trace.time_to_first_token_ms or 0.0)
+            first_token_score = max(0.0, 1.0 - (first_token_ms / 5000.0)) if has_first_token_signal else 0.5
+            signals.append(
+                ScoredSignal(
+                    name="time_to_first_token_efficiency",
+                    value=first_token_score,
+                    weight=1.5,
+                    evidence=f"ttft_ms={first_token_ms:.0f}, score={first_token_score:.3f}, present={has_first_token_signal}",
+                )
+            )
+            if not has_first_token_signal:
+                penalties.append(
+                    Penalty(
+                        "missing_time_to_first_token_signal",
+                        0.05,
+                        "UX timing signal for first token was not recorded",
+                    )
+                )
+            
+            has_resolution_signal = "time_to_resolution_ms" in ux_payload
+            resolution_ms = float(ux_trace.time_to_resolution_ms or 0.0)
+            resolution_score = max(0.0, 1.0 - (resolution_ms / 30000.0)) if has_resolution_signal else 0.5
+            signals.append(
+                ScoredSignal(
+                    name="time_to_resolution_efficiency",
+                    value=resolution_score,
+                    weight=1.5,
+                    evidence=f"ttr_ms={resolution_ms:.0f}, score={resolution_score:.3f}, present={has_resolution_signal}",
+                )
+            )
+            if not has_resolution_signal:
+                penalties.append(
+                    Penalty(
+                        "missing_time_to_resolution_signal",
+                        0.05,
+                        "UX timing signal for resolution was not recorded",
+                    )
+                )
+            
+            # Backtrack penalty: fewer iterations better.
+            has_backtrack_signal = "backtrack_count" in ux_payload
+            backtrack_count = int(ux_trace.backtrack_count or 0)
+            backtrack_score = max(0.0, 1.0 - (backtrack_count * 0.3)) if has_backtrack_signal else 0.5
+            signals.append(
+                ScoredSignal(
+                    name="convergence_directness",
+                    value=backtrack_score,
+                    weight=1.0,
+                    evidence=f"backtrack_count={backtrack_count}, score={backtrack_score:.3f}, present={has_backtrack_signal}",
+                )
+            )
+            if not has_backtrack_signal:
+                penalties.append(
+                    Penalty(
+                        "missing_backtrack_signal",
+                        0.03,
+                        "UX backtrack signal was not recorded",
+                    )
+                )
+            
+            # Clarity markers: structured output formats improve UX.
+            has_clarity_signal = "clarity_markers" in ux_payload
+            clarity_markers = list(ux_trace.clarity_markers or [])
+            clarity_score = 1.0 if clarity_markers else 0.5 if has_clarity_signal else 0.4
+            signals.append(
+                ScoredSignal(
+                    name="output_clarity",
+                    value=clarity_score,
+                    weight=1.0,
+                    evidence=f"clarity_markers={clarity_markers}, score={clarity_score:.3f}, present={has_clarity_signal}",
+                )
+            )
+            if not has_clarity_signal:
+                penalties.append(
+                    Penalty(
+                        "missing_clarity_signal",
+                        0.03,
+                        "UX clarity markers were not recorded",
+                    )
+                )
+            
             if ux_trace.user_confusion_detected and not ux_trace.clarification_requested:
                 penalties.append(
                     Penalty(
@@ -913,7 +1253,7 @@ def aggregate_capability_profile(scores: list[CapabilityScore]) -> dict[str, flo
     """
     by_category: dict[str, list[float]] = {}
     for cs in scores:
-        sub = getattr(cs, cs.category, None)
+        sub = getattr(cs, _category_to_subsystem_attr(cs.category), None)
         if sub is not None:
             by_category.setdefault(cs.category, []).append(sub.score)
 
@@ -933,7 +1273,7 @@ def print_capability_report(
 
     print("\n📊 CAPABILITY PROFILE:")
     for cat in ["planning", "tools", "memory", "ux", "robustness"]:
-        score = profile.get(cat, 0.0)
+        score = profile.get(cat, profile.get("tool", 0.0) if cat == "tools" else 0.0)
         bar_width = int(score * 30)
         bar = "█" * bar_width + "░" * (30 - bar_width)
         print(f"  {cat:12s} [{bar}] {score:.2%}")

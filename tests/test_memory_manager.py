@@ -445,7 +445,9 @@ def test_controlled_forgetting_stress_profile_reduces_retention_under_density(bo
     archived = int(result.get("archived", result.get("removed", 0)) or 0)
     retention_ratio = retained / float(len(catalog))
 
-    # TODO: [STABILIZATION_DEBT] Re-tighten archival/retention bounds after deterministic pruning behavior is restored.
+    # [STABILIZATION_DEBT] Retention bounds are loose pending deterministic pruning stabilization.
+    # Current: archived >= 0, retention 0.25-1.0. Tighten to 0.0-0.2 retained / 0.8-1.0 archived
+    # once memory forgetting determinism is restored (see memory_coordination.py:_assert_save_commit_boundary).
     assert archived >= 0
     assert 0.25 <= retention_ratio <= 1.0
 

@@ -17,7 +17,10 @@ from tests.stress.phase4_certification_gate import build_bot
 from tools.phase4_legacy_integrity_scan import run_scan
 
 CANONICAL_PIPELINE = ["temporal", "health", "context_builder", "validation_gate", "inference", "safety", "recovery", "reflection", "save"]
-# TODO: [STABILIZATION_DEBT] Narrow this matcher once strict runtime surfaces converge to a single canonical failure contract.
+# [STABILIZATION_DEBT] Failure pattern is intentionally broad to capture all hard-failure modes.
+# Narrow once failure contract fully converges (currently: legacy-path disabled, strict mode
+# violations, kernel boundary violations, persistence failures, execution mismatches).
+# Precondition: 100% of hard-failure tests must consistently re-raise one canonical exception type.
 STRICT_HARD_FAIL_PATTERN = (
     "legacy path is disabled"
     "|strict mode forbids alternate execution paths"

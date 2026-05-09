@@ -22,6 +22,7 @@ from dadbot.contracts import AttachmentList, ChunkCallback, FinalizedTurnResult
 from dadbot.core.execution_contract import (
     AgentState,
     ExecutionMode,
+    SovereignContext,
     TurnDelivery,
     TurnRequest,
     TurnResponse,
@@ -29,13 +30,14 @@ from dadbot.core.execution_contract import (
     UserInput,
     live_turn_request,
 )
+from dadbot.core.graph_failure_handler import DadBotGraphFailureHandlerMixin
 from dadbot.core.kernel_locks import KernelReplaySequenceLock
 from dadbot.core.kernel_signals import CorrelationContext, TracingContext
 
 logger = logging.getLogger(__name__)
 
 
-class DadBotTurnMixin:
+class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
     """Turn execution and graph failure handling for the DadBot facade."""
 
     # These attributes are provided by the concrete DadBot facade at runtime.
@@ -214,6 +216,15 @@ class DadBotTurnMixin:
         return str(value)[:limit]
 
     def _event_tap_context(self) -> tuple[str, str, str]:
+        return self._event_tap_context_from_context(None)
+
+    def _event_tap_context_from_context(self, context: SovereignContext | None) -> tuple[str, str, str]:
+        if context is not None:
+            return (
+                str(context.session_id or "default"),
+                str(context.tenant_id or "default"),
+                str(context.trace_id or ""),
+            )
         session_id = str(getattr(self, "active_thread_id", "") or "").strip() or "default"
         tenant_id = str(getattr(self, "tenant_id", "") or "").strip() or "default"
         trace_id = str(TracingContext.current_trace_id() or CorrelationContext.current() or uuid4().hex)
@@ -281,127 +292,6 @@ class DadBotTurnMixin:
                 state_snapshot={"kernel_state": self._snapshot_kernel_state()},
                 state_hash=str(state_hash or ""),
             )
-
-    # ------------------------------------------------------------------
-    # Graph failure handling
-    # ------------------------------------------------------------------
-
-    def _graph_failure_session_id(self) -> str:
-        candidate = getattr(self, "active_thread_id", "") or getattr(
-            self,
-            "tenant_id",
-            "",
-        )
-        normalized = str(candidate or "").strip()
-        return normalized or "default"
-
-    @staticmethod
-    def _safe_graph_failure_payload(value: Any, *, limit: int = 240) -> Any:
-        if value is None or isinstance(value, (bool, int, float)):
-            return value
-        if isinstance(value, str):
-            return value[:limit]
-        if isinstance(value, dict):
-            return {
-                str(key)[:80]: DadBotTurnMixin._safe_graph_failure_payload(
-                    item,
-                    limit=limit,
-                )
-                for key, item in list(value.items())[:12]
-            }
-        if isinstance(value, (list, tuple, set)):
-            return [DadBotTurnMixin._safe_graph_failure_payload(item, limit=limit) for item in list(value)[:12]]
-        return str(value)[:limit]
-
-    def _emit_graph_failure_event(
-        self,
-        *,
-        mode: str,
-        correlation_id: str,
-        trace_id: str,
-        user_input: str,
-        attachments: AttachmentList | None,
-        exc: Exception,
-    ) -> None:
-        orchestrator = getattr(self, "_turn_orchestrator", None)
-        if orchestrator is None:
-            try:
-                orchestrator = self._get_turn_orchestrator()
-            except Exception:  # noqa: BLE001
-                orchestrator = None
-        control_plane = getattr(orchestrator, "control_plane", None)
-        ledger_writer = getattr(control_plane, "ledger_writer", None)
-        write_event = getattr(ledger_writer, "write_event", None)
-        if not callable(write_event):
-            return
-
-        payload = {
-            "mode": mode,
-            "graph_enabled": True,
-            "strict_graph_mode": bool(getattr(self, "_strict_graph_mode", True)),
-            "error_type": type(exc).__name__,
-            "error": str(exc),
-            "user_input": self._safe_graph_failure_payload(user_input),
-            "attachment_count": len(attachments or []),
-            "attachments": self._safe_graph_failure_payload(
-                list(attachments or []),
-                limit=120,
-            ),
-            "recorded_at": str(
-                getattr(getattr(self, "_current_turn_time_base", None), "wall_time", ""),
-            ),
-        }
-        write_event(
-            event_type="GRAPH_EXECUTION_FAILED",
-            session_id=self._graph_failure_session_id(),
-            trace_id=trace_id or correlation_id,
-            kernel_step_id=f"graph.failure.{mode}",
-            payload={
-                **payload,
-                "correlation_id": correlation_id,
-                "trace_id": trace_id or correlation_id,
-            },
-            committed=True,
-        )
-
-    def _graph_failure_reply(self, correlation_id: str) -> str:
-        return self._append_signoff_compat(
-            "I hit an internal graph error and stopped before touching memory or state. "
-            f"Please try again. Reference ID: {correlation_id}",
-        )
-
-    def _raise_graph_execution_failure(
-        self,
-        exc: Exception,
-        *,
-        mode: str,
-        user_input: str,
-        attachments: AttachmentList | None = None,
-    ) -> None:
-        correlation_id = CorrelationContext.current() or CorrelationContext.ensure()
-        trace_id = TracingContext.current_trace_id() or correlation_id
-        logger.exception(
-            "Graph execution failed in %s mode; strict mode forbids alternate execution paths",
-            mode,
-            extra={
-                "correlation_id": correlation_id,
-                "trace_id": trace_id,
-                "graph_enabled": True,
-                "strict_graph_mode": bool(getattr(self, "_strict_graph_mode", True)),
-                "attachment_count": len(attachments or []),
-            },
-        )
-        self._emit_graph_failure_event(
-            mode=mode,
-            correlation_id=correlation_id,
-            trace_id=trace_id,
-            user_input=user_input,
-            attachments=attachments,
-            exc=exc,
-        )
-        raise RuntimeError(
-            "Graph execution failed in strict mode; legacy path is disabled",
-        ) from exc
 
     # ------------------------------------------------------------------
     # Stream helper
@@ -488,7 +378,7 @@ class DadBotTurnMixin:
             )
             self._checkpoint_turn_state()
             return self._response_from_result(request, result)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self._emit_turn_event(
                 "TURN_END",
                 mode=event_mode,
@@ -501,8 +391,9 @@ class DadBotTurnMixin:
                 mode=event_mode,
                 user_input=user_input,
                 attachments=attachments,
+                context=request.context,
             )
-            raise AssertionError("unreachable")
+            raise AssertionError("unreachable") from exc
         finally:
             self._execute_turn_session_id = previous_session_id
             self._active_turn_run_id = ""
@@ -635,6 +526,7 @@ class DadBotTurnMixin:
         attachments: AttachmentList | None = None,
         chunk_callback: ChunkCallback | None = None,
     ) -> FinalizedTurnResult:
+        context = self._build_sovereign_context(mode=ExecutionMode.LIVE)
         response = cast(
             TurnResponse,
             self.execute_turn(
@@ -642,7 +534,7 @@ class DadBotTurnMixin:
                     user_input,
                     attachments=list(attachments or []),
                     delivery=TurnDelivery.SYNC,
-                    session_id=str(getattr(self, "active_thread_id", "") or "default"),
+                    context=context,
                 ),
                 chunk_callback=chunk_callback,
             ),
@@ -685,6 +577,7 @@ class DadBotTurnMixin:
         *,
         chunk_callback: ChunkCallback | None = None,
         mode: ExecutionMode = ExecutionMode.LIVE,
+        context: SovereignContext | None = None,
     ) -> TurnResult:
         """Canonical deterministic turn execution contract.
 
@@ -692,6 +585,10 @@ class DadBotTurnMixin:
         REPLAY/RECOVERY require explicit handlers on the facade.
         """
         state.recompute_invariance_hash()
+        sovereign_context = context or self._build_sovereign_context(
+            mode=mode,
+            base_context=context,
+        )
 
         response = cast(
             TurnResponse,
@@ -701,6 +598,7 @@ class DadBotTurnMixin:
                     mode=mode,
                     delivery=TurnDelivery.SYNC,
                     session_id=str(getattr(self, "active_thread_id", "") or "default"),
+                    context=sovereign_context,
                 ),
                 state=state,
                 chunk_callback=chunk_callback,
@@ -713,6 +611,31 @@ class DadBotTurnMixin:
         state.recompute_invariance_hash()
         self._checkpoint_turn_state(state_hash=state.invariance_hash)
         return result
+
+    def _build_sovereign_context(
+        self,
+        *,
+        mode: ExecutionMode,
+        base_context: SovereignContext | None = None,
+    ) -> SovereignContext:
+        resolved_context = base_context or SovereignContext()
+        active_trace_id = str(TracingContext.current_trace_id() or "").strip()
+        active_correlation_id = str(CorrelationContext.current() or "").strip()
+        resolved_trace_id = (
+            str(resolved_context.trace_id or "").strip()
+            or active_trace_id
+            or active_correlation_id
+            or uuid4().hex
+        )
+        resolved_request_id = str(resolved_context.request_id or "").strip() or resolved_trace_id
+        return SovereignContext(
+            session_id=str(resolved_context.session_id or getattr(self, "active_thread_id", "") or "default"),
+            tenant_id=str(resolved_context.tenant_id or getattr(self, "tenant_id", "") or "default"),
+            trace_id=resolved_trace_id,
+            request_id=resolved_request_id,
+            execution_mode=mode,
+            policy_scope=str(resolved_context.policy_scope or "default"),
+        )
 
     def _run_turn_recovery_default(
         self,
@@ -772,7 +695,7 @@ class DadBotTurnMixin:
                     input.text,
                     attachments=list(input.attachments or []),
                     delivery=TurnDelivery.SYNC,
-                    session_id=str(getattr(self, "active_thread_id", "") or "default"),
+                    context=self._build_sovereign_context(mode=ExecutionMode.LIVE),
                 ),
                 chunk_callback=chunk_callback,
             ),
@@ -792,7 +715,7 @@ class DadBotTurnMixin:
                     user_input,
                     attachments=list(attachments or []),
                     delivery=TurnDelivery.ASYNC,
-                    session_id=str(getattr(self, "active_thread_id", "") or "default"),
+                    context=self._build_sovereign_context(mode=ExecutionMode.LIVE),
                 ),
                 chunk_callback=chunk_callback,
             ),
@@ -822,7 +745,7 @@ class DadBotTurnMixin:
                     user_input,
                     attachments=list(attachments or []),
                     delivery=TurnDelivery.STREAM,
-                    session_id=str(getattr(self, "active_thread_id", "") or "default"),
+                    context=self._build_sovereign_context(mode=ExecutionMode.LIVE),
                 ),
                 chunk_callback=_wrapped_chunk_callback,
             ),
@@ -855,7 +778,7 @@ class DadBotTurnMixin:
                     user_input,
                     attachments=list(attachments or []),
                     delivery=TurnDelivery.STREAM_ASYNC,
-                    session_id=str(getattr(self, "active_thread_id", "") or "default"),
+                    context=self._build_sovereign_context(mode=ExecutionMode.LIVE),
                 ),
                 chunk_callback=_wrapped_chunk_callback,
             ),
@@ -878,7 +801,7 @@ class DadBotTurnMixin:
                     user_input,
                     attachments=list(attachments or []),
                     delivery=TurnDelivery.ASYNC,
-                    session_id=str(getattr(self, "active_thread_id", "") or "default"),
+                    context=self._build_sovereign_context(mode=ExecutionMode.LIVE),
                 ),
             ),
         )
@@ -897,7 +820,7 @@ class DadBotTurnMixin:
                     user_input,
                     attachments=list(attachments or []),
                     delivery=TurnDelivery.SYNC,
-                    session_id=str(getattr(self, "active_thread_id", "") or "default"),
+                    context=self._build_sovereign_context(mode=ExecutionMode.LIVE),
                 ),
             ),
         )

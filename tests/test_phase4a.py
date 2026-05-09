@@ -265,7 +265,7 @@ class TestPhase4AOrchestratorIntegration:
         results = runner.run_all_scenarios()
 
         # Verify all scenarios attempted
-        assert len(results) == 15
+        assert len(results) == len(SCENARIOS)
 
         # At least N scenarios must produce an execution_result envelope.
         attempted = sum(1 for r in results if isinstance(r.get("execution_result"), dict))
@@ -405,7 +405,7 @@ class TestPhase4ACapabilityMeasurement:
         mock_runner = BenchmarkRunner(strict=False, mode="mock")
         mock_results = mock_runner.run_all_scenarios()
         mock_successes = sum(1 for r in mock_results if r["execution"]["completed"])
-        assert mock_successes == 15
+        assert mock_successes == len(SCENARIOS)
 
         # Try real orchestrator (may skip if unavailable)
         try:

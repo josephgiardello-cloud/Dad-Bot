@@ -17,7 +17,17 @@ import threading
 from abc import ABC, abstractmethod
 from copy import deepcopy
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from dadbot.contracts import SovereignEvent
+
+
+def _coerce_event_record(event: dict[str, Any] | SovereignEvent) -> dict[str, Any]:
+    if hasattr(event, "model_dump"):
+        payload = event.model_dump(mode="json")  # type: ignore[call-arg]
+        return dict(payload)
+    return dict(event)
 
 # ---------------------------------------------------------------------------
 # Abstract contract
@@ -28,8 +38,20 @@ class LedgerBackend(ABC):
     """Pluggable storage tier for ExecutionLedger events."""
 
     @abstractmethod
-    def append(self, event: dict[str, Any], *, committed: bool = False) -> None:
+    def append(self, event: dict[str, Any] | SovereignEvent, *, committed: bool = False) -> None:
         """Persist event.  When committed=True, must not return until durable."""
+
+    def append_events(
+        self,
+        events: list[dict[str, Any]] | list[SovereignEvent],
+        *,
+        committed: bool = False,
+    ) -> int:
+        count = 0
+        for event in list(events or []):
+            self.append(event, committed=committed)
+            count += 1
+        return count
 
     @abstractmethod
     def load(self) -> list[dict[str, Any]]:
@@ -52,9 +74,9 @@ class InMemoryLedgerBackend(LedgerBackend):
         self._events: list[dict[str, Any]] = []
         self._lock = threading.RLock()
 
-    def append(self, event: dict[str, Any], *, committed: bool = False) -> None:
+    def append(self, event: dict[str, Any] | SovereignEvent, *, committed: bool = False) -> None:
         with self._lock:
-            self._events.append(deepcopy(event))
+            self._events.append(deepcopy(_coerce_event_record(event)))
 
     def load(self) -> list[dict[str, Any]]:
         with self._lock:
@@ -106,9 +128,12 @@ class FileWALLedgerBackend(LedgerBackend):
         if not self._path.exists():
             self._path.touch()
 
-    def append(self, event: dict[str, Any], *, committed: bool = False) -> None:
-        line = json.dumps(event, default=str) + "\n"
-        should_fsync = self._fsync_enabled and (committed or str(event.get("type") or "") in self.COMMITTED_TYPES)
+    def append(self, event: dict[str, Any] | SovereignEvent, *, committed: bool = False) -> None:
+        serialized = _coerce_event_record(event)
+        line = json.dumps(serialized, default=str) + "\n"
+        should_fsync = self._fsync_enabled and (
+            committed or str(serialized.get("type") or "") in self.COMMITTED_TYPES
+        )
         with self._lock, open(self._path, "a", encoding="utf-8") as handle:
             handle.write(line)
             handle.flush()
@@ -174,11 +199,14 @@ class CRCFileWALLedgerBackend(LedgerBackend):
         if not self._path.exists():
             self._path.touch()
 
-    def append(self, event: dict[str, Any], *, committed: bool = False) -> None:
+    def append(self, event: dict[str, Any] | SovereignEvent, *, committed: bool = False) -> None:
         from dadbot.core.durability import CRC32LineCodec
 
-        line = CRC32LineCodec.encode(event)
-        should_fsync = self._fsync_enabled and (committed or str(event.get("type") or "") in self.COMMITTED_TYPES)
+        serialized = _coerce_event_record(event)
+        line = CRC32LineCodec.encode(serialized)
+        should_fsync = self._fsync_enabled and (
+            committed or str(serialized.get("type") or "") in self.COMMITTED_TYPES
+        )
         with self._lock, open(self._path, "a", encoding="utf-8") as handle:
             handle.write(line)
             handle.flush()
@@ -278,7 +306,7 @@ class StrongConsistencyBackend(LedgerBackend):
             )
         self._inner = inner
 
-    def append(self, event: dict[str, Any], *, committed: bool = False) -> None:
+    def append(self, event: dict[str, Any] | SovereignEvent, *, committed: bool = False) -> None:
         self._inner.append(event, committed=True)  # Always committed.
 
     def load(self) -> list[dict[str, Any]]:
@@ -310,9 +338,9 @@ class EventualConsistencyBackend(LedgerBackend):
         self._buffer: list[tuple[dict[str, Any], bool]] = []
         self._lock = threading.RLock()
 
-    def append(self, event: dict[str, Any], *, committed: bool = False) -> None:
+    def append(self, event: dict[str, Any] | SovereignEvent, *, committed: bool = False) -> None:
         with self._lock:
-            self._buffer.append((deepcopy(event), committed))
+            self._buffer.append((deepcopy(_coerce_event_record(event)), committed))
             if committed or len(self._buffer) >= self._buffer_size:
                 self._flush_locked()
 
@@ -366,9 +394,9 @@ class BatchWriteBackend(LedgerBackend):
         self._buffer: list[tuple[dict[str, Any], bool]] = []
         self._lock = threading.RLock()
 
-    def append(self, event: dict[str, Any], *, committed: bool = False) -> None:
+    def append(self, event: dict[str, Any] | SovereignEvent, *, committed: bool = False) -> None:
         with self._lock:
-            self._buffer.append((deepcopy(event), committed))
+            self._buffer.append((deepcopy(_coerce_event_record(event)), committed))
             if committed or len(self._buffer) >= self._batch_size:
                 self._flush_locked()
 

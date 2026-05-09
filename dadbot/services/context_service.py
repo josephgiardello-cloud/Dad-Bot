@@ -248,7 +248,29 @@ class ContextService:
                 if unique_hits:
                     ctx["semantic"] = unique_hits
                 if isinstance(state, dict):
-                    state["memory_retrieval_set"] = list(unique_hits or hits)
+                    existing = [
+                        dict(item)
+                        for item in list(state.get("memory_retrieval_set") or [])
+                        if isinstance(item, dict)
+                    ]
+                    merged = list(existing)
+                    seen = {
+                        hashlib.sha256(
+                            json.dumps(item, sort_keys=True, ensure_ascii=True, default=str).encode("utf-8")
+                        ).hexdigest()
+                        for item in existing
+                    }
+                    for item in list(unique_hits or hits):
+                        if not isinstance(item, dict):
+                            continue
+                        key = hashlib.sha256(
+                            json.dumps(item, sort_keys=True, ensure_ascii=True, default=str).encode("utf-8")
+                        ).hexdigest()
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        merged.append(dict(item))
+                    state["memory_retrieval_set"] = merged
         except Exception as exc:
             logger.debug("ContextService: semantic index query failed (non-fatal): %s", exc)
 
@@ -305,6 +327,29 @@ class ContextService:
                 metadata.get("compression_scheduled") or compression_scheduled,
             )
 
+    @staticmethod
+    def _build_memory_causal_trace(
+        memory_snapshot: dict[str, Any],
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        retrieval_set = [
+            dict(item)
+            for item in list(state.get("memory_retrieval_set") or [])
+            if isinstance(item, dict)
+        ]
+        claims = list((memory_snapshot.get("structured_memory") or {}).get("claims") or [])
+        retrieved_count = len(retrieval_set)
+        claims_count = len(claims)
+
+        return {
+            "source_read_link_id": str(memory_snapshot.get("full_history_id") or ""),
+            "source_write_link_id": str(state.get("memory_full_history_id") or ""),
+            "influenced_final_response": bool(retrieved_count > 0 or claims_count > 0),
+            "overridden": False,
+            "retrieval_count": retrieved_count,
+            "claims_count": claims_count,
+        }
+
     def build_context(self, turn_context: Any) -> dict[str, Any]:
         started = time.perf_counter()
         temporal = getattr(turn_context, "temporal", None)
@@ -357,9 +402,21 @@ class ContextService:
             state["memory_rolling_summary"] = str(memory_snapshot.get("rolling_summary") or "")
             state["memory_structured"] = dict(memory_snapshot.get("structured_memory") or {})
             state["memory_full_history_id"] = str(memory_snapshot.get("full_history_id") or "")
-            state["memory_retrieval_set"] = []
+            preserved = [
+                dict(item)
+                for item in list(state.get("memory_retrieval_set") or [])
+                if isinstance(item, dict)
+            ]
+            state["memory_retrieval_set"] = preserved
 
         self._run_semantic_rag(user_input, ctx, state)
+
+        if isinstance(state, dict):
+            memory_causal_trace = self._build_memory_causal_trace(memory_snapshot, state)
+            state["memory_causal_trace"] = memory_causal_trace
+            metadata = getattr(turn_context, "metadata", None)
+            if isinstance(metadata, dict):
+                metadata["memory_causal_trace"] = dict(memory_causal_trace)
 
         context_total_tokens = sum(
             self._estimate_tokens(str(ctx.get(key) or ""))

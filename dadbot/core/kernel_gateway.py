@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -49,10 +50,10 @@ class KernelGateway:
         KernelBoundary.assert_scope(operation)
 
     @staticmethod
-    def open_scope():
+    def open_scope() -> AbstractContextManager[None]:
         return KernelBoundary.open_scope()
 
-    def _scope(self):
+    def _scope(self) -> AbstractContextManager[None]:
         return KernelBoundary.open_scope()
 
     @staticmethod
@@ -63,6 +64,7 @@ class KernelGateway:
         attachments: AttachmentList | None,
         metadata: dict[str, Any],
     ) -> KernelTrace:
+        sovereign_context = dict(metadata.get("sovereign_context") or {})
         semantic_input = {
             "session_id": str(session_id or "default"),
             "user_input": str(user_input or ""),
@@ -70,6 +72,10 @@ class KernelGateway:
             "confluence_key": str(metadata.get("confluence_key") or ""),
             "confluence_mode": str(metadata.get("confluence_mode") or ""),
             "request_id": str(metadata.get("request_id") or ""),
+            "context_session_id": str(sovereign_context.get("session_id") or ""),
+            "context_tenant_id": str(sovereign_context.get("tenant_id") or ""),
+            "context_trace_id": str(sovereign_context.get("trace_id") or ""),
+            "context_request_id": str(sovereign_context.get("request_id") or ""),
         }
         semantic_input_hash = semantic_hash(semantic_input)
         return KernelTrace(

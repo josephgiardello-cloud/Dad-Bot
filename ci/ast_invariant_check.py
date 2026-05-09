@@ -85,7 +85,7 @@ def _iter_python_files() -> list[Path]:
     files: list[Path] = []
     for path in ROOT.rglob("*.py"):
         rel = path.relative_to(ROOT)
-        if any(part in EXCLUDED_DIR_NAMES for part in rel.parts):
+        if any(part.startswith(".venv") or part in EXCLUDED_DIR_NAMES for part in rel.parts):
             continue
         files.append(path)
     return files

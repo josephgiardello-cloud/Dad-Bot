@@ -40,7 +40,12 @@ def service_config(*, read_limit: int = 120, write_limit: int = 60, admin_limit:
     )
 
 
-def auth_headers(*, tenant_id: str = "family-a", scopes: tuple[str, ...] = ("read", "write")) -> dict[str, str]:
+def auth_headers(
+    *,
+    tenant_id: str = "family-a",
+    scopes: tuple[str, ...] = ("read", "write"),
+    dadbot_key: str = "",
+) -> dict[str, str]:
     token = ServiceTokenManager(SERVICE_TOKEN_SECRET, issuer="dadbot").issue(
         subject="integration-client",
         tenant_id=tenant_id,
@@ -48,7 +53,10 @@ def auth_headers(*, tenant_id: str = "family-a", scopes: tuple[str, ...] = ("rea
         allowed_tools=[],
         ttl_seconds=3600.0,
     )
-    return {"Authorization": f"Bearer {token}"}
+    headers = {"Authorization": f"Bearer {token}"}
+    if dadbot_key:
+        headers["X-DADBOT-KEY"] = dadbot_key
+    return headers
 
 
 def planner_debug_factory():
@@ -144,6 +152,28 @@ class CountingBroker(ImmediateResultBroker):
     def enqueue(self, task):
         self.enqueue_count += 1
         super().enqueue(task)
+
+
+class SparseStateBroker(ImmediateResultBroker):
+    def enqueue(self, task):
+        reply = f"Dad heard: {task.request.user_input}"
+        self.results.append(
+            WorkerResult(
+                task_id=task.task_id,
+                session_id=task.session_id,
+                request_id=task.request.request_id,
+                status="completed",
+                session_state={
+                    "history": [{"role": "assistant", "content": reply}],
+                },
+                response=ChatResponse(
+                    session_id=task.session_id,
+                    request_id=task.request.request_id,
+                    reply=reply,
+                    active_model=task.request.requested_model or "llama3.2",
+                ),
+            )
+        )
 
 
 class FakeRuntimeBot:
@@ -303,6 +333,42 @@ def test_api_event_stream_websocket_replays_and_streams_tenant_events():
     assert dispatched["tenant_id"] == "family-a"
 
 
+def test_api_pulse_websocket_streams_vitals_and_thinking_state():
+    from fastapi.testclient import TestClient
+
+    broker = ImmediateResultBroker()
+    event_bus = InMemoryEventBus()
+    orchestrator = DadBotOrchestrator(
+        broker,
+        state_store=InMemoryStateStore(),
+        event_bus=event_bus,
+        planner_debug_factory=planner_debug_factory,
+    )
+    app = create_api_app(orchestrator, config=service_config())
+
+    with TestClient(app) as client:
+        websocket_token = ServiceTokenManager(SERVICE_TOKEN_SECRET, issuer="dadbot").issue(
+            subject="integration-client",
+            tenant_id="family-a",
+            scopes={"read", "write"},
+            ttl_seconds=3600.0,
+        )
+        with client.websocket_connect(f"/v1/sessions/pulse-session/pulse/stream?access_token={websocket_token}") as websocket:
+            initial = websocket.receive_json()
+            response = client.post(
+                "/v1/sessions/pulse-session/chat",
+                json={"user_input": "hello pulse", "tenant_id": "family-a"},
+                headers=auth_headers(),
+            )
+            updated = websocket.receive_json()
+
+    assert response.status_code == 200
+    assert initial["event_type"] == "pulse.snapshot"
+    assert initial["session_id"] == "pulse-session"
+    assert updated["session_id"] == "pulse-session"
+    assert updated["trust_meter"]["trust_level"] == 50
+
+
 def test_api_turn_endpoint_blocks_until_response():
     from fastapi.testclient import TestClient
 
@@ -326,6 +392,41 @@ def test_api_turn_endpoint_blocks_until_response():
     assert payload["task"]["status"] == "completed"
     assert payload["response"]["reply"] == "Dad heard: hello from turn endpoint"
     assert payload["task"]["tenant_id"] == "family-a"
+    assert payload["turn"]["response_text"] == "Dad heard: hello from turn endpoint"
+    assert payload["turn"]["integrity_status"]["merkle_check_passed"] is True
+    assert isinstance(payload["turn"]["subconscious_metadata"], list)
+
+
+def test_api_turn_endpoint_contract_defaults_when_optional_state_missing():
+    from fastapi.testclient import TestClient
+
+    broker = SparseStateBroker()
+    orchestrator = DadBotOrchestrator(
+        broker,
+        state_store=InMemoryStateStore(),
+        planner_debug_factory=planner_debug_factory,
+    )
+    app = create_api_app(orchestrator, config=service_config())
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/sessions/defaults-session/turn",
+            json={"user_input": "defaults check", "tenant_id": "family-a", "timeout_seconds": 3},
+            headers=auth_headers(),
+        )
+
+    payload = response.json()
+    turn = payload["turn"]
+    assert response.status_code == 200
+    assert turn["response_text"] == "Dad heard: defaults check"
+    assert turn["trust_meter"]["trust_level"] == 50
+    assert turn["trust_meter"]["openness_level"] == 50
+    assert turn["drift_alarm"]["active"] is False
+    assert turn["drift_alarm"]["current_risk_level"] == "low"
+    assert turn["integrity_status"]["merkle_check_passed"] is True
+    assert turn["integrity_status"]["reason"] == ""
+    assert turn["subconscious_metadata"] == []
+    assert turn["thinking_state"] == []
 
 
 def test_api_turn_endpoint_veto_proxy_blocks_mandatory_halt_response_and_records_intervention():
@@ -579,6 +680,69 @@ def test_api_rejects_missing_bearer_token():
         response = client.post("/v1/sessions/secure-session/chat", json={"user_input": "hello"})
 
     assert response.status_code == 401
+
+
+def test_api_rejects_missing_secret_handshake_when_enabled(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("DADBOT_SECRET_KEY", "super-secret")
+    broker = ImmediateResultBroker()
+    orchestrator = DadBotOrchestrator(
+        broker,
+        state_store=InMemoryStateStore(),
+        planner_debug_factory=planner_debug_factory,
+    )
+    app = create_api_app(orchestrator, config=service_config())
+
+    with TestClient(app) as client:
+        rejected = client.post(
+            "/v1/sessions/secret-session/chat",
+            json={"user_input": "hello", "tenant_id": "family-a"},
+            headers=auth_headers(),
+        )
+        accepted = client.post(
+            "/v1/sessions/secret-session/chat",
+            json={"user_input": "hello", "tenant_id": "family-a"},
+            headers=auth_headers(dadbot_key="super-secret"),
+        )
+
+    assert rejected.status_code == 401
+    assert rejected.json()["detail"] == "Invalid or missing X-DADBOT-KEY"
+    assert accepted.status_code == 200
+
+
+def test_api_pulse_websocket_requires_secret_handshake_when_enabled(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("DADBOT_SECRET_KEY", "super-secret")
+    broker = ImmediateResultBroker()
+    event_bus = InMemoryEventBus()
+    orchestrator = DadBotOrchestrator(
+        broker,
+        state_store=InMemoryStateStore(),
+        event_bus=event_bus,
+        planner_debug_factory=planner_debug_factory,
+    )
+    app = create_api_app(orchestrator, config=service_config())
+
+    with TestClient(app) as client:
+        websocket_token = ServiceTokenManager(SERVICE_TOKEN_SECRET, issuer="dadbot").issue(
+            subject="integration-client",
+            tenant_id="family-a",
+            scopes={"read", "write"},
+            ttl_seconds=3600.0,
+        )
+
+        with pytest.raises(Exception):
+            with client.websocket_connect(f"/v1/sessions/secret-pulse/pulse/stream?access_token={websocket_token}"):
+                pass
+
+        with client.websocket_connect(
+            f"/v1/sessions/secret-pulse/pulse/stream?access_token={websocket_token}&dadbot_key=super-secret"
+        ) as websocket:
+            payload = websocket.receive_json()
+
+    assert payload["event_type"] == "pulse.snapshot"
 
 
 def test_api_rejects_tenant_mismatch():

@@ -7,10 +7,20 @@ import json as _json
 import logging
 import os
 import platform
+from datetime import datetime, timedelta, timezone
 from importlib import metadata as importlib_metadata
 from typing import Any, cast
 
-from dadbot.contracts import AttachmentList, FinalizedTurnResult
+from dadbot.contracts import (
+    AttachmentList,
+    FinalizedTurnResult,
+    GenericSovereignPayload,
+    LogicBranchPayload,
+    PlannerDecisionPayload,
+    PolicyVetoPayload,
+    SovereignEvent,
+    SovereignEventType,
+)
 from dadbot.core import shadow_mode as _shadow_mode
 from dadbot.core.composite_friction import CompositeFrictionEngine, FrictionSignals
 from dadbot.core.control_plane import (
@@ -54,6 +64,20 @@ def _stable_sha256(payload: dict[str, Any]) -> str:
             "utf-8",
         ),
     ).hexdigest()
+
+
+def _normalize_timestamp(value: Any) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    normalized = raw.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _dependency_versions_snapshot() -> dict[str, str]:
@@ -298,6 +322,36 @@ class DadBotOrchestrator:
             metadata=metadata,
         )
 
+    def _emit_sovereign_event(
+        self,
+        context: TurnContext,
+        *,
+        event_type: SovereignEventType,
+        payload: dict[str, Any],
+    ) -> SovereignEvent:
+        previous_checksum = str(context.metadata.get("sovereign_event_checksum") or "")
+        if event_type == SovereignEventType.PLANNER_DECISION:
+            sovereign_payload = PlannerDecisionPayload(**payload)
+        elif event_type == SovereignEventType.POLICY_VETO:
+            sovereign_payload = PolicyVetoPayload(**payload)
+        elif event_type == SovereignEventType.LOGIC_BRANCH:
+            sovereign_payload = LogicBranchPayload(**payload)
+        else:
+            sovereign_payload = GenericSovereignPayload(data=dict(payload or {}))
+
+        event = SovereignEvent(
+            turn_id=str(context.trace_id or ""),
+            event_type=event_type.value,
+            payload=sovereign_payload,
+            previous_checksum=previous_checksum,
+        )
+        stream = list(context.state.get("sovereign_events") or [])
+        stream.append(event.to_ledger_event())
+        context.state["sovereign_events"] = stream
+        context.metadata["sovereign_event_checksum"] = event.checksum
+        context.metadata["sovereign_event_count"] = len(stream)
+        return event
+
     # ------------------------------------------------------------------
     # _execute_job helpers
     # ------------------------------------------------------------------
@@ -444,6 +498,14 @@ class DadBotOrchestrator:
         typed_state["goal_alignment_guard_enabled"] = bool(context.state.get("goal_alignment_guard_enabled", False))
         typed_state["goal_alignment_diversion_streak"] = int(context.state.get("goal_alignment_diversion_streak") or 0)
         typed_state["goal_alignment_mandatory_halt"] = bool(context.state.get("goal_alignment_mandatory_halt", False))
+        typed_state["cognition_stream"] = list(context.state.get("cognition_stream") or [])
+        typed_state["subconscious_memory_fragments"] = list(context.state.get("subconscious_memory_fragments") or [])
+        typed_state["memory_retrieval_set"] = list(context.state.get("memory_retrieval_set") or [])
+        typed_state["last_integrity_status"] = {
+            "merkle_check_passed": not bool(context.metadata.get("integrity_failure", False)),
+            "reason": str(context.metadata.get("integrity_failure_reason") or ""),
+            "diagnostics": dict(context.metadata.get("integrity_failure_diagnostics") or {}),
+        }
         # Persist reflection summary if available
         if "reflection_summary" in context.state:
             typed_state["last_reflection_summary"] = dict(context.state["reflection_summary"])
@@ -476,6 +538,262 @@ class DadBotOrchestrator:
             if audit_report:
                 bot._last_capability_audit_report = audit_report
 
+    def _subconscious_checksum(self, fragment: dict[str, Any]) -> str:
+        payload = {
+            "summary": str(fragment.get("summary") or "").strip(),
+            "timestamp": str(fragment.get("timestamp") or "").strip(),
+            "category": str(fragment.get("category") or "").strip(),
+            "mood": str(fragment.get("mood") or "").strip(),
+            "event": str(fragment.get("event") or "").strip(),
+        }
+        return _stable_sha256(payload)
+
+    def _apply_integrity_failure(
+        self,
+        context: TurnContext,
+        *,
+        reason: str,
+        diagnostics: dict[str, Any] | None = None,
+    ) -> None:
+        resolved_reason = str(reason or "integrity_failure").strip() or "integrity_failure"
+        context.state["refusal_state"] = "integrity_failure"
+        context.state["integrity_failure_reason"] = resolved_reason
+        context.state["should_end"] = True
+        context.metadata["integrity_failure"] = True
+        context.metadata["integrity_failure_reason"] = resolved_reason
+        if diagnostics:
+            context.metadata["integrity_failure_diagnostics"] = dict(diagnostics)
+
+    @staticmethod
+    def _collect_sovereign_checksums(payload: Any) -> set[str]:
+        checksums: set[str] = set()
+        stack: list[Any] = [payload]
+        while stack:
+            item = stack.pop()
+            if isinstance(item, dict):
+                checksum = str(item.get("checksum") or "").strip()
+                previous_checksum = str(item.get("previous_checksum") or "").strip()
+                event_type = str(item.get("event_type") or "").strip()
+                if checksum and (previous_checksum or event_type):
+                    checksums.add(checksum)
+                for value in item.values():
+                    if isinstance(value, (dict, list, tuple)):
+                        stack.append(value)
+            elif isinstance(item, (list, tuple)):
+                stack.extend(item)
+        return checksums
+
+    def _authoritative_sovereign_checksum_set(self, context: TurnContext) -> set[str]:
+        checksums: set[str] = set()
+        checksums |= self._collect_sovereign_checksums(context.state.get("sovereign_events") or [])
+
+        ledger = getattr(getattr(self, "control_plane", None), "ledger", None)
+        read_events = getattr(ledger, "read", None)
+        if callable(read_events):
+            try:
+                events = read_events(full=False)
+            except TypeError:
+                events = read_events()
+            except NON_FATAL_RUNTIME_EXCEPTIONS:
+                events = []
+            checksums |= self._collect_sovereign_checksums(events)
+
+        checksum_head = str(context.metadata.get("sovereign_event_checksum") or "").strip()
+        if checksum_head:
+            checksums.add(checksum_head)
+        return checksums
+
+    @staticmethod
+    def _fragment_sovereign_checksum(memory: dict[str, Any]) -> str:
+        candidate = (
+            memory.get("sovereign_event_checksum")
+            or memory.get("signed_sovereign_checksum")
+            or memory.get("ledger_checksum")
+            or memory.get("event_checksum")
+            or memory.get("source_event_checksum")
+            or ""
+        )
+        return str(candidate or "").strip()
+
+    def _run_subconscious_retrieval(self, context: TurnContext, user_input: str) -> None:
+        bot = self.bot
+        if bot is None:
+            return
+        memory_catalog = getattr(bot, "memory_catalog", None)
+        semantic_matches = getattr(bot, "semantic_memory_matches", None)
+        if not callable(memory_catalog) or not callable(semantic_matches):
+            return
+
+        raw_memories = memory_catalog()
+        memories = list(raw_memories) if isinstance(raw_memories, list | tuple) else []
+        if not memories:
+            context.state["subconscious_memory_fragments"] = []
+            return
+
+        try:
+            raw_matches = semantic_matches(user_input, memories, limit=9)
+            matches = list(raw_matches) if isinstance(raw_matches, list | tuple) else []
+        except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
+            logger.debug("Subconscious retrieval unavailable (non-fatal): %s", exc)
+            context.state["subconscious_memory_fragments"] = []
+            return
+
+        cutoff = datetime.now(timezone.utc) - timedelta(days=180)
+        vetted: list[dict[str, Any]] = []
+        dropped_integrity = 0
+        handshake_checksums = self._authoritative_sovereign_checksum_set(context)
+        if not handshake_checksums:
+            self._apply_integrity_failure(
+                context,
+                reason="integrity_handshake_ledger_unavailable",
+                diagnostics={"stage": "subconscious_retrieval"},
+            )
+            context.state["subconscious_memory_fragments"] = []
+            context.state["memory_retrieval_set"] = []
+            context.metadata["subconscious_retrieval"] = {
+                "query": str(user_input or ""),
+                "retrieved": 0,
+                "dropped_integrity": 0,
+                "max_age_days": 180,
+                "similarity_threshold": 0.2,
+                "aborted": True,
+                "abort_reason": "integrity_handshake_ledger_unavailable",
+            }
+            return
+
+        for raw in matches:
+            if not isinstance(raw, (list, tuple)) or len(raw) < 2:
+                continue
+            similarity_raw, memory = raw[0], raw[1]
+            if not isinstance(memory, dict):
+                continue
+            try:
+                similarity = float(similarity_raw)
+            except (TypeError, ValueError):
+                similarity = 0.0
+            if similarity < 0.2:
+                continue
+
+            timestamp_raw = (
+                memory.get("updated_at")
+                or memory.get("created_at")
+                or memory.get("timestamp")
+                or ""
+            )
+            parsed_timestamp = _normalize_timestamp(timestamp_raw)
+            if parsed_timestamp is None or parsed_timestamp < cutoff:
+                continue
+
+            fragment = {
+                "memory_id": str(
+                    memory.get("id")
+                    or memory.get("memory_id")
+                    or memory.get("slug")
+                    or memory.get("key")
+                    or ""
+                ),
+                "summary": str(memory.get("summary") or memory.get("text") or "").strip(),
+                "category": str(memory.get("category") or "").strip(),
+                "mood": str(memory.get("mood") or "").strip(),
+                "event": str(memory.get("event") or "").strip(),
+                "timestamp": parsed_timestamp.isoformat().replace("+00:00", "Z"),
+                "similarity_score": round(similarity, 4),
+                "source": "subconscious_reflex",
+            }
+            if not fragment["summary"]:
+                continue
+
+            computed_checksum = self._subconscious_checksum(fragment)
+            known_checksum = str(
+                memory.get("checksum")
+                or memory.get("content_hash")
+                or memory.get("hash")
+                or ""
+            ).strip()
+            if known_checksum and known_checksum != computed_checksum:
+                dropped_integrity += 1
+                self._apply_integrity_failure(
+                    context,
+                    reason="integrity_handshake_fragment_hash_mismatch",
+                    diagnostics={
+                        "memory_id": fragment["memory_id"],
+                        "known_checksum": known_checksum,
+                        "computed_checksum": computed_checksum,
+                    },
+                )
+                context.state["subconscious_memory_fragments"] = []
+                context.state["memory_retrieval_set"] = []
+                context.metadata["subconscious_retrieval"] = {
+                    "query": str(user_input or ""),
+                    "retrieved": 0,
+                    "dropped_integrity": dropped_integrity,
+                    "max_age_days": 180,
+                    "similarity_threshold": 0.2,
+                    "aborted": True,
+                    "abort_reason": "integrity_handshake_fragment_hash_mismatch",
+                }
+                return
+
+            sovereign_checksum = self._fragment_sovereign_checksum(memory)
+            if not sovereign_checksum:
+                dropped_integrity += 1
+                self._apply_integrity_failure(
+                    context,
+                    reason="integrity_handshake_missing_sovereign_checksum",
+                    diagnostics={"memory_id": fragment["memory_id"]},
+                )
+                context.state["subconscious_memory_fragments"] = []
+                context.state["memory_retrieval_set"] = []
+                context.metadata["subconscious_retrieval"] = {
+                    "query": str(user_input or ""),
+                    "retrieved": 0,
+                    "dropped_integrity": dropped_integrity,
+                    "max_age_days": 180,
+                    "similarity_threshold": 0.2,
+                    "aborted": True,
+                    "abort_reason": "integrity_handshake_missing_sovereign_checksum",
+                }
+                return
+
+            if sovereign_checksum not in handshake_checksums:
+                dropped_integrity += 1
+                self._apply_integrity_failure(
+                    context,
+                    reason="integrity_handshake_sovereign_checksum_mismatch",
+                    diagnostics={
+                        "memory_id": fragment["memory_id"],
+                        "sovereign_checksum": sovereign_checksum,
+                    },
+                )
+                context.state["subconscious_memory_fragments"] = []
+                context.state["memory_retrieval_set"] = []
+                context.metadata["subconscious_retrieval"] = {
+                    "query": str(user_input or ""),
+                    "retrieved": 0,
+                    "dropped_integrity": dropped_integrity,
+                    "max_age_days": 180,
+                    "similarity_threshold": 0.2,
+                    "aborted": True,
+                    "abort_reason": "integrity_handshake_sovereign_checksum_mismatch",
+                }
+                return
+
+            fragment["checksum"] = computed_checksum
+            fragment["sovereign_event_checksum"] = sovereign_checksum
+            vetted.append(fragment)
+            if len(vetted) >= 5:
+                break
+
+        context.state["subconscious_memory_fragments"] = list(vetted)
+        context.state["memory_retrieval_set"] = list(vetted)
+        context.metadata["subconscious_retrieval"] = {
+            "query": str(user_input or ""),
+            "retrieved": len(vetted),
+            "dropped_integrity": dropped_integrity,
+            "max_age_days": 180,
+            "similarity_threshold": 0.2,
+        }
+
     async def _execute_job(
         self,
         session: dict[str, Any],
@@ -502,6 +820,9 @@ class DadBotOrchestrator:
         if not context.trace_id:
             raise InvariantViolation("TurnContext.trace_id must be non-empty")
 
+        # Gideon Reflex: read-only subconscious retrieval before standard graph inference.
+        self._run_subconscious_retrieval(context, str(job.user_input or ""))
+
         manifest = _build_determinism_manifest()
         prior_manifest = dict(session.get("state", {}).get("last_determinism_manifest") or {})
         self._check_manifest_drift(manifest, prior_manifest)
@@ -512,6 +833,19 @@ class DadBotOrchestrator:
             context.prev_checkpoint_hash = str(loaded_checkpoint.get("prev_checkpoint_hash") or "")
 
         self._stamp_determinism_metadata(context, job, manifest)
+        self._emit_sovereign_event(
+            context,
+            event_type=SovereignEventType.LOGIC_BRANCH,
+            payload={
+                "branch_name": "orchestrator._execute_job",
+                "condition": "graph.execute",
+                "outcome": "start",
+                "metadata": {
+                    "session_id": str(job.session_id or "default"),
+                    "job_id": str(job.job_id or ""),
+                },
+            },
+        )
 
         # Analyze behavioral reflection patterns from relational ledger
         self._analyze_behavioral_reflection(str(job.session_id or "default"), context)
@@ -521,15 +855,49 @@ class DadBotOrchestrator:
             result = await self.graph.execute(context)
             return result
 
-        result = await self._trace_binder.run(
-            trace_id=context.trace_id,
-            prompt=str(job.user_input or ""),
-            metadata={"session_id": str(job.session_id or "default")},
-            fn=_run,
-        )
-        self._last_turn_context = context
-        self._update_session_state_after_turn(session, context, result, manifest)
-        self._publish_health_evidence(context)
+        if self.bot is not None:
+            setattr(self.bot, "_active_turn_context", context)
+        try:
+            try:
+                result = await self._trace_binder.run(
+                    trace_id=context.trace_id,
+                    prompt=str(job.user_input or ""),
+                    metadata={"session_id": str(job.session_id or "default")},
+                    fn=_run,
+                )
+            except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
+                self._emit_sovereign_event(
+                    context,
+                    event_type=SovereignEventType.POLICY_VETO,
+                    payload={
+                        "policy_rule": "execution.kernel_failure",
+                        "reason": str(exc),
+                        "severity": "critical",
+                        "metadata": {
+                            "error_type": type(exc).__name__,
+                            "session_id": str(job.session_id or "default"),
+                        },
+                    },
+                )
+                raise
+            self._emit_sovereign_event(
+                context,
+                event_type=SovereignEventType.PLANNER_DECISION,
+                payload={
+                    "planner_node": "turn_graph",
+                    "selected_branch": "execute.completed",
+                    "rationale": "graph execution reached terminal result",
+                    "metadata": {
+                        "should_end": bool(result[1] if isinstance(result, tuple) and len(result) > 1 else False),
+                    },
+                },
+            )
+            self._last_turn_context = context
+            self._update_session_state_after_turn(session, context, result, manifest)
+            self._publish_health_evidence(context)
+        finally:
+            if self.bot is not None and getattr(self.bot, "_active_turn_context", None) is context:
+                setattr(self.bot, "_active_turn_context", None)
 
         # Shadow mode — non-blocking observation hook (observation phase only)
         if _shadow_mode.is_enabled():
@@ -566,6 +934,7 @@ class DadBotOrchestrator:
         *,
         session_id: str = "default",
         confluence_key: str | None = None,
+        metadata: dict[str, Any] | None = None,
         timeout_seconds: float | None = None,
     ) -> FinalizedTurnResult:
         confluence_mode = str(os.environ.get("DADBOT_GLOBAL_CONFLUENCE_MODE", "enforce")).strip().lower()
@@ -591,14 +960,16 @@ class DadBotOrchestrator:
             }
             explicit_key = f"legacy:{_stable_sha256(legacy_payload)}"
             logger.warning("Using legacy confluence fallback key because DADBOT_ALLOW_LEGACY_CONFLUENCE_KEY is enabled")
-        metadata: dict[str, Any] = {"confluence_mode": confluence_mode}
+        outbound_metadata: dict[str, Any] = {"confluence_mode": confluence_mode}
         if explicit_key:
-            metadata["confluence_key"] = explicit_key
+            outbound_metadata["confluence_key"] = explicit_key
+        if isinstance(metadata, dict) and metadata:
+            outbound_metadata.update(dict(metadata))
         return await self.control_plane.submit_turn(
             session_id=session_id,
             user_input=user_input,
             attachments=attachments,
-            metadata=metadata,
+            metadata=outbound_metadata,
             timeout_seconds=timeout_seconds,
         )
 
@@ -609,6 +980,7 @@ class DadBotOrchestrator:
         *,
         session_id: str = "default",
         confluence_key: str | None = None,
+        metadata: dict[str, Any] | None = None,
         timeout_seconds: float | None = None,
     ) -> FinalizedTurnResult:
         """Canonical async turn entry-point: all paths converge through control plane.
@@ -622,6 +994,7 @@ class DadBotOrchestrator:
                 attachments=attachments,
                 session_id=session_id,
                 confluence_key=confluence_key,
+                metadata=metadata,
                 timeout_seconds=timeout_seconds,
             )
         except TimeoutError:
@@ -637,13 +1010,19 @@ class DadBotOrchestrator:
         attachments: AttachmentList | None = None,
         *,
         confluence_key: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> FinalizedTurnResult:
         """Synchronous turn entry-point: delegates to canonical async path."""
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             loop = None
-        coro = self.handle_turn(user_input, attachments=attachments, confluence_key=confluence_key)
+        coro = self.handle_turn(
+            user_input,
+            attachments=attachments,
+            confluence_key=confluence_key,
+            metadata=metadata,
+        )
         if loop is not None and loop.is_running():
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                 return pool.submit(asyncio.run, coro).result()  # type: ignore[arg-type]
@@ -655,6 +1034,12 @@ class DadBotOrchestrator:
         attachments: AttachmentList | None = None,
         *,
         confluence_key: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> FinalizedTurnResult:
         """Async variant of run(): delegates to canonical handle_turn()."""
-        return await self.handle_turn(user_input, attachments=attachments, confluence_key=confluence_key)
+        return await self.handle_turn(
+            user_input,
+            attachments=attachments,
+            confluence_key=confluence_key,
+            metadata=metadata,
+        )

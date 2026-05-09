@@ -74,7 +74,9 @@ def _repo_python_files() -> list[Path]:
     files: list[Path] = []
     for path in REPO_ROOT.rglob("*.py"):
         relative = path.relative_to(REPO_ROOT)
-        if relative.parts and relative.parts[0] in {".venv", "tests", "session_logs", "runtime"}:
+        if relative.parts and (
+            relative.parts[0].startswith(".venv") or relative.parts[0] in {"tests", "session_logs", "runtime"}
+        ):
             continue
         files.append(path)
     return files

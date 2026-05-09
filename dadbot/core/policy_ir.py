@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Protocol
 
+from dadbot.contracts import PolicyVetoPayload, SovereignEvent, SovereignEventType, VetoReason
 from dadbot.core.runtime_types import (
     PolicyEffect,
     PolicyEffectType,
@@ -299,6 +300,7 @@ class PolicyCompilerIR:
         self,
         tool_result: ToolResult,
         context: dict[str, Any] | None = None,
+        turn_context: Any | None = None,
     ) -> PolicyDecisionIR:
         """Evaluate tool result and emit effect chain.
         
@@ -321,13 +323,62 @@ class PolicyCompilerIR:
             if rule.matches(context or {}):
                 matched_rule_ids.append(rule.rule_id)
 
-        return PolicyDecisionIR(
+        decision = PolicyDecisionIR(
             tool_result=tool_result,
             matched_rules=tuple(matched_rule_ids),
             emitted_effects=effects,
             final_output=final_output,
             output_was_modified=was_modified,
         )
+        self._emit_policy_veto_if_needed(
+            decision=decision,
+            turn_context=turn_context,
+        )
+        return decision
+
+    @staticmethod
+    def _emit_policy_veto_if_needed(*, decision: PolicyDecisionIR, turn_context: Any | None) -> None:
+        if turn_context is None:
+            return
+        deny_like = {
+            PolicyEffectType.DENY_TOOL,
+            PolicyEffectType.REQUIRE_APPROVAL,
+            PolicyEffectType.FORCE_DEGRADATION,
+        }
+        veto_effect = next((effect for effect in decision.emitted_effects if effect.effect_type in deny_like), None)
+        if veto_effect is None:
+            return
+
+        state = getattr(turn_context, "state", None)
+        metadata = getattr(turn_context, "metadata", None)
+        if not isinstance(state, dict) or not isinstance(metadata, dict):
+            return
+
+        severity = "critical" if veto_effect.effect_type == PolicyEffectType.DENY_TOOL else "high"
+        reason = str(veto_effect.reason or "policy_veto")
+        previous_checksum = str(metadata.get("sovereign_event_checksum") or "")
+        event = SovereignEvent(
+            turn_id=str(getattr(turn_context, "trace_id", "") or ""),
+            event_type=SovereignEventType.POLICY_VETO.value,
+            payload=PolicyVetoPayload(
+                policy_rule=str(veto_effect.source_rule or "policy_ir"),
+                reason=reason,
+                severity=severity,
+                veto_reason=VetoReason(
+                    code=veto_effect.effect_type.value,
+                    message=reason,
+                    severity=severity,
+                    metadata={"source_rule": str(veto_effect.source_rule or "")},
+                ),
+                metadata={"effect_type": veto_effect.effect_type.value},
+            ),
+            previous_checksum=previous_checksum,
+        )
+        stream = list(state.get("sovereign_events") or [])
+        stream.append(event.to_ledger_event())
+        state["sovereign_events"] = stream
+        metadata["sovereign_event_checksum"] = event.checksum
+        metadata["sovereign_event_count"] = len(stream)
 
 
 # Built-in policy rules

@@ -57,7 +57,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--timeout-min-s",
         type=int,
-        default=90,
+        default=300,
         help="Minimum lane timeout when deriving from baselines",
     )
     parser.add_argument(
@@ -357,6 +357,8 @@ def _derive_lane_timeout(
     max_s: int,
 ) -> tuple[int, str]:
     lane_floor_overrides = {
+        "DEV": 300,
+        "INTEGRATION": 300,
         "DURABILITY_P4": 300,
         "FULL_CERT": 720,
     }

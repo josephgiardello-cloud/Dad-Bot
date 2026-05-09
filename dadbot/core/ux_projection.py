@@ -200,6 +200,22 @@ class TurnUxProjector:
             "mood_hint": mood_hint,
             "status": status,
         }
+
+        turn_plan = dict(state.get("turn_plan") or {})
+        critique_record = dict(state.get("critique_record") or {})
+        clarification_requested = str(turn_plan.get("strategy") or "").strip().lower() == "clarify"
+        replan_triggered = bool(int(critique_record.get("iteration") or 0) > 0)
+        repair_event_emitted = bool(replan_triggered or not bool(critique_record.get("passed", True)))
+        ux_trace = {
+            "intent_shift_detected": bool(turn_plan.get("new_goal_detected", False)),
+            "clarification_requested": clarification_requested,
+            "repair_event_emitted": repair_event_emitted,
+            "user_confusion_detected": bool(clarification_requested),
+            "replan_triggered": replan_triggered,
+            "memory_correction_written": bool(state.get("memory_correction_written", False)),
+        }
+
+        ux_feedback.update(ux_trace)
         if evidence_digest is not None:
             ux_feedback["evidence_graph_digest"] = evidence_digest
 
@@ -211,3 +227,5 @@ class TurnUxProjector:
         metadata["turn_health_evidence"] = dict(evidence)
         state["ux_feedback"] = ux_feedback
         metadata["ux_feedback"] = dict(ux_feedback)
+        state["ux_trace"] = ux_trace
+        metadata["ux_trace"] = dict(ux_trace)

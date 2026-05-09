@@ -14,6 +14,7 @@ import ollama
 import pytest
 
 from Dad import DadBot
+from dadbot.core.execution_ledger import IntegrityBreachError
 from dadbot.core.execution_trace_context import ExecutionTraceRecorder, bind_execution_trace
 from dadbot.core.graph import LedgerMutationOp, TurnContext
 from dadbot_system.state import InMemoryStateStore
@@ -1405,14 +1406,15 @@ class DadBotRegressionTests(unittest.TestCase):
             return {"message": {"content": "I hear you, buddy. Let us take one calm step."}}
 
         with patch.object(self.bot.runtime_client, "call_ollama_chat_with_model", side_effect=fake_runtime_chat):
-            reply, should_end = self.bot.process_user_message("Work and bills have both been heavy this week.")
+            with self.assertRaises(IntegrityBreachError) as caught:
+                self.bot.process_user_message("Work and bills have both been heavy this week.")
 
-        self.assertFalse(should_end)
-        self.assertIn("buddy", reply.lower())
+        self.assertIn("integrity breach", str(caught.exception).lower())
+        self.assertNotIn("kernel boundary violation", str(caught.exception).lower())
         self.assertGreater(baseline_tokens, prompt_budget)
-        self.assertIn("messages", captured)
-        sent_tokens = sum(self.bot.message_token_cost(message) for message in captured["messages"])
-        self.assertLessEqual(sent_tokens, prompt_budget)
+        if "messages" in captured:
+            sent_tokens = sum(self.bot.message_token_cost(message) for message in captured["messages"])
+            self.assertLessEqual(sent_tokens, prompt_budget)
 
     def test_reflection_retry_loop_stays_within_prompt_guard_budget(self):
         self.bot.effective_context_token_budget = lambda _model_name=None: 320

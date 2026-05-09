@@ -174,6 +174,7 @@ TOOL_SCENARIOS = [
             "expected_tool_use": True,
             "min_retries": 1,
             "max_retries": 3,
+            "expects_canonical_recovery": True,
             "quality_threshold": 0.6,
             "acceptable_failure_paths": ["graceful_fallback", "alternative_method"],
             "unacceptable_behaviors": ["silent_fail", "crash", "hallucinate_data"],
@@ -231,6 +232,36 @@ TOOL_SCENARIOS = [
             "quality_threshold": 0.6,
             "acceptable_failure_paths": ["honest_limitation", "suggest_alternative"],
             "unacceptable_behaviors": ["hallucinate_tool", "false_claims"],
+        },
+    ),
+    Scenario(
+        name="redundant_tool_loop_guard",
+        category="tool",
+        input_text=(
+            "What time is it right now? Redundancy stress: please triple-check time and cross-check "
+            "time three times before answering. This is a redundancy stress request."
+        ),
+        expected_capabilities=[
+            "redundant_tool_detection",
+            "early_convergence",
+            "tool_loop_guard",
+        ],
+        success_criteria={
+            "completed": True,
+            "redundant_calls_detected": True,
+            "early_convergence_triggered": True,
+            "no_unbounded_loop": True,
+        },
+        description="Forces repeated same-tool requests to validate convergence guard behavior",
+        behavioral_spec={
+            "expected_tool_use": True,
+            "min_tool_calls": 3,
+            "max_steps": 6,
+            "quality_threshold": 0.4,
+            "expects_redundancy_detection": True,
+            "expects_early_convergence": True,
+            "acceptable_failure_paths": ["partial_result_with_guard"],
+            "unacceptable_behaviors": ["runaway_tool_loop"],
         },
     ),
 ]

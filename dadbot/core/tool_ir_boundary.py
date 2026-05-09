@@ -28,8 +28,10 @@ from dadbot.core.tool_ir import (
 # Allowed values (single source of truth at the IR boundary)
 # ---------------------------------------------------------------------------
 
-_ALLOWED_TOOLS: frozenset[str] = frozenset({"memory_lookup"})
-_ALLOWED_INTENTS: frozenset[str] = frozenset({"goal_lookup", "session_memory_fetch"})
+_ALLOWED_TOOLS: frozenset[str] = frozenset({"memory_lookup", "current_time", "echo"})
+_ALLOWED_INTENTS: frozenset[str] = frozenset(
+    {"goal_lookup", "session_memory_fetch", "time_lookup", "utility_echo"}
+)
 _ALLOWED_STATUSES: frozenset[str] = frozenset({"ok", "error", "cached", "skipped"})
 
 

@@ -17,8 +17,10 @@ def test_2026_compliance_suite_passes_all_scenarios() -> None:
     split_brain = dict(by_name.get("Memory_Integrity_Divergence") or {})
     split_evidence = dict(split_brain.get("evidence") or {})
     split_status = str(split_brain.get("status") or "")
-    # TODO: [STABILIZATION_DEBT] Reinstate strict PASS-only invariant once suite output is fully deterministic.
-    assert split_status in {"PASS", "FAIL"}
+    # [STABILIZATION_DEBT] Accepting PASS|FAIL pending Memory_Integrity_Divergence determinism.
+    # Precondition for strict PASS-only: ledger_hash must equal projection_hash for 100% of runs.
+    # Current: split_brain divergence still occurs in ~X% of runs (monitor via metrics).
+    assert split_status in {"PASS", "FAIL"}  # TODO: tighten to {"PASS"} when deterministic
     if split_status == "PASS":
         assert split_evidence.get("halt_intercepted") is True
         assert str(split_evidence.get("ledger_hash") or "")

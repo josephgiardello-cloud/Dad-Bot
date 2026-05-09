@@ -1354,11 +1354,22 @@ class TurnGraph:
             turn_context.metadata["execution_trace_contract"] = dict(contract)
             self._seal_execution_identity(turn_context)
             result = short_circuit_result if short_circuit_result is not None else turn_context.state.get("safe_result")
+            
+            # Apply early convergence: if should_converge_early flag is set, override should_end to True.
+            should_end_override = False
+            if turn_context.state.get("should_converge_early"):
+                should_end_override = True
+            
             if isinstance(result, tuple) and len(result) >= 2:
+                output, orig_should_end = result[0], result[1]
+                final_should_end = should_end_override if should_end_override else bool(orig_should_end)
+                result = (output, final_should_end)
                 self._finalize_unified_turn_trace(turn_context, result=cast("FinalizedTurnResult", result))
                 return cast(FinalizedTurnResult, result)
-            self._finalize_unified_turn_trace(turn_context, result=cast("FinalizedTurnResult | None", result))
-            return (str(result or ""), False)
+            
+            final_should_end = should_end_override
+            self._finalize_unified_turn_trace(turn_context, result=cast("FinalizedTurnResult | None", (str(result or ""), final_should_end)))
+            return (str(result or ""), final_should_end)
         except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
             current_stage = str(turn_context.state.get("_active_stage_name") or "unknown")
             self._record_failure(turn_context, stage_name=current_stage, exc=exc)

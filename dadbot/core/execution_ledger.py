@@ -20,6 +20,10 @@ from dadbot.core.ledger_backend import InMemoryLedgerBackend, SequenceValidator
 _TAIL_LIMIT = 256
 
 
+class IntegrityBreachError(RuntimeError):
+    """Raised when integrity checks require an immediate hard abort."""
+
+
 class WriteBoundaryViolationError(RuntimeError):
     """Raised when strict ledger mode rejects a write outside the boundary guard."""
 
@@ -86,6 +90,29 @@ def _chain_hash(prev_chain_hash: str, event_sha256: str) -> str:
     return hashlib.sha256(
         f"{prev_chain_hash or ''!s}:{event_sha256 or ''!s}".encode(),
     ).hexdigest()
+
+
+def _verify_persisted_chain(events: list[dict[str, Any]]) -> list[str]:
+    violations: list[str] = []
+    prev_chain = ""
+    for idx, event in enumerate(list(events or [])):
+        expected_event_sha = _event_sha256(event)
+        expected_prev = prev_chain
+        expected_chain = _chain_hash(expected_prev, expected_event_sha)
+
+        actual_event_sha = str(event.get("event_sha256") or "")
+        actual_prev = str(event.get("prev_chain_hash") or "")
+        actual_chain = str(event.get("chain_hash") or "")
+
+        if actual_event_sha and actual_event_sha != expected_event_sha:
+            violations.append(f"event[{idx}].event_sha256_mismatch")
+        if actual_prev and actual_prev != expected_prev:
+            violations.append(f"event[{idx}].prev_chain_hash_mismatch")
+        if actual_chain and actual_chain != expected_chain:
+            violations.append(f"event[{idx}].chain_hash_mismatch")
+
+        prev_chain = expected_chain
+    return violations
 
 
 class ExecutionLedger:
@@ -318,6 +345,19 @@ class ExecutionLedger:
     def load_from_backend(self) -> int:
         with self._lock:
             events = list(get_migrator().migrate_all(list(self._backend.load())))
+            has_persisted_chain = any(
+                str(event.get("chain_hash") or "")
+                or str(event.get("event_sha256") or "")
+                or str(event.get("prev_chain_hash") or "")
+                for event in events
+            )
+            if has_persisted_chain:
+                violations = _verify_persisted_chain(events)
+                if violations:
+                    raise RuntimeError(
+                        "Sovereign checksum chain verification failed while loading ledger: "
+                        + ", ".join(violations),
+                    )
             report = SequenceValidator.validate(events)
             if not bool(report.get("ok")):
                 warnings.warn(

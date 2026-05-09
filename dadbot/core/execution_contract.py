@@ -3,26 +3,47 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Awaitable, Callable
-from enum import Enum
-from typing import Any, Protocol, TypeAlias
+from dataclasses import dataclass
+from enum import StrEnum
+from typing import Any, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field  # pyright: ignore[reportMissingImports]
 
-ChunkCallback: TypeAlias = Callable[[str], Any]
-TurnResult: TypeAlias = tuple[str | None, bool]
+type ChunkCallback = Callable[[str], Any]
+type TurnResult = tuple[str | None, bool]
 
 
-class ExecutionMode(str, Enum):
+class ExecutionMode(StrEnum):
     LIVE = "live"
     REPLAY = "replay"
     RECOVERY = "recovery"
 
 
-class TurnDelivery(str, Enum):
+class TurnDelivery(StrEnum):
     SYNC = "sync"
     ASYNC = "async"
     STREAM = "stream"
     STREAM_ASYNC = "stream_async"
+
+
+@dataclass(slots=True)
+class SovereignContext:
+    session_id: str = "default"
+    tenant_id: str = "default"
+    trace_id: str = ""
+    request_id: str = ""
+    execution_mode: ExecutionMode = ExecutionMode.LIVE
+    policy_scope: str = "default"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "session_id": str(self.session_id or "default"),
+            "tenant_id": str(self.tenant_id or "default"),
+            "trace_id": str(self.trace_id or ""),
+            "request_id": str(self.request_id or ""),
+            "execution_mode": self.execution_mode.value,
+            "policy_scope": str(self.policy_scope or "default"),
+        }
 
 
 class UserInput(BaseModel):
@@ -66,6 +87,7 @@ class TurnRequest(BaseModel):
     delivery: TurnDelivery = TurnDelivery.SYNC
     session_id: str = "default"
     timeout_seconds: float | None = None
+    context: SovereignContext | None = None
 
 
 class TurnResponse(BaseModel):
@@ -135,13 +157,15 @@ def live_turn_request(
     attachments: list[dict[str, Any]] | None = None,
     *,
     delivery: TurnDelivery = TurnDelivery.SYNC,
-    session_id: str = "default",
     timeout_seconds: float | None = None,
+    context: SovereignContext | None = None,
 ) -> TurnRequest:
+    resolved_context = context or SovereignContext()
     return TurnRequest(
         input=UserInput(text=str(text or ""), attachments=list(attachments or [])),
         mode=ExecutionMode.LIVE,
         delivery=delivery,
-        session_id=str(session_id or "default"),
+        session_id=str(resolved_context.session_id or "default"),
         timeout_seconds=timeout_seconds,
+        context=resolved_context,
     )

@@ -13,6 +13,12 @@ from dadbot.pii_scrubber import scrub_memory_entry
 
 logger = logging.getLogger(__name__)
 
+# Rate-limit counter for out-of-context mutation skip warnings.
+# Reports total call count every N occurrences to surface misplaced writes
+# without flooding logs in normal operation.
+_SKIP_BOUNDARY_WARN_INTERVAL = 10
+_skip_boundary_warn_count = 0
+
 
 class MemoryCoordinator:
     """Router of memory lifecycle stages.
@@ -93,20 +99,27 @@ class MemoryCoordinator:
         return temporal
 
     def _assert_save_commit_boundary(self, turn_context=None) -> bool:
+        global _skip_boundary_warn_count
         state = getattr(turn_context, "state", None)
         if not isinstance(state, dict):
-            payload = self._temporal_debug_payload(
-                turn_context,
-                path="MemoryCoordinator._assert_save_commit_boundary:missing_turn_context",
-            )
-            logger.warning(
-                "Skipping commit-only memory mutation outside turn context node_id=%s stage=%s execution_path=%s trace_id=%s path=%s",
-                payload["node_id"],
-                payload["stage"],
-                payload["execution_path"],
-                payload["trace_id"],
-                payload["path"],
-            )
+            _skip_boundary_warn_count += 1
+            if _skip_boundary_warn_count % _SKIP_BOUNDARY_WARN_INTERVAL == 1:
+                payload = self._temporal_debug_payload(
+                    turn_context,
+                    path="MemoryCoordinator._assert_save_commit_boundary:missing_turn_context",
+                )
+                logger.warning(
+                    "Skipping commit-only memory mutation outside turn context "
+                    "(occurrence #%d, logging every %d) "
+                    "node_id=%s stage=%s execution_path=%s trace_id=%s path=%s",
+                    _skip_boundary_warn_count,
+                    _SKIP_BOUNDARY_WARN_INTERVAL,
+                    payload["node_id"],
+                    payload["stage"],
+                    payload["execution_path"],
+                    payload["trace_id"],
+                    payload["path"],
+                )
             return False
         commit_active = bool(getattr(self.bot, "_graph_commit_active", False))
         active_stage = str(state.get("_active_graph_stage") or "").strip().lower()

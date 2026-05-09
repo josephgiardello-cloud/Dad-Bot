@@ -590,6 +590,7 @@ Return ONLY valid JSON (no extra text):
         stripped_input: str,
         current_mood: str,
         plan_reason: str,
+        turn_context: Any | None = None,
     ) -> tuple[str | None, str | None]:
         title = str(params.get("title") or stripped_input[:100]).strip()
         due_text = str(params.get("due_text") or "").strip()
@@ -616,6 +617,7 @@ Return ONLY valid JSON (no extra text):
             parameters=dict(params),
             executor=_executor,
             compensating_action=_compensate,
+            turn_context=turn_context,
         )
         _result_holder.append(record.result)
         if record.status == "failed":
@@ -656,6 +658,7 @@ Return ONLY valid JSON (no extra text):
         stripped_input: str,
         current_mood: str,
         plan_reason: str,
+        turn_context: Any | None = None,
     ) -> tuple[str | None, str | None]:
         title = str(params.get("title") or stripped_input[:100]).strip()
         due_text = str(params.get("due_text") or "").strip()
@@ -667,6 +670,7 @@ Return ONLY valid JSON (no extra text):
             tool_name="set_reminder",
             parameters=dict(params),
             executor=_executor,
+            turn_context=turn_context,
         )
         if record.status == "failed":
             self.bot.update_planner_debug(
@@ -706,6 +710,7 @@ Return ONLY valid JSON (no extra text):
         stripped_input: str,
         settings: dict[str, object],
         plan_reason: str,
+        turn_context: Any | None = None,
     ) -> tuple[str | None, str | None]:
         query = str(params.get("query") or stripped_input).strip()
         normalized_query = self.bot.normalize_lookup_query(query)
@@ -715,6 +720,7 @@ Return ONLY valid JSON (no extra text):
             parameters={"query": normalized_query},
             executor=lambda: self.bot.lookup_web(normalized_query),
             # web_search is read-only; no compensating action needed
+            turn_context=turn_context,
         )
         if record.status == "failed":
             self.bot.update_planner_debug(
@@ -758,6 +764,7 @@ Return ONLY valid JSON (no extra text):
         stripped_input: str,
         settings: dict[str, object],
         plan_reason: str,
+        turn_context: Any | None = None,
     ) -> tuple[str | None, str | None]:
         query = str(params.get("query") or stripped_input).strip()
         normalized_query = self.bot.normalize_lookup_query(query)
@@ -766,6 +773,7 @@ Return ONLY valid JSON (no extra text):
             tool_name="web_search",
             parameters={"query": normalized_query},
             executor=lambda: self.bot.lookup_web(normalized_query),
+            turn_context=turn_context,
         )
         if record.status == "failed":
             self.bot.update_planner_debug(
@@ -811,6 +819,7 @@ Return ONLY valid JSON (no extra text):
         current_mood: str,
         settings: dict[str, object],
         plan_reason: str,
+        turn_context: Any | None = None,
     ) -> tuple[str | None, str | None]:
         executors = {
             _SET_REMINDER_TOOL: self._execute_set_reminder_tool_sync,
@@ -841,12 +850,14 @@ Return ONLY valid JSON (no extra text):
                 stripped_input=stripped_input,
                 current_mood=current_mood,
                 plan_reason=plan_reason,
+                turn_context=turn_context,
             )
         return executor(
             params=params,
             stripped_input=stripped_input,
             settings=settings,
             plan_reason=plan_reason,
+            turn_context=turn_context,
         )
 
     async def _execute_planned_tool_async(
@@ -858,6 +869,7 @@ Return ONLY valid JSON (no extra text):
         current_mood: str,
         settings: dict[str, object],
         plan_reason: str,
+        turn_context: Any | None = None,
     ) -> tuple[str | None, str | None]:
         executors = {
             _SET_REMINDER_TOOL: self._execute_set_reminder_tool_async,
@@ -888,12 +900,14 @@ Return ONLY valid JSON (no extra text):
                 stripped_input=stripped_input,
                 current_mood=current_mood,
                 plan_reason=plan_reason,
+                turn_context=turn_context,
             )
         return await executor(
             params=params,
             stripped_input=stripped_input,
             settings=settings,
             plan_reason=plan_reason,
+            turn_context=turn_context,
         )
 
     def _bayesian_tool_gate(
@@ -925,6 +939,7 @@ Return ONLY valid JSON (no extra text):
         stripped_input: str,
         current_mood: str,
         attachments: AttachmentList | None = None,
+        turn_context: Any | None = None,
     ) -> tuple[str | None, str | None]:
         settings = self.bot.agentic_tool_settings()
         if not settings["enabled"]:
@@ -1015,6 +1030,7 @@ Return ONLY valid JSON (no extra text):
                 current_mood=current_mood,
                 settings=settings,
                 plan_reason=gate_reason,
+                turn_context=turn_context,
             )
         except Exception as exc:
             if _is_event_loop_closed_error(exc):
@@ -1037,6 +1053,7 @@ Return ONLY valid JSON (no extra text):
         stripped_input: str,
         current_mood: str,
         attachments: AttachmentList | None = None,
+        turn_context: Any | None = None,
     ) -> tuple[str | None, str | None]:
         try:
             loop = asyncio.get_running_loop()
@@ -1139,6 +1156,7 @@ Return ONLY valid JSON (no extra text):
                 current_mood=current_mood,
                 settings=settings,
                 plan_reason=gate_reason,
+                turn_context=turn_context,
             )
         except Exception as exc:
             if _is_event_loop_closed_error(exc):
@@ -1260,6 +1278,7 @@ Return ONLY valid JSON (no extra text):
             stripped_input,
             current_mood,
             normalized_attachments,
+            turn_context=turn_context,
         )
         planner_snapshot = self.bot.planner_debug_snapshot()
         self._append_turn_pipeline_step(
@@ -1403,6 +1422,7 @@ Return ONLY valid JSON (no extra text):
             stripped_input,
             current_mood,
             normalized_attachments,
+            turn_context=turn_context,
         )
         planner_snapshot = self.bot.planner_debug_snapshot()
         self._append_turn_pipeline_step(

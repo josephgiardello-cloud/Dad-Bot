@@ -1,15 +1,202 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
-from typing import Any, Protocol, TypeAlias
+from typing import Annotated, Any, Literal, Protocol, TypeAlias
+from uuid import UUID, uuid4
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator  # pyright: ignore[reportMissingImports]
 
 Attachment: TypeAlias = dict[str, Any]
 AttachmentList: TypeAlias = list[Attachment]
 ChunkCallback: TypeAlias = Callable[[str], Any]
 PreparedTurnResult: TypeAlias = tuple[str | None, str | None, bool, str, AttachmentList]
 FinalizedTurnResult: TypeAlias = tuple[str | None, bool]
+
+
+class SovereignEventType(StrEnum):
+    PLANNER_DECISION = "PLANNER_DECISION"
+    TOOL_EXECUTION = "TOOL_EXECUTION"
+    POLICY_VETO = "POLICY_VETO"
+    LOGIC_BRANCH = "LOGIC_BRANCH"
+    GENERIC = "GENERIC"
+
+
+class PlannerDecisionPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["PLANNER_DECISION"] = "PLANNER_DECISION"
+    planner_node: str = ""
+    selected_branch: str = ""
+    rationale: str = ""
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ToolResultPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: str = ""
+    output_hash: str = ""
+    error: str = ""
+    latency_ms: float = 0.0
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class VetoReason(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code: str = ""
+    message: str = ""
+    severity: str = "high"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ToolExecutionPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["TOOL_EXECUTION"] = "TOOL_EXECUTION"
+    tool_name: str = ""
+    status: str = "pending"
+    input_hash: str = ""
+    output_hash: str = ""
+    tool_result: ToolResultPayload | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class PolicyVetoPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["POLICY_VETO"] = "POLICY_VETO"
+    policy_rule: str = ""
+    reason: str = ""
+    severity: str = "high"
+    veto_reason: VetoReason | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class LogicBranchPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["LOGIC_BRANCH"] = "LOGIC_BRANCH"
+    branch_name: str = ""
+    condition: str = ""
+    outcome: str = ""
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class GenericSovereignPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["GENERIC"] = "GENERIC"
+    data: dict[str, Any] = Field(default_factory=dict)
+
+
+SovereignEventPayload: TypeAlias = Annotated[
+    PlannerDecisionPayload
+    | ToolExecutionPayload
+    | PolicyVetoPayload
+    | LogicBranchPayload
+    | GenericSovereignPayload,
+    Field(discriminator="kind"),
+]
+
+
+def _sovereign_event_checksum(
+    *,
+    event_id: UUID,
+    timestamp: datetime,
+    turn_id: str,
+    event_type: str,
+    payload: dict[str, Any],
+    previous_checksum: str,
+) -> str:
+    canonical = {
+        "event_id": str(event_id),
+        "timestamp": timestamp.astimezone(UTC).isoformat(),
+        "turn_id": str(turn_id or ""),
+        "event_type": str(event_type or ""),
+        "payload": payload,
+        "previous_checksum": str(previous_checksum or ""),
+    }
+    digest = hashlib.sha256(
+        json.dumps(canonical, sort_keys=True, default=str).encode("utf-8"),
+    ).hexdigest()
+    return f"evtchk-{digest}"
+
+
+class SovereignEvent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    event_id: UUID = Field(default_factory=uuid4)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    turn_id: str
+    event_type: str
+    payload: SovereignEventPayload
+    previous_checksum: str = ""
+    checksum: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_type(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        normalized = dict(data)
+        payload = normalized.get("payload")
+        payload_kind = ""
+        if isinstance(payload, dict):
+            payload_kind = str(payload.get("kind") or "")
+        else:
+            payload_kind = str(getattr(payload, "kind", "") or "")
+        event_type = str(normalized.get("event_type") or "").strip()
+        normalized["event_type"] = event_type or payload_kind or SovereignEventType.GENERIC.value
+        return normalized
+
+    @model_validator(mode="after")
+    def _normalize_and_validate_checksum(self) -> SovereignEvent:
+        normalized_type = str(self.event_type or "").strip() or str(self.payload.kind)
+        if self.payload.kind != SovereignEventType.GENERIC.value and normalized_type != self.payload.kind:
+            raise ValueError(
+                f"event_type {normalized_type!r} must match payload kind {self.payload.kind!r}",
+            )
+        expected_checksum = _sovereign_event_checksum(
+            event_id=self.event_id,
+            timestamp=self.timestamp,
+            turn_id=self.turn_id,
+            event_type=normalized_type,
+            payload=self.payload.model_dump(mode="json"),
+            previous_checksum=self.previous_checksum,
+        )
+        if str(self.checksum or "").strip() and self.checksum != expected_checksum:
+            raise ValueError("checksum mismatch for sovereign event")
+        self.checksum = expected_checksum
+        return self
+
+    def verify_checksum(self, previous_checksum: str = "") -> bool:
+        expected = _sovereign_event_checksum(
+            event_id=self.event_id,
+            timestamp=self.timestamp,
+            turn_id=self.turn_id,
+            event_type=self.event_type,
+            payload=self.payload.model_dump(mode="json"),
+            previous_checksum=previous_checksum,
+        )
+        return self.previous_checksum == str(previous_checksum or "") and self.checksum == expected
+
+    def to_ledger_event(self) -> dict[str, Any]:
+        return {
+            "event_id": str(self.event_id),
+            "timestamp": self.timestamp.astimezone(UTC).isoformat(),
+            "turn_id": str(self.turn_id or ""),
+            "event_type": str(self.event_type or ""),
+            "payload": self.payload.model_dump(mode="json"),
+            "previous_checksum": str(self.previous_checksum or ""),
+            "checksum": str(self.checksum or ""),
+        }
 
 
 class SupportsDadBotAccess(Protocol):
@@ -368,7 +555,14 @@ __all__ = [
     "ChunkCallback",
     "DadBotContext",
     "FinalizedTurnResult",
+    "GenericSovereignPayload",
+    "LogicBranchPayload",
+    "PlannerDecisionPayload",
     "PreparedTurnResult",
+    "PolicyVetoPayload",
+    "SovereignEvent",
+    "SovereignEventPayload",
+    "SovereignEventType",
     "SupportsContextRuntime",
     "SupportsDadBotAccess",
     "SupportsLongTermSignals",
@@ -378,5 +572,6 @@ __all__ = [
     "SupportsRelationshipRuntime",
     "SupportsRelationshipSnapshot",
     "SupportsToneRuntime",
+    "ToolExecutionPayload",
     "SupportsTurnProcessingRuntime",
 ]

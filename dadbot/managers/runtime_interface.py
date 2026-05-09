@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import json
 import os
+import sys
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import cast
 
-from dadbot.contracts import DadBotContext, SupportsDadBotAccess
+from dadbot.contracts import DadBotContext, SovereignEvent, SovereignEventType, SupportsDadBotAccess
 from dadbot.core.execution_contract import TurnDelivery, TurnResponse, live_turn_request
 
 try:
@@ -29,6 +33,184 @@ class ChatTurn:
     assistant_text: str
     overlays: list[ChatInsight] = field(default_factory=list)
     severity_flags: list[str] = field(default_factory=list)
+
+
+class SovereignMonitor(threading.Thread):
+    """Low-priority monitor that renders live sovereign chain health in terminal."""
+
+    def __init__(
+        self,
+        *,
+        bot: object,
+        poll_seconds: float = 0.5,
+        ledger_path: str = "session_logs/relational_ledger.jsonl",
+    ) -> None:
+        super().__init__(name="SovereignMonitor", daemon=True)
+        self.bot = bot
+        self.poll_seconds = max(0.1, float(poll_seconds))
+        self.ledger_path = Path(str(ledger_path or "")).expanduser()
+        self.active = threading.Event()
+        self.active.set()
+        self._last_event_count = 0
+        self._last_flash_until = 0.0
+        self._last_ledger_size = -1
+        self._interrupt_sent = False
+
+    @staticmethod
+    def _ctx_dict(ctx: object | None, name: str) -> dict:
+        if ctx is None:
+            return {}
+        value = getattr(ctx, name, None)
+        return dict(value or {}) if isinstance(value, dict) else {}
+
+    def _active_context(self) -> object | None:
+        active_ctx = getattr(self.bot, "_active_turn_context", None)
+        if active_ctx is not None:
+            return active_ctx
+        return getattr(self.bot, "_last_turn_context", None)
+
+    @staticmethod
+    def _health_bar(valid_count: int, total_count: int, width: int = 20) -> str:
+        ratio = 1.0 if total_count <= 0 else max(0.0, min(1.0, float(valid_count) / float(total_count)))
+        filled = int(round(ratio * width))
+        return "[" + ("#" * filled) + ("-" * max(0, width - filled)) + "]"
+
+    def _verify_stream(self, stream: list[dict]) -> tuple[bool, int, str, str, bool]:
+        expected_previous = ""
+        valid_count = 0
+        last_hash = ""
+        turn_id = ""
+        veto_seen = False
+
+        for raw in list(stream or []):
+            try:
+                event = SovereignEvent.model_validate(raw)
+            except Exception as exc:  # noqa: BLE001
+                return False, valid_count, last_hash, turn_id, veto_seen
+
+            if turn_id and event.turn_id != turn_id:
+                return False, valid_count, last_hash, turn_id, veto_seen
+            turn_id = str(event.turn_id or "")
+
+            if event.previous_checksum != expected_previous:
+                return False, valid_count, last_hash, turn_id, veto_seen
+            if not event.verify_checksum(expected_previous):
+                return False, valid_count, last_hash, turn_id, veto_seen
+
+            valid_count += 1
+            expected_previous = event.checksum
+            last_hash = str(event.checksum or "")
+            if str(event.event_type or "") == SovereignEventType.POLICY_VETO.value:
+                veto_seen = True
+
+        return True, valid_count, last_hash, turn_id, veto_seen
+
+    def _scan_ledger_tail(self) -> tuple[bool, str]:
+        if not self.ledger_path:
+            return True, ""
+        try:
+            if not self.ledger_path.exists():
+                return True, ""
+            current_size = int(self.ledger_path.stat().st_size)
+            if current_size == self._last_ledger_size:
+                return True, ""
+            self._last_ledger_size = current_size
+
+            lines = self.ledger_path.read_text(encoding="utf-8").splitlines()[-8:]
+            for idx, raw in enumerate(lines):
+                if not str(raw).strip():
+                    continue
+                try:
+                    json.loads(raw)
+                except Exception:  # noqa: BLE001
+                    return False, f"malformed_jsonl_tail_line:{idx + 1}"
+            return True, ""
+        except Exception as exc:  # noqa: BLE001
+            return False, f"ledger_scan_error:{type(exc).__name__}"
+
+    @staticmethod
+    def _apply_refusal_state(ctx: object | None, reason: str) -> None:
+        if ctx is None:
+            return
+        state = getattr(ctx, "state", None)
+        metadata = getattr(ctx, "metadata", None)
+        if isinstance(state, dict):
+            state["refusal_state"] = "integrity_failure"
+            state["integrity_failure_reason"] = str(reason or "chain_corruption")
+            state["should_end"] = True
+        if isinstance(metadata, dict):
+            metadata["integrity_failure"] = True
+            metadata["integrity_failure_reason"] = str(reason or "chain_corruption")
+
+    def render_hud(
+        self,
+        *,
+        integrity: bool,
+        valid_count: int,
+        total_count: int,
+        turn_id: str,
+        last_hash: str,
+        veto_active: bool,
+        reason: str = "",
+    ) -> None:
+        safe = "[\x1b[92mSAFE\x1b[0m]"
+        corrupt = "[\x1b[91mCORRUPT\x1b[0m]"
+        status = safe if integrity else corrupt
+        bar = self._health_bar(valid_count, total_count)
+        veto_cell = "\x1b[93mVETO\x1b[0m" if veto_active else "----"
+        chain = (str(last_hash or "")[:8] or "--------")
+        line = (
+            f"\rKernel: {status} | Chain-Health {bar} {valid_count}/{total_count}"
+            f" | Veto: {veto_cell} | Turn: {str(turn_id or '')[:10]} | Chain: {chain}"
+        )
+        print(line, end="", flush=True)
+
+        if integrity:
+            self._interrupt_sent = False
+            return
+        if self._interrupt_sent:
+            return
+        msg = (
+            "\n\x1b[7m INTEGRITY FAILURE "
+            f"turn={str(turn_id or 'unknown')[:20]} reason={str(reason or 'chain_corruption')[:80]}"
+            " \x1b[0m\n"
+        )
+        sys.stderr.write(msg)
+        sys.stderr.flush()
+        self._interrupt_sent = True
+
+    def run(self) -> None:
+        while self.active.is_set():
+            ctx = self._active_context()
+            state = self._ctx_dict(ctx, "state")
+            stream = list(state.get("sovereign_events") or [])
+            integrity, valid_count, last_hash, turn_id, veto_seen = self._verify_stream(stream)
+            ledger_ok, ledger_reason = self._scan_ledger_tail()
+            if not ledger_ok:
+                integrity = False
+            reason = "" if integrity else (ledger_reason or "checksum_chain_failure")
+
+            total_count = len(stream)
+            if total_count > self._last_event_count and veto_seen:
+                self._last_flash_until = time.monotonic() + 1.0
+            self._last_event_count = total_count
+            veto_active = time.monotonic() <= self._last_flash_until
+
+            self.render_hud(
+                integrity=integrity,
+                valid_count=valid_count,
+                total_count=total_count,
+                turn_id=turn_id,
+                last_hash=last_hash,
+                veto_active=veto_active,
+                reason=reason,
+            )
+            if not integrity:
+                self._apply_refusal_state(ctx, reason)
+            time.sleep(self.poll_seconds)
+
+    def stop(self) -> None:
+        self.active.clear()
 
 
 class RuntimeInterfaceManager:
@@ -86,6 +268,33 @@ class RuntimeInterfaceManager:
         ).strip()
         self.story_mode_failed_attempts = 0
         self.story_mode_locked_until_ts = 0.0
+        self._sovereign_monitor: SovereignMonitor | None = None
+
+    @staticmethod
+    def _hud_mode_enabled() -> bool:
+        raw = str(os.environ.get("DADBOT_HUD_MODE", "")).strip().lower()
+        return raw in {"1", "true", "yes", "on"}
+
+    def _start_sovereign_monitor(self) -> None:
+        if not self._hud_mode_enabled():
+            return
+        if self._sovereign_monitor is not None and self._sovereign_monitor.is_alive():
+            return
+        monitor = SovereignMonitor(
+            bot=self.bot,
+            poll_seconds=0.5,
+            ledger_path=str(os.environ.get("DADBOT_RELATIONAL_LEDGER_PATH", "session_logs/relational_ledger.jsonl")),
+        )
+        self._sovereign_monitor = monitor
+        monitor.start()
+
+    def _stop_sovereign_monitor(self) -> None:
+        monitor = self._sovereign_monitor
+        self._sovereign_monitor = None
+        if monitor is None:
+            return
+        monitor.stop()
+        monitor.join(timeout=2.0)
 
     def _story_mode_lockout_remaining_seconds(self) -> int:
         remaining = float(getattr(self, "story_mode_locked_until_ts", 0.0) or 0.0) - time.monotonic()
@@ -554,48 +763,51 @@ class RuntimeInterfaceManager:
         if opening:
             self.bot.print_speaker_message("Dad", opening)
 
-        while True:
-            try:
-                user_input = input("Tony: ").strip()
-                if not user_input:
-                    continue
-                if self._handle_ui_command(user_input):
-                    continue
+        self._start_sovereign_monitor()
+        try:
+            while True:
+                try:
+                    user_input = input("Tony: ").strip()
+                    if not user_input:
+                        continue
+                    if self._handle_ui_command(user_input):
+                        continue
 
-                response = self.bot.execute_turn(
-                    live_turn_request(
-                        user_input,
-                        delivery=TurnDelivery.SYNC,
-                        session_id=str(getattr(self.bot, "active_thread_id", "") or "default"),
-                    ),
-                )
-                dad_reply, should_end = cast(TurnResponse, response).as_result()
-                if dad_reply:
-                    chat_turn = self._turn_from_context(str(dad_reply), getattr(self.bot, "_last_turn_context", None))
-                    self._render_turn(chat_turn)
-                    self._trigger_contextual_learning(user_input)
+                    response = self.bot.execute_turn(
+                        live_turn_request(
+                            user_input,
+                            delivery=TurnDelivery.SYNC,
+                        ),
+                    )
+                    dad_reply, should_end = cast(TurnResponse, response).as_result()
+                    if dad_reply:
+                        chat_turn = self._turn_from_context(str(dad_reply), getattr(self.bot, "_last_turn_context", None))
+                        self._render_turn(chat_turn)
+                        self._trigger_contextual_learning(user_input)
 
-                if should_end:
+                    if should_end:
+                        break
+                except KeyboardInterrupt:
+                    self.bot.persist_conversation()
+                    self.bot.print_speaker_message(
+                        "Dad",
+                        self.bot.reply_finalization.append_signoff(
+                            "Hey Tony, you okay? I'm right here.",
+                        ),
+                    )
                     break
-            except KeyboardInterrupt:
-                self.bot.persist_conversation()
-                self.bot.print_speaker_message(
-                    "Dad",
-                    self.bot.reply_finalization.append_signoff(
-                        "Hey Tony, you okay? I'm right here.",
-                    ),
-                )
-                break
-            except EOFError:
-                self.bot.persist_conversation()
-                break
-            except Exception:
-                self.bot.print_speaker_message(
-                    "Dad",
-                    self.bot.reply_finalization.append_signoff(
-                        "Sorry buddy, something went a bit wonky there. Try again?",
-                    ),
-                )
+                except EOFError:
+                    self.bot.persist_conversation()
+                    break
+                except Exception:
+                    self.bot.print_speaker_message(
+                        "Dad",
+                        self.bot.reply_finalization.append_signoff(
+                            "Sorry buddy, something went a bit wonky there. Try again?",
+                        ),
+                    )
+        finally:
+            self._stop_sovereign_monitor()
 
     def chat_loop_via_service(self, service_client, session_id=None):
         self._render_session_header("--- Dad is online via Dad Bot API a\u2764\ufe0f ---")
@@ -609,52 +821,56 @@ class RuntimeInterfaceManager:
 
         last_chat_turn: ChatTurn | None = None
 
-        while True:
-            try:
-                user_input = input("Tony: ").strip()
-                if not user_input:
-                    continue
-                if self._handle_ui_command(user_input, chat_turn=last_chat_turn):
-                    continue
+        self._start_sovereign_monitor()
+        try:
+            while True:
+                try:
+                    user_input = input("Tony: ").strip()
+                    if not user_input:
+                        continue
+                    if self._handle_ui_command(user_input, chat_turn=last_chat_turn):
+                        continue
 
-                result = service_client.chat(
-                    session_key,
-                    user_input=user_input,
-                    requested_model=self.bot.MODEL_NAME,
-                )
-                if result.session_state:
-                    self.bot.load_session_state_snapshot(result.session_state)
-                if result.active_model:
-                    self.bot.ACTIVE_MODEL = result.active_model
+                    result = service_client.chat(
+                        session_key,
+                        user_input=user_input,
+                        requested_model=self.bot.MODEL_NAME,
+                    )
+                    if result.session_state:
+                        self.bot.load_session_state_snapshot(result.session_state)
+                    if result.active_model:
+                        self.bot.ACTIVE_MODEL = result.active_model
 
-                if result.reply:
-                    chat_turn = self._turn_from_context(str(result.reply), dict(result.session_state or {}))
-                    self._render_turn(chat_turn)
-                    last_chat_turn = chat_turn
-                    self._trigger_contextual_learning(user_input)
+                    if result.reply:
+                        chat_turn = self._turn_from_context(str(result.reply), dict(result.session_state or {}))
+                        self._render_turn(chat_turn)
+                        last_chat_turn = chat_turn
+                        self._trigger_contextual_learning(user_input)
 
-                if result.should_end:
+                    if result.should_end:
+                        self.bot.persist_conversation()
+                        break
+                except KeyboardInterrupt:
+                    self.bot.persist_conversation()
+                    self.bot.print_speaker_message(
+                        "Dad",
+                        self.bot.reply_finalization.append_signoff(
+                            "Hey Tony, you okay? I'm right here.",
+                        ),
+                    )
+                    break
+                except EOFError:
                     self.bot.persist_conversation()
                     break
-            except KeyboardInterrupt:
-                self.bot.persist_conversation()
-                self.bot.print_speaker_message(
-                    "Dad",
-                    self.bot.reply_finalization.append_signoff(
-                        "Hey Tony, you okay? I'm right here.",
-                    ),
-                )
-                break
-            except EOFError:
-                self.bot.persist_conversation()
-                break
-            except Exception:
-                self.bot.print_speaker_message(
-                    "Dad",
-                    self.bot.reply_finalization.append_signoff(
-                        "Sorry buddy, something went a bit wonky there. Try again?",
-                    ),
-                )
+                except Exception:
+                    self.bot.print_speaker_message(
+                        "Dad",
+                        self.bot.reply_finalization.append_signoff(
+                            "Sorry buddy, something went a bit wonky there. Try again?",
+                        ),
+                    )
+        finally:
+            self._stop_sovereign_monitor()
 
 
-__all__ = ["RuntimeInterfaceManager"]
+__all__ = ["RuntimeInterfaceManager", "SovereignMonitor"]

@@ -60,3 +60,16 @@ _full_suite_enforce_verbose_latest.txt
 Thumbs.db
 .vscode/settings.json
 
+# Local benchmark sandboxes and generated outputs
+.venv-bfcl312/
+external/
+artifacts/external_benchmark/
+artifacts/external_benchmark_examples/
+artifacts/official_benchmarks/
+artifacts/mvf_clean_patch.diff
+artifacts/memory_manager_method_inventory.tsv
+unit_out.txt
+unit_full.txt
+integration_out.txt
+durability_out.txt
+

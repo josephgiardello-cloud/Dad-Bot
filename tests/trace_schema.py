@@ -146,7 +146,7 @@ class ToolTrace:
         try:
             status = ToolStatus(status_str)
         except ValueError:
-            status = ToolStatus.FAILED if status_str else ToolStatus.UNKNOWN
+            status = ToolStatus.FAILED if status_str else ToolStatus.SKIPPED
 
         output = (matched_result or {}).get("output")
         inputs = dict(execution.get("inputs") or execution.get("parameters") or {})
@@ -438,6 +438,7 @@ class NormalizedTrace:
         planner_output: dict | None = None,
         tools_executed: list[str] | None = None,
         memory_accessed: list[str] | None = None,
+        raw_state: dict[str, Any] | None = None,
     ) -> NormalizedTrace:
         """Build a NormalizedTrace from Phase 1 mock execution output."""
         errors = [ErrorRecord.classify(error)] if error else []
@@ -473,6 +474,7 @@ class NormalizedTrace:
             memory_accesses=memory,
             errors=errors,
             execution_mode="mock",
+            raw_state=dict(raw_state or {}),
         )
 
     @classmethod

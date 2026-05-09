@@ -2,10 +2,16 @@ from __future__ import annotations
 
 # ruff: noqa: B008, C901, PLR0913, PLR0915
 import asyncio
+import hmac
+import json
 import os
 import re
 from contextlib import asynccontextmanager
 from typing import Any, cast
+
+from dadbot.core.execution_contract import ExecutionMode, SovereignContext
+from dadbot.core.execution_ledger import IntegrityBreachError
+from dadbot.api_models import build_pulse_envelope, build_turn_envelope
 
 from .contracts import (
     DEFAULT_TENANT_ID,
@@ -38,6 +44,7 @@ try:
         WebSocketDisconnect,
     )
     from fastapi.middleware.cors import CORSMiddleware  # type: ignore[reportMissingImports]
+    from fastapi.responses import JSONResponse  # type: ignore[reportMissingImports]
 except ImportError:
     APIRouter = cast(Any, None)
     Depends = cast(Any, None)
@@ -46,6 +53,7 @@ except ImportError:
     HTTPException = cast(Any, None)
     Request = cast(Any, None)
     CORSMiddleware = cast(Any, None)
+    JSONResponse = cast(Any, None)
 
     class WebSocket:  # pragma: no cover - fallback only when FastAPI is missing.
         headers: dict[str, str]
@@ -107,6 +115,7 @@ def create_api_app(
         )
     )
     sb243_crisis_terms = [term.strip().lower() for term in sb243_crisis_terms_raw.split(",") if term.strip()]
+    dadbot_secret_key = str(os.environ.get("DADBOT_SECRET_KEY") or "").strip()
     sb243_negation_patterns: tuple[str, ...] = (
         r"\bnot suicidal\b",
         r"\bi am not suicidal\b",
@@ -186,6 +195,14 @@ def create_api_app(
             raise HTTPException(status_code=403, detail="tenant_id does not match the authenticated principal")
         return effective_tenant_id
 
+    def _is_valid_secret_key(provided_secret: str) -> bool:
+        if not dadbot_secret_key:
+            return True
+        candidate = str(provided_secret or "").strip()
+        if not candidate:
+            return False
+        return hmac.compare_digest(candidate, dadbot_secret_key)
+
     def _apply_request_identity(request_payload: dict, principal: ServicePrincipal, *, tenant_id: str) -> dict:
         resolved_payload = dict(request_payload or {})
         resolved_payload["tenant_id"] = tenant_id
@@ -244,11 +261,15 @@ def create_api_app(
         allow_origins=service_config.api.cors_origins,
         allow_credentials=False,
         allow_methods=["GET", "POST", "OPTIONS"],
-        allow_headers=["Authorization", "Content-Type", "X-Dadbot-Token"],
+        allow_headers=["Authorization", "Content-Type", "X-Dadbot-Token", "X-DADBOT-KEY"],
     )
 
     @app.middleware("http")
     async def _security_headers(request: Any, call_next):
+        if dadbot_secret_key:
+            provided_secret = request.headers.get("x-dadbot-key")
+            if not _is_valid_secret_key(str(provided_secret or "")):
+                return JSONResponse(status_code=401, content={"detail": "Invalid or missing X-DADBOT-KEY"})
         response = await call_next(request)
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("X-Frame-Options", "DENY")
@@ -544,6 +565,49 @@ def create_api_app(
             ],
         }
 
+    def _session_state_snapshot(session_id: str) -> dict[str, Any]:
+        registry = getattr(orchestrator, "session_registry", None) or getattr(_control_plane, "registry", None)
+        session = registry.get(session_id) if registry is not None and callable(getattr(registry, "get", None)) else None
+        if not isinstance(session, dict):
+            return {}
+        state = session.get("state")
+        return dict(state) if isinstance(state, dict) else {}
+
+    def _integrity_metadata_from_state(session_state: dict[str, Any]) -> dict[str, Any]:
+        last_integrity_status = dict(session_state.get("last_integrity_status") or {})
+        return {
+            "integrity_failure": not bool(last_integrity_status.get("merkle_check_passed", True)),
+            "integrity_failure_reason": str(last_integrity_status.get("reason") or ""),
+            "integrity_failure_diagnostics": dict(last_integrity_status.get("diagnostics") or {}),
+        }
+
+    def _attach_turn_contract(payload: dict[str, Any], *, session_id: str, tenant_id: str, request_id: str) -> dict[str, Any]:
+        task_payload = dict(payload.get("task") or {})
+        response_payload = dict(payload.get("response") or {})
+        session_state = dict(task_payload.get("session_state") or {})
+        turn_envelope = build_turn_envelope(
+            session_id=session_id,
+            request_id=request_id,
+            tenant_id=tenant_id,
+            response_payload=response_payload,
+            session_state=session_state,
+            session_metadata=_integrity_metadata_from_state(session_state),
+        )
+        resolved_payload = dict(payload)
+        resolved_payload["turn"] = turn_envelope.model_dump(mode="json")
+        return resolved_payload
+
+    def _build_pulse_payload(session_id: str, tenant_id: str, *, event_type: str = "pulse.snapshot") -> dict[str, Any]:
+        session_state = _session_state_snapshot(session_id)
+        pulse_envelope = build_pulse_envelope(
+            session_id=session_id,
+            tenant_id=tenant_id,
+            session_state=session_state,
+            session_metadata=_integrity_metadata_from_state(session_state),
+            event_type=event_type,
+        )
+        return pulse_envelope.model_dump(mode="json")
+
     router = APIRouter()
 
     @router.get("/health")
@@ -620,14 +684,32 @@ def create_api_app(
         if not check_request.user_input and not check_request.attachments:
             raise HTTPException(status_code=400, detail="user_input or attachments are required")
 
+        sovereign_context = SovereignContext(
+            session_id=str(session_id or "default"),
+            tenant_id=str(tenant_id or DEFAULT_TENANT_ID),
+            trace_id=str(resolved_payload.get("trace_id") or check_request.request_id or ""),
+            request_id=str(check_request.request_id or ""),
+            execution_mode=ExecutionMode.LIVE,
+            policy_scope="api.turn",
+        )
+        resolved_payload["trace_id"] = sovereign_context.trace_id
+        metadata = dict(resolved_payload.get("metadata") or {})
+        metadata["sovereign_context"] = sovereign_context.to_dict()
+        resolved_payload["metadata"] = metadata
+
         if sb243_safe_mode_enabled:
             matched_term = _detect_sb243_crisis_signal(check_request.user_input)
             if matched_term:
-                return _build_sb243_safe_mode_turn_payload(
+                return _attach_turn_contract(
+                    _build_sb243_safe_mode_turn_payload(
                     session_id=session_id,
                     tenant_id=tenant_id,
                     request_id=check_request.request_id,
                     matched_term=matched_term,
+                    ),
+                    session_id=session_id,
+                    tenant_id=tenant_id,
+                    request_id=check_request.request_id,
                 )
 
         timeout_seconds = float(resolved_payload.get("timeout_seconds") or 60.0)
@@ -636,11 +718,21 @@ def create_api_app(
 
         try:
             result = await asyncio.wait_for(result_future, timeout=timeout_seconds)
+        except IntegrityBreachError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Integrity breach hard-abort: {exc}",
+            ) from exc
         except TimeoutError as exc:
             raise HTTPException(status_code=504, detail="Timed out waiting for turn completion") from exc
 
         task_outcomes = await _control_plane.task_manager.await_session(session_id)
         for outcome in task_outcomes:
+            if isinstance(outcome, IntegrityBreachError):
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Integrity breach hard-abort: {outcome}",
+                )
             if isinstance(outcome, Exception):
                 raise HTTPException(status_code=500, detail=f"Kernel background task failure: {outcome}")
 
@@ -652,7 +744,12 @@ def create_api_app(
         if response is None and str((task_status or {}).get("status") or "").strip().lower() != "failed":
             raise HTTPException(status_code=504, detail="Timed out waiting for turn completion")
 
-        return _apply_veto_proxy_to_turn_payload(result)
+        return _attach_turn_contract(
+            _apply_veto_proxy_to_turn_payload(result),
+            session_id=session_id,
+            tenant_id=tenant_id,
+            request_id=check_request.request_id,
+        )
 
     @router.post("/sessions/{session_id}/stream")
     async def submit_stream(session_id: str, payload: dict, principal: ServicePrincipal = Depends(_http_principal)):
@@ -836,6 +933,14 @@ def create_api_app(
     @router.websocket("/sessions/{session_id}/events/stream")
     async def stream_session_events(websocket: WebSocket, session_id: str, tenant_id: str = ""):
         try:
+            provided_secret = str(
+                websocket.query_params.get("dadbot_key")
+                or websocket.query_params.get("x_dadbot_key")
+                or websocket.headers.get("x-dadbot-key")
+                or ""
+            )
+            if not _is_valid_secret_key(provided_secret):
+                raise HTTPException(status_code=401, detail="Invalid or missing X-DADBOT-KEY")
             principal = _resolve_principal(
                 _extract_bearer_token(
                     websocket.headers.get("authorization"),
@@ -874,6 +979,52 @@ def create_api_app(
         finally:
             if subscriber is not None and event_bus is not None and hasattr(event_bus, "unsubscribe"):
                 event_bus.unsubscribe(subscriber)
+
+    @router.websocket("/sessions/{session_id}/pulse/stream")
+    async def stream_session_pulse(websocket: WebSocket, session_id: str, tenant_id: str = ""):
+        try:
+            provided_secret = str(
+                websocket.query_params.get("dadbot_key")
+                or websocket.query_params.get("x_dadbot_key")
+                or websocket.headers.get("x-dadbot-key")
+                or ""
+            )
+            if not _is_valid_secret_key(provided_secret):
+                raise HTTPException(status_code=401, detail="Invalid or missing X-DADBOT-KEY")
+            principal = _resolve_principal(
+                _extract_bearer_token(
+                    websocket.headers.get("authorization"),
+                    websocket.query_params.get("access_token"),
+                )
+            )
+            _enforce_scope(principal, "read")
+            _enforce_rate_limit(principal, "read")
+            effective_tenant_id = _resolve_tenant(principal, tenant_id)
+        except HTTPException:
+            await websocket.close(code=4401)
+            return
+
+        await websocket.accept()
+        last_signature = ""
+        try:
+            while True:
+                payload = _build_pulse_payload(session_id, effective_tenant_id)
+                signature = json.dumps(payload, sort_keys=True, default=str)
+                if signature != last_signature:
+                    await websocket.send_json(payload)
+                    last_signature = signature
+                else:
+                    await websocket.send_json(
+                        {
+                            "event_type": "pulse.heartbeat",
+                            "session_id": session_id,
+                            "tenant_id": effective_tenant_id,
+                            "status": "alive",
+                        }
+                    )
+                await asyncio.sleep(1.0)
+        except WebSocketDisconnect:
+            return
 
     version_prefix = _version_prefix()
     if version_prefix:

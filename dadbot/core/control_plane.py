@@ -926,11 +926,40 @@ class ExecutionControlPlane:
             logger.warning("Trace invariant violation: no events recorded for trace %s", trace_id)
             return
 
-        # Count commit boundary markers (save nodes)
-        commit_count = sum(
-            1 for e in trace_events
-            if e.get("event_type") == "node_completed" and e.get("node_type") == "save"
-        )
+        # Count commit boundary markers from canonical TURN_EVENT payloads.
+        commit_count = 0
+        has_node_events = False
+        for event in trace_events:
+            payload = dict(event.get("payload") or {}) if isinstance(event, dict) else {}
+            event_type = str(event.get("event_type") or payload.get("event_type") or "").strip().lower()
+            stage = str(event.get("stage") or event.get("node_type") or payload.get("stage") or payload.get("node_type") or "").strip().lower()
+            if event_type in {"node_start", "node_complete", "node_completed", "turn_start", "turn_complete", "turn_failed"}:
+                has_node_events = True
+            if event_type in {"node_complete", "node_completed"} and stage == "save":
+                commit_count += 1
+
+        # Fallback to unified sink trace when ledger envelope normalization omits stage markers.
+        if commit_count == 0 and isinstance(session, dict):
+            session_state = dict(session.get("state") or {})
+            turn_trace = dict(session_state.get("turn_trace") or {})
+            if str(turn_trace.get("trace_id") or "").strip() == str(trace_id).strip():
+                fallback_commit_count = int(turn_trace.get("commit_boundary_count") or 0)
+                if fallback_commit_count > 0:
+                    commit_count = fallback_commit_count
+
+        if not has_node_events and commit_count == 0:
+            # Some persistence backends store only checkpoint summaries.
+            # In that mode commit-boundary cardinality cannot be derived here.
+            # Still record the composition contract for confluence tracking.
+            if session is not None:
+                self._record_turn_composition_contract(
+                    session=session,
+                    job=job,
+                    result=result,
+                    state_before_hash=str(state_before_hash or ""),
+                )
+            return
+
         if commit_count != 1:
             logger.warning(
                 "Trace invariant violation: expected exactly 1 commit boundary, found %d for trace %s",

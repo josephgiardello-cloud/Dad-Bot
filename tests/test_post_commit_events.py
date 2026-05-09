@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from dadbot.core.execution_ledger import IntegrityBreachError
 from dadbot.core.post_commit_events import POST_COMMIT_READY, PostCommitEvent
 from dadbot.core.runtime_errors import InvariantViolation, PersistenceFailure
 from dadbot.services.persistence import PersistenceService, StateDivergenceError
@@ -177,6 +178,32 @@ def test_finalize_turn_emits_post_commit_event_once_on_success():
     assert event.payload["turn_context"] is turn_context
     assert relationship_manager.calls == [turn_context]
     assert graph_manager.calls == [turn_context]
+
+
+def test_finalize_turn_hard_aborts_on_integrity_failure_marker():
+    runtime, _event_bus, _memory_coordinator, _relationship_manager, _graph_manager, _memory_runtime = _make_runtime()
+    turn_service = _TurnServiceStub(runtime)
+    service = PersistenceService(_PersistenceManagerStub(), turn_service=turn_service)
+    turn_context = _make_turn_context()
+    turn_context.metadata["integrity_failure"] = True
+
+    with pytest.raises(IntegrityBreachError, match="Finalization aborted due to integrity breach markers"):
+        service.finalize_turn(turn_context, ("done", False))
+
+    assert turn_service.finalize_calls == []
+
+
+def test_finalize_turn_hard_aborts_on_refusal_state_marker():
+    runtime, _event_bus, _memory_coordinator, _relationship_manager, _graph_manager, _memory_runtime = _make_runtime()
+    turn_service = _TurnServiceStub(runtime)
+    service = PersistenceService(_PersistenceManagerStub(), turn_service=turn_service)
+    turn_context = _make_turn_context()
+    turn_context.state["refusal_state"] = "integrity_failure"
+
+    with pytest.raises(IntegrityBreachError, match="Finalization aborted due to integrity breach markers"):
+        service.finalize_turn(turn_context, ("done", False))
+
+    assert turn_service.finalize_calls == []
 
 
 def test_finalize_turn_does_not_emit_post_commit_event_on_failed_commit():

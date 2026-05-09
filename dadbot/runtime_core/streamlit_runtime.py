@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any, cast
 
 from dadbot.core.dadbot import DadBot
-from dadbot.core.execution_contract import TurnDelivery, TurnResponse, live_turn_request
+from dadbot.core.execution_contract import SovereignContext, TurnDelivery, TurnResponse, live_turn_request
 
 
 @dataclass
@@ -151,7 +151,7 @@ class UIRuntimeAPI:
                 str(content or ""),
                 attachments=list(attachments or []),
                 delivery=TurnDelivery.SYNC,
-                session_id=normalized_thread_id,
+                context=SovereignContext(session_id=normalized_thread_id),
             ),
         )
         reply, should_end = cast(TurnResponse, response).as_result()

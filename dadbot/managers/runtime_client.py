@@ -120,7 +120,16 @@ class RuntimeClientManager:
                 except RuntimeError:
                     loop = None
                 if loop is not None and loop.is_running():
-                    loop.create_task(_await_close_result())
+                    _task = loop.create_task(_await_close_result())
+
+                    def _consume_aclose_exc(t: asyncio.Task) -> None:
+                        exc = t.exception() if not t.cancelled() else None
+                        if exc is not None:
+                            logger.debug(
+                                "Async client close error (ignored): %s", exc
+                            )
+
+                    _task.add_done_callback(_consume_aclose_exc)
                 else:
                     asyncio.run(_await_close_result())
             return

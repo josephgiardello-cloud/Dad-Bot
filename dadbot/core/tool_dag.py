@@ -367,8 +367,8 @@ class ToolPlanCompiler:
     No hidden nondeterminism in compilation.
     """
 
-    _VALID_TOOLS = frozenset({"memory_lookup"})
-    _VALID_INTENTS = frozenset({"goal_lookup", "session_memory_fetch"})
+    _VALID_TOOLS = frozenset({"memory_lookup", "current_time", "echo"})
+    _VALID_INTENTS = frozenset({"goal_lookup", "session_memory_fetch", "time_lookup", "utility_echo"})
 
     def compile(self, plan: ToolPlanIR) -> ToolDAG:
         """Compile ToolPlanIR → ToolDAG.

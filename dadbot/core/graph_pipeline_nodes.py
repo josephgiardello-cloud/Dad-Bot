@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import inspect
 import logging
+from collections.abc import Mapping
 from typing import Any, Protocol
 
+from dadbot.contracts import PolicyVetoPayload, SovereignEvent, SovereignEventType, VetoReason
 from dadbot.core.cognition_event import CognitionEnvelope, emit_cognition
 from dadbot.core.critic import CritiqueEngine
 from dadbot.core.graph_context import TurnContext
@@ -476,6 +478,51 @@ class InferenceNode(_NodeContractMixin):
 class SafetyNode(_NodeContractMixin):
     name = "safety"
 
+    @staticmethod
+    def _emit_policy_veto_event(turn_context: TurnContext, decision: Any) -> None:
+        state = getattr(turn_context, "state", None)
+        metadata = getattr(turn_context, "metadata", None)
+        if not isinstance(state, dict) or not isinstance(metadata, dict):
+            return
+
+        details = dict(getattr(decision, "details", {}) or {})
+        trace = dict(getattr(decision, "trace", {}) or {})
+        reason = str(
+            details.get("reason")
+            or details.get("error")
+            or trace.get("reason")
+            or "policy_blocked_output",
+        )
+        severity = "critical" if str(getattr(decision, "action", "")).strip().lower() in {"denied", "deny", "blocked", "rejected"} else "high"
+        previous_checksum = str(metadata.get("sovereign_event_checksum") or "")
+        event = SovereignEvent(
+            turn_id=str(getattr(turn_context, "trace_id", "") or ""),
+            event_type=SovereignEventType.POLICY_VETO.value,
+            payload=PolicyVetoPayload(
+                policy_rule=str(getattr(decision, "step_name", "") or "safety_policy"),
+                reason=reason,
+                severity=severity,
+                veto_reason=VetoReason(
+                    code=str(getattr(decision, "action", "") or "policy_veto"),
+                    message=reason,
+                    severity=severity,
+                    metadata={
+                        "step_name": str(getattr(decision, "step_name", "") or ""),
+                    },
+                ),
+                metadata={
+                    "trace": trace if isinstance(trace, Mapping) else {},
+                    "details": details,
+                },
+            ),
+            previous_checksum=previous_checksum,
+        )
+        stream = list(state.get("sovereign_events") or [])
+        stream.append(event.to_ledger_event())
+        state["sovereign_events"] = stream
+        metadata["sovereign_event_checksum"] = event.checksum
+        metadata["sovereign_event_count"] = len(stream)
+
     async def execute(self, registry: Any, turn_context: TurnContext) -> None:
         service = registry.get("safety_service")
         candidate = turn_context.state.get("candidate")
@@ -517,6 +564,9 @@ class SafetyNode(_NodeContractMixin):
             },
         )
         turn_context.state["policy_trace_events"] = policy_events
+        action = str(decision.action or "").strip().lower()
+        if action in {"denied", "deny", "blocked", "rejected"}:
+            self._emit_policy_veto_event(turn_context, decision)
         if decision.action == "passthrough":
             turn_context.state["safety_passthrough"] = {
                 "reason": "no_safety_manager",

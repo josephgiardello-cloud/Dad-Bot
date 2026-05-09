@@ -21,6 +21,7 @@ from dadbot.core.goals import (
     detect_goal_in_input,
 )
 from dadbot.core.graph import TurnContext
+from dadbot.core.tool_ir import ToolContractResult, ToolStatus
 from dadbot.core.nodes import ToolExecutorNode, ToolRouterNode
 from dadbot.core.orchestrator import DadBotOrchestrator
 from dadbot.core.planner import (
@@ -301,6 +302,23 @@ class TestPlannerNode:
         assert [r.get("intent") for r in requests] == ["goal_lookup", "session_memory_fetch"]
         assert all(str(r.get("tool_name") or "") == "memory_lookup" for r in requests)
 
+    @pytest.mark.asyncio
+    async def test_planner_adds_current_time_request_for_time_question(self):
+        planner = PlannerNode()
+        ctx = _make_context(
+            "What time is it right now?",
+            tool_ir={"requests": []},
+        )
+        ctx.metadata["tool_system_v2_enabled"] = True
+
+        result = await planner.run(ctx)
+
+        requests = list(result.state.get("tool_ir", {}).get("requests") or [])
+        tool_names = [str(r.get("tool_name") or "") for r in requests]
+        intents = [str(r.get("intent") or "") for r in requests]
+        assert "current_time" in tool_names
+        assert "time_lookup" in intents
+
     def test_turn_plan_trivial_factory(self):
         """TurnPlan.trivial() returns a valid, minimal plan dict."""
         plan = TurnPlan.trivial()
@@ -410,6 +428,90 @@ class TestToolRoutingPipeline:
         assert len(tool_results) == 2
         assert all(str(item.get("status") or "") == "ok" for item in tool_results)
         assert bool(result.metadata.get("tool_execution_graph_hash")) is True
+
+    @pytest.mark.asyncio
+    async def test_executor_emits_tool_failure_semantics(self):
+        executor = ToolExecutorNode()
+        ctx = _make_context(
+            "execute tools",
+            tool_ir={
+                "execution_plan": [
+                    {
+                        "sequence": 0,
+                        "tool_name": "memory_lookup",
+                        "args": {"scope": "session"},
+                        "intent": "session_memory_fetch",
+                        "expected_output": "session_memory_context",
+                        "priority": 20,
+                        "deterministic_id": "",
+                    },
+                ]
+            },
+        )
+        for item in ctx.state["tool_ir"]["execution_plan"]:
+            from dadbot.core.tool_ir import deterministic_tool_id
+
+            item["deterministic_id"] = deterministic_tool_id(item["tool_name"], item["args"])
+
+        result = await executor.run(ctx)
+
+        semantics = list(result.state.get("tool_failure_semantics") or [])
+        assert len(semantics) == 1
+        assert semantics[0].get("failure_class") == "bad_input"
+        assert semantics[0].get("tool_name") == "memory_lookup"
+
+    @pytest.mark.asyncio
+    async def test_executor_records_clean_recovery_path(self, monkeypatch):
+        executor = ToolExecutorNode()
+        ctx = _make_context(
+            "execute tools",
+            tool_ir={
+                "execution_plan": [
+                    {
+                        "sequence": 0,
+                        "tool_name": "memory_lookup",
+                        "args": {"scope": "session"},
+                        "intent": "session_memory_fetch",
+                        "expected_output": "session_memory_context",
+                        "priority": 20,
+                        "deterministic_id": "",
+                    },
+                ]
+            },
+        )
+        for item in ctx.state["tool_ir"]["execution_plan"]:
+            from dadbot.core.tool_ir import deterministic_tool_id
+
+            item["deterministic_id"] = deterministic_tool_id(item["tool_name"], item["args"])
+
+        call_count = {"count": 0}
+
+        def fake_dispatch(name, args, context):
+            call_count["count"] += 1
+            if call_count["count"] == 1:
+                return ToolContractResult(
+                    tool_name=name,
+                    status=ToolStatus.RETRY,
+                    data=None,
+                    error_context={"message": "retry"},
+                    repair_hint="retry once",
+                )
+            return ToolContractResult(
+                tool_name=name,
+                status=ToolStatus.SUCCESS,
+                data={"ok": True},
+                error_context={},
+            )
+
+        monkeypatch.setattr("dadbot.core.nodes.dispatch_registered_tool", fake_dispatch)
+
+        result = await executor.run(ctx)
+
+        recovery_paths = list(result.state.get("tool_recovery_paths") or [])
+        assert len(recovery_paths) == 1
+        assert recovery_paths[0].get("recovery_path") == "clean_recovery"
+        assert recovery_paths[0].get("recovered") is True
+        assert recovery_paths[0].get("attempts") == 2
 
 
 # ---------------------------------------------------------------------------

@@ -8,7 +8,6 @@ from either location without duplication.
 from __future__ import annotations
 
 from dadbot.contracts import (
-    ExecutionMode,
     GenericSovereignPayload,
     LogicBranchPayload,
     PlannerDecisionPayload,
@@ -16,11 +15,18 @@ from dadbot.contracts import (
     SovereignEvent,
     SovereignEventPayload,
     ToolExecutionPayload,
-    TurnRequest,
+)
+from dadbot.base.memory_base import (
+    GraphManagerProtocol,
+    MemoryIntegrationMixin,
+    MemoryIntegrationProtocol,
+    MemoryLifecycleMixin,
+    MemoryLifecycleProtocol,
+    MemorySearchMixin,
+    MemorySearchProtocol,
 )
 
 __all__ = [
-    "ExecutionMode",
     "GenericSovereignPayload",
     "LogicBranchPayload",
     "PlannerDecisionPayload",
@@ -28,5 +34,11 @@ __all__ = [
     "SovereignEvent",
     "SovereignEventPayload",
     "ToolExecutionPayload",
-    "TurnRequest",
+    "GraphManagerProtocol",
+    "MemoryIntegrationMixin",
+    "MemoryIntegrationProtocol",
+    "MemoryLifecycleMixin",
+    "MemoryLifecycleProtocol",
+    "MemorySearchMixin",
+    "MemorySearchProtocol",
 ]

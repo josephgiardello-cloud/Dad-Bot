@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, AbstractContextManager
 from contextvars import ContextVar
 
 _KERNEL_SCOPE: ContextVar[bool] = ContextVar("dadbot_kernel_scope", default=False)
@@ -26,7 +26,7 @@ class KernelBoundary:
 
     @staticmethod
     @contextmanager
-    def open_scope():
+    def open_scope() -> AbstractContextManager[None]:
         token = _KERNEL_SCOPE.set(True)
         try:
             yield

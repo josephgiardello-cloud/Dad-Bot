@@ -63,6 +63,7 @@ class DadBotActionMixin:
         parameters: dict[str, Any] | None = None,
         executor: Callable[[], Any],
         compensating_action: Callable[[], None] | None = None,
+        turn_context: Any | None = None,
     ):
         """Runtime-owned entrypoint for the canonical tool execution spine."""
         return _execute_tool(
@@ -70,6 +71,7 @@ class DadBotActionMixin:
             parameters=parameters,
             executor=executor,
             compensating_action=compensating_action,
+            turn_context=turn_context,
         )
 
     def _queue_or_apply_memory_patch(self, **patch):

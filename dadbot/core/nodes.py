@@ -15,6 +15,7 @@ from dadbot.core.tool_ir import ToolContractResult, ToolStatus, deterministic_to
 _MAX_DELEGATION_DEPTH: int = 2
 _MAX_DELEGATION_SUBTASKS: int = 8
 _ALLOWED_MEMORY_INTENTS = frozenset({"goal_lookup", "session_memory_fetch"})
+_ALLOWED_UTILITY_INTENTS = frozenset({"time_lookup", "utility_echo"})
 
 
 @dataclass(frozen=True)
@@ -173,16 +174,30 @@ class ToolRouterNode:
 class ToolExecutorNode:
     name = "tool_executor"
     _MAX_RETRY_ATTEMPTS: int = 1
+    _MAX_SAME_TOOL_CALLS: int = 2  # Penalize calls to same tool > 2x per turn
 
     async def run(self, context: TurnContext) -> TurnContext:
         tool_ir = dict(context.state.get("tool_ir") or {})
         executions: list[dict[str, Any]] = []
         results: list[dict[str, Any]] = []
+        failure_semantics: list[dict[str, Any]] = []
+        recovery_paths: list[dict[str, Any]] = []
+        
+        # Track tool calls for redundancy detection.
+        tool_call_counts: dict[str, int] = {}
+        redundant_calls: list[str] = []
+        
         for item in list(tool_ir.get("execution_plan") or []):
             seq = int(item.get("sequence") or 0)
             name = str(item.get("tool_name") or "").strip().lower()
             args = dict(item.get("args") or {})
             det_id = str(item.get("deterministic_id") or deterministic_tool_id(name, args))
+            
+            # Track tool call frequency for redundancy detection.
+            tool_call_counts[name] = tool_call_counts.get(name, 0) + 1
+            if tool_call_counts[name] > self._MAX_SAME_TOOL_CALLS:
+                redundant_calls.append(f"{name}:call_{tool_call_counts[name]}")
+            
             start = time.perf_counter()
             remediation_log: list[dict[str, Any]] = []
             raw: Any = None
@@ -224,7 +239,7 @@ class ToolExecutorNode:
                     continue
                 break
             if isinstance(raw, ToolContractResult):
-                status = raw.status.value
+                status = "ok" if raw.status == ToolStatus.SUCCESS else raw.status.value
                 output = raw
             else:
                 status = "ok"
@@ -247,11 +262,110 @@ class ToolExecutorNode:
                 "deterministic_id": det_id,
                 "remediation": remediation_log,
             })
+            failure_record = self._failure_semantics_for_result(
+                tool_name=name,
+                status=status,
+                output=output,
+                remediation=remediation_log,
+            )
+            if failure_record is not None:
+                failure_semantics.append(failure_record)
+            recovery_paths.append(
+                self._canonical_recovery_path_for_result(
+                    tool_name=name,
+                    status=status,
+                    remediation=remediation_log,
+                    attempts=attempt + 1,
+                    failure_record=failure_record,
+                ),
+            )
         tool_ir["executions"] = executions
         context.state["tool_ir"] = tool_ir
         context.state["tool_results"] = results
+        context.state["tool_failure_semantics"] = failure_semantics
+        context.state["tool_recovery_paths"] = recovery_paths
+        context.state["tool_call_counts"] = tool_call_counts
+        context.state["tool_redundant_calls"] = redundant_calls
+        
+        # If redundancy detected, set early convergence flag to trigger exit after scoring
+        if len(redundant_calls) > 0:
+            context.state["should_converge_early"] = True
+            context.state["convergence_reason"] = f"tool_redundancy: {len(redundant_calls)} redundant calls"
+        
         context.metadata["tool_execution_graph_hash"] = _stable_sha256({"executions": executions, "results": results})
         return context
+
+    @staticmethod
+    def _failure_semantics_for_result(
+        *,
+        tool_name: str,
+        status: str,
+        output: Any,
+        remediation: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        normalized = str(status or "").strip().lower()
+        if normalized in {"ok", "success", "cached", "skipped"}:
+            return None
+
+        failure_class = {
+            "retry": "timeout",
+            "contract_violation": "bad_input",
+            "fatal": "runtime_exception",
+            "error": "runtime_exception",
+            "failed": "runtime_exception",
+            "fail": "runtime_exception",
+        }.get(normalized, "runtime_exception")
+
+        reason = normalized
+        if isinstance(output, ToolContractResult):
+            reason = str(output.repair_hint or normalized)
+        elif isinstance(output, dict):
+            reason = str(output.get("error") or output.get("message") or normalized)
+
+        return {
+            "tool_name": str(tool_name or ""),
+            "failure_class": failure_class,
+            "status": normalized,
+            "reason": reason,
+            "remediation": list(remediation or []),
+        }
+
+    @staticmethod
+    def _canonical_recovery_path_for_result(
+        *,
+        tool_name: str,
+        status: str,
+        remediation: list[dict[str, Any]],
+        attempts: int,
+        failure_record: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        normalized = str(status or "").strip().lower()
+        recovered = normalized in {"ok", "success", "cached", "skipped"}
+        remediation_actions = [
+            str(step.get("action") or "").strip().lower()
+            for step in list(remediation or [])
+        ]
+        had_recovery_attempt = any(
+            action in {"retry", "fallback", "downgrade"} for action in remediation_actions
+        )
+
+        if not remediation:
+            path = "direct_success"
+        elif recovered and had_recovery_attempt:
+            path = "clean_recovery"
+        elif had_recovery_attempt:
+            path = "partial_recovery"
+        else:
+            path = "failed_recovery"
+
+        return {
+            "tool_name": str(tool_name or ""),
+            "attempts": max(int(attempts), 1),
+            "recovered": recovered,
+            "recovery_path": path,
+            "failure_class": str((failure_record or {}).get("failure_class") or ""),
+            "remediation_actions": remediation_actions,
+        }
 
 
 class InferenceNode:
@@ -345,6 +459,28 @@ class SaveNode:
     async def run(self, context: TurnContext) -> TurnContext:
         if getattr(context, "temporal", None) is None:
             raise RuntimeError("SaveNode requires temporal context")
+        
+        # Populate UX trace with timing signals before persistence.
+        # These will be captured in raw_state for scoring downstream.
+        ux_trace = dict(context.state.get("ux_trace") or context.state.get("ux_feedback") or {})
+        ux_trace["time_to_first_token_ms"] = float(context.compute_time_to_first_token_ms())
+        ux_trace["time_to_resolution_ms"] = float(context.compute_time_to_resolution_ms())
+        # Backtrack count: number of critique loops in inference node (proxy for plan revisions).
+        critique_record = dict(context.state.get("critique_record") or {})
+        ux_trace["backtrack_count"] = int(critique_record.get("iteration", 0))
+        # Clarity markers: detect structured vs fragmented output patterns.
+        candidate = context.state.get("candidate")
+        reply = str(candidate[0] if isinstance(candidate, tuple) else candidate or "")
+        clarity_markers = []
+        if reply.count("\n") > reply.count("  "):  # More newlines than spaces = structured
+            clarity_markers.append("structured_newlines")
+        if ":" in reply and reply.count(":") > 2:  # Multiple colons suggest key-value pairs
+            clarity_markers.append("key_value_format")
+        if any(bullet in reply for bullet in ["• ", "- ", "* ", "1. ", "• "]):  # Bullet points
+            clarity_markers.append("bullet_list")
+        ux_trace["clarity_markers"] = clarity_markers
+        context.state["ux_trace"] = ux_trace
+        
         if self.mgr is None:
             context.fidelity.save = True
             return context
@@ -510,13 +646,13 @@ register_tool(
     "echo",
     handler=_builtin_echo,
     required_args={"message"},
-    allowed_intents=None,
+    allowed_intents=set(_ALLOWED_UTILITY_INTENTS),
 )
 register_tool(
     "current_time",
     handler=_builtin_current_time,
     required_args=set(),
-    allowed_intents=None,
+    allowed_intents=set(_ALLOWED_UTILITY_INTENTS),
 )
 
 

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
@@ -95,6 +96,8 @@ class TurnContext:
     fidelity: TurnFidelity = field(default_factory=TurnFidelity)
     # Optional deterministic virtual clock; TemporalNode uses it when set instead of wall time.
     virtual_clock: VirtualClock | None = field(default=None)
+    # Turn start timestamp in milliseconds (captured at context initialization for UX timing).
+    turn_start_time_ms: float = field(default_factory=lambda: time.time() * 1000)
     # Hash-chain pointers for checkpoint integrity across load/save boundaries.
     last_checkpoint_hash: str = field(default="", init=False)
     prev_checkpoint_hash: str = field(default="", init=False)
@@ -242,3 +245,32 @@ class TurnContext:
             self.phase_history.append(transition)
             transitions.append(transition)
         return transitions
+
+    def compute_time_to_first_token_ms(self) -> float:
+        """Calculate milliseconds from turn start to first inference token.
+        
+        This is approximated as the time until the inference stage begins,
+        which represents when the LLM starts generating output.
+        """
+        if not self.stage_traces:
+            return 0.0
+        # First token approximately when inference stage starts (after planning/context build)
+        accumulated_ms = 0.0
+        for trace in self.stage_traces:
+            if trace.stage == "inference":
+                return accumulated_ms
+            accumulated_ms += trace.duration_ms
+        # If no inference stage found, return total elapsed time
+        return accumulated_ms
+
+    def compute_time_to_resolution_ms(self) -> float:
+        """Calculate milliseconds from turn start to final answer resolution.
+        
+        This is the total execution time: when SaveNode completes or full pipeline finishes.
+        """
+        if not self.stage_traces:
+            return 0.0
+        accumulated_ms = 0.0
+        for trace in self.stage_traces:
+            accumulated_ms += trace.duration_ms
+        return accumulated_ms

@@ -129,6 +129,17 @@ def _instantiate(path: str, *args: Any, **kwargs: Any) -> Any:
     return _resolve_attr(path)(*args, **kwargs)
 
 
+def _build_sovereign_memory_safe() -> Any:
+    try:
+        return _instantiate("dadbot.services.vector_memory:build_sovereign_memory")
+    except ImportError as exc:
+        _registry_logger.warning(
+            "SovereignMemory unavailable during boot; continuing without it: %s",
+            exc,
+        )
+        return None
+
+
 class ServiceRegistry:
     """Dependency-injection registry for DadBot manager instances.
 
@@ -443,6 +454,11 @@ def wire_runtime_managers(bot: Any) -> None:
                 "dadbot.managers.memory_coordination:MemoryCoordinator",
                 bot,
             ),
+        ),
+        ServiceDescriptor(
+            "sovereign_memory",
+            _build_sovereign_memory_safe,
+            depends_on=(),
         ),
         # ── safety / profile / context ──────────────────────────────────────
         ServiceDescriptor(

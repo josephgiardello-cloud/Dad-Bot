@@ -176,6 +176,15 @@ class TurnTrace:
             return
         self.trace_events.append(dict(event))
 
+    def get_current_state(self) -> dict[str, Any]:
+        """Reconstruct the latest projected state by reducing trace events in-order."""
+        state: dict[str, Any] = {}
+        for raw_event in list(self.trace_events or []):
+            if not isinstance(raw_event, dict):
+                continue
+            state = _reduce_trace_event_state(state, raw_event)
+        return state
+
     def finalize(self) -> None:
         """Mark trace as complete and compute integrity checks."""
         self.end_time = time.time()
@@ -332,3 +341,26 @@ def record_event_to_current_trace(event: dict[str, Any]) -> None:
     trace = get_current_trace()
     if trace is not None:
         trace.record_event(event)
+
+
+def _reduce_trace_event_state(state: dict[str, Any], event: dict[str, Any]) -> dict[str, Any]:
+    next_state = dict(state or {})
+    event_type = str(event.get("event_type") or event.get("type") or "")
+    checksum = str(event.get("checksum") or event.get("chain_hash") or "")
+    payload = dict(event.get("payload") or event.get("detail") or {})
+
+    next_state["last_event_type"] = event_type
+    next_state["last_checksum"] = checksum
+    next_state["event_count"] = int(next_state.get("event_count") or 0) + 1
+    if payload:
+        next_state["last_payload"] = payload
+
+    if event_type == "PLANNER_DECISION":
+        next_state["planner"] = payload
+    elif event_type == "TOOL_EXECUTION":
+        next_state["last_tool_execution"] = payload
+    elif event_type == "POLICY_VETO":
+        next_state["last_policy_veto"] = payload
+    elif event_type == "LOGIC_BRANCH":
+        next_state["last_logic_branch"] = payload
+    return next_state

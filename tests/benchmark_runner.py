@@ -122,6 +122,8 @@ class BenchmarkRunner:
         sandbox_outputs: bool = True,
         sandbox_root: str | None = None,
         disable_persistence_disk: bool = True,
+        use_offline_llm_stub: bool = False,
+        cert_mode: bool = False,
     ):
         """Initialize benchmark runner.
 
@@ -129,14 +131,21 @@ class BenchmarkRunner:
             strict: Whether to enforce strict validation.
             mode: Execution mode ("mock" or "orchestrator").
             orchestrator: Pre-initialized DadBotOrchestrator instance (required for orchestrator mode).
+            cert_mode: Certification mode; reject offline stubs and enforce strict execution.
         """
+        # Cert mode: reject offline stub.
+        if bool(cert_mode) and bool(use_offline_llm_stub):
+            raise ValueError("cert_mode and use_offline_llm_stub are mutually exclusive.")
+        
         self.strict = strict
         self.mode = mode
         self.orchestrator = orchestrator
+        self.cert_mode = bool(cert_mode)
         self._session_id = f"benchmark_session_{uuid.uuid4().hex[:8]}"
         self._turn_counter = 0
         self.sandbox_outputs = bool(sandbox_outputs)
         self.disable_persistence_disk = bool(disable_persistence_disk)
+        self.use_offline_llm_stub = bool(use_offline_llm_stub)
         self._sandbox_root = Path(sandbox_root) if sandbox_root else None
         self._sandbox_tmp: tempfile.TemporaryDirectory[str] | None = None
         self._sandbox_applied = False
@@ -144,6 +153,100 @@ class BenchmarkRunner:
         if mode == "orchestrator" and orchestrator is None:
             logger.warning("⚠️  Orchestrator mode selected but no orchestrator provided. Falling back to mock mode.")
             self.mode = "mock"
+
+    def _scenario_session_id(self, scenario: Scenario) -> str:
+        suffix = uuid.uuid5(uuid.NAMESPACE_DNS, str(scenario.name or "scenario")).hex[:12]
+        return f"{self._session_id}_{suffix}"
+
+    @staticmethod
+    def _extract_tools_from_state(state: dict[str, Any]) -> list[str]:
+        tool_ir = dict(state.get("tool_ir") or {})
+        executions = list(tool_ir.get("executions") or [])
+        tool_results = list(state.get("tool_results") or [])
+        execution_plan = list(tool_ir.get("execution_plan") or [])
+        requests = list(tool_ir.get("requests") or [])
+
+        names: list[str] = []
+        for item in executions:
+            if isinstance(item, dict):
+                name = str(item.get("tool_name") or "").strip()
+                if name and name.lower() != "safety":
+                    names.append(name)
+        if not names:
+            for item in tool_results:
+                if isinstance(item, dict):
+                    name = str(item.get("tool_name") or "").strip()
+                    if name and name.lower() != "safety":
+                        names.append(name)
+        if not names:
+            for item in execution_plan:
+                if isinstance(item, dict):
+                    name = str(item.get("tool_name") or "").strip()
+                    if name and name.lower() != "safety":
+                        names.append(name)
+        if not names:
+            for item in requests:
+                if isinstance(item, dict):
+                    name = str(item.get("tool_name") or "").strip()
+                    if name and name.lower() != "safety":
+                        names.append(name)
+        # Preserve order while deduplicating.
+        return list(dict.fromkeys(names))
+
+    @staticmethod
+    def _extract_planner_payload_from_state(state: dict[str, Any]) -> dict[str, Any] | None:
+        plan = state.get("plan")
+        tool_ir = dict(state.get("tool_ir") or {})
+        detected_goals = list(state.get("detected_goals") or state.get("new_goals") or [])
+        task_decomposition = dict(state.get("task_decomposition") or {})
+
+        if isinstance(plan, list):
+            plan_steps = [dict(step) if isinstance(step, dict) else {"step": str(step)} for step in plan]
+        elif isinstance(plan, dict):
+            plan_steps = [dict(plan)]
+        else:
+            plan_steps = []
+
+        dependencies = list(task_decomposition.get("dependencies") or [])
+        requests = list(tool_ir.get("requests") or [])
+        execution_plan = list(tool_ir.get("execution_plan") or [])
+
+        if not plan_steps and not detected_goals and not requests and not execution_plan:
+            return None
+
+        return {
+            "intent_type": str(state.get("intent_type") or "task_execution"),
+            "strategy": str(state.get("strategy") or "direct_resolution"),
+            "plan_steps": plan_steps,
+            "goal_count": len(detected_goals),
+            "replan_count": int(state.get("replan_count") or 0),
+            "dependency_count": len(dependencies),
+            "tool_request_count": len(requests),
+            "tool_plan_count": len(execution_plan),
+        }
+
+    @staticmethod
+    def _infer_completion_from_context(
+        state: dict[str, Any],
+        response_text: str,
+        fallback: bool,
+    ) -> bool:
+        execution_trace = list(state.get("execution_trace") or [])
+        turn_trace = dict(state.get("turn_trace") or {})
+
+        if execution_trace:
+            if any(str(item.get("event_type") or "") == "turn_failed" for item in execution_trace if isinstance(item, dict)):
+                return False
+            if any(str(item.get("event_type") or "") == "turn_complete" for item in execution_trace if isinstance(item, dict)):
+                return bool(str(response_text or "").strip())
+
+        if isinstance(turn_trace.get("completed"), bool):
+            return bool(turn_trace.get("completed"))
+
+        if state.get("error"):
+            return False
+
+        return bool(fallback)
 
     def close(self) -> None:
         sandbox_tmp = self._sandbox_tmp
@@ -456,10 +559,10 @@ class BenchmarkRunner:
             self._sandbox_applied = True
             return
 
-        # Phase 4A tests validate orchestrator behavior, not external model latency.
         # Keep maintenance deterministic and offline-safe by avoiding network-backed
         # summary refresh work from background threads.
-        self._stabilize_llm_calls(bot)
+        if self._should_use_offline_llm_stub():
+            self._stabilize_llm_calls(bot)
         self._stabilize_background_maintenance(bot)
 
         if self.sandbox_outputs:
@@ -527,6 +630,17 @@ class BenchmarkRunner:
                 runtime_client.call_ollama_chat_with_model = _offline_llm_response
         except Exception:
             logger.debug("Failed to patch runtime client LLM methods for benchmark sandbox", exc_info=True)
+
+    def _should_use_offline_llm_stub(self) -> bool:
+        if self.use_offline_llm_stub:
+            return True
+        try:
+            import os
+
+            raw = str(os.environ.get("DADBOT_BENCHMARK_OFFLINE_LLM", "") or "").strip().lower()
+            return raw in {"1", "true", "yes", "on"}
+        except Exception:
+            return False
 
     @staticmethod
     def _stabilize_background_maintenance(bot: Any) -> None:
@@ -613,36 +727,42 @@ class BenchmarkRunner:
         try:
             self._turn_counter += 1
             self._ensure_orchestrator_sandbox()
+            scenario_session_id = self._scenario_session_id(scenario)
 
             # Execute through orchestrator
             response_text, success = await self.orchestrator.handle_turn(
                 user_input=scenario.input_text,
-                session_id=self._session_id,
+                session_id=scenario_session_id,
                 timeout_seconds=15.0,
-                confluence_key=confluence_key_for_turn(self._session_id, scenario.input_text),
+                confluence_key=confluence_key_for_turn(scenario_session_id, scenario.input_text),
+                metadata={
+                    "tool_system_v2_enabled": True,
+                    "benchmark_mode": True,
+                },
             )
 
-            trace.completed = success
+            trace.completed = bool(str(response_text or "").strip())
             trace.steps = 1  # Will be updated with real step count from context
             trace.final_response = str(response_text or "")
 
             # Capture trace from orchestrator context
             context = getattr(self.orchestrator, "_last_turn_context", None)
             if context:
+                state = dict(getattr(context, "state", {}) or {})
                 # Planner output
-                plan = context.state.get("plan")
-                if plan:
-                    trace.planner_output = plan if isinstance(plan, dict) else {"plan": plan}
-                    trace.steps = len(plan) if isinstance(plan, (list, dict)) else 1
+                trace.planner_output = self._extract_planner_payload_from_state(state)
+                if isinstance(state.get("plan"), list):
+                    trace.steps = max(1, len(list(state.get("plan") or [])))
 
                 # Tools executed
-                tool_ir = context.state.get("tool_ir", {})
-                executions = tool_ir.get("executions", [])
-                trace.tools_executed = [e.get("tool_name") for e in executions if e.get("tool_name")]
+                trace.tools_executed = self._extract_tools_from_state(state)
 
                 # Memory accessed
-                memory_structured = context.state.get("memory_structured", {})
+                memory_structured = state.get("memory_structured", {})
                 trace.memory_accessed = list(memory_structured.keys())
+
+                # Completion should reflect successful turn completion, not conversation termination.
+                trace.completed = self._infer_completion_from_context(state, trace.final_response, trace.completed or bool(success))
 
         except TimeoutError:
             trace.error = "Execution timeout (15s)"
@@ -705,6 +825,12 @@ class BenchmarkRunner:
                 "planner_output": trace.planner_output,
                 "tools_executed": trace.tools_executed,
                 "memory_accessed": trace.memory_accessed,
+                "raw_state": {
+                    "tool_call_counts": dict(state.get("tool_call_counts") or {}),
+                    "tool_redundant_calls": list(state.get("tool_redundant_calls") or []),
+                    "should_converge_early": bool(state.get("should_converge_early") or False),
+                    "convergence_reason": str(state.get("convergence_reason") or ""),
+                },
                 "final_response": trace.final_response,
             },
             "scoring": asdict(score),
