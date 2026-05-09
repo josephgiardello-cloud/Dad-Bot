@@ -1015,7 +1015,9 @@ class DadBotOrchestrator:
         """Synchronous turn entry-point: delegates to canonical async path."""
         try:
             loop = asyncio.get_running_loop()
-        except RuntimeError:
+        except RuntimeError as exc:
+            if "no running event loop" not in str(exc).lower():
+                raise
             loop = None
         coro = self.handle_turn(
             user_input,
