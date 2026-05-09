@@ -34,6 +34,7 @@ from dadbot.core.merkle_anchor import append_leaf_and_anchor
 from dadbot.core.runtime_errors import (
     NON_FATAL_RUNTIME_EXCEPTIONS,
     PersistenceFailure,
+    RuntimeErrorBase,
 )
 
 logger = logging.getLogger(__name__)
@@ -46,12 +47,13 @@ POLICY_TRACE_EVENT_TYPE = "PolicyTraceEvent"
 # ---------------------------------------------------------------------------
 
 
-class StateDivergenceError(RuntimeError):
+class StateDivergenceError(RuntimeErrorBase):
     """Raised when projected state diverges from ledger-backed event state."""
 
     def __init__(self, message: str, *, report: dict[str, Any] | None = None) -> None:
-        super().__init__(message)
-        self.report = dict(report or {})
+        report_payload = dict(report or {})
+        super().__init__(message, context={"report": report_payload})
+        self.report = report_payload
 
 
 @dataclass(frozen=True)

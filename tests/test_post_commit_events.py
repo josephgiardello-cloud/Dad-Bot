@@ -6,7 +6,7 @@ import pytest
 
 from dadbot.core.execution_ledger import IntegrityBreachError
 from dadbot.core.post_commit_events import POST_COMMIT_READY, PostCommitEvent
-from dadbot.core.runtime_errors import InvariantViolation, PersistenceFailure
+from dadbot.core.runtime_errors import InvariantViolation, PersistenceFailure, RuntimeErrorBase
 from dadbot.services.persistence import PersistenceService, StateDivergenceError
 from dadbot.services.post_commit_worker import PostCommitWorker
 from dadbot_system.events import InMemoryEventBus
@@ -284,6 +284,7 @@ def test_finalize_turn_blocks_commit_on_memory_authority_divergence():
         service.finalize_turn(turn_context, ("done", False))
 
     assert isinstance(exc_info.value.__cause__, StateDivergenceError)
+    assert isinstance(exc_info.value.__cause__, RuntimeErrorBase)
     assert "commit blocked" in str(exc_info.value.__cause__)
 
     report = dict(getattr(exc_info.value.__cause__, "report", {}) or {})
