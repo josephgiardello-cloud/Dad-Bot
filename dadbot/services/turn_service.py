@@ -934,6 +934,149 @@ Return ONLY valid JSON (no extra text):
             plan_reason or f"Bayesian policy '{normalized_tool_bias}' permits tool '{normalized_tool_name}'.",
         )
 
+    def _validate_tool_intent_robustness(
+        self,
+        *,
+        tool_name: str,
+        params: dict[str, object],
+        user_input: str,
+        plan_reason: str,
+    ) -> tuple[bool, str]:
+        """
+        Pre-execution validation of tool intent quality.
+        
+        Checks semantic relevance, parameter validity, and confidence signals
+        before attempting tool execution.
+        
+        Returns:
+            (is_robust: bool, reason: str)
+            If is_robust=False, tool will NOT execute (soft recovery to direct response).
+        """
+        # CHECK 1: Semantic relevance (intent matches user input)
+        user_keywords = self._extract_intent_keywords(user_input)
+        tool_keywords = self._get_tool_intent_keywords(tool_name, params)
+        
+        if user_keywords and tool_keywords:  # Both non-empty
+            relevance = self._compute_semantic_overlap(user_keywords, tool_keywords)
+            if relevance < 0.35:  # Tunable threshold
+                return False, (
+                    f"Intent mismatch: user asks '{user_input[:40].strip()}...' but "
+                    f"tool is '{tool_name}' (semantic overlap={relevance:.2f})"
+                )
+        
+        # CHECK 2: Confidence from LLM reason field
+        uncertainty_patterns = ["uncertain", "not sure", "guess", "maybe", "probably", "might"]
+        if any(pat in plan_reason.lower() for pat in uncertainty_patterns):
+            return False, f"Low confidence indicated in reason: '{plan_reason}'"
+        
+        # CHECK 3: Tool-specific pre-conditions
+        if tool_name == _SET_REMINDER_TOOL:
+            is_valid, reason = self._validate_reminder_params(params, user_input)
+            if not is_valid:
+                return False, reason
+        
+        elif tool_name == _WEB_SEARCH_TOOL:
+            is_valid, reason = self._validate_search_params(params, user_input)
+            if not is_valid:
+                return False, reason
+        
+        # CHECK 4: Parameter sanity
+        if params is None or (isinstance(params, dict) and not params):
+            return False, "Tool parameters are empty"
+        
+        if isinstance(params, dict):
+            for v in params.values():
+                if not isinstance(v, (str, int, float, bool, list, dict, type(None))):
+                    return False, f"Tool parameters contain invalid type: {type(v).__name__}"
+        
+        # CHECK 5: Plan reason quality (heuristic)
+        if len((plan_reason or "").strip()) < 5:
+            return False, f"Plan reason too brief (low confidence signal): '{plan_reason}'"
+        
+        # ✅ ALL CHECKS PASSED
+        return True, "Intent validated"
+
+    def _validate_reminder_params(self, params: dict, user_input: str) -> tuple[bool, str]:
+        """Validate set_reminder parameters for semantic sanity."""
+        if "minutes_from_now" not in params:
+            return False, "Reminder missing required parameter: minutes_from_now"
+        
+        try:
+            minutes = float(params.get("minutes_from_now", 0))
+        except (ValueError, TypeError):
+            return False, f"Invalid minutes_from_now type: {type(params.get('minutes_from_now'))}"
+        
+        # Sanity checks: 1 min to 1 week (10080 min)
+        if minutes <= 0:
+            return False, f"Reminder time in past or zero: {minutes} minutes"
+        
+        if minutes > 10080:  # > 1 week
+            if "week" not in user_input.lower() and "month" not in user_input.lower():
+                return False, f"Very long reminder ({minutes}m) but user didn't mention extended duration"
+        
+        return True, "Reminder params valid"
+
+    def _validate_search_params(self, params: dict, user_input: str) -> tuple[bool, str]:
+        """Validate web_search parameters for semantic sanity."""
+        if "query" not in params:
+            return False, "Search missing required parameter: query"
+        
+        query = str(params.get("query", "")).strip()
+        if len(query) < 3:
+            return False, f"Search query too short ({len(query)} chars): '{query}'"
+        
+        if len(query) > 200:
+            return False, f"Search query too long ({len(query)} chars)"
+        
+        # Reject suspicious patterns (basic safety check)
+        suspicious = ["hack", "crack", "exploit", "payload", "injection"]
+        if any(pat in query.lower() for pat in suspicious):
+            return False, f"Search query contains suspicious patterns: '{query[:50]}...'"
+        
+        return True, "Search params valid"
+
+    def _extract_intent_keywords(self, text: str) -> set[str]:
+        """Extract significant keywords from text for semantic matching."""
+        import string
+        
+        words = text.lower().translate(str.maketrans('', '', string.punctuation)).split()
+        # Common stopwords to ignore
+        stopwords = {
+            "i", "me", "my", "we", "our", "you", "your", "he", "she", "it", "they",
+            "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for",
+            "of", "with", "by", "from", "is", "are", "was", "were", "be", "been",
+            "being", "do", "does", "did", "will", "would", "should", "could", "may",
+            "can", "have", "has", "had", "will", "would", "should", "could"
+        }
+        
+        return {w for w in words if w not in stopwords and len(w) > 2}
+
+    def _get_tool_intent_keywords(self, tool_name: str, params: dict) -> set[str]:
+        """Extract keywords from tool intent (tool name + parameters)."""
+        keywords = {tool_name.lower()}
+        
+        if tool_name == _SET_REMINDER_TOOL:
+            reminder_text = str(params.get("reminder_text", "")).strip()
+            if reminder_text:
+                keywords.update(self._extract_intent_keywords(reminder_text))
+        
+        elif tool_name == _WEB_SEARCH_TOOL:
+            query = str(params.get("query", "")).strip()
+            if query:
+                keywords.update(self._extract_intent_keywords(query))
+        
+        return keywords
+
+    def _compute_semantic_overlap(self, set_a: set[str], set_b: set[str]) -> float:
+        """Compute Jaccard similarity (intersection / union) between two keyword sets."""
+        if not set_a or not set_b:
+            return 0.0
+        
+        intersection = len(set_a & set_b)
+        union = len(set_a | set_b)
+        
+        return intersection / union if union > 0 else 0.0
+
     def plan_agentic_tools(
         self,
         stripped_input: str,
@@ -1021,6 +1164,30 @@ Return ONLY valid JSON (no extra text):
                     planner_parameters=params,
                 )
                 logger.info("Bayesian gate blocked tool %r: %s", plan.tool, gate_reason)
+                return None, None
+
+            # CONFIDENCE/ROBUSTNESS GATE: Validate tool intent quality before execution.
+            # This gate checks: semantic relevance, confidence signals, parameter sanity.
+            # If invalid, soft recovery (direct response) instead of execution attempt.
+            is_robust, robust_reason = self._validate_tool_intent_robustness(
+                tool_name=str(plan.tool or "").strip(),
+                params=params,
+                user_input=stripped_input,
+                plan_reason=plan_reason,
+            )
+            if not is_robust:
+                self.bot.update_planner_debug(
+                    planner_status="low_confidence_rejected",
+                    planner_reason=robust_reason,
+                    planner_tool=str(plan.tool or ""),
+                    planner_parameters=params,
+                )
+                logger.info(
+                    "Confidence gate rejected tool %r: %s",
+                    plan.tool,
+                    robust_reason,
+                )
+                # Soft recovery: return (None, None) so graph generates direct response
                 return None, None
 
             return self._execute_planned_tool_sync(
