@@ -56,7 +56,7 @@ class ExecutionEvidence:
     These values come from:
       * ``TurnContext.state["_execution_receipts"]`` — signed stage receipts
       * ``TurnContext.state["tool_ir"]["executions"]`` — tool invocation log
-      * ``TurnContext.state["memory_structured"]`` — memory access record
+            * ``TurnContext.state["memory_snapshot"]["memory_structured"]`` — canonical memory access record
     """
 
     turn_id: str
@@ -224,7 +224,8 @@ class ClaimEvidenceValidator:
         tool_ir = state.get("tool_ir") or {}
         tools_used: list[str] = [str(e.get("tool") or e.get("name") or "") for e in (tool_ir.get("executions") or [])]
 
-        mem_structured = state.get("memory_structured") or {}
+        memory_snapshot = state.get("memory_snapshot") or {}
+        mem_structured = memory_snapshot.get("memory_structured") or {}
         memory_reads: list[str] = [str(k) for k in mem_structured.keys()]
 
         receipts = state.get("_execution_receipts") or []
@@ -261,7 +262,8 @@ class ClaimEvidenceValidator:
         tool_ir = state.get("tool_ir") or {}
         tool_calls: list[str] = [str(e.get("tool") or e.get("name") or "") for e in (tool_ir.get("executions") or [])]
 
-        mem_structured = state.get("memory_structured") or {}
+        memory_snapshot = state.get("memory_snapshot") or {}
+        mem_structured = memory_snapshot.get("memory_structured") or {}
         memory_events: list[str] = [str(k) for k in mem_structured.keys()]
 
         receipt_hash = compute_receipt_chain_hash(receipts)
@@ -324,6 +326,10 @@ def build_synthetic_state(
     return {
         "plan": {"steps": _stages},
         "tool_ir": {"executions": [{"tool": t, "name": t} for t in _tools]},
+        "memory_snapshot": {
+            "memory_structured": {k: {} for k in _keys},
+            "memory_full_history_id": "hist-synthetic",
+        },
         "memory_structured": {k: {} for k in _keys},
         "_execution_receipts": _receipts,
     }

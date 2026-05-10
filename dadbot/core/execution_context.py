@@ -4,9 +4,13 @@ import contextlib
 import contextvars
 import hashlib
 import json
+import logging
 from dataclasses import asdict, dataclass, field
 from typing import Any
 from uuid import uuid4
+
+
+logger = logging.getLogger(__name__)
 
 
 def _stable_sha256(payload: Any) -> str:
@@ -54,6 +58,29 @@ def _normalize_determinism_contract(contract: dict[str, Any] | None) -> dict[str
         "ignore_response_fields": sorted(set(ignore_response)),
         "mode": str(base.get("mode") or "replay_strict"),
     }
+
+
+def _coerce_memory_snapshot(snapshot: Any) -> tuple[dict[str, Any], str]:
+    if not isinstance(snapshot, dict):
+        return {
+            "memory_structured": {},
+            "memory_full_history_id": "",
+        }, "missing_or_non_dict"
+
+    structured = snapshot.get("memory_structured")
+    history_id = snapshot.get("memory_full_history_id")
+    issues: list[str] = []
+
+    if not isinstance(structured, dict):
+        issues.append("memory_structured_not_dict")
+    if history_id is not None and not isinstance(history_id, str):
+        issues.append("memory_full_history_id_not_str")
+
+    normalized = {
+        "memory_structured": dict(structured) if isinstance(structured, dict) else {},
+        "memory_full_history_id": str(history_id or ""),
+    }
+    return normalized, ",".join(issues)
 
 
 @dataclass(frozen=True)
@@ -576,10 +603,19 @@ def build_execution_trace_context(
     tool_outputs = list(state.get("tool_results") or [])
     tool_output_records = [item if isinstance(item, dict) else {"value": item} for item in tool_outputs]
 
+    state_memory_snapshot, memory_snapshot_contract_warning = _coerce_memory_snapshot(state.get("memory_snapshot"))
+    if memory_snapshot_contract_warning:
+        logger.warning(
+            "Execution trace context built with malformed memory_snapshot (trace_id=%s, warning=%s)",
+            str(getattr(context, "trace_id", "") or ""),
+            memory_snapshot_contract_warning,
+        )
     memory_snapshot_used = {
         "memory_fingerprint": str(determinism.get("memory_fingerprint") or ""),
-        "memory_structured": dict(state.get("memory_structured") or {}),
-        "memory_full_history_id": str(state.get("memory_full_history_id") or ""),
+        "memory_structured": dict(state_memory_snapshot.get("memory_structured") or {}),
+        "memory_full_history_id": str(state_memory_snapshot.get("memory_full_history_id") or ""),
+        "contract_ok": not bool(memory_snapshot_contract_warning),
+        "contract_warning": str(memory_snapshot_contract_warning or ""),
     }
 
     model_call_parameters = {

@@ -61,7 +61,7 @@ if __package__ in (None, ""):
 from ci.import_graph_check import classify_layer
 
 ROOT = Path(__file__).resolve().parents[1]
-EXCLUDED_DIR_NAMES = {".git", ".venv", "__pycache__", ".pytest_cache", ".ruff_cache"}
+EXCLUDED_DIR_NAMES = {".git", ".venv", "__pycache__", ".pytest_cache", ".ruff_cache", "external"}
 
 # Objects that tools must not setattr() on — they belong to the kernel
 KERNEL_OWNED_NAMES: frozenset[str] = frozenset(

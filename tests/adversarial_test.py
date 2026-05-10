@@ -257,7 +257,8 @@ class TestMemoryPoisoningResistance:
         for i in range(6):
             user_input = f"Contradictory fact {i}: " + ("yes " if i % 2 == 0 else "no ") * 5
             _, context = await _run(orchestrator, user_input, session_id="adv-mem-structure")
-            structured = context.state.get("memory_structured")
+            memory_snapshot = dict(context.state.get("memory_snapshot") or {})
+            structured = memory_snapshot.get("memory_structured") or context.state.get("memory_structured")
             assert isinstance(structured, dict), f"memory_structured became {type(structured)} after turn {i}"
 
     @pytest.mark.asyncio

@@ -14,9 +14,27 @@ from dadbot.core.execution_context import (
 from dadbot.core.execution_memory_view import merge_memory_retrieval_sets
 from dadbot.core.goal_scorer import GoalAwareRanker
 from dadbot.core.memory_set_invariants import record_causal_step_locked
+from dadbot.services.memory_service import MemoryService
 from dadbot.utils import significant_tokens as _significant_tokens
 
 logger = logging.getLogger(__name__)
+
+
+class MemoryEvaluationViolation(RuntimeError):
+    """Raised when build_context is called more than once per turn.
+
+    Memory evaluation must occur exactly once per turn. No exceptions.
+    No fallback path. If this fires, a caller is re-entering build_context
+    for the same TurnContext — that is always an architecture violation.
+    """
+
+    def __init__(self, count: int) -> None:
+        super().__init__(
+            f"Memory evaluation already performed this turn (count={count}). "
+            "Exactly one memory evaluation is permitted per turn. "
+            "No exceptions. No fallback path.",
+        )
+        self.count = count
 
 
 class ContextService:
@@ -39,6 +57,8 @@ class ContextService:
         self.memory_manager = memory_manager
         self.semantic_index = semantic_index  # Optional; wired by ServiceRegistry.boot()
         self._goal_ranker = GoalAwareRanker()
+        runtime = getattr(self.context_builder, "bot", None)
+        self._memory_service = MemoryService(runtime) if runtime is not None else None
 
     def _runtime(self) -> Any:
         return getattr(self.context_builder, "bot", None)
@@ -297,7 +317,14 @@ class ContextService:
                 query_category="general",
                 query_mood="neutral",
                 limit=5,
-            ) or [])
+            ) or []) if self._memory_service is None else self._memory_service.fetch_semantic_candidates(
+                self.semantic_index,
+                query_embedding=query_embedding,
+                query_tokens=tokens,
+                query_category="general",
+                query_mood="neutral",
+                limit=5,
+            )
             if hits and active_goals:
                 hits = self._goal_ranker.rerank(hits, active_goals)
 
@@ -340,7 +367,14 @@ class ContextService:
                         query_category="general",
                         query_mood="neutral",
                         limit=5,
-                    ) or [])
+                    ) or []) if self._memory_service is None else self._memory_service.fetch_semantic_candidates(
+                        self.semantic_index,
+                        query_embedding=refined_embedding,
+                        query_tokens=refined_tokens,
+                        query_category="general",
+                        query_mood="neutral",
+                        limit=5,
+                    )
                     if refined_hits:
                         if active_goals:
                             refined_hits = self._goal_ranker.rerank(refined_hits, active_goals)
@@ -366,23 +400,33 @@ class ContextService:
                         for item in list(state.get("memory_retrieval_set") or [])
                         if isinstance(item, dict)
                     ]
-                    merged = list(existing)
-                    seen = {
-                        hashlib.sha256(
-                            json.dumps(item, sort_keys=True, ensure_ascii=True, default=str).encode("utf-8")
-                        ).hexdigest()
-                        for item in existing
-                    }
-                    for item in list(unique_hits or hits):
-                        if not isinstance(item, dict):
-                            continue
-                        key = hashlib.sha256(
-                            json.dumps(item, sort_keys=True, ensure_ascii=True, default=str).encode("utf-8")
-                        ).hexdigest()
-                        if key in seen:
-                            continue
-                        seen.add(key)
-                        merged.append(dict(item))
+                    incoming = [
+                        dict(item)
+                        for item in list(unique_hits or hits)
+                        if isinstance(item, dict)
+                    ]
+                    if self._memory_service is not None:
+                        merged, _ = self._memory_service.merge_retrieval_sets(
+                            existing,
+                            incoming,
+                            source_labels=["semantic_rag"],
+                        )
+                    else:
+                        merged = list(existing)
+                        seen = {
+                            hashlib.sha256(
+                                json.dumps(item, sort_keys=True, ensure_ascii=True, default=str).encode("utf-8")
+                            ).hexdigest()
+                            for item in existing
+                        }
+                        for item in incoming:
+                            key = hashlib.sha256(
+                                json.dumps(item, sort_keys=True, ensure_ascii=True, default=str).encode("utf-8")
+                            ).hexdigest()
+                            if key in seen:
+                                continue
+                            seen.add(key)
+                            merged.append(dict(item))
                     state["memory_retrieval_set"] = merged
                     state["memory_influence_brief"] = self._memory_influence_brief(merged, active_goals)
         except Exception as exc:
@@ -457,7 +501,9 @@ class ContextService:
 
         return {
             "source_read_link_id": str(memory_snapshot.get("full_history_id") or ""),
-            "source_write_link_id": str(state.get("memory_full_history_id") or ""),
+            "source_write_link_id": str(
+                (state.get("memory_snapshot") or {}).get("memory_full_history_id") or "",
+            ),
             "influenced_final_response": bool(retrieved_count > 0 or claims_count > 0),
             "overridden": False,
             "retrieval_count": retrieved_count,
@@ -466,6 +512,12 @@ class ContextService:
 
     def build_context(self, turn_context: Any) -> dict[str, Any]:
         started = time.perf_counter()
+        # GAP 1 hard lock: exactly one memory evaluation per turn.
+        _early_state = getattr(turn_context, "state", None)
+        if isinstance(_early_state, dict):
+            _eval_count = int(_early_state.get("_memory_eval_count", 0) or 0)
+            if _eval_count > 0:
+                raise MemoryEvaluationViolation(_eval_count)
         temporal = getattr(turn_context, "temporal", None)
         if temporal is None:
             raise RuntimeError("TemporalNode required — execution invalid")
@@ -512,19 +564,34 @@ class ContextService:
 
         state = getattr(turn_context, "state", None)
         if isinstance(state, dict):
-            state["memory_recent_buffer"] = list(memory_snapshot.get("recent_buffer") or [])
-            state["memory_rolling_summary"] = str(memory_snapshot.get("rolling_summary") or "")
-            state["memory_structured"] = dict(memory_snapshot.get("structured_memory") or {})
-            state["memory_full_history_id"] = str(memory_snapshot.get("full_history_id") or "")
+            canonical_memory_snapshot = {
+                "memory_recent_buffer": list(memory_snapshot.get("recent_buffer") or []),
+                "memory_rolling_summary": str(memory_snapshot.get("rolling_summary") or ""),
+                "memory_structured": dict(memory_snapshot.get("structured_memory") or {}),
+                "memory_full_history_id": str(memory_snapshot.get("full_history_id") or ""),
+            }
+            state["memory_snapshot"] = dict(canonical_memory_snapshot)
+            # GAP 1 hard lock: seal the per-turn evaluation counter immediately
+            # after writing the canonical snapshot. Any second call to build_context
+            # will see count >= 1 and raise MemoryEvaluationViolation before doing
+            # any work, preventing duplicate memory reads within a single turn.
+            state["_memory_eval_count"] = int(state.get("_memory_eval_count", 0) or 0) + 1
             preserved = [
                 dict(item)
                 for item in list(state.get("memory_retrieval_set") or [])
                 if isinstance(item, dict)
             ]
-            preserved, reconciliation = merge_memory_retrieval_sets(
-                preserved,
-                source_labels=["pre_turn"],
-            )
+            if self._memory_service is not None:
+                preserved, reconciliation = self._memory_service.merge_retrieval_sets(
+                    preserved,
+                    [],
+                    source_labels=["pre_turn"],
+                )
+            else:
+                preserved, reconciliation = merge_memory_retrieval_sets(
+                    preserved,
+                    source_labels=["pre_turn"],
+                )
             state["memory_retrieval_set"] = preserved
             state["memory_reconciliation"] = reconciliation
             # Gap C: record the retrieval causal step.

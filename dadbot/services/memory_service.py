@@ -67,3 +67,29 @@ class MemoryService:
             incoming,
             source_labels=source_labels,
         )
+
+    @staticmethod
+    def fetch_semantic_candidates(
+        index: Any,
+        *,
+        query_embedding: Any,
+        query_tokens: Any,
+        query_category: str,
+        query_mood: str,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """Fetch candidates from a semantic index, isolated from caller error handling."""
+        try:
+            return list(
+                index.fetch_candidates(
+                    query_embedding=query_embedding,
+                    query_tokens=query_tokens,
+                    query_category=query_category,
+                    query_mood=query_mood,
+                    limit=limit,
+                )
+                or []
+            )
+        except Exception as exc:
+            logger.debug("MemoryService: semantic index fetch failed (non-fatal): %s", exc)
+            return []

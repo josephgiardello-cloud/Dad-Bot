@@ -815,7 +815,14 @@ Rules:
             return 3
 
     def _active_selection_candidates(self):
-        consolidated = [entry for entry in self.bot.consolidated_memories() if not bool(entry.get("superseded", False))]
+        consolidated = [
+            entry
+            for entry in (
+                self.bot.normalize_consolidated_memory_entry(item)
+                for item in self.bot.MEMORY_STORE.get("consolidated_memories", [])
+            )
+            if entry is not None and not bool(entry.get("superseded", False))
+        ]
         if not consolidated:
             return []
         return consolidated[-20:]

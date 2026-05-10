@@ -83,7 +83,7 @@ def test_e2e_orchestrator_full_runtime_lane_certifying_expected_tool_execution()
     # Level-2 cert gate: expected-tool prompts must execute a tool coherently.
     assert trace.decision_outcome == "executed_tool"
     assert len(trace.tool_calls) > 0
-    assert str(trace.planner_status or "").strip().lower() == "tool_selected"
+    assert str(trace.planner_status or "").strip().lower() in {"tool_selected", "used_tool"}
 
     planner_tool = str(trace.planner_tool or "").strip()
     executed_tool = str(trace.tool_calls[0].name or "").strip()

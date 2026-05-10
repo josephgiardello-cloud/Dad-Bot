@@ -60,8 +60,11 @@ class _NodeContractMixin:
     def dependencies(self) -> tuple[str, ...]:
         return ()
 
+    async def execute(self, registry: Any, turn_context: TurnContext) -> None:
+        raise NotImplementedError(f"{type(self).__name__} must implement execute()")
+
     async def run(self, registry: Any, ctx: TurnContext) -> None:
-        execute_method = self.execute
+        execute_method: Any = self.execute
         execute_params = inspect.signature(execute_method).parameters
         result = execute_method(registry, ctx) if len(execute_params) >= 2 else execute_method(ctx)
         if inspect.isawaitable(result):
@@ -556,11 +559,18 @@ class SafetyNode(_NodeContractMixin):
         eval_input_hash = str(semantic_trace.get("eval_input_hash") or "")
         if eval_input_hash:
             execution_result = get_unified_execution_result(turn_context)
-            execution_result = set_unified_execution_eval_hash(
-                execution_result,
-                eval_input_hash=eval_input_hash,
-            )
-            set_unified_execution_result(turn_context, execution_result)
+            status = str(execution_result.get("status") or "").strip().lower()
+            if status == "pending":
+                execution_result = set_unified_execution_eval_hash(
+                    execution_result,
+                    eval_input_hash=eval_input_hash,
+                )
+                set_unified_execution_result(turn_context, execution_result)
+            else:
+                turn_context.state["semantic_eval_hash_write_skipped"] = {
+                    "reason": "terminal_execution_result",
+                    "status": status,
+                }
             by_hash = dict(turn_context.state.get("semantic_decision_by_eval_hash") or {})
             by_hash[eval_input_hash] = {
                 "action": decision.action,

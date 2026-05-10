@@ -538,6 +538,99 @@ class TurnService:
                 return parsed
         return None
 
+    def _call_json_with_validation_sync(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        purpose: str,
+        schema: type[BaseModel],
+        max_parse_attempts: int = 2,
+    ) -> BaseModel | None:
+        for parse_attempt in range(max(1, int(max_parse_attempts))):
+            try:
+                response = self._llm_adapter.call(
+                    messages=messages,
+                    options={"temperature": 0.1},
+                    response_format="json",
+                    purpose=purpose,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Structured LLM call failed (%s, attempt %d): %s",
+                    purpose,
+                    parse_attempt + 1,
+                    exc,
+                )
+                continue
+            parsed = self._parse_structured_json(
+                content=str(response.get("message", {}).get("content") or ""),
+                schema=schema,
+                failure_status="fallback",
+                failure_reason="Model returned invalid structured JSON.",
+            )
+            if parsed is not None:
+                return parsed
+        return None
+
+    def _reflection_prompt(
+        self,
+        original_input: str,
+        query: str,
+        observation: str,
+    ) -> str:
+        prompt_budget_fn = getattr(getattr(self.bot, "prompt_assembly", None), "_compute_prompt_budget", None)
+        if callable(prompt_budget_fn):
+            prompt_budget = max(128, int(prompt_budget_fn() or 0))
+        else:
+            context_budget = max(
+                256,
+                int(
+                    self.bot.effective_context_token_budget(getattr(self.bot, "ACTIVE_MODEL", None))
+                    or getattr(self.bot, "CONTEXT_TOKEN_BUDGET", 0)
+                    or 0
+                ),
+            )
+            reserved_tokens = max(64, int(getattr(self.bot, "RESERVED_RESPONSE_TOKENS", 0) or 0))
+            prompt_budget = max(128, context_budget - reserved_tokens)
+
+        input_text = str(original_input or "").strip()
+        query_text = str(query or "").strip()
+        observation_text = str(observation or "").strip()
+
+        def _render_prompt(current_observation: str) -> str:
+            return (
+                "You are checking whether a web lookup is good enough before Dad replies to Tony.\n\n"
+                f"User request: {input_text}\n"
+                f"Current search query: {query_text}\n"
+                "Observed result:\n"
+                f"{current_observation}\n\n"
+                "Return ONLY valid JSON with this shape:\n"
+                '{"sufficient": true or false, "refined_query": "better query" or null, "reason": "short explanation"}\n\n'
+                "Rules:\n"
+                "- Set sufficient=true when the observed result is good enough to answer naturally.\n"
+                "- Set sufficient=false only when a more specific query is needed.\n"
+                "- If sufficient=false, provide a refined_query that is different from the current search query.\n"
+                "- Keep reason short and concrete."
+            )
+
+        candidate_observation = observation_text
+        message = {"role": "user", "content": _render_prompt(candidate_observation)}
+        while self.bot.message_token_cost(message) > prompt_budget and len(candidate_observation) > 96:
+            candidate_observation = candidate_observation[: max(96, int(len(candidate_observation) * 0.75))].rstrip()
+            if not candidate_observation.endswith("..."):
+                candidate_observation += "..."
+            message = {"role": "user", "content": _render_prompt(candidate_observation)}
+        return str(message["content"])
+
+    @staticmethod
+    def _reminder_confirmation_reply(reminder: Any) -> str:
+        reminder_dict = dict(reminder or {}) if isinstance(reminder, dict) else {}
+        title = str(reminder_dict.get("title") or "that").strip() or "that"
+        due_text = str(reminder_dict.get("due_text") or "").strip()
+        if due_text:
+            return f"I set that reminder for you: {title} ({due_text})."
+        return f"I set that reminder for you: {title}."
+
     def _reflect_on_web_observation(
         self,
         original_input: str,
@@ -1040,7 +1133,7 @@ Return ONLY valid JSON (no extra text):
         reminder = record.result
         if reminder:
             self.bot.update_planner_debug(
-                planner_status="tool_selected",
+                planner_status="used_tool",
                 planner_reason=plan_reason or "Planner selected a reminder tool.",
                 planner_tool="set_reminder",
                 planner_parameters=params,
@@ -1102,7 +1195,7 @@ Return ONLY valid JSON (no extra text):
         reminder = record.result
         if reminder:
             self.bot.update_planner_debug(
-                planner_status="tool_selected",
+                planner_status="used_tool",
                 planner_reason=plan_reason or "Planner selected a reminder tool.",
                 planner_tool="set_reminder",
                 planner_parameters=params,
@@ -1165,7 +1258,7 @@ Return ONLY valid JSON (no extra text):
                 settings,
             )
             self.bot.update_planner_debug(
-                planner_status="tool_selected",
+                planner_status="used_tool",
                 planner_reason=plan_reason or "Planner selected a web lookup.",
                 planner_tool="web_search",
                 planner_parameters=params,
@@ -1218,7 +1311,7 @@ Return ONLY valid JSON (no extra text):
                 settings,
             )
             self.bot.update_planner_debug(
-                planner_status="tool_selected",
+                planner_status="used_tool",
                 planner_reason=plan_reason or "Planner selected a web lookup.",
                 planner_tool="web_search",
                 planner_parameters=params,
@@ -1406,6 +1499,7 @@ Return ONLY valid JSON (no extra text):
         """Validate set_reminder parameters for semantic sanity."""
         title = str(params.get("title", "")).strip()
         due_text = str(params.get("due_text", "")).strip()
+        minutes_from_now = params.get("minutes_from_now", None)
 
         if not title and not str(user_input or "").strip():
             return False, "Reminder missing content: neither title nor user input is available"
@@ -1415,6 +1509,14 @@ Return ONLY valid JSON (no extra text):
 
         if due_text and len(due_text) > 200:
             return False, "Reminder due_text too long"
+
+        if minutes_from_now is not None:
+            try:
+                minutes_value = float(minutes_from_now)
+            except (TypeError, ValueError):
+                return False, "Reminder minutes_from_now must be numeric"
+            if minutes_value < 0:
+                return False, "Reminder time is invalid: minutes_from_now cannot be in the past"
 
         return True, "Reminder params valid"
 

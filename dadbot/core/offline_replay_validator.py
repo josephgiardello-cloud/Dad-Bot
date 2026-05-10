@@ -95,6 +95,8 @@ def _recompute_identity_fingerprint(identity: dict[str, Any]) -> str:
     """Re-compute the execution identity fingerprint from a stored identity dict.
 
     Mirrors ``ExecutionIdentity.fingerprint`` without importing that class.
+    GAP 2: includes memory_snapshot_hash and execution_result_hash so that
+    replay validation covers the full unified identity envelope.
     """
     canonical = {
         "trace_id": str(identity.get("trace_id") or ""),
@@ -103,6 +105,8 @@ def _recompute_identity_fingerprint(identity: dict[str, Any]) -> str:
         "checkpoint_chain_hash": str(identity.get("checkpoint_chain_hash") or ""),
         "mutation_tx_count": int(identity.get("mutation_tx_count") or 0),
         "event_count": int(identity.get("event_count") or 0),
+        "memory_snapshot_hash": str(identity.get("memory_snapshot_hash") or ""),
+        "execution_result_hash": str(identity.get("execution_result_hash") or ""),
     }
     return hashlib.sha256(
         json.dumps(canonical, sort_keys=True, default=str).encode("utf-8"),

@@ -168,6 +168,22 @@ class ExecutionJob:
         self.job_id = job_id
 
 
+class SchedulerProtocol(Protocol):
+    """GAP 3: Explicit scheduler boundary for ControlPlane.
+
+    ControlPlane depends only on this interface, not on the concrete Scheduler
+    implementation.  Any object satisfying these three methods can be injected,
+    which enforces the scheduler/control-plane boundary structurally.
+    """
+
+    async def register(self, job: ExecutionJob) -> asyncio.Future[FinalizedTurnResult]: ...
+    async def drain_once(
+        self,
+        executor: Callable[[dict[str, Any], ExecutionJob], Awaitable[FinalizedTurnResult]],
+    ) -> bool: ...
+    async def wait_for_work(self, *, timeout_seconds: float | None = None) -> bool: ...
+
+
 @dataclass(slots=True)
 class SchedulerOptions:
     max_inflight_jobs: int = 16
@@ -184,7 +200,7 @@ class ControlPlaneOptions:
     enable_observability: bool = True
     execution_lease: ExecutionLease | None = None
     ledger: ExecutionLedger | None = None
-    scheduler: Scheduler | None = None
+    scheduler: SchedulerProtocol | None = None
 
 
 class SessionRegistry:

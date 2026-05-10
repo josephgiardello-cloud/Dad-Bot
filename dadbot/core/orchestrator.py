@@ -502,7 +502,10 @@ class DadBotOrchestrator:
             "final_hash": str(terminal_state.final_trace_hash or context.trace_id or ""),
         }
         typed_state["last_determinism_manifest"] = dict(manifest)
-        typed_state["last_memory_full_history_id"] = str(context.state.get("memory_full_history_id") or "")
+        memory_snapshot = dict(context.state.get("memory_snapshot") or {})
+        typed_state["last_memory_full_history_id"] = str(
+            memory_snapshot.get("memory_full_history_id") or "",
+        )
         typed_state["last_checkpoint_hash"] = str(getattr(context, "last_checkpoint_hash", "") or "")
         typed_state["prev_checkpoint_hash"] = str(getattr(context, "prev_checkpoint_hash", "") or "")
         typed_state["goal_alignment_guard_enabled"] = bool(context.state.get("goal_alignment_guard_enabled", False))

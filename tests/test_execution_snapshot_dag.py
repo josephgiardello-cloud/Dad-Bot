@@ -14,8 +14,10 @@ def _fake_context() -> SimpleNamespace:
         user_input="How did my week go?",
         trace_id="trace-123",
         state={
-            "memory_structured": {"claims": [{"summary": "user had a hard week"}]},
-            "memory_full_history_id": "hist-abc",
+            "memory_snapshot": {
+                "memory_structured": {"claims": [{"summary": "user had a hard week"}]},
+                "memory_full_history_id": "hist-abc",
+            },
             "memory_retrieval_set": [{"summary_key": "m1", "summary": "slept poorly"}],
             "tool_results": [{"tool": "calendar", "value": "2 meetings"}],
         },
@@ -47,6 +49,8 @@ def test_trace_context_contains_snapshot_and_dag():
     assert trace["schema_version"] == "2.0"
     assert trace["execution_snapshot"]["inputs"]["trace_id"] == "trace-123"
     assert trace["execution_snapshot"]["memory_snapshot"]["memory_full_history_id"] == "hist-abc"
+    assert trace["memory_snapshot_used"]["contract_ok"] is True
+    assert trace["memory_snapshot_used"]["contract_warning"] == ""
     assert len(trace["execution_snapshot"]["outputs_per_step"]) == 6
 
     dag = trace["execution_dag"]
@@ -87,3 +91,19 @@ def test_trace_context_requires_dict_metadata_contract():
 
     with pytest.raises(TypeError, match="context.metadata must be a dict"):
         build_execution_trace_context(context=context, result=("final", True), recorder=recorder)
+
+
+def test_trace_context_marks_missing_snapshot_as_soft_warning(caplog):
+    recorder = ExecutionTraceRecorder(trace_id="trace-123", prompt="How did my week go?")
+    context = _fake_context()
+    context.state = {
+        "memory_retrieval_set": [{"summary_key": "m1", "summary": "slept poorly"}],
+        "tool_results": [{"tool": "calendar", "value": "2 meetings"}],
+    }
+
+    with caplog.at_level("WARNING"):
+        trace = build_execution_trace_context(context=context, result=("final", True), recorder=recorder)
+
+    assert trace["memory_snapshot_used"]["contract_ok"] is False
+    assert trace["memory_snapshot_used"]["contract_warning"] == "missing_or_non_dict"
+    assert "malformed memory_snapshot" in caplog.text

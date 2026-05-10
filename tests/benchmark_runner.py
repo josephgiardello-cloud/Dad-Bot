@@ -397,7 +397,8 @@ class BenchmarkRunner:
             if key:
                 contradictions_seen.add(key)
 
-        memory_structured = dict(raw_state.get("memory_structured") or {})
+        memory_snapshot = dict(raw_state.get("memory_snapshot") or {})
+        memory_structured = dict(memory_snapshot.get("memory_structured") or raw_state.get("memory_structured") or {})
         for value in memory_structured.values():
             if not isinstance(value, dict):
                 continue
@@ -758,7 +759,8 @@ class BenchmarkRunner:
                 trace.tools_executed = self._extract_tools_from_state(state)
 
                 # Memory accessed
-                memory_structured = state.get("memory_structured", {})
+                memory_snapshot = dict(state.get("memory_snapshot") or {})
+                memory_structured = memory_snapshot.get("memory_structured") or state.get("memory_structured", {})
                 trace.memory_accessed = list(memory_structured.keys())
 
                 # Completion should reflect successful turn completion, not conversation termination.

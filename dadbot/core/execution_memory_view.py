@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any
+
+
+logger = logging.getLogger(__name__)
 
 
 def _stable_sha256(payload: Any) -> str:
@@ -99,6 +103,29 @@ def merge_memory_retrieval_sets(
     return merged, reconciliation
 
 
+def _coerce_memory_snapshot(snapshot: Any) -> tuple[dict[str, Any], str]:
+    if not isinstance(snapshot, dict):
+        return {
+            "memory_structured": {},
+            "memory_full_history_id": "",
+        }, "missing_or_non_dict"
+
+    structured = snapshot.get("memory_structured")
+    history_id = snapshot.get("memory_full_history_id")
+    issues: list[str] = []
+
+    if not isinstance(structured, dict):
+        issues.append("memory_structured_not_dict")
+    if history_id is not None and not isinstance(history_id, str):
+        issues.append("memory_full_history_id_not_str")
+
+    normalized = {
+        "memory_structured": dict(structured) if isinstance(structured, dict) else {},
+        "memory_full_history_id": str(history_id or ""),
+    }
+    return normalized, ",".join(issues)
+
+
 @dataclass(frozen=True)
 class ExecutionMemoryView:
     """Execution-scoped memory snapshot used for deterministic replay."""
@@ -111,8 +138,14 @@ class ExecutionMemoryView:
     @classmethod
     def from_context(cls, context: Any) -> ExecutionMemoryView:
         state = dict(getattr(context, "state", {}) or {})
-        structured = dict(state.get("memory_structured") or {})
-        history_id = str(state.get("memory_full_history_id") or "")
+        snapshot, warning = _coerce_memory_snapshot(state.get("memory_snapshot"))
+        if warning:
+            logger.warning(
+                "ExecutionMemoryView.from_context coerced malformed memory_snapshot (warning=%s)",
+                warning,
+            )
+        structured = dict(snapshot.get("memory_structured") or {})
+        history_id = str(snapshot.get("memory_full_history_id") or "")
         retrieval = [
             item if isinstance(item, dict) else {"value": item}
             for item in list(state.get("memory_retrieval_set") or [])

@@ -479,11 +479,27 @@ class _MutationDispatchMixin:
         metadata = getattr(turn_context, "metadata", None)
         state_dict = state if isinstance(state, dict) else {}
         metadata_dict = metadata if isinstance(metadata, dict) else {}
+        snapshot = dict(state_dict.get("memory_snapshot") or {})
+        contract_issues: list[str] = []
+        if not isinstance(snapshot.get("memory_recent_buffer"), list):
+            contract_issues.append("memory_recent_buffer_not_list")
+        if not isinstance(snapshot.get("memory_rolling_summary"), str):
+            contract_issues.append("memory_rolling_summary_not_str")
+        if not isinstance(snapshot.get("memory_structured"), dict):
+            contract_issues.append("memory_structured_not_dict")
+        history_id = snapshot.get("memory_full_history_id")
+        if history_id is not None and not isinstance(history_id, str):
+            contract_issues.append("memory_full_history_id_not_str")
+        if contract_issues:
+            logger.warning(
+                "Hierarchical memory payload coerced malformed memory_snapshot (issues=%s)",
+                ",".join(contract_issues),
+            )
         return {
-            "recent_buffer": list(state_dict.get("memory_recent_buffer") or []),
-            "rolling_summary": str(state_dict.get("memory_rolling_summary") or ""),
-            "structured_memory": dict(state_dict.get("memory_structured") or {}),
-            "full_history_id": state_dict.get("memory_full_history_id"),
+            "recent_buffer": list(snapshot.get("memory_recent_buffer") or []),
+            "rolling_summary": str(snapshot.get("memory_rolling_summary") or ""),
+            "structured_memory": dict(snapshot.get("memory_structured") or {}),
+            "full_history_id": snapshot.get("memory_full_history_id"),
             "token_counts": {
                 "recent": int(metadata_dict.get("recent_tokens", 0) or 0),
                 "summary": int(metadata_dict.get("summary_tokens", 0) or 0),

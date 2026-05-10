@@ -143,12 +143,15 @@ class OrchestratorIntegrationLayer:
         memory_data = {}
 
         # Structured memory
-        memory_structured = context.state.get("memory_structured", {})
+        memory_snapshot = dict(context.state.get("memory_snapshot") or {})
+        memory_structured = memory_snapshot.get("memory_structured") or context.state.get("memory_structured", {})
         memory_data["memory_accessed"] = list(memory_structured.keys())
         memory_data["memory_key_count"] = len(memory_structured)
 
         # Full history ID
-        memory_data["history_id"] = context.state.get("memory_full_history_id", "")
+        memory_data["history_id"] = str(
+            memory_snapshot.get("memory_full_history_id") or context.state.get("memory_full_history_id", ""),
+        )
 
         # Session goals
         session_goals = context.state.get("session_goals", [])

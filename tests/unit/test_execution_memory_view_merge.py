@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
-from dadbot.core.execution_memory_view import merge_memory_retrieval_sets
+from dadbot.core.execution_memory_view import ExecutionMemoryView, merge_memory_retrieval_sets
 
 pytestmark = pytest.mark.unit
 
@@ -43,3 +45,39 @@ def test_merge_memory_retrieval_sets_keeps_distinct_entries_in_order() -> None:
     assert [item["summary"] for item in merged] == ["first", "second"]
     assert int(reconciliation["merged_count"]) == 2
     assert int(reconciliation["conflict_count"]) == 0
+
+
+def test_execution_memory_view_from_context_coerces_missing_snapshot(caplog) -> None:
+    context = SimpleNamespace(
+        state={
+            "memory_retrieval_set": ["raw-item"],
+        },
+    )
+
+    with caplog.at_level("WARNING"):
+        view = ExecutionMemoryView.from_context(context)
+
+    assert view.memory_structured == {}
+    assert view.memory_full_history_id == ""
+    assert view.memory_retrieval_set == [{"value": "raw-item"}]
+    assert "coerced malformed memory_snapshot" in caplog.text
+
+
+def test_execution_memory_view_from_context_coerces_malformed_snapshot_fields(caplog) -> None:
+    context = SimpleNamespace(
+        state={
+            "memory_snapshot": {
+                "memory_structured": ["not-a-dict"],
+                "memory_full_history_id": 42,
+            },
+            "memory_retrieval_set": [],
+        },
+    )
+
+    with caplog.at_level("WARNING"):
+        view = ExecutionMemoryView.from_context(context)
+
+    assert view.memory_structured == {}
+    assert view.memory_full_history_id == "42"
+    assert "memory_structured_not_dict" in caplog.text
+    assert "memory_full_history_id_not_str" in caplog.text

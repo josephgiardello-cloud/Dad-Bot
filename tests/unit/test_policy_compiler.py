@@ -4,6 +4,11 @@ import asyncio
 
 import pytest
 
+from dadbot.core.execution_result_unified import (
+    build_unified_execution_result,
+    mark_unified_execution_success,
+    set_unified_execution_result,
+)
 from dadbot.core.graph import TurnContext
 from dadbot.core.graph_pipeline_nodes import SafetyNode as PipelineSafetyNode
 from dadbot.core.nodes import SafetyNode as RuntimeSafetyNode
@@ -111,6 +116,32 @@ def test_pipeline_safety_node_passthrough_sets_flag() -> None:
     considered = list(trace.get("considered_rules") or [])
     assert considered == [{"name": "passthrough", "kind": "passthrough"}]
     assert str((trace.get("selected_rule") or {}).get("name") or "") == "passthrough"
+
+
+def test_pipeline_safety_node_skips_eval_hash_write_for_terminal_execution_result() -> None:
+    node = PipelineSafetyNode()
+    context = TurnContext(user_input="hi")
+    context.state["candidate"] = "candidate"
+
+    terminal_er = mark_unified_execution_success(
+        build_unified_execution_result(),
+        response="done",
+        should_end=False,
+    )
+    set_unified_execution_result(context, terminal_er)
+
+    asyncio.run(node.execute(_Registry(_ValidateOnlyService()), context))
+
+    stored = dict(context.state.get("execution_result") or {})
+    outputs = dict(stored.get("outputs") or {})
+    assert outputs.get("semantic_eval_input_hash") == ""
+
+    skipped = dict(context.state.get("semantic_eval_hash_write_skipped") or {})
+    assert skipped.get("reason") == "terminal_execution_result"
+    assert skipped.get("status") == "ok"
+
+    by_hash = dict(context.state.get("semantic_decision_by_eval_hash") or {})
+    assert by_hash
 
 
 def test_policy_trace_is_deterministic_for_same_inputs() -> None:

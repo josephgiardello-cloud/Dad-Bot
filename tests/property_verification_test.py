@@ -155,13 +155,16 @@ class TestDadBotPhase4Properties:
                 f"Message {i}",
                 session_id="pv-layers",
             )
+            memory_snapshot = dict(context.state.get("memory_snapshot") or {})
+            recent_buffer = list(memory_snapshot.get("memory_recent_buffer") or context.state.get("memory_recent_buffer") or [])
+            rolling_summary = str(memory_snapshot.get("memory_rolling_summary") or context.state.get("memory_rolling_summary") or "")
+            structured = dict(memory_snapshot.get("memory_structured") or context.state.get("memory_structured") or {})
 
-            assert len(list(context.state.get("memory_recent_buffer") or [])) <= 24
+            assert len(recent_buffer) <= 24
 
             if i >= 15:
-                assert len(str(context.state.get("memory_rolling_summary") or "")) > 10
+                assert len(rolling_summary) > 10
 
-            structured = context.state.get("memory_structured")
             assert isinstance(structured, dict)
 
     @pytest.mark.xfail(

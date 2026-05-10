@@ -98,12 +98,12 @@ class TestPhase1MockExecution:
     """Phase 1: Mock execution baseline (always works)."""
 
     def test_all_scenarios_pass_mock(self):
-        """Phase 1: All 15 scenarios pass with mock backend."""
+        """Phase 1: All scenarios pass with mock backend."""
         runner = BenchmarkRunner(strict=False, mode="mock")
         results = runner.run_all_scenarios()
 
         # Verify all scenarios complete
-        assert len(results) == 15
+        assert len(results) == len(SCENARIOS)
         assert all(r["execution"]["completed"] for r in results)
         assert all(r["scoring"]["success"] for r in results)
 
@@ -468,8 +468,8 @@ class TestScenarioSuiteValidation:
     """Validate scenario suite structure (independent of execution)."""
 
     def test_scenarios_completeness(self):
-        """Verify 15 scenarios are defined."""
-        assert len(SCENARIOS) == 15
+        """Verify canonical scenario count is defined."""
+        assert len(SCENARIOS) == 16
 
     def test_scenario_structure(self):
         """Verify each scenario has required fields."""
@@ -496,7 +496,7 @@ class TestScenarioSuiteValidation:
 
         expected = {
             "planning": 3,
-            "tool": 4,
+            "tool": 5,
             "memory": 3,
             "ux": 3,
             "robustness": 2,

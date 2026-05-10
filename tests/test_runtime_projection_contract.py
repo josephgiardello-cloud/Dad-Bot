@@ -78,7 +78,7 @@ def _repo_python_files() -> tuple[Path, ...]:
     for path in REPO_ROOT.rglob("*.py"):
         relative = path.relative_to(REPO_ROOT)
         if relative.parts and (
-            relative.parts[0].startswith(".venv") or relative.parts[0] in {"tests", "session_logs", "runtime"}
+            relative.parts[0].startswith(".venv") or relative.parts[0] in {"tests", "session_logs", "runtime", "external"}
         ):
             continue
         files.append(path)

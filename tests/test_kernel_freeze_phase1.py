@@ -59,8 +59,12 @@ def test_terminal_state_persisted_for_turn(bot, monkeypatch) -> None:
     orchestrator = bot.turn_orchestrator
 
     async def _fake_execute(context, audit_mode=False):
-        context.state["memory_structured"] = {"pref": "coffee"}
-        context.state["memory_full_history_id"] = "history-1"
+        context.state["memory_snapshot"] = {
+            "memory_recent_buffer": [],
+            "memory_rolling_summary": "",
+            "memory_structured": {"pref": "coffee"},
+            "memory_full_history_id": "history-1",
+        }
         context.state["memory_retrieval_set"] = [{"memory_id": "m1", "score": 0.9}]
         context.state["capability_audit_report"] = {"allowed": True}
         context.state["safety_check_result"] = {"safe": True, "violations": []}

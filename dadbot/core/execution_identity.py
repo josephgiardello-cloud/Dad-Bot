@@ -44,6 +44,11 @@ class ExecutionIdentity:
 
     Build via ``ExecutionIdentity.from_turn_context(turn_context)`` after the
     execution trace contract has been finalized.
+
+    GAP 2: ``memory_snapshot_hash`` and ``execution_result_hash`` unify the
+    full turn identity — trace, memory read, and execution output — into one
+    verifiable fingerprint.  Replay validators can now assert cross-layer
+    equivalence without inspecting each layer separately.
     """
 
     trace_id: str
@@ -52,6 +57,8 @@ class ExecutionIdentity:
     checkpoint_chain_hash: str
     mutation_tx_count: int
     event_count: int
+    memory_snapshot_hash: str = ""
+    execution_result_hash: str = ""
 
     @property
     def fingerprint(self) -> str:
@@ -63,6 +70,8 @@ class ExecutionIdentity:
             "checkpoint_chain_hash": str(self.checkpoint_chain_hash or ""),
             "mutation_tx_count": int(self.mutation_tx_count),
             "event_count": int(self.event_count),
+            "memory_snapshot_hash": str(self.memory_snapshot_hash or ""),
+            "execution_result_hash": str(self.execution_result_hash or ""),
         }
         return hashlib.sha256(
             json.dumps(canonical, sort_keys=True).encode("utf-8"),
@@ -76,6 +85,8 @@ class ExecutionIdentity:
             "checkpoint_chain_hash": str(self.checkpoint_chain_hash or ""),
             "mutation_tx_count": int(self.mutation_tx_count),
             "event_count": int(self.event_count),
+            "memory_snapshot_hash": str(self.memory_snapshot_hash or ""),
+            "execution_result_hash": str(self.execution_result_hash or ""),
             "fingerprint": self.fingerprint,
         }
 
@@ -105,6 +116,16 @@ class ExecutionIdentity:
         determinism = dict(metadata.get("determinism") or {})
         mutation_queue = getattr(turn_context, "mutation_queue", None)
         mutation_snapshot = mutation_queue.snapshot() if hasattr(mutation_queue, "snapshot") else {}
+        # GAP 2: hash the canonical memory snapshot and execution result so the
+        # unified fingerprint covers trace + memory read + execution output.
+        memory_snapshot = dict(state.get("memory_snapshot") or {})
+        memory_snapshot_hash = hashlib.sha256(
+            json.dumps(memory_snapshot, sort_keys=True, default=str).encode("utf-8"),
+        ).hexdigest()[:16]
+        execution_result = dict(state.get("execution_result") or {})
+        execution_result_hash = hashlib.sha256(
+            json.dumps(execution_result, sort_keys=True, default=str).encode("utf-8"),
+        ).hexdigest()[:16]
         return cls(
             trace_id=str(getattr(turn_context, "trace_id", "") or ""),
             trace_hash=str(trace_contract.get("trace_hash") or ""),
@@ -114,4 +135,6 @@ class ExecutionIdentity:
             ),
             mutation_tx_count=int(mutation_snapshot.get("transactions", 0)),
             event_count=int(trace_contract.get("event_count", 0)),
+            memory_snapshot_hash=memory_snapshot_hash,
+            execution_result_hash=execution_result_hash,
         )
