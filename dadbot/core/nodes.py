@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import inspect
 import json
@@ -70,12 +71,48 @@ def get_tool_required_args() -> dict[str, frozenset[str]]:
     return {name: reg.required_args for name, reg in _TOOL_REGISTRY.items()}
 
 
+def _deterministic_subtask_trace_id(
+    *,
+    root_trace_id: str,
+    parent_trace_id: str,
+    depth: int,
+    branch_index: int,
+    subtask: dict[str, Any],
+) -> str:
+    payload = {
+        "root_trace_id": str(root_trace_id or ""),
+        "parent_trace_id": str(parent_trace_id or ""),
+        "depth": int(depth),
+        "branch_index": int(branch_index),
+        "agent": str(subtask.get("agent") or ""),
+        "input": str(subtask.get("input") or ""),
+    }
+    return _stable_sha256(payload)[:32]
+
+
 class TemporalNode:
     name = "temporal"
 
     async def run(self, context: TurnContext) -> TurnContext:
+        # LEDGER_EXEMPT: TemporalNode predates ledger protocol; temporal snapshot written to context.state["temporal"]
         if getattr(context, "temporal", None) is None:
             raise InvariantViolation("TemporalNode missing - deterministic execution violated")
+        vc = getattr(context, "virtual_clock", None)
+        if vc is not None:
+            from dadbot.core.graph_temporal import TurnTemporalAxis
+            epoch = vc.tick()
+            dt = vc.to_datetime()
+            offset = dt.utcoffset()
+            offset_minutes = int(offset.total_seconds() // 60) if offset is not None else 0
+            new_temporal = TurnTemporalAxis(
+                turn_started_at=dt.isoformat(timespec="seconds"),
+                wall_time=dt.isoformat(timespec="seconds"),
+                wall_date=dt.date().isoformat(),
+                timezone=str(dt.tzname() or "local").strip() or "local",
+                utc_offset_minutes=offset_minutes,
+                epoch_seconds=epoch,
+            )
+            context.temporal = new_temporal
         snap = context.temporal_snapshot() if callable(getattr(context, "temporal_snapshot", None)) else {}
         context.state.setdefault("temporal", snap)
         context.metadata.setdefault("temporal", snap)
@@ -89,6 +126,7 @@ class HealthNode:
         self.mgr = manager
 
     async def run(self, context: TurnContext) -> TurnContext:
+        # LEDGER_EXEMPT: HealthNode predates ledger protocol; health tick written to context.state["health"]
         tick = getattr(self.mgr, "tick", None)
         if callable(tick):
             context.state["health"] = tick()
@@ -114,6 +152,7 @@ class ContextBuilderNode:
         return []
 
     async def run(self, context: TurnContext) -> TurnContext:
+        # LEDGER_EXEMPT: ContextBuilderNode predates ledger protocol; memory context written to context.state["rich_context"]
         query = getattr(self.mgr, "query", None)
         if callable(query):
             queried = query(context.user_input)
@@ -145,6 +184,7 @@ class ToolRouterNode:
     name = "tool_router"
 
     async def run(self, context: TurnContext) -> TurnContext:
+        # LEDGER_EXEMPT: ToolRouterNode predates ledger protocol; compiled plan written to context.state["tool_ir"]
         tool_ir = dict(context.state.get("tool_ir") or {})
         raw_requests = list(tool_ir.get("requests") or [])
         compiled: list[dict[str, Any]] = []
@@ -196,6 +236,7 @@ class ToolExecutorNode:
     _MAX_SAME_TOOL_CALLS: int = 2  # Penalize calls to same tool > 2x per turn
 
     async def run(self, context: TurnContext) -> TurnContext:
+        # LEDGER_EXEMPT: ToolExecutorNode predates ledger protocol; execution records in context.state["tool_results"]
         tool_ir = dict(context.state.get("tool_ir") or {})
         executions: list[dict[str, Any]] = []
         results: list[dict[str, Any]] = []
@@ -407,7 +448,91 @@ class InferenceNode:
         context.state["_critique_revision_context"] = hint
         return False
 
+    async def _run_sub_agent(self, context: TurnContext, run_agent: Any) -> str:
+        try:
+            result = run_agent(context, context.state.get("rich_context", {}))
+            if inspect.isawaitable(result):
+                result = await result
+            text = result[0] if isinstance(result, tuple) else str(result or "")
+            return str(text)
+        except Exception as exc:
+            return f"[error: sub-task failed: {exc}]"
+
+    async def _dispatch_delegation(
+        self,
+        context: TurnContext,
+        block: dict[str, Any],
+        run_agent: Any,
+        depth: int = 0,
+    ) -> list[str]:
+        if depth >= _MAX_DELEGATION_DEPTH:
+            context.metadata["delegation_depth_exceeded"] = True
+            return ["[delegation depth exceeded]"]
+        mode = str(block.get("mode") or "sequential").lower()
+        subtasks = list(block.get("subtasks") or [])[:_MAX_DELEGATION_SUBTASKS]
+        blackboard: dict[str, Any] = dict(context.state.get("agent_blackboard") or {})
+        seed_fingerprint = _stable_sha256(blackboard)
+        sub_ctxs: list[TurnContext] = []
+        subtask_ids: list[str] = []
+        for branch_index, task in enumerate(subtasks):
+            sub_ctx = TurnContext(user_input=str(task.get("input") or ""))
+            sub_ctx.trace_id = _deterministic_subtask_trace_id(
+                root_trace_id=str(context.trace_id or ""),
+                parent_trace_id=str(context.trace_id or ""),
+                depth=depth,
+                branch_index=branch_index,
+                subtask=task,
+            )
+            sub_ctx.state.update(dict(context.state))
+            sub_ctx.metadata.update(dict(context.metadata))
+            sub_ctx.metadata["parent_trace_id"] = context.trace_id
+            sub_ctx.metadata["agent_name"] = str(task.get("agent") or "")
+            sub_ctx.metadata["delegation_depth"] = depth + 1
+            sub_ctx.state["rich_context"] = dict(context.state.get("rich_context") or {})
+            subtask_ids.append(sub_ctx.trace_id)
+            sub_ctxs.append(sub_ctx)
+        results: list[str] = []
+        if mode == "parallel":
+            for sub_ctx in sub_ctxs:
+                sub_ctx.state["agent_blackboard"] = dict(blackboard)
+            raw = await asyncio.gather(*[self._run_sub_agent(sc, run_agent) for sc in sub_ctxs])
+            results = list(raw)
+            for i, task in enumerate(subtasks):
+                agent_name = str(task.get("agent") or "")
+                if agent_name:
+                    blackboard[agent_name] = results[i]
+        else:
+            for sub_ctx, task in zip(sub_ctxs, subtasks):
+                sub_ctx.state["agent_blackboard"] = dict(blackboard)
+                result = await self._run_sub_agent(sub_ctx, run_agent)
+                agent_name = str(task.get("agent") or "")
+                if agent_name:
+                    blackboard[agent_name] = result
+                results.append(result)
+        # Stamp context
+        context.metadata["delegation_depth"] = depth
+        context.metadata["subtasks_executed"] = len(results)
+        context.state["delegation_results"] = results
+        context.state["agent_blackboard"] = dict(blackboard)
+        final_fingerprint = _stable_sha256(blackboard)
+        failure_count = sum(1 for r in results if str(r).startswith("[error:"))
+        arb_hash = _stable_sha256({"subtask_ids": subtask_ids, "results": results})
+        context.state["arbitration_metadata"] = {
+            "mode": mode,
+            "agents_dispatched": len(subtasks),
+            "failure_count": failure_count,
+            "arbitration_hash": arb_hash,
+            "subtask_ids": subtask_ids,
+        }
+        # Stamp blackboard fingerprints into determinism envelope
+        det = dict(context.metadata.get("determinism") or {})
+        det["agent_blackboard_seed_fingerprint"] = seed_fingerprint
+        det["agent_blackboard_final_fingerprint"] = final_fingerprint
+        context.metadata["determinism"] = det
+        return results
+
     async def run(self, context: TurnContext) -> TurnContext:
+        # LEDGER_EXEMPT: InferenceNode predates ledger protocol; LLM candidate written to context.state["candidate"]
         run_agent = getattr(self.mgr, "run_agent", None)
         if not callable(run_agent):
             raise RuntimeError("InferenceNode requires manager.run_agent")
@@ -419,6 +544,55 @@ class InferenceNode:
             if self._run_critique_check(context, candidate, iteration):
                 break
         context.state.pop("_critique_revision_context", None)
+
+        # Parse JSON blocks returned from the agent
+        raw = candidate[0] if isinstance(candidate, tuple) else str(candidate or "")
+        block: dict[str, Any] | None = None
+        try:
+            parsed = json.loads(raw.strip())
+            if isinstance(parsed, dict) and "type" in parsed:
+                block = parsed
+        except (json.JSONDecodeError, ValueError, TypeError):
+            block = None
+
+        if block is not None:
+            block_type = str(block.get("type") or "")
+            if block_type == "reasoning":
+                steps = list(block.get("steps") or [])
+                conclusion = str(block.get("conclusion") or raw)
+                context.metadata["reasoning_structured"] = True
+                context.metadata["reasoning_steps_count"] = len(steps)
+                candidate = (conclusion, False)
+            elif block_type == "tool":
+                tool_name = str(block.get("name") or "")
+                tool_args = dict(block.get("args") or {})
+                context.metadata["tool_called"] = tool_name
+                try:
+                    tool_result = dispatch_registered_tool(tool_name, tool_args, context)
+                    context.metadata["tool_call_executed"] = True
+                    context.state["tool_result"] = tool_result
+                except Exception as exc:
+                    context.metadata["tool_call_executed"] = False
+                    context.state["tool_result"] = f"[tool error: {exc}]"
+                # Mark as tool call so follow-up agent call knows it's a child
+                context.metadata["parent_trace_id"] = context.trace_id
+                follow_up = run_agent(context, rich_context)
+                if inspect.isawaitable(follow_up):
+                    follow_up = await follow_up
+                candidate = follow_up
+            elif block_type == "delegate":
+                del_results = await self._dispatch_delegation(context, block, run_agent, depth=0)
+                # Build summary reply
+                failure_count = int((context.state.get("arbitration_metadata") or {}).get("failure_count") or 0)
+                n = len(del_results)
+                if failure_count > 0:
+                    summary = f"I delegated {n} sub-tasks. {failure_count} sub-task(s) failed. " + " ".join(
+                        r for r in del_results if str(r).startswith("[error:")
+                    )
+                else:
+                    summary = f"I delegated {n} sub-tasks. Results: " + "; ".join(str(r) for r in del_results)
+                candidate = (summary, False)
+
         context.state["candidate"] = candidate
         return context
 
@@ -430,6 +604,7 @@ class SafetyNode:
         self.mgr = safety_manager
 
     async def run(self, context: TurnContext) -> TurnContext:
+        # LEDGER_EXEMPT: SafetyNode predates ledger protocol; policy decision in context.state["policy_trace_events"]
         candidate = context.state.get("candidate")
         plan = PolicyCompiler.compile_safety(self.mgr)
         decision = PolicyCompiler.evaluate_safety(plan, context, candidate)
@@ -477,6 +652,7 @@ class SaveNode:
         self.mgr = persistence_manager
 
     async def run(self, context: TurnContext) -> TurnContext:
+        # LEDGER_EXEMPT: SaveNode predates ledger protocol; persistence outcome recorded in context.fidelity.save
         if getattr(context, "temporal", None) is None:
             raise RuntimeError("SaveNode requires temporal context")
         
@@ -503,6 +679,8 @@ class SaveNode:
         
         if self.mgr is None:
             context.fidelity.save = True
+            context.state["last_commit_id"] = context.trace_id
+            context.state["last_transaction_status"] = "committed"
             return context
         begin = getattr(self.mgr, "begin_transaction", None)
         apply = getattr(self.mgr, "apply_mutations", None)
@@ -523,10 +701,13 @@ class SaveNode:
                 if callable(save_turn):
                     save_turn(context, context.state.get("safe_result"))
             context.fidelity.save = True
+            context.state["last_commit_id"] = context.trace_id
+            context.state["last_transaction_status"] = "committed"
             return context
         except Exception:
             if callable(rollback):
                 rollback(context)
+            context.state["last_transaction_status"] = "rolled_back"
             raise
 
 
@@ -537,6 +718,7 @@ class ReflectionNode:
         self.mgr = reflection_manager
 
     async def run(self, context: TurnContext) -> TurnContext:
+        # LEDGER_EXEMPT: ReflectionNode predates ledger protocol; output in context.state["reflection"]
         reflect = getattr(self.mgr, "reflect", None)
         if callable(reflect):
             try:

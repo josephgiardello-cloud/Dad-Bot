@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import contextlib
 import hashlib
 import json as _json
 import logging
@@ -818,6 +819,18 @@ class DadBotOrchestrator:
             session_id=str(job.session_id or "default"),
             metadata=dict(job.metadata or {}),
         )
+        if not context.trace_id:
+            raise InvariantViolation("TurnContext.trace_id must be non-empty")
+
+        try:
+            ledger_writer = getattr(getattr(self, "control_plane", None), "ledger_writer", None)
+        except RuntimeError:
+            ledger_writer = None
+        write_event = getattr(ledger_writer, "write_event", None)
+        if callable(write_event):
+            # Runtime-only callback consumed by tool executor deny-path mirroring.
+            object.__setattr__(context, "_canonical_ledger_emit", write_event)
+            object.__setattr__(context, "_canonical_ledger_session_id", str(job.session_id or "default"))
         session_state = session.get("state")
         if isinstance(session_state, dict):
             session_goals = session_state.get("goals")
@@ -830,9 +843,6 @@ class DadBotOrchestrator:
                 session_state.get("goal_alignment_mandatory_halt", False)
             )
         context.state["goal_alignment_guard_enabled"] = self._goal_alignment_guard_enabled()
-        if not context.trace_id:
-            raise InvariantViolation("TurnContext.trace_id must be non-empty")
-
         # Gideon Reflex: read-only subconscious retrieval before standard graph inference.
         self._run_subconscious_retrieval(context, str(job.user_input or ""))
 
@@ -841,9 +851,12 @@ class DadBotOrchestrator:
         self._check_manifest_drift(manifest, prior_manifest)
 
         loaded_checkpoint = self._load_checkpoint_data(str(job.session_id or "default"), manifest)
+        loaded_checkpoint_anchor = str((session_state or {}).get("last_checkpoint_hash") or "") if isinstance(session_state, dict) else ""
         if isinstance(loaded_checkpoint, dict) and loaded_checkpoint:
             context.last_checkpoint_hash = str(loaded_checkpoint.get("checkpoint_hash") or "")
             context.prev_checkpoint_hash = str(loaded_checkpoint.get("prev_checkpoint_hash") or "")
+            if not loaded_checkpoint_anchor:
+                loaded_checkpoint_anchor = str(loaded_checkpoint.get("checkpoint_hash") or "")
 
         self._stamp_determinism_metadata(context, job, manifest)
         self._emit_sovereign_event(
@@ -905,6 +918,22 @@ class DadBotOrchestrator:
                     },
                 },
             )
+            load_checkpoint = getattr(self._checkpointer, "load_checkpoint", None)
+            if callable(load_checkpoint):
+                with contextlib.suppress(Exception):
+                    persisted_checkpoint = load_checkpoint(
+                        str(job.session_id or "default"),
+                        trace_id=str(context.trace_id or ""),
+                        current_manifest=manifest,
+                        strict=bool(self._strict),
+                    )
+                    if isinstance(persisted_checkpoint, dict):
+                        context.last_checkpoint_hash = str(persisted_checkpoint.get("checkpoint_hash") or "")
+                        context.prev_checkpoint_hash = str(persisted_checkpoint.get("prev_checkpoint_hash") or "")
+            if loaded_checkpoint_anchor:
+                # Expose previous-turn continuity anchor even when multiple in-turn
+                # checkpoint snapshots advance the internal hash chain.
+                context.prev_checkpoint_hash = loaded_checkpoint_anchor
             self._last_turn_context = context
             self._update_session_state_after_turn(session, context, result, manifest)
             self._publish_health_evidence(context)

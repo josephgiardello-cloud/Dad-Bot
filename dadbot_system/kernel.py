@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
@@ -49,6 +50,9 @@ class SessionRegistry:
                 "status": "active",
                 "event_log": [],
                 "lock": asyncio.Lock(),
+                # Item 13: Heartbeat lease fields.
+                "last_heartbeat_at": time.time(),
+                "heartbeat_interval_s": 30.0,
             }
         return self._sessions[session_id]
 
@@ -62,6 +66,27 @@ class SessionRegistry:
         entry = self._sessions.get(session_id)
         if entry is not None:
             entry["status"] = "terminated"
+
+    def record_heartbeat(self, session_id: str) -> bool:
+        """Update heartbeat timestamp for *session_id*.
+
+        Returns True if the session exists and the heartbeat was recorded,
+        False if the session is not found.
+        """
+        entry = self._sessions.get(session_id)
+        if entry is None:
+            return False
+        entry["last_heartbeat_at"] = time.time()
+        return True
+
+    def is_heartbeat_stale(self, session_id: str) -> bool:
+        """Return True if the session heartbeat has expired (>3x heartbeat_interval_s)."""
+        entry = self._sessions.get(session_id)
+        if entry is None:
+            return False
+        interval = float(entry.get("heartbeat_interval_s") or 30.0)
+        last = float(entry.get("last_heartbeat_at") or 0.0)
+        return time.time() - last > interval * 3
 
     def list_sessions(self) -> list[str]:
         return list(self._sessions)
@@ -224,10 +249,15 @@ class Scheduler:
         asyncio.create_task(scheduler.run(kernel_execute_fn))
     """
 
-    def __init__(self, registry: SessionRegistry) -> None:
+    def __init__(self, registry: SessionRegistry, *, enforce_heartbeat: bool | None = None) -> None:
         self.queue: asyncio.Queue[ExecutionJob] = asyncio.Queue()
         self.registry = registry
         self._running = False
+        if enforce_heartbeat is None:
+            raw = str(os.environ.get("DADBOT_ENFORCE_HEARTBEAT", "0")).strip().lower()
+            self._enforce_heartbeat = raw in {"1", "true", "yes", "on"}
+        else:
+            self._enforce_heartbeat = bool(enforce_heartbeat)
 
     async def submit(self, job: ExecutionJob) -> None:
         await self.queue.put(job)
@@ -245,6 +275,16 @@ class Scheduler:
 
             if session["status"] != "active":
                 _reject(job, RuntimeError(f"Session {job.session_id!r} is {session['status']!r}"))
+                self.queue.task_done()
+                continue
+
+            # Heartbeat enforcement is opt-in so healthy idle sessions are not
+            # revoked unless an explicit liveness contract is configured.
+            if self._enforce_heartbeat and self.registry.is_heartbeat_stale(job.session_id):
+                session["status"] = "heartbeat_expired"
+                _reject(job, RuntimeError(
+                    f"Session {job.session_id!r} heartbeat expired — session auto-revoked"
+                ))
                 self.queue.task_done()
                 continue
 
@@ -312,6 +352,14 @@ class ControlPlane:
 
     def terminate_session(self, session_id: str) -> None:
         self.registry.terminate(session_id)
+
+    def record_heartbeat(self, session_id: str) -> bool:
+        """Forward heartbeat update for *session_id* to the session registry.
+
+        Call this from the API layer on any incoming request to keep the
+        session lease alive.  Returns True if the heartbeat was recorded.
+        """
+        return self.registry.record_heartbeat(session_id)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

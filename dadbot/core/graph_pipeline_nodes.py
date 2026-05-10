@@ -9,6 +9,9 @@ All names are re-exported from dadbot.core.graph for backward compatibility.
 """
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import json
 import inspect
 import logging
 from collections.abc import Mapping
@@ -43,6 +46,8 @@ from dadbot.core.recovery_ir import (
 from dadbot.core.runtime_types import CanonicalPayload, ToolExecutionStatus, ToolResult
 
 logger = logging.getLogger(__name__)
+_MAX_DELEGATION_DEPTH = 2
+_MAX_DELEGATION_SUBTASKS = 8
 
 
 class GraphNode(Protocol):
@@ -420,6 +425,277 @@ class InferenceNode(_NodeContractMixin):
             return blend(reply, current_mood), bool(candidate[1])
         return blend(str(candidate or ""), current_mood)
 
+    @staticmethod
+    def _stable_sha256(payload: Any) -> str:
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, ensure_ascii=True, default=str).encode("utf-8"),
+        ).hexdigest()
+
+    @staticmethod
+    def _candidate_text(candidate: Any) -> str:
+        if isinstance(candidate, tuple):
+            return str(candidate[0] or "")
+        return str(candidate or "")
+
+    @staticmethod
+    def _candidate_should_end(candidate: Any) -> bool:
+        if isinstance(candidate, tuple) and len(candidate) >= 2:
+            return bool(candidate[1])
+        return False
+
+    @staticmethod
+    def _deterministic_subtask_trace_id(
+        *,
+        root_trace_id: str,
+        parent_trace_id: str,
+        depth: int,
+        branch_index: int,
+        subtask: dict[str, Any],
+    ) -> str:
+        payload = {
+            "root_trace_id": str(root_trace_id or ""),
+            "parent_trace_id": str(parent_trace_id or ""),
+            "depth": int(depth),
+            "branch_index": int(branch_index),
+            "agent": str(subtask.get("agent") or ""),
+            "input": str(subtask.get("input") or ""),
+        }
+        return InferenceNode._stable_sha256(payload)[:32]
+
+    @staticmethod
+    def _parse_json_block(candidate: Any) -> dict[str, Any] | None:
+        raw = InferenceNode._candidate_text(candidate).strip()
+        if not raw:
+            return None
+        try:
+            parsed = json.loads(raw)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        if "type" not in parsed:
+            return None
+        return parsed
+
+    async def _invoke_agent_candidate(
+        self,
+        service: Any,
+        context: TurnContext,
+        rich_context: dict[str, Any],
+    ) -> Any:
+        candidate_or_awaitable = service.run_agent(context, rich_context)
+        candidate = (
+            await candidate_or_awaitable
+            if inspect.isawaitable(candidate_or_awaitable)
+            else candidate_or_awaitable
+        )
+        return self._blend_daily_checkin_reply(service, context, candidate)
+
+    async def _resolve_candidate_blocks(
+        self,
+        *,
+        service: Any,
+        root_context: TurnContext,
+        current_context: TurnContext,
+        candidate: Any,
+        rich_context: dict[str, Any],
+        depth: int,
+    ) -> Any:
+        block = self._parse_json_block(candidate)
+        if not isinstance(block, dict):
+            return candidate
+
+        block_type = str(block.get("type") or "").strip().lower()
+        if block_type == "reasoning":
+            steps = list(block.get("steps") or [])
+            conclusion = str(block.get("conclusion") or self._candidate_text(candidate))
+            root_context.metadata["reasoning_structured"] = True
+            root_context.metadata["reasoning_steps_count"] = len(steps)
+            return (conclusion, self._candidate_should_end(candidate))
+
+        if block_type == "tool":
+            from dadbot.core.nodes import dispatch_registered_tool
+
+            tool_name = str(block.get("name") or "")
+            tool_args = dict(block.get("args") or {})
+            root_context.metadata["tool_called"] = tool_name
+            try:
+                tool_result = dispatch_registered_tool(tool_name, tool_args, root_context)
+                root_context.metadata["tool_call_executed"] = True
+                root_context.state["tool_result"] = tool_result
+            except Exception as exc:
+                root_context.metadata["tool_call_executed"] = False
+                root_context.state["tool_result"] = f"[tool error: {exc}]"
+
+            followup_metadata = dict(current_context.metadata or {})
+            followup_metadata["parent_trace_id"] = str(root_context.trace_id or "")
+            current_context.metadata.update(followup_metadata)
+            followup = await self._invoke_agent_candidate(service, current_context, rich_context)
+            return await self._resolve_candidate_blocks(
+                service=service,
+                root_context=root_context,
+                current_context=current_context,
+                candidate=followup,
+                rich_context=rich_context,
+                depth=depth,
+            )
+
+        if block_type == "delegate":
+            return await self._dispatch_delegation(
+                service=service,
+                root_context=root_context,
+                current_context=current_context,
+                block=block,
+                rich_context=rich_context,
+                depth=depth,
+            )
+
+        return candidate
+
+    async def _run_subtask(
+        self,
+        *,
+        service: Any,
+        root_context: TurnContext,
+        parent_context: TurnContext,
+        rich_context: dict[str, Any],
+        subtask: dict[str, Any],
+        depth: int,
+        branch_index: int,
+        blackboard: dict[str, Any],
+    ) -> tuple[str, str, str]:
+        sub_context = TurnContext(user_input=str(subtask.get("input") or ""))
+        sub_context.trace_id = self._deterministic_subtask_trace_id(
+            root_trace_id=str(root_context.trace_id or ""),
+            parent_trace_id=str(current_context.trace_id or ""),
+            depth=depth,
+            branch_index=branch_index,
+            subtask=subtask,
+        )
+        sub_context.state.update(dict(parent_context.state or {}))
+        sub_context.metadata.update(dict(parent_context.metadata or {}))
+        sub_context.metadata["parent_trace_id"] = str(root_context.trace_id or "")
+        sub_context.metadata["agent_name"] = str(subtask.get("agent") or "")
+        sub_context.metadata["delegation_depth"] = depth + 1
+        sub_context.state["agent_blackboard"] = dict(blackboard)
+        try:
+            sub_candidate = await self._invoke_agent_candidate(service, sub_context, dict(rich_context or {}))
+            resolved = await self._resolve_candidate_blocks(
+                service=service,
+                root_context=root_context,
+                current_context=sub_context,
+                candidate=sub_candidate,
+                rich_context=dict(rich_context or {}),
+                depth=depth + 1,
+            )
+            return (
+                self._candidate_text(resolved),
+                str(sub_context.metadata.get("agent_name") or ""),
+                str(sub_context.trace_id or ""),
+            )
+        except Exception as exc:
+            return (
+                f"[error: sub-task failed: {exc}]",
+                str(sub_context.metadata.get("agent_name") or ""),
+                str(sub_context.trace_id or ""),
+            )
+
+    async def _dispatch_delegation(
+        self,
+        *,
+        service: Any,
+        root_context: TurnContext,
+        current_context: TurnContext,
+        block: dict[str, Any],
+        rich_context: dict[str, Any],
+        depth: int,
+    ) -> Any:
+        if depth >= _MAX_DELEGATION_DEPTH:
+            root_context.metadata["delegation_depth_exceeded"] = True
+            return ("[delegation depth exceeded]", False)
+
+        mode = str(block.get("mode") or "sequential").strip().lower()
+        if mode not in {"sequential", "parallel"}:
+            mode = "sequential"
+
+        subtasks = [
+            dict(item)
+            for item in list(block.get("subtasks") or [])[:_MAX_DELEGATION_SUBTASKS]
+            if isinstance(item, dict)
+        ]
+
+        blackboard: dict[str, Any] = dict(root_context.state.get("agent_blackboard") or {})
+        seed_fingerprint = self._stable_sha256(blackboard)
+
+        results: list[str] = []
+        subtask_ids: list[str] = []
+        if mode == "parallel":
+            executions = [
+                self._run_subtask(
+                    service=service,
+                    root_context=root_context,
+                    parent_context=current_context,
+                    rich_context=rich_context,
+                    subtask=subtask,
+                    depth=depth,
+                    branch_index=index,
+                    blackboard=blackboard,
+                )
+                for index, subtask in enumerate(subtasks)
+            ]
+            completed = await asyncio.gather(*executions)
+            for result_text, agent_name, subtask_id in completed:
+                results.append(result_text)
+                subtask_ids.append(subtask_id)
+                if agent_name:
+                    blackboard[agent_name] = result_text
+        else:
+            for index, subtask in enumerate(subtasks):
+                result_text, agent_name, subtask_id = await self._run_subtask(
+                    service=service,
+                    root_context=root_context,
+                    parent_context=current_context,
+                    rich_context=rich_context,
+                    subtask=subtask,
+                    depth=depth,
+                    branch_index=index,
+                    blackboard=blackboard,
+                )
+                results.append(result_text)
+                subtask_ids.append(subtask_id)
+                if agent_name:
+                    blackboard[agent_name] = result_text
+
+        root_context.metadata["delegation_depth"] = depth
+        root_context.metadata["subtasks_executed"] = len(results)
+        root_context.state["delegation_results"] = list(results)
+        root_context.state["agent_blackboard"] = dict(blackboard)
+
+        failure_count = sum(1 for item in results if str(item).startswith("[error:"))
+        arbitration_hash = self._stable_sha256({"subtask_ids": subtask_ids, "results": results})
+        root_context.state["arbitration_metadata"] = {
+            "mode": mode,
+            "agents_dispatched": len(subtasks),
+            "failure_count": failure_count,
+            "arbitration_hash": arbitration_hash,
+            "subtask_ids": subtask_ids,
+        }
+
+        determinism = dict(root_context.metadata.get("determinism") or {})
+        determinism["agent_blackboard_seed_fingerprint"] = seed_fingerprint
+        determinism["agent_blackboard_final_fingerprint"] = self._stable_sha256(blackboard)
+        root_context.metadata["determinism"] = determinism
+
+        if failure_count:
+            summary = f"I delegated {len(results)} sub-tasks. {failure_count} sub-task failed."
+            failures = [item for item in results if str(item).startswith("[error:")]
+            if failures:
+                summary = f"{summary} {' '.join(str(item) for item in failures)}"
+            return (summary, False)
+
+        summary = f"I delegated {len(results)} sub-tasks. Results: " + "; ".join(str(item) for item in results)
+        return (summary, False)
+
     async def execute(self, registry: Any, turn_context: TurnContext) -> None:
         service = registry.get("agent_service")
         rich_context = turn_context.state.get("rich_context", {})
@@ -475,13 +751,15 @@ class InferenceNode(_NodeContractMixin):
             target_node="inference",
             confidence_score=0.5,
         ))
-        candidate_or_awaitable = service.run_agent(turn_context, rich_context)
-        candidate = (
-            await candidate_or_awaitable
-            if inspect.isawaitable(candidate_or_awaitable)
-            else candidate_or_awaitable
+        candidate = await self._invoke_agent_candidate(service, turn_context, rich_context)
+        candidate = await self._resolve_candidate_blocks(
+            service=service,
+            root_context=turn_context,
+            current_context=turn_context,
+            candidate=candidate,
+            rich_context=dict(rich_context or {}),
+            depth=0,
         )
-        candidate = self._blend_daily_checkin_reply(service, turn_context, candidate)
         self._run_critique_check(turn_context, candidate, 0)
         turn_context.state.pop("_critique_revision_context", None)
         turn_context.state["candidate"] = candidate
@@ -761,6 +1039,22 @@ class TemporalNode(_NodeContractMixin):
         if getattr(turn_context, "temporal", None) is None:
             raise RuntimeError(
                 "TemporalNode missing — deterministic execution violated",
+            )
+        virtual_clock = getattr(turn_context, "virtual_clock", None)
+        if virtual_clock is not None:
+            from dadbot.core.graph_temporal import TurnTemporalAxis
+
+            epoch = float(virtual_clock.tick())
+            dt = virtual_clock.to_datetime()
+            offset = dt.utcoffset()
+            offset_minutes = int(offset.total_seconds() // 60) if offset is not None else 0
+            turn_context.temporal = TurnTemporalAxis(
+                turn_started_at=dt.isoformat(timespec="seconds"),
+                wall_time=dt.isoformat(timespec="seconds"),
+                wall_date=dt.date().isoformat(),
+                timezone=str(dt.tzname() or "local").strip() or "local",
+                utc_offset_minutes=offset_minutes,
+                epoch_seconds=epoch,
             )
         temporal_payload = turn_context.temporal_snapshot()
         turn_context.state.setdefault("temporal", temporal_payload)
