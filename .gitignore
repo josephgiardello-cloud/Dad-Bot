@@ -25,6 +25,7 @@ data/
 
 # Session logs (ephemeral turn records)
 session_logs/
+*.jsonl
 
 # Export / import artefacts
 memory_export*.json
@@ -34,6 +35,7 @@ memory_forgetting_backup_*.json
 
 # System snapshots / runtime backups (canonical home: artifacts/backups/)
 artifacts/backups/
+artifacts/
 
 # Diagnostic / process logs
 _dad_stop_stdout.txt
