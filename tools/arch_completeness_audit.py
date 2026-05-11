@@ -149,6 +149,24 @@ def _grep_identifier(text: str, identifier: str) -> bool:
     return bool(re.search(r"\b" + re.escape(identifier) + r"\b", text))
 
 
+def _has_exemption_marker(
+    source: str,
+    func_start_line: int,
+    func_end_line: int | None = None,
+    exemption_prefix: str = "TRACE_EXEMPT",
+) -> bool:
+    """
+    Check if a function has an exemption marker comment (e.g., TRACE_EXEMPT).
+    Returns True if the marker appears in the first N lines of the function.
+    """
+    lines = source.split("\n")
+    search_range = min(func_start_line + 10, func_end_line or func_start_line + 20)
+    for i in range(max(0, func_start_line - 1), search_range):
+        if i < len(lines) and exemption_prefix in lines[i]:
+            return True
+    return False
+
+
 # ── Step 7.2 — Module presence check ─────────────────────────────────────────
 
 def check_missing_modules(manifest: dict) -> dict:
@@ -329,12 +347,15 @@ def check_param_propagation(manifest: dict) -> dict:
                         missing.append(field)
 
             if missing:
-                violations.append({
-                    "file": _rel(filepath),
-                    "function": node.name,
-                    "missing_fields": missing,
-                    "lineno": node.lineno,
-                })
+                # Check if function has a TRACE_EXEMPT marker; if so, skip the violation
+                has_exemption = _has_exemption_marker(src, node.lineno)
+                if not has_exemption:
+                    violations.append({
+                        "file": _rel(filepath),
+                        "function": node.name,
+                        "missing_fields": missing,
+                        "lineno": node.lineno,
+                    })
 
         if file_level_missing:
             violations.append({

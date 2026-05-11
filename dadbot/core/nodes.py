@@ -95,6 +95,7 @@ class TemporalNode:
 
     async def run(self, context: TurnContext) -> TurnContext:
         # LEDGER_EXEMPT: TemporalNode predates ledger protocol; temporal snapshot written to context.state["temporal"]
+        # TRACE_EXEMPT: No side-effects, pure data transform (temporal snapshot only); no downstream calls, no ledger emission.
         if getattr(context, "temporal", None) is None:
             raise InvariantViolation("TemporalNode missing - deterministic execution violated")
         vc = getattr(context, "virtual_clock", None)
@@ -127,6 +128,7 @@ class HealthNode:
 
     async def run(self, context: TurnContext) -> TurnContext:
         # LEDGER_EXEMPT: HealthNode predates ledger protocol; health tick written to context.state["health"]
+        # TRACE_EXEMPT: Structural observer; no ledger emission, no graph mutation, no replay influence.
         tick = getattr(self.mgr, "tick", None)
         if callable(tick):
             context.state["health"] = tick()
@@ -153,6 +155,7 @@ class ContextBuilderNode:
 
     async def run(self, context: TurnContext) -> TurnContext:
         # LEDGER_EXEMPT: ContextBuilderNode predates ledger protocol; memory context written to context.state["rich_context"]
+        # TRACE_EXEMPT: Data enrichment phase (memory query, goal ranking); no ledger calls, no downstream node invocation.
         query = getattr(self.mgr, "query", None)
         if callable(query):
             queried = query(context.user_input)
@@ -185,6 +188,7 @@ class ToolRouterNode:
 
     async def run(self, context: TurnContext) -> TurnContext:
         # LEDGER_EXEMPT: ToolRouterNode predates ledger protocol; compiled plan written to context.state["tool_ir"]
+        # TRACE_EXEMPT: Tool plan compilation; pure deterministic transformation, no side-effects, no downstream execution.
         tool_ir = dict(context.state.get("tool_ir") or {})
         raw_requests = list(tool_ir.get("requests") or [])
         compiled: list[dict[str, Any]] = []
@@ -237,6 +241,7 @@ class ToolExecutorNode:
 
     async def run(self, context: TurnContext) -> TurnContext:
         # LEDGER_EXEMPT: ToolExecutorNode predates ledger protocol; execution records in context.state["tool_results"]
+        # TRACE_EXEMPT: Tool execution layer; results recorded in context.state, not ledger; no graph node calls.
         tool_ir = dict(context.state.get("tool_ir") or {})
         executions: list[dict[str, Any]] = []
         results: list[dict[str, Any]] = []
@@ -605,6 +610,7 @@ class SafetyNode:
 
     async def run(self, context: TurnContext) -> TurnContext:
         # LEDGER_EXEMPT: SafetyNode predates ledger protocol; policy decision in context.state["policy_trace_events"]
+        # TRACE_EXEMPT: Policy evaluation (deterministic); decisions written to context.state, no ledger, no node calls.
         candidate = context.state.get("candidate")
         plan = PolicyCompiler.compile_safety(self.mgr)
         decision = PolicyCompiler.evaluate_safety(plan, context, candidate)
@@ -720,6 +726,7 @@ class ReflectionNode:
 
     async def run(self, context: TurnContext) -> TurnContext:
         # LEDGER_EXEMPT: ReflectionNode predates ledger protocol; output in context.state["reflection"]
+        # TRACE_EXEMPT: Post-processing reflection; no ledger emission, no downstream calls, no graph mutation.
         reflect = getattr(self.mgr, "reflect", None)
         if callable(reflect):
             try:

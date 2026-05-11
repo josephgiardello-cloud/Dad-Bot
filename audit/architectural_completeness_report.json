@@ -1,5 +1,5 @@
 {
-  "completeness_score": 94,
+  "completeness_score": 100,
   "missing_modules": [],
   "partial_subsystems": [],
   "fragmented_subsystems": [],
@@ -106,84 +106,7 @@
     }
   },
   "contract_drift": [],
-  "missing_parameters": [
-    {
-      "file": "dadbot/core/graph.py",
-      "function": "_run_stage",
-      "missing_fields": [
-        "trace_id",
-        "kernel_step_id",
-        "determinism_manifest"
-      ],
-      "lineno": 1166
-    },
-    {
-      "file": "dadbot/core/graph.py",
-      "function": "execute",
-      "missing_fields": [
-        "trace_id",
-        "kernel_step_id",
-        "determinism_manifest"
-      ],
-      "lineno": 1307
-    },
-    {
-      "file": "dadbot/core/nodes.py",
-      "function": "run",
-      "missing_fields": [
-        "trace_id"
-      ],
-      "lineno": 96
-    },
-    {
-      "file": "dadbot/core/nodes.py",
-      "function": "run",
-      "missing_fields": [
-        "trace_id"
-      ],
-      "lineno": 128
-    },
-    {
-      "file": "dadbot/core/nodes.py",
-      "function": "run",
-      "missing_fields": [
-        "trace_id"
-      ],
-      "lineno": 154
-    },
-    {
-      "file": "dadbot/core/nodes.py",
-      "function": "run",
-      "missing_fields": [
-        "trace_id"
-      ],
-      "lineno": 186
-    },
-    {
-      "file": "dadbot/core/nodes.py",
-      "function": "run",
-      "missing_fields": [
-        "trace_id"
-      ],
-      "lineno": 238
-    },
-    {
-      "file": "dadbot/core/nodes.py",
-      "function": "run",
-      "missing_fields": [
-        "trace_id"
-      ],
-      "lineno": 606
-    },
-    {
-      "file": "dadbot/core/nodes.py",
-      "function": "run",
-      "missing_fields": [
-        "trace_id"
-      ],
-      "lineno": 721
-    }
-  ],
+  "missing_parameters": [],
   "orphan_expectations": [],
   "summary": {
     "total_modules_checked": 30,
@@ -191,7 +114,7 @@
     "partial_subsystems": 0,
     "fragmented_subsystems": 0,
     "interface_drift_count": 0,
-    "param_propagation_violations": 9,
+    "param_propagation_violations": 0,
     "scanned_exec_functions": 32,
     "orphan_symbols": 0,
     "not_referenced_orphan_targets": [

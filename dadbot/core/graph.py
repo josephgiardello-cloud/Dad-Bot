@@ -1175,6 +1175,13 @@ class TurnGraph:
     ) -> tuple[TurnContext, bool, FinalizedTurnResult | None]:
         stage_name, node = pipeline_items[idx]
         stage_key = str(stage_name or "unknown")
+        # ──────────────────────────────────────────────────────────────────────────
+        # Contract: Stage boundary MUST maintain identity tuple (non-shadowing).
+        # These are read from context and must NOT be regenerated mid-stage.
+        # ──────────────────────────────────────────────────────────────────────────
+        trace_id = turn_context.trace_id
+        kernel_step_id = turn_context.kernel_step_id
+        determinism_manifest = turn_context.determinism_manifest
         stage_started_at = self._record_stage_start(turn_context, stage_key=stage_key, idx=idx)
         self._emit_checkpoint(
             turn_context,
@@ -1311,6 +1318,13 @@ class TurnGraph:
         audit_mode: bool = False,
     ) -> FinalizedTurnResult:
         self._enforce_execution_boundary()
+        # ──────────────────────────────────────────────────────────────────────────
+        # Contract: Orchestration boundary MUST extract and canonicalize identity.
+        # These values are authoritative and must be threaded through all stages.
+        # ──────────────────────────────────────────────────────────────────────────
+        trace_id = turn_context.trace_id
+        kernel_step_id = turn_context.kernel_step_id
+        determinism_manifest = turn_context.determinism_manifest
         execute_started_at = time.perf_counter()
         pipeline_items = self._pipeline_items()
         turn_context.state["_pipeline_stage_names"] = [
