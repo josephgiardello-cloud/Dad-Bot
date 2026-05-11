@@ -1259,6 +1259,14 @@ Text: {summary}
             "updated_at": graph.get("updated_at"),
         }
 
+    def invalidate_projection_cache(self) -> int:
+        """Invalidate cached projections and bump generation for deterministic rebuilds."""
+        cache_entries = len(self._projection_cache)
+        self._projection_cache.clear()
+        current_generation = int(getattr(self._bot, "_memory_graph_generation", 0) or 0)
+        self._bot._memory_graph_generation = current_generation + 1
+        return cache_entries
+
     # ------------------------------------------------------------------
     # Store sync / snapshot
     # ------------------------------------------------------------------

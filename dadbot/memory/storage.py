@@ -23,7 +23,14 @@ from dadbot.core.execution_context import (
     ensure_execution_trace_root,
     record_execution_step,
 )
+from dadbot.core.execution_context import (
+    get_active_core_state,
+    push_core_state_event,
+    require_bound_core_state_for_mutation,
+)
 from dadbot.core.kernel_locks import KernelEventTotalityLock
+from dadbot.core.core_state import CoreState, InputEvent, memory_projection, transition
+from dadbot.core.state_lineage import canonical_state_hash
 from dadbot.memory.migration import MemoryMigrationRegistry
 
 logger = logging.getLogger(__name__)
@@ -64,11 +71,14 @@ class _MemoryStoreParticipant:
         return None
 
     def commit(self) -> None:
-        self._backend._write_memory_store_unlocked()
+        self._backend._write_memory_store_unlocked(self._backend._projected_store)
 
     def rollback(self) -> None:
-        self._backend._manager.memory_store = deepcopy(self._previous_store)
-        self._backend._write_memory_store_unlocked()
+        restored = self._backend.replace_projection_via_canonical_event(
+            self._previous_store,
+            save=False,
+        )
+        self._backend._write_memory_store_unlocked(restored)
 
 
 class _SemanticIndexParticipant:
@@ -108,6 +118,9 @@ class _GraphStoreParticipant:
     def commit(self) -> None:
         if self._graph_manager is None:
             return
+        invalidate_projection_cache = getattr(self._graph_manager, "invalidate_projection_cache", None)
+        if callable(invalidate_projection_cache):
+            invalidate_projection_cache()
         sync_graph_store = getattr(self._graph_manager, "sync_graph_store", None)
         if callable(sync_graph_store):
             sync_graph_store(turn_context=None)
@@ -140,14 +153,15 @@ class MemoryStorageBackend:
     def __init__(self, bot, manager) -> None:
         self.bot = bot
         self._manager = manager
+        self._projected_store: dict[str, object] = {}
 
     # ------------------------------------------------------------------ private write helpers
 
-    def _write_json_memory_store_unlocked(self):
+    def _write_json_memory_store_unlocked(self, store_projection: dict):
         try:
             self.bot.write_json_atomically(
                 self.bot.MEMORY_PATH,
-                self._manager.memory_store,
+                store_projection,
                 backup=True,
             )
         except OSError as exc:
@@ -158,12 +172,12 @@ class MemoryStorageBackend:
                 level=logging.INFO,
             )
 
-    def _write_memory_store_unlocked(self):
+    def _write_memory_store_unlocked(self, store_projection: dict):
         if getattr(self.bot, "_tenant_document_store", None) is not None:
             try:
                 self.bot._tenant_document_store.save_session_state(
                     "memory",
-                    self._manager.memory_store,
+                    store_projection,
                 )
             except OSError as exc:
                 self.bot.record_runtime_issue(
@@ -172,25 +186,21 @@ class MemoryStorageBackend:
                     exc,
                     level=logging.INFO,
                 )
-                self._write_json_memory_store_unlocked()
+                self._write_json_memory_store_unlocked(store_projection)
                 return
-            self._write_json_memory_store_unlocked()
+            self._write_json_memory_store_unlocked(store_projection)
             return
-        self._write_json_memory_store_unlocked()
+        self._write_json_memory_store_unlocked(store_projection)
 
     # ------------------------------------------------------------------ public mutation
 
-    def _apply_mutation_in_memory(self, *, mutator=None, changes=None, normalize=True):
-        if mutator is not None:
-            mutator(self._manager.memory_store)
-        if changes:
-            self._manager.memory_store.update(changes)
-        if normalize:
-            self._manager.memory_store = self._manager.normalize_memory_store(
-                self._manager.memory_store,
-            )
-
-    def _coordinated_commit(self, *, before_store: dict, changes: dict) -> None:
+    def _coordinated_commit(
+        self,
+        *,
+        before_store: dict,
+        after_store: dict,
+        changes: dict,
+    ) -> None:
         tx_module = __import__(
             "dadbot.core.transaction_coordinator",
             fromlist=["TransactionContext", "TransactionCoordinator"],
@@ -198,7 +208,6 @@ class MemoryStorageBackend:
         transaction_context_cls = tx_module.TransactionContext
         transaction_coordinator_cls = tx_module.TransactionCoordinator
 
-        after_store = deepcopy(dict(self._manager.memory_store or {}))
         changed_keys = set((changes or {}).keys())
 
         semantic_changed = bool(
@@ -240,6 +249,79 @@ class MemoryStorageBackend:
                 f"Cross-store transaction failed and was rolled back: {report.error or 'unknown error'}",
             )
 
+    def _resolve_transition_base_state(self) -> CoreState:
+        active = get_active_core_state()
+        if active is not None:
+            return active
+        cached = getattr(self._manager, "memory_core_state", None)
+        if callable(cached):
+            state = cached()
+            if isinstance(state, CoreState):
+                return state
+        session_state = {}
+        snapshotter = getattr(self.bot, "snapshot_session_state", None)
+        if callable(snapshotter):
+            try:
+                session_state = dict(snapshotter() or {})
+            except Exception:
+                session_state = {}
+        return CoreState.from_dict(dict(session_state.get("core_state") or {}))
+
+    def _emit_memory_event(self, event_type: str, payload: dict) -> CoreState:
+        active = get_active_core_state()
+        if active is not None:
+            next_state = push_core_state_event(event_type, payload)
+            resolved = next_state if next_state is not None else active
+            self._manager._set_memory_core_state_cache(resolved)
+            return resolved
+        base = self._resolve_transition_base_state()
+        resolved = transition(base, InputEvent(event_type=event_type, payload=dict(payload or {})))
+        self._manager._set_memory_core_state_cache(resolved)
+        return resolved
+
+    def _emit_memory_events(self, *, before_store: dict, changes: dict) -> CoreState:
+        state = self._resolve_transition_base_state()
+        if not changes:
+            return state
+        for key in sorted(str(item) for item in dict(changes).keys()):
+            value = changes.get(key)
+            str_key = str(key)
+            if str_key == "memories":
+                before_memories = list(before_store.get("memories") or [])
+                after_memories = list(value or []) if isinstance(value, list) else []
+                if not after_memories and before_memories:
+                    state = self._emit_memory_event("MemoryCleared", {})
+                    continue
+                if len(after_memories) == len(before_memories) + 1:
+                    prefix_match = before_memories == after_memories[: len(before_memories)]
+                    if prefix_match:
+                        state = self._emit_memory_event(
+                            "MemoryAppended",
+                            {"entry": dict(after_memories[-1] or {})},
+                        )
+                        continue
+                state = self._emit_memory_event(
+                    "MemoryUpdated",
+                    {"key": "memories", "value": after_memories},
+                )
+                continue
+            if value is None:
+                state = self._emit_memory_event("MemoryDeleted", {"key": str_key})
+            else:
+                state = self._emit_memory_event(
+                    "MemoryUpdated",
+                    {"key": str_key, "value": value},
+                )
+        return state
+
+    def _project_memory_store(self, state: CoreState) -> dict:
+        self._manager._set_memory_core_state_cache(state)
+        projected = memory_projection(state, defaults=self.bot.default_memory_store())
+        normalized = self._manager.normalize_memory_store(projected)
+        self._manager._set_memory_projection_cache(normalized)
+        self._projected_store = dict(normalized)
+        return dict(normalized)
+
     def mutate_memory_store(
         self,
         mutator=None,
@@ -271,28 +353,100 @@ class MemoryStorageBackend:
                 },
                 required=True,
             )
+            require_bound_core_state_for_mutation(
+                source="MemoryStorageBackend.mutate_memory_store",
+                changed_keys=sorted(str(key) for key in (changes or {}).keys()),
+            )
             io_lock = getattr(self.bot, "_io_lock", None)
             if io_lock is None:
-                before_store = deepcopy(dict(self._manager.memory_store or {}))
-                self._apply_mutation_in_memory(
-                    mutator=mutator,
-                    changes=changes,
-                    normalize=normalize,
+                return self._run_mutation_commit_path(
+                    mutator=mutator, changes=changes, normalize=normalize, save=save,
                 )
-                if save:
-                    self._coordinated_commit(before_store=before_store, changes=changes)
-                return self._manager.memory_store
-
             with io_lock:
-                before_store = deepcopy(dict(self._manager.memory_store or {}))
-                self._apply_mutation_in_memory(
-                    mutator=mutator,
-                    changes=changes,
-                    normalize=normalize,
+                return self._run_mutation_commit_path(
+                    mutator=mutator, changes=changes, normalize=normalize, save=save,
                 )
-                if save:
-                    self._coordinated_commit(before_store=before_store, changes=changes)
-                return self._manager.memory_store
+
+    def _run_mutation_commit_path(
+        self,
+        *,
+        mutator,
+        changes: dict,
+        normalize: bool,
+        save: bool,
+    ) -> dict:
+        """Shared mutation + commit + projection routing logic (lock-agnostic)."""
+        before_store = deepcopy(dict(self._manager.memory_projection() or {}))
+        before_hash = canonical_state_hash(before_store)
+        candidate_store = deepcopy(before_store)
+        if mutator is not None:
+            mutator(candidate_store)
+        if changes:
+            candidate_store.update(dict(changes or {}))
+        event_changes = {
+            key: candidate_store.get(key)
+            for key in sorted(set(before_store.keys()) | set(candidate_store.keys()))
+            if before_store.get(key) != candidate_store.get(key)
+        }
+        if normalize:
+            normalized_candidate = self._manager.normalize_memory_store(
+                {**before_store, **event_changes},
+            )
+            event_changes = {
+                key: normalized_candidate.get(key)
+                for key in sorted(event_changes.keys())
+            }
+        next_state = self._emit_memory_events(before_store=before_store, changes=event_changes)
+        after_store = self._project_memory_store(next_state)
+        if save:
+            self._coordinated_commit(
+                before_store=before_store,
+                after_store=after_store,
+                changes=event_changes,
+            )
+        after_hash = canonical_state_hash(after_store)
+        self.bot._last_memory_state_hash = after_hash
+        record_execution_step(
+            "memory_projection_updated",
+            payload={
+                "changed_keys": sorted(str(key) for key in (event_changes or {}).keys()),
+                "projection_size": len(after_store),
+            },
+            required=True,
+        )
+        record_execution_step(
+            "memory_state_canonicalized",
+            payload={
+                "before_hash": before_hash,
+                "after_hash": after_hash,
+                "changed": bool(before_hash != after_hash),
+                "changed_keys": sorted(str(key) for key in (event_changes or {}).keys()),
+            },
+            required=True,
+        )
+        return after_store
+
+    def replace_projection_via_canonical_event(
+        self,
+        store: dict | None,
+        *,
+        save: bool = False,
+    ) -> dict:
+        """Replace projection through canonical MemoryInitialized routing.
+
+        This closes legacy projection-only reset paths so equivalent resets
+        always produce equivalent event/state transitions.
+        """
+        normalized = self._manager.normalize_memory_store(dict(store or {}))
+        next_state = self._emit_memory_event(
+            "MemoryInitialized",
+            {"store": normalized},
+        )
+        projected = self._project_memory_store(next_state)
+        # Replacement is intentionally projection-only to keep writes confined
+        # to commit/rollback/clear commit-boundary paths.
+        _ = save
+        return projected
 
     # ------------------------------------------------------------------ load
 
@@ -320,7 +474,11 @@ class MemoryStorageBackend:
                         normalized,
                         backup=False,
                     )
-                return normalized
+                initialized = self._emit_memory_event(
+                    "MemoryInitialized",
+                    {"store": normalized},
+                )
+                return self._project_memory_store(initialized)
 
         primary_path = self.bot.MEMORY_PATH
         backup_path = self.bot.json_backup_path(primary_path)
@@ -355,7 +513,11 @@ class MemoryStorageBackend:
                     )
             if tenant_document_store is not None:
                 tenant_document_store.save_session_state("memory", normalized)
-            return normalized
+            initialized = self._emit_memory_event(
+                "MemoryInitialized",
+                {"store": normalized},
+            )
+            return self._project_memory_store(initialized)
 
         if last_error is not None:
             self.bot.record_runtime_issue(
@@ -366,7 +528,11 @@ class MemoryStorageBackend:
         store = self.bot.default_memory_store()
         if tenant_document_store is not None:
             tenant_document_store.save_session_state("memory", store)
-        return store
+        initialized = self._emit_memory_event(
+            "MemoryInitialized",
+            {"store": store},
+        )
+        return self._project_memory_store(initialized)
 
     # ------------------------------------------------------------------ save / export / clear
 
@@ -374,38 +540,25 @@ class MemoryStorageBackend:
         with MemoryWriteOwnerScope.bind("MemoryManager"):
             return self.mutate_memory_store(save=False, owner="MemoryManager")
 
-    def save_memory_store(self):
-        io_lock = getattr(self.bot, "_io_lock", None)
-        if io_lock is None:
-            self._manager.memory_store = self._manager.normalize_memory_store(
-                self._manager.memory_store,
-            )
-            self._write_memory_store_unlocked()
-            return
-        with io_lock:
-            self._manager.memory_store = self._manager.normalize_memory_store(
-                self._manager.memory_store,
-            )
-            self._write_memory_store_unlocked()
-
     def export_memory_store(self, export_path):
         destination = Path(export_path)
         with self.bot._io_lock:
-            normalized = self._manager.normalize_memory_store(
-                self._manager.memory_store,
-            )
+            normalized = self._manager.normalize_memory_store(self._manager.memory_projection())
             self.bot.write_json_atomically(destination, normalized, backup=False)
 
-    def clear_memory_store(self):
-        """Reset memory store to defaults and clear semantic + graph indexes."""
+    def clear_memory_projection(self):
+        """Reset memory by canonical event and persist resulting projection."""
+        require_bound_core_state_for_mutation(
+            source="MemoryStorageBackend.clear_memory_projection",
+            changed_keys=["*"],
+        )
         with self.bot._io_lock:
-            self._manager.memory_store = self.bot.default_memory_store()
-            self._manager.memory_store = self._manager.normalize_memory_store(
-                self._manager.memory_store,
-            )
-            self._write_memory_store_unlocked()
+            cleared_state = self._emit_memory_event("MemoryCleared", {})
+            after_store = self._project_memory_store(cleared_state)
+            self._write_memory_store_unlocked(after_store)
         self._manager.clear_semantic_memory_index()
         self._manager.clear_graph_store()
+        return after_store
 
 
 __all__ = ["MemoryStorageBackend"]

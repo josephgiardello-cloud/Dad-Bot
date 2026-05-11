@@ -142,6 +142,32 @@ def test_dadbot_runtime_state_attr_maps_read_and_write_through(bot):
     assert "_last_turn_pipeline" not in bot.__dict__
 
 
+def test_dadbot_attribute_map_roundtrip_parity(bot):
+    # Some routed names are intentionally read-only aliases.
+    exemptions = {
+        "runtime_state_container": "runtime state container alias is provider-owned/read-only",
+    }
+
+    unexpected_failures: list[str] = []
+    maps = [
+        DadBot._CONFIG_ATTR_MAP,
+        DadBot._RUNTIME_STATE_ATTR_MAP,
+        DadBot._INTERNAL_RUNTIME_ATTR_MAP,
+    ]
+
+    for attr_map in maps:
+        for external_name in attr_map:
+            value = getattr(bot, external_name)
+            try:
+                setattr(bot, external_name, value)
+                assert getattr(bot, external_name) == value
+            except Exception as exc:  # noqa: BLE001
+                if external_name not in exemptions:
+                    unexpected_failures.append(f"{external_name}: {type(exc).__name__}: {exc}")
+
+    assert not unexpected_failures, "Unexpected map roundtrip failures:\n" + "\n".join(unexpected_failures)
+
+
 def test_action_methods_are_mixin_owned_not_declared_on_dadbot():
     assert "record_relationship_history_point" not in DadBot.__dict__
     assert "soft_reset_session_context" not in DadBot.__dict__

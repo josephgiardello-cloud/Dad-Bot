@@ -101,6 +101,7 @@ def test_health_checker_identity_check_passes_with_trace_ids():
     assert identity["ok"] is True
 
 
+@pytest.mark.slow
 def test_health_checker_run_all_includes_global_invariant_contract():
     ledger = ExecutionLedger()
     session_store = SessionStore()

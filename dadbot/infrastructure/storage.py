@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
-import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
+
+from dadbot.utils import create_temp_file_path, safe_unlink
 
 
 class StorageBackend(Protocol):
@@ -23,12 +25,17 @@ class FileSystemAdapter:
         target = Path(target_path)
         target.parent.mkdir(parents=True, exist_ok=True)
 
-        # Keep tempfile + shutil.move pattern to match prior behavior.
-        with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8") as handle:
-            json.dump(data, handle, indent=4)
-            temp_name = handle.name
-
-        shutil.move(temp_name, target)
+        temp_name = create_temp_file_path(
+            suffix=target.suffix,
+            prefix=f"{target.stem}.",
+            directory=target.parent,
+        )
+        try:
+            with Path(temp_name).open("w", encoding="utf-8") as handle:
+                json.dump(data, handle, indent=4)
+            os.replace(temp_name, target)
+        finally:
+            safe_unlink(temp_name)
 
     def create_corruption_snapshot(self, path: Path) -> Path | None:
         source = Path(path)

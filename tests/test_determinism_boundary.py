@@ -118,3 +118,31 @@ def test_capture_async_record_and_replay():
     result2 = asyncio.run(boundary.capture_async("inference.llm_reply", async_llm))
     assert result2 == "async reply"
     assert len(calls) == 1  # never called again
+
+
+def test_determinism_boundary_record_mode_detects_structural_drift_when_enabled():
+    boundary = DeterminismBoundary(strict_structural_drift=True)
+
+    boundary.inject("slot.strict", {"result": "stable"})
+
+    with pytest.raises(DeterminismViolation, match="structural|drift"):
+        boundary.capture("slot.strict", lambda: {"result": "changed"})
+
+
+def test_replay_completeness_rehydrates_sealed_slots_after_restart():
+    calls = []
+
+    def _producer():
+        calls.append("called")
+        return {"reply": "stable"}
+
+    record_boundary = DeterminismBoundary()
+    record_boundary.capture("slot.reply", _producer)
+    snapshot = record_boundary.snapshot()
+
+    replay_boundary = DeterminismBoundary.from_snapshot(snapshot)
+    replay_boundary.seal()
+    result = replay_boundary.capture("slot.reply", lambda: {"reply": "should-not-run"})
+
+    assert result == {"reply": "stable"}
+    assert calls == ["called"]

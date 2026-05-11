@@ -15,7 +15,13 @@ from typing import Any, Protocol
 
 from dadbot.contracts import AttachmentList, FinalizedTurnResult
 from dadbot.core.compaction import ArchiveTier, CompactionPolicy, EventCompactor
+from dadbot.core.core_state import CoreState, InputEvent, project_views, transition
 from dadbot.core.execution_boundary import ControlPlaneExecutionBoundary
+from dadbot.core.execution_context import (
+    open_core_state_scope,
+    close_core_state_scope,
+)
+from dadbot.core.execution_context import get_active_core_state, push_core_state_event
 from dadbot.core.execution_lease import ExecutionLease, LeaseConflictError
 from dadbot.core.execution_ledger import ExecutionLedger
 from dadbot.core.execution_ledger_memory import InMemoryExecutionLedger
@@ -38,6 +44,7 @@ from dadbot.core.kernel_signals import get_exporter, get_metrics, get_tracer
 from dadbot.core.ledger_reader import LedgerReader
 from dadbot.core.ledger_writer_adapter import LedgerWriterAdapter
 from dadbot.core.recovery_manager import RecoveryManager
+from dadbot.core.runtime_correctness_kernel import RuntimeCorrectnessKernel
 from dadbot.core.semantic_primitives import hash as semantic_hash
 from dadbot.core.session_store import SessionStore
 
@@ -555,10 +562,18 @@ class ExecutionControlPlane:
         self._inflight_by_request: dict[tuple[str, str], asyncio.Future[FinalizedTurnResult]] = {}
         self._inflight_lock = asyncio.Lock()
         self.graph = graph
+        self.runtime_correctness_kernel = RuntimeCorrectnessKernel(
+            determinism=self,
+            memory=self,
+            graph=self.graph,
+            canonicalizer=self,
+            facade=None,
+        )
         self._ledger_compactor: EventCompactor | None = None
         self._last_compaction_report: dict[str, Any] = {"compacted": False, "reason": "not_run"}
         self._global_confluence_contracts: dict[str, str] = {}
         self._last_confluence_report: dict[str, Any] = {"enforced": False, "reason": "not_run"}
+        self._last_runtime_correctness_report: dict[str, Any] = {"enforced": False, "reason": "not_run"}
         self._confluence_metrics: dict[str, int] = {
             "attempted": 0,
             "bound_first_observation": 0,
@@ -569,7 +584,7 @@ class ExecutionControlPlane:
         self.kernel_gateway = KernelGateway(self)
 
     @property
-    def scheduler(self) -> Scheduler:
+    def scheduler(self) -> SchedulerProtocol:
         KernelGateway.assert_scope("control_plane.scheduler")
         return self._scheduler
 
@@ -1069,8 +1084,22 @@ class ExecutionControlPlane:
         future = await self.scheduler.register(job)
         session_before = self.registry.get_or_create(session_key)
         before_state_hash = self._stable_hash(dict(session_before.get("state") or {}))
+        # Initialize CoreState from persisted session state; all turn mutations will
+        # flow through the event bus (push_core_state_event) and update this binding.
+        initial_core_state = CoreState.from_dict(
+            dict(session_before.get("state") or {}).get("core_state"),
+        )
         max_wait_seconds = resolved_timeout_seconds
         deadline = time.time() + max_wait_seconds
+        _cs_token = open_core_state_scope(initial_core_state)
+        push_core_state_event(
+            "job_submitted",
+            {
+                "session_id": session_key,
+                "trace_id": trace_id,
+                "job_id": job.job_id,
+            },
+        )
         try:
             while not future.done():
                 if time.time() > deadline:
@@ -1107,6 +1136,12 @@ class ExecutionControlPlane:
                 job.metadata["execution_result"] = current_execution_result
             session_after = self.registry.get_or_create(session_key)
             self._validate_trace_invariant(job, result, session=session_after, state_before_hash=before_state_hash)
+            self._run_runtime_correctness_kernel(
+                session=session_after,
+                job=job,
+                result=result,
+                state_before_hash=before_state_hash,
+            )
             self._maybe_compact_ledger()
             if dedupe_future is not None and not dedupe_future.done():
                 dedupe_future.set_result(result)
@@ -1136,6 +1171,7 @@ class ExecutionControlPlane:
                 async with self._inflight_lock:
                     if self._inflight_by_request.get(dedupe_key) is dedupe_future:
                         self._inflight_by_request.pop(dedupe_key, None)
+            close_core_state_scope(_cs_token)
 
     async def submit_turn(
         self,
@@ -1236,6 +1272,128 @@ class ExecutionControlPlane:
             state_before_hash=str(state_before_hash or ""),
         )
 
+    def _build_runtime_correctness_snapshot(
+        self,
+        *,
+        session: dict[str, Any],
+        job: ExecutionJob,
+        result: FinalizedTurnResult,
+        state_before_hash: str,
+    ) -> dict[str, Any]:
+        state = dict(session.get("state") or {}) if isinstance(session, dict) else {}
+        terminal_state = dict(state.get("last_terminal_state") or {})
+        trace_events = self._job_trace_events(job)
+        commit_boundary_count = 0
+        for event in trace_events:
+            payload = dict(event.get("payload") or {}) if isinstance(event, dict) else {}
+            event_type = str(event.get("event_type") or payload.get("event_type") or "").strip().lower()
+            stage = str(
+                event.get("stage")
+                or event.get("node_type")
+                or payload.get("stage")
+                or payload.get("node_type")
+                or ""
+            ).strip().lower()
+            if event_type in {"node_complete", "node_completed"} and stage == "save":
+                commit_boundary_count += 1
+
+        composition_contract = dict(state.get("last_execution_composition_contract") or {})
+        observed_confluence_hash = str(composition_contract.get("confluence_class_hash") or "").strip()
+        expected_confluence_hash = str(dict(job.metadata or {}).get("expected_execution_confluence_hash") or "").strip()
+        response = str(result[0] if isinstance(result, tuple) and len(result) >= 1 else "")
+        should_end = bool(result[1] if isinstance(result, tuple) and len(result) >= 2 else False)
+        return {
+            "trace_id": str(job.trace_id or ""),
+            "session_id": str(job.session_id or ""),
+            "job_id": str(job.job_id or ""),
+            "execution_dag_hash": str(terminal_state.get("execution_dag_hash") or ""),
+            "determinism_closure_hash": str(terminal_state.get("determinism_closure_hash") or ""),
+            "post_commit_mutation_effects_hash": str(terminal_state.get("post_commit_mutation_effects_hash") or ""),
+            "memory_retrieval_set": list(state.get("memory_retrieval_set") or []),
+            "trace_events": trace_events,
+            "commit_boundary_count": int(commit_boundary_count),
+            "expected_execution_confluence_hash": expected_confluence_hash,
+            "observed_execution_confluence_hash": observed_confluence_hash,
+            "state_before_hash": str(state_before_hash or ""),
+            "state_after_hash": str(self._stable_hash(state) or ""),
+            "result": {
+                "response": response,
+                "should_end": should_end,
+            },
+        }
+
+    def _run_runtime_correctness_kernel(
+        self,
+        *,
+        session: dict[str, Any],
+        job: ExecutionJob,
+        result: FinalizedTurnResult,
+        state_before_hash: str,
+    ) -> dict[str, Any]:
+        snapshot = self._build_runtime_correctness_snapshot(
+            session=session,
+            job=job,
+            result=result,
+            state_before_hash=state_before_hash,
+        )
+        report = self.runtime_correctness_kernel.run(session, snapshot)
+        session_state = session.setdefault("state", {}) if isinstance(session, dict) else {}
+        if isinstance(session_state, dict):
+            session_state["last_execution_correctness_report"] = dict(report)
+            session_state["last_execution_correctness_snapshot"] = dict(snapshot)
+            # KEY REVERSAL: CoreState is the authority — memory_retrieval_set is
+            # derived FROM CoreState, not the other way around.
+            active_core_state = get_active_core_state()
+            base_core_state = (
+                active_core_state
+                if active_core_state is not None
+                else CoreState.from_dict(session_state.get("core_state"))
+            )
+            next_core_state = transition(
+                base_core_state,
+                InputEvent(
+                    event_type="turn_committed",
+                    payload={
+                        "trace_id": str(job.trace_id or ""),
+                        "response": str(result[0] if isinstance(result, tuple) and len(result) >= 1 else ""),
+                        "should_end": bool(result[1] if isinstance(result, tuple) and len(result) >= 2 else False),
+                        # CoreState memory is the source of truth; legacy snapshot is secondary.
+                        "memory_retrieval_set": base_core_state.memory.to_dict_list(),
+                    },
+                    metadata={
+                        "job_id": str(job.job_id or ""),
+                    },
+                ),
+            )
+            projections = project_views(next_core_state)
+            session_state["core_state"] = next_core_state.to_dict()
+            session_state["core_state_views"] = {
+                "memory": {
+                    "entries": [dict(item.payload or {}) for item in projections.memory.entries],
+                },
+                "graph": {
+                    "adjacency": dict(projections.graph.adjacency),
+                },
+                "execution": {
+                    "trace_id": projections.execution.state.trace_id,
+                    "last_response": projections.execution.state.last_response,
+                    "should_end": bool(projections.execution.state.should_end),
+                },
+                "canonical": {
+                    "event_count": len(projections.canonical.events),
+                    "last_event_id": str(projections.canonical.events[-1].event_id if projections.canonical.events else ""),
+                },
+                "facade": projections.facade.as_payload(),
+            }
+
+        metadata = dict(job.metadata or {})
+        metadata["runtime_correctness_report"] = dict(report)
+        metadata["runtime_correctness_snapshot"] = dict(snapshot)
+        metadata["core_state"] = dict(session_state.get("core_state") or {}) if isinstance(session_state, dict) else {}
+        job.metadata = metadata
+        self._last_runtime_correctness_report = dict(report)
+        return report
+
     def boot_reconcile(self) -> dict[str, Any]:
         """Phase 3: boot reconciliation is now ledger-only via direct replay."""
         store = SessionStore(ledger=self.ledger, projection_only=True)
@@ -1253,6 +1411,7 @@ class ExecutionControlPlane:
             "ledger_compaction": dict(self._last_compaction_report or {}),
             "execution_confluence": dict(self._last_confluence_report or {}),
             "execution_confluence_metrics": dict(self._confluence_metrics),
+            "runtime_correctness": dict(self._last_runtime_correctness_report or {}),
             "ok": True,
         }
 

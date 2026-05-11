@@ -46,6 +46,7 @@ def test_observability_import_does_not_pull_heavy_runtime_modules() -> None:
     assert payload["heavy_modules"] == []
 
 
+@pytest.mark.slow
 def test_dadbot_import_time_budget() -> None:
     proc = _run_python(
         "import importlib, json, time;"

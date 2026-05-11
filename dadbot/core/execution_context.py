@@ -5,6 +5,7 @@ import contextvars
 import hashlib
 import json
 import logging
+import os
 from dataclasses import asdict, dataclass, field
 from typing import Any
 from uuid import uuid4
@@ -15,12 +16,24 @@ logger = logging.getLogger(__name__)
 
 def _stable_sha256(payload: Any) -> str:
     return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, default=str).encode("utf-8"),
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8"),
     ).hexdigest()
 
 
 def _json_clone(payload: Any) -> Any:
-    return json.loads(json.dumps(payload, sort_keys=True, default=str))
+    return json.loads(
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ),
+    )
 
 
 def _drop_ignored_fields(payload: Any, ignored_fields: list[str]) -> Any:
@@ -195,11 +208,25 @@ def record_external_system_call(
         "time_token": time_token,
         "tool_call_record": tool_call_record.to_dict(),
     }
-    return record_execution_step(
+    step = record_execution_step(
         "external_system_call",
         payload=payload,
         required=required,
     )
+    # Route tool call through CoreState event bus (all execution through events).
+    push_core_state_event(
+        "tool_called",
+        {
+            "operation": normalized_operation,
+            "system": normalized_system,
+            "status": str(status or "ok").strip().lower() or "ok",
+            "time_token": time_token,
+            "request_hash": request_hash,
+            "response_hash": response_hash,
+            "deterministic_id": str(deterministic_id or "").strip(),
+        },
+    )
+    return step
 
 
 def build_external_system_call_graph(steps: list[dict[str, Any]]) -> dict[str, Any]:
@@ -263,6 +290,10 @@ class RuntimeTraceViolation(RuntimeError):
     """Raised when a trace-required operation executes without an active trace."""
 
 
+class UnboundCoreStateMutationError(RuntimeError):
+    """Raised when a write is attempted without a turn-bound CoreState in strict mode."""
+
+
 class ExecutionTraceRecorder:
     """Turn-scoped recorder for authoritative execution operations."""
 
@@ -304,6 +335,119 @@ _TRACE_REQUIRED: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "dadbot_execution_trace_required",
     default=False,
 )
+
+# ---------------------------------------------------------------------------
+# CoreState event bus — turn-scoped mutable reference to the active CoreState.
+# All writes during a turn flow through push_core_state_event(), which applies
+# the reducer and updates this contextvar.  At turn-end, control_plane reads
+# the final value and persists it as the authoritative session state.
+# ---------------------------------------------------------------------------
+_ACTIVE_CORE_STATE: contextvars.ContextVar[Any] = contextvars.ContextVar(
+    "dadbot_active_core_state",
+    default=None,
+)
+
+
+def get_active_core_state() -> Any:
+    """Return the active CoreState for the current turn, or None if not bound."""
+    return _ACTIVE_CORE_STATE.get()
+
+
+def core_state_strict_mutation_mode_enabled() -> bool:
+    """Return whether unbound mutation attempts must hard-fail.
+
+    Default behavior:
+    - CI: enabled by default (unless explicitly disabled)
+    - Local/dev: disabled by default (unless explicitly enabled)
+
+    Override with DADBOT_STRICT_CORESTATE_MUTATIONS.
+    """
+    raw = str(os.environ.get("DADBOT_STRICT_CORESTATE_MUTATIONS") or "").strip().lower()
+    if raw:
+        return raw in {"1", "true", "yes", "on"}
+    # CI defaults to strict; local/dev remains permissive until rollout completes.
+    return str(os.environ.get("CI") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def require_bound_core_state_for_mutation(
+    *,
+    source: str,
+    changed_keys: list[str] | None = None,
+) -> Any:
+    """Require a turn-bound CoreState for mutation paths when strict mode is on."""
+    active = get_active_core_state()
+    if active is not None:
+        return active
+    if not core_state_strict_mutation_mode_enabled():
+        return None
+    violation = {
+        "source": str(source or ""),
+        "changed_keys": list(changed_keys or []),
+        "has_core_state": False,
+        "strict_mode": True,
+    }
+    raise UnboundCoreStateMutationError(
+        "All mutations must be CoreState-bound. "
+        "Memory cannot change without a canonical event and reducer transition. "
+        "Reducer-only mutation policy violation: no CoreState bound "
+        f"(violation={violation!r})",
+    )
+
+
+def push_core_state_event(
+    event_type: str,
+    payload: dict[str, Any] | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> Any:
+    """Apply an InputEvent to the active CoreState via the pure reducer.
+
+    Returns the new CoreState, or None if no CoreState is bound for this turn.
+    This is the single write path: event → reducer → CoreState.
+    """
+    current = _ACTIVE_CORE_STATE.get()
+    if current is None:
+        return None
+    # Lazy import avoids module-level circular dependency risk.
+    from dadbot.core.core_state import InputEvent, transition  # noqa: PLC0415
+    next_state = transition(
+        current,
+        InputEvent(
+            event_type=str(event_type or ""),
+            payload=dict(payload or {}),
+            metadata=dict(metadata or {}),
+        ),
+    )
+    _ACTIVE_CORE_STATE.set(next_state)
+    return next_state
+
+
+@contextlib.contextmanager
+def bind_core_state(initial_state: Any):
+    """Bind a CoreState to the current async context for the duration of a turn.
+
+    Must be entered before the turn executor runs so all downstream mutations
+    (memory writes, tool calls, etc.) can update the shared CoreState via
+    push_core_state_event().
+    """
+    token = _ACTIVE_CORE_STATE.set(initial_state)
+    try:
+        yield
+    finally:
+        _ACTIVE_CORE_STATE.reset(token)
+
+
+def open_core_state_scope(initial_state: Any) -> Any:
+    """Set the active CoreState and return the contextvar token.
+
+    Pair with close_core_state_scope(token) in a try/finally block when a
+    context manager is inconvenient (e.g. wrapping an existing try/except/finally).
+    """
+    return _ACTIVE_CORE_STATE.set(initial_state)
+
+
+def close_core_state_scope(token: Any) -> None:
+    """Reset the active CoreState to the state before open_core_state_scope."""
+    _ACTIVE_CORE_STATE.reset(token)
 
 
 def active_execution_trace() -> ExecutionTraceRecorder | None:

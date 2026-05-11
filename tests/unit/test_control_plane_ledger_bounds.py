@@ -77,6 +77,39 @@ async def test_submit_turn_records_execution_composition_contract() -> None:
 
 
 @pytest.mark.asyncio
+async def test_submit_turn_records_runtime_correctness_report() -> None:
+    async def _executor(session: dict, _job) -> tuple[str, bool]:
+        state = session.setdefault("state", {})
+        state["last_terminal_state"] = {
+            "execution_dag_hash": "dag-r",
+            "policy_hash": "pol-r",
+            "post_commit_mutation_effects_hash": "mut-r",
+            "determinism_closure_hash": "det-r",
+        }
+        return ("ok", False)
+
+    plane = ExecutionControlPlane(registry=SessionRegistry(), kernel_executor=_executor)
+    await plane.submit_turn(session_id="s-runtime-correctness", user_input="hello")
+
+    session = plane.registry.get_or_create("s-runtime-correctness")
+    state = dict(session.get("state") or {})
+    report = dict(state.get("last_execution_correctness_report") or {})
+    assert bool(report.get("fingerprint"))
+    assert bool(dict(report.get("determinism") or {}).get("replay_equivalent")) is True
+    assert bool(dict(report.get("memory") or {}).get("mutation_chain_valid")) is True
+
+    core_state = dict(state.get("core_state") or {})
+    views = dict(state.get("core_state_views") or {})
+    assert int(core_state.get("version", 0)) >= 1
+    assert bool(dict(views.get("facade") or {}).get("state_hash"))
+    assert int(dict(views.get("canonical") or {}).get("event_count", 0)) >= 1
+
+    status = plane.boot_reconcile()
+    runtime_correctness = dict(status.get("runtime_correctness") or {})
+    assert runtime_correctness.get("fingerprint") == report.get("fingerprint")
+
+
+@pytest.mark.asyncio
 async def test_global_confluence_law_binds_first_observation_and_reuses_expected_hash(monkeypatch) -> None:
     monkeypatch.setenv("DADBOT_GLOBAL_CONFLUENCE_MODE", "enforce")
 

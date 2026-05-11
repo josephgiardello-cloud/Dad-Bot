@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import shutil
 import subprocess
-import tempfile
 from pathlib import Path
+
+from dadbot.utils import create_temp_file_path, safe_unlink
 
 try:
     import pyttsx3  # type: ignore[import-not-found]
@@ -33,8 +34,7 @@ def synthesize_piper_audio(
         )
     temp_path = None
     try:
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as handle:
-            temp_path = handle.name
+        temp_path = create_temp_file_path(suffix=".wav", prefix="dadbot_tts_")
         result = subprocess.run(
             [piper_exe, "--model", model_path, "--output_file", temp_path],
             input=text.encode("utf-8"),
@@ -52,10 +52,7 @@ def synthesize_piper_audio(
         return None, f"Piper error: {exc}"
     finally:
         if temp_path:
-            try:
-                Path(temp_path).unlink(missing_ok=True)
-            except Exception:
-                pass
+            safe_unlink(temp_path)
 
 
 def resolve_tts_voice_id(engine, voice_profile):
@@ -96,8 +93,7 @@ def synthesize_tts_audio(
 
     temp_path = None
     try:
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as handle:
-            temp_path = handle.name
+        temp_path = create_temp_file_path(suffix=".wav", prefix="dadbot_tts_")
 
         engine = pyttsx3.init()
         voice_id = resolve_tts_voice_id(engine, voice_profile)
@@ -119,7 +115,4 @@ def synthesize_tts_audio(
         return None, f"TTS failed: {exc}"
     finally:
         if temp_path:
-            try:
-                Path(temp_path).unlink(missing_ok=True)
-            except Exception:
-                pass
+            safe_unlink(temp_path)

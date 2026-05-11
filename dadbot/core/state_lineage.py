@@ -7,7 +7,13 @@ from typing import Any
 
 
 def _stable_sha256(payload: Any) -> str:
-    blob = json.dumps(payload, sort_keys=True, ensure_ascii=True, default=str)
+    blob = json.dumps(
+        payload,
+        sort_keys=True,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        default=str,
+    )
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 

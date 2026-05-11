@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import tempfile
-from pathlib import Path
-
 import streamlit as st
+from dadbot.utils import create_temp_file_path, safe_unlink
 
 try:
     from faster_whisper import WhisperModel
@@ -42,9 +40,9 @@ def transcribe_audio_bytes(
 
     temp_path = None
     try:
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as handle:
+        temp_path = create_temp_file_path(suffix=".wav", prefix="dadbot_stt_")
+        with open(temp_path, "wb") as handle:
             handle.write(audio_bytes)
-            temp_path = handle.name
 
         if backend == "faster_whisper":
             model = load_faster_whisper_model(model_name)
@@ -68,7 +66,4 @@ def transcribe_audio_bytes(
         return "", f"Transcription failed: {exc}"
     finally:
         if temp_path:
-            try:
-                Path(temp_path).unlink(missing_ok=True)
-            except Exception:
-                pass
+            safe_unlink(temp_path)

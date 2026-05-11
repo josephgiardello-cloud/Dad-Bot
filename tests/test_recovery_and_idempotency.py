@@ -264,6 +264,31 @@ def test_validate_trace_catches_all_forbidden_fields():
             validate_trace([dirty])
 
 
+def test_validate_trace_rejects_request_and_correlation_fields() -> None:
+    import pytest
+
+    from dadbot.core.canonical_event import validate_trace
+
+    event = {
+        "type": "JOB_QUEUED",
+        "session_id": "s-validate-full",
+        "trace_id": "tr-validate-full",
+        "timestamp": 1.0,
+        "kernel_step_id": "test.full_policy",
+        "sequence": 1,
+        "session_index": 1,
+        "event_id": "evt-v2",
+        "parent_event_id": "",
+        "payload": {
+            "request_id": "req-1",
+            "correlation_id": "corr-1",
+        },
+    }
+
+    with pytest.raises(AssertionError, match="request_id|correlation_id"):
+        validate_trace([event], enforce_full_policy=True)
+
+
 def test_capability_audit_event_is_excluded_from_replay_hash():
     left = InMemoryExecutionLedger()
     right = InMemoryExecutionLedger()

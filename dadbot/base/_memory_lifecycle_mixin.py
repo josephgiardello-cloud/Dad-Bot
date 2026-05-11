@@ -20,13 +20,14 @@ class MemoryLifecycleMixin:
         return self._storage.prepare_memory_store_for_save()
 
     def save_memory_store(self):
-        return self._storage.save_memory_store()
+        projection = self.normalize_memory_store(self.memory_projection())
+        return self._storage._write_memory_store_unlocked(projection)
 
     def export_memory_store(self, export_path):
         return self._storage.export_memory_store(export_path)
 
     def clear_memory_store(self):
-        return self._storage.clear_memory_store()
+        return self._storage.clear_memory_projection()
 
     # Lifecycle/catalog delegation shims
 

@@ -79,6 +79,65 @@ class _ManagerDescriptor:
         obj._set_explicit_manager(self._name, value)
 
 
+class _MemoryProjectionProxy(dict):
+    """Compatibility dict facade that routes writes through canonical events."""
+
+    def __init__(self, bot: "DadBot") -> None:
+        super().__init__()
+        self._bot = bot
+
+    def _snapshot(self) -> dict[str, Any]:
+        memory = getattr(self._bot, "memory", None)
+        if memory is None:
+            return {}
+        return dict(memory.memory_projection() or {})
+
+    def __getitem__(self, key: Any) -> Any:
+        return self._snapshot()[key]
+
+    def get(self, key: Any, default: Any = None) -> Any:
+        return self._snapshot().get(key, default)
+
+    def __iter__(self):
+        return iter(self._snapshot())
+
+    def __len__(self) -> int:
+        return len(self._snapshot())
+
+    def keys(self):
+        return self._snapshot().keys()
+
+    def values(self):
+        return self._snapshot().values()
+
+    def items(self):
+        return self._snapshot().items()
+
+    def __eq__(self, other: Any) -> bool:
+        if isinstance(other, _MemoryProjectionProxy):
+            return self._snapshot() == other._snapshot()
+        if isinstance(other, dict):
+            return self._snapshot() == other
+        return self._snapshot() == other
+
+    def __repr__(self) -> str:
+        return repr(self._snapshot())
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        self._bot.mutate_memory_store(save=False, **{str(key): value})
+
+    def __delitem__(self, key: Any) -> None:
+        self._bot.mutate_memory_store(save=False, **{str(key): None})
+
+    def update(self, *args: Any, **kwargs: Any) -> None:
+        updates = dict(*args, **kwargs)
+        if updates:
+            self._bot.mutate_memory_store(save=False, **updates)
+
+    def clear(self) -> None:
+        self._bot.memory.clear_memory_store()
+
+
 class DadBot(
     DadBotBootMixin,
     DadBotTurnMixin,
@@ -455,20 +514,26 @@ class DadBot(
 
     @property
     def MEMORY_STORE(self):
-        return self.memory.memory_store
+        proxy = getattr(self, "_memory_store_proxy", None)
+        if proxy is None:
+            proxy = _MemoryProjectionProxy(self)
+            self._memory_store_proxy = proxy
+        return proxy
 
     @MEMORY_STORE.setter
     def MEMORY_STORE(self, value: Any):
-        # Preserve reference identity for callers that intentionally pass a
-        # prebuilt in-memory store (used by service-split compatibility tests).
+        # Compatibility surface remains, but reset must still flow through
+        # canonical event routing to preserve deterministic state transitions.
         _mem = self.memory
         if _mem is not None:
             store: dict[str, Any] = cast("dict[str, Any]", value) if isinstance(value, dict) else {}
-            replace_unchecked = getattr(_mem, "_replace_memory_store_unchecked", None)
-            if callable(replace_unchecked):
-                replace_unchecked(store)
-            else:
-                _mem.memory_store = store
+            replace_canonical = getattr(_mem._storage, "replace_projection_via_canonical_event", None)
+            if callable(replace_canonical):
+                replace_canonical(store, save=False)
+                return
+            replace_projection = getattr(_mem, "_set_memory_projection_cache", None)
+            if callable(replace_projection):
+                replace_projection(store)
 
     @property
     def STYLE(self):

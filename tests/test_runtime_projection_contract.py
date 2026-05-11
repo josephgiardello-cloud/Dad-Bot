@@ -121,6 +121,7 @@ def test_streamlit_consumer_does_not_import_runtime_internals_or_raw_journal() -
     assert imported_names.isdisjoint(FORBIDDEN_CONSUMER_IMPORT_NAMES)
 
 
+@pytest.mark.slow
 def test_only_consumer_modules_import_projection_boundary_clients() -> None:
     offending_paths: list[str] = []
 

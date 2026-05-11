@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from functools import lru_cache
+from pathlib import Path
 
 try:
     import orjson
@@ -94,6 +97,30 @@ def json_load(file_handle):
     return json_loads(file_handle.read())
 
 
+def create_temp_file_path(*, suffix="", prefix="dadbot_", directory=None):
+    fd, temp_path = tempfile.mkstemp(
+        suffix=str(suffix or ""),
+        prefix=str(prefix or "dadbot_"),
+        dir=directory,
+    )
+    os.close(fd)
+    return temp_path
+
+
+def safe_unlink(path, *, retries=3):
+    file_path = Path(path)
+    attempts = max(1, int(retries or 1))
+    for _ in range(attempts):
+        try:
+            file_path.unlink(missing_ok=True)
+            return True
+        except FileNotFoundError:
+            return True
+        except (PermissionError, OSError):
+            continue
+    return not file_path.exists()
+
+
 @lru_cache(maxsize=8192)
 def normalize_memory_text(text):
     return " ".join(str(text or "").strip().lower().split())
@@ -116,12 +143,14 @@ def significant_tokens(text):
 
 
 __all__ = [
+    "create_temp_file_path",
     "env_truthy",
     "json_dump",
     "json_dumps",
     "json_load",
     "json_loads",
     "normalize_memory_text",
+    "safe_unlink",
     "significant_tokens",
     "tokenize_text",
 ]

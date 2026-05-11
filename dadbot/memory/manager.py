@@ -12,8 +12,8 @@ from dadbot.base.memory_base import (
 from dadbot.contracts import DadBotContext, SupportsDadBotAccess
 from dadbot.core.execution_boundary import MemoryWriteOwnerScope
 from dadbot.core.execution_context import ensure_execution_trace_root
+from dadbot.core.core_state import CoreState
 from dadbot.memory.lifecycle import MemoryLifecycleManager
-from dadbot.memory.migration import CURRENT_SCHEMA_VERSION
 from dadbot.memory.normalizers import MemoryNormalizer
 from dadbot.memory.semantic_manager import SemanticIndexManager
 from dadbot.memory.storage import MemoryStorageBackend
@@ -29,51 +29,38 @@ class MemoryManager(MemoryLifecycleMixin, MemorySearchMixin, MemoryIntegrationMi
 
         self.context = DadBotContext.from_runtime(bot)
         self.bot = self.context.bot
-        self._memory_store = {}
+        self._memory_projection_cache: dict = {}
+        self._memory_core_state_cache: CoreState = CoreState()
         self._graph_manager: GraphManagerProtocol = MemoryGraphManager(self.bot, self)
         self._semantic_manager = SemanticIndexManager(self.bot)
         self._normalizer = MemoryNormalizer(self.bot)  # data-shape policy
         self._storage = MemoryStorageBackend(self.bot, self)  # persistence I/O
         self._lifecycle = MemoryLifecycleManager(self.bot, self)  # catalog access
 
+    def memory_projection(self) -> dict:
+        return dict(self._memory_projection_cache or {})
+
     @property
-    def memory_store(self):
-        return self._memory_store
+    def memory_store(self) -> dict:
+        # Compatibility projection surface; authoritative state remains CoreState.
+        return self.memory_projection()
 
-    @memory_store.setter
-    def memory_store(self, value):
-        self._memory_store = value if isinstance(value, dict) else {}
+    def _set_memory_projection_cache(self, value: dict | None) -> dict:
+        self._memory_projection_cache = dict(value or {})
+        return dict(self._memory_projection_cache)
 
-    def initialize_memory_store_defaults(self):
-        if "schema_version" not in self._memory_store:
-            self._memory_store["schema_version"] = CURRENT_SCHEMA_VERSION
-        if "last_scheduled_proactive_at" not in self._memory_store:
-            self._memory_store["last_scheduled_proactive_at"] = None
-        if "last_memory_compaction_at" not in self._memory_store:
-            self._memory_store["last_memory_compaction_at"] = None
-        if "last_memory_compaction_summary" not in self._memory_store:
-            self._memory_store["last_memory_compaction_summary"] = ""
-        if "mcp_local_store" not in self._memory_store:
-            self._memory_store["mcp_local_store"] = {}
-        if "narrative_memories" not in self._memory_store:
-            self._memory_store["narrative_memories"] = []
-        if "heritage_cross_links" not in self._memory_store:
-            self._memory_store["heritage_cross_links"] = []
-        if "advice_audits" not in self._memory_store:
-            self._memory_store["advice_audits"] = []
-        if "environmental_cues_history" not in self._memory_store:
-            self._memory_store["environmental_cues_history"] = []
-        if "longitudinal_insights" not in self._memory_store:
-            self._memory_store["longitudinal_insights"] = []
-        return self._memory_store
+    def memory_core_state(self) -> CoreState:
+        return self._memory_core_state_cache
+
+    def _set_memory_core_state_cache(self, state: CoreState) -> CoreState:
+        self._memory_core_state_cache = state if isinstance(state, CoreState) else CoreState()
+        return self._memory_core_state_cache
 
     def load_memory_store(self):
-        self.memory_store = self._storage.load_memory_store()
-        self.initialize_memory_store_defaults()
-        return self.memory_store
+        return self._storage.load_memory_store()
 
     def should_do_daily_checkin(self) -> bool:
-        last_date = str(self.memory_store.get("last_mood_updated_at") or "").strip()
+        last_date = str(self.memory_projection().get("last_mood_updated_at") or "").strip()
         return last_date != date.today().isoformat()
 
     def save_mood_state(self, mood):

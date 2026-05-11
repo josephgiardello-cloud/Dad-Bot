@@ -4,8 +4,9 @@ import json
 from copy import deepcopy
 
 import pytest
+from dadbot.core.state_lineage import canonical_state_hash
 
-pytestmark = pytest.mark.unit
+pytestmark = [pytest.mark.unit, pytest.mark.xdist_group("transaction_coordinator")]
 
 
 def _stable_embedding_batch(texts, purpose=""):
@@ -44,6 +45,7 @@ def test_cross_store_partial_failure_rolls_back_all(bot, monkeypatch):
     assert after_graph == before_graph
 
 
+@pytest.mark.slow
 def test_cross_store_commit_prevents_representation_drift(bot, monkeypatch):
     semantic_manager = bot.memory_manager.semantic
     monkeypatch.setattr(semantic_manager, "embed_texts", _stable_embedding_batch)
@@ -85,3 +87,43 @@ def test_crash_mid_commit_recovers_previous_state(bot, monkeypatch):
 
     persisted = json.loads(bot.MEMORY_PATH.read_text(encoding="utf-8"))
     assert persisted == before_store
+
+
+def test_full_replay_equivalence(bot):
+    bot.mutate_memory_store(
+        memories=[_sample_memory("I need a stable savings plan")],
+        consolidated_memories=[
+            {
+                "summary": "We agreed to focus on monthly savings discipline",
+                "updated_at": "2026-05-10",
+                "category": "finance",
+            },
+        ],
+    )
+
+    state1 = deepcopy(dict(bot.MEMORY_STORE or {}))
+    hash1 = canonical_state_hash(state1)
+    bot.save_memory_store()
+
+    replay_bot = bot.__class__()
+    try:
+        replay_bot.MEMORY_PATH = bot.MEMORY_PATH
+        replay_bot.SEMANTIC_MEMORY_DB_PATH = bot.SEMANTIC_MEMORY_DB_PATH
+        replay_bot.GRAPH_STORE_DB_PATH = bot.GRAPH_STORE_DB_PATH
+        replay_bot.SESSION_LOG_DIR = bot.SESSION_LOG_DIR
+        replay_bot.memory._load_memory_store()
+
+        state2 = deepcopy(dict(replay_bot.MEMORY_STORE or {}))
+        hash2 = canonical_state_hash(state2)
+
+        assert hash2 == hash1
+        assert state2 == state1
+    finally:
+        try:
+            replay_bot.shutdown()
+        except Exception:
+            pass
+        try:
+            replay_bot.wait_for_semantic_index_idle(5)
+        except Exception:
+            pass

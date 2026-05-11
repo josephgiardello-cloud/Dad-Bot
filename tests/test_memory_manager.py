@@ -4,6 +4,7 @@ from datetime import date, timedelta
 from types import SimpleNamespace
 
 import pytest
+from dadbot.core.state_lineage import canonical_state_hash
 
 pytestmark = pytest.mark.unit
 
@@ -162,6 +163,111 @@ def test_mutate_memory_store_persists_valid_json_under_concurrent_writes(bot):
     assert bot.normalize_memory_store(persisted)["recent_moods"] == persisted["recent_moods"]
 
 
+def test_mutate_memory_store_triggers_semantic_and_graph_sync_without_stale_projection(bot, monkeypatch):
+    memory_manager = bot.memory
+    graph_manager = memory_manager.graph_manager
+
+    call_counts = {
+        "semantic_sync": 0,
+        "graph_invalidate": 0,
+        "graph_sync": 0,
+    }
+
+    original_semantic_sync = memory_manager.sync_semantic_memory_index
+    original_graph_sync = graph_manager.sync_graph_store
+    original_graph_invalidate = graph_manager.invalidate_projection_cache
+
+    def _semantic_sync_wrapper(memories):
+        call_counts["semantic_sync"] += 1
+        return original_semantic_sync(memories)
+
+    def _graph_invalidate_wrapper():
+        call_counts["graph_invalidate"] += 1
+        return original_graph_invalidate()
+
+    def _graph_sync_wrapper(turn_context=None):
+        call_counts["graph_sync"] += 1
+        return original_graph_sync(turn_context=turn_context)
+
+    monkeypatch.setattr(memory_manager, "sync_semantic_memory_index", _semantic_sync_wrapper)
+    monkeypatch.setattr(graph_manager, "invalidate_projection_cache", _graph_invalidate_wrapper)
+    monkeypatch.setattr(graph_manager, "sync_graph_store", _graph_sync_wrapper)
+
+    bot.mutate_memory_store(
+        memories=[
+            {
+                "summary": "Tony has been saving money for emergencies.",
+                "category": "finance",
+                "mood": "neutral",
+                "updated_at": date.today().isoformat(),
+            }
+        ],
+    )
+
+    assert call_counts["semantic_sync"] >= 1
+    assert call_counts["graph_invalidate"] >= 1
+    assert call_counts["graph_sync"] >= 1
+
+
+def test_graph_projection_generation_advances_across_repeated_mutations(bot, monkeypatch):
+    memory_manager = bot.memory
+    graph_manager = memory_manager.graph_manager
+
+    observed_generation: list[int] = []
+    cache_sizes_at_sync: list[int] = []
+    original_sync = graph_manager.sync_graph_store
+
+    def _sync_wrapper(turn_context=None):
+        cache_sizes_at_sync.append(len(getattr(graph_manager, "_projection_cache", {})))
+        return original_sync(turn_context=turn_context)
+
+    monkeypatch.setattr(graph_manager, "sync_graph_store", _sync_wrapper)
+
+    for index in range(3):
+        # Ensure there is cache to invalidate before each commit cycle.
+        graph_manager._projection_cache[f"seed-{index}"] = {"nodes": [], "edges": []}
+        bot.mutate_memory_store(
+            memories=[
+                {
+                    "summary": f"Tony has been tracking category pattern {index}.",
+                    "category": "patterns",
+                    "mood": "neutral",
+                    "updated_at": date.today().isoformat(),
+                }
+            ],
+        )
+        observed_generation.append(int(getattr(bot, "_memory_graph_generation", 0) or 0))
+
+    assert all(size == 0 for size in cache_sizes_at_sync)
+    assert observed_generation == sorted(observed_generation)
+    assert len(set(observed_generation)) == len(observed_generation)
+
+
+@pytest.mark.slow
+def test_memory_state_hash_is_identical_across_10_same_input_runs(bot):
+    memory_hashes = []
+    memory_states = []
+    for _ in range(10):
+        bot.MEMORY_STORE = bot.default_memory_store()
+        bot.mutate_memory_store(
+            memories=[
+                {
+                    "summary": "Tony has been practicing direct planning checklists.",
+                    "category": "preferences",
+                    "mood": "positive",
+                    "updated_at": date.today().isoformat(),
+                }
+            ],
+        )
+        state = dict(bot.memory.memory_store)
+        memory_states.append(state)
+        memory_hashes.append(canonical_state_hash(state))
+
+    assert len(set(memory_hashes)) == 1
+    first = memory_states[0]
+    assert all(state == first for state in memory_states)
+
+
 def test_normalize_consolidated_memory_entry_limits_lists_and_recomputes_confidence(bot):
     entry = bot.normalize_consolidated_memory_entry(
         {
@@ -241,6 +347,7 @@ def _turn_context_for_forgetting():
     )
 
 
+@pytest.mark.slow
 def test_controlled_forgetting_archives_old_low_signal_noise(bot):
     stale_date = (date.today() - timedelta(days=500)).isoformat()
     bot.save_memory_catalog(
@@ -324,6 +431,7 @@ def test_controlled_forgetting_never_archives_identity_memory(bot):
     assert remaining[0]["category"] == "identity"
 
 
+@pytest.mark.slow
 def test_controlled_forgetting_soft_prunes_under_memory_saturation(bot):
     stale_date = (date.today() - timedelta(days=240)).isoformat()
     dense_catalog = []
@@ -350,6 +458,7 @@ def test_controlled_forgetting_soft_prunes_under_memory_saturation(bot):
     assert len(bot.memory_catalog()) < len(dense_catalog)
 
 
+@pytest.mark.slow
 def test_controlled_forgetting_prioritizes_low_signal_conflicting_memory(bot):
     stale_date = (date.today() - timedelta(days=320)).isoformat()
     bot.save_memory_catalog(
@@ -402,6 +511,7 @@ def test_controlled_forgetting_retains_stale_high_importance_memory(bot):
     assert "emergency fund" in str(remaining[0].get("summary", "")).lower()
 
 
+@pytest.mark.slow
 def test_controlled_forgetting_stress_profile_reduces_retention_under_density(bot):
     old_date = (date.today() - timedelta(days=420)).isoformat()
     recent_date = (date.today() - timedelta(days=14)).isoformat()
@@ -616,6 +726,7 @@ def test_relevant_memories_for_input_uses_prompt_budget_to_cap_limit(bot):
     assert len(memories) == 1
 
 
+@pytest.mark.slow
 def test_build_memory_context_places_recent_archive_notes_before_older_memories(bot):
     today = date.today().isoformat()
     bot.MEMORY_STORE["session_archive"] = [
@@ -681,6 +792,7 @@ def test_load_memory_store_recovers_from_backup_when_primary_is_corrupted(bot):
     assert restored["memories"][0]["summary"] == first_snapshot["summary"]
 
 
+@pytest.mark.slow
 def test_sync_graph_store_extracts_consolidated_archive_traits_and_patterns(bot):
     today = date.today().isoformat()
     bot.MEMORY_STORE["consolidated_memories"] = [
@@ -746,6 +858,7 @@ def test_sync_graph_store_extracts_consolidated_archive_traits_and_patterns(bot)
     assert ("goal", "emergency_fund") in labels_by_type
 
 
+@pytest.mark.slow
 def test_graph_retrieval_for_input_ranks_consolidated_over_weaker_archive(bot):
     today = date.today().isoformat()
     bot.MEMORY_STORE["consolidated_memories"] = [
@@ -779,6 +892,7 @@ def test_graph_retrieval_for_input_ranks_consolidated_over_weaker_archive(bot):
     assert result["compressed_summary"]
 
 
+@pytest.mark.slow
 def test_graph_retrieval_surfaces_contradictions_in_supporting_evidence(bot):
     today = date.today().isoformat()
     bot.MEMORY_STORE["consolidated_memories"] = [
@@ -801,6 +915,7 @@ def test_graph_retrieval_surfaces_contradictions_in_supporting_evidence(bot):
     assert any("Tension:" in line for line in result["summary_lines"])
 
 
+@pytest.mark.slow
 def test_build_memory_context_uses_graph_first_and_semantic_second(bot):
     today = date.today().isoformat()
     bot.MEMORY_STORE["consolidated_memories"] = [
@@ -833,6 +948,7 @@ def test_build_memory_context_uses_graph_first_and_semantic_second(bot):
     assert "emergency_fund" in context or "emergency fund" in context
 
 
+@pytest.mark.slow
 def test_build_memory_context_includes_active_consolidated_context(bot):
     today = date.today().isoformat()
     bot.MEMORY_STORE["consolidated_memories"] = [
@@ -857,6 +973,7 @@ def test_build_memory_context_includes_active_consolidated_context(bot):
     assert "Tension: Spent impulsively after payday." in context
 
 
+@pytest.mark.slow
 def test_build_memory_context_includes_deep_pattern_context(bot):
     today = date.today().isoformat()
     bot.MEMORY_STORE["life_patterns"] = [

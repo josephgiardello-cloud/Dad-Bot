@@ -39,7 +39,7 @@ def test_dadbot_composes_split_services(bot):
     assert bot.model_runtime is bot.services.model_runtime
     assert bot.maintenance_scheduler is bot.services.maintenance_scheduler
     assert bot.PROFILE is bot.profile_runtime.profile
-    assert bot.MEMORY_STORE is bot.memory.memory_store
+    assert dict(bot.MEMORY_STORE) == bot.memory.memory_store
     assert bot.memory_coordinator is not bot.memory_manager
     assert bot.profile_runtime is not None
     assert bot.long_term_signals is not None
@@ -129,7 +129,7 @@ def test_profile_and_memory_store_are_manager_backed(bot):
     bot.MEMORY_STORE = memory_store
 
     assert bot.profile_runtime.profile is profile
-    assert bot.memory.memory_store is memory_store
+    assert bot.memory.memory_store == bot.memory.normalize_memory_store(memory_store)
 
 
 def test_turn_orchestrator_property_uses_services_container(bot):

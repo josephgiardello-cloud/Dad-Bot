@@ -14,6 +14,7 @@ from typing import Any
 from dadbot.core.execution_context import (
     RuntimeTraceViolation,
     ensure_execution_trace_root,
+    require_bound_core_state_for_mutation,
 )
 from dadbot.core.execution_ledger import IntegrityBreachError
 from dadbot.core.kernel_mutation_gate import apply_event, emit_event
@@ -370,6 +371,10 @@ class PersistenceService(
         turn_context: Any,
         snapshot: dict[str, Any],
     ) -> None:
+        require_bound_core_state_for_mutation(
+            source="PersistenceService._restore_transaction_snapshot",
+            changed_keys=["memory_store", "graph_snapshot", "session_state"],
+        )
         session_state = dict(snapshot.get("session_state", {}) or {})
         if session_state:
             runtime.load_session_state_snapshot(deepcopy(session_state))

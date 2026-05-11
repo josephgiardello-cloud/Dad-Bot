@@ -142,11 +142,6 @@
 			"group": "test"
 		},
 		{
-			"task": "Bound integrity scanner traversal and exclude non-semantic directories",
-			"status": "done",
-			"commit": "f0c262a"
-		},
-		{
 			"label": "Git status tasks file",
 			"type": "shell",
 			"command": "git",

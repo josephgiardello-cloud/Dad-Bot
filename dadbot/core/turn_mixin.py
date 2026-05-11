@@ -526,6 +526,15 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
         attachments: AttachmentList | None = None,
         chunk_callback: ChunkCallback | None = None,
     ) -> FinalizedTurnResult:
+        pre_turn_daily_checkin_due = False
+        memory = getattr(self, "memory", None)
+        should_do_daily_checkin = getattr(memory, "should_do_daily_checkin", None)
+        if callable(should_do_daily_checkin):
+            try:
+                pre_turn_daily_checkin_due = bool(should_do_daily_checkin())
+            except Exception:
+                pre_turn_daily_checkin_due = False
+
         context = self._build_sovereign_context(mode=ExecutionMode.LIVE)
         response = cast(
             TurnResponse,
@@ -554,11 +563,14 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
         blend_daily_checkin_reply = getattr(tone_context, "blend_daily_checkin_reply", None)
         if callable(should_do_daily_checkin) and callable(blend_daily_checkin_reply):
             try:
-                should_blend = bool(getattr(self, "_pending_daily_checkin_context", False)) or bool(
-                    should_do_daily_checkin(),
-                )
+                should_blend = bool(pre_turn_daily_checkin_due) or bool(
+                    getattr(self, "_pending_daily_checkin_context", False),
+                ) or bool(
+                    getattr(self, "_last_should_offer_daily_checkin", False),
+                ) or bool(should_do_daily_checkin())
                 if should_blend:
                     self._pending_daily_checkin_context = True
+                    self._last_should_offer_daily_checkin = False
                     mood = "neutral"
                     last_ctx = getattr(self, "_last_turn_context", None)
                     if last_ctx is not None:

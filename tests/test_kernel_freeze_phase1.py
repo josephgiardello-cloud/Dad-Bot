@@ -6,10 +6,12 @@ from types import SimpleNamespace
 import pytest
 
 from dadbot.core.execution_boundary import (
+    MemoryWriteOwnerScope,
     MemoryWriteSurfaceViolation,
     ModelGatewayViolation,
     RuntimeExecutionViolation,
 )
+from dadbot.core.execution_context import UnboundCoreStateMutationError
 from dadbot.runtime import launcher
 
 
@@ -52,6 +54,22 @@ def test_runtime_client_rejects_spoofed_modelport(bot) -> None:
 def test_memory_storage_rejects_spoofed_owner(bot) -> None:
     with pytest.raises(MemoryWriteSurfaceViolation):
         bot.memory._storage.mutate_memory_store(owner="MemoryManager", memories=[])
+
+
+@pytest.mark.phase4
+def test_memory_storage_requires_bound_core_state_in_strict_mode(bot, monkeypatch) -> None:
+    monkeypatch.setenv("DADBOT_STRICT_CORESTATE_MUTATIONS", "1")
+    with MemoryWriteOwnerScope.bind("MemoryManager"):
+        with pytest.raises(UnboundCoreStateMutationError):
+            bot.memory._storage.mutate_memory_store(owner="MemoryManager", reminders=[])
+
+
+@pytest.mark.phase4
+def test_memory_storage_allows_unbound_core_state_in_permissive_mode(bot, monkeypatch) -> None:
+    monkeypatch.setenv("DADBOT_STRICT_CORESTATE_MUTATIONS", "0")
+    with MemoryWriteOwnerScope.bind("MemoryManager"):
+        bot.memory._storage.mutate_memory_store(owner="MemoryManager", reminders=[])
+    assert isinstance(bot.MEMORY_STORE.get("reminders"), list)
 
 
 @pytest.mark.phase4

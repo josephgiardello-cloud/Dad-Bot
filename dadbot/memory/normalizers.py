@@ -8,6 +8,7 @@ call-sites continue to work unchanged.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import uuid
 from datetime import date, datetime
@@ -125,9 +126,17 @@ class MemoryNormalizer:
 
     @staticmethod
     def memory_sort_key(memory):
-        created_at = memory.get("created_at", "")
-        updated_at = memory.get("updated_at", "")
-        return (updated_at, created_at, memory.get("summary", ""))
+        created_at = str(memory.get("created_at", "") or "")
+        updated_at = str(memory.get("updated_at", "") or "")
+        summary = str(memory.get("summary", "") or "")
+        category = str(memory.get("category", "") or "")
+        mood = str(memory.get("mood", "") or "")
+        # Stable final tiebreaker so equal timestamps/summary/category/mood still
+        # produce deterministic ordering independent of input sequence.
+        payload_hash = hashlib.sha256(
+            json.dumps(dict(memory or {}), sort_keys=True, default=str).encode("utf-8"),
+        ).hexdigest()
+        return (updated_at, created_at, summary, category, mood, payload_hash)
 
     @staticmethod
     def infer_memory_category(summary):
@@ -1031,11 +1040,14 @@ class MemoryNormalizer:
 
         normalized = dict(default_store)
         normalized["memories"] = (
-            [
-                entry
-                for entry in (self.normalize_persisted_memory_entry(item) for item in store.get("memories", []))
-                if entry is not None
-            ]
+            sorted(
+                [
+                    entry
+                    for entry in (self.normalize_persisted_memory_entry(item) for item in store.get("memories", []))
+                    if entry is not None
+                ],
+                key=self.memory_sort_key,
+            )
             if isinstance(store.get("memories"), list)
             else []
         )

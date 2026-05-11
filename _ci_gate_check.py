@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import os
 import pathlib
 import re
 import subprocess
@@ -32,6 +33,7 @@ GROUP1_MANIFEST = ROOT / "refactor_group_1.yaml"
 BACKLOG = ROOT / "refactor_backlog.yaml"
 BASELINE_CYCLE_FILE = ROOT / "_baseline_cycles.txt"
 CONTRACT_COMPILER = ROOT / "tools" / "contract_test_compiler.py"
+CORESTATE_MUTATION_GUARD_CHECK = ROOT / "ci" / "corestate_mutation_guard_check.py"
 
 # Group-prefix patterns for refactor branches (e.g. refactor/group-02-*)
 GROUP_BRANCH_PATTERN = re.compile(r"refactor/group-(\d+)-")
@@ -61,6 +63,17 @@ def _fail(msg: str) -> None:
 
 def _warn(msg: str) -> None:
     print(f"  WARN  {msg}")
+
+
+def _is_ci_environment() -> bool:
+    ci_markers = (
+        "CI",
+        "GITHUB_ACTIONS",
+        "TF_BUILD",
+        "BUILD_BUILDID",
+        "AZURE_HTTP_USER_AGENT",
+    )
+    return any(str(os.environ.get(name) or "").strip() for name in ci_markers)
 
 
 # ─── Check: no parallel refactor group branches ───────────────────────────────
@@ -248,7 +261,12 @@ def check_no_new_cycles() -> bool:
     baseline_cycles = _load_baseline_cycles()
 
     if baseline_cycles is None:
-        # First run: save baseline and pass
+        if _is_ci_environment():
+            _fail(
+                "Cycle baseline file is missing in CI. Commit _baseline_cycles.txt from a local baseline run before merging."
+            )
+            return False
+        # Local bootstrap convenience: save baseline and pass.
         _save_baseline_cycles(current_cycles)
         _pass(
             f"Baseline cycle snapshot created with {len(current_cycles)} cycles — future runs will diff against this."
@@ -354,6 +372,28 @@ def check_contract_gate() -> bool:
     return True
 
 
+def check_corestate_mutation_guard(*, enforce: bool = False) -> bool:
+    """Run static guard check for direct memory_store write bypasses."""
+    if not CORESTATE_MUTATION_GUARD_CHECK.exists():
+        _fail(f"CoreState mutation guard check not found: {CORESTATE_MUTATION_GUARD_CHECK}")
+        return False
+
+    cmd = [str(VENV_PYTHON), str(CORESTATE_MUTATION_GUARD_CHECK)]
+    if enforce:
+        cmd.append("--enforce")
+
+    rc, output = _run(cmd, capture=True)
+    if output:
+        print(output)
+
+    if rc != 0:
+        _fail("CoreState mutation guard check failed")
+        return False
+
+    _pass(f"CoreState mutation guard check passed (enforce={bool(enforce)})")
+    return True
+
+
 # ─── Full hard gate — Group N ─────────────────────────────────────────────────
 
 
@@ -378,10 +418,13 @@ def run_group_gate(group_number: int) -> bool:
         print("\n[ 4/5 ] No new import cycles?")
         results.append(check_no_new_cycles())
 
-        print("\n[ 5/6 ] Contract gate green?")
+        print("\n[ 5/7 ] Contract gate green?")
         results.append(check_contract_gate())
 
-        print("\n[ 6/6 ] No parallel group branches?")
+        print("\n[ 6/7 ] CoreState mutation guard (enforce mode)?")
+        results.append(check_corestate_mutation_guard(enforce=True))
+
+        print("\n[ 7/7 ] No parallel group branches?")
         results.append(check_no_parallel_groups())
     else:
         _warn(f"No gate specification for group {group_number}. Add it to _ci_gate_check.py.")
@@ -468,6 +511,16 @@ def main() -> None:
     parser.add_argument("--group-gate", metavar="N", type=int, help="Run full hard gate for group N")
     parser.add_argument("--cycle-check", action="store_true", help="Import cycle delta check only")
     parser.add_argument("--contract-gate", action="store_true", help="Contract compiler gate only")
+    parser.add_argument(
+        "--corestate-mutation-gate",
+        action="store_true",
+        help="CoreState mutation guard gate only (warn mode unless --enforce-corestate-mutation-gate is set)",
+    )
+    parser.add_argument(
+        "--enforce-corestate-mutation-gate",
+        action="store_true",
+        help="Use enforce mode for --corestate-mutation-gate",
+    )
     parser.add_argument("--no-parallel-groups", action="store_true", help="Parallel branch check only")
     parser.add_argument(
         "--save-baseline", action="store_true", help="Overwrite baseline cycle snapshot with current state"
@@ -501,6 +554,11 @@ def main() -> None:
     if args.contract_gate:
         print("\n[ contract gate ]")
         ok = check_contract_gate()
+        sys.exit(0 if ok else 1)
+
+    if args.corestate_mutation_gate:
+        print("\n[ corestate mutation guard gate ]")
+        ok = check_corestate_mutation_guard(enforce=bool(args.enforce_corestate_mutation_gate))
         sys.exit(0 if ok else 1)
 
     if args.no_parallel_groups:

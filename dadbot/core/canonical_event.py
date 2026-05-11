@@ -71,15 +71,23 @@ NON_REPLAY_EVENT_TYPES: frozenset[str] = frozenset(
 )
 
 
-def _strip_non_canonical(value: Any) -> Any:
+def _strip_non_canonical(value: Any, *, depth: int = 0) -> Any:
     if isinstance(value, dict):
-        return {
-            key: _strip_non_canonical(item) for key, item in value.items() if key not in NON_CANONICAL_PAYLOAD_FIELDS
-        }
+        cleaned: dict[str, Any] = {}
+        for key, item in value.items():
+            if key in NON_CANONICAL_PAYLOAD_FIELDS:
+                # Preserve semantic temporal fields nested inside canonical domain payloads
+                # (e.g., memory/session entries) while still stripping top-level operational
+                # timestamp metadata from the event envelope itself.
+                if depth > 0 and key in {"created_at", "updated_at"}:
+                    cleaned[key] = _strip_non_canonical(item, depth=depth + 1)
+                continue
+            cleaned[key] = _strip_non_canonical(item, depth=depth + 1)
+        return cleaned
     if isinstance(value, list):
-        return [_strip_non_canonical(item) for item in value]
+        return [_strip_non_canonical(item, depth=depth + 1) for item in value]
     if isinstance(value, tuple):
-        return [_strip_non_canonical(item) for item in value]
+        return [_strip_non_canonical(item, depth=depth + 1) for item in value]
     return value
 
 
@@ -104,7 +112,11 @@ def canonicalize_event_payload(payload: Any) -> dict[str, Any]:
     return _strip_non_canonical(payload)
 
 
-def validate_trace(trace: list[dict[str, Any]]) -> None:
+def validate_trace(
+    trace: list[dict[str, Any]],
+    *,
+    enforce_full_policy: bool = False,
+) -> None:
     """Assert that no event payload in *trace* carries forbidden non-canonical fields.
 
     Raises:
@@ -115,11 +127,12 @@ def validate_trace(trace: list[dict[str, Any]]) -> None:
     catch regressions before they reach production.
 
     """
+    disallowed_fields = NON_CANONICAL_PAYLOAD_FIELDS if enforce_full_policy else FORBIDDEN_TRACE_FIELDS
     for i, event in enumerate(trace or []):
         payload = event.get("payload") or {}
         if not isinstance(payload, dict):
             continue
-        for field in FORBIDDEN_TRACE_FIELDS:
+        for field in disallowed_fields:
             if field in payload:
                 raise AssertionError(
                     f"Non-canonical field {field!r} found in event[{i}] payload "
