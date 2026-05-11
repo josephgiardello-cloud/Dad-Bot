@@ -1,4 +1,4 @@
-"""MemoryGraphManager â€” owns memory graph construction, projection, store sync, and retrieval.
+﻿"""MemoryGraphManager ├óΓé¼ΓÇ¥ owns memory graph construction, projection, store sync, and retrieval.
 Extracted from MemoryManager to thin the god class.
 """
 
@@ -10,6 +10,14 @@ import logging
 import os
 import re
 from dadbot.memory.graph_entity_resolver import GraphEntityResolver
+from dadbot.memory.graph_views import (
+    build_graph_projection as _build_graph_projection_view,
+    build_graph_summary_context as _build_graph_summary_context_view,
+    graph_retrieval_for_input as _graph_retrieval_for_input_view,
+    graph_snapshot as _graph_snapshot_view,
+    preview_memory_graph as _preview_memory_graph_view,
+    sync_graph_store as _sync_graph_store_view,
+)
 from dadbot.utils import env_truthy
 from dadbot_system.graph_compression import GraphPromptCompressor
 from dadbot_system.graph_store import PostgresGraphStore, SQLiteGraphStore
@@ -530,7 +538,7 @@ Text: {summary}
             or None
         )
         # Preserve the original valid_from / event_time / ingestion_time on
-        # subsequent upserts â€” only update valid_until if explicitly supplied.
+        # subsequent upserts ├óΓé¼ΓÇ¥ only update valid_until if explicitly supplied.
         if existing.get("valid_from") is None and candidate["valid_from"]:
             existing["valid_from"] = candidate["valid_from"]
         if existing.get("event_time") is None and candidate["event_time"]:
@@ -578,7 +586,7 @@ Text: {summary}
         Returns the mutated edge (in-place) for convenience.
 
         Rules:
-        - No silent overwrite — caller must pass ``reason`` for contradiction cases.
+        - No silent overwrite ΓÇö caller must pass ``reason`` for contradiction cases.
         - Edge is never deleted; it becomes non-visible but remains auditable.
         """
         edge["valid_until"] = turn_time_str
@@ -595,7 +603,7 @@ Text: {summary}
         current_time_str: str,
     ) -> bool:
         """Return True if a valid (non-invalidated) edge with the same
-        source→relation→target triple already exists in ``edge_map``.
+        sourceΓåÆrelationΓåÆtarget triple already exists in ``edge_map``.
 
         Used as a pre-commit invariant check before adding a new edge:
         if True, the caller must first call ``invalidate_edge`` on the
@@ -745,8 +753,8 @@ Text: {summary}
         temporal = getattr(turn_context, "temporal", None)
         if temporal is None:
             if turn_context is not None:
-                # TurnGraph is active but temporal node missing — hard fail.
-                raise RuntimeError("TemporalNode required — execution invalid")
+                # TurnGraph is active but temporal node missing ΓÇö hard fail.
+                raise RuntimeError("TemporalNode required ΓÇö execution invalid")
             runtime_temporal = getattr(self._bot, "_current_turn_time_base", None)
             runtime_wall_time = str(
                 getattr(runtime_temporal, "wall_time", "") or "",
@@ -768,7 +776,7 @@ Text: {summary}
         wall_time = str(getattr(temporal, "wall_time", "")).strip()
         wall_date = str(getattr(temporal, "wall_date", "")).strip()
         if not wall_time or not wall_date:
-            raise RuntimeError("TemporalNode required — execution invalid")
+            raise RuntimeError("TemporalNode required ΓÇö execution invalid")
         return temporal
 
     def _project_consolidated_memories(self, node_map, edge_map, *, turn_context=None):
@@ -1136,128 +1144,10 @@ Text: {summary}
                 )
 
     def build_graph_projection(self, turn_context=None):
-        temporal = self._require_turn_temporal(turn_context)
-        enforce_temporal_window = turn_context is not None
-        cache_key = (
-            int(getattr(self._bot, "_memory_graph_generation", 0) or 0),
-            str(getattr(temporal, "wall_time", "") if enforce_temporal_window else ""),
-            str(getattr(temporal, "wall_date", "") if enforce_temporal_window else ""),
-        )
-        cached = self._projection_cache.get(cache_key)
-        if cached is not None:
-            return copy.deepcopy(cached)
-        node_map = {}
-        edge_map = {}
-        self._project_consolidated_memories(
-            node_map,
-            edge_map,
-            turn_context=turn_context,
-        )
-        self._project_archive_sessions(node_map, edge_map, turn_context=turn_context)
-        self._project_persona_traits(node_map, edge_map, turn_context=turn_context)
-        self._project_life_patterns(node_map, edge_map, turn_context=turn_context)
-        # Apply bi-temporal validity filter: only surface edges that are valid
-        # at the canonical turn time so stale/invalidated edges are excluded.
-        current_time_str = str(getattr(temporal, "wall_time", "")) if enforce_temporal_window else ""
-        nodes = sorted(
-            node_map.values(),
-            key=lambda item: (item["node_type"], item["label"], item["node_key"]),
-        )
-        node_keys = {item.get("node_key") for item in nodes}
-        edges = sorted(
-            (
-                e
-                for e in edge_map.values()
-                if (
-                    self.is_edge_valid(e, current_time_str)
-                    if current_time_str
-                    else self.is_edge_valid(e, str(e.get("updated_at") or ""))
-                )
-                and e.get("source_key") in node_keys
-                and e.get("target_key") in node_keys
-            ),
-            key=lambda item: (
-                item["source_key"],
-                item["relation_type"],
-                item["target_key"],
-            ),
-        )
-        for edge in edges:
-            if not edge.get("valid_from"):
-                edge["valid_from"] = edge.get("updated_at") or current_time_str
-        updated_at = None
-        for item in [*nodes, *edges]:
-            value = item.get("updated_at")
-            if value and (updated_at is None or str(value) > str(updated_at)):
-                updated_at = value
-        snapshot = {"nodes": nodes, "edges": edges, "updated_at": updated_at}
-        self._projection_cache[cache_key] = copy.deepcopy(snapshot)
-        return snapshot
+        return _build_graph_projection_view(self, turn_context=turn_context)
 
     def preview_memory_graph(self, snapshot=None):
-        graph = snapshot or self.graph_snapshot()
-        nodes_by_key = {node["node_key"]: node for node in graph.get("nodes", [])}
-        semantic_weights = {}
-        semantic_types = {}
-        source_neighbors = {}
-
-        for edge in graph.get("edges", []):
-            source = nodes_by_key.get(edge.get("source_key"))
-            target = nodes_by_key.get(edge.get("target_key"))
-            if source is None or target is None:
-                continue
-            if source.get("node_type") not in self.GRAPH_SOURCE_NODE_TYPES:
-                continue
-            if target.get("node_type") == "contradiction":
-                continue
-            label = str(target.get("label") or "").strip().lower()
-            if not label:
-                continue
-            semantic_weights[label] = semantic_weights.get(label, 0.0) + float(
-                edge.get("weight", 0.0) or 0.0,
-            )
-            semantic_types[label] = target.get("node_type")
-            source_neighbors.setdefault(source["node_key"], []).append(label)
-
-        edge_weights = {}
-        for labels in source_neighbors.values():
-            unique = []
-            for label in labels:
-                if label not in unique:
-                    unique.append(label)
-            for index, left in enumerate(unique):
-                for right in unique[index + 1 :]:
-                    edge_key = tuple(sorted((left, right)))
-                    edge_weights[edge_key] = edge_weights.get(edge_key, 0.0) + 1.0
-
-        preview_nodes = []
-        for label, weight in sorted(
-            semantic_weights.items(),
-            key=lambda item: (-item[1], item[0]),
-        )[:18]:
-            node_type = semantic_types.get(label, "topic")
-            preview_type = node_type if node_type in {"topic", "category", "mood"} else "topic"
-            preview_nodes.append(
-                {
-                    "id": f"{preview_type}:{label}",
-                    "label": label,
-                    "type": preview_type,
-                    "weight": max(1, int(round(weight))),
-                },
-            )
-
-        preview_edges = [
-            {"source": left, "target": right, "weight": max(1, int(round(weight)))}
-            for (left, right), weight in sorted(
-                edge_weights.items(),
-                key=lambda item: (-item[1], item[0]),
-            )[:18]
-        ]
-        return {
-            "nodes": preview_nodes,
-            "edges": preview_edges,
-            "updated_at": graph.get("updated_at"),
-        }
+        return _preview_memory_graph_view(self, snapshot=snapshot)
 
     def invalidate_projection_cache(self) -> int:
         """Invalidate cached projections and bump generation for deterministic rebuilds."""
@@ -1272,69 +1162,10 @@ Text: {summary}
     # ------------------------------------------------------------------
 
     def sync_graph_store(self, turn_context=None):
-        runtime = getattr(self, "_bot", None)
-        commit_active = bool(getattr(runtime, "_graph_commit_active", False))
-        if turn_context is not None:
-            # TurnGraph path: strict temporal + commit boundary enforcement.
-            self._require_turn_temporal(turn_context)
-            active_stage = (
-                str(
-                    (getattr(turn_context, "state", None) or {}).get(
-                        "_active_graph_stage",
-                    )
-                    or "",
-                )
-                .strip()
-                .lower()
-            )
-            if not commit_active or active_stage not in {"save", ""}:
-                raise RuntimeError(
-                    "Graph sync violation: graph writes are only allowed at SaveNode commit boundary "
-                    f"(active_stage={active_stage!r}, commit_active={commit_active!r}).",
-                )
-        # Maintenance / direct-API path (turn_context=None): no boundary check.
-        snapshot = self.build_graph_projection(turn_context=turn_context)
-        try:
-            self.ensure_graph_store()
-            self._graph_store_backend.replace_graph(
-                snapshot.get("nodes", []),
-                snapshot.get("edges", []),
-            )
-        except Exception as exc:
-            logger.warning("Graph store sync failed: %s", exc)
-        return snapshot
+        return _sync_graph_store_view(self, turn_context=turn_context)
 
     def graph_snapshot(self):
-        try:
-            self.ensure_graph_store()
-            snapshot = self._graph_store_backend.fetch_graph()
-            if snapshot.get("nodes") or snapshot.get("edges"):
-                if not snapshot.get("updated_at"):
-                    updated_at = None
-                    for item in [
-                        *list(snapshot.get("nodes") or []),
-                        *list(snapshot.get("edges") or []),
-                    ]:
-                        if not isinstance(item, dict):
-                            continue
-                        value = item.get("updated_at")
-                        if value and (updated_at is None or str(value) > str(updated_at)):
-                            updated_at = value
-                    snapshot = dict(snapshot)
-                    snapshot["updated_at"] = updated_at
-                return snapshot
-        except Exception as exc:
-            logger.warning(
-                "Graph store fetch failed, using in-memory projection: %s",
-                exc,
-            )
-        # Graph store is empty or unavailable: fall back to in-memory projection.
-        try:
-            snapshot = self.build_graph_projection(turn_context=None)
-            return snapshot
-        except Exception as exc:
-            logger.warning("In-memory graph projection failed: %s", exc)
-            return {"nodes": [], "edges": [], "updated_at": None}
+        return _graph_snapshot_view(self)
 
     # ------------------------------------------------------------------
     # Source display helpers
@@ -1477,80 +1308,7 @@ Text: {summary}
     # ------------------------------------------------------------------
 
     def graph_retrieval_for_input(self, query, limit=3):
-        snapshot = self.graph_snapshot()
-        nodes = {node["node_key"]: node for node in snapshot.get("nodes", [])}
-        if not nodes:
-            return None
-
-        adjacency = {}
-        for edge in snapshot.get("edges", []):
-            adjacency.setdefault(edge.get("source_key"), []).append(edge)
-            adjacency.setdefault(edge.get("target_key"), []).append(edge)
-
-        query_tokens = self._bot.significant_tokens(query)
-        query_category = self._bot.infer_memory_category(query)
-        query_mood = self._bot.normalize_mood(query)
-        recent_topics = set(self._bot.recent_memory_topics(limit=4))
-        mood_trend = self._bot.current_memory_mood_trend()
-
-        ranked = []
-        for node in nodes.values():
-            if node.get("node_type") not in self.GRAPH_SOURCE_NODE_TYPES:
-                continue
-            result = self._score_graph_node(
-                node,
-                adjacency,
-                nodes,
-                query_tokens,
-                query_category,
-                query_mood,
-                mood_trend,
-                recent_topics,
-            )
-            if result is None:
-                continue
-            score, matched_labels = result
-            ranked.append((score, node, matched_labels))
-
-        if not ranked:
-            return None
-
-        selected = sorted(
-            ranked,
-            key=lambda item: (
-                item[0],
-                item[1].get("updated_at", ""),
-                item[1].get("label", ""),
-            ),
-            reverse=True,
-        )[: max(1, int(limit or 3))]
-        return {
-            "compressed_summary": self._graph_prompt_compressor.compress_neighborhood(
-                query,
-                snapshot.get("nodes", []),
-                snapshot.get("edges", []),
-                max_tokens=self._bot.runtime_config.graph_context_token_budget,
-            ),
-            "summary_lines": self.graph_source_lines(selected),
-            "supporting_evidence": [
-                {
-                    "source_type": node.get("node_type"),
-                    "label": node.get("label", ""),
-                    "summary": self.graph_source_summary(node),
-                    "category": str(node.get("category") or "general").strip().lower() or "general",
-                    "mood": self._bot.normalize_mood(node.get("mood")),
-                    "confidence": round(float(node.get("confidence", 0.0) or 0.0), 2),
-                    "updated_at": node.get("updated_at"),
-                    "score": score,
-                    "matched_nodes": matched_labels,
-                    "contradictions": list(
-                        (node.get("attributes") or {}).get("contradictions", []),
-                    )[:2],
-                }
-                for score, node, matched_labels in selected
-            ],
-            "updated_at": snapshot.get("updated_at"),
-        }
+        return _graph_retrieval_for_input_view(self, query, limit=limit)
 
     def _rank_graph_summary_nodes(self, nodes, adjacency):
         """Rank semantic nodes by total weighted source-node connections.
@@ -1632,30 +1390,4 @@ Text: {summary}
         return lines
 
     def build_graph_summary_context(self, limit=3):
-        snapshot = self.graph_snapshot()
-        nodes = {node["node_key"]: node for node in snapshot.get("nodes", [])}
-        if not nodes:
-            return None
-
-        compressed = self._graph_prompt_compressor.compress_neighborhood(
-            "long-term relationship state with Tony",
-            snapshot.get("nodes", []),
-            snapshot.get("edges", []),
-            max_tokens=min(260, self._bot.runtime_config.graph_context_token_budget),
-        )
-        if compressed:
-            return "Relationship graph summary:\n" + compressed
-
-        adjacency = {}
-        for edge in snapshot.get("edges", []):
-            adjacency.setdefault(edge.get("source_key"), []).append(edge)
-            adjacency.setdefault(edge.get("target_key"), []).append(edge)
-
-        ranked = self._rank_graph_summary_nodes(nodes, adjacency)
-        if not ranked:
-            return None
-
-        lines = self._format_graph_summary_lines(ranked, limit)
-        if not lines:
-            return None
-        return "Relationship graph summary:\n" + "\n".join(lines)
+        return _build_graph_summary_context_view(self, limit=limit)

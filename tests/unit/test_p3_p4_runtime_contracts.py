@@ -234,5 +234,8 @@ def test_canonical_payload_strips_non_deterministic_fields() -> None:
     canonical = canonicalize_event_payload(payload)
     assert "submitted_at" not in canonical
     assert "request_id" not in canonical
-    assert "updated_at" not in dict(canonical.get("nested") or {})
+    # updated_at is preserved in nested domain payloads (depth > 0) for replay equivalence;
+    # only stripped from the top-level event envelope.
+    assert "updated_at" not in canonical  # top-level: stripped
+    assert "updated_at" in dict(canonical.get("nested") or {})  # nested: preserved
     assert canonical.get("summary") == "stable"

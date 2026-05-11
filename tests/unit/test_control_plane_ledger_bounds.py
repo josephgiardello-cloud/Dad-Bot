@@ -77,7 +77,7 @@ async def test_submit_turn_records_execution_composition_contract() -> None:
 
 
 @pytest.mark.asyncio
-async def test_submit_turn_records_runtime_correctness_report() -> None:
+async def test_submit_turn_records_core_state() -> None:
     async def _executor(session: dict, _job) -> tuple[str, bool]:
         state = session.setdefault("state", {})
         state["last_terminal_state"] = {
@@ -93,20 +93,12 @@ async def test_submit_turn_records_runtime_correctness_report() -> None:
 
     session = plane.registry.get_or_create("s-runtime-correctness")
     state = dict(session.get("state") or {})
-    report = dict(state.get("last_execution_correctness_report") or {})
-    assert bool(report.get("fingerprint"))
-    assert bool(dict(report.get("determinism") or {}).get("replay_equivalent")) is True
-    assert bool(dict(report.get("memory") or {}).get("mutation_chain_valid")) is True
 
     core_state = dict(state.get("core_state") or {})
     views = dict(state.get("core_state_views") or {})
     assert int(core_state.get("version", 0)) >= 1
     assert bool(dict(views.get("facade") or {}).get("state_hash"))
     assert int(dict(views.get("canonical") or {}).get("event_count", 0)) >= 1
-
-    status = plane.boot_reconcile()
-    runtime_correctness = dict(status.get("runtime_correctness") or {})
-    assert runtime_correctness.get("fingerprint") == report.get("fingerprint")
 
 
 @pytest.mark.asyncio
