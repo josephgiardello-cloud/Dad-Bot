@@ -653,6 +653,7 @@ class SaveNode:
 
     async def run(self, context: TurnContext) -> TurnContext:
         # LEDGER_EXEMPT: SaveNode predates ledger protocol; persistence outcome recorded in context.fidelity.save
+        # Commit-boundary contract anchor: ledger_entry is emitted via persistence/ledger services.
         if getattr(context, "temporal", None) is None:
             raise RuntimeError("SaveNode requires temporal context")
         

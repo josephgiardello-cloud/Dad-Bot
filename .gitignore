@@ -75,3 +75,7 @@ unit_full.txt
 integration_out.txt
 durability_out.txt
 
+# ── Shell interpolation escape artifacts ───────────────────────────────────
+# PowerShell $(Join-Path ...) unevaluated as filename (Case A artifact)
+$(Join-Path $env
+

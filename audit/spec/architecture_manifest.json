@@ -11,7 +11,7 @@
     "nodes":                     "dadbot/core/nodes.py",
     "execution_policy":          "dadbot/core/execution_policy.py",
     "execution_kernel":          "dadbot/core/execution_kernel.py",
-    "execution_recovery":        "dadbot/core/execution_recovery.py",
+    "execution_recovery":        "dadbot/core/recovery_manager.py",
     "execution_identity":        "dadbot/core/execution_identity.py",
     "execution_receipt":         "dadbot/core/execution_receipt.py",
     "execution_trace_context":   "dadbot/core/execution_trace_context.py",
@@ -71,7 +71,7 @@
     "recovery_manager": {
       "entrypoint": "dadbot/core/recovery_manager.py",
       "supporting": [
-        "dadbot/core/execution_recovery.py",
+        "dadbot/core/recovery_ir.py",
         "dadbot/core/turn_resume_store.py",
         "dadbot/core/durable_checkpoint.py"
       ],

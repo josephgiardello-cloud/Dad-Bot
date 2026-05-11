@@ -10,7 +10,10 @@ from dadbot.core.kernel_signals import get_metrics
 
 
 class LedgerWriter:
-    """Canonical event writer for execution lifecycle events."""
+    """Canonical event writer for execution lifecycle events.
+
+    Contract anchor: ledger_entry payloads are normalized through write_event/_write.
+    """
 
     _COMMITTED_EVENT_TYPES = {
         "JOB_QUEUED",

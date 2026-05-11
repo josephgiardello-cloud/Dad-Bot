@@ -83,6 +83,18 @@ def _defined_names(tree: ast.Module) -> set[str]:
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             names.add(node.name)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                imported = (alias.asname or alias.name.split(".")[0]).strip()
+                if imported:
+                    names.add(imported)
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                imported = (alias.asname or alias.name).strip()
+                if imported:
+                    names.add(imported)
         elif isinstance(node, ast.Assign):
             for t in node.targets:
                 if isinstance(t, ast.Name):
@@ -276,6 +288,21 @@ def check_param_propagation(manifest: dict) -> dict:
         if not tree:
             continue
 
+        rel = _rel(filepath)
+
+        # Fields scanned as call/import are file-level concerns; report once per file
+        # instead of once per execution function to avoid noise inflation.
+        file_level_missing: list[str] = []
+        for field in required_fields:
+            spec = cross_cutting[field]
+            if spec.get("scan_as", "parameter_or_attribute") != "call_or_import":
+                continue
+            required_in = spec.get("required_in_patterns", [])
+            if required_in and not any(pat in rel for pat in required_in):
+                continue
+            if not _grep_identifier(src, field):
+                file_level_missing.append(field)
+
         for node in ast.walk(tree):
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
@@ -294,15 +321,11 @@ def check_param_propagation(manifest: dict) -> dict:
                 required_in = spec.get("required_in_patterns", [])
 
                 # Only enforce in files that match the required_in_patterns
-                rel = _rel(filepath)
                 if required_in and not any(pat in rel for pat in required_in):
                     continue
 
                 if scan_as in ("parameter_or_attribute",):
                     if field not in all_names:
-                        missing.append(field)
-                elif scan_as == "call_or_import":
-                    if not _grep_identifier(src, field):
                         missing.append(field)
 
             if missing:
@@ -312,6 +335,14 @@ def check_param_propagation(manifest: dict) -> dict:
                     "missing_fields": missing,
                     "lineno": node.lineno,
                 })
+
+        if file_level_missing:
+            violations.append({
+                "file": _rel(filepath),
+                "function": "<module>",
+                "missing_fields": sorted(set(file_level_missing)),
+                "lineno": 1,
+            })
 
     return {
         "violations": violations,
