@@ -29,7 +29,7 @@ class TraceBinder:
 
     async def run(
         self,
-        trace_id: str,
+        trace_token: str,
         prompt: str,
         metadata: dict[str, Any],
         fn: Callable[[], Coroutine[Any, Any, _T]],
@@ -53,11 +53,11 @@ class TraceBinder:
             If ``trace_id`` is empty.
 
         """
-        if not trace_id:
+        if not trace_token:
             raise RuntimeError("TraceBinder.run requires a non-empty trace_id")
 
         recorder = ExecutionTraceRecorder(
-            trace_id=trace_id,
+            trace_token=trace_token,
             prompt=prompt,
             metadata=metadata,
         )

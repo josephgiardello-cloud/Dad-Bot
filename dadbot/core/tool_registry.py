@@ -197,28 +197,50 @@ class ToolRegistry:
 class ToolContract:
     """Validates tool invocation against spec."""
 
-    @staticmethod
-    def validate(spec: ToolSpec, invocation: ToolInvocation) -> tuple[bool, str]:
+    _ROLE_DEFAULT_PERMISSIONS: dict[str, set[str]] = {
+        "agent": {"tool.execute"},
+        "system": {"tool.execute", "tool.read", "tool.write"},
+        "admin": {"tool.execute", "tool.read", "tool.write", "tool.admin"},
+        "auditor": {"tool.execute", "tool.read"},
+    }
+
+    @classmethod
+    def _extract_caller_permissions(cls, invocation: ToolInvocation) -> tuple[str, set[str]]:
+        caller_id = "anonymous"
+        permissions: set[str] = set()
+
+        caller = invocation.caller
+        if caller is not None:
+            if str(caller.trace_id or "").strip():
+                caller_id = str(caller.trace_id).strip()
+            role = str(caller.role or "").strip().lower()
+            permissions.update(cls._ROLE_DEFAULT_PERMISSIONS.get(role, {"tool.execute"}))
+
+        return caller_id, permissions
+
+    @classmethod
+    def validate(cls, spec: ToolSpec, invocation: ToolInvocation) -> tuple[bool, str]:
         """Validate invocation matches spec contract.
-        
+
         Args:
             spec: Expected tool spec
             invocation: Actual invocation
-            
+
         Returns:
             (is_valid, error_message) tuple
         """
         if spec.name.lower() != invocation.tool_spec.name.lower():
             return False, f"tool name mismatch: expected {spec.name}, got {invocation.tool_spec.name}"
 
-        required_perms = spec.required_permissions
+        required_perms = {str(p).strip().lower() for p in spec.required_permissions if str(p).strip()}
         if required_perms:
-            caller_perms = set()
-            if invocation.caller:
-                # In practice, extract from context; for now assume available
-                pass
-            # This is a placeholder; real validation would check caller permissions
-            # against spec.required_permissions
+            caller_id, caller_perms = cls._extract_caller_permissions(invocation)
+            missing = sorted(required_perms - caller_perms)
+            if missing:
+                return (
+                    False,
+                    f"permission denied for caller={caller_id}: missing {', '.join(missing)}",
+                )
 
         return True, "ok"
 
@@ -258,10 +280,11 @@ class ToolExecutionContext:
         # Validate contract
         is_valid, validation_error = ToolContract.validate(spec, invocation)
         if not is_valid:
+            denied = "permission denied" in str(validation_error).lower()
             return ToolResult(
                 tool_name=spec.name,
                 invocation_id=invocation.invocation_id,
-                status=ToolExecutionStatus.ERROR,
+                status=ToolExecutionStatus.DENIED if denied else ToolExecutionStatus.ERROR,
                 error=validation_error,
                 replay_safe=False,
             )

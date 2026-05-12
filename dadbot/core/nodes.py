@@ -9,7 +9,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from dadbot.core.graph import NodeType, TurnContext
+from dadbot.core.graph_context import TurnContext
+from dadbot.core.graph_types import NodeType
 from dadbot.core.invariant_gate import InvariantGate
 from dadbot.core.policy_compiler import PolicyCompiler
 from dadbot.core.runtime_errors import InvariantViolation
@@ -186,6 +187,75 @@ MemoryNode = ContextBuilderNode
 class ToolRouterNode:
     name = "tool_router"
 
+    @staticmethod
+    def _request_priority(item: dict[str, Any]) -> int:
+        try:
+            return int(item.get("priority") or 100)
+        except Exception:
+            return -1
+
+    def _compile_request(
+        self,
+        *,
+        index: int,
+        raw: Any,
+        seen: set[str],
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        item = dict(raw or {})
+        name = str(item.get("tool_name") or "").strip().lower()
+        args = item.get("args")
+        intent = str(item.get("intent") or "").strip().lower()
+        expected = str(item.get("expected_output") or "").strip()
+        registration = get_registered_tool(name)
+        priority = self._request_priority(item)
+
+        if registration is None:
+            return None, {"index": index, "reason": "unsupported_tool"}
+        if not isinstance(args, dict):
+            return None, {"index": index, "reason": "invalid_args"}
+        if registration.allowed_intents is not None and intent not in registration.allowed_intents:
+            return None, {"index": index, "reason": "invalid_intent"}
+        if registration.require_expected_output and not expected:
+            return None, {"index": index, "reason": "invalid_request"}
+        if priority < 0:
+            return None, {"index": index, "reason": "invalid_request"}
+
+        req = {
+            "tool_name": name,
+            "args": dict(args),
+            "intent": intent,
+            "expected_output": expected,
+            "priority": priority,
+        }
+        req_id = deterministic_tool_id(req["tool_name"], req["args"])
+        if req_id in seen:
+            return None, {"index": index, "reason": "duplicate_request", "deterministic_id": req_id}
+        seen.add(req_id)
+        return req, None
+
+    @staticmethod
+    def _execution_plan(compiled: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        ordered = sorted(
+            compiled,
+            key=lambda i: (
+                int(i["priority"]),
+                str(i["intent"]),
+                deterministic_tool_id(i["tool_name"], i["args"]),
+            ),
+        )
+        return [
+            {
+                "sequence": idx,
+                "tool_name": r["tool_name"],
+                "args": r["args"],
+                "intent": r["intent"],
+                "expected_output": r["expected_output"],
+                "priority": r["priority"],
+                "deterministic_id": deterministic_tool_id(r["tool_name"], r["args"]),
+            }
+            for idx, r in enumerate(ordered)
+        ]
+
     async def run(self, context: TurnContext) -> TurnContext:
         # LEDGER_EXEMPT: ToolRouterNode predates ledger protocol; compiled plan written to context.state["tool_ir"]
         # TRACE_EXEMPT: Tool plan compilation; pure deterministic transformation, no side-effects, no downstream execution.
@@ -195,40 +265,13 @@ class ToolRouterNode:
         rejected: list[dict[str, Any]] = []
         seen: set[str] = set()
         for index, raw in enumerate(raw_requests):
-            item = dict(raw or {})
-            name = str(item.get("tool_name") or "").strip().lower()
-            args = item.get("args")
-            intent = str(item.get("intent") or "").strip().lower()
-            expected = str(item.get("expected_output") or "").strip()
-            registration = get_registered_tool(name)
-            try:
-                priority = int(item.get("priority") or 100)
-            except Exception:
-                priority = -1
-            if registration is None:
-                rejected.append({"index": index, "reason": "unsupported_tool"})
+            req, reject = self._compile_request(index=index, raw=raw, seen=seen)
+            if reject is not None:
+                rejected.append(reject)
                 continue
-            if not isinstance(args, dict):
-                rejected.append({"index": index, "reason": "invalid_args"})
-                continue
-            if registration.allowed_intents is not None and intent not in registration.allowed_intents:
-                rejected.append({"index": index, "reason": "invalid_intent"})
-                continue
-            if registration.require_expected_output and not expected:
-                rejected.append({"index": index, "reason": "invalid_request"})
-                continue
-            if priority < 0:
-                rejected.append({"index": index, "reason": "invalid_request"})
-                continue
-            req = {"tool_name": name, "args": dict(args), "intent": intent, "expected_output": expected, "priority": priority}
-            req_id = deterministic_tool_id(req["tool_name"], req["args"])
-            if req_id in seen:
-                rejected.append({"index": index, "reason": "duplicate_request", "deterministic_id": req_id})
-                continue
-            seen.add(req_id)
-            compiled.append(req)
-        compiled.sort(key=lambda i: (int(i["priority"]), str(i["intent"]), deterministic_tool_id(i["tool_name"], i["args"])))
-        tool_ir["execution_plan"] = [{"sequence": idx, "tool_name": r["tool_name"], "args": r["args"], "intent": r["intent"], "expected_output": r["expected_output"], "priority": r["priority"], "deterministic_id": deterministic_tool_id(r["tool_name"], r["args"])} for idx, r in enumerate(compiled)]
+            if req is not None:
+                compiled.append(req)
+        tool_ir["execution_plan"] = self._execution_plan(compiled)
         tool_ir["compiler"] = {"strict": True, "compiled_count": len(compiled), "rejected_count": len(rejected), "rejected": rejected}
         context.state["tool_ir"] = tool_ir
         return context
@@ -238,6 +281,103 @@ class ToolExecutorNode:
     name = "tool_executor"
     _MAX_RETRY_ATTEMPTS: int = 1
     _MAX_SAME_TOOL_CALLS: int = 2  # Penalize calls to same tool > 2x per turn
+
+    def _execute_plan_item(
+        self,
+        *,
+        item: dict[str, Any],
+        context: TurnContext,
+        tool_call_counts: dict[str, int],
+        redundant_calls: list[str],
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any] | None, dict[str, Any]]:
+        seq = int(item.get("sequence") or 0)
+        name = str(item.get("tool_name") or "").strip().lower()
+        args = dict(item.get("args") or {})
+        det_id = str(item.get("deterministic_id") or deterministic_tool_id(name, args))
+
+        tool_call_counts[name] = tool_call_counts.get(name, 0) + 1
+        if tool_call_counts[name] > self._MAX_SAME_TOOL_CALLS:
+            redundant_calls.append(f"{name}:call_{tool_call_counts[name]}")
+
+        start = time.perf_counter()
+        remediation_log: list[dict[str, Any]] = []
+        raw: Any = None
+        for attempt in range(self._MAX_RETRY_ATTEMPTS + 1):
+            try:
+                raw = dispatch_registered_tool(name, args, context)
+            except Exception as exc:
+                raw = ToolContractResult(
+                    tool_name=name,
+                    status=ToolStatus.FATAL,
+                    data=None,
+                    error_context={"exception": str(exc)},
+                    repair_hint=f"Tool {name!r} raised an unexpected exception.",
+                )
+            if not isinstance(raw, ToolContractResult):
+                break
+            failure_class = {
+                ToolStatus.RETRY: "retryable_tool_failure",
+                ToolStatus.CONTRACT_VIOLATION: "execution_contract_violation",
+                ToolStatus.FATAL: "fatal_tool_failure",
+            }.get(raw.status, "fatal_tool_failure")
+            decision = InvariantGate.decide_remediation(
+                failure_class,
+                reason=str(raw.repair_hint or ""),
+                attempt=attempt,
+                max_attempts=self._MAX_RETRY_ATTEMPTS,
+                details={"tool_name": name, "status": raw.status.value},
+            )
+            remediation_log.append(
+                {
+                    "action": decision.action.value,
+                    "failure_class": decision.failure_class,
+                    "attempt": decision.attempt,
+                    "max_attempts": decision.max_attempts,
+                    "reason": decision.reason,
+                },
+            )
+            if raw.status == ToolStatus.RETRY and decision.action.value == "retry":
+                continue
+            break
+
+        if isinstance(raw, ToolContractResult):
+            status = "ok" if raw.status == ToolStatus.SUCCESS else raw.status.value
+            output = raw
+        else:
+            status = "ok"
+            output = raw
+
+        rec = {
+            "sequence": seq,
+            "tool_name": name,
+            "status": status,
+            "output": output,
+            "latency": time.perf_counter() - start,
+            "deterministic_id": det_id,
+            "remediation": remediation_log,
+        }
+        result = {
+            "sequence": seq,
+            "tool_name": name,
+            "status": status,
+            "output": output,
+            "deterministic_id": det_id,
+            "remediation": remediation_log,
+        }
+        failure_record = self._failure_semantics_for_result(
+            tool_name=name,
+            status=status,
+            output=output,
+            remediation=remediation_log,
+        )
+        recovery_path = self._canonical_recovery_path_for_result(
+            tool_name=name,
+            status=status,
+            remediation=remediation_log,
+            attempts=attempt + 1,
+            failure_record=failure_record,
+        )
+        return rec, result, failure_record, recovery_path
 
     async def run(self, context: TurnContext) -> TurnContext:
         # LEDGER_EXEMPT: ToolExecutorNode predates ledger protocol; execution records in context.state["tool_results"]
@@ -251,99 +391,19 @@ class ToolExecutorNode:
         # Track tool calls for redundancy detection.
         tool_call_counts: dict[str, int] = {}
         redundant_calls: list[str] = []
-        
+
         for item in list(tool_ir.get("execution_plan") or []):
-            seq = int(item.get("sequence") or 0)
-            name = str(item.get("tool_name") or "").strip().lower()
-            args = dict(item.get("args") or {})
-            det_id = str(item.get("deterministic_id") or deterministic_tool_id(name, args))
-            
-            # Track tool call frequency for redundancy detection.
-            tool_call_counts[name] = tool_call_counts.get(name, 0) + 1
-            if tool_call_counts[name] > self._MAX_SAME_TOOL_CALLS:
-                redundant_calls.append(f"{name}:call_{tool_call_counts[name]}")
-            
-            start = time.perf_counter()
-            remediation_log: list[dict[str, Any]] = []
-            raw: Any = None
-            for attempt in range(self._MAX_RETRY_ATTEMPTS + 1):
-                try:
-                    raw = dispatch_registered_tool(name, args, context)
-                except Exception as exc:
-                    raw = ToolContractResult(
-                        tool_name=name,
-                        status=ToolStatus.FATAL,
-                        data=None,
-                        error_context={"exception": str(exc)},
-                        repair_hint=f"Tool {name!r} raised an unexpected exception.",
-                    )
-                if not isinstance(raw, ToolContractResult):
-                    break
-                failure_class = {
-                    ToolStatus.RETRY: "retryable_tool_failure",
-                    ToolStatus.CONTRACT_VIOLATION: "execution_contract_violation",
-                    ToolStatus.FATAL: "fatal_tool_failure",
-                }.get(raw.status, "fatal_tool_failure")
-                decision = InvariantGate.decide_remediation(
-                    failure_class,
-                    reason=str(raw.repair_hint or ""),
-                    attempt=attempt,
-                    max_attempts=self._MAX_RETRY_ATTEMPTS,
-                    details={"tool_name": name, "status": raw.status.value},
-                )
-                remediation_log.append(
-                    {
-                        "action": decision.action.value,
-                        "failure_class": decision.failure_class,
-                        "attempt": decision.attempt,
-                        "max_attempts": decision.max_attempts,
-                        "reason": decision.reason,
-                    },
-                )
-                if raw.status == ToolStatus.RETRY and decision.action.value == "retry":
-                    continue
-                break
-            if isinstance(raw, ToolContractResult):
-                status = "ok" if raw.status == ToolStatus.SUCCESS else raw.status.value
-                output = raw
-            else:
-                status = "ok"
-                output = raw
-            rec = {
-                "sequence": seq,
-                "tool_name": name,
-                "status": status,
-                "output": output,
-                "latency": time.perf_counter() - start,
-                "deterministic_id": det_id,
-                "remediation": remediation_log,
-            }
-            executions.append(rec)
-            results.append({
-                "sequence": seq,
-                "tool_name": name,
-                "status": status,
-                "output": output,
-                "deterministic_id": det_id,
-                "remediation": remediation_log,
-            })
-            failure_record = self._failure_semantics_for_result(
-                tool_name=name,
-                status=status,
-                output=output,
-                remediation=remediation_log,
+            rec, result, failure_record, recovery_path = self._execute_plan_item(
+                item=dict(item),
+                context=context,
+                tool_call_counts=tool_call_counts,
+                redundant_calls=redundant_calls,
             )
+            executions.append(rec)
+            results.append(result)
             if failure_record is not None:
                 failure_semantics.append(failure_record)
-            recovery_paths.append(
-                self._canonical_recovery_path_for_result(
-                    tool_name=name,
-                    status=status,
-                    remediation=remediation_log,
-                    attempts=attempt + 1,
-                    failure_record=failure_record,
-                ),
-            )
+            recovery_paths.append(recovery_path)
         tool_ir["executions"] = executions
         context.state["tool_ir"] = tool_ir
         context.state["tool_results"] = results
@@ -477,44 +537,11 @@ class InferenceNode:
         subtasks = list(block.get("subtasks") or [])[:_MAX_DELEGATION_SUBTASKS]
         blackboard: dict[str, Any] = dict(context.state.get("agent_blackboard") or {})
         seed_fingerprint = _stable_sha256(blackboard)
-        sub_ctxs: list[TurnContext] = []
-        subtask_ids: list[str] = []
-        for branch_index, task in enumerate(subtasks):
-            sub_ctx = TurnContext(user_input=str(task.get("input") or ""))
-            sub_ctx.trace_id = _deterministic_subtask_trace_id(
-                root_trace_id=str(context.trace_id or ""),
-                parent_trace_id=str(context.trace_id or ""),
-                depth=depth,
-                branch_index=branch_index,
-                subtask=task,
-            )
-            sub_ctx.state.update(dict(context.state))
-            sub_ctx.metadata.update(dict(context.metadata))
-            sub_ctx.metadata["parent_trace_id"] = context.trace_id
-            sub_ctx.metadata["agent_name"] = str(task.get("agent") or "")
-            sub_ctx.metadata["delegation_depth"] = depth + 1
-            sub_ctx.state["rich_context"] = dict(context.state.get("rich_context") or {})
-            subtask_ids.append(sub_ctx.trace_id)
-            sub_ctxs.append(sub_ctx)
-        results: list[str] = []
+        sub_ctxs, subtask_ids = self._build_delegation_subcontexts(context, subtasks, depth)
         if mode == "parallel":
-            for sub_ctx in sub_ctxs:
-                sub_ctx.state["agent_blackboard"] = dict(blackboard)
-            raw = await asyncio.gather(*[self._run_sub_agent(sc, run_agent) for sc in sub_ctxs])
-            results = list(raw)
-            for i, task in enumerate(subtasks):
-                agent_name = str(task.get("agent") or "")
-                if agent_name:
-                    blackboard[agent_name] = results[i]
+            results = await self._run_parallel_subtasks(sub_ctxs, subtasks, blackboard, run_agent)
         else:
-            for sub_ctx, task in zip(sub_ctxs, subtasks):
-                sub_ctx.state["agent_blackboard"] = dict(blackboard)
-                result = await self._run_sub_agent(sub_ctx, run_agent)
-                agent_name = str(task.get("agent") or "")
-                if agent_name:
-                    blackboard[agent_name] = result
-                results.append(result)
-        # Stamp context
+            results = await self._run_sequential_subtasks(sub_ctxs, subtasks, blackboard, run_agent)
         context.metadata["delegation_depth"] = depth
         context.metadata["subtasks_executed"] = len(results)
         context.state["delegation_results"] = results
@@ -536,6 +563,130 @@ class InferenceNode:
         context.metadata["determinism"] = det
         return results
 
+    def _build_delegation_subcontexts(
+        self,
+        context: TurnContext,
+        subtasks: list[dict[str, Any]],
+        depth: int,
+    ) -> tuple[list[TurnContext], list[str]]:
+        sub_ctxs: list[TurnContext] = []
+        subtask_ids: list[str] = []
+        for branch_index, task in enumerate(subtasks):
+            sub_ctx = TurnContext(user_input=str(task.get("input") or ""))
+            sub_ctx.trace_id = _deterministic_subtask_trace_id(
+                root_trace_id=str(context.trace_id or ""),
+                parent_trace_id=str(context.trace_id or ""),
+                depth=depth,
+                branch_index=branch_index,
+                subtask=task,
+            )
+            sub_ctx.state.update(dict(context.state))
+            sub_ctx.metadata.update(dict(context.metadata))
+            sub_ctx.metadata["parent_trace_id"] = context.trace_id
+            sub_ctx.metadata["agent_name"] = str(task.get("agent") or "")
+            sub_ctx.metadata["delegation_depth"] = depth + 1
+            sub_ctx.state["rich_context"] = dict(context.state.get("rich_context") or {})
+            subtask_ids.append(sub_ctx.trace_id)
+            sub_ctxs.append(sub_ctx)
+        return sub_ctxs, subtask_ids
+
+    async def _run_parallel_subtasks(
+        self,
+        sub_ctxs: list[TurnContext],
+        subtasks: list[dict[str, Any]],
+        blackboard: dict[str, Any],
+        run_agent: Any,
+    ) -> list[str]:
+        for sub_ctx in sub_ctxs:
+            sub_ctx.state["agent_blackboard"] = dict(blackboard)
+        raw = await asyncio.gather(*[self._run_sub_agent(sc, run_agent) for sc in sub_ctxs])
+        results = list(raw)
+        for i, task in enumerate(subtasks):
+            agent_name = str(task.get("agent") or "")
+            if agent_name:
+                blackboard[agent_name] = results[i]
+        return results
+
+    async def _run_sequential_subtasks(
+        self,
+        sub_ctxs: list[TurnContext],
+        subtasks: list[dict[str, Any]],
+        blackboard: dict[str, Any],
+        run_agent: Any,
+    ) -> list[str]:
+        results: list[str] = []
+        for sub_ctx, task in zip(sub_ctxs, subtasks):
+            sub_ctx.state["agent_blackboard"] = dict(blackboard)
+            result = await self._run_sub_agent(sub_ctx, run_agent)
+            agent_name = str(task.get("agent") or "")
+            if agent_name:
+                blackboard[agent_name] = result
+            results.append(result)
+        return results
+
+    def _parse_candidate_block(self, candidate: Any) -> tuple[str, dict[str, Any] | None]:
+        raw = candidate[0] if isinstance(candidate, tuple) else str(candidate or "")
+        try:
+            parsed = json.loads(raw.strip())
+        except (json.JSONDecodeError, ValueError, TypeError):
+            return raw, None
+        if isinstance(parsed, dict) and "type" in parsed:
+            return raw, parsed
+        return raw, None
+
+    async def _apply_tool_block(
+        self,
+        context: TurnContext,
+        block: dict[str, Any],
+        run_agent: Any,
+        rich_context: dict[str, Any],
+    ) -> Any:
+        tool_name = str(block.get("name") or "")
+        tool_args = dict(block.get("args") or {})
+        context.metadata["tool_called"] = tool_name
+        try:
+            tool_result = dispatch_registered_tool(tool_name, tool_args, context)
+            context.metadata["tool_call_executed"] = True
+            context.state["tool_result"] = tool_result
+        except Exception as exc:
+            context.metadata["tool_call_executed"] = False
+            context.state["tool_result"] = f"[tool error: {exc}]"
+        context.metadata["parent_trace_id"] = context.trace_id
+        follow_up = run_agent(context, rich_context)
+        if inspect.isawaitable(follow_up):
+            follow_up = await follow_up
+        return follow_up
+
+    async def _resolve_structured_block(
+        self,
+        context: TurnContext,
+        block: dict[str, Any],
+        raw: str,
+        run_agent: Any,
+        rich_context: dict[str, Any],
+    ) -> Any | None:
+        block_type = str(block.get("type") or "")
+        if block_type == "reasoning":
+            steps = list(block.get("steps") or [])
+            conclusion = str(block.get("conclusion") or raw)
+            context.metadata["reasoning_structured"] = True
+            context.metadata["reasoning_steps_count"] = len(steps)
+            return (conclusion, False)
+        if block_type == "tool":
+            return await self._apply_tool_block(context, block, run_agent, rich_context)
+        if block_type == "delegate":
+            del_results = await self._dispatch_delegation(context, block, run_agent, depth=0)
+            failure_count = int((context.state.get("arbitration_metadata") or {}).get("failure_count") or 0)
+            n = len(del_results)
+            if failure_count > 0:
+                summary = f"I delegated {n} sub-tasks. {failure_count} sub-task(s) failed. " + " ".join(
+                    r for r in del_results if str(r).startswith("[error:")
+                )
+            else:
+                summary = f"I delegated {n} sub-tasks. Results: " + "; ".join(str(r) for r in del_results)
+            return (summary, False)
+        return None
+
     async def run(self, context: TurnContext) -> TurnContext:
         # LEDGER_EXEMPT: InferenceNode predates ledger protocol; LLM candidate written to context.state["candidate"]
         run_agent = getattr(self.mgr, "run_agent", None)
@@ -550,53 +701,17 @@ class InferenceNode:
                 break
         context.state.pop("_critique_revision_context", None)
 
-        # Parse JSON blocks returned from the agent
-        raw = candidate[0] if isinstance(candidate, tuple) else str(candidate or "")
-        block: dict[str, Any] | None = None
-        try:
-            parsed = json.loads(raw.strip())
-            if isinstance(parsed, dict) and "type" in parsed:
-                block = parsed
-        except (json.JSONDecodeError, ValueError, TypeError):
-            block = None
-
+        raw, block = self._parse_candidate_block(candidate)
         if block is not None:
-            block_type = str(block.get("type") or "")
-            if block_type == "reasoning":
-                steps = list(block.get("steps") or [])
-                conclusion = str(block.get("conclusion") or raw)
-                context.metadata["reasoning_structured"] = True
-                context.metadata["reasoning_steps_count"] = len(steps)
-                candidate = (conclusion, False)
-            elif block_type == "tool":
-                tool_name = str(block.get("name") or "")
-                tool_args = dict(block.get("args") or {})
-                context.metadata["tool_called"] = tool_name
-                try:
-                    tool_result = dispatch_registered_tool(tool_name, tool_args, context)
-                    context.metadata["tool_call_executed"] = True
-                    context.state["tool_result"] = tool_result
-                except Exception as exc:
-                    context.metadata["tool_call_executed"] = False
-                    context.state["tool_result"] = f"[tool error: {exc}]"
-                # Mark as tool call so follow-up agent call knows it's a child
-                context.metadata["parent_trace_id"] = context.trace_id
-                follow_up = run_agent(context, rich_context)
-                if inspect.isawaitable(follow_up):
-                    follow_up = await follow_up
-                candidate = follow_up
-            elif block_type == "delegate":
-                del_results = await self._dispatch_delegation(context, block, run_agent, depth=0)
-                # Build summary reply
-                failure_count = int((context.state.get("arbitration_metadata") or {}).get("failure_count") or 0)
-                n = len(del_results)
-                if failure_count > 0:
-                    summary = f"I delegated {n} sub-tasks. {failure_count} sub-task(s) failed. " + " ".join(
-                        r for r in del_results if str(r).startswith("[error:")
-                    )
-                else:
-                    summary = f"I delegated {n} sub-tasks. Results: " + "; ".join(str(r) for r in del_results)
-                candidate = (summary, False)
+            resolved_candidate = await self._resolve_structured_block(
+                context,
+                block,
+                raw,
+                run_agent,
+                rich_context,
+            )
+            if resolved_candidate is not None:
+                candidate = resolved_candidate
 
         context.state["candidate"] = candidate
         return context
@@ -657,65 +772,79 @@ class SaveNode:
     def __init__(self, persistence_manager: Any = None) -> None:
         self.mgr = persistence_manager
 
+    @staticmethod
+    def _build_clarity_markers(reply: str) -> list[str]:
+        clarity_markers: list[str] = []
+        if reply.count("\n") > reply.count("  "):
+            clarity_markers.append("structured_newlines")
+        if ":" in reply and reply.count(":") > 2:
+            clarity_markers.append("key_value_format")
+        if any(bullet in reply for bullet in ["• ", "- ", "* ", "1. ", "• "]):
+            clarity_markers.append("bullet_list")
+        return clarity_markers
+
+    def _prepare_ux_trace(self, context: TurnContext) -> None:
+        ux_trace = dict(context.state.get("ux_trace") or context.state.get("ux_feedback") or {})
+        ux_trace["time_to_first_token_ms"] = float(context.compute_time_to_first_token_ms())
+        ux_trace["time_to_resolution_ms"] = float(context.compute_time_to_resolution_ms())
+        critique_record = dict(context.state.get("critique_record") or {})
+        ux_trace["backtrack_count"] = int(critique_record.get("iteration", 0))
+        candidate = context.state.get("candidate")
+        reply = str(candidate[0] if isinstance(candidate, tuple) else candidate or "")
+        ux_trace["clarity_markers"] = self._build_clarity_markers(reply)
+        context.state["ux_trace"] = ux_trace
+
+    def _apply_commit_flow(self, context: TurnContext) -> None:
+        begin = getattr(self.mgr, "begin_transaction", None)
+        apply = getattr(self.mgr, "apply_mutations", None)
+        finalize = getattr(self.mgr, "finalize_turn", None)
+        commit = getattr(self.mgr, "commit_transaction", None)
+        if callable(begin):
+            begin(context)
+        if callable(apply):
+            apply(context)
+        if callable(finalize):
+            context.state["safe_result"] = finalize(context, context.state.get("safe_result"))
+        if callable(commit):
+            commit(context)
+            return
+        save_turn = getattr(self.mgr, "save_turn", None)
+        if callable(save_turn):
+            save_turn(context, context.state.get("safe_result"))
+
     async def run(self, context: TurnContext) -> TurnContext:
         # LEDGER_EXEMPT: SaveNode predates ledger protocol; persistence outcome recorded in context.fidelity.save
         # Commit-boundary contract anchor: ledger_entry is emitted via persistence/ledger services.
         if getattr(context, "temporal", None) is None:
             raise RuntimeError("SaveNode requires temporal context")
-        
-        # Populate UX trace with timing signals before persistence.
-        # These will be captured in raw_state for scoring downstream.
-        ux_trace = dict(context.state.get("ux_trace") or context.state.get("ux_feedback") or {})
-        ux_trace["time_to_first_token_ms"] = float(context.compute_time_to_first_token_ms())
-        ux_trace["time_to_resolution_ms"] = float(context.compute_time_to_resolution_ms())
-        # Backtrack count: number of critique loops in inference node (proxy for plan revisions).
-        critique_record = dict(context.state.get("critique_record") or {})
-        ux_trace["backtrack_count"] = int(critique_record.get("iteration", 0))
-        # Clarity markers: detect structured vs fragmented output patterns.
-        candidate = context.state.get("candidate")
-        reply = str(candidate[0] if isinstance(candidate, tuple) else candidate or "")
-        clarity_markers = []
-        if reply.count("\n") > reply.count("  "):  # More newlines than spaces = structured
-            clarity_markers.append("structured_newlines")
-        if ":" in reply and reply.count(":") > 2:  # Multiple colons suggest key-value pairs
-            clarity_markers.append("key_value_format")
-        if any(bullet in reply for bullet in ["• ", "- ", "* ", "1. ", "• "]):  # Bullet points
-            clarity_markers.append("bullet_list")
-        ux_trace["clarity_markers"] = clarity_markers
-        context.state["ux_trace"] = ux_trace
-        
+        self._prepare_ux_trace(context)
+
         if self.mgr is None:
             context.fidelity.save = True
             context.state["last_commit_id"] = context.trace_id
             context.state["last_transaction_status"] = "committed"
             return context
-        begin = getattr(self.mgr, "begin_transaction", None)
-        apply = getattr(self.mgr, "apply_mutations", None)
-        finalize = getattr(self.mgr, "finalize_turn", None)
-        commit = getattr(self.mgr, "commit_transaction", None)
         rollback = getattr(self.mgr, "rollback_transaction", None)
         try:
-            if callable(begin):
-                begin(context)
-            if callable(apply):
-                apply(context)
-            if callable(finalize):
-                context.state["safe_result"] = finalize(context, context.state.get("safe_result"))
-            if callable(commit):
-                commit(context)
-            else:
-                save_turn = getattr(self.mgr, "save_turn", None)
-                if callable(save_turn):
-                    save_turn(context, context.state.get("safe_result"))
+            self._apply_commit_flow(context)
             context.fidelity.save = True
             context.state["last_commit_id"] = context.trace_id
             context.state["last_transaction_status"] = "committed"
             return context
-        except Exception:
+        except Exception as exc:
+            rollback_failed = False
             if callable(rollback):
-                rollback(context)
-            context.state["last_transaction_status"] = "rolled_back"
-            raise
+                try:
+                    rollback(context)
+                except Exception as rollback_exc:
+                    rollback_failed = True
+                    context.state["rollback_error"] = str(rollback_exc)
+            context.state["last_transaction_status"] = (
+                "rollback_failed"
+                if rollback_failed
+                else ("rolled_back" if callable(rollback) else "failed_no_rollback")
+            )
+            raise exc
 
 
 class ReflectionNode:

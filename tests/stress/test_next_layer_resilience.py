@@ -310,6 +310,31 @@ def test_controlled_failure_injection_preserves_recovery_visibility_and_phase_sy
 def test_replay_under_perturbation_keeps_deterministic_signature():
     """D) Same seed + jitter + safe branch reorder should preserve deterministic output contract."""
 
+    def _normalize_boundary(snapshot: dict[str, Any]) -> dict[str, Any]:
+        """Drop perf-only markers that are intentionally timing-sensitive under jitter tests."""
+
+        def _clean(value: Any) -> Any:
+            if isinstance(value, dict):
+                cleaned: dict[str, Any] = {}
+                for key, item in value.items():
+                    key_str = str(key)
+                    lowered = key_str.lower()
+                    if (
+                        "_perf" in lowered
+                        or "_wall" in lowered
+                        or "_time" in lowered
+                        or "_ts" in lowered
+                        or "timestamp" in lowered
+                    ):
+                        continue
+                    cleaned[key_str] = _clean(item)
+                return cleaned
+            if isinstance(value, list):
+                return [_clean(item) for item in value]
+            return value
+
+        return dict(_clean(dict(snapshot or {})))
+
     def run_signature(seed: int, *, reverse_branches: bool, jitter_ms: dict[str, float]) -> dict[str, Any]:
         registry = MockRegistry()
         graph = TurnGraph(registry=registry)
@@ -339,7 +364,7 @@ def test_replay_under_perturbation_keeps_deterministic_signature():
             "fidelity": ctx.fidelity.to_dict(),
             "mutation_snapshot": ctx.mutation_queue.snapshot(),
             "safe_result": ctx.state.get("safe_result"),
-            "determinism_boundary": ctx.determinism_boundary.snapshot(),
+            "determinism_boundary": _normalize_boundary(ctx.determinism_boundary.snapshot()),
             "branch_state": branch_state,
             "checkpoint_hashes": list(run.checkpoint_hashes),
         }

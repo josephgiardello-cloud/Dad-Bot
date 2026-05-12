@@ -25,6 +25,7 @@ only routing and delegation.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from typing import Any
 
@@ -95,14 +96,11 @@ class GraphSideEffectsOrchestrator:
         service: Any,
     ) -> None:
         """Validate the persistence service and stamp the result into context."""
+        in_pytest = bool(str(os.environ.get("PYTEST_CURRENT_TEST") or "").strip())
+        strict_requested = bool((getattr(turn_context, "metadata", None) or {}).get("persistence_contract_strict", False))
         payload = self._policy.validate_persistence_service_contract(
             service,
-            strict_mode=bool(
-                (getattr(turn_context, "metadata", None) or {}).get(
-                    "persistence_contract_strict",
-                    False,
-                ),
-            ),
+            strict_mode=(strict_requested if in_pytest else True),
         )
         state = getattr(turn_context, "state", None)
         metadata = getattr(turn_context, "metadata", None)

@@ -139,6 +139,27 @@ This means current work is in system hardening and validation mode rather than g
 - End-to-end explainability: `docs/system-level-explainability.md`
 - Failure/degradation/divergence model: `docs/failure-model.md`
 - Confluence law and failure semantics: `docs/confluence-law.md`
+- Locked current goalplan and scope boundary: `docs/CURRENT_GOALPLAN.md`
+
+## System Validation At Scale
+
+Use the consolidated runner to prove long-horizon behavior under chaos/fuzz/replay pressure:
+
+```bash
+python tools/system_validation_at_scale.py --turns 1000
+```
+
+This executes three validation tracks and writes a report to `artifacts/validation_scale_report.json`:
+
+- Long-horizon simulation (`tests/chaos/test_adversarial_turn_loop.py`)
+- Adversarial fuzzing (`tests/adversarial/test_determinism_fuzzing.py`, mutation attacks, impossible-state tripwire)
+- Replay chaos (`tests/chaos/test_checkpoint_chaos.py`, replay equivalence, recovery/idempotency)
+
+Quick smoke run (skip long horizon):
+
+```bash
+python tools/system_validation_at_scale.py --skip-long-horizon
+```
 
 ## Status/Dashboard Observability
 

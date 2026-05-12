@@ -10,6 +10,8 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 from uuid import uuid4
 
+from dadbot.core.mutation_entry_invariants import enforce_mutation_entry_invariants
+
 
 logger = logging.getLogger(__name__)
 
@@ -151,19 +153,14 @@ def _normalize_time_token(
     return _stable_sha256(payload)[:16]
 
 
-def record_external_system_call(
+def _normalize_external_call_inputs(
     *,
     operation: str,
     system: str,
-    request_payload: dict[str, Any] | None = None,
-    response_payload: dict[str, Any] | None = None,
-    status: str = "ok",
-    source: str = "",
-    deterministic_id: str = "",
-    response_schema_version: str = "1.0",
-    determinism_contract: dict[str, Any] | None = None,
-    required: bool = False,
-) -> dict[str, Any] | None:
+    request_payload: dict[str, Any] | None,
+    response_payload: dict[str, Any] | None,
+    determinism_contract: dict[str, Any] | None,
+) -> dict[str, Any]:
     request = dict(request_payload or {})
     response = dict(response_payload or {})
     normalized_contract = _normalize_determinism_contract(determinism_contract)
@@ -186,7 +183,28 @@ def record_external_system_call(
         system=normalized_system,
         request_hash=request_hash,
     )
-    tool_call_record = ToolCallRecord(
+    return {
+        "request": request,
+        "response": response,
+        "normalized_contract": normalized_contract,
+        "normalized_operation": normalized_operation,
+        "normalized_system": normalized_system,
+        "request_hash": request_hash,
+        "response_hash": response_hash,
+        "time_token": time_token,
+    }
+
+
+def _build_tool_call_record(
+    *,
+    canonicalized_request: dict[str, Any],
+    response: dict[str, Any],
+    request_hash: str,
+    response_schema_version: str,
+    normalized_contract: dict[str, Any],
+    time_token: str,
+) -> ToolCallRecord:
+    return ToolCallRecord(
         canonicalized_input_payload=dict(canonicalized_request or {}),
         canonicalized_input_hash=request_hash,
         raw_output_payload=dict(response or {}),
@@ -194,6 +212,69 @@ def record_external_system_call(
         response_schema_version=str(response_schema_version or "1.0"),
         determinism_contract=normalized_contract,
         stable_time_token=time_token,
+    )
+
+
+def _tool_called_event_payload(
+    *,
+    normalized_operation: str,
+    normalized_system: str,
+    status: str,
+    time_token: str,
+    request_hash: str,
+    response_hash: str,
+    deterministic_id: str,
+) -> dict[str, Any]:
+    return {
+        "operation": normalized_operation,
+        "system": normalized_system,
+        "status": str(status or "ok").strip().lower() or "ok",
+        "time_token": time_token,
+        "request_hash": request_hash,
+        "response_hash": response_hash,
+        "deterministic_id": str(deterministic_id or "").strip(),
+    }
+
+
+def record_external_system_call(
+    *,
+    operation: str,
+    system: str,
+    request_payload: dict[str, Any] | None = None,
+    response_payload: dict[str, Any] | None = None,
+    status: str = "ok",
+    source: str = "",
+    deterministic_id: str = "",
+    response_schema_version: str = "1.0",
+    determinism_contract: dict[str, Any] | None = None,
+    required: bool = False,
+) -> dict[str, Any] | None:
+    normalized = _normalize_external_call_inputs(
+        operation=operation,
+        system=system,
+        request_payload=request_payload,
+        response_payload=response_payload,
+        determinism_contract=determinism_contract,
+    )
+    request = dict(normalized.get("request") or {})
+    response = dict(normalized.get("response") or {})
+    normalized_contract = dict(normalized.get("normalized_contract") or {})
+    normalized_operation = str(normalized.get("normalized_operation") or "external_system_call")
+    normalized_system = str(normalized.get("normalized_system") or "unknown")
+    request_hash = str(normalized.get("request_hash") or "")
+    response_hash = str(normalized.get("response_hash") or "")
+    time_token = str(normalized.get("time_token") or "")
+    canonicalized_request = _drop_ignored_fields(
+        request,
+        list(normalized_contract.get("ignore_request_fields") or []),
+    )
+    tool_call_record = _build_tool_call_record(
+        canonicalized_request=canonicalized_request,
+        response=response,
+        request_hash=request_hash,
+        response_schema_version=response_schema_version,
+        normalized_contract=normalized_contract,
+        time_token=time_token,
     )
     payload = {
         "operation": normalized_operation,
@@ -216,67 +297,30 @@ def record_external_system_call(
     # Route tool call through CoreState event bus (all execution through events).
     push_core_state_event(
         "tool_called",
-        {
-            "operation": normalized_operation,
-            "system": normalized_system,
-            "status": str(status or "ok").strip().lower() or "ok",
-            "time_token": time_token,
-            "request_hash": request_hash,
-            "response_hash": response_hash,
-            "deterministic_id": str(deterministic_id or "").strip(),
-        },
+        _tool_called_event_payload(
+            normalized_operation=normalized_operation,
+            normalized_system=normalized_system,
+            status=status,
+            time_token=time_token,
+            request_hash=request_hash,
+            response_hash=response_hash,
+            deterministic_id=deterministic_id,
+        ),
     )
     return step
 
 
 def build_external_system_call_graph(steps: list[dict[str, Any]]) -> dict[str, Any]:
     nodes: list[dict[str, Any]] = []
-    edges: list[dict[str, Any]] = []
     node_ids: list[str] = []
-    for step in steps:
-        if str(step.get("operation") or "").strip().lower() != "external_system_call":
+    for step in list(steps or []):
+        if not _is_external_system_call_step(step):
             continue
-        seq = int(step.get("seq") or 0)
-        payload = dict(step.get("payload") or {})
-        tool_call_record = dict(payload.get("tool_call_record") or {})
-        operation = str(payload.get("operation") or "external_system_call").strip().lower()
-        system = str(payload.get("system") or "unknown").strip().lower()
-        request_hash = str(
-            tool_call_record.get("canonicalized_input_hash")
-            or payload.get("request_hash")
-            or "",
-        )
-        response_hash = str(
-            tool_call_record.get("raw_output_hash")
-            or payload.get("response_hash")
-            or "",
-        )
-        execution_result = dict(payload.get("metadata", {}).get("execution_result") or {})
-        status = str(execution_result.get("status") or payload.get("status") or "ok").strip().lower() or "ok"
-        time_token = str(
-            tool_call_record.get("stable_time_token")
-            or payload.get("time_token")
-            or "",
-        )
-        node_id = f"ext:{seq}:{system}:{request_hash[:8] or 'na'}"
-        node = ToolExecutionTraceNode(
-            node_id=node_id,
-            sequence=seq,
-            operation=operation,
-            system=system,
-            request_hash=request_hash,
-            response_hash=response_hash,
-            status=status,
-            time_token=time_token,
-        )
+        node_id, node_payload = _external_call_node(step)
         node_ids.append(node_id)
-        nodes.append(node.to_dict())
+        nodes.append(node_payload)
 
-    for idx in range(1, len(node_ids)):
-        edges.append(
-            {"from": node_ids[idx - 1], "to": node_ids[idx], "type": "sequence"},
-        )
-
+    edges = _external_call_sequence_edges(node_ids)
     graph_payload = {"nodes": nodes, "edges": edges}
     graph = ExternalSystemCallGraph(
         nodes=nodes,
@@ -284,6 +328,57 @@ def build_external_system_call_graph(steps: list[dict[str, Any]]) -> dict[str, A
         graph_hash=_stable_sha256(graph_payload),
     )
     return graph.to_dict()
+
+
+def _is_external_system_call_step(step: dict[str, Any]) -> bool:
+    return str(step.get("operation") or "").strip().lower() == "external_system_call"
+
+
+def _resolve_tool_call_hashes(
+    tool_call_record: dict[str, Any], payload: dict[str, Any]
+) -> tuple[str, str, str]:
+    request_hash = str(
+        tool_call_record.get("canonicalized_input_hash") or payload.get("request_hash") or ""
+    )
+    response_hash = str(
+        tool_call_record.get("raw_output_hash") or payload.get("response_hash") or ""
+    )
+    time_token = str(
+        tool_call_record.get("stable_time_token") or payload.get("time_token") or ""
+    )
+    return request_hash, response_hash, time_token
+
+
+def _external_call_node(step: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    seq = int(step.get("seq") or 0)
+    payload = dict(step.get("payload") or {})
+    tool_call_record = dict(payload.get("tool_call_record") or {})
+    operation = str(payload.get("operation") or "external_system_call").strip().lower()
+    system = str(payload.get("system") or "unknown").strip().lower()
+    request_hash, response_hash, time_token = _resolve_tool_call_hashes(tool_call_record, payload)
+    execution_result = dict(payload.get("metadata", {}).get("execution_result") or {})
+    status = str(execution_result.get("status") or payload.get("status") or "ok").strip().lower() or "ok"
+    node_id = f"ext:{seq}:{system}:{request_hash[:8] or 'na'}"
+    node = ToolExecutionTraceNode(
+        node_id=node_id,
+        sequence=seq,
+        operation=operation,
+        system=system,
+        request_hash=request_hash,
+        response_hash=response_hash,
+        status=status,
+        time_token=time_token,
+    )
+    return node_id, node.to_dict()
+
+
+def _external_call_sequence_edges(node_ids: list[str]) -> list[dict[str, Any]]:
+    edges: list[dict[str, Any]] = []
+    for idx in range(1, len(node_ids)):
+        edges.append(
+            {"from": node_ids[idx - 1], "to": node_ids[idx], "type": "sequence"},
+        )
+    return edges
 
 
 class RuntimeTraceViolation(RuntimeError):
@@ -300,11 +395,16 @@ class ExecutionTraceRecorder:
     def __init__(
         self,
         *,
-        trace_id: str,
+        trace_token: str = "",
         prompt: str,
         metadata: dict[str, Any] | None = None,
+        **legacy_kwargs: Any,
     ):
-        self.trace_id = str(trace_id or "")
+        legacy_trace = legacy_kwargs.pop("trace_id", "")
+        if legacy_kwargs:
+            unknown = ", ".join(sorted(str(name) for name in legacy_kwargs))
+            raise TypeError(f"Unexpected keyword argument(s): {unknown}")
+        self.trace_id = str(trace_token or legacy_trace or "")
         self.prompt = str(prompt or "")
         self.metadata = dict(metadata or {})
         self._steps: list[dict[str, Any]] = []
@@ -404,6 +504,19 @@ def push_core_state_event(
     Returns the new CoreState, or None if no CoreState is bound for this turn.
     This is the single write path: event → reducer → CoreState.
     """
+    event_payload = dict(payload or {})
+    event_metadata = dict(metadata or {})
+    invariant_metadata: dict[str, Any] = {}
+    trace_id = str(event_metadata.get("trace_id") or "").strip()
+    if trace_id:
+        invariant_metadata["trace_id"] = trace_id
+    enforce_mutation_entry_invariants(
+        mutation_kind="core_state_event",
+        source="execution_context.push_core_state_event",
+        changed_keys=sorted(str(key) for key in event_payload.keys()),
+        metadata=invariant_metadata,
+    )
+
     current = _ACTIVE_CORE_STATE.get()
     if current is None:
         return None
@@ -413,8 +526,8 @@ def push_core_state_event(
         current,
         InputEvent(
             event_type=str(event_type or ""),
-            payload=dict(payload or {}),
-            metadata=dict(metadata or {}),
+            payload=event_payload,
+            metadata=event_metadata,
         ),
     )
     _ACTIVE_CORE_STATE.set(next_state)
@@ -512,7 +625,7 @@ def ensure_execution_trace_root(
     root_op = str(operation or "out_of_band_entry").strip().lower() or "out_of_band_entry"
     synthetic_trace_id = f"oob-{uuid4().hex}"
     recorder = ExecutionTraceRecorder(
-        trace_id=synthetic_trace_id,
+        trace_token=synthetic_trace_id,
         prompt=str(prompt or f"[{root_op}]"),
         metadata={
             "out_of_band": True,
@@ -545,7 +658,7 @@ class ExecutionTraceContext:
         return asdict(self)
 
 
-def _normalized_steps(raw_steps: list[Any]) -> list[dict[str, Any]]:
+def _strip_temporal_payload_keys(payload: dict[str, Any]) -> dict[str, Any]:
     temporal_only_keys = {
         "completed_at",
         "timestamp",
@@ -555,7 +668,71 @@ def _normalized_steps(raw_steps: list[Any]) -> list[dict[str, Any]]:
         "ts",
         "time",
     }
+    normalized = dict(payload or {})
+    for key in temporal_only_keys:
+        normalized.pop(key, None)
+    return normalized
 
+
+def _normalized_external_call_record(
+    *,
+    tool_call_record: dict[str, Any],
+    normalized_token: str,
+) -> dict[str, Any]:
+    normalized_contract = _normalize_determinism_contract(
+        dict(tool_call_record.get("determinism_contract") or {}),
+    )
+    canonicalized_input_payload = _drop_ignored_fields(
+        dict(tool_call_record.get("canonicalized_input_payload") or {}),
+        list(normalized_contract.get("ignore_request_fields") or []),
+    )
+    raw_output_payload = _drop_ignored_fields(
+        dict(tool_call_record.get("raw_output_payload") or {}),
+        list(normalized_contract.get("ignore_response_fields") or []),
+    )
+    return ToolCallRecord(
+        canonicalized_input_payload=dict(canonicalized_input_payload or {}),
+        canonicalized_input_hash=_stable_sha256(canonicalized_input_payload),
+        raw_output_payload=dict(raw_output_payload or {}),
+        raw_output_hash=_stable_sha256(raw_output_payload),
+        response_schema_version=str(
+            tool_call_record.get("response_schema_version") or "1.0",
+        ),
+        determinism_contract=normalized_contract,
+        stable_time_token=normalized_token,
+    ).to_dict()
+
+
+def _normalize_external_system_call_payload(
+    *,
+    seq: int,
+    operation: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    normalized_payload = dict(payload or {})
+    system = str(normalized_payload.get("system") or "").strip().lower()
+    tool_call_record = dict(normalized_payload.get("tool_call_record") or {})
+    request_hash = str(
+        tool_call_record.get("canonicalized_input_hash")
+        or normalized_payload.get("request_hash")
+        or "",
+    )
+    normalized_token = _normalize_time_token(
+        seq=seq,
+        operation=operation,
+        system=system,
+        request_hash=request_hash,
+    )
+    normalized_payload["time_token"] = normalized_token
+    if tool_call_record:
+        normalized_payload["tool_call_record"] = _normalized_external_call_record(
+            tool_call_record=tool_call_record,
+            normalized_token=normalized_token,
+        )
+    return normalized_payload
+
+
+def _normalized_steps(raw_steps: list[Any]) -> list[dict[str, Any]]:
     steps: list[dict[str, Any]] = []
     for index, item in enumerate(list(raw_steps or [])):
         if not isinstance(item, dict):
@@ -563,48 +740,14 @@ def _normalized_steps(raw_steps: list[Any]) -> list[dict[str, Any]]:
         raw_seq = item.get("seq")
         seq = int(raw_seq if isinstance(raw_seq, int) else index)
         operation = str(item.get("operation") or "").strip().lower()
-        payload = dict(item.get("payload") or {})
-        for key in temporal_only_keys:
-            payload.pop(key, None)
+        payload = _strip_temporal_payload_keys(dict(item.get("payload") or {}))
 
         if operation == "external_system_call":
-            system = str(payload.get("system") or "").strip().lower()
-            tool_call_record = dict(payload.get("tool_call_record") or {})
-            request_hash = str(
-                tool_call_record.get("canonicalized_input_hash")
-                or payload.get("request_hash")
-                or "",
-            )
-            normalized_token = _normalize_time_token(
+            payload = _normalize_external_system_call_payload(
                 seq=seq,
                 operation=operation,
-                system=system,
-                request_hash=request_hash,
+                payload=payload,
             )
-            payload["time_token"] = normalized_token
-            if tool_call_record:
-                normalized_contract = _normalize_determinism_contract(
-                    dict(tool_call_record.get("determinism_contract") or {}),
-                )
-                canonicalized_input_payload = _drop_ignored_fields(
-                    dict(tool_call_record.get("canonicalized_input_payload") or {}),
-                    list(normalized_contract.get("ignore_request_fields") or []),
-                )
-                raw_output_payload = _drop_ignored_fields(
-                    dict(tool_call_record.get("raw_output_payload") or {}),
-                    list(normalized_contract.get("ignore_response_fields") or []),
-                )
-                payload["tool_call_record"] = ToolCallRecord(
-                    canonicalized_input_payload=dict(canonicalized_input_payload or {}),
-                    canonicalized_input_hash=_stable_sha256(canonicalized_input_payload),
-                    raw_output_payload=dict(raw_output_payload or {}),
-                    raw_output_hash=_stable_sha256(raw_output_payload),
-                    response_schema_version=str(
-                        tool_call_record.get("response_schema_version") or "1.0",
-                    ),
-                    determinism_contract=normalized_contract,
-                    stable_time_token=normalized_token,
-                ).to_dict()
 
         steps.append(
             {
@@ -650,6 +793,60 @@ def derive_execution_trace_hash(trace_context: dict[str, Any]) -> str:
     return _stable_sha256(canonical)
 
 
+def _is_tool_invocation_operation(operation: str) -> bool:
+    return operation in {"external_system_call", "tool_call", "tool_dispatch"}
+
+
+def _tool_name_from_payload(payload: dict[str, Any]) -> str:
+    return str(payload.get("system") or payload.get("tool") or payload.get("name") or "")
+
+
+def _tool_status_from_payload(payload: dict[str, Any]) -> str:
+    execution_result = dict(payload.get("metadata", {}).get("execution_result") or {})
+    return str(execution_result.get("status") or payload.get("status") or "")
+
+
+def _tool_projection_with_record(
+    *,
+    operation: str,
+    tool_name: str,
+    status: str,
+    record: dict[str, Any],
+) -> dict[str, Any]:
+    contract = _normalize_determinism_contract(dict(record.get("determinism_contract") or {}))
+    canonicalized_input_payload = _drop_ignored_fields(
+        dict(record.get("canonicalized_input_payload") or {}),
+        list(contract.get("ignore_request_fields") or []),
+    )
+    normalized_output_payload = _drop_ignored_fields(
+        dict(record.get("raw_output_payload") or {}),
+        list(contract.get("ignore_response_fields") or []),
+    )
+    return {
+        "operation": operation,
+        "tool": tool_name,
+        "status": status,
+        "request_hash": _stable_sha256(canonicalized_input_payload),
+        "response_hash": _stable_sha256(normalized_output_payload),
+        "response_schema_version": str(record.get("response_schema_version") or "1.0"),
+        "stable_time_token": str(record.get("stable_time_token") or ""),
+        "determinism_contract_hash": _stable_sha256(contract),
+    }
+
+
+def _tool_projection_live(*, operation: str, tool_name: str, status: str, payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "operation": operation,
+        "tool": tool_name,
+        "status": status,
+        "request_hash": str(payload.get("request_hash") or ""),
+        "response_hash": str(payload.get("response_hash") or ""),
+        "response_schema_version": "",
+        "stable_time_token": str(payload.get("time_token") or ""),
+        "determinism_contract_hash": "",
+    }
+
+
 def build_tool_invocation_projection(
     execution_trace_context: dict[str, Any],
     *,
@@ -659,55 +856,31 @@ def build_tool_invocation_projection(
     for step in list(execution_trace_context.get("steps") or []):
         operation = str(step.get("operation") or "")
         payload = dict(step.get("payload") or {})
-        if operation not in {"external_system_call", "tool_call", "tool_dispatch"}:
+        if not _is_tool_invocation_operation(operation):
             continue
 
-        tool_name = str(
-            payload.get("system") or payload.get("tool") or payload.get("name") or "",
-        )
-        execution_result = dict(payload.get("metadata", {}).get("execution_result") or {})
-        status = str(execution_result.get("status") or payload.get("status") or "")
+        tool_name = _tool_name_from_payload(payload)
+        status = _tool_status_from_payload(payload)
 
         if not live_tool_mode and isinstance(payload.get("tool_call_record"), dict):
             record = dict(payload.get("tool_call_record") or {})
-            contract = _normalize_determinism_contract(
-                dict(record.get("determinism_contract") or {}),
-            )
-            canonicalized_input_payload = _drop_ignored_fields(
-                dict(record.get("canonicalized_input_payload") or {}),
-                list(contract.get("ignore_request_fields") or []),
-            )
-            normalized_output_payload = _drop_ignored_fields(
-                dict(record.get("raw_output_payload") or {}),
-                list(contract.get("ignore_response_fields") or []),
-            )
             tools.append(
-                {
-                    "operation": operation,
-                    "tool": tool_name,
-                    "status": status,
-                    "request_hash": _stable_sha256(canonicalized_input_payload),
-                    "response_hash": _stable_sha256(normalized_output_payload),
-                    "response_schema_version": str(
-                        record.get("response_schema_version") or "1.0",
-                    ),
-                    "stable_time_token": str(record.get("stable_time_token") or ""),
-                    "determinism_contract_hash": _stable_sha256(contract),
-                },
+                _tool_projection_with_record(
+                    operation=operation,
+                    tool_name=tool_name,
+                    status=status,
+                    record=record,
+                ),
             )
             continue
 
         tools.append(
-            {
-                "operation": operation,
-                "tool": tool_name,
-                "status": status,
-                "request_hash": str(payload.get("request_hash") or ""),
-                "response_hash": str(payload.get("response_hash") or ""),
-                "response_schema_version": "",
-                "stable_time_token": str(payload.get("time_token") or ""),
-                "determinism_contract_hash": "",
-            },
+            _tool_projection_live(
+                operation=operation,
+                tool_name=tool_name,
+                status=status,
+                payload=payload,
+            ),
         )
     return tools
 
@@ -726,6 +899,51 @@ def _require_execution_context_contract(context: Any) -> tuple[dict[str, Any], d
     return dict(state), dict(metadata)
 
 
+def _normalize_execution_response(result: Any) -> str:
+    return str((result[0] if isinstance(result, tuple) else result) or "")
+
+
+def _coerce_record_list(values: list[Any]) -> list[dict[str, Any]]:
+    return [item if isinstance(item, dict) else {"value": item} for item in list(values or [])]
+
+
+def _build_memory_snapshot_used(
+    *,
+    context: Any,
+    state: dict[str, Any],
+    determinism: dict[str, Any],
+) -> dict[str, Any]:
+    state_memory_snapshot, memory_snapshot_contract_warning = _coerce_memory_snapshot(state.get("memory_snapshot"))
+    if memory_snapshot_contract_warning:
+        logger.warning(
+            "Execution trace context built with malformed memory_snapshot (trace_id=%s, warning=%s)",
+            str(getattr(context, "trace_id", "") or ""),
+            memory_snapshot_contract_warning,
+        )
+    return {
+        "memory_fingerprint": str(determinism.get("memory_fingerprint") or ""),
+        "memory_structured": dict(state_memory_snapshot.get("memory_structured") or {}),
+        "memory_full_history_id": str(state_memory_snapshot.get("memory_full_history_id") or ""),
+        "contract_ok": not bool(memory_snapshot_contract_warning),
+        "contract_warning": str(memory_snapshot_contract_warning or ""),
+    }
+
+
+def _build_model_call_parameters(determinism: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "provider": str(determinism.get("llm_provider") or ""),
+        "model": str(determinism.get("llm_model") or ""),
+        "seed_policy": str(determinism.get("seed_policy") or ""),
+        "temperature_policy": str(determinism.get("temperature_policy") or ""),
+    }
+
+
+def _collect_recorded_steps(recorder: ExecutionTraceRecorder | None) -> tuple[list[dict[str, Any]], list[str]]:
+    recorded_steps = recorder.steps if recorder is not None else []
+    operations = [str(step.get("operation") or "") for step in recorded_steps]
+    return recorded_steps, operations
+
+
 def build_execution_trace_context(
     *,
     context,
@@ -735,45 +953,28 @@ def build_execution_trace_context(
     state, metadata = _require_execution_context_contract(context)
     determinism = dict(metadata.get("determinism") or {})
 
-    normalized_response = str(
-        (result[0] if isinstance(result, tuple) else result) or "",
-    )
+    normalized_response = _normalize_execution_response(result)
 
     retrieval_set = list(
         state.get("memory_retrieval_set") or state.get("retrieval_set") or state.get("memory_retrieval_results") or [],
     )
-    retrieval_records = [item if isinstance(item, dict) else {"value": item} for item in retrieval_set]
+    retrieval_records = _coerce_record_list(retrieval_set)
 
     tool_outputs = list(state.get("tool_results") or [])
-    tool_output_records = [item if isinstance(item, dict) else {"value": item} for item in tool_outputs]
+    tool_output_records = _coerce_record_list(tool_outputs)
 
-    state_memory_snapshot, memory_snapshot_contract_warning = _coerce_memory_snapshot(state.get("memory_snapshot"))
-    if memory_snapshot_contract_warning:
-        logger.warning(
-            "Execution trace context built with malformed memory_snapshot (trace_id=%s, warning=%s)",
-            str(getattr(context, "trace_id", "") or ""),
-            memory_snapshot_contract_warning,
-        )
-    memory_snapshot_used = {
-        "memory_fingerprint": str(determinism.get("memory_fingerprint") or ""),
-        "memory_structured": dict(state_memory_snapshot.get("memory_structured") or {}),
-        "memory_full_history_id": str(state_memory_snapshot.get("memory_full_history_id") or ""),
-        "contract_ok": not bool(memory_snapshot_contract_warning),
-        "contract_warning": str(memory_snapshot_contract_warning or ""),
-    }
+    memory_snapshot_used = _build_memory_snapshot_used(
+        context=context,
+        state=state,
+        determinism=determinism,
+    )
 
-    model_call_parameters = {
-        "provider": str(determinism.get("llm_provider") or ""),
-        "model": str(determinism.get("llm_model") or ""),
-        "seed_policy": str(determinism.get("seed_policy") or ""),
-        "temperature_policy": str(determinism.get("temperature_policy") or ""),
-    }
+    model_call_parameters = _build_model_call_parameters(determinism)
 
     model_output = state.get("model_output") or state.get("inference_output") or normalized_response
 
     trace_recorder = recorder or active_execution_trace()
-    recorded_steps = trace_recorder.steps if trace_recorder is not None else []
-    operations = [str(step.get("operation") or "") for step in recorded_steps]
+    recorded_steps, operations = _collect_recorded_steps(trace_recorder)
     execution_snapshot = _build_execution_snapshot(
         context=context,
         result=result,
@@ -856,6 +1057,64 @@ def _step_output_payload(step: dict[str, Any]) -> dict[str, Any]:
     return projection
 
 
+def _snapshot_outputs_per_step(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "seq": int(step.get("seq") or 0),
+            "operation": str(step.get("operation") or ""),
+            "input": _step_input_payload(step),
+            "output": _step_output_payload(step),
+            "payload_hash": _stable_sha256(dict(step.get("payload") or {})),
+        }
+        for step in steps
+    ]
+
+
+def _snapshot_model_inputs(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        _step_input_payload(step)
+        for step in steps
+        if str(step.get("operation") or "") == "model_call"
+    ]
+
+
+def _snapshot_memory_delta_summary(
+    *,
+    state: dict[str, Any],
+    metadata: dict[str, Any],
+    memory_write_intents: list[Any],
+) -> dict[str, Any]:
+    return dict(
+        state.get("memory_delta_summary")
+        or metadata.get("memory_delta_summary")
+        or {
+            "version": "1.0",
+            "intent_count": len(memory_write_intents),
+            "intents": list(memory_write_intents),
+            "memory_retrieval_set_after_commit": list(state.get("memory_retrieval_set") or []),
+        },
+    )
+
+
+def _snapshot_inputs(context: Any, control_plane: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "prompt": str(getattr(context, "user_input", "") or ""),
+        "trace_id": str(getattr(context, "trace_id", "") or ""),
+        "session_id": str(control_plane.get("session_id") or ""),
+    }
+
+
+def _snapshot_memory_snapshot(
+    *,
+    state: dict[str, Any],
+    memory_snapshot_used: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        **memory_snapshot_used,
+        "retrieval_set": list(state.get("memory_retrieval_set") or []),
+    }
+
+
 def _build_execution_snapshot(
     *,
     context: Any,
@@ -871,44 +1130,25 @@ def _build_execution_snapshot(
         (result[0] if isinstance(result, tuple) else result) or "",
     )
 
-    outputs_per_step = [
-        {
-            "seq": int(step.get("seq") or 0),
-            "operation": str(step.get("operation") or ""),
-            "input": _step_input_payload(step),
-            "output": _step_output_payload(step),
-            "payload_hash": _stable_sha256(dict(step.get("payload") or {})),
-        }
-        for step in steps
-    ]
-
-    model_inputs = [_step_input_payload(step) for step in steps if str(step.get("operation") or "") == "model_call"]
+    outputs_per_step = _snapshot_outputs_per_step(steps)
+    model_inputs = _snapshot_model_inputs(steps)
     memory_write_intents = list(
         state.get("memory_write_intents")
         or metadata.get("memory_write_intents")
         or [],
     )
-    memory_delta_summary = dict(
-        state.get("memory_delta_summary")
-        or metadata.get("memory_delta_summary")
-        or {
-            "version": "1.0",
-            "intent_count": len(memory_write_intents),
-            "intents": list(memory_write_intents),
-            "memory_retrieval_set_after_commit": list(state.get("memory_retrieval_set") or []),
-        },
+    memory_delta_summary = _snapshot_memory_delta_summary(
+        state=state,
+        metadata=metadata,
+        memory_write_intents=memory_write_intents,
     )
 
     snapshot = {
-        "inputs": {
-            "prompt": str(getattr(context, "user_input", "") or ""),
-            "trace_id": str(getattr(context, "trace_id", "") or ""),
-            "session_id": str(control_plane.get("session_id") or ""),
-        },
-        "memory_snapshot": {
-            **memory_snapshot_used,
-            "retrieval_set": list(state.get("memory_retrieval_set") or []),
-        },
+        "inputs": _snapshot_inputs(context, control_plane),
+        "memory_snapshot": _snapshot_memory_snapshot(
+            state=state,
+            memory_snapshot_used=memory_snapshot_used,
+        ),
         "model_inputs": {
             "parameters": dict(model_call_parameters),
             "calls": model_inputs,
@@ -922,15 +1162,9 @@ def _build_execution_snapshot(
     return snapshot
 
 
-def _build_execution_dag(
-    steps: list[dict[str, Any]],
-    *,
-    external_system_calls: dict[str, Any] | None = None,
-) -> dict[str, Any]:
+def _build_dag_nodes(steps: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[str]]:
     nodes: list[dict[str, Any]] = []
-    edges: list[dict[str, Any]] = []
     node_ids: list[str] = []
-
     for step in steps:
         seq = int(step.get("seq") or 0)
         operation = str(step.get("operation") or "")
@@ -944,16 +1178,14 @@ def _build_execution_dag(
                 "payload_hash": _stable_sha256(dict(step.get("payload") or {})),
             },
         )
+    return nodes, node_ids
 
-    for idx in range(1, len(node_ids)):
-        edges.append(
-            {
-                "from": node_ids[idx - 1],
-                "to": node_ids[idx],
-                "type": "sequence",
-            },
-        )
 
+def _build_iteration_edges(
+    steps: list[dict[str, Any]],
+    node_ids: list[str],
+) -> list[dict[str, Any]]:
+    edges: list[dict[str, Any]] = []
     iteration_starts: dict[int, str] = {}
     for step, node_id in zip(steps, node_ids):
         operation = str(step.get("operation") or "")
@@ -966,13 +1198,22 @@ def _build_execution_dag(
             continue
         source = iteration_starts.get(iteration)
         if source and source != node_id:
-            edges.append(
-                {
-                    "from": source,
-                    "to": node_id,
-                    "type": "iteration",
-                },
-            )
+            edges.append({"from": source, "to": node_id, "type": "iteration"})
+    return edges
+
+
+def _build_execution_dag(
+    steps: list[dict[str, Any]],
+    *,
+    external_system_calls: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    nodes, node_ids = _build_dag_nodes(steps)
+
+    edges: list[dict[str, Any]] = [
+        {"from": node_ids[idx - 1], "to": node_ids[idx], "type": "sequence"}
+        for idx in range(1, len(node_ids))
+    ]
+    edges.extend(_build_iteration_edges(steps, node_ids))
 
     graph = {
         "nodes": nodes,

@@ -16,28 +16,70 @@ def _stable_sha256(payload: Any) -> str:
     ).hexdigest()
 
 
-def _memory_entry_signature(item: dict[str, Any]) -> str:
-    normalized = dict(item or {})
-    memory_id = str(
+def _memory_entry_id(normalized: dict[str, Any]) -> str:
+    return str(
         normalized.get("memory_id")
         or normalized.get("id")
         or normalized.get("summary_key")
         or normalized.get("key")
         or "",
     ).strip()
+
+
+def _memory_entry_fallback_candidate(normalized: dict[str, Any]) -> dict[str, Any]:
+    candidate = {
+        "summary": str(normalized.get("summary") or normalized.get("title") or ""),
+        "content": str(normalized.get("content") or normalized.get("value") or ""),
+        "category": str(normalized.get("category") or normalized.get("type") or ""),
+        "source": str(normalized.get("source") or normalized.get("origin") or ""),
+        "tool": str(normalized.get("tool") or normalized.get("tool_name") or ""),
+    }
+    if not any(str(value or "").strip() for value in candidate.values()):
+        candidate["payload"] = dict(normalized)
+    return candidate
+
+
+def _memory_entry_signature(item: dict[str, Any]) -> str:
+    normalized = dict(item or {})
+    memory_id = _memory_entry_id(normalized)
     if memory_id:
         candidate = {"memory_id": memory_id}
     else:
-        candidate = {
-            "summary": str(normalized.get("summary") or normalized.get("title") or ""),
-            "content": str(normalized.get("content") or normalized.get("value") or ""),
-            "category": str(normalized.get("category") or normalized.get("type") or ""),
-            "source": str(normalized.get("source") or normalized.get("origin") or ""),
-            "tool": str(normalized.get("tool") or normalized.get("tool_name") or ""),
-        }
-        if not any(str(value or "").strip() for value in candidate.values()):
-            candidate["payload"] = dict(normalized)
+        candidate = _memory_entry_fallback_candidate(normalized)
     return _stable_sha256(candidate)
+
+
+def _merge_memory_candidate(
+    *,
+    item: dict[str, Any],
+    label: str,
+    source_index: int,
+    merged: list[dict[str, Any]],
+    index_by_signature: dict[str, int],
+    conflicts: list[dict[str, Any]],
+) -> None:
+    signature = _memory_entry_signature(item)
+    candidate = dict(item)
+    candidate["memory_merge_source"] = label
+    candidate["memory_merge_order"] = int(source_index)
+    if signature not in index_by_signature:
+        index_by_signature[signature] = len(merged)
+        merged.append(candidate)
+        return
+
+    existing_index = index_by_signature[signature]
+    existing = merged[existing_index]
+    if existing != candidate:
+        conflicts.append(
+            {
+                "signature": signature,
+                "kept_source": str(existing.get("memory_merge_source") or ""),
+                "replaced_by": label,
+                "kept_summary": str(existing.get("summary") or existing.get("content") or ""),
+                "new_summary": str(candidate.get("summary") or candidate.get("content") or ""),
+            },
+        )
+    merged[existing_index] = candidate
 
 
 def merge_memory_retrieval_sets(
@@ -62,28 +104,14 @@ def merge_memory_retrieval_sets(
         source_summary.append({"label": label, "count": len(normalized_source)})
 
         for item in normalized_source:
-            signature = _memory_entry_signature(item)
-            candidate = dict(item)
-            candidate["memory_merge_source"] = label
-            candidate["memory_merge_order"] = int(source_index)
-            if signature not in index_by_signature:
-                index_by_signature[signature] = len(merged)
-                merged.append(candidate)
-                continue
-
-            existing_index = index_by_signature[signature]
-            existing = merged[existing_index]
-            if existing != candidate:
-                conflicts.append(
-                    {
-                        "signature": signature,
-                        "kept_source": str(existing.get("memory_merge_source") or ""),
-                        "replaced_by": label,
-                        "kept_summary": str(existing.get("summary") or existing.get("content") or ""),
-                        "new_summary": str(candidate.get("summary") or candidate.get("content") or ""),
-                    },
-                )
-            merged[existing_index] = candidate
+            _merge_memory_candidate(
+                item=item,
+                label=label,
+                source_index=source_index,
+                merged=merged,
+                index_by_signature=index_by_signature,
+                conflicts=conflicts,
+            )
 
     reconciliation = {
         "reconciliation_id": _stable_sha256(

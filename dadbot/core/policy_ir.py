@@ -54,6 +54,65 @@ class PolicyCondition:
     condition_type: PolicyRuleCondition
     params: dict[str, Any] = field(default_factory=dict)
 
+    @staticmethod
+    def _match_tool_name(params: dict[str, Any], context: dict[str, Any]) -> bool:
+        names = params.get("names", [])
+        tool_result = context.get("tool_result")
+        return tool_result and tool_result.tool_name in names
+
+    @staticmethod
+    def _match_execution_status(params: dict[str, Any], context: dict[str, Any]) -> bool:
+        statuses = params.get("statuses", [])
+        tool_result = context.get("tool_result")
+        return tool_result and tool_result.status in statuses
+
+    @staticmethod
+    def _match_error_pattern(params: dict[str, Any], context: dict[str, Any]) -> bool:
+        import re
+
+        pattern = params.get("pattern", "")
+        tool_result = context.get("tool_result")
+        if not tool_result or not tool_result.error:
+            return False
+        return bool(re.search(pattern, tool_result.error, re.IGNORECASE))
+
+    @staticmethod
+    def _match_tool_determinism(params: dict[str, Any], context: dict[str, Any]) -> bool:
+        determinism = params.get("determinism")
+        tool_spec = context.get("tool_spec")
+        return tool_spec and tool_spec.determinism == determinism
+
+    @staticmethod
+    def _match_tool_side_effects(params: dict[str, Any], context: dict[str, Any]) -> bool:
+        side_effect = params.get("side_effect_class")
+        tool_spec = context.get("tool_spec")
+        return tool_spec and tool_spec.side_effect_class == side_effect
+
+    @staticmethod
+    def _match_output_size_threshold(
+        params: dict[str, Any],
+        context: dict[str, Any],
+    ) -> bool:
+        threshold = params.get("threshold_bytes", 1000000)
+        tool_result = context.get("tool_result")
+        if not tool_result or not tool_result.payload:
+            return False
+        try:
+            import json
+
+            size = len(json.dumps(tool_result.payload.content).encode("utf-8"))
+            return size > threshold
+        except Exception:
+            return False
+
+    @staticmethod
+    def _match_permission_required(params: dict[str, Any], context: dict[str, Any]) -> bool:
+        permission = params.get("permission", "")
+        caller = context.get("caller_identity")
+        user_context = context.get("user_context", {})
+        granted = user_context.get("permissions", [])
+        return permission and permission not in granted
+
     def matches(self, context: dict[str, Any]) -> bool:
         """Evaluate condition against context.
         
@@ -64,54 +123,19 @@ class PolicyCondition:
           - user_context: dict
         """
         if self.condition_type == PolicyRuleCondition.TOOL_NAME_MATCH:
-            names = self.params.get("names", [])
-            tool_result = context.get("tool_result")
-            return tool_result and tool_result.tool_name in names
-
+            return self._match_tool_name(self.params, context)
         elif self.condition_type == PolicyRuleCondition.EXECUTION_STATUS:
-            statuses = self.params.get("statuses", [])
-            tool_result = context.get("tool_result")
-            return tool_result and tool_result.status in statuses
-
+            return self._match_execution_status(self.params, context)
         elif self.condition_type == PolicyRuleCondition.ERROR_PATTERN:
-            import re
-
-            pattern = self.params.get("pattern", "")
-            tool_result = context.get("tool_result")
-            if not tool_result or not tool_result.error:
-                return False
-            return bool(re.search(pattern, tool_result.error, re.IGNORECASE))
-
+            return self._match_error_pattern(self.params, context)
         elif self.condition_type == PolicyRuleCondition.TOOL_DETERMINISM:
-            determinism = self.params.get("determinism")
-            tool_spec = context.get("tool_spec")
-            return tool_spec and tool_spec.determinism == determinism
-
+            return self._match_tool_determinism(self.params, context)
         elif self.condition_type == PolicyRuleCondition.TOOL_SIDE_EFFECTS:
-            side_effect = self.params.get("side_effect_class")
-            tool_spec = context.get("tool_spec")
-            return tool_spec and tool_spec.side_effect_class == side_effect
-
+            return self._match_tool_side_effects(self.params, context)
         elif self.condition_type == PolicyRuleCondition.OUTPUT_SIZE_THRESHOLD:
-            threshold = self.params.get("threshold_bytes", 1000000)
-            tool_result = context.get("tool_result")
-            if not tool_result or not tool_result.payload:
-                return False
-            try:
-                import json
-
-                size = len(json.dumps(tool_result.payload.content).encode("utf-8"))
-                return size > threshold
-            except Exception:
-                return False
-
+            return self._match_output_size_threshold(self.params, context)
         elif self.condition_type == PolicyRuleCondition.PERMISSION_REQUIRED:
-            permission = self.params.get("permission", "")
-            caller = context.get("caller_identity")
-            user_context = context.get("user_context", {})
-            granted = user_context.get("permissions", [])
-            return permission and permission not in granted
-
+            return self._match_permission_required(self.params, context)
         # Default: unrecognized condition always matches (fail-open)
         return True
 

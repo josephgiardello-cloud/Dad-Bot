@@ -106,17 +106,17 @@ class KernelReplaySequenceLock:
     """Strict replay-sequence hashing for deterministic equality checks."""
 
     @staticmethod
-    def canonical_event(event: dict[str, Any], *, trace_id: str) -> dict[str, Any]:
+    def canonical_event(event: dict[str, Any], *, trace_token: str) -> dict[str, Any]:
         item = dict(event or {})
         sequence = int(item.get("sequence") or item.get("sequence_id") or 0)
         event_type = str(item.get("event_type") or item.get("type") or "").strip()
         stage = str(item.get("stage") or "").strip()
-        expected_event_id = hashlib.sha256(f"{trace_id}:{sequence}".encode()).hexdigest()[:16]
+        expected_event_id = hashlib.sha256(f"{trace_token}:{sequence}".encode()).hexdigest()[:16]
         observed_event_id = str(item.get("event_id") or "").strip()
         if observed_event_id and observed_event_id != expected_event_id:
             raise RuntimeError(
                 "Replay strict equality violation: event_id mismatch "
-                f"trace_id={trace_id!r} sequence={sequence} expected={expected_event_id!r} "
+                f"trace_id={trace_token!r} sequence={sequence} expected={expected_event_id!r} "
                 f"actual={observed_event_id!r}",
             )
         return {
@@ -131,7 +131,14 @@ class KernelReplaySequenceLock:
         }
 
     @classmethod
-    def strict_hash(cls, *, trace_id: str, events: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
+    def strict_hash(
+        cls,
+        *,
+        trace_token: str = "",
+        events: list[dict[str, Any]],
+        **legacy_kwargs: Any,
+    ) -> tuple[str, list[dict[str, Any]]]:
+        resolved_trace_token = str(trace_token or legacy_kwargs.get("trace_id") or "")
         expected = 1
         canonical: list[dict[str, Any]] = []
         ordered_events = sorted(
@@ -139,7 +146,7 @@ class KernelReplaySequenceLock:
             key=lambda item: int((dict(item or {})).get("sequence") or (dict(item or {})).get("sequence_id") or 0),
         )
         for raw in ordered_events:
-            item = cls.canonical_event(raw, trace_id=str(trace_id or ""))
+            item = cls.canonical_event(raw, trace_token=resolved_trace_token)
             seq = int(item.get("sequence") or 0)
             if seq < expected:
                 continue

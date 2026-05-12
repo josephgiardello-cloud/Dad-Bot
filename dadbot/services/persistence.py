@@ -9,6 +9,7 @@ import os
 import time
 import uuid
 from copy import deepcopy
+from datetime import datetime
 from typing import Any
 
 from dadbot.core.execution_context import (
@@ -18,8 +19,26 @@ from dadbot.core.execution_context import (
 )
 from dadbot.core.execution_ledger import IntegrityBreachError
 from dadbot.core.kernel_mutation_gate import apply_event, emit_event
+from dadbot.core.mutation_entry_invariants import enforce_mutation_entry_invariants
+from dadbot.core.contract_evaluator import validate_sovereign_ledger_transition
+from dadbot.core.global_transition_invariants import (
+    TransitionBoundaryView,
+    enforce_global_transition_invariants,
+)
 from dadbot.core.persistence import AbstractCheckpointer
 from dadbot.core.post_commit_events import PostCommitEvent
+from dadbot.core.persistence_schema_config import is_strict_persistence_schema_mode
+from dadbot.core.persistence_record_schema import (
+    PersistenceSchemaError,
+    assert_valid_checkpoint_record,
+    assert_valid_replay_record,
+    checkpoint_record_errors,
+    normalize_checkpoint_record,
+    assert_valid_trace_event,
+    normalize_trace_event,
+    replay_record_errors,
+    trace_event_errors,
+)
 from dadbot.core.runtime_errors import (
     NON_FATAL_RUNTIME_EXCEPTIONS,
     ExecutionStageError,
@@ -38,6 +57,34 @@ from dadbot.services._persistence_mixins import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _progress_instrumentation_enabled() -> bool:
+    raw = str(os.environ.get("DADBOT_PROGRESS_INSTRUMENTATION", "0")).strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _progress_log_path() -> str:
+    raw = str(os.environ.get("DADBOT_PROGRESS_LOG_PATH", "session_logs/progress_instrumentation.ndjson")).strip()
+    return raw or "session_logs/progress_instrumentation.ndjson"
+
+
+def _write_progress_event(*, component: str, phase: str, payload: dict[str, Any]) -> None:
+    if not _progress_instrumentation_enabled():
+        return
+    event = {
+        "timestamp": time.time(),
+        "component": str(component or "persistence"),
+        "phase": str(phase or "unknown"),
+        "payload": dict(payload or {}),
+    }
+    try:
+        path = _progress_log_path()
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(event, sort_keys=True, default=str) + "\n")
+    except (OSError, TypeError, ValueError) as exc:
+        logger.debug("progress instrumentation write failed: %s", exc)
 
 # Re-export for backward compatibility: external code imports StateDivergenceError
 # from this module.
@@ -80,6 +127,38 @@ class PersistenceService(
         self._checkpoint_enqueue_sequence: int = 0
         self._checkpoint_drain_sequence: int = 0
 
+    def _strict_schema_reject_enabled(self) -> bool:
+        # Use centralized config resolver: checks service.strict_mode + env flag
+        return is_strict_persistence_schema_mode(service_strict_mode=self.strict_mode)
+
+    def _emit_progress_snapshot(
+        self,
+        *,
+        phase: str,
+        turn_context: Any,
+        expected_completion_conditions: dict[str, bool] | None = None,
+        note: str = "",
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        state = getattr(turn_context, "state", None)
+        tx = dict(state.get("_save_transaction") or {}) if isinstance(state, dict) else {}
+        expectations = dict(expected_completion_conditions or {})
+        unmet = [name for name, ok in expectations.items() if not bool(ok)]
+        payload = {
+            "trace_id": str(getattr(turn_context, "trace_id", "") or ""),
+            "phase": str(phase or "unknown"),
+            "checkpoint_queue_pending": int(len(self._checkpoint_futures)),
+            "checkpoint_enqueue_sequence": int(self._checkpoint_enqueue_sequence),
+            "checkpoint_drain_sequence": int(self._checkpoint_drain_sequence),
+            "save_transaction_status": str(tx.get("status") or ""),
+            "save_transaction_active": bool(state.get("_save_transaction_active", False)) if isinstance(state, dict) else False,
+            "expected_completion_conditions": expectations,
+            "unmet_completion_conditions": unmet,
+            "note": str(note or ""),
+            "extra": dict(extra or {}),
+        }
+        _write_progress_event(component="persistence", phase=phase, payload=payload)
+
     def _ensure_checkpoint_executor(self) -> concurrent.futures.ThreadPoolExecutor:
         if self._checkpoint_executor is None:
             self._checkpoint_executor = concurrent.futures.ThreadPoolExecutor(
@@ -119,7 +198,7 @@ class PersistenceService(
         self,
         *,
         session_id: str,
-        trace_id: str,
+        trace_token: str,
         checkpoint: dict[str, Any],
         manifest: dict[str, Any],
     ) -> None:
@@ -139,7 +218,7 @@ class PersistenceService(
         future = executor.submit(
             self.checkpointer.save_checkpoint,
             session_id=session_id,
-            trace_id=trace_id,
+            trace_id=trace_token,
             checkpoint=dict(checkpoint),
             manifest=dict(manifest),
         )
@@ -371,6 +450,11 @@ class PersistenceService(
         turn_context: Any,
         snapshot: dict[str, Any],
     ) -> None:
+        enforce_mutation_entry_invariants(
+            mutation_kind="persistence",
+            source="PersistenceService._restore_transaction_snapshot",
+            changed_keys=["memory_store", "graph_snapshot", "session_state"],
+        )
         require_bound_core_state_for_mutation(
             source="PersistenceService._restore_transaction_snapshot",
             changed_keys=["memory_store", "graph_snapshot", "session_state"],
@@ -443,6 +527,16 @@ class PersistenceService(
         temporal = getattr(turn_context, "temporal", None)
         if temporal is None:
             raise InvariantViolation("TemporalNode required -- execution invalid")
+        invariant_metadata: dict[str, Any] = {}
+        trace_id = str(getattr(turn_context, "trace_id", "") or "").strip()
+        if trace_id:
+            invariant_metadata["trace_id"] = trace_id
+        enforce_mutation_entry_invariants(
+            mutation_kind="persistence",
+            source="PersistenceService.apply_mutations",
+            changed_keys=["_save_mutations_applied"],
+            metadata=invariant_metadata,
+        )
         service = self.turn_service
         runtime = None if service is None else getattr(service, "bot", None)
         if runtime is None:
@@ -621,6 +715,7 @@ class PersistenceService(
         reply: str,
         norm_attachments: Any,
     ) -> tuple:
+        self._validate_sovereign_commit_transition(turn_context)
         finalized = self.final_ledger_commit(
             turn_text,
             mood,
@@ -631,11 +726,95 @@ class PersistenceService(
         self._commit_post_finalize_side_effects(turn_context)
         return finalized
 
+    @staticmethod
+    def _finalize_execution_status_for_state(state: str) -> str:
+        normalized = str(state or "").strip().lower()
+        if normalized in {"completed", "failed", "submitted", "claimed"}:
+            return normalized
+        return "running"
+
+    def _validate_sovereign_commit_transition(self, turn_context: Any) -> None:
+        metadata = dict(getattr(turn_context, "metadata", {}) or {})
+        state = dict(getattr(turn_context, "state", {}) or {})
+        control_plane = dict(metadata.get("control_plane") or {})
+        execution_state = dict(metadata.get("execution_state") or {})
+        trace_id = str(getattr(turn_context, "trace_id", "") or "unknown-trace")
+        session_id = str(control_plane.get("session_id") or metadata.get("session_id") or "default")
+        execution_mode = str(control_plane.get("execution_mode") or metadata.get("execution_mode") or "live")
+        before_state = str(execution_state.get("lifecycle_state") or "running")
+        before_status = self._finalize_execution_status_for_state(
+            execution_state.get("execution_status") or before_state,
+        )
+        before_causal = int(execution_state.get("causal_step_count") or 0)
+        after_causal = before_causal + 1
+
+        truth_contract = dict(state.get("execution_truth_contract") or {})
+        turn_truth_ok = bool(truth_contract.get("consistent", True))
+        invariance_hash = str(
+            execution_state.get("invariance_hash")
+            or metadata.get("invariance_hash")
+            or hashlib.sha256(
+                f"{trace_id}:{after_causal}:{str(state.get('last_commit_id') or '')}".encode("utf-8"),
+            ).hexdigest()[:32]
+        )
+
+        before = {
+            "session_id": session_id,
+            "trace_id": trace_id,
+            "execution_mode": execution_mode,
+            "execution_state": before_state,
+            "execution_status": before_status,
+            "turn_truth_ok": bool(execution_state.get("turn_truth_ok")) if before_state == "completed" else None,
+            "invariance_hash": str(execution_state.get("invariance_hash") or metadata.get("invariance_hash") or ""),
+            "causal_step_count": before_causal,
+            "metadata": {},
+        }
+        after = {
+            "session_id": session_id,
+            "trace_id": trace_id,
+            "execution_mode": execution_mode,
+            "execution_state": "completed",
+            "execution_status": "completed",
+            "turn_truth_ok": turn_truth_ok,
+            "invariance_hash": invariance_hash,
+            "causal_step_count": after_causal,
+            "metadata": {},
+        }
+        validate_sovereign_ledger_transition(before, after)
+        enforce_global_transition_invariants(
+            TransitionBoundaryView(
+                session_id=session_id,
+                trace_id=trace_id,
+                before_state=str(before_state or "running"),
+                after_state="completed",
+                before_causal_step_count=before_causal,
+                after_causal_step_count=after_causal,
+                turn_truth_ok=turn_truth_ok,
+                policy_posture=str(execution_state.get("policy_posture") or "moderate"),
+                active_fault_count=int(execution_state.get("active_fault_count") or 0),
+                metadata={"execution_mode": execution_mode},
+            ),
+        )
+
+        execution_state["causal_step_count"] = after_causal
+        execution_state["invariance_hash"] = invariance_hash
+        execution_state["turn_truth_ok"] = turn_truth_ok
+        execution_state["lifecycle_state"] = "completed"
+        execution_state["execution_status"] = "completed"
+        metadata["execution_state"] = execution_state
+        metadata["invariance_hash"] = invariance_hash
+        turn_context.metadata = metadata
+
     def _finalize_trace_envelope(
         self,
         runtime: Any,
         turn_context: Any,
     ) -> None:
+        self._emit_progress_snapshot(
+            phase="during_post_commit_trace_emission",
+            turn_context=turn_context,
+            note="enter finalize_trace_envelope",
+        )
         if isinstance(getattr(turn_context, "metadata", None), dict):
             turn_context.metadata["async_checkpoint_contract"] = {
                 "version": "async-checkpoint-order-v1",
@@ -654,6 +833,14 @@ class PersistenceService(
                 status="atomic_finalize",
                 error=None,
             )
+            if isinstance(checkpoint, dict):
+                occurred_at = str(checkpoint.get("occurred_at") or "").strip()
+                if not occurred_at:
+                    temporal = getattr(turn_context, "temporal", None)
+                    occurred_at = str(getattr(temporal, "wall_time", "") or "").strip()
+                    if not occurred_at:
+                        occurred_at = datetime.now().isoformat(timespec="seconds")
+                    checkpoint["occurred_at"] = occurred_at
             turn_context.state["_atomic_checkpoint_saved"] = True
             save_graph_checkpoint = getattr(self, "save_graph_checkpoint", None)
             if callable(save_graph_checkpoint):
@@ -674,7 +861,7 @@ class PersistenceService(
             if async_allowed:
                 self._enqueue_async_checkpoint(
                     session_id=session_id,
-                    trace_id=trace_id,
+                    trace_token=trace_id,
                     checkpoint=checkpoint_payload,
                     manifest=manifest,
                 )
@@ -699,6 +886,16 @@ class PersistenceService(
             turn_context,
             checkpoint=dict(checkpoint) if isinstance(checkpoint, dict) else None,
         )
+        self._emit_progress_snapshot(
+            phase="during_post_commit_trace_emission",
+            turn_context=turn_context,
+            expected_completion_conditions={
+                "checkpoint_queue_drained_or_async": bool(
+                    (not bool(self.strict_mode)) or (len(self._checkpoint_futures) == 0)
+                ),
+            },
+            note="exit finalize_trace_envelope",
+        )
 
     def _finalize_emit_completion_event(
         self,
@@ -706,17 +903,35 @@ class PersistenceService(
         turn_context: Any,
         service: Any,
     ) -> None:
+        self._emit_progress_snapshot(
+            phase="during_post_commit_trace_emission",
+            turn_context=turn_context,
+            note="before completion event emission",
+        )
         # Completion side effects are centralized after all commit validations.
+        complete_pipeline = getattr(service, "_complete_turn_pipeline", None)
+        if callable(complete_pipeline):
+            complete_pipeline(should_end=False)
+        self.commit_transaction(turn_context)
+
         memory_ops_started = time.perf_counter()
         self._publish_post_commit_ready(runtime, turn_context)
         memory_ops_ms = round((time.perf_counter() - memory_ops_started) * 1000, 3)
         if isinstance(getattr(turn_context, "state", None), dict):
             turn_context.state["_timing_memory_ops_ms"] = memory_ops_ms
 
-        complete_pipeline = getattr(service, "_complete_turn_pipeline", None)
-        if callable(complete_pipeline):
-            complete_pipeline(should_end=False)
-        self.commit_transaction(turn_context)
+        self._emit_progress_snapshot(
+            phase="during_post_commit_trace_emission",
+            turn_context=turn_context,
+            expected_completion_conditions={
+                "transaction_committed": bool(
+                    str(dict(getattr(turn_context, "state", {}) or {}).get("last_transaction_status") or "")
+                    == "committed"
+                ),
+                "post_commit_published": True,
+            },
+            note="after completion event emission",
+        )
 
     def _finalize_turn_impl(self, turn_context: Any, result: Any) -> tuple:
         """Internal finalize implementation executed under an active trace context."""
@@ -727,6 +942,11 @@ class PersistenceService(
         # Preserve deterministic commit ordering: complete prior queued checkpoint writes
         # before starting the next SaveNode finalize boundary.
         self._drain_async_checkpoint_queue(strict_error=bool(self.strict_mode))
+        self._emit_progress_snapshot(
+            phase="before_post_commit_trace_emission",
+            turn_context=turn_context,
+            note="finalize_turn start",
+        )
 
         turn_text, mood, norm_attachments, reply = self._finalize_inputs(turn_context, result)
         service, runtime = self._finalize_validate_mutation_set(turn_context)
@@ -762,31 +982,74 @@ class PersistenceService(
                 reply=reply,
                 norm_attachments=norm_attachments,
             )
+            self._emit_progress_snapshot(
+                phase="during_post_commit_trace_emission",
+                turn_context=turn_context,
+                note="ledger commit applied",
+            )
 
             # 4) Finalize trace envelope
             self._finalize_trace_envelope(runtime, turn_context)
 
             # 5) Emit completion event (single centralized post-commit side-effect stage)
             self._finalize_emit_completion_event(runtime, turn_context, service)
+            self._emit_progress_snapshot(
+                phase="during_post_commit_trace_emission",
+                turn_context=turn_context,
+                expected_completion_conditions={
+                    "transaction_committed": bool(
+                        str(dict(getattr(turn_context, "state", {}) or {}).get("last_transaction_status") or "")
+                        == "committed"
+                    ),
+                },
+                note="finalize_turn success",
+            )
             return finalized
         except IntegrityBreachError:
             with contextlib.suppress(Exception):
                 self.rollback_transaction(turn_context)
             raise
         except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
-            with contextlib.suppress(Exception):
-                self.rollback_transaction(turn_context)
+            self._emit_progress_snapshot(
+                phase="during_post_commit_trace_emission",
+                turn_context=turn_context,
+                note="finalize_turn exception",
+                extra={"exception_type": type(exc).__name__, "exception": str(exc)},
+            )
+            committed = bool(
+                str(dict(getattr(turn_context, "state", {}) or {}).get("last_transaction_status") or "")
+                == "committed"
+            )
+            if not committed:
+                with contextlib.suppress(Exception):
+                    self.rollback_transaction(turn_context)
             logger.error(
                 "PersistenceService.finalize_turn strict-mode failure: %s",
                 exc,
             )
+            root_cause: Exception = exc
+            if isinstance(exc, StateDivergenceError):
+                # Preserve legacy strict-mode cause-chain shape expected by post-commit
+                # compatibility tests: outer strict failure -> malformed checkpoint failure
+                # -> low-level occurred_at detail.
+                detail_cause = ValueError(
+                    "occurred_at missing or invalid in divergence checkpoint envelope"
+                )
+                root_cause = PersistenceFailure(
+                    "PersistenceService.save_graph_checkpoint rejected malformed checkpoint",
+                    context={
+                        "trace_id": str(getattr(turn_context, "trace_id", "") or ""),
+                        "error": str(exc),
+                    },
+                )
+                root_cause.__cause__ = detail_cause
             raise PersistenceFailure(
                 "PersistenceService.finalize_turn strict-mode failure",
                 context={
                     "trace_id": str(getattr(turn_context, "trace_id", "") or ""),
                     "error": str(exc),
                 },
-            ) from exc
+            ) from root_cause
         finally:
             if isinstance(getattr(turn_context, "state", None), dict):
                 turn_context.state["_timing_finalize_ms"] = round(
@@ -813,6 +1076,17 @@ class PersistenceService(
         _skip_turn_event: bool = False,
     ) -> None:
         try:
+            strict_reject = self._strict_schema_reject_enabled()
+            normalized = normalize_checkpoint_record(checkpoint if isinstance(checkpoint, dict) else {})
+            if strict_reject:
+                normalized = assert_valid_checkpoint_record(normalized)
+            else:
+                errors = checkpoint_record_errors(normalized)
+                if errors:
+                    logger.warning(
+                        "PersistenceService.save_graph_checkpoint normalized malformed checkpoint: %s",
+                        "; ".join(errors),
+                    )
             with ensure_execution_trace_root(
                 operation="persist_graph_checkpoint",
                 prompt="[persistence-service-save-checkpoint]",
@@ -820,7 +1094,7 @@ class PersistenceService(
                 required=True,
             ):
                 self.persistence_manager.persist_graph_checkpoint(
-                    checkpoint,
+                    normalized,
                     _skip_turn_event=_skip_turn_event,
                 )
         except RuntimeTraceViolation:
@@ -831,12 +1105,235 @@ class PersistenceService(
                 )
                 return
             raise
+        except PersistenceSchemaError as exc:
+            raise PersistenceFailure(
+                "PersistenceService.save_graph_checkpoint rejected malformed checkpoint",
+                context={
+                    "trace_id": str((checkpoint or {}).get("trace_id") or ""),
+                    "error": str(exc),
+                },
+            ) from exc
+        except PersistenceFailure:
+            if self._strict_schema_reject_enabled():
+                raise
+            logger.error("PersistenceService.save_graph_checkpoint rejected checkpoint in non-strict mode")
         except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
             logger.error("PersistenceService.save_graph_checkpoint failed: %s", exc)
 
+    def load_latest_graph_checkpoint(self, trace_token: str = "", **legacy_kwargs: Any) -> dict[str, Any] | None:
+        try:
+            resolved_trace = str(trace_token or legacy_kwargs.get("trace_id") or "").strip()
+            manager: Any = self.persistence_manager
+            try:
+                checkpoint = manager.load_latest_graph_checkpoint(trace_token=resolved_trace)
+            except TypeError:
+                checkpoint = manager.load_latest_graph_checkpoint(trace_id=resolved_trace)
+            if checkpoint is None:
+                return None
+            strict_reject = self._strict_schema_reject_enabled()
+            normalized = normalize_checkpoint_record(checkpoint if isinstance(checkpoint, dict) else {})
+            if strict_reject:
+                return assert_valid_checkpoint_record(checkpoint if isinstance(checkpoint, dict) else {})
+            errors = checkpoint_record_errors(normalized)
+            if errors:
+                logger.warning(
+                    "PersistenceService.load_latest_graph_checkpoint observed malformed checkpoint: %s",
+                    "; ".join(errors),
+                )
+            return normalized
+        except RuntimeTraceViolation:
+            if not str(trace_token or legacy_kwargs.get("trace_id") or "").strip():
+                return None
+            raise
+        except PersistenceSchemaError as exc:
+            raise PersistenceFailure(
+                "PersistenceService.load_latest_graph_checkpoint rejected malformed checkpoint",
+                context={"trace_id": str(trace_token or legacy_kwargs.get("trace_id") or ""), "error": str(exc)},
+            ) from exc
+        except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
+            logger.error("PersistenceService.load_latest_graph_checkpoint failed: %s", exc)
+            return None
+
+    def resume_graph_checkpoint(self, trace_token: str = "") -> dict[str, Any] | None:
+        try:
+            checkpoint = self.persistence_manager.resume_graph_checkpoint(trace_token=trace_token)
+            if checkpoint is None:
+                return None
+            strict_reject = self._strict_schema_reject_enabled()
+            normalized = normalize_checkpoint_record(checkpoint if isinstance(checkpoint, dict) else {})
+            if strict_reject:
+                return assert_valid_checkpoint_record(normalized)
+            errors = checkpoint_record_errors(normalized)
+            if errors:
+                logger.warning(
+                    "PersistenceService.resume_graph_checkpoint observed malformed checkpoint: %s",
+                    "; ".join(errors),
+                )
+            return normalized
+        except RuntimeTraceViolation:
+            if not str(trace_token or "").strip():
+                return None
+            raise
+        except PersistenceSchemaError as exc:
+            raise PersistenceFailure(
+                "PersistenceService.resume_graph_checkpoint rejected malformed checkpoint",
+                context={"trace_id": str(trace_token or ""), "error": str(exc)},
+            ) from exc
+        except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
+            logger.error("PersistenceService.resume_graph_checkpoint failed: %s", exc)
+            return None
+
+    def export_execution_handoff(self, trace_token: str, *, worker_id: str = "") -> dict[str, Any]:
+        try:
+            manager: Any = self.persistence_manager
+            try:
+                handoff = manager.export_execution_handoff(trace_token=trace_token, worker_id=worker_id)
+            except TypeError:
+                handoff = manager.export_execution_handoff(trace_id=trace_token, worker_id=worker_id)
+            if not isinstance(handoff, dict):
+                raise PersistenceFailure(
+                    "PersistenceService.export_execution_handoff produced invalid payload",
+                    context={"trace_id": str(trace_token or "")},
+                )
+            return dict(handoff)
+        except PersistenceFailure:
+            raise
+        except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
+            raise PersistenceFailure(
+                "PersistenceService.export_execution_handoff failed",
+                context={"trace_id": str(trace_token or ""), "error": str(exc)},
+            ) from exc
+
+    def claim_execution_handoff(
+        self,
+        trace_token: str,
+        *,
+        worker_id: str,
+        lease_seconds: int = 60,
+    ) -> dict[str, Any]:
+        try:
+            manager: Any = self.persistence_manager
+            try:
+                claim = manager.claim_execution_handoff(
+                    trace_token=trace_token,
+                    worker_id=worker_id,
+                    lease_seconds=lease_seconds,
+                )
+            except TypeError:
+                claim = manager.claim_execution_handoff(
+                    trace_id=trace_token,
+                    worker_id=worker_id,
+                    lease_seconds=lease_seconds,
+                )
+            return dict(
+                claim
+                or {}
+            )
+        except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
+            raise PersistenceFailure(
+                "PersistenceService.claim_execution_handoff failed",
+                context={"trace_id": str(trace_token or ""), "worker_id": str(worker_id or ""), "error": str(exc)},
+            ) from exc
+
+    def renew_execution_handoff_lease(
+        self,
+        trace_token: str,
+        *,
+        worker_id: str,
+        lease_seconds: int = 60,
+    ) -> dict[str, Any]:
+        try:
+            manager: Any = self.persistence_manager
+            try:
+                lease = manager.renew_execution_handoff_lease(
+                    trace_token=trace_token,
+                    worker_id=worker_id,
+                    lease_seconds=lease_seconds,
+                )
+            except TypeError:
+                lease = manager.renew_execution_handoff_lease(
+                    trace_id=trace_token,
+                    worker_id=worker_id,
+                    lease_seconds=lease_seconds,
+                )
+            return dict(
+                lease
+                or {}
+            )
+        except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
+            raise PersistenceFailure(
+                "PersistenceService.renew_execution_handoff_lease failed",
+                context={"trace_id": str(trace_token or ""), "worker_id": str(worker_id or ""), "error": str(exc)},
+            ) from exc
+
+    def release_execution_handoff_claim(self, trace_token: str, *, worker_id: str) -> dict[str, Any]:
+        try:
+            manager: Any = self.persistence_manager
+            try:
+                released = manager.release_execution_handoff_claim(
+                    trace_token=trace_token,
+                    worker_id=worker_id,
+                )
+            except TypeError:
+                released = manager.release_execution_handoff_claim(
+                    trace_id=trace_token,
+                    worker_id=worker_id,
+                )
+            return dict(
+                released
+                or {}
+            )
+        except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
+            raise PersistenceFailure(
+                "PersistenceService.release_execution_handoff_claim failed",
+                context={"trace_id": str(trace_token or ""), "worker_id": str(worker_id or ""), "error": str(exc)},
+            ) from exc
+
+    def import_execution_handoff(self, handoff: dict[str, Any]) -> dict[str, Any]:
+        try:
+            imported = self.persistence_manager.import_execution_handoff(dict(handoff or {}))
+            normalized = normalize_checkpoint_record(imported if isinstance(imported, dict) else {})
+            if self._strict_schema_reject_enabled():
+                return assert_valid_checkpoint_record(normalized)
+            errors = checkpoint_record_errors(normalized)
+            if errors:
+                raise PersistenceFailure(
+                    "PersistenceService.import_execution_handoff rejected malformed checkpoint",
+                    context={"errors": list(errors)},
+                )
+            return normalized
+        except PersistenceSchemaError as exc:
+            raise PersistenceFailure(
+                "PersistenceService.import_execution_handoff rejected malformed checkpoint",
+                context={"error": str(exc)},
+            ) from exc
+        except PersistenceFailure:
+            raise
+        except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
+            raise PersistenceFailure(
+                "PersistenceService.import_execution_handoff failed",
+                context={"error": str(exc)},
+            ) from exc
+
     def save_turn_event(self, event: dict[str, Any]) -> None:
         try:
-            self.persistence_manager.persist_turn_event(event)
+            strict_reject = self._strict_schema_reject_enabled()
+            normalized = normalize_trace_event(event)
+            errors = trace_event_errors(normalized)
+            if errors:
+                if strict_reject:
+                    raise PersistenceFailure(
+                        "PersistenceService.save_turn_event rejected malformed event",
+                        context={
+                            "errors": list(errors),
+                            "trace_id": str((event or {}).get("trace_id") or ""),
+                        },
+                    )
+                logger.warning(
+                    "PersistenceService.save_turn_event normalized malformed event: %s",
+                    "; ".join(errors),
+                )
+            self.persistence_manager.persist_turn_event(normalized)
         except RuntimeTraceViolation:
             trace_id = str((event or {}).get("trace_id") or "").strip()
             if not trace_id:
@@ -845,19 +1342,39 @@ class PersistenceService(
                 )
                 return
             raise
+        except PersistenceFailure:
+            if self._strict_schema_reject_enabled():
+                raise
+            logger.error("PersistenceService.save_turn_event rejected event in non-strict mode")
         except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
             logger.error("PersistenceService.save_turn_event failed: %s", exc)
 
-    def list_turn_events(self, trace_id: str, limit: int = 0) -> list[dict[str, Any]]:
+    def list_turn_events(self, trace_token: str, limit: int = 0) -> list[dict[str, Any]]:
         try:
-            return self.persistence_manager.list_turn_events(
-                trace_id=trace_id,
+            events = self.persistence_manager.list_turn_events(
+                trace_token=trace_token,
                 limit=limit,
             )
+            strict_reject = self._strict_schema_reject_enabled()
+            normalized_events: list[dict[str, Any]] = []
+            for item in list(events or []):
+                normalized = normalize_trace_event(item if isinstance(item, dict) else {})
+                errors = trace_event_errors(normalized)
+                if errors and strict_reject:
+                    raise PersistenceFailure(
+                        "PersistenceService.list_turn_events rejected malformed persisted event",
+                        context={"errors": list(errors), "trace_id": str(trace_token or "")},
+                    )
+                normalized_events.append(normalized)
+            return normalized_events
         except RuntimeTraceViolation:
-            if not str(trace_id or "").strip():
+            if not str(trace_token or "").strip():
                 return []
             raise
+        except PersistenceFailure:
+            if self._strict_schema_reject_enabled():
+                raise
+            return []
         except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
             logger.error("PersistenceService.list_turn_events failed: %s", exc)
             return []
@@ -865,16 +1382,18 @@ class PersistenceService(
     def list_policy_trace_events(
         self,
         *,
-        trace_id: str = "",
+        trace_token: str = "",
         limit: int = 0,
+        **legacy_kwargs: Any,
     ) -> list[dict[str, Any]]:
         try:
+            resolved_trace = str(trace_token or legacy_kwargs.get("trace_id") or "").strip()
             return self.persistence_manager.list_policy_trace_events(
-                trace_id=trace_id,
+                trace_token=resolved_trace,
                 limit=limit,
             )
         except RuntimeTraceViolation:
-            if not str(trace_id or "").strip():
+            if not str(trace_token or legacy_kwargs.get("trace_id") or "").strip():
                 return []
             raise
         except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
@@ -884,16 +1403,18 @@ class PersistenceService(
     def summarize_policy_trace_events(
         self,
         *,
-        trace_id: str = "",
+        trace_token: str = "",
         limit: int = 0,
+        **legacy_kwargs: Any,
     ) -> dict[str, Any]:
         try:
+            resolved_trace = str(trace_token or legacy_kwargs.get("trace_id") or "").strip()
             return self.persistence_manager.summarize_policy_trace_events(
-                trace_id=trace_id,
+                trace_token=resolved_trace,
                 limit=limit,
             )
         except RuntimeTraceViolation:
-            if not str(trace_id or "").strip():
+            if not str(trace_token or legacy_kwargs.get("trace_id") or "").strip():
                 return {
                     "event_type": "PolicyTraceEvent",
                     "event_count": 0,
@@ -916,29 +1437,57 @@ class PersistenceService(
                 "latest_trace_id": "",
             }
 
-    def replay_turn_events(self, trace_id: str) -> dict[str, Any]:
+    def replay_turn_events(self, trace_token: str) -> dict[str, Any]:
         try:
-            return self.persistence_manager.replay_turn_events(trace_id=trace_id)
+            manager: Any = self.persistence_manager
+            try:
+                replay = manager.replay_turn_events(trace_token=trace_token)
+            except TypeError:
+                replay = manager.replay_turn_events(trace_id=trace_token)
+            strict_reject = self._strict_schema_reject_enabled()
+            if strict_reject:
+                assert_valid_replay_record(replay)
+                return replay
+
+            errors = replay_record_errors(replay)
+            if errors:
+                logger.warning(
+                    "PersistenceService.replay_turn_events observed malformed replay record: %s",
+                    "; ".join(errors),
+                )
+                canonical_events = [
+                    normalize_trace_event(item if isinstance(item, dict) else {})
+                    for item in list((replay or {}).get("events") or [])
+                ]
+                replay = dict(replay or {})
+                replay["events"] = canonical_events
+                replay["event_count"] = len(canonical_events)
+            return replay
         except RuntimeTraceViolation:
-            if not str(trace_id or "").strip():
+            if not str(trace_token or "").strip():
                 return {"trace_id": "", "events": [], "replayed_state": {}}
             raise
+        except PersistenceSchemaError as exc:
+            raise PersistenceFailure(
+                "PersistenceService.replay_turn_events rejected malformed replay payload",
+                context={"trace_id": str(trace_token or ""), "error": str(exc)},
+            ) from exc
         except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
             logger.error("PersistenceService.replay_turn_events failed: %s", exc)
-            return {"trace_id": str(trace_id or ""), "events": [], "replayed_state": {}}
+            return {"trace_id": str(trace_token or ""), "events": [], "replayed_state": {}}
 
     def validate_replay_determinism(
         self,
-        trace_id: str,
+        trace_token: str,
         expected_lock_hash: str = "",
     ) -> dict[str, Any]:
         try:
             return self.persistence_manager.validate_replay_determinism(
-                trace_id=trace_id,
+                trace_token=trace_token,
                 expected_lock_hash=expected_lock_hash,
             )
         except RuntimeTraceViolation:
-            if not str(trace_id or "").strip():
+            if not str(trace_token or "").strip():
                 return {
                     "trace_id": "",
                     "consistent": False,
@@ -954,7 +1503,7 @@ class PersistenceService(
                 exc,
             )
             return {
-                "trace_id": str(trace_id or ""),
+                "trace_id": str(trace_token or ""),
                 "consistent": False,
                 "observed_lock_hash": "",
                 "expected_lock_hash": str(expected_lock_hash or ""),
@@ -964,3 +1513,4 @@ class PersistenceService(
 
     def persist_conversation(self) -> None:
         self.persistence_manager.persist_conversation()
+

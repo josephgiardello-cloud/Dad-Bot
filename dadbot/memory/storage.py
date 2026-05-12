@@ -29,6 +29,7 @@ from dadbot.core.execution_context import (
     require_bound_core_state_for_mutation,
 )
 from dadbot.core.kernel_locks import KernelEventTotalityLock
+from dadbot.core.mutation_entry_invariants import enforce_mutation_entry_invariants
 from dadbot.core.core_state import CoreState, InputEvent, memory_projection, transition
 from dadbot.core.state_lineage import canonical_state_hash
 from dadbot.memory.migration import MemoryMigrationRegistry
@@ -353,6 +354,11 @@ class MemoryStorageBackend:
                 },
                 required=True,
             )
+            enforce_mutation_entry_invariants(
+                mutation_kind="memory_store",
+                source="MemoryStorageBackend.mutate_memory_store",
+                changed_keys=sorted(str(key) for key in (changes or {}).keys()),
+            )
             require_bound_core_state_for_mutation(
                 source="MemoryStorageBackend.mutate_memory_store",
                 changed_keys=sorted(str(key) for key in (changes or {}).keys()),
@@ -376,7 +382,15 @@ class MemoryStorageBackend:
         save: bool,
     ) -> dict:
         """Shared mutation + commit + projection routing logic (lock-agnostic)."""
-        before_store = deepcopy(dict(self._manager.memory_projection() or {}))
+        before_state = self._resolve_transition_base_state()
+        before_store = self._manager.normalize_memory_store(
+            deepcopy(
+                memory_projection(
+                    before_state,
+                    defaults=self.bot.default_memory_store(),
+                )
+            )
+        )
         before_hash = canonical_state_hash(before_store)
         candidate_store = deepcopy(before_store)
         if mutator is not None:
@@ -548,6 +562,11 @@ class MemoryStorageBackend:
 
     def clear_memory_projection(self):
         """Reset memory by canonical event and persist resulting projection."""
+        enforce_mutation_entry_invariants(
+            mutation_kind="memory_store",
+            source="MemoryStorageBackend.clear_memory_projection",
+            changed_keys=["*"],
+        )
         require_bound_core_state_for_mutation(
             source="MemoryStorageBackend.clear_memory_projection",
             changed_keys=["*"],

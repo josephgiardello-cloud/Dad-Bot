@@ -7,6 +7,7 @@ Usage:
   python _ci_gate_check.py --group-gate  <group_number>    # full hard-gate evaluation
   python _ci_gate_check.py --cycle-check                   # import cycle delta only
     python _ci_gate_check.py --contract-gate                # contract-to-test compiler gate only
+    python _ci_gate_check.py --readiness-gate                # strict readiness: run_all + architecture_gate
   python _ci_gate_check.py --no-parallel-groups            # parallel branch check only
 
 Exit codes:
@@ -34,6 +35,9 @@ BACKLOG = ROOT / "refactor_backlog.yaml"
 BASELINE_CYCLE_FILE = ROOT / "_baseline_cycles.txt"
 CONTRACT_COMPILER = ROOT / "tools" / "contract_test_compiler.py"
 CORESTATE_MUTATION_GUARD_CHECK = ROOT / "ci" / "corestate_mutation_guard_check.py"
+ADVERSARIAL_CLOSURE_GATE = ROOT / "ci" / "adversarial_closure_gate.py"
+DISTRIBUTION_READINESS_RUNNER = ROOT / "tests" / "distribution_readiness" / "run_all.py"
+ARCHITECTURE_GATE = ROOT / "tools" / "architecture_gate.py"
 
 # Group-prefix patterns for refactor branches (e.g. refactor/group-02-*)
 GROUP_BRANCH_PATTERN = re.compile(r"refactor/group-(\d+)-")
@@ -394,6 +398,42 @@ def check_corestate_mutation_guard(*, enforce: bool = False) -> bool:
     return True
 
 
+def check_adversarial_closure_gate() -> bool:
+    """Run deterministic adversarial-closure safety classification and hard-fail on unsafe states."""
+    if not ADVERSARIAL_CLOSURE_GATE.exists():
+        _fail(f"Adversarial closure gate not found: {ADVERSARIAL_CLOSURE_GATE}")
+        return False
+
+    rc, output = _run([str(VENV_PYTHON), str(ADVERSARIAL_CLOSURE_GATE)], capture=True)
+    if output:
+        print(output)
+    if rc != 0:
+        _fail("Adversarial closure gate failed (unsafe-state classification is blocking)")
+        return False
+    _pass("Adversarial closure gate passed")
+    return True
+
+
+def check_readiness_gate() -> bool:
+    """Strict readiness gate: both distribution readiness and architecture gate must pass."""
+    print("[readiness] distribution_readiness run_all.py")
+    rc_readiness, out_readiness = _run([str(VENV_PYTHON), str(DISTRIBUTION_READINESS_RUNNER)])
+    if rc_readiness != 0:
+        _fail("distribution_readiness/run_all.py failed")
+        print(out_readiness)
+        return False
+    _pass("distribution_readiness/run_all.py passed")
+
+    print("\n[readiness] architecture_gate.py")
+    rc_arch, out_arch = _run([str(VENV_PYTHON), str(ARCHITECTURE_GATE)])
+    if rc_arch != 0:
+        _fail("tools/architecture_gate.py failed")
+        print(out_arch)
+        return False
+    _pass("tools/architecture_gate.py passed")
+    return True
+
+
 # ─── Full hard gate — Group N ─────────────────────────────────────────────────
 
 
@@ -406,25 +446,28 @@ def run_group_gate(group_number: int) -> bool:
     results: list[bool] = []
 
     if group_number == 1:
-        print("[ 1/5 ] All Group 1 modules complete?")
+        print("[ 1/8 ] All Group 1 modules complete?")
         results.append(check_group1_all_complete())
 
-        print("\n[ 2/5 ] DEV lane green?")
+        print("\n[ 2/8 ] DEV lane green?")
         results.append(check_dev_lane())
 
-        print("\n[ 3/5 ] Integration lane green?")
+        print("\n[ 3/8 ] Integration lane green?")
         results.append(check_integration_lane())
 
-        print("\n[ 4/5 ] No new import cycles?")
+        print("\n[ 4/8 ] No new import cycles?")
         results.append(check_no_new_cycles())
 
-        print("\n[ 5/7 ] Contract gate green?")
+        print("\n[ 5/8 ] Contract gate green?")
         results.append(check_contract_gate())
 
-        print("\n[ 6/7 ] CoreState mutation guard (enforce mode)?")
+        print("\n[ 6/8 ] CoreState mutation guard (enforce mode)?")
         results.append(check_corestate_mutation_guard(enforce=True))
 
-        print("\n[ 7/7 ] No parallel group branches?")
+        print("\n[ 7/8 ] Adversarial closure gate green?")
+        results.append(check_adversarial_closure_gate())
+
+        print("\n[ 8/8 ] No parallel group branches?")
         results.append(check_no_parallel_groups())
     else:
         _warn(f"No gate specification for group {group_number}. Add it to _ci_gate_check.py.")
@@ -512,9 +555,19 @@ def main() -> None:
     parser.add_argument("--cycle-check", action="store_true", help="Import cycle delta check only")
     parser.add_argument("--contract-gate", action="store_true", help="Contract compiler gate only")
     parser.add_argument(
+        "--readiness-gate",
+        action="store_true",
+        help="Strict readiness gate: requires both distribution-readiness and architecture_gate to pass",
+    )
+    parser.add_argument(
         "--corestate-mutation-gate",
         action="store_true",
         help="CoreState mutation guard gate only (warn mode unless --enforce-corestate-mutation-gate is set)",
+    )
+    parser.add_argument(
+        "--adversarial-closure-gate",
+        action="store_true",
+        help="Adversarial closure deterministic unsafe-state gate only",
     )
     parser.add_argument(
         "--enforce-corestate-mutation-gate",
@@ -556,9 +609,19 @@ def main() -> None:
         ok = check_contract_gate()
         sys.exit(0 if ok else 1)
 
+    if args.readiness_gate:
+        print("\n[ readiness gate ]")
+        ok = check_readiness_gate()
+        sys.exit(0 if ok else 1)
+
     if args.corestate_mutation_gate:
         print("\n[ corestate mutation guard gate ]")
         ok = check_corestate_mutation_guard(enforce=bool(args.enforce_corestate_mutation_gate))
+        sys.exit(0 if ok else 1)
+
+    if args.adversarial_closure_gate:
+        print("\n[ adversarial closure gate ]")
+        ok = check_adversarial_closure_gate()
         sys.exit(0 if ok else 1)
 
     if args.no_parallel_groups:

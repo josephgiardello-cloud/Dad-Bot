@@ -395,6 +395,86 @@ class ConstraintCritiqueEngine:
             max_iterations=2,
         )
 
+    @staticmethod
+    def _normalized_evaluation_inputs(
+        *,
+        candidate: str,
+        turn_plan: dict[str, Any],
+        tool_ir: dict[str, Any] | None,
+        tool_results: list[dict[str, Any]] | None,
+    ) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+        reply = str(candidate or "").strip()
+        plan = dict(turn_plan or {})
+        ir = dict(tool_ir or {})
+        results = list(tool_results or [])
+        return reply, plan, ir, results
+
+    def _collect_violations(
+        self,
+        *,
+        reply: str,
+        user_input: str,
+        plan: dict[str, Any],
+        ir: dict[str, Any],
+        results: list[dict[str, Any]],
+    ) -> tuple[list[ConstraintViolation], float, bool, float]:
+        total_weight = sum(c.weight for c in self.constraints)
+        violated_weight = 0.0
+        violations: list[ConstraintViolation] = []
+        hard_failure = False
+        for constraint in self.constraints:
+            if not constraint.evaluate(reply, user_input, plan, ir, results):
+                continue
+            violations.append(
+                ConstraintViolation(
+                    constraint_id=constraint.id,
+                    violation_type=constraint.violation_type,
+                    weight=constraint.weight,
+                    recoverable=constraint.recoverable,
+                ),
+            )
+            violated_weight += constraint.weight
+            if not constraint.recoverable:
+                hard_failure = True
+        return violations, violated_weight, hard_failure, total_weight
+
+    @staticmethod
+    def _hint_for_violation(
+        *,
+        violation: ConstraintViolation,
+        user_input: str,
+    ) -> str | None:
+        if violation.violation_type == CritiqueViolationType.EMPTY_REPLY:
+            return "Provide a complete, on-topic reply"
+        if violation.violation_type == CritiqueViolationType.FALLBACK_DETECTED:
+            return "Avoid fallback/error phrasing; provide a real answer"
+        if violation.violation_type == CritiqueViolationType.MISSING_EMPATHY:
+            return "Acknowledge the user's feelings before responding"
+        if violation.violation_type == CritiqueViolationType.MISSING_QUESTION_COVERAGE:
+            return f"Directly address the question: '{user_input[:80]}'"
+        if violation.violation_type == CritiqueViolationType.BREVITY_VIOLATION:
+            return "Give a more thorough answer"
+        if violation.violation_type == CritiqueViolationType.TOOL_OMISSION:
+            return "Use required memory tool evidence before finalizing"
+        if violation.violation_type == CritiqueViolationType.TOOL_REDUNDANCY:
+            return "Avoid unnecessary tool calls for simple turns"
+        if violation.violation_type in (
+            CritiqueViolationType.TOOL_EXECUTION_MISMATCH,
+            CritiqueViolationType.TOOL_RESULT_MISMATCH,
+        ):
+            return "Ensure tool plan, execution, and outputs are aligned"
+        if violation.violation_type == CritiqueViolationType.TOOL_CORRECTNESS_FAILURE:
+            return "Resolve tool failures before composing the final reply"
+        return None
+
+    def _revision_hint(self, *, violations: list[ConstraintViolation], user_input: str) -> str:
+        hints: list[str] = []
+        for violation in violations:
+            hint = self._hint_for_violation(violation=violation, user_input=user_input)
+            if hint:
+                hints.append(hint)
+        return "; ".join(hints)
+
     def evaluate(
         self,
         candidate: str,
@@ -406,64 +486,29 @@ class ConstraintCritiqueEngine:
         tool_results: list[dict[str, Any]] | None = None,
     ) -> ConstraintCritiqueResult:
         """Evaluate all constraints and return a ConstraintCritiqueResult."""
-        reply = str(candidate or "").strip()
-        plan = dict(turn_plan or {})
-        ir = dict(tool_ir or {})
-        results = list(tool_results or [])
-
-        total_weight = sum(c.weight for c in self.constraints)
-        violated_weight = 0.0
-        violations: list[ConstraintViolation] = []
-        hard_failure = False
-
-        for constraint in self.constraints:
-            if constraint.evaluate(reply, user_input, plan, ir, results):
-                violations.append(
-                    ConstraintViolation(
-                        constraint_id=constraint.id,
-                        violation_type=constraint.violation_type,
-                        weight=constraint.weight,
-                        recoverable=constraint.recoverable,
-                    ),
-                )
-                violated_weight += constraint.weight
-                if not constraint.recoverable:
-                    hard_failure = True
+        reply, plan, ir, results = self._normalized_evaluation_inputs(
+            candidate=candidate,
+            turn_plan=turn_plan,
+            tool_ir=tool_ir,
+            tool_results=tool_results,
+        )
+        violations, violated_weight, hard_failure, total_weight = self._collect_violations(
+            reply=reply,
+            user_input=user_input,
+            plan=plan,
+            ir=ir,
+            results=results,
+        )
 
         satisfaction_ratio = (total_weight - violated_weight) / total_weight if total_weight > 0 else 1.0
         satisfaction_ratio = max(0.0, min(1.0, round(satisfaction_ratio, 4)))
         passed = (satisfaction_ratio >= self.pass_threshold) and not hard_failure
 
-        # Build revision hint from violations.
-        hints: list[str] = []
-        for v in violations:
-            if v.violation_type == CritiqueViolationType.EMPTY_REPLY:
-                hints.append("Provide a complete, on-topic reply")
-            elif v.violation_type == CritiqueViolationType.FALLBACK_DETECTED:
-                hints.append("Avoid fallback/error phrasing; provide a real answer")
-            elif v.violation_type == CritiqueViolationType.MISSING_EMPATHY:
-                hints.append("Acknowledge the user's feelings before responding")
-            elif v.violation_type == CritiqueViolationType.MISSING_QUESTION_COVERAGE:
-                hints.append(f"Directly address the question: '{user_input[:80]}'")
-            elif v.violation_type == CritiqueViolationType.BREVITY_VIOLATION:
-                hints.append("Give a more thorough answer")
-            elif v.violation_type == CritiqueViolationType.TOOL_OMISSION:
-                hints.append("Use required memory tool evidence before finalizing")
-            elif v.violation_type == CritiqueViolationType.TOOL_REDUNDANCY:
-                hints.append("Avoid unnecessary tool calls for simple turns")
-            elif v.violation_type in (
-                CritiqueViolationType.TOOL_EXECUTION_MISMATCH,
-                CritiqueViolationType.TOOL_RESULT_MISMATCH,
-            ):
-                hints.append("Ensure tool plan, execution, and outputs are aligned")
-            elif v.violation_type == CritiqueViolationType.TOOL_CORRECTNESS_FAILURE:
-                hints.append("Resolve tool failures before composing the final reply")
-
         return ConstraintCritiqueResult(
             violations=violations,
             satisfaction_ratio=satisfaction_ratio,
             passed=passed,
-            revision_hint="; ".join(hints),
+            revision_hint=self._revision_hint(violations=violations, user_input=user_input),
             iteration=iteration,
             hard_failure=hard_failure,
         )

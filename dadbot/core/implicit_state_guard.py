@@ -61,6 +61,48 @@ def _is_windows_cloud_recall_file(file_path: Path) -> bool:
     return bool(attrs & _WINDOWS_CLOUD_RECALL_ATTRIBUTE_MASK)
 
 
+def _mutable_global_finding(*, module: str, symbol: str, line: int) -> ImplicitStateFinding | None:
+    name = str(symbol or "")
+    if not name or name.isupper() or name.startswith("_"):
+        return None
+    return ImplicitStateFinding(
+        module=module,
+        symbol=name,
+        kind="module_mutable_global",
+        severity="warning",
+        line=int(line),
+    )
+
+
+def _scan_assign_node(module: str, node: ast.Assign) -> list[ImplicitStateFinding]:
+    if not isinstance(node.value, _MUTABLE_AST_NODES):
+        return []
+    findings: list[ImplicitStateFinding] = []
+    for target in node.targets:
+        if not isinstance(target, ast.Name):
+            continue
+        finding = _mutable_global_finding(
+            module=module,
+            symbol=str(target.id),
+            line=int(node.lineno),
+        )
+        if finding is not None:
+            findings.append(finding)
+    return findings
+
+
+def _scan_annassign_node(module: str, node: ast.AnnAssign) -> ImplicitStateFinding | None:
+    if not isinstance(node.target, ast.Name):
+        return None
+    if not isinstance(node.value, _MUTABLE_AST_NODES):
+        return None
+    return _mutable_global_finding(
+        module=module,
+        symbol=str(node.target.id),
+        line=int(node.lineno),
+    )
+
+
 def _scan_file(root: Path, file_path: Path) -> list[ImplicitStateFinding]:
     if _is_windows_cloud_recall_file(file_path):
         return []
@@ -77,37 +119,12 @@ def _scan_file(root: Path, file_path: Path) -> list[ImplicitStateFinding]:
     module = _module_name(root, file_path)
     for node in tree.body:
         if isinstance(node, ast.Assign):
-            value = node.value
-            if isinstance(value, _MUTABLE_AST_NODES):
-                for target in node.targets:
-                    if isinstance(target, ast.Name):
-                        name = str(target.id)
-                        if name.isupper() or name.startswith("_"):
-                            continue
-                        findings.append(
-                            ImplicitStateFinding(
-                                module=module,
-                                symbol=name,
-                                kind="module_mutable_global",
-                                severity="warning",
-                                line=int(node.lineno),
-                            ),
-                        )
-        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            value = node.value
-            if isinstance(value, _MUTABLE_AST_NODES):
-                name = str(node.target.id)
-                if name.isupper() or name.startswith("_"):
-                    continue
-                findings.append(
-                    ImplicitStateFinding(
-                        module=module,
-                        symbol=name,
-                        kind="module_mutable_global",
-                        severity="warning",
-                        line=int(node.lineno),
-                    ),
-                )
+            findings.extend(_scan_assign_node(module, node))
+            continue
+        if isinstance(node, ast.AnnAssign):
+            finding = _scan_annassign_node(module, node)
+            if finding is not None:
+                findings.append(finding)
     return findings
 
 

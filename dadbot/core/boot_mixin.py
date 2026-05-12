@@ -278,9 +278,6 @@ class DadBotBootMixin:
 
         # Bootstrap managers required before profile/memory hydration.
         self.services.wire_bootstrap()
-        self.services.registry.declare_boundary_compliance(
-            self._boundary_contracts["boot"],
-        )
 
         # Placeholder until _hydrate_profile_and_memory wires the real adapter.
         self._model_port: Any | None = None
@@ -305,9 +302,6 @@ class DadBotBootMixin:
         self.memory.load_memory_store()
         self.profile_runtime.refresh_profile_runtime()
         self.services.wire_runtime()
-        self.services.registry.declare_boundary_compliance(
-            self._boundary_contracts["boot"],
-        )
         self.service_registry = self.services.registry
 
         # Wire the deterministic model-interaction port now that runtime is ready.
@@ -320,6 +314,11 @@ class DadBotBootMixin:
             runtime_client=self.runtime_client,
             model_runtime=self.model_runtime,
             config=config,
+        )
+        if self._model_port is None:
+            raise RuntimeError("Boot boundary contract violation: model port was not wired")
+        self.services.registry.declare_boundary_compliance(
+            self._boundary_contracts["boot"],
         )
         self._lifecycle_state = DadBotLifecycleState.HYDRATED
 

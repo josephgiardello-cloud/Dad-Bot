@@ -162,10 +162,14 @@ class ExecutionLedger:
         with self._lock:
             return int(self._cache.get("sequence_counter") or 0) + 1
 
-    def get_next_trace_sequence(self, trace_id: str) -> int:
+    def get_next_trace_sequence(self, trace_token: str = "", **legacy_kwargs: Any) -> int:
+        legacy_trace = legacy_kwargs.pop("trace_id", "")
+        if legacy_kwargs:
+            unknown = ", ".join(sorted(str(name) for name in legacy_kwargs))
+            raise TypeError(f"Unexpected keyword argument(s): {unknown}")
         with self._lock:
             counters = dict(self._cache.get("trace_sequence_counters") or {})
-            key = str(trace_id or "").strip()
+            key = str(trace_token or legacy_trace or "").strip()
             return int(counters.get(key, 0)) + 1
 
     def event_count(self) -> int:
@@ -210,6 +214,62 @@ class ExecutionLedger:
         if int(self._cache.get("event_count") or 0) != len(self._events):
             self._rebuild_cache()
 
+    def _apply_session_lineage(self, payload: dict[str, Any]) -> tuple[str, str]:
+        session_id = str(payload.get("session_id") or "")
+        parent_event_id = str(payload.get("parent_event_id") or "")
+        current_head = str(self._session_heads.get(session_id) or "")
+        if session_id:
+            if parent_event_id:
+                if current_head and parent_event_id != current_head:
+                    raise RuntimeError(
+                        f"causal chain violation: session_id={session_id!r} parent={parent_event_id!r} head={current_head!r}",
+                    )
+            else:
+                payload["parent_event_id"] = current_head
+            payload["session_index"] = int(self._session_indices.get(session_id, 0)) + 1
+        else:
+            payload.setdefault("parent_event_id", "")
+            payload.setdefault("session_index", 0)
+        return session_id, current_head
+
+    def _seal_payload_hash_chain(self, payload: dict[str, Any], next_sequence: int) -> None:
+        payload.setdefault("payload", {})
+        payload["_seq"] = len(self._events)
+        payload.setdefault("sequence", next_sequence)
+        payload.setdefault("event_id", _deterministic_event_id(payload))
+        stamp_schema_version(payload)
+
+        event_sha256 = _event_sha256(payload)
+        prev_chain_hash = str(self._events[-1].get("chain_hash") or "") if self._events else ""
+        payload["event_sha256"] = event_sha256
+        payload["prev_chain_hash"] = prev_chain_hash
+        payload["chain_hash"] = _chain_hash(prev_chain_hash, event_sha256)
+
+    def _update_session_heads(self, payload: dict[str, Any], session_id: str) -> None:
+        if not session_id:
+            return
+        event_id = str(payload.get("event_id") or "")
+        self._session_heads[session_id] = event_id
+        self._session_indices[session_id] = int(payload.get("session_index") or 0)
+
+    def _update_trace_sequence_cache(self, payload: dict[str, Any], cache: dict[str, Any]) -> None:
+        if str(payload.get("type") or "") != "TURN_EVENT":
+            return
+        turn_payload = dict(payload.get("payload") or {})
+        trace_id = str(turn_payload.get("trace_id") or "").strip()
+        if not trace_id:
+            return
+        counters = dict(cache.get("trace_sequence_counters") or {})
+        counters[trace_id] = int(turn_payload.get("sequence") or 0)
+        cache["trace_sequence_counters"] = counters
+
+    def _update_recent_tail_cache(self, payload: dict[str, Any], cache: dict[str, Any]) -> None:
+        tail = list(cache.get("recent_tail") or [])
+        tail.append(payload)
+        if len(tail) > _TAIL_LIMIT:
+            tail = tail[-_TAIL_LIMIT:]
+        cache["recent_tail"] = tail
+
     def write(self, event: dict[str, Any]) -> dict[str, Any]:
         from dadbot.core.ledger.enforcement import LedgerEnforcer
 
@@ -218,40 +278,10 @@ class ExecutionLedger:
         with self._lock:
             payload = dict(event or {})
             cache = self._cache
-            session_id = str(payload.get("session_id") or "")
-            parent_event_id = str(payload.get("parent_event_id") or "")
-            current_head = str(self._session_heads.get(session_id) or "")
-            if session_id:
-                if parent_event_id:
-                    if current_head and parent_event_id != current_head:
-                        raise RuntimeError(
-                            f"causal chain violation: session_id={session_id!r} parent={parent_event_id!r} head={current_head!r}",
-                        )
-                else:
-                    payload["parent_event_id"] = current_head
-                payload["session_index"] = int(self._session_indices.get(session_id, 0)) + 1
-            else:
-                payload.setdefault("parent_event_id", "")
-                payload.setdefault("session_index", 0)
-
-            payload.setdefault("payload", {})
             next_sequence = int(cache.get("sequence_counter") or 0) + 1
-            payload["_seq"] = len(self._events)
-            payload.setdefault("sequence", next_sequence)
-            payload.setdefault("event_id", _deterministic_event_id(payload))
-            stamp_schema_version(payload)
-            event_sha256 = _event_sha256(payload)
-            prev_chain_hash = str(self._events[-1].get("chain_hash") or "") if self._events else ""
-            payload["event_sha256"] = event_sha256
-            payload["prev_chain_hash"] = prev_chain_hash
-            payload["chain_hash"] = _chain_hash(prev_chain_hash, event_sha256)
-
-            event_id = str(payload.get("event_id") or "")
-            if session_id:
-                self._session_heads[session_id] = event_id
-                self._session_indices[session_id] = int(
-                    payload.get("session_index") or 0,
-                )
+            session_id, _ = self._apply_session_lineage(payload)
+            self._seal_payload_hash_chain(payload, next_sequence)
+            self._update_session_heads(payload, session_id)
 
             self._events.append(payload)
             self._backend.append(
@@ -262,18 +292,8 @@ class ExecutionLedger:
             cache["sequence_counter"] = int(payload.get("sequence") or next_sequence)
             cache["event_count"] = int(cache.get("event_count") or 0) + 1
             cache["last_event_hash"] = str(payload.get("chain_hash") or "")
-            if str(payload.get("type") or "") == "TURN_EVENT":
-                turn_payload = dict(payload.get("payload") or {})
-                trace_id = str(turn_payload.get("trace_id") or "").strip()
-                if trace_id:
-                    counters = dict(cache.get("trace_sequence_counters") or {})
-                    counters[trace_id] = int(turn_payload.get("sequence") or 0)
-                    cache["trace_sequence_counters"] = counters
-            tail = list(cache.get("recent_tail") or [])
-            tail.append(payload)
-            if len(tail) > _TAIL_LIMIT:
-                tail = tail[-_TAIL_LIMIT:]
-            cache["recent_tail"] = tail
+            self._update_trace_sequence_cache(payload, cache)
+            self._update_recent_tail_cache(payload, cache)
             cache["version"] = int(cache.get("version") or 0) + 1
             self.validate_cache()
             return payload
@@ -342,16 +362,46 @@ class ExecutionLedger:
             "violations": violations,
         }
 
+    @staticmethod
+    def _has_persisted_chain(events: list[dict[str, Any]]) -> bool:
+        return any(
+            str(event.get("chain_hash") or "")
+            or str(event.get("event_sha256") or "")
+            or str(event.get("prev_chain_hash") or "")
+            for event in events
+        )
+
+    def _apply_replay_filters(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        filtered = list(events)
+        for replay_filter in self._replay_filters:
+            filtered = list(replay_filter(list(filtered)))
+        return filtered
+
+    def _rehydrate_loaded_events(self, events: list[dict[str, Any]]) -> None:
+        self._events = deepcopy(events)
+        self._session_heads.clear()
+        self._session_indices.clear()
+        prev_chain = ""
+        for event in self._events:
+            if not str(event.get("event_id") or ""):
+                event["event_id"] = _deterministic_event_id(event)
+            event_sha256 = _event_sha256(event)
+            event["event_sha256"] = event_sha256
+            event["prev_chain_hash"] = prev_chain
+            prev_chain = _chain_hash(prev_chain, event_sha256)
+            event["chain_hash"] = prev_chain
+            session_id = str(event.get("session_id") or "")
+            event_id = str(event.get("event_id") or "")
+            if session_id and event_id:
+                self._session_heads[session_id] = event_id
+                self._session_indices[session_id] = int(
+                    event.get("session_index") or 0,
+                )
+
     def load_from_backend(self) -> int:
         with self._lock:
             events = list(get_migrator().migrate_all(list(self._backend.load())))
-            has_persisted_chain = any(
-                str(event.get("chain_hash") or "")
-                or str(event.get("event_sha256") or "")
-                or str(event.get("prev_chain_hash") or "")
-                for event in events
-            )
-            if has_persisted_chain:
+            if self._has_persisted_chain(events):
                 violations = _verify_persisted_chain(events)
                 if violations:
                     raise RuntimeError(
@@ -365,27 +415,8 @@ class ExecutionLedger:
                     RuntimeWarning,
                     stacklevel=2,
                 )
-            for replay_filter in self._replay_filters:
-                events = list(replay_filter(list(events)))
-            self._events = deepcopy(events)
-            self._session_heads.clear()
-            self._session_indices.clear()
-            prev_chain = ""
-            for event in self._events:
-                if not str(event.get("event_id") or ""):
-                    event["event_id"] = _deterministic_event_id(event)
-                event_sha256 = _event_sha256(event)
-                event["event_sha256"] = event_sha256
-                event["prev_chain_hash"] = prev_chain
-                prev_chain = _chain_hash(prev_chain, event_sha256)
-                event["chain_hash"] = prev_chain
-                session_id = str(event.get("session_id") or "")
-                event_id = str(event.get("event_id") or "")
-                if session_id and event_id:
-                    self._session_heads[session_id] = event_id
-                    self._session_indices[session_id] = int(
-                        event.get("session_index") or 0,
-                    )
+            events = self._apply_replay_filters(events)
+            self._rehydrate_loaded_events(events)
             self._rebuild_cache()
             self.validate_cache()
             return len(self._events)

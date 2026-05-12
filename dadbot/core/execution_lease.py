@@ -137,6 +137,14 @@ class ExecutionLease:
                 return None
             return str(lease.get("owner_id") or "") or None
 
+    def lease_for(self, session_id: str) -> dict[str, Any] | None:
+        sid = self._normalize_session(session_id)
+        with self._lock:
+            lease = self._leases.get(sid)
+            if not lease or self._expired(lease, time.monotonic()):
+                return None
+            return dict(lease)
+
     def is_held(self, session_id: str) -> bool:
         return self.owner_of(session_id) is not None
 

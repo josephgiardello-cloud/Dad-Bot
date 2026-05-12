@@ -12,9 +12,7 @@ def upcast_trace_contract(contract: dict[str, Any] | None) -> dict[str, Any]:
     return migrate_trace_contract(payload)
 
 
-def upcast_event_record(event: dict[str, Any] | None) -> dict[str, Any]:
-    item = dict(event or {})
-
+def _normalize_event_aliases(item: dict[str, Any]) -> None:
     if "type" not in item and "event_type" in item:
         item["type"] = str(item.pop("event_type") or "")
     if "sequence" not in item and "sequence_id" in item:
@@ -23,6 +21,8 @@ def upcast_event_record(event: dict[str, Any] | None) -> dict[str, Any]:
         except (TypeError, ValueError):
             item["sequence"] = 0
 
+
+def _normalize_event_scalars(item: dict[str, Any]) -> None:
     item["type"] = str(item.get("type") or "").strip() or "LEGACY_EVENT"
     item["sequence"] = int(item.get("sequence") or 0)
     item["kernel_step_id"] = str(item.get("kernel_step_id") or item.get("stage") or "legacy.unknown")
@@ -30,6 +30,12 @@ def upcast_event_record(event: dict[str, Any] | None) -> dict[str, Any]:
     item["session_index"] = int(item.get("session_index") or item["sequence"] or 0)
     item["event_id"] = str(item.get("event_id") or "")
     item["parent_event_id"] = str(item.get("parent_event_id") or "")
+
+
+def upcast_event_record(event: dict[str, Any] | None) -> dict[str, Any]:
+    item = dict(event or {})
+    _normalize_event_aliases(item)
+    _normalize_event_scalars(item)
     item["payload"] = canonicalize_event_payload(item.get("payload") or {})
     return item
 

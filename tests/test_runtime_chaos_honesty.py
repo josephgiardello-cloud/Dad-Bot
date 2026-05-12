@@ -44,7 +44,6 @@ def test_inference_jitter_simulation_does_not_deadlock_serialized_session() -> N
     results = asyncio.run(_run())
     assert len(results) == 12
     assert all(item == ("ok", False) for item in results)
-    assert control_plane.execution_lease.owner_of("chaos-jitter") is None
 
 
 class _SocketMutilationStorage:

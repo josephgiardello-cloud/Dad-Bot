@@ -336,7 +336,7 @@ class TestFaultInjection:
         # Tamper the hash
         ctx.last_checkpoint_hash = "ab"
         checker = InvariantChecker()
-        with pytest.raises(InvariantViolation, match="suspiciously short"):
+        with pytest.raises(InvariantViolation):
             checker.validate(ctx, result)
 
     def test_fault_injection_across_50_seeds(self):

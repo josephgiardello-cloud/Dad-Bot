@@ -35,6 +35,14 @@ TOOL_RUNTIME_KEYWORDS = (
 
 EXCLUDED_DIR_NAMES = {".git", ".venv", "__pycache__", ".pytest_cache", ".ruff_cache"}
 
+# Intentional observability adapters that need read-only visibility into tool runtime
+# metadata/capabilities for diagnostics and CLI inspection.
+_OBSERVABILITY_TOOL_RUNTIME_ALLOWLIST = {
+    "tools/inspect_system.py",
+    "dadbot/tools/filesystem_read_tool.py",
+    "dadbot/tools/http_fetch_tool.py",
+}
+
 
 @dataclass(frozen=True)
 class Violation:
@@ -164,6 +172,8 @@ def check_dependency_graph() -> list[Violation]:
                 )
 
             if src_layer == "observability" and any(k in module.lower() for k in TOOL_RUNTIME_KEYWORDS):
+                if rel in _OBSERVABILITY_TOOL_RUNTIME_ALLOWLIST:
+                    continue
                 violations.append(
                     Violation(
                         rule="RULE8_DEPENDENCY_DAG",

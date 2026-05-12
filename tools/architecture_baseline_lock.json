@@ -13,7 +13,7 @@
     "prevent_decision_point_growth": true
   },
   "reconciliation": {
-    "generated_at": "2026-05-06T03:26:32.925721+00:00",
+    "generated_at": "2026-05-12T02:14:46.247981+00:00",
     "migration_inflation_allowlist": [
       {
         "source": "complexity_diff_gate",
@@ -21,8 +21,33 @@
         "reason": "Contract migration inflation in known transition hotfile"
       },
       {
+        "source": "complexity_diff_gate",
+        "file": "dadbot/core/graph_pipeline_nodes.py",
+        "reason": "Contract migration inflation in known transition hotfile"
+      },
+      {
+        "source": "complexity_diff_gate",
+        "file": "dadbot/core/graph_pipeline_nodes.py",
+        "reason": "Contract migration inflation in known transition hotfile"
+      },
+      {
         "source": "god_class_audit",
         "file": "dadbot/core/graph_mutation.py",
+        "reason": "Contract migration inflation in known transition hotfile"
+      },
+      {
+        "source": "god_class_audit",
+        "file": "dadbot/core/graph_mutation.py",
+        "reason": "Contract migration inflation in known transition hotfile"
+      },
+      {
+        "source": "god_class_audit",
+        "file": "dadbot/core/graph_pipeline_nodes.py",
+        "reason": "Contract migration inflation in known transition hotfile"
+      },
+      {
+        "source": "god_class_audit",
+        "file": "dadbot/core/graph_pipeline_nodes.py",
         "reason": "Contract migration inflation in known transition hotfile"
       }
     ],
@@ -30,228 +55,71 @@
       {
         "source": "complexity_diff_gate",
         "file": "dadbot/core/graph.py",
-        "detail": "dadbot/core/graph.py: LOC 1089->1415 and CC 171->256",
-        "reason": "Compared against pre-migration complexity baseline"
-      },
-      {
-        "source": "complexity_diff_gate",
-        "file": "dadbot/core/graph.py",
-        "detail": "dadbot/core/graph.py: decision_points 72->91",
-        "reason": "Compared against pre-migration complexity baseline"
-      },
-      {
-        "source": "complexity_diff_gate",
-        "file": "dadbot/core/nodes.py",
-        "detail": "dadbot/core/nodes.py: LOC 1211->1282 and CC 384->408",
+        "detail": "dadbot/core/graph.py: LOC 1089->1353 and CC 171->275",
         "reason": "Compared against pre-migration complexity baseline"
       },
       {
         "source": "complexity_diff_gate",
         "file": "dadbot/core/orchestrator.py",
-        "detail": "dadbot/core/orchestrator.py: LOC 331->422 and CC 94->118",
+        "detail": "dadbot/core/orchestrator.py: LOC 331->1268 and CC 94->392",
         "reason": "Compared against pre-migration complexity baseline"
       },
       {
         "source": "complexity_diff_gate",
         "file": "dadbot/core/orchestrator.py",
-        "detail": "dadbot/core/orchestrator.py: decision_points 25->26",
+        "detail": "dadbot/core/orchestrator.py: decision_points 25->117",
         "reason": "Compared against pre-migration complexity baseline"
       },
       {
         "source": "complexity_diff_gate",
         "file": "dadbot/core/graph_context.py",
-        "detail": "dadbot/core/graph_context.py: LOC 182->200 and CC 41->46",
+        "detail": "dadbot/core/graph_context.py: LOC 182->225 and CC 41->52",
         "reason": "Compared against pre-migration complexity baseline"
       },
       {
         "source": "complexity_diff_gate",
         "file": "dadbot/core/graph_context.py",
-        "detail": "dadbot/core/graph_context.py: decision_points 7->8",
+        "detail": "dadbot/core/graph_context.py: decision_points 7->13",
         "reason": "Compared against pre-migration complexity baseline"
       },
       {
         "source": "god_class_audit",
         "file": "dadbot/core/graph.py",
-        "detail": "  LOC grew 1089\u21921415 (+326) but CC did not decrease (171\u2192256)",
+        "detail": "  LOC grew 1089\u21921353 (+264) but CC did not decrease (171\u2192275)",
         "reason": "Pre-migration god-class baseline no longer representative"
       },
       {
         "source": "god_class_audit",
         "file": "dadbot/core/graph.py",
-        "detail": "  decision_points grew 72\u2192114 (+42)",
-        "reason": "Pre-migration god-class baseline no longer representative"
-      },
-      {
-        "source": "god_class_audit",
-        "file": "dadbot/core/nodes.py",
-        "detail": "  LOC grew 1211\u21921282 (+71) but CC did not decrease (384\u2192408)",
-        "reason": "Pre-migration god-class baseline no longer representative"
-      },
-      {
-        "source": "god_class_audit",
-        "file": "dadbot/core/nodes.py",
-        "detail": "  decision_points grew 130\u2192136 (+6)",
+        "detail": "  decision_points grew 72\u219278 (+6)",
         "reason": "Pre-migration god-class baseline no longer representative"
       },
       {
         "source": "god_class_audit",
         "file": "dadbot/core/orchestrator.py",
-        "detail": "  LOC grew 331\u2192422 (+91) but CC did not decrease (94\u2192118)",
+        "detail": "  LOC grew 331\u21921268 (+937) but CC did not decrease (94\u2192392)",
         "reason": "Pre-migration god-class baseline no longer representative"
       },
       {
         "source": "god_class_audit",
         "file": "dadbot/core/orchestrator.py",
-        "detail": "  decision_points grew 25\u219231 (+6)",
+        "detail": "  decision_points grew 25\u2192127 (+102)",
         "reason": "Pre-migration god-class baseline no longer representative"
       },
       {
         "source": "god_class_audit",
         "file": "dadbot/core/graph_context.py",
-        "detail": "  LOC grew 182\u2192200 (+18) but CC did not decrease (41\u219246)",
+        "detail": "  LOC grew 182\u2192225 (+43) but CC did not decrease (41\u219252)",
         "reason": "Pre-migration god-class baseline no longer representative"
       },
       {
         "source": "god_class_audit",
         "file": "dadbot/core/graph_context.py",
-        "detail": "  decision_points grew 7\u219213 (+6)",
+        "detail": "  decision_points grew 7\u219218 (+11)",
         "reason": "Pre-migration god-class baseline no longer representative"
       }
     ],
-    "real_regressions": [
-      {
-        "source": "contract_guard",
-        "file": "dadbot/core/execution_binder.py",
-        "detail": "dadbot/core/execution_binder.py:30 run(trace_id)",
-        "reason": "New forbidden primitive signature introduced"
-      },
-      {
-        "source": "contract_guard",
-        "file": "dadbot/core/execution_context.py",
-        "detail": "dadbot/core/execution_context.py:241 __init__(trace_id)",
-        "reason": "New forbidden primitive signature introduced"
-      },
-      {
-        "source": "contract_guard",
-        "file": "dadbot/core/kernel_locks.py",
-        "detail": "dadbot/core/kernel_locks.py:109 canonical_event(trace_id)",
-        "reason": "New forbidden primitive signature introduced"
-      },
-      {
-        "source": "contract_guard",
-        "file": "dadbot/core/kernel_locks.py",
-        "detail": "dadbot/core/kernel_locks.py:134 strict_hash(trace_id)",
-        "reason": "New forbidden primitive signature introduced"
-      },
-      {
-        "source": "contract_guard",
-        "file": "dadbot/core/kernel_signals.py",
-        "detail": "dadbot/core/kernel_signals.py:138 __init__(trace_id)",
-        "reason": "New forbidden primitive signature introduced"
-      },
-      {
-        "source": "contract_guard",
-        "file": "dadbot/core/kernel_signals.py",
-        "detail": "dadbot/core/kernel_signals.py:177 span(trace_id)",
-        "reason": "New forbidden primitive signature introduced"
-      },
-      {
-        "source": "contract_guard",
-        "file": "dadbot/core/kernel_signals.py",
-        "detail": "dadbot/core/kernel_signals.py:202 ensure_trace_id(trace_id)",
-        "reason": "New forbidden primitive signature introduced"
-      },
-      {
-        "source": "contract_guard",
-        "file": "dadbot/core/kernel_signals.py",
-        "detail": "dadbot/core/kernel_signals.py:90 __init__(trace_id)",
-        "reason": "New forbidden primitive signature introduced"
-      },
-      {
-        "source": "contract_guard",
-        "file": "dadbot/core/shadow_mode.py",
-        "detail": "dadbot/core/shadow_mode.py:323 _emit(trace_id)",
-        "reason": "New forbidden primitive signature introduced"
-      },
-      {
-        "source": "contract_guard",
-        "file": "dadbot/core/shadow_mode.py",
-        "detail": "dadbot/core/shadow_mode.py:58 shadow_log(trace_id)",
-        "reason": "New forbidden primitive signature introduced"
-      },
-      {
-        "source": "contract_guard",
-        "file": "dadbot/core/turn_mixin.py",
-        "detail": "dadbot/core/turn_mixin.py:291 _emit_graph_failure_event(trace_id)",
-        "reason": "New forbidden primitive signature introduced"
-      },
-      {
-        "source": "contract_guard",
-        "file": "dadbot/managers/conversation_persistence.py",
-        "detail": "dadbot/managers/conversation_persistence.py:306 _turn_event_path(trace_id)",
-        "reason": "New forbidden primitive signature introduced"
-      },
-      {
-        "source": "contract_guard",
-        "file": "dadbot/managers/conversation_persistence.py",
-        "detail": "dadbot/managers/conversation_persistence.py:310 _snapshot_path(trace_id)",
-        "reason": "New forbidden primitive signature introduced"
-      },
-      {
-        "source": "contract_guard",
-        "file": "dadbot/managers/conversation_persistence.py",
-        "detail": "dadbot/managers/conversation_persistence.py:314 _compute_next_sequence(trace_id)",
-        "reason": "New forbidden primitive signature introduced"
-      },
-      {
-        "source": "contract_guard",
-        "file": "dadbot/managers/conversation_persistence.py",
-        "detail": "dadbot/managers/conversation_persistence.py:376 list_turn_events(trace_id)",
-        "reason": "New forbidden primitive signature introduced"
-      },
-      {
-        "source": "contract_guard",
-        "file": "dadbot/managers/conversation_persistence.py",
-        "detail": "dadbot/managers/conversation_persistence.py:460 replay_turn_events(trace_id)",
-        "reason": "New forbidden primitive signature introduced"
-      },
-      {
-        "source": "contract_guard",
-        "file": "dadbot/managers/conversation_persistence.py",
-        "detail": "dadbot/managers/conversation_persistence.py:483 validate_replay_determinism(trace_id)",
-        "reason": "New forbidden primitive signature introduced"
-      },
-      {
-        "source": "contract_guard",
-        "file": "dadbot/managers/conversation_persistence.py",
-        "detail": "dadbot/managers/conversation_persistence.py:550 load_latest_graph_checkpoint(trace_id)",
-        "reason": "New forbidden primitive signature introduced"
-      },
-      {
-        "source": "contract_guard",
-        "file": "dadbot/managers/conversation_persistence.py",
-        "detail": "dadbot/managers/conversation_persistence.py:581 resume_graph_checkpoint(trace_id)",
-        "reason": "New forbidden primitive signature introduced"
-      },
-      {
-        "source": "contract_guard",
-        "file": "dadbot/services/persistence.py",
-        "detail": "dadbot/services/persistence.py:942 list_turn_events(trace_id)",
-        "reason": "New forbidden primitive signature introduced"
-      },
-      {
-        "source": "contract_guard",
-        "file": "dadbot/services/persistence.py",
-        "detail": "dadbot/services/persistence.py:954 replay_turn_events(trace_id)",
-        "reason": "New forbidden primitive signature introduced"
-      },
-      {
-        "source": "contract_guard",
-        "file": "dadbot/services/persistence.py",
-        "detail": "dadbot/services/persistence.py:963 validate_replay_determinism(trace_id)",
-        "reason": "New forbidden primitive signature introduced"
-      }
-    ],
+    "real_regressions": [],
     "policy": {
       "rebaseline_only_after_classification": true,
       "strict_bucket_for_failures": "A"

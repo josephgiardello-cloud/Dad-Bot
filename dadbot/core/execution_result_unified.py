@@ -49,6 +49,63 @@ class _FrozenExecutionResult(dict):  # type: ignore[type-arg]
         return new
 
 
+def _validate_invariant_degradation(execution_result: dict[str, Any], *, tag: str) -> None:
+    degradation = execution_result.get("degradation")
+    if not isinstance(degradation, dict):
+        raise ExecutionResultInvariantError(
+            f"Invariant 4 violated{tag}: degradation must be a dict, got {type(degradation).__name__}"
+        )
+    if "items" not in degradation:
+        raise ExecutionResultInvariantError(
+            f"Invariant 4 violated{tag}: degradation.items is missing"
+        )
+    if not isinstance(degradation["items"], list):
+        raise ExecutionResultInvariantError(
+            f"Invariant 4 violated{tag}: degradation.items must be a list"
+        )
+
+
+def _validate_invariant_success_failure_fields(*, status: str, execution_result: dict[str, Any], tag: str) -> None:
+    if status != "ok":
+        return
+    failure = dict(execution_result.get("failure") or {})
+    dirty_fields = [k for k in ("class", "type", "message", "source") if str(failure.get(k) or "").strip()]
+    if dirty_fields:
+        raise ExecutionResultInvariantError(
+            f"Invariant 1 violated{tag}: status='ok' but failure fields are non-empty: {dirty_fields}"
+        )
+
+
+def _validate_invariant_failed_outputs(*, status: str, execution_result: dict[str, Any], tag: str) -> None:
+    if status != "failed":
+        return
+    outputs = execution_result.get("outputs")
+    if not isinstance(outputs, dict):
+        raise ExecutionResultInvariantError(
+            f"Invariant 2 violated{tag}: status='failed' but outputs is absent or not a dict"
+        )
+    failure = dict(execution_result.get("failure") or {})
+    if not str(failure.get("class") or "").strip():
+        raise ExecutionResultInvariantError(
+            f"Invariant 2 violated{tag}: status='failed' but failure.class is empty"
+        )
+
+
+def _validate_invariant_timeout(*, status: str, execution_result: dict[str, Any], tag: str) -> None:
+    timeout = dict(execution_result.get("timeout") or {})
+    timed_out = bool(timeout.get("timed_out", False))
+    failure = dict(execution_result.get("failure") or {})
+    failure_class = str(failure.get("class") or "").strip().lower()
+    if timed_out and failure_class not in {"timeout", ""}:
+        raise ExecutionResultInvariantError(
+            f"Invariant 3 violated{tag}: timeout.timed_out=True but failure.class='{failure_class}' (must be 'timeout')"
+        )
+    if status == "failed" and failure_class == "timeout" and not timed_out:
+        raise ExecutionResultInvariantError(
+            f"Invariant 3 violated{tag}: failure.class='timeout' but timeout.timed_out is False"
+        )
+
+
 def assert_execution_result_invariants(
     execution_result: dict[str, Any],
     *,
@@ -66,60 +123,10 @@ def assert_execution_result_invariants(
     tag = f" [{context}]" if context else ""
     status = str(execution_result.get("status") or "").lower()
 
-    # ── Invariant 4 ── degradation must always be present ─────────────────────
-    degradation = execution_result.get("degradation")
-    if not isinstance(degradation, dict):
-        raise ExecutionResultInvariantError(
-            f"Invariant 4 violated{tag}: degradation must be a dict, got {type(degradation).__name__}"
-        )
-    if "items" not in degradation:
-        raise ExecutionResultInvariantError(
-            f"Invariant 4 violated{tag}: degradation.items is missing"
-        )
-    if not isinstance(degradation["items"], list):
-        raise ExecutionResultInvariantError(
-            f"Invariant 4 violated{tag}: degradation.items must be a list"
-        )
-
-    # ── Invariant 1 ── success ⇒ failure fields empty ─────────────────────────
-    if status == "ok":
-        failure = dict(execution_result.get("failure") or {})
-        dirty_fields = [
-            k for k in ("class", "type", "message", "source")
-            if str(failure.get(k) or "").strip()
-        ]
-        if dirty_fields:
-            raise ExecutionResultInvariantError(
-                f"Invariant 1 violated{tag}: status='ok' but failure fields are non-empty: {dirty_fields}"
-            )
-
-    # ── Invariant 2 ── failure ⇒ outputs dict must exist ──────────────────────
-    if status == "failed":
-        outputs = execution_result.get("outputs")
-        if not isinstance(outputs, dict):
-            raise ExecutionResultInvariantError(
-                f"Invariant 2 violated{tag}: status='failed' but outputs is absent or not a dict"
-            )
-        # failure.class must be non-empty so callers know what failed
-        failure = dict(execution_result.get("failure") or {})
-        if not str(failure.get("class") or "").strip():
-            raise ExecutionResultInvariantError(
-                f"Invariant 2 violated{tag}: status='failed' but failure.class is empty"
-            )
-
-    # ── Invariant 3 ── timeout ⇒ failure.class == "timeout" OR timed_out ──────
-    timeout = dict(execution_result.get("timeout") or {})
-    timed_out = bool(timeout.get("timed_out", False))
-    failure = dict(execution_result.get("failure") or {})
-    failure_class = str(failure.get("class") or "").strip().lower()
-    if timed_out and failure_class not in {"timeout", ""}:
-        raise ExecutionResultInvariantError(
-            f"Invariant 3 violated{tag}: timeout.timed_out=True but failure.class='{failure_class}' (must be 'timeout')"
-        )
-    if status == "failed" and failure_class == "timeout" and not timed_out:
-        raise ExecutionResultInvariantError(
-            f"Invariant 3 violated{tag}: failure.class='timeout' but timeout.timed_out is False"
-        )
+    _validate_invariant_degradation(execution_result, tag=tag)
+    _validate_invariant_success_failure_fields(status=status, execution_result=execution_result, tag=tag)
+    _validate_invariant_failed_outputs(status=status, execution_result=execution_result, tag=tag)
+    _validate_invariant_timeout(status=status, execution_result=execution_result, tag=tag)
 
 
 def build_unified_execution_result(
@@ -153,13 +160,12 @@ def build_unified_execution_result(
     }
 
 
-def ensure_unified_execution_result(payload: dict[str, Any] | None) -> dict[str, Any]:
-    raw = dict(payload or {})
-    baseline = build_unified_execution_result()
-
+def _normalize_status(raw: dict[str, Any]) -> str:
     status = str(raw.get("status") or "pending").strip().lower()
-    baseline["status"] = status if status in _UNIFIED_STATUS_VALUES else "pending"
+    return status if status in _UNIFIED_STATUS_VALUES else "pending"
 
+
+def _normalize_degradation(raw: dict[str, Any], baseline: dict[str, Any]) -> None:
     degradation = raw.get("degradation")
     if isinstance(degradation, dict):
         items = degradation.get("items")
@@ -167,44 +173,68 @@ def ensure_unified_execution_result(payload: dict[str, Any] | None) -> dict[str,
             safe_items = [dict(item) for item in items if isinstance(item, dict)]
             baseline["degradation"]["items"] = safe_items
             baseline["degradation"]["count"] = int(len(safe_items))
-        else:
-            baseline["degradation"]["count"] = int(degradation.get("count") or 0)
-    else:
-        fallback_items = raw.get("turn_ir_degradations") or raw.get("ir_degradations")
-        if isinstance(fallback_items, list):
-            safe_items = [dict(item) for item in fallback_items if isinstance(item, dict)]
-            baseline["degradation"]["items"] = safe_items
-            baseline["degradation"]["count"] = int(len(safe_items))
+            return
+        baseline["degradation"]["count"] = int(degradation.get("count") or 0)
+        return
 
+    fallback_items = raw.get("turn_ir_degradations") or raw.get("ir_degradations")
+    if isinstance(fallback_items, list):
+        safe_items = [dict(item) for item in fallback_items if isinstance(item, dict)]
+        baseline["degradation"]["items"] = safe_items
+        baseline["degradation"]["count"] = int(len(safe_items))
+
+
+def _normalize_failure(raw: dict[str, Any], baseline: dict[str, Any]) -> None:
     failure = raw.get("failure")
-    if isinstance(failure, dict):
-        baseline["failure"] = {
-            "class": str(failure.get("class") or ""),
-            "type": str(failure.get("type") or ""),
-            "message": str(failure.get("message") or ""),
-            "source": str(failure.get("source") or ""),
-            "retryable": bool(failure.get("retryable", False)),
-        }
+    if not isinstance(failure, dict):
+        return
+    baseline["failure"] = {
+        "class": str(failure.get("class") or ""),
+        "type": str(failure.get("type") or ""),
+        "message": str(failure.get("message") or ""),
+        "source": str(failure.get("source") or ""),
+        "retryable": bool(failure.get("retryable", False)),
+    }
 
+
+def _normalize_timeout(raw: dict[str, Any], baseline: dict[str, Any]) -> None:
     timeout = raw.get("timeout")
-    if isinstance(timeout, dict):
-        baseline["timeout"] = {
-            "seconds": max(0.0, float(timeout.get("seconds") or 0.0)),
-            "timed_out": bool(timeout.get("timed_out", False)),
-        }
+    if not isinstance(timeout, dict):
+        return
+    baseline["timeout"] = {
+        "seconds": max(0.0, float(timeout.get("seconds") or 0.0)),
+        "timed_out": bool(timeout.get("timed_out", False)),
+    }
 
+
+def _normalize_outputs(raw: dict[str, Any], baseline: dict[str, Any]) -> None:
     outputs = raw.get("outputs")
-    if isinstance(outputs, dict):
-        baseline["outputs"] = {
-            "response": str(outputs.get("response") or ""),
-            "should_end": bool(outputs.get("should_end", False)),
-            "semantic_eval_input_hash": str(outputs.get("semantic_eval_input_hash") or ""),
-        }
+    if not isinstance(outputs, dict):
+        return
+    baseline["outputs"] = {
+        "response": str(outputs.get("response") or ""),
+        "should_end": bool(outputs.get("should_end", False)),
+        "semantic_eval_input_hash": str(outputs.get("semantic_eval_input_hash") or ""),
+    }
 
+
+def _preserve_legacy_execution_fields(raw: dict[str, Any], baseline: dict[str, Any]) -> None:
     # Preserve legacy fields used by older planner/reply surfaces.
     for key in ("initial_result", "result", "candidates"):
         if key in raw:
             baseline[key] = raw[key]
+
+
+def ensure_unified_execution_result(payload: dict[str, Any] | None) -> dict[str, Any]:
+    raw = dict(payload or {})
+    baseline = build_unified_execution_result()
+
+    baseline["status"] = _normalize_status(raw)
+    _normalize_degradation(raw, baseline)
+    _normalize_failure(raw, baseline)
+    _normalize_timeout(raw, baseline)
+    _normalize_outputs(raw, baseline)
+    _preserve_legacy_execution_fields(raw, baseline)
 
     assert_execution_result_invariants(baseline, context="ensure_unified_execution_result")
     return baseline

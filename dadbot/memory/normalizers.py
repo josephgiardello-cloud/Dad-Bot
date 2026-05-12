@@ -192,6 +192,54 @@ class MemoryNormalizer:
 
     # ------------------------------------------------------------------ entry normalizers
 
+    @staticmethod
+    def _normalize_reminder_status(raw_status):
+        status = str(raw_status or "open").strip().lower()
+        if status not in {"open", "done"}:
+            return "open"
+        return status
+
+    @staticmethod
+    def _parse_datetime_minute_precision(raw_value):
+        text = str(raw_value or "").strip()
+        if not text:
+            return None
+        try:
+            parsed = dateutil_parser.parse(text)
+            return parsed.replace(second=0, microsecond=0).isoformat(timespec="seconds")
+        except (ValueError, TypeError, OverflowError):
+            return None
+
+    @staticmethod
+    def _parse_due_at(raw_due_at, due_text):
+        parsed_raw_due_at = MemoryNormalizer._parse_datetime_minute_precision(raw_due_at)
+        if parsed_raw_due_at is not None:
+            return parsed_raw_due_at
+        if not str(due_text or "").strip():
+            return None
+        try:
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(due_text or "").strip()):
+                return f"{str(due_text).strip()}T09:00:00"
+            parsed_due_at = dateutil_parser.parse(
+                str(due_text or "").strip(),
+                default=datetime.now().replace(
+                    hour=9,
+                    minute=0,
+                    second=0,
+                    microsecond=0,
+                ),
+            )
+            return parsed_due_at.replace(second=0, microsecond=0).isoformat(timespec="seconds")
+        except (ValueError, TypeError, OverflowError):
+            return None
+
+    @staticmethod
+    def _normalize_notification_count(value):
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError):
+            return 0
+
     def normalize_reminder_entry(self, reminder):
         if not isinstance(reminder, dict):
             return None
@@ -204,60 +252,13 @@ class MemoryNormalizer:
             reminder.get("created_at") or datetime.now().isoformat(timespec="seconds"),
         )
         updated_at = str(reminder.get("updated_at") or created_at)
-        status = str(reminder.get("status") or "open").strip().lower()
-        if status not in {"open", "done"}:
-            status = "open"
+        status = self._normalize_reminder_status(reminder.get("status"))
 
         reminder_id = str(reminder.get("id") or uuid.uuid4().hex[:12])
         due_text = str(reminder.get("due_text") or "").strip()
-        raw_due_at = str(reminder.get("due_at") or "").strip()
-        if raw_due_at:
-            try:
-                parsed_due_at = dateutil_parser.parse(raw_due_at)
-                due_at = parsed_due_at.replace(second=0, microsecond=0).isoformat(
-                    timespec="seconds",
-                )
-            except (ValueError, TypeError, OverflowError):
-                due_at = None
-        elif due_text:
-            try:
-                if re.fullmatch(r"\d{4}-\d{2}-\d{2}", due_text):
-                    due_at = f"{due_text}T09:00:00"
-                else:
-                    parsed_due_at = dateutil_parser.parse(
-                        due_text,
-                        default=datetime.now().replace(
-                            hour=9,
-                            minute=0,
-                            second=0,
-                            microsecond=0,
-                        ),
-                    )
-                    due_at = parsed_due_at.replace(second=0, microsecond=0).isoformat(
-                        timespec="seconds",
-                    )
-            except (ValueError, TypeError, OverflowError):
-                due_at = None
-        else:
-            due_at = None
-
-        raw_last_notified_at = str(reminder.get("last_notified_at") or "").strip()
-        if raw_last_notified_at:
-            try:
-                parsed_last_notified_at = dateutil_parser.parse(raw_last_notified_at)
-                last_notified_at = parsed_last_notified_at.replace(
-                    second=0,
-                    microsecond=0,
-                ).isoformat(timespec="seconds")
-            except (ValueError, TypeError, OverflowError):
-                last_notified_at = None
-        else:
-            last_notified_at = None
-
-        try:
-            notification_count = max(0, int(reminder.get("notification_count", 0) or 0))
-        except (TypeError, ValueError):
-            notification_count = 0
+        due_at = self._parse_due_at(reminder.get("due_at"), due_text)
+        last_notified_at = self._parse_datetime_minute_precision(reminder.get("last_notified_at"))
+        notification_count = self._normalize_notification_count(reminder.get("notification_count", 0))
         return {
             "id": reminder_id,
             "title": title,
@@ -303,23 +304,14 @@ class MemoryNormalizer:
             "turn_count": turn_count,
         }
 
-    def normalize_consolidated_memory_entry(self, entry):
-        if isinstance(entry, str):
-            entry = {"summary": entry}
-
-        if not isinstance(entry, dict):
-            return None
-
-        summary = self.bot.naturalize_memory_summary(entry.get("summary", ""))
-        if not summary:
-            return None
-
+    def _normalize_consolidated_source_count(self, entry: dict) -> int:
         try:
-            source_count = max(1, int(entry.get("source_count", 1)))
+            return max(1, int(entry.get("source_count", 1)))
         except (TypeError, ValueError):
-            source_count = 1
+            return 1
 
-        supporting_summaries = []
+    def _normalize_consolidated_supporting_summaries(self, entry: dict) -> list[str]:
+        supporting_summaries: list[str] = []
         supporting_limit = self.bot.runtime_config.window("supporting_summaries", 4)
         for item in entry.get("supporting_summaries", []):
             cleaned = self.bot.naturalize_memory_summary(str(item or ""))
@@ -327,8 +319,10 @@ class MemoryNormalizer:
                 supporting_summaries.append(cleaned)
             if len(supporting_summaries) >= supporting_limit:
                 break
+        return supporting_summaries
 
-        contradictions = []
+    def _normalize_consolidated_contradictions(self, entry: dict) -> list[str]:
+        contradictions: list[str] = []
         contradiction_limit = self.bot.runtime_config.window("contradictions", 4)
         for item in entry.get("contradictions", []):
             cleaned = str(item or "").strip()
@@ -336,24 +330,35 @@ class MemoryNormalizer:
                 contradictions.append(cleaned)
             if len(contradictions) >= contradiction_limit:
                 break
+        return contradictions
 
-        updated_at = self._normalize_memory_timestamp(
-            entry.get("updated_at"),
-            fallback=self._turn_date_fallback(),
-        )
-        superseded_at = self._normalize_optional_timestamp(entry.get("superseded_at"))
-        last_reinforced_at = self._normalize_optional_timestamp(
-            entry.get("last_reinforced_at"),
-        )
+    @staticmethod
+    def _normalize_consolidated_version(entry: dict) -> int:
         try:
-            version = max(1, int(entry.get("version", 1)))
+            return max(1, int(entry.get("version", 1)))
         except (TypeError, ValueError):
-            version = 1
+            return 1
+
+    @staticmethod
+    def _normalize_consolidated_importance(entry: dict) -> float:
         try:
-            importance_score = float(entry.get("importance_score", 0.0))
+            return max(0.0, min(1.0, float(entry.get("importance_score", 0.0))))
         except (TypeError, ValueError):
-            importance_score = 0.0
-        payload = {
+            return 0.0
+
+    def _build_consolidated_payload(
+        self,
+        *,
+        entry: dict,
+        summary: str,
+        source_count: int,
+        contradictions: list[str],
+        supporting_summaries: list[str],
+        updated_at: str,
+        superseded_at: str | None,
+        last_reinforced_at: str | None,
+    ) -> dict:
+        return {
             "summary": summary,
             "category": str(
                 entry.get("category") or self.bot.infer_memory_category(summary),
@@ -368,8 +373,8 @@ class MemoryNormalizer:
                 contradiction_count=len(contradictions),
                 updated_at=updated_at,
             ),
-            "importance_score": max(0.0, min(1.0, importance_score)),
-            "version": version,
+            "importance_score": self._normalize_consolidated_importance(entry),
+            "version": self._normalize_consolidated_version(entry),
             "superseded": bool(entry.get("superseded", False)),
             "superseded_by": str(entry.get("superseded_by") or "").strip(),
             "superseded_reason": str(entry.get("superseded_reason") or "").strip(),
@@ -379,12 +384,9 @@ class MemoryNormalizer:
             "contradictions": contradictions,
             "updated_at": updated_at,
         }
-        try:
-            validated = ConsolidatedMemory.model_validate(payload)
-        except ValidationError:
-            return None
 
-        dumped = validated.model_dump(mode="json")
+    @staticmethod
+    def _dump_consolidated_entry(dumped: dict, *, updated_at: str) -> dict:
         return {
             "summary": dumped["summary"],
             "category": dumped["category"],
@@ -401,6 +403,47 @@ class MemoryNormalizer:
             "contradictions": dumped["contradictions"],
             "updated_at": updated_at,
         }
+
+    def normalize_consolidated_memory_entry(self, entry):
+        if isinstance(entry, str):
+            entry = {"summary": entry}
+
+        if not isinstance(entry, dict):
+            return None
+
+        summary = self.bot.naturalize_memory_summary(entry.get("summary", ""))
+        if not summary:
+            return None
+
+        source_count = self._normalize_consolidated_source_count(entry)
+        supporting_summaries = self._normalize_consolidated_supporting_summaries(entry)
+        contradictions = self._normalize_consolidated_contradictions(entry)
+
+        updated_at = self._normalize_memory_timestamp(
+            entry.get("updated_at"),
+            fallback=self._turn_date_fallback(),
+        )
+        superseded_at = self._normalize_optional_timestamp(entry.get("superseded_at"))
+        last_reinforced_at = self._normalize_optional_timestamp(
+            entry.get("last_reinforced_at"),
+        )
+        payload = self._build_consolidated_payload(
+            entry=entry,
+            summary=summary,
+            source_count=source_count,
+            contradictions=contradictions,
+            supporting_summaries=supporting_summaries,
+            updated_at=updated_at,
+            superseded_at=superseded_at,
+            last_reinforced_at=last_reinforced_at,
+        )
+        try:
+            validated = ConsolidatedMemory.model_validate(payload)
+        except ValidationError:
+            return None
+
+        dumped = validated.model_dump(mode="json")
+        return self._dump_consolidated_entry(dumped, updated_at=updated_at)
 
     def normalize_persona_evolution_entry(self, entry):
         if not isinstance(entry, dict):
@@ -533,99 +576,81 @@ class MemoryNormalizer:
                 entry.get("created_at") or self._turn_timestamp_fallback(),
             ),
         }
+    @staticmethod
+    def _normalize_graph_node(node: object) -> dict | None:
+        if not isinstance(node, dict):
+            return None
+        label = str(node.get("label") or "").strip().lower()
+        node_type = str(node.get("type") or "topic").strip().lower()
+        if not label or node_type not in {"topic", "category", "mood"}:
+            return None
+        try:
+            weight = max(1, int(node.get("weight", 1)))
+        except (TypeError, ValueError):
+            weight = 1
+        return {
+            "id": str(node.get("id") or f"{node_type}:{label}"),
+            "label": label,
+            "type": node_type,
+            "weight": weight,
+        }
+
+    @staticmethod
+    def _normalize_graph_edge(edge: object) -> dict | None:
+        if not isinstance(edge, dict):
+            return None
+        source = str(edge.get("source") or "").strip().lower()
+        target = str(edge.get("target") or "").strip().lower()
+        if not source or not target:
+            return None
+        try:
+            weight = max(1, int(edge.get("weight", 1)))
+        except (TypeError, ValueError):
+            weight = 1
+        return {"source": source, "target": target, "weight": weight}
+
+    @staticmethod
+    def _normalize_dict_list(raw: object, *, tail: int | None = None) -> list[dict]:
+        items = list(raw or [])
+        if tail is not None:
+            items = items[-tail:]
+        return [dict(item) for item in items if isinstance(item, dict)]
 
     def normalize_memory_graph(self, graph):
         default_graph = self.bot.default_memory_graph()
         if not isinstance(graph, dict):
             return default_graph
-
-        nodes = []
-        for node in graph.get("nodes", [])[:24]:
-            if not isinstance(node, dict):
-                continue
-            label = str(node.get("label") or "").strip().lower()
-            node_type = str(node.get("type") or "topic").strip().lower()
-            if not label or node_type not in {"topic", "category", "mood"}:
-                continue
-            try:
-                weight = max(1, int(node.get("weight", 1)))
-            except (TypeError, ValueError):
-                weight = 1
-            nodes.append(
-                {
-                    "id": str(node.get("id") or f"{node_type}:{label}"),
-                    "label": label,
-                    "type": node_type,
-                    "weight": weight,
-                },
-            )
-
-        edges = []
-        for edge in graph.get("edges", [])[:24]:
-            if not isinstance(edge, dict):
-                continue
-            source = str(edge.get("source") or "").strip().lower()
-            target = str(edge.get("target") or "").strip().lower()
-            if not source or not target:
-                continue
-            try:
-                weight = max(1, int(edge.get("weight", 1)))
-            except (TypeError, ValueError):
-                weight = 1
-            edges.append(
-                {
-                    "source": source,
-                    "target": target,
-                    "weight": weight,
-                },
-            )
-
+        nodes = [n for node in graph.get("nodes", [])[:24] if (n := self._normalize_graph_node(node)) is not None]
+        edges = [e for edge in graph.get("edges", [])[:24] if (e := self._normalize_graph_edge(edge)) is not None]
         return {
             "nodes": nodes,
             "edges": edges,
             "updated_at": graph.get("updated_at") or default_graph["updated_at"],
         }
 
-    def normalize_relationship_state(self, state):
-        default_state = self.bot.default_relationship_state()
-        if not isinstance(state, dict):
-            return default_state
+    @staticmethod
+    def _normalize_emotional_momentum(raw_momentum: object) -> str:
+        momentum = str(raw_momentum)
+        return momentum if momentum in {"steady", "warming", "heavy"} else "steady"
 
-        last_updated = self._normalize_memory_timestamp(
-            state.get("last_updated"),
-            fallback=default_state["last_updated"],
-        )
-        trust_level = self.bot.decay_relationship_level(
-            state.get("trust_level", default_state["trust_level"]),
-            last_updated,
-        )
-        openness_level = self.bot.decay_relationship_level(
-            state.get("openness_level", default_state["openness_level"]),
-            last_updated,
-        )
+    @staticmethod
+    def _normalize_recurring_topics(recurring_topics: object) -> dict[str, int]:
+        cleaned_topics: dict[str, int] = {}
+        if not isinstance(recurring_topics, dict):
+            return cleaned_topics
+        for topic, count in recurring_topics.items():
+            topic_name = str(topic).strip().lower()
+            if not topic_name:
+                continue
+            try:
+                cleaned_topics[topic_name] = max(0, int(count))
+            except (TypeError, ValueError):
+                continue
+        return cleaned_topics
 
-        momentum = str(
-            state.get("emotional_momentum", default_state["emotional_momentum"]),
-        )
-        emotional_momentum = momentum if momentum in {"steady", "warming", "heavy"} else "steady"
-
-        recurring_topics = state.get("recurring_topics", {})
-        cleaned_topics = {}
-        if isinstance(recurring_topics, dict):
-            for topic, count in recurring_topics.items():
-                topic_name = str(topic).strip().lower()
-                if not topic_name:
-                    continue
-                try:
-                    cleaned_topics[topic_name] = max(0, int(count))
-                except (TypeError, ValueError):
-                    continue
-
-        recent_checkins = []
-        for item in self.bot.runtime_config.tail(
-            state.get("recent_checkins", []),
-            "recent_checkins",
-        ):
+    def _normalize_recent_checkins(self, raw_checkins: object) -> list[dict[str, str]]:
+        recent_checkins: list[dict[str, str]] = []
+        for item in self.bot.runtime_config.tail(raw_checkins if isinstance(raw_checkins, list) else [], "recent_checkins"):
             if not isinstance(item, dict):
                 continue
             recent_checkins.append(
@@ -635,13 +660,13 @@ class MemoryNormalizer:
                     "topic": str(item.get("topic") or "general").strip().lower() or "general",
                 },
             )
-        profiles = self.bot.relationship_hypothesis_profiles()
+        return recent_checkins
+
+    def _normalize_relationship_hypotheses(self, state: dict, profiles: dict) -> list[dict[str, object]]:
         raw_hypotheses = state.get("hypotheses", [])
-        candidate_hypotheses = []
+        candidate_hypotheses: list[dict[str, object]] = []
         if isinstance(raw_hypotheses, dict):
-            raw_hypotheses = [
-                {"name": name, "probability": probability} for name, probability in raw_hypotheses.items()
-            ]
+            raw_hypotheses = [{"name": name, "probability": probability} for name, probability in raw_hypotheses.items()]
         for item in raw_hypotheses:
             if not isinstance(item, dict):
                 continue
@@ -660,20 +685,38 @@ class MemoryNormalizer:
                     "probability": probability,
                 },
             )
-
         if not candidate_hypotheses:
             candidate_hypotheses = self.bot.default_relationship_hypotheses()
-
         total_probability = sum(item.get("probability", 0.0) for item in candidate_hypotheses) or 1.0
         for item in candidate_hypotheses:
-            item["probability"] = round(
-                float(item.get("probability", 0.0)) / total_probability,
-                4,
-            )
-        candidate_hypotheses.sort(
-            key=lambda item: (-item.get("probability", 0.0), item.get("name", "")),
+            item["probability"] = round(float(item.get("probability", 0.0)) / total_probability, 4)
+        candidate_hypotheses.sort(key=lambda item: (-item.get("probability", 0.0), item.get("name", "")))
+        return candidate_hypotheses[: len(profiles)]
+
+    def normalize_relationship_state(self, state):
+        default_state = self.bot.default_relationship_state()
+        if not isinstance(state, dict):
+            return default_state
+
+        last_updated = self._normalize_memory_timestamp(
+            state.get("last_updated"),
+            fallback=default_state["last_updated"],
         )
-        hypotheses = candidate_hypotheses[: len(profiles)]
+        trust_level = self.bot.decay_relationship_level(
+            state.get("trust_level", default_state["trust_level"]),
+            last_updated,
+        )
+        openness_level = self.bot.decay_relationship_level(
+            state.get("openness_level", default_state["openness_level"]),
+            last_updated,
+        )
+        emotional_momentum = self._normalize_emotional_momentum(
+            state.get("emotional_momentum", default_state["emotional_momentum"]),
+        )
+        cleaned_topics = self._normalize_recurring_topics(state.get("recurring_topics", {}))
+        recent_checkins = self._normalize_recent_checkins(state.get("recent_checkins", []))
+        profiles = self.bot.relationship_hypothesis_profiles()
+        hypotheses = self._normalize_relationship_hypotheses(state, profiles)
         active_hypothesis = hypotheses[0]["name"] if hypotheses else default_state["active_hypothesis"]
         last_hypothesis_updated = self._normalize_memory_timestamp(
             state.get("last_hypothesis_updated"),
@@ -714,27 +757,8 @@ class MemoryNormalizer:
 
     # ------------------------------------------------------------------ memory entry normalizers
 
-    def normalize_memory_entry(self, memory):
-        if not isinstance(memory, dict):
-            return None
-
-        summary = self.bot.naturalize_memory_summary(memory.get("summary", ""))
-        if not summary:
-            return None
-
-        category = memory.get("category")
-        if category in {None, "summary", "category"}:
-            category = self.infer_memory_category(summary)
-
-        created_at = self._normalize_memory_timestamp(
-            memory.get("created_at"),
-            fallback=self._turn_date_fallback(),
-        )
-        updated_at = self._normalize_memory_timestamp(
-            memory.get("updated_at"),
-            fallback=created_at,
-        )
-        payload = {
+    def _memory_entry_payload(self, memory, *, summary, category, created_at, updated_at):
+        return {
             "summary": summary,
             "category": category,
             "mood": self.bot.normalize_mood(memory.get("mood")) if "mood" in memory else "neutral",
@@ -759,12 +783,9 @@ class MemoryNormalizer:
                 memory.get("contradictions"),
             ),
         }
-        try:
-            validated = MemoryEntry.model_validate(payload)
-        except ValidationError:
-            return None
 
-        dumped = validated.model_dump(mode="json")
+    @staticmethod
+    def _project_memory_entry_common(memory, dumped, *, created_at, updated_at):
         normalized = {
             "summary": dumped["summary"],
             "category": dumped["category"],
@@ -795,6 +816,10 @@ class MemoryNormalizer:
             normalized["pinned"] = bool(dumped["pinned"])
         if "contradictions" in memory:
             normalized["contradictions"] = dumped["contradictions"]
+        return normalized
+
+    @staticmethod
+    def _project_memory_entry_counters(memory, normalized):
         if "access_count" in memory:
             try:
                 normalized["access_count"] = max(0, int(memory.get("access_count", 0) or 0))
@@ -814,6 +839,47 @@ class MemoryNormalizer:
                 "medium": max(0, int(raw.get("medium", 0) or 0)),
                 "low": max(0, int(raw.get("low", 0) or 0)),
             }
+
+    def normalize_memory_entry(self, memory):
+        if not isinstance(memory, dict):
+            return None
+
+        summary = self.bot.naturalize_memory_summary(memory.get("summary", ""))
+        if not summary:
+            return None
+
+        category = memory.get("category")
+        if category in {None, "summary", "category"}:
+            category = self.infer_memory_category(summary)
+
+        created_at = self._normalize_memory_timestamp(
+            memory.get("created_at"),
+            fallback=self._turn_date_fallback(),
+        )
+        updated_at = self._normalize_memory_timestamp(
+            memory.get("updated_at"),
+            fallback=created_at,
+        )
+        payload = self._memory_entry_payload(
+            memory,
+            summary=summary,
+            category=category,
+            created_at=created_at,
+            updated_at=updated_at,
+        )
+        try:
+            validated = MemoryEntry.model_validate(payload)
+        except ValidationError:
+            return None
+
+        dumped = validated.model_dump(mode="json")
+        normalized = self._project_memory_entry_common(
+            memory,
+            dumped,
+            created_at=created_at,
+            updated_at=updated_at,
+        )
+        self._project_memory_entry_counters(memory, normalized)
         return normalized
 
     def normalize_persisted_memory_entry(self, memory):
@@ -1071,68 +1137,58 @@ class MemoryNormalizer:
 
     # -- Private field-group helpers for normalize_memory_store -----------------
 
+    def _normalize_catalog_entries(self, store: dict, *, source_key: str, tail_key: str, normalizer) -> list[dict]:
+        return self.bot.runtime_config.tail(
+            [
+                entry
+                for entry in (normalizer(item) for item in store.get(source_key, []))
+                if entry is not None
+            ],
+            tail_key,
+        )
+
     def _normalize_catalog_list_fields(self, store: dict, normalized: dict) -> None:
-        normalized["consolidated_memories"] = self.bot.runtime_config.tail(
-            [
-                entry
-                for entry in (
-                    self.normalize_consolidated_memory_entry(item) for item in store.get("consolidated_memories", [])
-                )
-                if entry is not None
-            ],
-            "consolidated_memories",
+        normalized["consolidated_memories"] = self._normalize_catalog_entries(
+            store,
+            source_key="consolidated_memories",
+            tail_key="consolidated_memories",
+            normalizer=self.normalize_consolidated_memory_entry,
         )
-        normalized["persona_evolution"] = self.bot.runtime_config.tail(
-            [
-                entry
-                for entry in (
-                    self.normalize_persona_evolution_entry(item) for item in store.get("persona_evolution", [])
-                )
-                if entry is not None
-            ],
-            "persona_evolution",
+        normalized["persona_evolution"] = self._normalize_catalog_entries(
+            store,
+            source_key="persona_evolution",
+            tail_key="persona_evolution",
+            normalizer=self.normalize_persona_evolution_entry,
         )
-        normalized["wisdom_insights"] = self.bot.runtime_config.tail(
-            [
-                entry
-                for entry in (self.normalize_wisdom_entry(item) for item in store.get("wisdom_insights", []))
-                if entry is not None
-            ],
-            "wisdom_insights",
+        normalized["wisdom_insights"] = self._normalize_catalog_entries(
+            store,
+            source_key="wisdom_insights",
+            tail_key="wisdom_insights",
+            normalizer=self.normalize_wisdom_entry,
         )
-        normalized["life_patterns"] = self.bot.runtime_config.tail(
-            [
-                entry
-                for entry in (self.normalize_life_pattern_entry(item) for item in store.get("life_patterns", []))
-                if entry is not None
-            ],
-            "life_patterns",
+        normalized["life_patterns"] = self._normalize_catalog_entries(
+            store,
+            source_key="life_patterns",
+            tail_key="life_patterns",
+            normalizer=self.normalize_life_pattern_entry,
         )
-        normalized["pending_proactive_messages"] = self.bot.runtime_config.tail(
-            [
-                entry
-                for entry in (
-                    self.normalize_proactive_message_entry(item) for item in store.get("pending_proactive_messages", [])
-                )
-                if entry is not None
-            ],
-            "pending_proactive_messages",
+        normalized["pending_proactive_messages"] = self._normalize_catalog_entries(
+            store,
+            source_key="pending_proactive_messages",
+            tail_key="pending_proactive_messages",
+            normalizer=self.normalize_proactive_message_entry,
         )
-        normalized["reminders"] = self.bot.runtime_config.tail(
-            [
-                reminder
-                for reminder in (self.normalize_reminder_entry(item) for item in store.get("reminders", []))
-                if reminder is not None
-            ],
-            "reminders",
+        normalized["reminders"] = self._normalize_catalog_entries(
+            store,
+            source_key="reminders",
+            tail_key="reminders",
+            normalizer=self.normalize_reminder_entry,
         )
-        normalized["session_archive"] = self.bot.runtime_config.tail(
-            [
-                entry
-                for entry in (self.normalize_session_archive_entry(item) for item in store.get("session_archive", []))
-                if entry is not None
-            ],
-            "session_archive",
+        normalized["session_archive"] = self._normalize_catalog_entries(
+            store,
+            source_key="session_archive",
+            tail_key="session_archive",
+            normalizer=self.normalize_session_archive_entry,
         )
 
     def _normalize_health_fields(self, store: dict, normalized: dict) -> None:
@@ -1263,27 +1319,13 @@ class MemoryNormalizer:
 
     def _normalize_bounded_list_fields(self, store: dict, normalized: dict) -> None:
         normalized["mcp_local_store"] = dict(store.get("mcp_local_store") or {})
-        normalized["narrative_memories"] = [
-            dict(item) for item in list(store.get("narrative_memories") or []) if isinstance(item, dict)
-        ]
-        normalized["heritage_cross_links"] = [
-            dict(item) for item in list(store.get("heritage_cross_links") or []) if isinstance(item, dict)
-        ]
-        normalized["advice_audits"] = [
-            dict(item) for item in list(store.get("advice_audits") or [])[-160:] if isinstance(item, dict)
-        ]
-        normalized["environmental_cues_history"] = [
-            dict(item) for item in list(store.get("environmental_cues_history") or [])[-200:] if isinstance(item, dict)
-        ]
-        normalized["longitudinal_insights"] = [
-            dict(item) for item in list(store.get("longitudinal_insights") or [])[-40:] if isinstance(item, dict)
-        ]
-        normalized["relationship_timeline"] = str(
-            store.get("relationship_timeline") or "",
-        ).strip()
-        normalized["memory_graph"] = self.normalize_memory_graph(
-            store.get("memory_graph"),
-        )
+        normalized["narrative_memories"] = self._normalize_dict_list(store.get("narrative_memories"))
+        normalized["heritage_cross_links"] = self._normalize_dict_list(store.get("heritage_cross_links"))
+        normalized["advice_audits"] = self._normalize_dict_list(store.get("advice_audits"), tail=160)
+        normalized["environmental_cues_history"] = self._normalize_dict_list(store.get("environmental_cues_history"), tail=200)
+        normalized["longitudinal_insights"] = self._normalize_dict_list(store.get("longitudinal_insights"), tail=40)
+        normalized["relationship_timeline"] = str(store.get("relationship_timeline") or "").strip()
+        normalized["memory_graph"] = self.normalize_memory_graph(store.get("memory_graph"))
 
 
 __all__ = ["MemoryNormalizer"]

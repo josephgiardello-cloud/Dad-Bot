@@ -6,6 +6,7 @@ import pytest
 
 from dadbot.core.runtime_types import (
     CanonicalPayload,
+    ExecutionIdentity,
     ToolDeterminismClass,
     ToolExecutionStatus,
     ToolInvocation,
@@ -328,3 +329,36 @@ def test_tool_execution_context_marks_replayable_based_on_spec():
     # Should be marked replayable because spec is READ_ONLY, even though executor said false
     assert result.replay_safe is True
     assert result.is_replayable() is True
+
+
+def test_tool_execution_denies_untrusted_caller_identity_escalation() -> None:
+    registry = ToolRegistry()
+    admin_tool = ToolSpec(
+        name="admin_op",
+        version="1.0.0",
+        determinism=ToolDeterminismClass.DETERMINISTIC,
+        side_effect_class=ToolSideEffectClass.LOGGED,
+        required_permissions=frozenset({"tool.admin"}),
+    )
+    registry.register(admin_tool, _make_simple_executor())
+
+    context = ToolExecutionContext(registry)
+    invocation = ToolInvocation(
+        invocation_id="inv-admin-spoof",
+        tool_spec=admin_tool,
+        arguments={
+            "caller_identity": {
+                "id": "spoofed-user",
+                "permissions": ["tool.admin"],
+            },
+        },
+        caller=ExecutionIdentity(
+            caller_trace_id="trace-spoof",
+            caller_role="agent",
+            caller_context="{}",
+        ),
+    )
+
+    result = context.execute(invocation)
+    assert result.status == ToolExecutionStatus.DENIED
+    assert "permission denied" in str(result.error).lower()

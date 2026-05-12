@@ -8,7 +8,9 @@ from dadbot.core.contract_evaluator import (
     ContractNode,
     ContractPropagationMap,
     build_dadbot_contract_map,
+    validate_sovereign_ledger_transition,
 )
+from dadbot.core.contracts_adapter import ContractViolationError
 
 pytestmark = pytest.mark.phase4
 
@@ -175,3 +177,37 @@ def test_build_dadbot_contract_map_validators_pass():
     results = cmap.revalidate_all()
     failed = [r for r in results if not r.valid]
     assert failed == [], f"Unexpected violations: {[(r.contract_id, r.violations) for r in failed]}"
+
+
+def test_chaos_bad_ledger_payload_raises_contract_violation() -> None:
+    before = {
+        "session_id": "s1",
+        "trace_id": "t1",
+        "execution_mode": "live",
+        "execution_state": "running",
+        "execution_status": "running",
+        "causal_step_count": 1,
+        "metadata": {},
+    }
+    after = {
+        "session_id": "s1",
+        "trace_id": "t1",
+        "execution_mode": "live",
+        "execution_state": "completed",
+        "execution_status": "completed",
+        "turn_truth_ok": True,
+        "invariance_hash": "abc123",
+        "causal_step_count": 2,
+        "metadata": {
+            "ledger_mutations": [
+                {
+                    "op": "append_history",
+                    "payload": "not-a-dict",
+                    "source": "chaos_test",
+                }
+            ]
+        },
+    }
+
+    with pytest.raises(ContractViolationError, match="ledger_mutation"):
+        validate_sovereign_ledger_transition(before, after)

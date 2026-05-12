@@ -65,9 +65,32 @@ class _FakeKernel:
         self.memory_query = SimpleNamespace(
             relevant_memories_for_input=lambda q, limit=5: [{"summary": q, "limit": limit}],
         )
+        self.memory_catalog = lambda: [{"summary": "Allergic to peanuts", "category": "health", "mood": "calm"}]
+        self.semantic_memory_matches = lambda q, memories, limit=3: list(memories)[:limit]
+        self.synced_semantic_index = []
+        self.sync_semantic_memory_index = lambda memories: self.synced_semantic_index.extend(list(memories or []))
+
+        self.ledger_writer = SimpleNamespace(
+            write_event=lambda event_type, **kwargs: {"event_id": "evt-runtime", "type": event_type, **kwargs}
+        )
+        self.execution_ledger = SimpleNamespace(
+            read=lambda: [
+                {
+                    "event_id": "e1",
+                    "session_id": "default",
+                    "type": "JOB_COMPLETED",
+                    "payload": {"summary": "Discussed tomato garden plan"},
+                    "timestamp": "2026-05-12T00:00:00Z",
+                }
+            ]
+            * 12
+        )
 
     def process_user_message(self, message: str):
         return (f"echo::{message}", True)
+
+    def execute_turn(self, request):
+        return SimpleNamespace(as_result=lambda: (f"reply::{request.input.text}", True))
 
     def reset_session_state(self):
         self._reset_called = True
@@ -79,7 +102,7 @@ def test_chat_returns_minimal_materialized_result_shape():
 
     result = assistant.chat("hello")
 
-    assert result["response"] == "echo::hello"
+    assert result["response"] == "reply::hello"
     assert result["memory_updates"] is None
     assert result["tool_calls"] is None
     assert "debug" not in result
@@ -91,7 +114,7 @@ def test_chat_debug_gates_kernel_metadata():
 
     result = assistant.chat("hello", debug=True)
 
-    assert result["response"] == "echo::hello"
+    assert result["response"] == "reply::hello"
     assert result["debug"]["trace"] == {"phase": "done"}
     assert result["debug"]["planner"] == {"tool_calls": ["memory_lookup"]}
 
@@ -157,3 +180,46 @@ def test_browser_tool_controls_delegate_to_kernel_mcp_surface():
     assert status == {"running": False, "tool_count": 18}
     assert started == {"running": True, "restart": True}
     assert stopped == {"running": False}
+
+
+def test_run_agent_loop_wires_semantic_memory_observation_hook():
+    kernel = _FakeKernel()
+    assistant = AssistantRuntime(kernel)
+
+    result = assistant.run_agent_loop("hello", enable_semantic_memory=True)
+
+    assert result.completed_turns >= 1
+
+
+def test_run_memory_consolidation_executes_job():
+    kernel = _FakeKernel()
+    assistant = AssistantRuntime(kernel)
+
+    payload = assistant.run_memory_consolidation(background=False, force=True)
+
+    assert payload["status"] == "written"
+
+
+def test_executive_startup_observation_formats_pending_tasks(monkeypatch):
+    monkeypatch.setattr(
+        "dadbot_system.local_mcp_server.get_pending_executive_tasks",
+        lambda limit=8: [
+            {"id": "tsk1", "title": "Send invoice", "due": "2026-05-13T09:00:00", "priority": "high", "done": False},
+            {"id": "tsk2", "title": "Review PR", "due": "", "priority": "normal", "done": False},
+        ][:limit],
+    )
+
+    text = AssistantRuntime._executive_startup_observation(max_tasks=8)
+
+    assert "Startup executive tasks (pending):" in text
+    assert "[tsk1] Send invoice" in text
+    assert "[tsk2] Review PR" in text
+
+
+def test_executive_startup_observation_returns_empty_when_no_tasks(monkeypatch):
+    monkeypatch.setattr(
+        "dadbot_system.local_mcp_server.get_pending_executive_tasks",
+        lambda limit=8: [],
+    )
+
+    assert AssistantRuntime._executive_startup_observation(max_tasks=8) == ""

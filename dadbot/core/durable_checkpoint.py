@@ -79,7 +79,7 @@ class DurableCheckpoint:
             if not self._checkpoints:
                 return {
                     "ok": True,
-                    "reason": "no checkpoints saved yet â€” clean start",
+                    "reason": "no checkpoints saved yet - clean start",
                     "checkpoint_count": 0,
                 }
             last = deepcopy(self._checkpoints[-1])
@@ -111,33 +111,16 @@ class DurableCheckpoint:
         with self._lock:
             report["checkpoint_count"] = len(self._checkpoints)
 
-        if current_event_count < expected_event_count:
-            msg = (
-                f"Ledger truncation detected: expected at least {expected_event_count} events, "
-                f"found {current_event_count}. Refusing to resume."
-            )
-            raise CheckpointIntegrityError(msg)
-
-        if not bool(verification.get("ok", True)):
-            msg = (
-                "Ledger replay verification failed: "
-                f"mode={verification_mode!r} violations={list(verification.get('violations') or [])!r}"
-            )
-            raise CheckpointIntegrityError(msg)
-
-        if current_replay_hash != expected_replay_hash:
-            msg = (
-                f"Ledger replay hash mismatch: expected {expected_replay_hash!r}, "
-                f"got {current_replay_hash!r}. Ledger may be corrupted or partially written."
-            )
-            raise CheckpointIntegrityError(msg)
-
-        if expected_chain_hash and current_chain_hash != expected_chain_hash:
-            msg = (
-                f"Ledger chain hash mismatch: expected {expected_chain_hash!r}, "
-                f"got {current_chain_hash!r}. Ledger may be tampered or reordered."
-            )
-            raise CheckpointIntegrityError(msg)
+        _assert_checkpoint_integrity(
+            current_event_count=current_event_count,
+            expected_event_count=expected_event_count,
+            current_replay_hash=current_replay_hash,
+            expected_replay_hash=expected_replay_hash,
+            current_chain_hash=current_chain_hash,
+            expected_chain_hash=expected_chain_hash,
+            verification=verification,
+            verification_mode=verification_mode,
+        )
 
         report["ok"] = True
         report["reason"] = "ledger head matches last checkpoint"
@@ -159,9 +142,7 @@ class DurableCheckpoint:
                 )
             if index > 0:
                 prev = chain[index - 1]
-                if checkpoint.get("prev_checkpoint_hash") != prev.get(
-                    "checkpoint_hash",
-                ):
+                if checkpoint.get("prev_checkpoint_hash") != prev.get("checkpoint_hash"):
                     violations.append(
                         f"Checkpoint {index} prev_hash broken: "
                         f"expected={prev.get('checkpoint_hash')!r}, "
@@ -198,3 +179,36 @@ class DurableCheckpoint:
             default=str,
         ).encode("utf-8")
         return hashlib.sha256(serialized).hexdigest()
+
+
+def _assert_checkpoint_integrity(
+    *,
+    current_event_count: int,
+    expected_event_count: int,
+    current_replay_hash: str,
+    expected_replay_hash: str,
+    current_chain_hash: str,
+    expected_chain_hash: str,
+    verification: dict,
+    verification_mode: str,
+) -> None:
+    if current_event_count < expected_event_count:
+        raise CheckpointIntegrityError(
+            f"Ledger truncation detected: expected at least {expected_event_count} events, "
+            f"found {current_event_count}. Refusing to resume."
+        )
+    if not bool(verification.get("ok", True)):
+        raise CheckpointIntegrityError(
+            "Ledger replay verification failed: "
+            f"mode={verification_mode!r} violations={list(verification.get('violations') or [])!r}"
+        )
+    if current_replay_hash != expected_replay_hash:
+        raise CheckpointIntegrityError(
+            f"Ledger replay hash mismatch: expected {expected_replay_hash!r}, "
+            f"got {current_replay_hash!r}. Ledger may be corrupted or partially written."
+        )
+    if expected_chain_hash and current_chain_hash != expected_chain_hash:
+        raise CheckpointIntegrityError(
+            f"Ledger chain hash mismatch: expected {expected_chain_hash!r}, "
+            f"got {current_chain_hash!r}. Ledger may be tampered or reordered."
+        )

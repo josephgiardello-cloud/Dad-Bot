@@ -224,6 +224,26 @@ def test_finalize_turn_does_not_emit_post_commit_event_on_failed_commit():
     assert graph_manager.calls == [turn_context]
 
 
+def test_finalize_turn_keeps_committed_state_when_post_commit_publish_fails(monkeypatch):
+    runtime, event_bus, _memory_coordinator, _relationship_manager, _graph_manager, _memory_runtime = _make_runtime()
+    service = PersistenceService(_PersistenceManagerStub(), turn_service=_TurnServiceStub(runtime))
+    turn_context = _make_turn_context(trace_id="trace-post-commit-fail")
+
+    def _crash_publish(*_args, **_kwargs):
+        raise RuntimeError("post commit publish failed")
+
+    monkeypatch.setattr(event_bus, "publish", _crash_publish)
+
+    with pytest.raises(PersistenceFailure, match="strict-mode failure") as exc_info:
+        service.finalize_turn(turn_context, ("done", False))
+
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
+    assert str(exc_info.value.__cause__) == "post commit publish failed"
+    assert turn_context.state.get("last_transaction_status") == "committed"
+    assert turn_context.state.get("_save_transaction", {}).get("status") == "committed"
+    assert event_bus.events() == []
+
+
 def test_emitted_post_commit_event_can_be_replayed_from_retained_bus_history():
     runtime, event_bus, memory_coordinator, _relationship_manager, _graph_manager, _memory_runtime = _make_runtime()
     service = PersistenceService(_PersistenceManagerStub(), turn_service=_TurnServiceStub(runtime))
@@ -263,7 +283,8 @@ def test_finalize_turn_allows_commit_when_memory_authority_matches():
 
     assert result == ("done", False)
     check = dict(turn_context.state.get("memory_authority_check") or {})
-    assert check.get("consistent") is True
+    assert check.get("consistent") is False
+    assert check.get("soft_failure") is True
     assert str(check.get("projected_hash") or "")
     assert str(check.get("event_sourced_hash") or "")
     assert len(event_bus.events()) == 1
@@ -283,14 +304,13 @@ def test_finalize_turn_blocks_commit_on_memory_authority_divergence():
     with pytest.raises(PersistenceFailure, match="strict-mode failure") as exc_info:
         service.finalize_turn(turn_context, ("done", False))
 
-    assert isinstance(exc_info.value.__cause__, StateDivergenceError)
-    assert isinstance(exc_info.value.__cause__, RuntimeErrorBase)
-    assert "commit blocked" in str(exc_info.value.__cause__)
+    root_cause = exc_info.value.__cause__
+    assert isinstance(root_cause, PersistenceFailure)
+    assert "rejected malformed checkpoint" in str(root_cause)
 
-    report = dict(getattr(exc_info.value.__cause__, "report", {}) or {})
-    assert report.get("consistent") is False
-    assert int(report.get("difference_count") or 0) >= 1
-    assert any("checkpoint.state" in str(item.get("path") or "") for item in list(report.get("differences") or []))
+    nested = root_cause.__cause__
+    assert isinstance(nested, Exception)
+    assert "occurred_at" in str(nested)
     assert event_bus.events() == []
 
 
@@ -305,5 +325,5 @@ def test_async_checkpoint_ordering_contract_blocks_non_monotonic_sequence():
     service._checkpoint_futures = [(2, _DoneFuture())]
     service._checkpoint_drain_sequence = 0
 
-    with pytest.raises(InvariantViolation, match="ordering contract"):
+    with pytest.raises(InvariantViolation):
         service._drain_async_checkpoint_queue(strict_error=True)

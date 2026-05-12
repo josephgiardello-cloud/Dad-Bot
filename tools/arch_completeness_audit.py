@@ -167,6 +167,68 @@ def _has_exemption_marker(
     return False
 
 
+def _trace_exemption_reason(
+    source: str,
+    func_start_line: int,
+    func_end_line: int | None = None,
+    exemption_prefix: str = "TRACE_EXEMPT",
+) -> str:
+    """Extract TRACE_EXEMPT reason text near a function start."""
+    lines = source.split("\n")
+    search_range = min(func_start_line + 10, func_end_line or func_start_line + 20)
+    for i in range(max(0, func_start_line - 1), search_range):
+        if i >= len(lines):
+            break
+        line = str(lines[i] or "")
+        if exemption_prefix not in line:
+            continue
+        prefix_index = line.find(exemption_prefix)
+        trailing = line[prefix_index + len(exemption_prefix):]
+        if ":" in trailing:
+            return trailing.split(":", 1)[1].strip()
+        return trailing.strip()
+    return ""
+
+
+def _validate_trace_exemption(
+    source: str,
+    func_node: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> tuple[bool, list[str]]:
+    """Validate TRACE_EXEMPT markers are explicit and side-effect-safe."""
+    errors: list[str] = []
+    func_start = int(getattr(func_node, "lineno", 0) or 0)
+    func_end = int(getattr(func_node, "end_lineno", func_start) or func_start)
+
+    if not _has_exemption_marker(source, func_start, func_end):
+        errors.append("missing TRACE_EXEMPT marker")
+        return False, errors
+
+    reason = _trace_exemption_reason(source, func_start, func_end)
+    if len(reason.strip()) < 24:
+        errors.append("TRACE_EXEMPT reason too short; require explicit technical justification")
+
+    # Ensure exempt methods do not call durability/ledger/emit paths.
+    disallowed_calls = {
+        "save_turn_event",
+        "save_graph_checkpoint",
+        "emit_execution_identity",
+        "emit_kernel_rejection",
+        "transition_phase",
+    }
+    for node in ast.walk(func_node):
+        if not isinstance(node, ast.Call):
+            continue
+        call_name = ""
+        if isinstance(node.func, ast.Name):
+            call_name = str(node.func.id or "")
+        elif isinstance(node.func, ast.Attribute):
+            call_name = str(node.func.attr or "")
+        if call_name in disallowed_calls:
+            errors.append(f"TRACE_EXEMPT function calls side-effect API: {call_name}")
+
+    return len(errors) == 0, errors
+
+
 # ── Step 7.2 — Module presence check ─────────────────────────────────────────
 
 def check_missing_modules(manifest: dict) -> dict:
@@ -331,6 +393,18 @@ def check_param_propagation(manifest: dict) -> dict:
             params = _func_param_names(node)
             attrs = _attribute_accesses(node)
             all_names = params | attrs
+            has_exemption = _has_exemption_marker(src, node.lineno, getattr(node, "end_lineno", None))
+            if has_exemption:
+                is_valid, exemption_errors = _validate_trace_exemption(src, node)
+                if not is_valid:
+                    violations.append({
+                        "file": _rel(filepath),
+                        "function": node.name,
+                        "missing_fields": [],
+                        "lineno": node.lineno,
+                        "exemption_errors": exemption_errors,
+                    })
+                    continue
 
             missing = []
             for field in required_fields:
@@ -347,8 +421,7 @@ def check_param_propagation(manifest: dict) -> dict:
                         missing.append(field)
 
             if missing:
-                # Check if function has a TRACE_EXEMPT marker; if so, skip the violation
-                has_exemption = _has_exemption_marker(src, node.lineno)
+                # TRACE_EXEMPT markers are validated above; only skip when valid.
                 if not has_exemption:
                     violations.append({
                         "file": _rel(filepath),

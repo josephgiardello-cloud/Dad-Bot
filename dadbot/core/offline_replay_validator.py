@@ -188,7 +188,7 @@ class OfflineReplayValidator:
         contract: dict[str, Any],
         events: list[dict[str, Any]],
         *,
-        trace_id: str = "",
+        trace_token: str = "",
     ) -> ReplayValidationReport:
         """Verify an execution trace contract against its event list.
 
@@ -220,8 +220,8 @@ class OfflineReplayValidator:
         events = list(events or [])
 
         # Derive trace_id from events if not supplied.
-        if not trace_id and events:
-            trace_id = str(events[0].get("trace_id") or "")
+        if not trace_token and events:
+            trace_token = str(events[0].get("trace_id") or "")
 
         # --- Check 1: schema version presence ---------------------------
         checks.append("schema_version_present")
@@ -244,7 +244,7 @@ class OfflineReplayValidator:
         # --- Check 3: trace hash integrity ------------------------------
         checks.append("trace_hash_integrity")
         stored_hash = str(contract.get("trace_hash") or "").strip()
-        recomputed_hash = _recompute_trace_hash(events, trace_id)
+        recomputed_hash = _recompute_trace_hash(events, trace_token)
         meta["stored_trace_hash"] = stored_hash
         meta["recomputed_trace_hash"] = recomputed_hash
         if stored_hash != recomputed_hash:
@@ -342,7 +342,7 @@ class OfflineReplayValidator:
         contract: dict[str, Any],
         events: list[dict[str, Any]],
         identity: dict[str, Any],
-        trace_id: str = "",
+        trace_token: str = "",
     ) -> ReplayValidationReport:
         """Run all checks: trace contract + identity fingerprint together.
 
@@ -350,7 +350,7 @@ class OfflineReplayValidator:
         into a single report.  This is the recommended entry point for full
         offline verification of a persisted turn.
         """
-        trace_report = self.validate_trace_contract(contract, events, trace_id=trace_id)
+        trace_report = self.validate_trace_contract(contract, events, trace_token=trace_token)
         identity_report = self.validate_execution_identity(identity, events=events)
 
         all_violations = trace_report.violations + identity_report.violations

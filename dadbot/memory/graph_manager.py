@@ -1,4 +1,4 @@
-﻿"""MemoryGraphManager ├óΓé¼ΓÇ¥ owns memory graph construction, projection, store sync, and retrieval.
+"""MemoryGraphManager owns memory graph construction, projection, store sync, and retrieval.
 Extracted from MemoryManager to thin the god class.
 """
 
@@ -185,91 +185,124 @@ class MemoryGraphManager:
     # Fact extraction
     # ------------------------------------------------------------------
 
-    def extract_typed_graph_facts(
+    def _append_typed_fact(
         self,
-        text,
-        source_type,
         *,
-        default_category="general",
-        default_mood="neutral",
-        default_day="",
+        facts,
+        seen,
+        lowered,
+        source_type,
+        label,
+        semantic_type,
+        relation_type=None,
+        weight=1.0,
+        confidence=0.7,
     ):
-        summary = str(text or "").strip()
-        lowered = summary.lower()
-        facts = []
-        seen = set()
-
-        def add_fact(
+        entity_type, canonical = self.canonical_graph_entity(
             label,
-            semantic_type,
-            relation_type=None,
-            weight=1.0,
-            confidence=0.7,
-        ):
-            entity_type, canonical = self.canonical_graph_entity(
-                label,
-                semantic_type=semantic_type,
-            )
-            if not canonical:
-                return
-            resolved_relation = self.relation_type_for_entity(
-                source_type,
-                entity_type,
-                lowered,
-                fallback=relation_type or "mentions",
-            )
-            key = (entity_type, canonical, resolved_relation)
-            if key in seen:
-                return
-            seen.add(key)
-            facts.append(
-                {
-                    "entity_type": entity_type,
-                    "label": canonical,
-                    "relation_type": resolved_relation,
-                    "weight": weight,
-                    "confidence": confidence,
-                },
-            )
+            semantic_type=semantic_type,
+        )
+        if not canonical:
+            return
+        resolved_relation = self.relation_type_for_entity(
+            source_type,
+            entity_type,
+            lowered,
+            fallback=relation_type or "mentions",
+        )
+        key = (entity_type, canonical, resolved_relation)
+        if key in seen:
+            return
+        seen.add(key)
+        facts.append(
+            {
+                "entity_type": entity_type,
+                "label": canonical,
+                "relation_type": resolved_relation,
+                "weight": weight,
+                "confidence": confidence,
+            },
+        )
 
+    def _append_default_facts(
+        self,
+        *,
+        facts,
+        seen,
+        lowered,
+        source_type,
+        default_category,
+        default_mood,
+        default_day,
+    ):
         if default_category and default_category != "general":
-            add_fact(
-                default_category,
-                "category",
+            self._append_typed_fact(
+                facts=facts,
+                seen=seen,
+                lowered=lowered,
+                source_type=source_type,
+                label=default_category,
+                semantic_type="category",
                 relation_type="concerns",
                 weight=1.1,
                 confidence=0.8,
             )
         if default_mood and default_mood != "neutral":
-            add_fact(
-                default_mood,
-                "emotion",
+            self._append_typed_fact(
+                facts=facts,
+                seen=seen,
+                lowered=lowered,
+                source_type=source_type,
+                label=default_mood,
+                semantic_type="emotion",
                 relation_type="feels",
                 weight=1.0,
                 confidence=0.82,
             )
         if default_day:
-            add_fact(
-                default_day,
-                "day",
+            self._append_typed_fact(
+                facts=facts,
+                seen=seen,
+                lowered=lowered,
+                source_type=source_type,
+                label=default_day,
+                semantic_type="day",
                 relation_type="mentioned_on",
                 weight=0.9,
                 confidence=0.78,
             )
 
+    def _append_alias_facts(self, *, facts, seen, lowered, source_type):
         for canonical, aliases in self.GRAPH_ENTITY_ALIASES.items():
             if lowered == canonical or canonical in lowered or any(alias in lowered for alias in aliases):
-                add_fact(
-                    canonical,
-                    self.GRAPH_ENTITY_TYPES.get(canonical, "topic"),
+                self._append_typed_fact(
+                    facts=facts,
+                    seen=seen,
+                    lowered=lowered,
+                    source_type=source_type,
+                    label=canonical,
+                    semantic_type=self.GRAPH_ENTITY_TYPES.get(canonical, "topic"),
                     weight=1.1,
                     confidence=0.8,
                 )
 
+    def _append_sentiment_and_stressor_facts(
+        self,
+        *,
+        facts,
+        seen,
+        lowered,
+        source_type,
+        default_category,
+    ):
         if any(token in lowered for token in ["proud", "relieved", "grateful"]):
-            add_fact(
-                "positive",
-                "emotion",
+            self._append_typed_fact(
+                facts=facts,
+                seen=seen,
+                lowered=lowered,
+                source_type=source_type,
+                label="positive",
+                semantic_type="emotion",
                 relation_type="feels",
                 weight=0.95,
                 confidence=0.78,
@@ -287,22 +320,31 @@ class MemoryGraphManager:
             ]
         ):
             if default_category and default_category != "general":
-                add_fact(
-                    f"{default_category}_pressure",
-                    "stressor",
+                self._append_typed_fact(
+                    facts=facts,
+                    seen=seen,
+                    lowered=lowered,
+                    source_type=source_type,
+                    label=f"{default_category}_pressure",
+                    semantic_type="stressor",
                     relation_type="struggles_with",
                     weight=1.15,
                     confidence=0.82,
                 )
-            else:
-                add_fact(
-                    "stress",
-                    "stressor",
-                    relation_type="struggles_with",
-                    weight=1.0,
-                    confidence=0.78,
-                )
+                return
+            self._append_typed_fact(
+                facts=facts,
+                seen=seen,
+                lowered=lowered,
+                source_type=source_type,
+                label="stress",
+                semantic_type="stressor",
+                relation_type="struggles_with",
+                weight=1.0,
+                confidence=0.78,
+            )
 
+    def _append_llm_facts(self, *, facts, seen, summary, lowered, source_type):
         llm_facts = self.llm_typed_graph_facts(summary, source_type)
         for fact in llm_facts:
             entity_type, canonical = self.canonical_graph_entity(
@@ -331,14 +373,70 @@ class MemoryGraphManager:
                 },
             )
 
+    def _append_keyword_facts(self, *, facts, seen, summary, lowered, source_type):
         for token in self.graph_keyword_tokens(summary, limit=3):
-            add_fact(
-                token,
-                "topic",
+            self._append_typed_fact(
+                facts=facts,
+                seen=seen,
+                lowered=lowered,
+                source_type=source_type,
+                label=token,
+                semantic_type="topic",
                 relation_type="mentions",
                 weight=0.7,
                 confidence=0.65,
             )
+
+    def extract_typed_graph_facts(
+        self,
+        text,
+        source_type,
+        *,
+        default_category="general",
+        default_mood="neutral",
+        default_day="",
+    ):
+        summary = str(text or "").strip()
+        lowered = summary.lower()
+        facts = []
+        seen = set()
+
+        self._append_default_facts(
+            facts=facts,
+            seen=seen,
+            lowered=lowered,
+            source_type=source_type,
+            default_category=default_category,
+            default_mood=default_mood,
+            default_day=default_day,
+        )
+        self._append_alias_facts(
+            facts=facts,
+            seen=seen,
+            lowered=lowered,
+            source_type=source_type,
+        )
+        self._append_sentiment_and_stressor_facts(
+            facts=facts,
+            seen=seen,
+            lowered=lowered,
+            source_type=source_type,
+            default_category=default_category,
+        )
+        self._append_llm_facts(
+            facts=facts,
+            seen=seen,
+            summary=summary,
+            lowered=lowered,
+            source_type=source_type,
+        )
+        self._append_keyword_facts(
+            facts=facts,
+            seen=seen,
+            summary=summary,
+            lowered=lowered,
+            source_type=source_type,
+        )
         return facts
 
     def llm_typed_graph_facts(self, text, source_type):
@@ -498,16 +596,14 @@ Text: {summary}
         return existing
 
     @staticmethod
-    def upsert_graph_edge(edge_map, **edge):
-        edge_key = edge["edge_key"]
-        existing = edge_map.get(edge_key)
+    def _graph_edge_candidate(edge_key, edge):
         evidence = list(edge.get("evidence") or [])
         # Bi-temporal fields: valid_from / valid_until represent the knowledge
         # validity window; event_time is when the fact occurred; ingestion_time
-        # is when we first observed it.  All default to updated_at so legacy
+        # is when we first observed it. All default to updated_at so legacy
         # projections without explicit turn-time still get a sensible value.
         updated_at_str = edge.get("updated_at") or ""
-        candidate = {
+        return {
             "edge_key": edge_key,
             "source_key": edge["source_key"],
             "target_key": edge["target_key"],
@@ -522,6 +618,34 @@ Text: {summary}
             "evidence": evidence,
             "attributes": dict(edge.get("attributes") or {}),
         }
+
+    @staticmethod
+    def _merge_graph_edge_temporal(existing, candidate):
+        # Preserve original valid_from / event_time / ingestion_time on
+        # subsequent upserts; only update valid_until if explicitly supplied.
+        if existing.get("valid_from") is None and candidate["valid_from"]:
+            existing["valid_from"] = candidate["valid_from"]
+        if existing.get("event_time") is None and candidate["event_time"]:
+            existing["event_time"] = candidate["event_time"]
+        if existing.get("ingestion_time") is None and candidate["ingestion_time"]:
+            existing["ingestion_time"] = candidate["ingestion_time"]
+        if candidate.get("valid_until") is not None:
+            existing["valid_until"] = candidate["valid_until"]
+
+    @staticmethod
+    def _merge_graph_edge_collections(existing, candidate):
+        for item in candidate["evidence"]:
+            if item not in existing["evidence"]:
+                existing["evidence"].append(item)
+        for key, value in candidate["attributes"].items():
+            if key not in existing["attributes"] or value:
+                existing["attributes"][key] = value
+
+    @staticmethod
+    def upsert_graph_edge(edge_map, **edge):
+        edge_key = edge["edge_key"]
+        existing = edge_map.get(edge_key)
+        candidate = MemoryGraphManager._graph_edge_candidate(edge_key, edge)
         if existing is None:
             edge_map[edge_key] = candidate
             return candidate
@@ -537,22 +661,8 @@ Text: {summary}
             )
             or None
         )
-        # Preserve the original valid_from / event_time / ingestion_time on
-        # subsequent upserts ├óΓé¼ΓÇ¥ only update valid_until if explicitly supplied.
-        if existing.get("valid_from") is None and candidate["valid_from"]:
-            existing["valid_from"] = candidate["valid_from"]
-        if existing.get("event_time") is None and candidate["event_time"]:
-            existing["event_time"] = candidate["event_time"]
-        if existing.get("ingestion_time") is None and candidate["ingestion_time"]:
-            existing["ingestion_time"] = candidate["ingestion_time"]
-        if candidate.get("valid_until") is not None:
-            existing["valid_until"] = candidate["valid_until"]
-        for item in candidate["evidence"]:
-            if item not in existing["evidence"]:
-                existing["evidence"].append(item)
-        for key, value in candidate["attributes"].items():
-            if key not in existing["attributes"] or value:
-                existing["attributes"][key] = value
+        MemoryGraphManager._merge_graph_edge_temporal(existing, candidate)
+        MemoryGraphManager._merge_graph_edge_collections(existing, candidate)
         return existing
 
     @staticmethod
@@ -1221,6 +1331,98 @@ Text: {summary}
         "life_pattern": 1.05,
     }
 
+    def _graph_source_text(self, node, attributes, summary):
+        return " ".join(
+            part
+            for part in [
+                node.get("label", ""),
+                node.get("content", ""),
+                summary,
+                " ".join(attributes.get("supporting_summaries", [])),
+                " ".join(attributes.get("contradictions", [])),
+            ]
+            if part
+        )
+
+    def _graph_base_overlap(
+        self,
+        *,
+        node,
+        source_tokens,
+        query_tokens,
+        query_category,
+        query_mood,
+        mood_trend,
+    ):
+        overlap = len(query_tokens & source_tokens)
+        if query_category != "general" and str(node.get("category") or "general").strip().lower() == query_category:
+            overlap += 2
+        if query_mood != "neutral" and self._bot.normalize_mood(node.get("mood")) == query_mood:
+            overlap += 1
+        if mood_trend != "neutral" and self._bot.normalize_mood(node.get("mood")) == mood_trend:
+            overlap += 0.5
+        return overlap
+
+    def _graph_neighbor_overlap(
+        self,
+        *,
+        node,
+        adjacency,
+        nodes,
+        query_tokens,
+        query_category,
+        query_mood,
+        recent_topics,
+    ):
+        matched_labels = []
+        overlap_bonus = 0.0
+        for edge in adjacency.get(node["node_key"], []):
+            neighbor_key = (
+                edge.get("target_key") if edge.get("source_key") == node["node_key"] else edge.get("source_key")
+            )
+            neighbor = nodes.get(neighbor_key)
+            if (
+                neighbor is None
+                or neighbor.get("node_type") in self.GRAPH_SOURCE_NODE_TYPES
+                or neighbor.get("node_type") == "contradiction"
+            ):
+                continue
+            label = str(neighbor.get("label") or "").strip().lower()
+            if not label:
+                continue
+            if label in query_tokens or (query_category != "general" and label == query_category) or label in recent_topics:
+                matched_labels.append(label)
+                overlap_bonus += 1.1
+            elif query_mood != "neutral" and label == query_mood:
+                matched_labels.append(label)
+                overlap_bonus += 0.8
+        return overlap_bonus, matched_labels
+
+    @staticmethod
+    def _graph_overlap_gate(*, overlap, query_tokens, text):
+        if overlap > 0 or not query_tokens:
+            return overlap, False
+        if any(token in text.lower() for token in query_tokens):
+            return 0.75, False
+        return overlap, True
+
+    def _graph_score_value(self, *, node, attributes, overlap):
+        freshness = self._bot.memory_freshness_weight(node.get("updated_at"))
+        confidence = max(
+            0.4,
+            min(1.15, float(node.get("confidence", 0.6) or 0.6) + 0.15),
+        )
+        contradictions = len(attributes.get("contradictions", []))
+        contradiction_penalty = max(0.5, 1.0 - contradictions * 0.12)
+        score = (
+            overlap
+            * freshness
+            * confidence
+            * contradiction_penalty
+            * self._RETRIEVAL_SOURCE_TYPE_WEIGHTS.get(node.get("node_type"), 1.0)
+        )
+        return score
+
     def _score_graph_node(
         self,
         node,
@@ -1237,68 +1439,30 @@ Text: {summary}
         """
         attributes = dict(node.get("attributes") or {})
         summary = self.graph_source_summary(node)
-        text = " ".join(
-            part
-            for part in [
-                node.get("label", ""),
-                node.get("content", ""),
-                summary,
-                " ".join(attributes.get("supporting_summaries", [])),
-                " ".join(attributes.get("contradictions", [])),
-            ]
-            if part
-        )
+        text = self._graph_source_text(node, attributes, summary)
         source_tokens = self._bot.significant_tokens(text)
-        overlap = len(query_tokens & source_tokens)
-        if query_category != "general" and str(node.get("category") or "general").strip().lower() == query_category:
-            overlap += 2
-        if query_mood != "neutral" and self._bot.normalize_mood(node.get("mood")) == query_mood:
-            overlap += 1
-        if mood_trend != "neutral" and self._bot.normalize_mood(node.get("mood")) == mood_trend:
-            overlap += 0.5
-        matched_labels = []
-        for edge in adjacency.get(node["node_key"], []):
-            neighbor_key = (
-                edge.get("target_key") if edge.get("source_key") == node["node_key"] else edge.get("source_key")
-            )
-            neighbor = nodes.get(neighbor_key)
-            if (
-                neighbor is None
-                or neighbor.get("node_type") in self.GRAPH_SOURCE_NODE_TYPES
-                or neighbor.get("node_type") == "contradiction"
-            ):
-                continue
-            label = str(neighbor.get("label") or "").strip().lower()
-            if not label:
-                continue
-            if (
-                label in query_tokens
-                or (query_category != "general" and label == query_category)
-                or label in recent_topics
-            ):
-                matched_labels.append(label)
-                overlap += 1.1
-            elif query_mood != "neutral" and label == query_mood:
-                matched_labels.append(label)
-                overlap += 0.8
-        if overlap <= 0 and query_tokens:
-            if not any(token in text.lower() for token in query_tokens):
-                return None
-            overlap = 0.75
-        freshness = self._bot.memory_freshness_weight(node.get("updated_at"))
-        confidence = max(
-            0.4,
-            min(1.15, float(node.get("confidence", 0.6) or 0.6) + 0.15),
+        overlap = self._graph_base_overlap(
+            node=node,
+            source_tokens=source_tokens,
+            query_tokens=query_tokens,
+            query_category=query_category,
+            query_mood=query_mood,
+            mood_trend=mood_trend,
         )
-        contradictions = len(attributes.get("contradictions", []))
-        contradiction_penalty = max(0.5, 1.0 - contradictions * 0.12)
-        score = (
-            overlap
-            * freshness
-            * confidence
-            * contradiction_penalty
-            * self._RETRIEVAL_SOURCE_TYPE_WEIGHTS.get(node.get("node_type"), 1.0)
+        overlap_bonus, matched_labels = self._graph_neighbor_overlap(
+            node=node,
+            adjacency=adjacency,
+            nodes=nodes,
+            query_tokens=query_tokens,
+            query_category=query_category,
+            query_mood=query_mood,
+            recent_topics=recent_topics,
         )
+        overlap += overlap_bonus
+        overlap, should_skip = self._graph_overlap_gate(overlap=overlap, query_tokens=query_tokens, text=text)
+        if should_skip:
+            return None
+        score = self._graph_score_value(node=node, attributes=attributes, overlap=overlap)
         if score <= 0.15:
             return None
         return round(score, 4), sorted(set(matched_labels))
@@ -1310,6 +1474,47 @@ Text: {summary}
     def graph_retrieval_for_input(self, query, limit=3):
         return _graph_retrieval_for_input_view(self, query, limit=limit)
 
+    def _process_node_edges(
+        self,
+        node: dict,
+        adjacency: dict,
+        nodes: dict,
+    ) -> tuple[list, list, float]:
+        source_neighbors: list = []
+        companion_labels: list = []
+        total_weight = 0.0
+        for edge in adjacency.get(node["node_key"], []):
+            neighbor_key = (
+                edge.get("target_key") if edge.get("source_key") == node["node_key"] else edge.get("source_key")
+            )
+            neighbor = nodes.get(neighbor_key)
+            if neighbor is None:
+                continue
+            if neighbor.get("node_type") in self.GRAPH_SOURCE_NODE_TYPES:
+                source_neighbors.append(neighbor)
+                total_weight += float(edge.get("weight", 0.0) or 0.0) * max(
+                    0.4,
+                    float(neighbor.get("confidence", 0.0) or 0.0),
+                )
+                for peer_edge in adjacency.get(neighbor["node_key"], []):
+                    peer_key = (
+                        peer_edge.get("target_key")
+                        if peer_edge.get("source_key") == neighbor["node_key"]
+                        else peer_edge.get("source_key")
+                    )
+                    peer = nodes.get(peer_key)
+                    if (
+                        peer is None
+                        or peer.get("node_key") == node["node_key"]
+                        or peer.get("node_type") in self.GRAPH_SOURCE_NODE_TYPES
+                        or peer.get("node_type") == "contradiction"
+                    ):
+                        continue
+                    companion_labels.append(
+                        str(peer.get("label") or "").strip().lower(),
+                    )
+        return source_neighbors, companion_labels, total_weight
+
     def _rank_graph_summary_nodes(self, nodes, adjacency):
         """Rank semantic nodes by total weighted source-node connections.
         Returns list of (total_weight, node, source_types, companion_labels).
@@ -1318,39 +1523,7 @@ Text: {summary}
         for node in nodes.values():
             if node.get("node_type") in self.GRAPH_SOURCE_NODE_TYPES or node.get("node_type") == "contradiction":
                 continue
-            source_neighbors = []
-            companion_labels = []
-            total_weight = 0.0
-            for edge in adjacency.get(node["node_key"], []):
-                neighbor_key = (
-                    edge.get("target_key") if edge.get("source_key") == node["node_key"] else edge.get("source_key")
-                )
-                neighbor = nodes.get(neighbor_key)
-                if neighbor is None:
-                    continue
-                if neighbor.get("node_type") in self.GRAPH_SOURCE_NODE_TYPES:
-                    source_neighbors.append(neighbor)
-                    total_weight += float(edge.get("weight", 0.0) or 0.0) * max(
-                        0.4,
-                        float(neighbor.get("confidence", 0.0) or 0.0),
-                    )
-                    for peer_edge in adjacency.get(neighbor["node_key"], []):
-                        peer_key = (
-                            peer_edge.get("target_key")
-                            if peer_edge.get("source_key") == neighbor["node_key"]
-                            else peer_edge.get("source_key")
-                        )
-                        peer = nodes.get(peer_key)
-                        if (
-                            peer is None
-                            or peer.get("node_key") == node["node_key"]
-                            or peer.get("node_type") in self.GRAPH_SOURCE_NODE_TYPES
-                            or peer.get("node_type") == "contradiction"
-                        ):
-                            continue
-                        companion_labels.append(
-                            str(peer.get("label") or "").strip().lower(),
-                        )
+            source_neighbors, companion_labels, total_weight = self._process_node_edges(node, adjacency, nodes)
             if not source_neighbors:
                 continue
             source_types = sorted(

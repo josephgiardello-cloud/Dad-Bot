@@ -514,3 +514,160 @@ def test_fallback_chain_exhaustion_returns_degraded_result():
     assert result.degraded_reason == "fallback_chain_exhausted"
     assert result.fallback_used is True
     assert len(result.metadata.get("fallback_failures", [])) == 2
+
+
+def test_permission_enforcement_rejects_tool_invocation():
+    registry = DynamicToolRegistry()
+    _register_tool(
+        registry,
+        name="permissioned_tool",
+        version="1.0.0",
+        intent="lookup",
+        cost=0.2,
+        latency=5,
+        reliability=0.99,
+    )
+
+    runtime = ExternalToolRuntime(
+        registry,
+        permission_enforcer=lambda _name, _payload: (False, "missing_scope:read.tools"),
+    )
+    result = runtime.execute("permissioned_tool", {"query": "x", "_idempotency_key": "perm-deny-1"})
+
+    assert result.status == ToolExecutionStatus.SKIPPED
+    assert "permission_denied:missing_scope:read.tools" in result.error
+
+
+def test_hard_timeout_is_enforced_and_normalized():
+    registry = DynamicToolRegistry()
+
+    def very_slow(_payload: dict) -> ToolExecutionResult:
+        import time
+        time.sleep(0.08)
+        return ToolExecutionResult(
+            tool_name="slow_tool",
+            status=ToolExecutionStatus.OK,
+            output={"ok": True},
+            confidence=0.95,
+        )
+
+    _register_tool(
+        registry,
+        name="slow_tool",
+        version="1.0.0",
+        intent="lookup",
+        cost=0.5,
+        latency=10,
+        reliability=0.9,
+        handler=very_slow,
+    )
+    runtime = ExternalToolRuntime(
+        registry,
+        retry_policy=RetryPolicy(max_attempts=1),
+        hard_timeout_seconds=0.01,
+        sleeper=lambda _seconds: None,
+    )
+
+    result = runtime.execute("slow_tool", {"query": "x", "_idempotency_key": "hard-timeout-1"})
+
+    assert result.status == ToolExecutionStatus.TIMEOUT
+    normalized = dict(result.metadata.get("normalized_error") or {})
+    assert normalized.get("failure_kind") == NetworkFailureKind.TIMEOUT.value
+
+
+def test_latency_spike_marks_result_degraded():
+    registry = DynamicToolRegistry()
+
+    def fast_handler(_payload: dict) -> ToolExecutionResult:
+        import time
+        time.sleep(0.005)
+        return ToolExecutionResult(
+            tool_name="latency_sensitive",
+            status=ToolExecutionStatus.OK,
+            output={"v": 1},
+            confidence=0.95,
+        )
+
+    _register_tool(
+        registry,
+        name="latency_sensitive",
+        version="1.0.0",
+        intent="lookup",
+        cost=0.3,
+        latency=5,
+        reliability=0.99,
+        handler=fast_handler,
+    )
+    runtime = ExternalToolRuntime(
+        registry,
+        latency_spike_ms=0.01,
+    )
+
+    result = runtime.execute("latency_sensitive", {"_idempotency_key": "latency-spike-1"})
+
+    assert result.status == ToolExecutionStatus.DEGRADED
+    assert result.degraded_reason == "latency_spike"
+    assert bool(result.metadata.get("latency_spike")) is True
+
+
+def test_memory_ingestion_receives_tool_result_events():
+    registry = DynamicToolRegistry()
+    _register_tool(
+        registry,
+        name="memoryable_tool",
+        version="1.0.0",
+        intent="lookup",
+        cost=0.1,
+        latency=1,
+        reliability=0.99,
+    )
+
+    events: list[dict] = []
+    runtime = ExternalToolRuntime(
+        registry,
+        memory_sink=lambda event: events.append(dict(event)),
+    )
+
+    result = runtime.execute("memoryable_tool", {"key": "value", "_idempotency_key": "memory-ingest-1"})
+
+    assert result.status == ToolExecutionStatus.OK
+    assert len(events) == 1
+    assert events[0].get("kind") == "tool_result"
+    assert events[0].get("tool_name") == "memoryable_tool"
+
+
+def test_tool_execution_stats_include_failure_classification():
+    registry = DynamicToolRegistry()
+
+    def timeout_like(_payload: dict) -> ToolExecutionResult:
+        return ToolExecutionResult(
+            tool_name="flaky_tool",
+            status=ToolExecutionStatus.ERROR,
+            output=None,
+            error="upstream timeout",
+            confidence=0.0,
+            metadata={"http_status": 503},
+        )
+
+    _register_tool(
+        registry,
+        name="flaky_tool",
+        version="1.0.0",
+        intent="lookup",
+        cost=0.3,
+        latency=50,
+        reliability=0.3,
+        handler=timeout_like,
+    )
+
+    runtime = ExternalToolRuntime(
+        registry,
+        retry_policy=RetryPolicy(max_attempts=1),
+    )
+    runtime.execute("flaky_tool", {"_idempotency_key": "stats-failure-1"})
+    stats = runtime.tool_execution_stats()
+
+    assert stats["total"] >= 1
+    assert stats["errors"] >= 1
+    failure_classes = dict(stats.get("failure_classes") or {})
+    assert NetworkFailureKind.SERVER.value in failure_classes

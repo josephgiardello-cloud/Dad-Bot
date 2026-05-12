@@ -54,33 +54,48 @@ def _node_decision_sequence_hash(execution_trace_context: dict[str, Any]) -> str
     return _stable_sha256(sequence)
 
 
+def _failure_transition_status_signal(resolved_status: str) -> bool:
+    return resolved_status.lower() in {"error", "failed", "retry", "recover", "recovered"}
+
+
+def _has_step_failure_signal(failure_view: dict[str, Any]) -> bool:
+    return bool(
+        str(failure_view.get("class") or "")
+        or str(failure_view.get("type") or "")
+        or str(failure_view.get("message") or ""),
+    )
+
+
+def _build_step_error_string(failure_view: dict[str, Any], payload: dict[str, Any]) -> str:
+    return str(
+        failure_view.get("message")
+        or payload.get("error")
+        or failure_view.get("type")
+        or payload.get("error_type")
+        or ""
+    )
+
+
+def _failure_transition_for_step(step: dict[str, Any]) -> dict[str, Any] | None:
+    payload = dict(step.get("payload") or {})
+    execution_result = dict(payload.get("metadata", {}).get("execution_result") or {})
+    failure_view = dict(execution_result.get("failure") or {})
+    resolved_status = str(execution_result.get("status") or payload.get("status") or "")
+    if not _has_step_failure_signal(failure_view) and not _failure_transition_status_signal(resolved_status):
+        return None
+    return {
+        "operation": str(step.get("operation") or ""),
+        "status": resolved_status,
+        "error": _build_step_error_string(failure_view, payload),
+    }
+
+
 def _failure_recovery_transition_hash(execution_trace_context: dict[str, Any]) -> str:
     transitions: list[dict[str, Any]] = []
     for step in list(execution_trace_context.get("steps") or []):
-        payload = dict(step.get("payload") or {})
-        execution_result = dict(payload.get("metadata", {}).get("execution_result") or {})
-        failure_view = dict(execution_result.get("failure") or {})
-        resolved_status = str(execution_result.get("status") or payload.get("status") or "")
-        has_failure = bool(
-            str(failure_view.get("class") or "")
-            or str(failure_view.get("type") or "")
-            or str(failure_view.get("message") or ""),
-        )
-        status_signals_failure = resolved_status.lower() in {"error", "failed", "retry", "recover", "recovered"}
-        if has_failure or status_signals_failure:
-            transitions.append(
-                {
-                    "operation": str(step.get("operation") or ""),
-                    "status": resolved_status,
-                    "error": str(
-                        failure_view.get("message")
-                        or payload.get("error")
-                        or failure_view.get("type")
-                        or payload.get("error_type")
-                        or ""
-                    ),
-                },
-            )
+        transition = _failure_transition_for_step(step)
+        if transition is not None:
+            transitions.append(transition)
     return _stable_sha256(transitions)
 
 
@@ -109,6 +124,92 @@ def _invariant_decision_hash(invariant_decisions: list[dict[str, Any]]) -> str:
     return _stable_sha256(normalized)
 
 
+def _resolve_trace_hashes(
+    trace: dict[str, Any],
+    *,
+    final_trace_hash_fallback: str,
+) -> tuple[str, str, str]:
+    final_trace_hash = str(trace.get("final_hash") or final_trace_hash_fallback or "")
+    execution_dag_hash = str((trace.get("execution_dag") or {}).get("dag_hash") or "")
+    external_system_call_graph_hash = str((trace.get("external_system_calls") or {}).get("graph_hash") or "")
+    return final_trace_hash, execution_dag_hash, external_system_call_graph_hash
+
+
+def _post_commit_mutation_effects_hash(trace: dict[str, Any], *, graph_output: str) -> str:
+    snapshot = dict(trace.get("execution_snapshot") or {})
+    return _stable_sha256(
+        {
+            "outputs_per_step": list(snapshot.get("outputs_per_step") or []),
+            "final_output": str(snapshot.get("final_output") or graph_output or ""),
+            "memory_write_intents": list(snapshot.get("memory_write_intents") or []),
+            "memory_delta_summary": dict(snapshot.get("memory_delta_summary") or {}),
+        },
+    )
+
+
+def _reducer_components(
+    *,
+    trace: dict[str, Any],
+    graph_output: str,
+    memory_view: dict[str, Any],
+    policy_snapshot: dict[str, Any],
+    tool_trace_hash: str,
+    invariant_decisions: list[dict[str, Any]],
+    ledger_events: list[dict[str, Any]],
+    live_tool_mode: bool,
+) -> dict[str, Any]:
+    model_output_hashes = _model_output_hashes(trace)
+    memory_retrieval_hash = _stable_sha256(list(memory_view.get("memory_retrieval_set") or []))
+    policy_hash = _stable_sha256(dict(policy_snapshot or {}))
+    execution_order_hash = _execution_order_hash(trace)
+    node_decision_sequence_hash = _node_decision_sequence_hash(trace)
+    failure_recovery_transition_hash = _failure_recovery_transition_hash(trace)
+    tool_invocation_sequence_hash = _stable_sha256(
+        build_tool_invocation_projection(trace, live_tool_mode=live_tool_mode),
+    )
+    post_commit_mutation_effects_hash = _post_commit_mutation_effects_hash(trace, graph_output=graph_output)
+    invariant_hash = _invariant_decision_hash(invariant_decisions)
+    ledger_hash = _ledger_event_chain_hash(ledger_events)
+    return {
+        "model_output_hashes": model_output_hashes,
+        "memory_retrieval_hash": memory_retrieval_hash,
+        "policy_hash": policy_hash,
+        "tool_trace_hash": str(tool_trace_hash or ""),
+        "execution_order_hash": execution_order_hash,
+        "node_decision_sequence_hash": node_decision_sequence_hash,
+        "failure_recovery_transition_hash": failure_recovery_transition_hash,
+        "tool_invocation_sequence_hash": tool_invocation_sequence_hash,
+        "post_commit_mutation_effects_hash": post_commit_mutation_effects_hash,
+        "invariant_decision_hash": invariant_hash,
+        "ledger_event_chain_hash": ledger_hash,
+    }
+
+
+def _determinism_closure_payload(
+    *,
+    components: dict[str, Any],
+    final_trace_hash: str,
+    execution_dag_hash: str,
+    external_system_call_graph_hash: str,
+) -> dict[str, Any]:
+    return {
+        "model_output_hashes": components["model_output_hashes"],
+        "memory_retrieval_hash": components["memory_retrieval_hash"],
+        "policy_hash": components["policy_hash"],
+        "final_trace_hash": final_trace_hash,
+        "execution_dag_hash": execution_dag_hash,
+        "external_system_call_graph_hash": external_system_call_graph_hash,
+        "tool_trace_hash": components["tool_trace_hash"],
+        "execution_order_hash": components["execution_order_hash"],
+        "node_decision_sequence_hash": components["node_decision_sequence_hash"],
+        "failure_recovery_transition_hash": components["failure_recovery_transition_hash"],
+        "tool_invocation_sequence_hash": components["tool_invocation_sequence_hash"],
+        "post_commit_mutation_effects_hash": components["post_commit_mutation_effects_hash"],
+        "invariant_decision_hash": components["invariant_decision_hash"],
+        "ledger_event_chain_hash": components["ledger_event_chain_hash"],
+    }
+
+
 def reduce_official_execution_state(
     *,
     graph_output: str,
@@ -123,49 +224,26 @@ def reduce_official_execution_state(
     live_tool_mode: bool = False,
 ) -> dict[str, Any]:
     trace = dict(execution_trace_context or {})
-    final_trace_hash = str(trace.get("final_hash") or final_trace_hash_fallback or "")
-    execution_dag_hash = str((trace.get("execution_dag") or {}).get("dag_hash") or "")
-    external_system_call_graph_hash = str((trace.get("external_system_calls") or {}).get("graph_hash") or "")
-
-    model_output_hashes = _model_output_hashes(trace)
-    memory_retrieval_hash = _stable_sha256(list(memory_view.get("memory_retrieval_set") or []))
-    policy_hash = _stable_sha256(dict(policy_snapshot or {}))
-    execution_order_hash = _execution_order_hash(trace)
-    node_decision_sequence_hash = _node_decision_sequence_hash(trace)
-    failure_recovery_transition_hash = _failure_recovery_transition_hash(trace)
-    tool_invocation_sequence_hash = _stable_sha256(
-        build_tool_invocation_projection(trace, live_tool_mode=live_tool_mode),
+    final_trace_hash, execution_dag_hash, external_system_call_graph_hash = _resolve_trace_hashes(
+        trace,
+        final_trace_hash_fallback=final_trace_hash_fallback,
     )
-
-    snapshot = dict(trace.get("execution_snapshot") or {})
-    post_commit_mutation_effects_hash = _stable_sha256(
-        {
-            "outputs_per_step": list(snapshot.get("outputs_per_step") or []),
-            "final_output": str(snapshot.get("final_output") or graph_output or ""),
-            "memory_write_intents": list(snapshot.get("memory_write_intents") or []),
-            "memory_delta_summary": dict(snapshot.get("memory_delta_summary") or {}),
-        },
+    components = _reducer_components(
+        trace=trace,
+        graph_output=graph_output,
+        memory_view=memory_view,
+        policy_snapshot=policy_snapshot,
+        tool_trace_hash=tool_trace_hash,
+        invariant_decisions=list(invariant_decisions or []),
+        ledger_events=list(ledger_events or []),
+        live_tool_mode=live_tool_mode,
     )
-
-    invariant_hash = _invariant_decision_hash(list(invariant_decisions or []))
-    ledger_hash = _ledger_event_chain_hash(list(ledger_events or []))
-
-    closure_payload = {
-        "model_output_hashes": model_output_hashes,
-        "memory_retrieval_hash": memory_retrieval_hash,
-        "policy_hash": policy_hash,
-        "final_trace_hash": final_trace_hash,
-        "execution_dag_hash": execution_dag_hash,
-        "external_system_call_graph_hash": external_system_call_graph_hash,
-        "tool_trace_hash": str(tool_trace_hash or ""),
-        "execution_order_hash": execution_order_hash,
-        "node_decision_sequence_hash": node_decision_sequence_hash,
-        "failure_recovery_transition_hash": failure_recovery_transition_hash,
-        "tool_invocation_sequence_hash": tool_invocation_sequence_hash,
-        "post_commit_mutation_effects_hash": post_commit_mutation_effects_hash,
-        "invariant_decision_hash": invariant_hash,
-        "ledger_event_chain_hash": ledger_hash,
-    }
+    closure_payload = _determinism_closure_payload(
+        components=components,
+        final_trace_hash=final_trace_hash,
+        execution_dag_hash=execution_dag_hash,
+        external_system_call_graph_hash=external_system_call_graph_hash,
+    )
 
     return {
         "schema_version": "1.0",
@@ -177,16 +255,16 @@ def reduce_official_execution_state(
         "execution_dag_hash": execution_dag_hash,
         "external_system_call_graph_hash": external_system_call_graph_hash,
         "policy_snapshot": dict(policy_snapshot or {}),
-        "model_output_hashes": model_output_hashes,
-        "memory_retrieval_hash": memory_retrieval_hash,
-        "policy_hash": policy_hash,
-        "tool_trace_hash": str(tool_trace_hash or ""),
-        "execution_order_hash": execution_order_hash,
-        "node_decision_sequence_hash": node_decision_sequence_hash,
-        "failure_recovery_transition_hash": failure_recovery_transition_hash,
-        "tool_invocation_sequence_hash": tool_invocation_sequence_hash,
-        "post_commit_mutation_effects_hash": post_commit_mutation_effects_hash,
-        "invariant_decision_hash": invariant_hash,
-        "ledger_event_chain_hash": ledger_hash,
+        "model_output_hashes": components["model_output_hashes"],
+        "memory_retrieval_hash": components["memory_retrieval_hash"],
+        "policy_hash": components["policy_hash"],
+        "tool_trace_hash": components["tool_trace_hash"],
+        "execution_order_hash": components["execution_order_hash"],
+        "node_decision_sequence_hash": components["node_decision_sequence_hash"],
+        "failure_recovery_transition_hash": components["failure_recovery_transition_hash"],
+        "tool_invocation_sequence_hash": components["tool_invocation_sequence_hash"],
+        "post_commit_mutation_effects_hash": components["post_commit_mutation_effects_hash"],
+        "invariant_decision_hash": components["invariant_decision_hash"],
+        "ledger_event_chain_hash": components["ledger_event_chain_hash"],
         "determinism_closure_hash": _stable_sha256(closure_payload),
     }

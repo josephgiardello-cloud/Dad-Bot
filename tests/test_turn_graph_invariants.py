@@ -51,5 +51,5 @@ def test_turn_graph_raises_when_save_stage_missing() -> None:
 
     context = TurnContext(user_input="hello")
 
-    with pytest.raises(RuntimeError, match="Structural turn invariant violated: SaveNode did not execute"):
+    with pytest.raises(RuntimeError, match="Kernel validation failed"):
         asyncio.run(graph.execute(context))

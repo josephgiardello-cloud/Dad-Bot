@@ -92,6 +92,23 @@ def _semantic_actions(
     return actions
 
 
+def _build_exec_memory_state(terminal_state: dict[str, Any]) -> dict[str, Any]:
+    view = dict(terminal_state.get("final_memory_view") or {})
+    return {
+        "memory_structured": dict(view.get("memory_structured") or {}),
+        "memory_retrieval_set": list(view.get("memory_retrieval_set") or []),
+        "memory_full_history_id": str(view.get("memory_full_history_id") or ""),
+    }
+
+
+def _build_exec_embedding_state(terminal_state: dict[str, Any]) -> dict[str, Any]:
+    policy_snapshot = terminal_state.get("policy_snapshot") or {}
+    return {
+        "lock_hash": str(policy_snapshot.get("embedding_lock_hash") or ""),
+        "lock_model": str(policy_snapshot.get("embedding_lock_model") or ""),
+    }
+
+
 def build_execution_state(
     *,
     terminal_state: dict[str, Any],
@@ -99,12 +116,7 @@ def build_execution_state(
     semantic_mode: SemanticMode = "exact",
 ) -> ExecutionState:
     trace = canonicalize_execution_trace_context(execution_trace_context)
-    view = dict(terminal_state.get("final_memory_view") or {})
-    memory_state = {
-        "memory_structured": dict(view.get("memory_structured") or {}),
-        "memory_retrieval_set": list(view.get("memory_retrieval_set") or []),
-        "memory_full_history_id": str(view.get("memory_full_history_id") or ""),
-    }
+    memory_state = _build_exec_memory_state(terminal_state)
     trace_dag = dict(trace.get("execution_dag") or {})
     tool_io_graph = dict(trace.get("external_system_calls") or {})
     model_outputs = [
@@ -112,14 +124,7 @@ def build_execution_state(
         for step in list(trace.get("steps") or [])
         if str(step.get("operation") or "") == "model_output"
     ]
-    embedding_state = {
-        "lock_hash": str(
-            (terminal_state.get("policy_snapshot") or {}).get("embedding_lock_hash") or "",
-        ),
-        "lock_model": str(
-            (terminal_state.get("policy_snapshot") or {}).get("embedding_lock_model") or "",
-        ),
-    }
+    embedding_state = _build_exec_embedding_state(terminal_state)
     return ExecutionState(
         memory_state=_normalize_value(memory_state, mode=semantic_mode),
         trace_dag=_normalize_value(trace_dag, mode="exact"),
@@ -136,6 +141,19 @@ def _structural_equivalent(
     *,
     rules: AllowedTransformations,
 ) -> tuple[bool, list[str]]:
+
+    def _project_nodes(nodes: list[dict[str, Any]]) -> list[dict[str, str]]:
+        return sorted(
+            [
+                {
+                    "operation": str(node.get("operation") or ""),
+                    "payload_hash": str(node.get("payload_hash") or ""),
+                }
+                for node in nodes
+            ],
+            key=lambda item: json.dumps(item, sort_keys=True),
+        )
+
     violations: list[str] = []
 
     left_edges = list(left.trace_dag.get("edges") or [])
@@ -146,26 +164,8 @@ def _structural_equivalent(
     left_nodes = list(left.trace_dag.get("nodes") or [])
     right_nodes = list(right.trace_dag.get("nodes") or [])
     if rules.allow_causal_reorder:
-        left_projection = sorted(
-            [
-                {
-                    "operation": str(node.get("operation") or ""),
-                    "payload_hash": str(node.get("payload_hash") or ""),
-                }
-                for node in left_nodes
-            ],
-            key=lambda item: json.dumps(item, sort_keys=True),
-        )
-        right_projection = sorted(
-            [
-                {
-                    "operation": str(node.get("operation") or ""),
-                    "payload_hash": str(node.get("payload_hash") or ""),
-                }
-                for node in right_nodes
-            ],
-            key=lambda item: json.dumps(item, sort_keys=True),
-        )
+        left_projection = _project_nodes(left_nodes)
+        right_projection = _project_nodes(right_nodes)
         if left_projection != right_projection:
             violations.append("execution_dag_topology")
     elif left_nodes != right_nodes:

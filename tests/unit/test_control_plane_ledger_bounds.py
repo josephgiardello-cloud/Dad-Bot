@@ -5,6 +5,9 @@ import pytest
 pytestmark = pytest.mark.unit
 
 from dadbot.core.control_plane import ExecutionControlPlane, SessionRegistry
+from dadbot.core.distributed_correctness import NodeRole
+from dadbot.core.ledger_writer import LedgerWriter
+from dadbot.core.runtime_errors import AuthorityViolation, InvariantViolation
 
 
 @pytest.mark.asyncio
@@ -23,6 +26,87 @@ async def test_submit_turn_triggers_ledger_compaction_report(monkeypatch, tmp_pa
     assert "compacted" in report
     assert "event_count" in report
     assert "lossless_proof" in report
+
+
+def test_distributed_runtime_authority_rejects_split_brain_claim_path() -> None:
+    async def _executor(_session: dict, _job) -> tuple[str, bool]:
+        return ("ok", False)
+
+    plane = ExecutionControlPlane(registry=SessionRegistry(), kernel_executor=_executor)
+    now_ms = plane._distributed_now_ms()
+    plane._distributed_correctness.register_node(
+        node_id="shadow-leader",
+        epoch=plane._distributed_epoch,
+        lease_until_ms=now_ms + 60_000,
+        role=NodeRole.LEADER,
+        state_hash="split",
+    )
+
+    with pytest.raises(AuthorityViolation):
+        plane._enforce_distributed_runtime_authority(operation="scheduler_claim")
+
+
+def test_distributed_runtime_authority_rejects_non_authoritative_replay_path() -> None:
+    async def _executor(_session: dict, _job) -> tuple[str, bool]:
+        return ("ok", False)
+
+    plane = ExecutionControlPlane(registry=SessionRegistry(), kernel_executor=_executor)
+    now_ms = plane._distributed_now_ms()
+    # Expire the local leader lease first so the failure mode is non-authoritative,
+    # not split-brain.
+    plane._distributed_correctness.register_node(
+        node_id=plane._scheduler.worker_id,
+        epoch=plane._distributed_epoch,
+        lease_until_ms=now_ms - 1,
+        role=NodeRole.LEADER,
+        state_hash="stale",
+    )
+    plane._distributed_correctness.register_node(
+        node_id="higher-epoch-leader",
+        epoch=plane._distributed_epoch + 1,
+        lease_until_ms=now_ms + 60_000,
+        role=NodeRole.LEADER,
+        state_hash="authoritative",
+    )
+
+    with pytest.raises(AuthorityViolation):
+        plane._enforce_distributed_runtime_authority(operation="replay_acceptance_gate")
+
+
+def test_control_plane_binds_graph_execution_token() -> None:
+    class _GraphProbe:
+        def __init__(self) -> None:
+            self.bound_token = ""
+
+        def set_required_execution_token(self, execution_token: str) -> None:
+            self.bound_token = str(execution_token or "")
+
+    async def _executor(_session: dict, _job) -> tuple[str, bool]:
+        return ("ok", False)
+
+    graph_probe = _GraphProbe()
+    plane = ExecutionControlPlane(
+        registry=SessionRegistry(),
+        kernel_executor=_executor,
+        graph=graph_probe,
+    )
+    assert graph_probe.bound_token == plane.execution_token
+
+
+@pytest.mark.asyncio
+async def test_submit_turn_raises_when_commit_boundary_invariant_fails(monkeypatch) -> None:
+    async def _executor(_session: dict, _job) -> tuple[str, bool]:
+        return ("ok", False)
+
+    plane = ExecutionControlPlane(registry=SessionRegistry(), kernel_executor=_executor)
+
+    def _fake_counts(_trace_events: list[dict[str, object]]) -> tuple[int, bool]:
+        return (2, True)
+
+    monkeypatch.setattr(type(plane), "_trace_event_invariant_counts", staticmethod(_fake_counts))
+
+    with pytest.raises(InvariantViolation):
+        await plane.submit_turn(session_id="s-commit-boundary", user_input="hello")
 
 
 @pytest.mark.asyncio
@@ -188,12 +272,42 @@ async def test_submit_turn_failure_writes_typed_failure_payload() -> None:
     assert failure.get("failure_class") == "timeout"
     assert failure.get("failure_source") == "infrastructure"
     assert bool(failure.get("retryable")) is True
+    execution_state = dict(payload.get("metadata", {}).get("execution_state") or {})
+    assert execution_state.get("failure_type") == "retryable"
+    assert execution_state.get("failure_action") == "manual_retry"
+    assert bool(execution_state.get("auto_retry")) is False
     execution_result = dict(payload.get("metadata", {}).get("execution_result") or {})
     assert execution_result.get("status") == "failed"
     failure_view = dict(execution_result.get("failure") or {})
     assert failure_view.get("class") == "timeout"
     timeout_view = dict(execution_result.get("timeout") or {})
     assert bool(timeout_view.get("timed_out")) is True
+
+    policy_events = [e for e in events if str(e.get("type") or "") == "JOB_MANUAL_RETRY_REQUIRED"]
+    assert policy_events, "expected explicit failure policy event for manual retry"
+
+
+@pytest.mark.asyncio
+async def test_submit_turn_failure_emits_quarantine_policy_event() -> None:
+    async def _executor(_session: dict, _job) -> tuple[str, bool]:
+        raise RuntimeError("poison payload from downstream tool")
+
+    plane = ExecutionControlPlane(registry=SessionRegistry(), kernel_executor=_executor)
+
+    with pytest.raises(RuntimeError):
+        await plane.submit_turn(session_id="s-poison", user_input="hello")
+
+    events = list(plane.ledger_events())
+    quarantined = [e for e in events if str(e.get("type") or "") == "JOB_QUARANTINED"]
+    assert quarantined, "expected JOB_QUARANTINED policy event"
+
+    failed = [e for e in events if str(e.get("type") or "") == "JOB_FAILED"]
+    assert failed, "expected JOB_FAILED ledger event"
+    payload = dict(failed[-1].get("payload") or {})
+    execution_state = dict(payload.get("metadata", {}).get("execution_state") or {})
+    assert execution_state.get("failure_type") == "poison"
+    assert execution_state.get("failure_action") == "quarantine"
+    assert bool(execution_state.get("auto_retry")) is False
 
 
 @pytest.mark.asyncio
@@ -284,3 +398,162 @@ async def test_boot_reconcile_exposes_confluence_metrics(monkeypatch) -> None:
     metrics = dict(status.get("execution_confluence_metrics") or {})
     assert int(metrics.get("attempted", 0)) >= 2
     assert int(metrics.get("matched", 0)) >= 1
+
+
+@pytest.mark.asyncio
+async def test_boot_reconcile_reports_ambiguous_effects_for_recovery() -> None:
+    async def _executor(_session: dict, _job) -> tuple[str, bool]:
+        return ("ok", False)
+
+    plane = ExecutionControlPlane(registry=SessionRegistry(), kernel_executor=_executor)
+    LedgerWriter(plane.ledger).append_effect_begin(
+        session_id="s-amb",
+        trace_id="tr-amb",
+        effect_id="eff-amb-1",
+        request_id="req-amb-1",
+    )
+
+    status = plane.boot_reconcile()
+    effect_reconciliation = dict(status.get("effect_reconciliation") or {})
+    assert bool(effect_reconciliation.get("reconcile_required")) is True
+    ambiguous_effects = list(effect_reconciliation.get("ambiguous_effects") or [])
+    assert ambiguous_effects, "expected ambiguous effects to be surfaced"
+    assert ambiguous_effects[0].get("effect_id") == "eff-amb-1"
+
+
+@pytest.mark.asyncio
+async def test_boot_reconcile_auto_consumes_reconcile_required_effects(monkeypatch) -> None:
+    monkeypatch.setenv("DADBOT_AUTO_RECONCILE_ON_BOOT", "1")
+    monkeypatch.setenv("DADBOT_RECONCILE_PASS_MAX", "8")
+    monkeypatch.setenv("DADBOT_RECONCILE_MODE", "close_only")
+
+    async def _executor(_session: dict, _job) -> tuple[str, bool]:
+        return ("ok", False)
+
+    plane = ExecutionControlPlane(registry=SessionRegistry(), kernel_executor=_executor)
+    writer = LedgerWriter(plane.ledger)
+    writer.append_effect_begin(
+        session_id="s-auto",
+        trace_id="tr-auto-begin",
+        effect_id="eff-auto-1",
+        request_id="req-auto-1",
+    )
+    writer.write_event(
+        event_type="JOB_RECONCILE_REQUIRED",
+        session_id="s-auto",
+        trace_id="tr-auto-required",
+        kernel_step_id="control_plane.reconcile.required",
+        payload={
+            "request_id": "req-auto-1",
+            "effect_id": "eff-auto-1",
+            "reason": "ambiguous_effect_state",
+        },
+    )
+
+    status = plane.boot_reconcile()
+    effect_reconciliation = dict(status.get("effect_reconciliation") or {})
+    consumer = dict(effect_reconciliation.get("consumer") or {})
+
+    assert bool(consumer.get("enabled")) is True
+    assert int(consumer.get("attempted", 0)) >= 1
+    assert int(consumer.get("applied", 0)) >= 1
+    assert bool(effect_reconciliation.get("reconcile_required")) is False
+    assert list(effect_reconciliation.get("ambiguous_effects") or []) == []
+
+    events = list(plane.ledger_events())
+    reconciled = [event for event in events if str(event.get("type") or "") == "EFFECT_RECONCILED"]
+    assert reconciled, "expected EFFECT_RECONCILED event from auto-reconcile consumer"
+
+
+@pytest.mark.asyncio
+async def test_boot_reconcile_auto_consumer_honors_max_items(monkeypatch) -> None:
+    monkeypatch.setenv("DADBOT_AUTO_RECONCILE_ON_BOOT", "1")
+    monkeypatch.setenv("DADBOT_RECONCILE_PASS_MAX", "1")
+    monkeypatch.setenv("DADBOT_RECONCILE_MODE", "close_only")
+
+    async def _executor(_session: dict, _job) -> tuple[str, bool]:
+        return ("ok", False)
+
+    plane = ExecutionControlPlane(registry=SessionRegistry(), kernel_executor=_executor)
+    writer = LedgerWriter(plane.ledger)
+
+    writer.append_effect_begin(
+        session_id="s-bound",
+        trace_id="tr-bound-begin-1",
+        effect_id="eff-bound-1",
+        request_id="req-bound-1",
+    )
+    writer.write_event(
+        event_type="JOB_RECONCILE_REQUIRED",
+        session_id="s-bound",
+        trace_id="tr-bound-required-1",
+        kernel_step_id="control_plane.reconcile.required",
+        payload={
+            "request_id": "req-bound-1",
+            "effect_id": "eff-bound-1",
+            "reason": "ambiguous_effect_state",
+        },
+    )
+
+    writer.append_effect_begin(
+        session_id="s-bound",
+        trace_id="tr-bound-begin-2",
+        effect_id="eff-bound-2",
+        request_id="req-bound-2",
+    )
+    writer.write_event(
+        event_type="JOB_RECONCILE_REQUIRED",
+        session_id="s-bound",
+        trace_id="tr-bound-required-2",
+        kernel_step_id="control_plane.reconcile.required",
+        payload={
+            "request_id": "req-bound-2",
+            "effect_id": "eff-bound-2",
+            "reason": "ambiguous_effect_state",
+        },
+    )
+
+    status = plane.boot_reconcile()
+    effect_reconciliation = dict(status.get("effect_reconciliation") or {})
+    consumer = dict(effect_reconciliation.get("consumer") or {})
+
+    assert bool(consumer.get("enabled")) is True
+    assert int(consumer.get("max_items", 0)) == 1
+    assert int(consumer.get("attempted", 0)) == 1
+    assert int(consumer.get("applied", 0)) == 1
+    assert int(consumer.get("remaining", 0)) >= 1
+    assert bool(effect_reconciliation.get("reconcile_required")) is True
+
+    ambiguous_effects = list(effect_reconciliation.get("ambiguous_effects") or [])
+    assert len(ambiguous_effects) == 1
+
+
+@pytest.mark.asyncio
+async def test_submit_turn_starts_live_without_projection_redelivery() -> None:
+    seen_modes: list[str] = []
+    seen_states: list[dict[str, object]] = []
+
+    async def _executor(_session: dict, job) -> tuple[str, bool]:
+        seen_modes.append(str(dict(job.metadata or {}).get("execution_mode") or ""))
+        seen_states.append(dict(dict(job.metadata or {}).get("execution_state") or {}))
+        return ("ok", False)
+
+    plane = ExecutionControlPlane(
+        registry=SessionRegistry(),
+        kernel_executor=_executor,
+        worker_id="worker-test",
+        redelivery_retry_interval_seconds=0.005,
+    )
+
+    result = await plane.submit_turn(session_id="s-redelivery", user_input="hello", timeout_seconds=1.0)
+
+    assert result == ("ok", False)
+    assert seen_modes == ["live"]
+    assert seen_states
+    assert int(seen_states[0].get("redelivery_count", 0)) == 0
+    assert int(seen_states[0].get("lease_conflict_count", 0)) == 0
+    assert seen_states[0].get("lifecycle_state") == "running"
+
+    events = list(plane.ledger_events())
+    redeliveries = [e for e in events if str(e.get("type") or "") == "JOB_REDELIVERY_SCHEDULED"]
+    assert not redeliveries, "unexpected redelivery event for initial live execution"

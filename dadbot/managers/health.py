@@ -178,8 +178,12 @@ class RuntimeHealthManager:
         }
         history = list(self.health_history(limit=max_points))
         history.append(point)
+        recent_moods = list(self.bot.MEMORY_STORE.get("recent_moods", []) or [])
         self.bot.mutate_memory_store(
             health_history=history[-max(8, int(max_points or 240)) :],
+            recent_moods=recent_moods,
+            last_mood=self.bot.MEMORY_STORE.get("last_mood"),
+            last_mood_updated_at=self.bot.MEMORY_STORE.get("last_mood_updated_at"),
             save=False,
         )
 

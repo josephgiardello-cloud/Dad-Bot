@@ -31,6 +31,8 @@ from enum import Enum
 from threading import RLock
 from typing import Any
 
+from dadbot.core.runtime_errors import ReplayMismatch
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -417,7 +419,7 @@ class ExecutionIdempotencyRegistry:
 # ---------------------------------------------------------------------------
 
 
-class ReplayMismatchError(RuntimeError):
+class ReplayMismatchError(ReplayMismatch):
     """Raised when a replay produces a structurally inconsistent result."""
 
 

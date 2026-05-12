@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 import asyncio
 import contextlib
 import hashlib
@@ -29,7 +31,6 @@ from dadbot.core.execution_policy import (
     StagePhaseMappingPolicy,
     TurnFailureSeverity,
 )
-from dadbot.core.execution_policy_service import StageEntryGate
 from dadbot.core.execution_receipt import (
     DEFAULT_SIGNER as _DEFAULT_RECEIPT_SIGNER,
 )
@@ -55,11 +56,13 @@ from dadbot.core.graph_pipeline_nodes import (  # re-export pipeline node stubs
     _invoke_node_run_compat,
 )
 from dadbot.core.graph_side_effects import GraphSideEffectsOrchestrator
+from dadbot.core.graph_topology import TurnGraphTopology
 from dadbot.core.graph_temporal import (  # re-export temporal types
     TurnPhase,
     TurnTemporalAxis,
     VirtualClock,
 )
+from dadbot.core.graph_traverser import TurnGraphTraverser
 from dadbot.core.graph_types import (  # re-export trace/op types
     LedgerMutationOp,
     MemoryMutationOp,
@@ -83,7 +86,6 @@ from dadbot.core.runtime_errors import (
     InvariantViolation as RuntimeInvariantViolation,
 )
 from dadbot.core.side_effect_adapter import SideEffectAdapter
-from dadbot.core.turn_resume_store import TurnResumeStore
 from dadbot.core.ux_projection import TurnUxProjector  # re-export
 
 logger = logging.getLogger(__name__)
@@ -185,13 +187,14 @@ class TurnGraph:
             ReflectionNode(),
             SaveNode(),
         ]
-        self._node_map: dict[str, Any] = {}
-        self._edges: dict[str, str] = {}
-        self._entry_node: str | None = None
+        self._topology = TurnGraphTopology(nodes=list(self.nodes or []))
+        # Compatibility aliases for existing internal references.
+        self._node_map = self._topology.node_map
+        self._edges = self._topology.edges
+        self._entry_node = self._topology.entry_node
+        self._traverser = TurnGraphTraverser(registry=self.registry)
         for node in list(self.nodes or []):
             node_name = str(getattr(node, "name", type(node).__name__) or type(node).__name__).strip().lower()
-            if node_name and node_name not in self._node_map:
-                self._node_map[node_name] = node
             if node_name == "save" and not hasattr(node, "mgr") and self.registry is not None:
                 with contextlib.suppress(Exception):
                     cast(Any, node).mgr = self.registry.get("persistence_service")
@@ -230,8 +233,6 @@ class TurnGraph:
             policy_engine=self._policy_engine,
             json_safe=_json_safe,
         )
-        # Stage-entry policy gate: idempotency, capability, and ordering checks.
-        self._stage_entry_gate = StageEntryGate()
         self._invariant_gate = InvariantGate()
         # Side-effect adapter: all record-and-emit writes go through this layer.
         self._side_effect_adapter = SideEffectAdapter()
@@ -279,17 +280,8 @@ class TurnGraph:
         """
         raise RuntimeExecutionError(
             "configure_resume(store_dir=...) is removed",
-            context={"replacement": "configure_resume_store(TurnResumeStore(ledger=...))"},
+            context={"replacement": "Use execution ledger replay via ExecutionControlPlane/PersistenceService"},
         )
-
-    def configure_resume_store(
-        self,
-        resume_store: TurnResumeStore,
-        *,
-        policy: ResumabilityPolicy | None = None,
-    ) -> None:
-        """Deprecated: recovery is now ledger-only via replay. Use ExecutionLedger directly."""
-        pass  # No-op: Phase 3 uses ledger replay, not stored resume points.
 
     def configure_capabilities(
         self,
@@ -354,6 +346,52 @@ class TurnGraph:
             detail=detail,
         )
 
+    def _build_invariant_event_envelope(
+        self,
+        turn_context: TurnContext,
+        *,
+        event_type: str,
+        stage: str,
+        sequence: int,
+        detail: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        return {
+            "type": event_type,
+            "session_id": str(
+                turn_context.metadata.get("session_id")
+                or turn_context.state.get("session_id")
+                or "default"
+            ),
+            "kernel_step_id": f"trace.{stage}.{event_type}",
+            "payload": {
+                "sequence": sequence,
+                "detail": dict(detail or {}),
+            },
+        }
+
+    @staticmethod
+    def _pipeline_stage_names(turn_context: TurnContext) -> list[str]:
+        return [
+            str(name).strip().lower()
+            for name in list(turn_context.state.get("_pipeline_stage_names") or [])
+            if str(name).strip()
+        ]
+
+    @staticmethod
+    def _project_invariant_decision(decision: Any) -> dict[str, Any]:
+        return {
+            "approved": decision.approved,
+            "reason": decision.reason,
+            "details": dict(decision.details or {}),
+            "remediation": {
+                "action": decision.remediation.action.value,
+                "failure_class": decision.remediation.failure_class,
+                "attempt": decision.remediation.attempt,
+                "max_attempts": decision.remediation.max_attempts,
+                "reason": decision.remediation.reason,
+            } if decision.remediation is not None else None,
+        }
+
     def _enforce_transition_invariant(
         self,
         turn_context: TurnContext,
@@ -369,46 +407,28 @@ class TurnGraph:
             # No trace yet; invariant validation not ready
             return
 
-        lenient = bool(turn_context.metadata.get("invariant_gate_lenient", False))
+        lenient = bool(
+            str(os.environ.get("PYTEST_CURRENT_TEST") or "").strip()
+            and bool(turn_context.metadata.get("invariant_gate_lenient", False))
+        )
         try:
             latest = dict(trace[-1])
             sequence = int(latest.get("sequence") or 0)
 
-            event_envelope = {
-                "type": event_type,
-                "session_id": str(
-                    turn_context.metadata.get("session_id")
-                    or turn_context.state.get("session_id")
-                    or "default"
-                ),
-                "kernel_step_id": f"trace.{stage}.{event_type}",
-                "payload": {
-                    "sequence": sequence,
-                    "detail": dict(detail or {}),
-                },
-            }
+            event_envelope = self._build_invariant_event_envelope(
+                turn_context,
+                event_type=event_type,
+                stage=stage,
+                sequence=sequence,
+                detail=detail,
+            )
             self._invariant_gate.validate_event(event_envelope)
-            pipeline_names = [
-                str(name).strip().lower()
-                for name in list(turn_context.state.get("_pipeline_stage_names") or [])
-                if str(name).strip()
-            ]
+            pipeline_names = self._pipeline_stage_names(turn_context)
             decision = self._invariant_gate.assess_execution_semantics(
                 trace,
                 pipeline_stage_names=pipeline_names,
             )
-            turn_context.state["invariant_gate"] = {
-                "approved": decision.approved,
-                "reason": decision.reason,
-                "details": dict(decision.details or {}),
-                "remediation": {
-                    "action": decision.remediation.action.value,
-                    "failure_class": decision.remediation.failure_class,
-                    "attempt": decision.remediation.attempt,
-                    "max_attempts": decision.remediation.max_attempts,
-                    "reason": decision.remediation.reason,
-                } if decision.remediation is not None else None,
-            }
+            turn_context.state["invariant_gate"] = self._project_invariant_decision(decision)
             if not decision.approved:
                 if lenient:
                     logger.debug(
@@ -442,9 +462,69 @@ class TurnGraph:
     ) -> None:
         """Validate minimum persistence interface for graph execution semantics.
 
-        Strict mode is opt-in via metadata['persistence_contract_strict'].
+        Strict mode is always enforced in runtime paths.
         """
         self._side_effects.validate_persistence_service_contract(turn_context, service)
+
+    def _capture_identity_tuple_baseline(self, turn_context: TurnContext) -> None:
+        """Capture the canonical identity tuple exactly once at orchestration entry."""
+        turn_context.state["_identity_tuple_baseline"] = {
+            "trace_id": str(turn_context.trace_id or ""),
+            "kernel_step_id": str(turn_context.kernel_step_id or ""),
+            "determinism_manifest_object_id": int(id(turn_context.determinism_manifest)),
+        }
+
+    def _enforce_identity_tuple_immutable(self, turn_context: TurnContext, *, boundary: str) -> None:
+        """Hard invariant: identity tuple may not drift across execution boundaries."""
+        baseline = dict(turn_context.state.get("_identity_tuple_baseline") or {})
+        if not baseline:
+            return
+
+        current_trace_id = str(turn_context.trace_id or "")
+        current_kernel_step_id = str(turn_context.kernel_step_id or "")
+        current_manifest_object_id = int(id(turn_context.determinism_manifest))
+
+        expected_trace_id = str(baseline.get("trace_id") or "")
+        expected_kernel_step_id = str(baseline.get("kernel_step_id") or "")
+        expected_manifest_object_id = int(baseline.get("determinism_manifest_object_id") or 0)
+
+        if (
+            current_trace_id != expected_trace_id
+            or current_kernel_step_id != expected_kernel_step_id
+            or current_manifest_object_id != expected_manifest_object_id
+        ):
+            raise RuntimeInvariantViolation(
+                "Identity tuple drift detected: trace_id/kernel_step_id/determinism_manifest must be immutable",
+                context={
+                    "boundary": str(boundary or "unknown"),
+                    "expected": {
+                        "trace_id": expected_trace_id,
+                        "kernel_step_id": expected_kernel_step_id,
+                        "determinism_manifest_object_id": expected_manifest_object_id,
+                    },
+                    "observed": {
+                        "trace_id": current_trace_id,
+                        "kernel_step_id": current_kernel_step_id,
+                        "determinism_manifest_object_id": current_manifest_object_id,
+                    },
+                },
+            )
+
+    def _deterministic_wall_time(self, turn_context: TurnContext, *, slot: str) -> float:
+        """Capture wall-clock time through determinism boundary for replay stability."""
+        value = turn_context.determinism_boundary.capture(str(slot), time.time)
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return float(time.time())
+
+    def _deterministic_perf_counter(self, turn_context: TurnContext, *, slot: str) -> float:
+        """Capture perf-counter time through determinism boundary for replay stability."""
+        value = turn_context.determinism_boundary.capture(str(slot), time.perf_counter)
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return float(time.perf_counter())
 
     def _seal_execution_identity(self, turn_context: TurnContext) -> ExecutionIdentity:
         """Build, validate, persist, and seal the canonical execution identity.
@@ -500,20 +580,7 @@ class TurnGraph:
         self._execution_kernel = kernel
 
     def _pipeline_items(self) -> list[tuple[str, Any]]:
-        if self._node_map and self._entry_node is not None:
-            items: list[tuple[str, Any]] = []
-            node_name = self._entry_node
-            while node_name is not None:
-                items.append((node_name, self._node_map[node_name]))
-                node_name = self._edges.get(node_name)
-            return items
-        return [
-            (
-                str(getattr(node, "name", type(node).__name__) or type(node).__name__),
-                node,
-            )
-            for node in self.nodes
-        ]
+        return self._topology.pipeline_items()
 
     # (Deleted: _emit_turn_health_state, _mark_structural_degradation, _mark_stage_enter — no longer used)
 
@@ -530,13 +597,13 @@ class TurnGraph:
                 "[KERNEL SHADOW VIOLATION] %s",
                 getattr(result, "reason", "graph build validation failed"),
             )
-        # Any explicit add_node call switches pipeline resolution to node-map mode.
-        if self._entry_node is None:
-            self._entry_node = name
-        self._node_map[name] = node
+        self._topology.add_node(name, node)
+        self._entry_node = self._topology.entry_node
+        self._node_map = self._topology.node_map
 
     def set_edge(self, source: str, target: str) -> None:
-        self._edges[source] = target
+        self._topology.set_edge(source, target)
+        self._edges = self._topology.edges
 
     def set_kernel(self, kernel: Any) -> None:
         """Attach an execution kernel.  All node calls route through it."""
@@ -555,45 +622,10 @@ class TurnGraph:
     # (Deleted: _emit_execution_witness — no longer used)
 
     async def _run_parallel_subnodes(self, node: Any, turn_context: TurnContext) -> TurnContext:
-        async def _run_subnode(subnode: Any) -> None:
-            sub_run = getattr(subnode, "run", None)
-            if callable(sub_run):
-                result = await _invoke_node_run_compat(sub_run, self.registry, turn_context)
-                if result is not None:
-                    return
-                return
-            sub_execute = getattr(subnode, "execute", None)
-            if callable(sub_execute):
-                params = inspect.signature(sub_execute).parameters
-                if len(params) >= 2:
-                    await cast("Any", sub_execute)(self.registry, turn_context)
-                else:
-                    await cast("Any", sub_execute)(turn_context)
-                return
-            raise TypeError(f"Unsupported node type: {type(subnode).__name__}")
-
-        await asyncio.gather(*(_run_subnode(subnode) for subnode in node))
-        return turn_context
+        return await self._traverser.run_parallel_subnodes(node, turn_context)
 
     async def _call_node_direct(self, node: Any, turn_context: TurnContext) -> TurnContext:
-        if isinstance(node, (tuple, list)):
-            return await self._run_parallel_subnodes(node, turn_context)
-
-        run_method = getattr(node, "run", None)
-        if callable(run_method):
-            result = await _invoke_node_run_compat(run_method, self.registry, turn_context)
-            return cast("TurnContext", result or turn_context)
-
-        execute_method = getattr(node, "execute", None)
-        if callable(execute_method):
-            execute_params = inspect.signature(execute_method).parameters
-            if len(execute_params) >= 2:
-                await cast("Any", execute_method)(self.registry, turn_context)
-            else:
-                await cast("Any", execute_method)(turn_context)
-            return turn_context
-
-        raise TypeError(f"Unsupported node type: {type(node).__name__}")
+        return await self._traverser.call_node_direct(node, turn_context)
 
     def _apply_kernel_step_result(
         self,
@@ -904,8 +936,14 @@ class TurnGraph:
 
     def _record_stage_start(self, turn_context: TurnContext, *, stage_key: str, idx: int) -> float:
         turn_context.state["_active_stage_name"] = stage_key
-        stage_started_at = time.perf_counter()
-        stage_started_wall = time.time()
+        stage_started_at = self._deterministic_perf_counter(
+            turn_context,
+            slot=f"graph.stage.{stage_key}.{idx}.start_perf",
+        )
+        stage_started_wall = self._deterministic_wall_time(
+            turn_context,
+            slot=f"graph.stage.{stage_key}.{idx}.start_wall",
+        )
         self._record_execution_trace(
             turn_context,
             event_type="node_start",
@@ -923,7 +961,11 @@ class TurnGraph:
         idx: int,
         stage_started_at: float,
     ) -> float:
-        stage_ms = round((time.perf_counter() - stage_started_at) * 1000, 3)
+        stage_finished_at = self._deterministic_perf_counter(
+            turn_context,
+            slot=f"graph.stage.{stage_key}.{idx}.end_perf",
+        )
+        stage_ms = round((stage_finished_at - stage_started_at) * 1000, 3)
         turn_context.stage_traces.append(StageTrace(stage=stage_key, duration_ms=stage_ms, error=None))
         self._mark_stage_fidelity(turn_context, stage_key)
         self._record_execution_trace(
@@ -943,7 +985,11 @@ class TurnGraph:
         stage_started_at: float,
         stage_exc: Exception,
     ) -> None:
-        stage_ms = round((time.perf_counter() - stage_started_at) * 1000, 3)
+        stage_finished_at = self._deterministic_perf_counter(
+            turn_context,
+            slot=f"graph.stage.{stage_key}.{idx}.end_perf",
+        )
+        stage_ms = round((stage_finished_at - stage_started_at) * 1000, 3)
         turn_context.stage_traces.append(StageTrace(stage=stage_key, duration_ms=stage_ms, error=str(stage_exc)))
         self._record_execution_trace(
             turn_context,
@@ -969,7 +1015,10 @@ class TurnGraph:
 
     def _project_unified_trace_nodes(self, turn_context: TurnContext) -> list[dict[str, Any]]:
         """Project unified execution nodes from canonical stage traces."""
-        now_ts = time.time()
+        now_ts = self._deterministic_wall_time(
+            turn_context,
+            slot="graph.unified_trace.project_nodes.now_ts",
+        )
         projected: list[dict[str, Any]] = []
         for idx, stage in enumerate(list(turn_context.stage_traces or [])):
             stage_name = str(getattr(stage, "stage", "") or "unknown").strip().lower()
@@ -989,7 +1038,10 @@ class TurnGraph:
         return projected
 
     def _initialize_unified_turn_trace(self, turn_context: TurnContext) -> None:
-        now_ts = time.time()
+        now_ts = self._deterministic_wall_time(
+            turn_context,
+            slot="graph.unified_trace.start_time",
+        )
         session_id = str(
             turn_context.metadata.get("session_id")
             or turn_context.state.get("session_id")
@@ -1034,6 +1086,88 @@ class TurnGraph:
         turn_context.state.pop("turn_trace", None)
         turn_context.metadata.pop("turn_trace", None)
 
+    @staticmethod
+    def _coerce_finalized_output(result: FinalizedTurnResult | None) -> tuple[str | None, bool]:
+        response: str | None = None
+        should_end = False
+        if isinstance(result, tuple) and len(result) >= 2:
+            response = str(result[0] or "")
+            should_end = bool(result[1])
+        elif result is not None:
+            response = str(result)
+        return response, should_end
+
+    @staticmethod
+    def _count_commit_boundaries(nodes: list[dict[str, Any]]) -> int:
+        return sum(1 for node in list(nodes or []) if str((node or {}).get("node_type") or "") == "save")
+
+    @staticmethod
+    def _build_trace_checksum(trace: dict[str, Any]) -> str:
+        checksum_payload = {
+            "trace_id": str(trace.get("trace_id") or ""),
+            "session_id": str(trace.get("session_id") or ""),
+            "nodes": list(trace.get("nodes") or []),
+            "ledger_event_count": len(list(trace.get("trace_events") or [])),
+            "output": dict(trace.get("output") or {}),
+        }
+        checksum_content = json.dumps(checksum_payload, sort_keys=True, default=str)
+        return f"chk-{hashlib.sha256(checksum_content.encode('utf-8')).hexdigest()[:32]}"
+
+    def _validate_unified_projection_counts(
+        self,
+        turn_context: TurnContext,
+        *,
+        projected_count: int,
+        enforce_projection_consistency: bool,
+    ) -> int:
+        execution_trace_count = len(list(turn_context.state.get("execution_trace") or []))
+        if enforce_projection_consistency and projected_count != execution_trace_count:
+            raise ProjectionMismatch(
+                "Unified trace projection mismatch",
+                context={
+                    "execution_trace_count": execution_trace_count,
+                    "projected_trace_event_count": projected_count,
+                    "trace_id": str(turn_context.trace_id or ""),
+                },
+            )
+        return execution_trace_count
+
+    def _build_unified_trace_metadata(
+        self,
+        turn_context: TurnContext,
+        *,
+        execution_trace_count: int,
+        projected_count: int,
+        trace: dict[str, Any],
+    ) -> dict[str, Any]:
+        trace_metadata = dict(trace.get("metadata") or {})
+        trace_metadata.update(
+            {
+                "projection_version": "graph-execution-v1",
+                "source_of_truth": "execution_trace+stage_traces",
+                "execution_trace_event_count": execution_trace_count,
+                "projected_trace_event_count": projected_count,
+                "stage_trace_count": len(list(turn_context.stage_traces or [])),
+                "phase": str(getattr(turn_context.phase, "value", turn_context.phase) or ""),
+            },
+        )
+        return trace_metadata
+
+    def _build_unified_turn_output(
+        self,
+        turn_context: TurnContext,
+        *,
+        response: str | None,
+        should_end: bool,
+        error: str,
+    ) -> dict[str, Any]:
+        return {
+            "response": response,
+            "should_end": should_end,
+            "confidence": 1.0,
+            "recovery_fallback": bool(turn_context.short_circuit or bool(error)),
+        }
+
     def _finalize_unified_turn_trace(
         self,
         turn_context: TurnContext,
@@ -1047,62 +1181,37 @@ class TurnGraph:
             return
         trace = dict(trace_obj)
 
-        response: str | None = None
-        should_end = False
-        if isinstance(result, tuple) and len(result) >= 2:
-            response = str(result[0] or "")
-            should_end = bool(result[1])
-        elif result is not None:
-            response = str(result)
-
-        trace["output"] = {
-            "response": response,
-            "should_end": should_end,
-            "confidence": 1.0,
-            "recovery_fallback": bool(turn_context.short_circuit or bool(error)),
-        }
+        response, should_end = self._coerce_finalized_output(result)
+        trace["output"] = self._build_unified_turn_output(
+            turn_context,
+            response=response,
+            should_end=should_end,
+            error=error,
+        )
         trace["nodes"] = self._project_unified_trace_nodes(turn_context)
         trace["trace_events"] = self._project_unified_trace_events(turn_context)
-        execution_trace_count = len(list(turn_context.state.get("execution_trace") or []))
         projected_count = len(list(trace.get("trace_events") or []))
-        if enforce_projection_consistency and projected_count != execution_trace_count:
-            raise ProjectionMismatch(
-                "Unified trace projection mismatch",
-                context={
-                    "execution_trace_count": execution_trace_count,
-                    "projected_trace_event_count": projected_count,
-                    "trace_id": str(turn_context.trace_id or ""),
-                },
-            )
+        execution_trace_count = self._validate_unified_projection_counts(
+            turn_context,
+            projected_count=projected_count,
+            enforce_projection_consistency=enforce_projection_consistency,
+        )
         if error:
             trace["error"] = str(error)
 
-        trace_metadata = dict(trace.get("metadata") or {})
-        trace_metadata.update(
-            {
-                "projection_version": "graph-execution-v1",
-                "source_of_truth": "execution_trace+stage_traces",
-                "execution_trace_event_count": execution_trace_count,
-                "projected_trace_event_count": projected_count,
-                "stage_trace_count": len(list(turn_context.stage_traces or [])),
-                "phase": str(getattr(turn_context.phase, "value", turn_context.phase) or ""),
-            },
+        trace["metadata"] = self._build_unified_trace_metadata(
+            turn_context,
+            execution_trace_count=execution_trace_count,
+            projected_count=projected_count,
+            trace=trace,
         )
-        trace["metadata"] = trace_metadata
-        trace["end_time"] = time.time()
+        trace["end_time"] = self._deterministic_wall_time(
+            turn_context,
+            slot="graph.unified_trace.end_time",
+        )
         trace["duration_ms"] = max(0.0, (float(trace["end_time"]) - float(trace.get("start_time") or 0.0)) * 1000.0)
-        trace["commit_boundary_count"] = sum(
-            1 for node in list(trace.get("nodes") or []) if str((node or {}).get("node_type") or "") == "save"
-        )
-        checksum_payload = {
-            "trace_id": str(trace.get("trace_id") or ""),
-            "session_id": str(trace.get("session_id") or ""),
-            "nodes": list(trace.get("nodes") or []),
-            "ledger_event_count": len(list(trace.get("trace_events") or [])),
-            "output": dict(trace.get("output") or {}),
-        }
-        checksum_content = json.dumps(checksum_payload, sort_keys=True, default=str)
-        trace["checksum"] = f"chk-{hashlib.sha256(checksum_content.encode('utf-8')).hexdigest()[:32]}"
+        trace["commit_boundary_count"] = self._count_commit_boundaries(list(trace.get("nodes") or []))
+        trace["checksum"] = self._build_trace_checksum(trace)
         trace["completed"] = True
         serialized = dict(trace)
         # Persist as read-only sink snapshot for observability/replay only.
@@ -1163,6 +1272,29 @@ class TurnGraph:
             detail={"from": stage_key, "to": next_stage_name, "index": idx},
         )
 
+    def _enforce_kernel_invariants(
+        self,
+        *,
+        turn_context: TurnContext,
+        stage: str,
+        operation: str,
+        mutation_outside_save_node: bool = False,
+    ) -> None:
+        validate_result = self._execution_kernel.validate(
+            stage=stage,
+            operation=operation,
+            context=turn_context,
+            mutation_outside_save_node=mutation_outside_save_node,
+        )
+        if not bool(getattr(validate_result, "ok", True)):
+            raise ExecutionStageError(
+                "Kernel validation failed",
+                context={
+                    "stage": str(stage or ""),
+                    "reason": str(getattr(validate_result, "reason", "kernel validation failed")),
+                },
+            )
+
     async def _run_stage(  # noqa: PLR0913
         self,
         *,
@@ -1182,6 +1314,7 @@ class TurnGraph:
         trace_id = turn_context.trace_id
         kernel_step_id = turn_context.kernel_step_id
         determinism_manifest = turn_context.determinism_manifest
+        self._enforce_identity_tuple_immutable(turn_context, boundary=f"stage_enter:{stage_key}")
         stage_started_at = self._record_stage_start(turn_context, stage_key=stage_key, idx=idx)
         self._emit_checkpoint(
             turn_context,
@@ -1190,23 +1323,16 @@ class TurnGraph:
             persistence_service=persistence_service,
             persistence_is_lightweight=persistence_is_lightweight,
         )
-        validate_result = self._execution_kernel.validate(
+        self._enforce_kernel_invariants(
+            turn_context=turn_context,
             stage=stage_key,
             operation=f"turn_graph.stage:{stage_key}",
-            context=turn_context,
         )
-        if not bool(getattr(validate_result, "ok", True)):
-            raise ExecutionStageError(
-                "Kernel validation failed",
-                context={
-                    "stage": stage_key,
-                    "reason": str(getattr(validate_result, "reason", "kernel validation failed")),
-                },
-            )
         self._capture_memory_before(turn_context, stage_key)
 
         try:
             turn_context = await self._execute_node(node, turn_context)
+            self._enforce_identity_tuple_immutable(turn_context, boundary=f"stage_exit:{stage_key}")
             self._record_stage_success(
                 turn_context,
                 stage_key=stage_key,
@@ -1260,15 +1386,6 @@ class TurnGraph:
         turn_context.state["_active_stage_name"] = ""
         return turn_context, short_circuit, cast("FinalizedTurnResult | None", short_circuit_result)
 
-    def _enforce_save_invariant(self, turn_context: TurnContext) -> None:
-        save_traces = [trace for trace in turn_context.stage_traces if str(trace.stage or "") == "save"]
-        requires_save_invariant = any(
-            stage in {"temporal", "health", "context_builder", "inference", "safety", "reflection"}
-            for stage in list(turn_context.state.get("_pipeline_stage_names") or [])
-        )
-        if requires_save_invariant and not save_traces:
-            raise RuntimeInvariantViolation("Structural turn invariant violated: SaveNode did not execute")
-
     async def _execute_pipeline(
         self,
         turn_context: TurnContext,
@@ -1291,7 +1408,6 @@ class TurnGraph:
             if short_circuit:
                 short_circuit_result = maybe_result
                 break
-        self._enforce_save_invariant(turn_context)
         return short_circuit_result
 
     def _record_failure(self, turn_context: TurnContext, *, stage_name: str, exc: Exception) -> None:
@@ -1311,6 +1427,28 @@ class TurnGraph:
         turn_context.determinism_manifest["failure_replay"] = replay
         turn_context.state["failure_taxonomy"] = {"severity": "error", "error": str(exc)}
 
+    def _resolve_execute_result(
+        self,
+        turn_context: TurnContext,
+        *,
+        short_circuit_result: FinalizedTurnResult | None,
+    ) -> FinalizedTurnResult:
+        result = short_circuit_result if short_circuit_result is not None else turn_context.state.get("safe_result")
+
+        # Apply early convergence: if should_converge_early flag is set, override should_end to True.
+        should_end_override = bool(turn_context.state.get("should_converge_early"))
+
+        if isinstance(result, tuple) and len(result) >= 2:
+            output, orig_should_end = result[0], result[1]
+            final_should_end = should_end_override if should_end_override else bool(orig_should_end)
+            resolved = (output, final_should_end)
+            self._finalize_unified_turn_trace(turn_context, result=cast("FinalizedTurnResult", resolved))
+            return cast(FinalizedTurnResult, resolved)
+
+        final_result: FinalizedTurnResult = (str(result or ""), should_end_override)
+        self._finalize_unified_turn_trace(turn_context, result=cast("FinalizedTurnResult | None", final_result))
+        return final_result
+
     async def execute(
         self,
         turn_context: TurnContext,
@@ -1325,7 +1463,12 @@ class TurnGraph:
         trace_id = turn_context.trace_id
         kernel_step_id = turn_context.kernel_step_id
         determinism_manifest = turn_context.determinism_manifest
-        execute_started_at = time.perf_counter()
+        self._capture_identity_tuple_baseline(turn_context)
+        self._enforce_identity_tuple_immutable(turn_context, boundary="execute_enter")
+        execute_started_at = self._deterministic_perf_counter(
+            turn_context,
+            slot="graph.execute.start_perf",
+        )
         pipeline_items = self._pipeline_items()
         turn_context.state["_pipeline_stage_names"] = [
             str(name or "").strip().lower() for name, _node in pipeline_items if str(name or "").strip()
@@ -1337,6 +1480,11 @@ class TurnGraph:
         self._stamp_contract_version(turn_context)
         self._initialize_unified_turn_trace(turn_context)
         turn_context.metadata["audit_mode"] = bool(audit_mode)
+        self._enforce_kernel_invariants(
+            turn_context=turn_context,
+            stage="pre_execute",
+            operation="turn_graph.execute.pre_execute",
+        )
 
         with contextlib.suppress(Exception):
             self._record_execution_trace(
@@ -1353,12 +1501,29 @@ class TurnGraph:
                 persistence_service=persistence_service,
                 persistence_is_lightweight=persistence_is_lightweight,
             )
+            self._enforce_kernel_invariants(
+                turn_context=turn_context,
+                stage="post_execute",
+                operation="turn_graph.execute.post_execute",
+            )
             with contextlib.suppress(Exception):
                 self._record_execution_trace(
                     turn_context,
                     event_type="turn_complete",
                     stage="graph",
-                    detail={"elapsed_ms": round((time.perf_counter() - execute_started_at) * 1000, 3)},
+                    detail={
+                        "elapsed_ms": round(
+                            (
+                                self._deterministic_perf_counter(
+                                    turn_context,
+                                    slot="graph.execute.end_perf",
+                                )
+                                - execute_started_at
+                            )
+                            * 1000,
+                            3,
+                        ),
+                    },
                 )
             contract = self._finalize_trace_contract(
                 turn_context,
@@ -1366,24 +1531,12 @@ class TurnGraph:
             )
             turn_context.state["execution_trace_contract"] = dict(contract)
             turn_context.metadata["execution_trace_contract"] = dict(contract)
+            self._enforce_identity_tuple_immutable(turn_context, boundary="execute_exit")
             self._seal_execution_identity(turn_context)
-            result = short_circuit_result if short_circuit_result is not None else turn_context.state.get("safe_result")
-            
-            # Apply early convergence: if should_converge_early flag is set, override should_end to True.
-            should_end_override = False
-            if turn_context.state.get("should_converge_early"):
-                should_end_override = True
-            
-            if isinstance(result, tuple) and len(result) >= 2:
-                output, orig_should_end = result[0], result[1]
-                final_should_end = should_end_override if should_end_override else bool(orig_should_end)
-                result = (output, final_should_end)
-                self._finalize_unified_turn_trace(turn_context, result=cast("FinalizedTurnResult", result))
-                return cast(FinalizedTurnResult, result)
-            
-            final_should_end = should_end_override
-            self._finalize_unified_turn_trace(turn_context, result=cast("FinalizedTurnResult | None", (str(result or ""), final_should_end)))
-            return (str(result or ""), final_should_end)
+            return self._resolve_execute_result(
+                turn_context,
+                short_circuit_result=short_circuit_result,
+            )
         except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
             current_stage = str(turn_context.state.get("_active_stage_name") or "unknown")
             self._record_failure(turn_context, stage_name=current_stage, exc=exc)

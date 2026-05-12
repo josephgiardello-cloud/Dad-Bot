@@ -34,3 +34,8 @@ def test_ci_gate_exposes_contract_gate_flag():
     text = CI_GATE.read_text(encoding="utf-8")
     assert "--contract-gate" in text
     assert "--fail-on-untested" in text
+
+
+def test_ci_gate_exposes_adversarial_closure_gate_flag():
+    text = CI_GATE.read_text(encoding="utf-8")
+    assert "--adversarial-closure-gate" in text

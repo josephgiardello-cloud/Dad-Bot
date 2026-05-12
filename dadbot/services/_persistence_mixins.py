@@ -15,7 +15,7 @@ from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from dadbot.core.capability_audit_runner import (
     CAPABILITY_AUDIT_EVENT_TYPE,
@@ -75,6 +75,64 @@ class TemporalBudget:
     elapsed_ms: float
     topic_drift_streak: int
     budget_pressure: float
+
+
+class _PersistenceManagerProtocol(Protocol):
+    """Narrow protocol for persistence manager methods used by mixins."""
+
+    def load_latest_graph_checkpoint(self, *args: Any, **kwargs: Any) -> dict[str, Any] | None:
+        ...
+
+    def _execution_ledger(self) -> Any:
+        ...
+
+
+class _PersistenceMixinHostProtocol(Protocol):
+    """Contract that concrete persistence host must satisfy for mixin composition."""
+
+    turn_service: Any
+    strict_mode: bool
+    persistence_manager: _PersistenceManagerProtocol
+    _merkle_session_leaves: dict[str, list[str]]
+
+    def save_turn_event(self, event: dict[str, Any]) -> Any:
+        ...
+
+    def _json_safe(self, payload: Any) -> Any:
+        ...
+
+    def _stable_hash(self, payload: Any) -> str:
+        ...
+
+    def _normalize_authority_snapshot(self, payload: Any) -> Any:
+        ...
+
+    def _diff_authority_state(self, projected: Any, event_sourced: Any, *, max_items: int = 512) -> list[dict[str, Any]]:
+        ...
+
+    def _ledger_op_append_history(self, runtime: Any, payload: dict[str, Any]) -> None:
+        ...
+
+    def _ledger_op_record_turn_state(self, runtime: Any, payload: dict[str, Any]) -> None:
+        ...
+
+    def _ledger_op_sync_thread_snapshot(self, runtime: Any, payload: dict[str, Any]) -> None:
+        ...
+
+    def _ledger_op_clear_turn_context(self, runtime: Any, payload: dict[str, Any]) -> None:
+        ...
+
+    def _ledger_op_schedule_maintenance(self, runtime: Any, payload: dict[str, Any], service: Any) -> None:
+        ...
+
+    def _ledger_op_health_snapshot(self, runtime: Any, service: Any) -> None:
+        ...
+
+    def _ledger_op_policy_trace_event(self: _PersistenceMixinHostProtocol, runtime: Any, turn_context: Any, payload: dict[str, Any]) -> None:
+        ...
+
+    def _ledger_op_capability_audit_event(self: _PersistenceMixinHostProtocol, runtime: Any, turn_context: Any, payload: dict[str, Any]) -> None:
+        ...
 
 
 # ---------------------------------------------------------------------------
@@ -209,7 +267,7 @@ class _LedgerOpsMixin:
                         "policy_trace": event_payload,
                     },
                 }
-                self.save_turn_event(turn_event_payload)  # type: ignore[attr-defined]
+                self.save_turn_event(turn_event_payload)
 
                 if callable(write_event):
                     write_event(
@@ -265,7 +323,7 @@ class _LedgerOpsMixin:
             if temporal is not None:
                 occurred_at = str(getattr(temporal, "wall_time", "") or "")
 
-            self.save_turn_event(  # type: ignore[attr-defined]
+            self.save_turn_event(
                 {
                     "event_type": CAPABILITY_AUDIT_EVENT_TYPE,
                     "trace_id": trace_id,
@@ -367,7 +425,7 @@ class _MutationDispatchMixin:
         )
 
     def _dispatch_ledger_mutation_intent(
-        self,
+        self: _PersistenceMixinHostProtocol,
         runtime: Any,
         turn_context: Any,
         service: Any,
@@ -377,14 +435,14 @@ class _MutationDispatchMixin:
     ) -> None:
         op = str(payload.get("op") or "").strip().lower()
         handlers = {
-            LedgerMutationOp.APPEND_HISTORY.value: lambda: self._ledger_op_append_history(runtime, payload),  # type: ignore[attr-defined]
-            LedgerMutationOp.RECORD_TURN_STATE.value: lambda: self._ledger_op_record_turn_state(runtime, payload),  # type: ignore[attr-defined]
-            LedgerMutationOp.SYNC_THREAD_SNAPSHOT.value: lambda: self._ledger_op_sync_thread_snapshot(runtime, payload),  # type: ignore[attr-defined]
-            LedgerMutationOp.CLEAR_TURN_CONTEXT.value: lambda: self._ledger_op_clear_turn_context(runtime, payload),  # type: ignore[attr-defined]
-            LedgerMutationOp.SCHEDULE_MAINTENANCE.value: lambda: self._ledger_op_schedule_maintenance(runtime, payload, service),  # type: ignore[attr-defined]
-            LedgerMutationOp.HEALTH_SNAPSHOT.value: lambda: self._ledger_op_health_snapshot(runtime, service),  # type: ignore[attr-defined]
-            LedgerMutationOp.POLICY_TRACE_EVENT.value: lambda: self._ledger_op_policy_trace_event(runtime, turn_context, payload),  # type: ignore[attr-defined]
-            LedgerMutationOp.CAPABILITY_AUDIT_EVENT.value: lambda: self._ledger_op_capability_audit_event(runtime, turn_context, payload),  # type: ignore[attr-defined]
+            LedgerMutationOp.APPEND_HISTORY.value: lambda: self._ledger_op_append_history(runtime, payload),
+            LedgerMutationOp.RECORD_TURN_STATE.value: lambda: self._ledger_op_record_turn_state(runtime, payload),
+            LedgerMutationOp.SYNC_THREAD_SNAPSHOT.value: lambda: self._ledger_op_sync_thread_snapshot(runtime, payload),
+            LedgerMutationOp.CLEAR_TURN_CONTEXT.value: lambda: self._ledger_op_clear_turn_context(runtime, payload),
+            LedgerMutationOp.SCHEDULE_MAINTENANCE.value: lambda: self._ledger_op_schedule_maintenance(runtime, payload, service),
+            LedgerMutationOp.HEALTH_SNAPSHOT.value: lambda: self._ledger_op_health_snapshot(runtime, service),
+            LedgerMutationOp.POLICY_TRACE_EVENT.value: lambda: self._ledger_op_policy_trace_event(runtime, turn_context, payload),
+            LedgerMutationOp.CAPABILITY_AUDIT_EVENT.value: lambda: self._ledger_op_capability_audit_event(runtime, turn_context, payload),
         }
         handler = handlers.get(op)
         if handler is None:
@@ -434,12 +492,12 @@ class _MutationDispatchMixin:
             f"MutationIntent: unknown type={intent_type!r} source={source!r}",
         )
 
-    def _drain_mutation_queue(self, runtime: Any, turn_context: Any) -> None:
+    def _drain_mutation_queue(self: _PersistenceMixinHostProtocol, runtime: Any, turn_context: Any) -> None:
         mutation_queue = getattr(turn_context, "mutation_queue", None)
         if mutation_queue is None:
             return
 
-        service = self.turn_service  # type: ignore[attr-defined]
+        service = self.turn_service
 
         def dispatch(intent: Any) -> None:
             self._dispatch_mutation_intent(runtime, turn_context, service, intent)
@@ -508,7 +566,7 @@ class _MutationDispatchMixin:
             },
         }
 
-    def _persist_hierarchical_memory_commit(self, turn_context: Any, *, commit_id: str) -> None:
+    def _persist_hierarchical_memory_commit(self: _PersistenceMixinHostProtocol, turn_context: Any, *, commit_id: str) -> None:
         state = getattr(turn_context, "state", None)
         metadata = getattr(turn_context, "metadata", None)
         if not isinstance(state, dict):
@@ -528,7 +586,7 @@ class _MutationDispatchMixin:
         if temporal is not None:
             occurred_at = str(getattr(temporal, "wall_time", "") or "")
 
-        self.save_turn_event(  # type: ignore[attr-defined]
+        self.save_turn_event(
             {
                 "event_type": "hierarchical_memory_commit",
                 "trace_id": trace_id,
@@ -553,7 +611,7 @@ class _MutationDispatchMixin:
 class _AuthorityStateMixin:
     """Authority state comparison and walk utilities for integrity checks."""
 
-    def _normalize_authority_snapshot(self, payload: Any) -> Any:
+    def _normalize_authority_snapshot(self: _PersistenceMixinHostProtocol, payload: Any) -> Any:
         def _walk(value: Any) -> Any:
             if isinstance(value, dict):
                 normalized: dict[str, Any] = {}
@@ -574,7 +632,7 @@ class _AuthorityStateMixin:
                 return [_walk(item) for item in value]
             return value
 
-        return _walk(self._json_safe(payload))  # type: ignore[attr-defined]
+        return _walk(self._json_safe(payload))
 
     def _diff_authority_state(
         self,
@@ -687,21 +745,24 @@ class _AuthorityStateMixin:
 class _IntegrityVerifyMixin:
     """Memory authority and Merkle anchor verification at the SaveNode boundary."""
 
-    def _load_event_sourced_checkpoint(self, trace_id: str) -> dict[str, Any]:
-        trace_key = str(trace_id or "").strip()
+    def _load_event_sourced_checkpoint(self: _PersistenceMixinHostProtocol, trace_token: str) -> dict[str, Any]:
+        trace_key = str(trace_token or "").strip()
         with ensure_execution_trace_root(
             operation="persistence_load_event_sourced_checkpoint",
             prompt="[persistence-load-event-sourced-checkpoint]",
             metadata={"source": "PersistenceService._load_event_sourced_checkpoint"},
             required=True,
         ):
-            loader = getattr(self.persistence_manager, "load_latest_graph_checkpoint", None)  # type: ignore[attr-defined]
+            loader = getattr(self.persistence_manager, "load_latest_graph_checkpoint", None)
             if callable(loader):
-                loaded = loader(trace_id=trace_key)
+                try:
+                    loaded = loader(trace_token=trace_key)
+                except TypeError:
+                    loaded = loader(trace_id=trace_key)
                 if isinstance(loaded, dict):
                     return dict(loaded)
 
-            ledger_resolver = getattr(self.persistence_manager, "_execution_ledger", None)  # type: ignore[attr-defined]
+            ledger_resolver = getattr(self.persistence_manager, "_execution_ledger", None)
             if not callable(ledger_resolver):
                 return {}
             ledger = ledger_resolver()
@@ -725,7 +786,7 @@ class _IntegrityVerifyMixin:
             return {}
 
     def _enforce_memory_authority(
-        self,
+        self: _PersistenceMixinHostProtocol,
         runtime: Any,
         turn_context: Any,
         *,
@@ -758,26 +819,26 @@ class _IntegrityVerifyMixin:
             )
 
         projected_checkpoint = dict(checkpoint)
-        projected_session_state = self._normalize_authority_snapshot(  # type: ignore[attr-defined]
+        projected_session_state = self._normalize_authority_snapshot(
             runtime.snapshot_session_state(),
         )
 
         event_checkpoint_copy = dict(event_checkpoint)
-        event_session_state = self._normalize_authority_snapshot(  # type: ignore[attr-defined]
+        event_session_state = self._normalize_authority_snapshot(
             event_checkpoint_copy.pop("session_state", {}),
         )
 
         projected = {
-            "checkpoint": self._normalize_authority_snapshot(projected_checkpoint),  # type: ignore[attr-defined]
+            "checkpoint": self._normalize_authority_snapshot(projected_checkpoint),
             "session_state": projected_session_state,
         }
         event_sourced = {
-            "checkpoint": self._normalize_authority_snapshot(event_checkpoint_copy),  # type: ignore[attr-defined]
+            "checkpoint": self._normalize_authority_snapshot(event_checkpoint_copy),
             "session_state": event_session_state,
         }
 
-        projected_hash = self._stable_hash(projected)  # type: ignore[attr-defined]
-        event_hash = self._stable_hash(event_sourced)  # type: ignore[attr-defined]
+        projected_hash = self._stable_hash(projected)
+        event_hash = self._stable_hash(event_sourced)
         if projected_hash == event_hash:
             state = getattr(turn_context, "state", None)
             if isinstance(state, dict):
@@ -789,7 +850,7 @@ class _IntegrityVerifyMixin:
                 }
             return
 
-        diffs = self._diff_authority_state(projected, event_sourced)  # type: ignore[attr-defined]
+        diffs = self._diff_authority_state(projected, event_sourced)
         report = {
             "trace_id": trace_id,
             "consistent": False,
@@ -831,8 +892,8 @@ class _IntegrityVerifyMixin:
             report=report,
         )
 
-    def _record_merkle_anchor(self, turn_context: Any, *, commit_id: str) -> None:
-        runtime = getattr(getattr(self.turn_service, "bot", None), "config", None)  # type: ignore[attr-defined]
+    def _record_merkle_anchor(self: _PersistenceMixinHostProtocol, turn_context: Any, *, commit_id: str) -> None:
+        runtime = getattr(getattr(self.turn_service, "bot", None), "config", None)
         enabled = bool(getattr(runtime, "merkle_anchor_enabled", True))
         if not enabled:
             return
@@ -848,10 +909,10 @@ class _IntegrityVerifyMixin:
             "trace_id": trace_id,
             "commit_id": str(commit_id or ""),
             "occurred_at": occurred_at,
-            "state_hash": self._stable_hash(getattr(turn_context, "state", {}) or {}),  # type: ignore[attr-defined]
-            "metadata_hash": self._stable_hash(getattr(turn_context, "metadata", {}) or {}),  # type: ignore[attr-defined]
+            "state_hash": self._stable_hash(getattr(turn_context, "state", {}) or {}),
+            "metadata_hash": self._stable_hash(getattr(turn_context, "metadata", {}) or {}),
         }
-        leaves = self._merkle_session_leaves.setdefault(session_id, [])  # type: ignore[attr-defined]
+        leaves = self._merkle_session_leaves.setdefault(session_id, [])
         anchor = append_leaf_and_anchor(leaves, payload)
         if isinstance(metadata, dict):
             metadata_snapshot = dict(metadata)
@@ -861,7 +922,7 @@ class _IntegrityVerifyMixin:
             state_snapshot = dict(getattr(turn_context, "state", {}) or {})
             state_snapshot["merkle_anchor"] = dict(anchor)
             turn_context.state = state_snapshot
-        self.save_turn_event(  # type: ignore[attr-defined]
+        self.save_turn_event(
             {
                 "event_type": "merkle_anchor_commit",
                 "trace_id": trace_id,

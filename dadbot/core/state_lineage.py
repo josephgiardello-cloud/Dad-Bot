@@ -24,15 +24,17 @@ def canonical_state_hash(state: Mapping[str, Any] | dict[str, Any]) -> str:
 def build_state_snapshot_entry(
     *,
     session_id: str,
-    trace_id: str,
+    trace_token: str = "",
+    trace_id: str = "",
     version: int,
     prev_snapshot_hash: str,
     state_hash: str,
     reason: str,
 ) -> dict[str, Any]:
+    resolved_trace_token = str(trace_token or trace_id or "")
     entry: dict[str, Any] = {
         "session_id": str(session_id or ""),
-        "trace_id": str(trace_id or ""),
+        "trace_id": resolved_trace_token,
         "version": int(version),
         "prev_snapshot_hash": str(prev_snapshot_hash or ""),
         "state_hash": str(state_hash or ""),

@@ -64,6 +64,44 @@ def _entry_has_decay_signal(entry: dict[str, Any]) -> bool:
     return False
 
 
+def _decay_signatures(
+    *,
+    before: list[dict[str, Any]],
+    decay_entries: list[dict[str, Any]] | None,
+) -> set[str]:
+    signatures: set[str] = set()
+    for entry in list(decay_entries or []):
+        if isinstance(entry, dict):
+            signatures.add(_memory_entry_signature(entry))
+    for entry in list(before or []):
+        if isinstance(entry, dict) and _entry_has_decay_signal(entry):
+            signatures.add(_memory_entry_signature(entry))
+    return signatures
+
+
+def _memory_entry_label(entry: dict[str, Any], signature: str) -> str:
+    return str(
+        entry.get("summary")
+        or entry.get("content")
+        or entry.get("memory_id")
+        or signature[:12]
+    )
+
+
+def _silent_shrink_violations(
+    *,
+    before_by_sig: dict[str, dict[str, Any]],
+    after_sigs: set[str],
+    decay_sigs: set[str],
+) -> list[str]:
+    violations: list[str] = []
+    for signature, entry in before_by_sig.items():
+        if signature in after_sigs or signature in decay_sigs:
+            continue
+        violations.append(_memory_entry_label(entry, signature))
+    return violations
+
+
 # ── Shrink invariant ─────────────────────────────────────────────────────────
 
 def assert_memory_set_shrink_invariant(
@@ -91,14 +129,7 @@ def assert_memory_set_shrink_invariant(
 
     tag = f" [{context}]" if context else ""
 
-    # Build a set of signatures that are permitted to disappear.
-    decay_sigs: set[str] = set()
-    for entry in list(decay_entries or []):
-        if isinstance(entry, dict):
-            decay_sigs.add(_memory_entry_signature(entry))
-    for entry in list(before or []):
-        if isinstance(entry, dict) and _entry_has_decay_signal(entry):
-            decay_sigs.add(_memory_entry_signature(entry))
+    decay_sigs = _decay_signatures(before=before, decay_entries=decay_entries)
 
     before_by_sig: dict[str, dict[str, Any]] = {
         _memory_entry_signature(e): e for e in before if isinstance(e, dict)
@@ -107,22 +138,51 @@ def assert_memory_set_shrink_invariant(
         _memory_entry_signature(e) for e in after if isinstance(e, dict)
     }
 
-    violations: list[str] = []
-    for sig, entry in before_by_sig.items():
-        if sig not in after_sigs and sig not in decay_sigs:
-            label = str(
-                entry.get("summary")
-                or entry.get("content")
-                or entry.get("memory_id")
-                or sig[:12]
-            )
-            violations.append(label)
+    violations = _silent_shrink_violations(
+        before_by_sig=before_by_sig,
+        after_sigs=after_sigs,
+        decay_sigs=decay_sigs,
+    )
 
     if violations:
         raise MemorySetInvariantViolation(
             f"Prohibited memory-set shrink{tag}: {len(violations)} entries removed without "
             f"a decay/downgrade signal: {violations[:5]}"
         )
+
+
+def _collect_decay_signatures(decay_entries: list[dict[str, Any]] | None) -> set[str]:
+    sigs: set[str] = set()
+    for entry in list(decay_entries or []):
+        if isinstance(entry, dict):
+            sigs.add(_memory_entry_signature(entry))
+    return sigs
+
+
+def _find_salience_violations(
+    before_by_sig: dict[str, dict[str, Any]],
+    after_by_sig: dict[str, dict[str, Any]],
+    decay_sigs: set[str],
+    salience_drop_threshold: float,
+) -> list[str]:
+    violations: list[str] = []
+    for sig, before_entry in before_by_sig.items():
+        after_entry = after_by_sig.get(sig)
+        if after_entry is None:
+            continue
+        if sig in decay_sigs or _entry_has_decay_signal(after_entry):
+            continue
+        before_sal = _entry_salience(before_entry)
+        after_sal = _entry_salience(after_entry)
+        drop = before_sal - after_sal
+        if drop >= salience_drop_threshold:
+            label = str(
+                before_entry.get("summary")
+                or before_entry.get("content")
+                or sig[:12]
+            )
+            violations.append(f"{label!r}: {before_sal:.3f} → {after_sal:.3f}")
+    return violations
 
 
 # ── Salience invariant ────────────────────────────────────────────────────────
@@ -144,11 +204,7 @@ def assert_memory_set_salience_invariant(
         return
 
     tag = f" [{context}]" if context else ""
-
-    decay_sigs: set[str] = set()
-    for entry in list(decay_entries or []):
-        if isinstance(entry, dict):
-            decay_sigs.add(_memory_entry_signature(entry))
+    decay_sigs = _collect_decay_signatures(decay_entries)
 
     before_by_sig: dict[str, dict[str, Any]] = {
         _memory_entry_signature(e): e for e in before if isinstance(e, dict)
@@ -157,23 +213,7 @@ def assert_memory_set_salience_invariant(
         _memory_entry_signature(e): e for e in after if isinstance(e, dict)
     }
 
-    violations: list[str] = []
-    for sig, before_entry in before_by_sig.items():
-        after_entry = after_by_sig.get(sig)
-        if after_entry is None:
-            continue  # Handled by shrink invariant.
-        if sig in decay_sigs or _entry_has_decay_signal(after_entry):
-            continue
-        before_sal = _entry_salience(before_entry)
-        after_sal = _entry_salience(after_entry)
-        drop = before_sal - after_sal
-        if drop >= salience_drop_threshold:
-            label = str(
-                before_entry.get("summary")
-                or before_entry.get("content")
-                or sig[:12]
-            )
-            violations.append(f"{label!r}: {before_sal:.3f} → {after_sal:.3f}")
+    violations = _find_salience_violations(before_by_sig, after_by_sig, decay_sigs, salience_drop_threshold)
 
     if violations:
         raise MemorySetInvariantViolation(

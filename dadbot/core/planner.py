@@ -236,6 +236,24 @@ class PlannerNode:
         user_input = str(context.user_input or "").strip()
         active_goals = list(context.state.get("session_goals") or [])
 
+        plan, intent_type, complexity, subgoals, active_goal_ids, new_goal_detected = self._build_plan(
+            context=context,
+            user_input=user_input,
+            active_goals=active_goals,
+            detect_goal_in_input=detect_goal_in_input,
+        )
+        self._emit_planner_cognition(context, intent_type, complexity, subgoals, new_goal_detected)
+        self._maybe_apply_tool_v2_requests(
+            context=context,
+            user_input=user_input,
+            intent_type=intent_type,
+            active_goal_ids=active_goal_ids,
+        )
+        self._mark_planner_completed(context, intent_type)
+        return context
+
+    @staticmethod
+    def _emit_planner_start(context: TurnContext, user_input: str, active_goals: list) -> None:
         emit_cognition(context, CognitionEnvelope(
             step_id=f"{context.trace_id}:planner:start",
             thought_trace=f"Planner: classifying intent for {len(user_input)} char input, {len(active_goals)} active goals",
@@ -243,13 +261,25 @@ class PlannerNode:
             confidence_score=0.5,
         ))
 
+    @staticmethod
+    def _mark_planner_completed(context: TurnContext, intent_type: str) -> None:
+        context.metadata["planner_ran"] = True
+        context.metadata["intent_type"] = str(intent_type)
+
+    def _build_plan(
+        self,
+        *,
+        context: TurnContext,
+        user_input: str,
+        active_goals: list,
+        detect_goal_in_input,
+    ) -> tuple[TurnPlan, str, str, list[str], list[str], bool]:
         intent_type = self._classify_intent(user_input)
         complexity = self._estimate_complexity(user_input, active_goals)
         subgoals = self._extract_subgoals(user_input, intent_type, complexity)
         strategy = self._select_strategy(intent_type, complexity)
         active_goal_ids = self._match_active_goals(user_input, active_goals)
 
-        # Detect if this turn introduces a new user goal.
         new_goal = detect_goal_in_input(user_input)
         new_goal_detected = new_goal is not None
         if new_goal is not None:
@@ -272,8 +302,17 @@ class PlannerNode:
             plan=plan,
             subgoals=subgoals,
         )
+        return plan, intent_type, complexity, subgoals, active_goal_ids, new_goal_detected
 
-        _complexity_confidence = {
+    @staticmethod
+    def _emit_planner_cognition(
+        context: TurnContext,
+        intent_type: str,
+        complexity: str,
+        subgoals: list[str],
+        new_goal_detected: bool,
+    ) -> None:
+        complexity_confidence = {
             ComplexityLevel.SIMPLE: 0.9,
             ComplexityLevel.MODERATE: 0.75,
             ComplexityLevel.COMPLEX: 0.6,
@@ -282,48 +321,50 @@ class PlannerNode:
             step_id=f"{context.trace_id}:planner:done",
             thought_trace=(
                 f"Planner: intent={intent_type}, complexity={complexity}, "
-                f"strategy={strategy}, subgoals={len(subgoals)}, "
+                f"strategy={context.state.get('turn_plan', {}).get('strategy', '')}, subgoals={len(subgoals)}, "
                 f"new_goal={new_goal_detected}"
             ),
             target_node="planner",
-            confidence_score=_complexity_confidence.get(complexity, 0.7),
+            confidence_score=complexity_confidence.get(complexity, 0.7),
         ))
 
-        # Phase 3: Planner emits only MemoryTool requests behind the v2 switch.
-        if bool(context.metadata.get("tool_system_v2_enabled", False)):
-            tool_ir = dict(context.state.get("tool_ir") or {})
-            tool_ir["requests"] = self._tool_requests_for_turn(
-                user_input=user_input,
-                intent_type=intent_type,
-                active_goal_ids=active_goal_ids,
+    def _maybe_apply_tool_v2_requests(
+        self,
+        *,
+        context: TurnContext,
+        user_input: str,
+        intent_type: str,
+        active_goal_ids: list[str],
+    ) -> None:
+        if not bool(context.metadata.get("tool_system_v2_enabled", False)):
+            return
+        tool_ir = dict(context.state.get("tool_ir") or {})
+        tool_ir["requests"] = self._tool_requests_for_turn(
+            user_input=user_input,
+            intent_type=intent_type,
+            active_goal_ids=active_goal_ids,
+        )
+        context.state["tool_ir"] = tool_ir
+
+        tool_request_counts: dict[str, int] = {}
+        redundant_requests: list[str] = []
+        for req in list(tool_ir.get("requests") or []):
+            if not isinstance(req, dict):
+                continue
+            tool_name = str(req.get("tool_name") or "").strip().lower()
+            if not tool_name:
+                continue
+            tool_request_counts[tool_name] = int(tool_request_counts.get(tool_name, 0)) + 1
+            if int(tool_request_counts[tool_name]) > 2:
+                redundant_requests.append(f"{tool_name}:request_{tool_request_counts[tool_name]}")
+
+        if redundant_requests:
+            context.state["tool_call_counts"] = dict(tool_request_counts)
+            context.state["tool_redundant_calls"] = list(redundant_requests)
+            context.state["should_converge_early"] = True
+            context.state["convergence_reason"] = (
+                f"tool_redundancy: {len(redundant_requests)} redundant requests"
             )
-            context.state["tool_ir"] = tool_ir
-
-            # Fallback convergence signal for request-only benchmark paths where
-            # execution plans may not be materialized before scoring.
-            tool_request_counts: dict[str, int] = {}
-            redundant_requests: list[str] = []
-            for req in list(tool_ir.get("requests") or []):
-                if not isinstance(req, dict):
-                    continue
-                tool_name = str(req.get("tool_name") or "").strip().lower()
-                if not tool_name:
-                    continue
-                tool_request_counts[tool_name] = int(tool_request_counts.get(tool_name, 0)) + 1
-                if int(tool_request_counts[tool_name]) > 2:
-                    redundant_requests.append(f"{tool_name}:request_{tool_request_counts[tool_name]}")
-
-            if redundant_requests:
-                context.state["tool_call_counts"] = dict(tool_request_counts)
-                context.state["tool_redundant_calls"] = list(redundant_requests)
-                context.state["should_converge_early"] = True
-                context.state["convergence_reason"] = (
-                    f"tool_redundancy: {len(redundant_requests)} redundant requests"
-                )
-
-        context.metadata["planner_ran"] = True
-        context.metadata["intent_type"] = str(intent_type)
-        return context
 
     def _tool_requests_for_turn(
         self,

@@ -29,6 +29,12 @@ from dadbot.core.graph_types import (
 
 logger = logging.getLogger(__name__)
 
+# Pre-computed op sets — evaluated once at module load, not per-call.
+_MEMORY_OPS: frozenset[str] = frozenset(item.value for item in MemoryMutationOp)
+_RELATIONSHIP_OPS: frozenset[str] = frozenset(item.value for item in RelationshipMutationOp)
+_LEDGER_OPS: frozenset[str] = frozenset(item.value for item in LedgerMutationOp)
+_GOAL_OPS: frozenset[str] = frozenset(item.value for item in GoalMutationOp)
+
 # Canonical durability boundary contract for the execution graph.
 SAVE_NODE_COMMIT_CONTRACT = (
     "All durable mutations MUST go through SaveNode. The graph guarantees speculative execution until that boundary."
@@ -108,16 +114,16 @@ class MutationIntent:
         # Canonical taxonomy check (single shared vocabulary contract).
         ensure_valid_mutation_op(kind, op)
         if kind is MutationKind.MEMORY:
-            if op and op not in {item.value for item in MemoryMutationOp}:
+            if op and op not in _MEMORY_OPS:
                 raise RuntimeError(f"Unsupported memory mutation op: {op!r}")
         elif kind is MutationKind.RELATIONSHIP:
-            if op and op not in {item.value for item in RelationshipMutationOp}:
+            if op and op not in _RELATIONSHIP_OPS:
                 raise RuntimeError(f"Unsupported relationship mutation op: {op!r}")
         elif kind is MutationKind.LEDGER:
-            if op and op not in {item.value for item in LedgerMutationOp}:
+            if op and op not in _LEDGER_OPS:
                 raise RuntimeError(f"Unsupported ledger mutation op: {op!r}")
         elif kind is MutationKind.GOAL:
-            if op and op not in {item.value for item in GoalMutationOp}:
+            if op and op not in _GOAL_OPS:
                 raise RuntimeError(f"Unsupported goal mutation op: {op!r}")
 
     def __post_init__(self) -> None:
@@ -221,6 +227,50 @@ class MutationQueue:
         self._assert_owner()
         return len(self._queue)
 
+    def _apply_transactional_rollback(
+        self,
+        *,
+        exc: Exception,
+        intent: "MutationIntent",
+        applied: list,
+        to_drain: list,
+        tx_id: str,
+        resolved_rollback_mode: "MutationRollbackMode",
+    ) -> None:
+        rollback_count = 0
+        rollback_failures = 0
+        for applied_intent, compensator in reversed(applied):
+            if callable(compensator):
+                try:
+                    compensator()
+                    rollback_count += 1
+                except Exception as exc:  # noqa: BLE001 — must not let rollback abort the loop
+                    logger.warning("Rollback compensator raised: %s", exc)
+                    rollback_failures += 1
+
+        self._queue = [*to_drain, *self._queue]
+        for applied_intent, _ in applied:
+            with contextlib.suppress(ValueError):
+                self._drained.remove(applied_intent)
+        status = (
+            MutationTransactionStatus.ROLLBACK_FAILED
+            if rollback_failures
+            else MutationTransactionStatus.ROLLED_BACK
+        )
+        self._transactions.append(
+            MutationTransactionRecord(
+                transaction_id=tx_id,
+                status=status,
+                applied_count=len(applied),
+                failed_count=1,
+                rollback_count=rollback_count,
+                rollback_failures=rollback_failures,
+                trace_id=self._owner_trace_id,
+                rollback_mode=resolved_rollback_mode,
+                error=str(exc),
+            ),
+        )
+
     def drain(
         self,
         executor: Callable[[MutationIntent], Any],
@@ -253,8 +303,6 @@ class MutationQueue:
             hard_fail_on_error=hard_fail_on_error,
         )
         applied: list[tuple[MutationIntent, Any]] = []
-        rollback_count = 0
-        rollback_failures = 0
 
         for index, intent in enumerate(to_drain):
             try:
@@ -273,36 +321,13 @@ class MutationQueue:
                     continue
 
                 if transactional:
-                    for applied_intent, compensator in reversed(applied):
-                        if callable(compensator):
-                            try:
-                                compensator()
-                                rollback_count += 1
-                            except Exception as exc:  # noqa: BLE001 — must not let rollback abort the loop
-                                logger.warning("Rollback compensator raised: %s", exc)
-                                rollback_failures += 1
-
-                    self._queue = [*to_drain, *self._queue]
-                    for applied_intent, _ in applied:
-                        with contextlib.suppress(ValueError):
-                            self._drained.remove(applied_intent)
-                    status = (
-                        MutationTransactionStatus.ROLLBACK_FAILED
-                        if rollback_failures
-                        else MutationTransactionStatus.ROLLED_BACK
-                    )
-                    self._transactions.append(
-                        MutationTransactionRecord(
-                            transaction_id=tx_id,
-                            status=status,
-                            applied_count=len(applied),
-                            failed_count=1,
-                            rollback_count=rollback_count,
-                            rollback_failures=rollback_failures,
-                            trace_id=self._owner_trace_id,
-                            rollback_mode=resolved_rollback_mode,
-                            error=str(exc),
-                        ),
+                    self._apply_transactional_rollback(
+                        exc=exc,
+                        intent=intent,
+                        applied=applied,
+                        to_drain=to_drain,
+                        tx_id=tx_id,
+                        resolved_rollback_mode=resolved_rollback_mode,
                     )
                 else:
                     self._queue = [intent, *to_drain[index + 1 :], *self._queue]

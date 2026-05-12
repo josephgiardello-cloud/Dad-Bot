@@ -171,6 +171,63 @@ class TestTracingPropagation:
 
         asyncio.run(_run())
 
+    def test_orchestrator_execute_job_resolves_recovery_mode_from_checkpoint(self, monkeypatch):
+        from dadbot.core.control_plane import ExecutionJob
+        from dadbot.core.orchestrator import DadBotOrchestrator
+
+        orchestrator = DadBotOrchestrator()
+        captured: dict[str, object] = {}
+
+        checkpoint = {
+            "checkpoint_hash": "chk-123",
+            "prev_checkpoint_hash": "chk-122",
+            "phase": "save",
+            "continuity": {"strict_sequence_hash": "seq-123"},
+            "execution_state": {
+                "state": {"restored": True, "memory_retrieval_set": [{"memory_id": "m1"}]},
+                "metadata": {"restored_meta": True},
+                "phase_history": [{"from": "plan", "to": "save", "reason": "checkpoint"}],
+                "stage_traces": [{"stage": "save", "duration_ms": 1.5, "error": ""}],
+                "event_sequence": 7,
+            },
+        }
+
+        monkeypatch.setattr(orchestrator, "_load_checkpoint_data", lambda *_args, **_kwargs: checkpoint)
+
+        async def _fake_execute(context):
+            captured["execution_mode"] = context.metadata.get("execution_mode")
+            captured["restored"] = context.state.get("restored")
+            captured["restored_meta"] = context.metadata.get("restored_meta")
+            captured["checkpoint_hash"] = context.last_checkpoint_hash
+            captured["event_sequence"] = context.event_sequence
+            return ("ok", False)
+
+        monkeypatch.setattr(orchestrator.graph, "execute", _fake_execute)
+
+        async def _run() -> None:
+            result = await orchestrator._execute_job(
+                {"state": {}},
+                ExecutionJob(
+                    session_id="trace-test",
+                    user_input="hello",
+                    metadata={
+                        "execution_state": {
+                            "lifecycle_state": "recovery_pending",
+                            "redelivery_count": 1,
+                        },
+                    },
+                ),
+            )
+            assert result == ("ok", False)
+
+        asyncio.run(_run())
+
+        assert captured["execution_mode"] == "recovery"
+        assert captured["restored"] is True
+        assert captured["restored_meta"] is True
+        assert captured["checkpoint_hash"] == "chk-123"
+        assert captured["event_sequence"] == 7
+
     def test_orchestrator_strict_param_in_signature(self):
         from dadbot.core.orchestrator import DadBotOrchestrator
 
@@ -569,7 +626,7 @@ class TestServiceValidation:
 
 class TestQueueSaturation:
     def test_register_beyond_max_inflight_raises(self):
-        """Registering a second job when max_inflight_jobs=1 must raise RuntimeError."""
+        """Registering beyond max_inflight_jobs must raise a backpressure error."""
 
         def _run():
             async def _inner():
@@ -578,9 +635,12 @@ class TestQueueSaturation:
                     Scheduler,
                     SessionRegistry,
                 )
+                from dadbot.core.contracts.lifecycle_events import Submitted
                 from dadbot.core.execution_ledger import ExecutionLedger
                 from dadbot.core.ledger_reader import LedgerReader
                 from dadbot.core.ledger_writer import LedgerWriter
+                from dadbot.core.execution_resource_budget import BackpressureSignal
+                from datetime import datetime
 
                 registry = SessionRegistry()
                 ledger = ExecutionLedger()
@@ -592,7 +652,7 @@ class TestQueueSaturation:
                 await sched.register(job1)  # fills the only slot
 
                 job2 = ExecutionJob(session_id="s2", user_input="second")
-                with pytest.raises(RuntimeError, match="backpressure"):
+                with pytest.raises(BackpressureSignal):
                     await sched.register(job2)
 
             asyncio.run(_inner())
@@ -609,9 +669,11 @@ class TestQueueSaturation:
                     Scheduler,
                     SessionRegistry,
                 )
+                from dadbot.core.contracts.lifecycle_events import Submitted
                 from dadbot.core.execution_ledger import ExecutionLedger
                 from dadbot.core.ledger_reader import LedgerReader
                 from dadbot.core.ledger_writer import LedgerWriter
+                from datetime import datetime
 
                 registry = SessionRegistry()
                 ledger = ExecutionLedger()
@@ -620,6 +682,14 @@ class TestQueueSaturation:
                 sched = Scheduler(registry, reader=reader, writer=writer, max_inflight_jobs=1)
 
                 job1 = ExecutionJob(session_id="s1", user_input="first")
+                writer.append_execution_lifecycle(
+                    Submitted(execution_id=job1.job_id, occurred_at=datetime.now()),
+                    session_id="s1",
+                    trace_id=job1.trace_id,
+                    kernel_step_id="test.submit",
+                    committed=False,
+                )
+                sched.projection.rebuild_from_ledger(ledger.read())
                 writer.append_job_submitted(job1)
                 writer.append_job_queued(job1)
                 future1 = await sched.register(job1)

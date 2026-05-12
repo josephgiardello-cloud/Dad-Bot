@@ -29,10 +29,15 @@ CANONICAL_EVENT_FIELDS: frozenset[str] = frozenset(
 #   - validate_trace() raises AssertionError if any survive into a trace.
 NON_CANONICAL_PAYLOAD_FIELDS: frozenset[str] = frozenset(
     {
+        "timestamp",
         "submitted_at",
+        "submitted_timestamp",
+        "submitted_monotonic",
         "acquired_at",
         "expires_at",
+        "lease_expiry",
         "last_checked_at",
+        "retry_not_before_monotonic",
         "occurred_at",
         "created_at",
         "updated_at",

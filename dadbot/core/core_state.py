@@ -193,14 +193,15 @@ class CoreState:
         }
 
     @staticmethod
-    def from_dict(payload: dict[str, Any] | None) -> "CoreState":
-        source = dict(payload or {})
-        memory_entries: list[MemoryEntry] = []
+    def _parse_memory_entries(source: dict[str, Any]) -> "list[MemoryEntry]":
+        entries: list[MemoryEntry] = []
         for item in list(source.get("memory") or []):
             if isinstance(item, dict):
-                memory_entries.append(MemoryEntry.from_payload(item))
-        memory_kv = canonicalize_event_payload(dict(source.get("memory_kv") or {}))
+                entries.append(MemoryEntry.from_payload(item))
+        return entries
 
+    @staticmethod
+    def _parse_canonical_events(source: dict[str, Any]) -> "list[CanonicalEvent]":
         events: list[CanonicalEvent] = []
         for item in list(source.get("events") or []):
             if not isinstance(item, dict):
@@ -214,18 +215,27 @@ class CoreState:
                     payload=canonicalize_event_payload(dict(item.get("payload") or {})),
                 ),
             )
+        return events
 
-        execution_payload = dict(source.get("execution") or {})
-        execution = ExecutionState(
-            trace_id=str(execution_payload.get("trace_id") or "").strip(),
-            last_response=str(execution_payload.get("last_response") or ""),
-            should_end=bool(execution_payload.get("should_end", False)),
+    @staticmethod
+    def _parse_execution_state(source: dict[str, Any]) -> "ExecutionState":
+        ep = dict(source.get("execution") or {})
+        return ExecutionState(
+            trace_id=str(ep.get("trace_id") or "").strip(),
+            last_response=str(ep.get("last_response") or ""),
+            should_end=bool(ep.get("should_end", False)),
         )
 
+    @staticmethod
+    def from_dict(payload: dict[str, Any] | None) -> "CoreState":
+        source = dict(payload or {})
+        memory_entries = CoreState._parse_memory_entries(source)
+        events = CoreState._parse_canonical_events(source)
+        execution = CoreState._parse_execution_state(source)
         return CoreState(
             version=int(source.get("version") or 0),
             memory=SortedMemoryVector.from_entries(memory_entries),
-            memory_kv=memory_kv,
+            memory_kv=canonicalize_event_payload(dict(source.get("memory_kv") or {})),
             events=tuple(events),
             execution=execution,
         )
@@ -322,6 +332,126 @@ def memory_projection(
     return projected
 
 
+def _memory_entries_from_list(memories_list: Any) -> SortedMemoryVector:
+    if not isinstance(memories_list, list):
+        return SortedMemoryVector.from_entries(())
+    return SortedMemoryVector.from_entries(
+        [MemoryEntry.from_payload(item) for item in memories_list if isinstance(item, dict)],
+    )
+
+
+def _apply_legacy_memory_initialized(
+    *,
+    payload: dict[str, Any],
+) -> tuple[SortedMemoryVector, dict[str, Any]]:
+    store = dict(payload.get("store") or {})
+    memory = _memory_entries_from_list(list(store.get("memories") or []))
+    memory_kv = {str(key): value for key, value in store.items() if str(key) != "memories"}
+    return memory, memory_kv
+
+
+def _apply_legacy_memory_appended(
+    *,
+    payload: dict[str, Any],
+    memory: SortedMemoryVector,
+    memory_kv: dict[str, Any],
+) -> tuple[SortedMemoryVector, dict[str, Any]]:
+    entry = payload.get("entry")
+    if isinstance(entry, dict):
+        memory = memory.insert(MemoryEntry.from_payload(entry))
+    return memory, memory_kv
+
+
+def _apply_legacy_memory_updated(
+    *,
+    payload: dict[str, Any],
+    memory: SortedMemoryVector,
+    memory_kv: dict[str, Any],
+) -> tuple[SortedMemoryVector, dict[str, Any]]:
+    key = str(payload.get("key") or "").strip()
+    if key == "memories":
+        memory = _memory_entries_from_list(payload.get("value"))
+    elif key:
+        memory_kv[key] = payload.get("value")
+    return memory, memory_kv
+
+
+def _apply_legacy_memory_deleted(
+    *,
+    payload: dict[str, Any],
+    memory: SortedMemoryVector,
+    memory_kv: dict[str, Any],
+) -> tuple[SortedMemoryVector, dict[str, Any]]:
+    key = str(payload.get("key") or "").strip()
+    if key == "memories":
+        memory = SortedMemoryVector.from_entries(())
+    elif key:
+        memory_kv.pop(key, None)
+    return memory, memory_kv
+
+
+def _apply_legacy_memory_projection_event(
+    *,
+    event_type: str,
+    payload: dict[str, Any],
+    memory: SortedMemoryVector,
+    memory_kv: dict[str, Any],
+) -> tuple[SortedMemoryVector, dict[str, Any]]:
+    if event_type == "memoryinitialized":
+        return _apply_legacy_memory_initialized(payload=payload)
+
+    if event_type == "memoryappended":
+        return _apply_legacy_memory_appended(payload=payload, memory=memory, memory_kv=memory_kv)
+
+    if event_type == "memoryupdated":
+        return _apply_legacy_memory_updated(payload=payload, memory=memory, memory_kv=memory_kv)
+
+    if event_type == "memorydeleted":
+        return _apply_legacy_memory_deleted(payload=payload, memory=memory, memory_kv=memory_kv)
+
+    if event_type == "memorycleared":
+        memory = SortedMemoryVector.from_entries(())
+        memory_kv = {}
+    return memory, memory_kv
+
+
+def _apply_replacement_and_upsert_events(
+    *,
+    event_type: str,
+    payload: dict[str, Any],
+    memory: SortedMemoryVector,
+) -> SortedMemoryVector:
+    if event_type == "memories_replaced":
+        # Full replacement: CoreState.memory becomes the sole authority for the memories list.
+        # Legacy memory_store["memories"] is derived from this after transition.
+        memories_list = payload.get("memories")
+        if isinstance(memories_list, list):
+            memory = _memory_entries_from_list(memories_list)
+    elif event_type in {"memory_upsert", "turn_committed"}:
+        memories = payload.get("memory_retrieval_set")
+        if isinstance(memories, list):
+            for item in memories:
+                if isinstance(item, dict):
+                    memory = memory.insert(MemoryEntry.from_payload(item))
+    return memory
+
+
+def _apply_execution_transition(
+    *,
+    execution: ExecutionState,
+    event_type: str,
+    payload: dict[str, Any],
+) -> ExecutionState:
+    if event_type != "turn_committed":
+        return execution
+    return replace(
+        execution,
+        trace_id=str(payload.get("trace_id") or execution.trace_id or "").strip(),
+        last_response=str(payload.get("response") or ""),
+        should_end=bool(payload.get("should_end", False)),
+    )
+
+
 def transition(current_state: CoreState, input_event: InputEvent) -> CoreState:
     state = current_state
     parent_state_hash = state.state_hash()
@@ -337,56 +467,17 @@ def transition(current_state: CoreState, input_event: InputEvent) -> CoreState:
     payload = dict(input_event.payload or {})
     event_type = str(input_event.event_type or "").strip().lower()
 
-    if event_type == "memoryinitialized":
-        store = dict(payload.get("store") or {})
-        memories_list = list(store.get("memories") or [])
-        memory = SortedMemoryVector.from_entries(
-            [MemoryEntry.from_payload(item) for item in memories_list if isinstance(item, dict)],
-        )
-        memory_kv = {str(key): value for key, value in store.items() if str(key) != "memories"}
-
-    elif event_type == "memoryappended":
-        entry = payload.get("entry")
-        if isinstance(entry, dict):
-            memory = memory.insert(MemoryEntry.from_payload(entry))
-
-    elif event_type == "memoryupdated":
-        key = str(payload.get("key") or "").strip()
-        if key == "memories":
-            memories_list = payload.get("value")
-            if isinstance(memories_list, list):
-                memory = SortedMemoryVector.from_entries(
-                    [MemoryEntry.from_payload(item) for item in memories_list if isinstance(item, dict)],
-                )
-        elif key:
-            memory_kv[key] = payload.get("value")
-
-    elif event_type == "memorydeleted":
-        key = str(payload.get("key") or "").strip()
-        if key == "memories":
-            memory = SortedMemoryVector.from_entries(())
-        elif key:
-            memory_kv.pop(key, None)
-
-    elif event_type == "memorycleared":
-        memory = SortedMemoryVector.from_entries(())
-        memory_kv = {}
-
-    if event_type == "memories_replaced":
-        # Full replacement: CoreState.memory becomes the sole authority for the memories list.
-        # Legacy memory_store["memories"] is derived from this after transition.
-        memories_list = payload.get("memories")
-        if isinstance(memories_list, list):
-            memory = SortedMemoryVector.from_entries(
-                [MemoryEntry.from_payload(item) for item in memories_list if isinstance(item, dict)]
-            )
-
-    elif event_type in {"memory_upsert", "turn_committed"}:
-        memories = payload.get("memory_retrieval_set")
-        if isinstance(memories, list):
-            for item in memories:
-                if isinstance(item, dict):
-                    memory = memory.insert(MemoryEntry.from_payload(item))
+    memory, memory_kv = _apply_legacy_memory_projection_event(
+        event_type=event_type,
+        payload=payload,
+        memory=memory,
+        memory_kv=memory_kv,
+    )
+    memory = _apply_replacement_and_upsert_events(
+        event_type=event_type,
+        payload=payload,
+        memory=memory,
+    )
 
     # "store_key_mutated": tracks non-memories key changes (version/event recorded, no memory change).
     # "tool_called": routes tool-call observability through the event log.
@@ -394,14 +485,11 @@ def transition(current_state: CoreState, input_event: InputEvent) -> CoreState:
     # These event types intentionally produce no memory projection change; they advance
     # the version and append to the canonical event log only.
 
-    execution = state.execution
-    if event_type == "turn_committed":
-        execution = replace(
-            execution,
-            trace_id=str(payload.get("trace_id") or execution.trace_id or "").strip(),
-            last_response=str(payload.get("response") or ""),
-            should_end=bool(payload.get("should_end", False)),
-        )
+    execution = _apply_execution_transition(
+        execution=state.execution,
+        event_type=event_type,
+        payload=payload,
+    )
 
     return CoreState(
         version=int(state.version) + 1,

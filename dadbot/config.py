@@ -285,9 +285,11 @@ class DadBotConfig:
         self.light_mode = bool(
             self.light_mode or env_truthy("DADBOT_LIGHT_MODE", default=False),
         )
-        self.strict_graph_mode = bool(
-            self.strict_graph_mode and env_truthy("DADBOT_STRICT_GRAPH_MODE", default=True),
+        test_only_non_strict = bool(
+            str(os.environ.get("PYTEST_CURRENT_TEST") or "").strip()
+            and env_truthy("DADBOT_TEST_ALLOW_NONSTRICT_GRAPH_MODE", default=False)
         )
+        self.strict_graph_mode = bool(self.strict_graph_mode and not test_only_non_strict)
         self.active_model = str(self.model_name).strip() or "llama3.2"
         self.active_embedding_model = None
         self.llm_provider = str(os.environ.get("DADBOT_LLM_PROVIDER", "ollama")).strip().lower() or "ollama"

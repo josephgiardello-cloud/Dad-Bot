@@ -15,8 +15,36 @@ class RuntimeExecutionError(RuntimeErrorBase):
     """Raised when turn execution fails outside a narrower domain subtype."""
 
 
-class InvariantViolation(RuntimeErrorBase):
+class DadbotRuntimeError(RuntimeErrorBase):
+    """Top-level runtime contract error for Dadbot execution boundaries."""
+
+
+class AuthorityError(DadbotRuntimeError):
+    """Raised when an authority boundary is violated."""
+
+
+class InvariantError(DadbotRuntimeError):
+    """Raised when an invariant boundary is violated."""
+
+
+class BackpressureError(DadbotRuntimeError):
+    """Raised when runtime backpressure is applied."""
+
+
+class ReplayError(DadbotRuntimeError):
+    """Raised when replay or idempotency validation fails."""
+
+
+class AuthorityViolation(AuthorityError):
+    """Raised when a runtime authority contract is violated."""
+
+
+class InvariantViolation(InvariantError):
     """Raised when a runtime invariant is violated."""
+
+
+class ReplayMismatch(ReplayError):
+    """Raised when replay output diverges from recorded execution shape."""
 
 
 class ProjectionMismatch(RuntimeErrorBase):
@@ -43,11 +71,18 @@ NON_FATAL_RUNTIME_EXCEPTIONS = (
 
 
 __all__ = [
+    "AuthorityError",
+    "AuthorityViolation",
+    "BackpressureError",
+    "DadbotRuntimeError",
     "NON_FATAL_RUNTIME_EXCEPTIONS",
     "ExecutionStageError",
     "InvariantViolation",
+    "InvariantError",
     "PersistenceFailure",
     "ProjectionMismatch",
+    "ReplayError",
+    "ReplayMismatch",
     "RuntimeErrorBase",
     "RuntimeExecutionError",
 ]

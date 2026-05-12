@@ -58,8 +58,8 @@ class SessionStore:
         *,
         session_id: str,
         state_patch: dict[str, Any],
-        kernel_step_id: str,
-        trace_id: str,
+        step_key: str,
+        trace_token: str,
     ) -> None:
         state = dict(self._sessions.get(str(session_id or "default")) or {})
         state.update(deepcopy(dict(state_patch or {})))
@@ -74,10 +74,10 @@ class SessionStore:
             self._apply_kernel_mutation(
                 session_id=session_id,
                 state_patch=dict(payload.get("state") or {}),
-                kernel_step_id=str(
+                step_key=str(
                     event.get("kernel_step_id") or "session_store.apply",
                 ),
-                trace_id=str(event.get("trace_id") or ""),
+                trace_token=str(event.get("trace_id") or ""),
             )
         elif event_type == "SESSION_STATE_DELETED":
             self._sessions.pop(session_id, None)

@@ -97,7 +97,7 @@ services:
     environment:
       POSTGRES_DB: dadbot
       POSTGRES_USER: dadbot
-      POSTGRES_PASSWORD: dadbot
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./docker/init-pgvector.sql:/docker-entrypoint-initdb.d/init-pgvector.sql:ro

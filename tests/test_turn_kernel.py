@@ -513,6 +513,9 @@ def test_scheduler_consumes_jobs_from_ledger_pending_tail():
 
     events = control_plane.ledger_events()
     event_types = [event["type"] for event in events]
-    assert event_types[:3] == ["JOB_SUBMITTED", "SESSION_BOUND", "JOB_QUEUED"]
+    submitted_idx = event_types.index("JOB_SUBMITTED")
+    bound_idx = event_types.index("SESSION_BOUND")
+    queued_idx = event_types.index("JOB_QUEUED")
+    assert submitted_idx < bound_idx < queued_idx
     assert "JOB_STARTED" in event_types
     assert event_types[-1] == "JOB_COMPLETED"

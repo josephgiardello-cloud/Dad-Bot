@@ -28,7 +28,6 @@ import re
 import subprocess
 import sys
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -198,7 +197,6 @@ def _manifest_payload(contract_path: Path, contract_text: str, contracts: list[C
 
     return {
         "schema_version": "contract-test-manifest.v1",
-        "generated_at_utc": datetime.now(UTC).isoformat(timespec="seconds"),
         "contract_map": {
             "path": contract_path.as_posix(),
             "version": version,

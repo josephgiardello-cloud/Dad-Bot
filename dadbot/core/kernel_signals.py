@@ -91,11 +91,11 @@ class Span:
         self,
         name: str,
         *,
-        trace_id: str = "",
+        trace_token: str = "",
         parent_span_id: str = "",
     ) -> None:
         self.name = str(name or "unnamed")
-        self.trace_id = str(trace_id or _current_trace_id.get() or _new_id("tr"))
+        self.trace_id = str(trace_token or _current_trace_id.get() or _new_id("tr"))
         self.span_id = _new_id("sp")
         self.parent_span_id = str(parent_span_id or _current_span_id.get() or "")
         self.started_at: float = time.time()
@@ -139,11 +139,11 @@ class _NoOpSpan(Span):
         self,
         name: str,
         *,
-        trace_id: str = "",
+        trace_token: str = "",
         parent_span_id: str = "",
     ) -> None:
         self.name = str(name or "unnamed")
-        self.trace_id = str(trace_id or "")
+        self.trace_id = str(trace_token or "")
         self.span_id = ""
         self.parent_span_id = str(parent_span_id or "")
         self.started_at = time.time()
@@ -178,17 +178,19 @@ class TracingContext:
         self,
         name: str,
         *,
+        trace_token: str = "",
         trace_id: str = "",
         level: TraceLevel | str | int = TraceLevel.MINIMAL,
     ) -> Span:
+        resolved_trace_token = str(trace_token or trace_id or "")
         event_level = TraceLevel.parse(level)
         if event_level == TraceLevel.AUDIT:
-            return Span(name, trace_id=trace_id)
+            return Span(name, trace_token=resolved_trace_token)
         if self._min_level == TraceLevel.OFF:
-            return _NoOpSpan(name=name, trace_id=trace_id)
+            return _NoOpSpan(name=name, trace_token=resolved_trace_token)
         if event_level < self._min_level:
-            return _NoOpSpan(name=name, trace_id=trace_id)
-        return Span(name, trace_id=trace_id)
+            return _NoOpSpan(name=name, trace_token=resolved_trace_token)
+        return Span(name, trace_token=resolved_trace_token)
 
     @staticmethod
     def current_trace_id() -> str:
@@ -199,12 +201,12 @@ class TracingContext:
         return _current_span_id.get() or ""
 
     @staticmethod
-    def ensure_trace_id(trace_id: str = "") -> str:
+    def ensure_trace_id(trace_token: str = "") -> str:
         """Return existing trace ID or create and install a new one."""
         existing = _current_trace_id.get()
         if existing:
             return existing
-        new_id = str(trace_id or _new_id("tr"))
+        new_id = str(trace_token or _new_id("tr"))
         _current_trace_id.set(new_id)
         return new_id
 

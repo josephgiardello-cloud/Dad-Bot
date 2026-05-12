@@ -312,6 +312,32 @@ class InferenceNode(_NodeContractMixin):
         )
         return any(marker in lowered for marker in markers)
 
+    @staticmethod
+    def _trimmed_items(values: Any, *, limit: int = 3) -> list[str]:
+        items = [str(item) for item in list(values or []) if str(item).strip()]
+        return items[:limit]
+
+    @classmethod
+    def _goal_resynthesis_lines(cls, *, message: str, proposal: dict[str, Any]) -> list[str]:
+        revised_goal = str(proposal.get("revised_goal") or "")
+        rationale = str(proposal.get("rationale") or "")
+        constraints = cls._trimmed_items(proposal.get("suggested_constraints"), limit=3)
+        next_steps = cls._trimmed_items(proposal.get("next_steps"), limit=3)
+
+        lines = [message]
+        if revised_goal:
+            lines.append(f"Revised goal: {revised_goal}")
+        if rationale:
+            lines.append(f"Why now: {rationale}")
+        if constraints:
+            lines.append("Constraints:")
+            lines.extend(f"- {item}" for item in constraints)
+        if next_steps:
+            lines.append("Next steps:")
+            lines.extend(f"- {item}" for item in next_steps)
+        lines.append("Reply 'realign' to proceed with this plan.")
+        return lines
+
     @classmethod
     def _goal_resynthesis_reply(cls, turn_context: TurnContext) -> str | None:
         state = turn_context.state if isinstance(turn_context.state, dict) else {}
@@ -326,49 +352,22 @@ class InferenceNode(_NodeContractMixin):
 
         proposal = dict(resynthesis.get("proposal") or {})
         message = str(resynthesis.get("message") or "Sustained friction detected.")
-        revised_goal = str(proposal.get("revised_goal") or "")
-        rationale = str(proposal.get("rationale") or "")
-        constraints = [
-            str(item) for item in list(proposal.get("suggested_constraints") or []) if str(item).strip()
-        ]
-        next_steps = [
-            str(item) for item in list(proposal.get("next_steps") or []) if str(item).strip()
-        ]
-
-        lines = [message]
-        if revised_goal:
-            lines.append(f"Revised goal: {revised_goal}")
-        if rationale:
-            lines.append(f"Why now: {rationale}")
-        if constraints:
-            lines.append("Constraints:")
-            lines.extend(f"- {item}" for item in constraints[:3])
-        if next_steps:
-            lines.append("Next steps:")
-            lines.extend(f"- {item}" for item in next_steps[:3])
-        lines.append("Reply 'realign' to proceed with this plan.")
+        lines = cls._goal_resynthesis_lines(message=message, proposal=proposal)
         return "\n".join(lines)
 
-    @classmethod
-    def _goal_alignment_interrupt_reply(cls, turn_context: TurnContext) -> str | None:
-        state = turn_context.state if isinstance(turn_context.state, dict) else {}
-        if not bool(state.get("goal_alignment_guard_enabled", False)):
-            return None
+    @staticmethod
+    def _goal_alignment_state(turn_context: TurnContext) -> dict[str, Any]:
+        return turn_context.state if isinstance(turn_context.state, dict) else {}
 
+    @staticmethod
+    def _goal_candidates(state: dict[str, Any]) -> list[dict[str, Any]]:
         goals_raw = state.get("session_goals")
         if not isinstance(goals_raw, list):
             goals_raw = state.get("goals")
-        goals = [dict(item) for item in list(goals_raw or []) if isinstance(item, dict)]
-        if not goals:
-            return None
+        return [dict(item) for item in list(goals_raw or []) if isinstance(item, dict)]
 
-        user_tokens = cls._significant_tokens(turn_context.user_input)
-        if len(user_tokens) < 4:
-            return None
-
-        user_text = str(turn_context.user_input or "").strip().lower()
-        confirms_realign = any(marker in user_text for marker in cls._REALIGN_CONFIRMATION_MARKERS)
-
+    @classmethod
+    def _best_goal_overlap(cls, user_tokens: set[str], goals: list[dict[str, Any]]) -> tuple[float, str]:
         best_overlap = 0.0
         best_goal = ""
         for goal in goals[:6]:
@@ -382,12 +381,44 @@ class InferenceNode(_NodeContractMixin):
             if overlap > best_overlap:
                 best_overlap = overlap
                 best_goal = description
+        return best_overlap, best_goal
 
+    @staticmethod
+    def _apply_realign_confirmation(state: dict[str, Any], *, confirms_realign: bool) -> bool:
         mandatory_halt = bool(state.get("goal_alignment_mandatory_halt", False))
         if mandatory_halt and confirms_realign:
             state["goal_alignment_mandatory_halt"] = False
             state["goal_alignment_diversion_streak"] = 0
             mandatory_halt = False
+        return mandatory_halt
+
+    @staticmethod
+    def _record_diversion(state: dict[str, Any], *, diversion_streak: int) -> bool:
+        state["goal_alignment_diversion_streak"] = diversion_streak
+        mandatory_halt = bool(state.get("goal_alignment_mandatory_halt", False))
+        if diversion_streak >= InferenceNode._MANDATORY_HALT_AFTER_DIVERSIONS:
+            state["goal_alignment_mandatory_halt"] = True
+            mandatory_halt = True
+        return mandatory_halt
+
+    @classmethod
+    def _goal_alignment_interrupt_reply(cls, turn_context: TurnContext) -> str | None:
+        state = cls._goal_alignment_state(turn_context)
+        if not bool(state.get("goal_alignment_guard_enabled", False)):
+            return None
+
+        goals = cls._goal_candidates(state)
+        if not goals:
+            return None
+
+        user_tokens = cls._significant_tokens(turn_context.user_input)
+        if len(user_tokens) < 4:
+            return None
+
+        user_text = str(turn_context.user_input or "").strip().lower()
+        confirms_realign = any(marker in user_text for marker in cls._REALIGN_CONFIRMATION_MARKERS)
+        best_overlap, best_goal = cls._best_goal_overlap(user_tokens, goals)
+        mandatory_halt = cls._apply_realign_confirmation(state, confirms_realign=confirms_realign)
 
         if best_overlap >= cls._GOAL_ALIGNMENT_OVERLAP_THRESHOLD:
             state["goal_alignment_diversion_streak"] = 0
@@ -395,10 +426,7 @@ class InferenceNode(_NodeContractMixin):
             return None
 
         diversion_streak = int(state.get("goal_alignment_diversion_streak") or 0) + 1
-        state["goal_alignment_diversion_streak"] = diversion_streak
-        if diversion_streak >= cls._MANDATORY_HALT_AFTER_DIVERSIONS:
-            state["goal_alignment_mandatory_halt"] = True
-            mandatory_halt = True
+        mandatory_halt = cls._record_diversion(state, diversion_streak=diversion_streak)
 
         if mandatory_halt:
             return (
@@ -567,7 +595,7 @@ class InferenceNode(_NodeContractMixin):
         sub_context = TurnContext(user_input=str(subtask.get("input") or ""))
         sub_context.trace_id = self._deterministic_subtask_trace_id(
             root_trace_id=str(root_context.trace_id or ""),
-            parent_trace_id=str(current_context.trace_id or ""),
+            parent_trace_id=str(parent_context.trace_id or ""),
             depth=depth,
             branch_index=branch_index,
             subtask=subtask,
@@ -614,57 +642,22 @@ class InferenceNode(_NodeContractMixin):
             root_context.metadata["delegation_depth_exceeded"] = True
             return ("[delegation depth exceeded]", False)
 
-        mode = str(block.get("mode") or "sequential").strip().lower()
-        if mode not in {"sequential", "parallel"}:
-            mode = "sequential"
-
-        subtasks = [
-            dict(item)
-            for item in list(block.get("subtasks") or [])[:_MAX_DELEGATION_SUBTASKS]
-            if isinstance(item, dict)
-        ]
+        mode = self._delegation_mode(block)
+        subtasks = self._delegation_subtasks(block)
 
         blackboard: dict[str, Any] = dict(root_context.state.get("agent_blackboard") or {})
         seed_fingerprint = self._stable_sha256(blackboard)
 
-        results: list[str] = []
-        subtask_ids: list[str] = []
-        if mode == "parallel":
-            executions = [
-                self._run_subtask(
-                    service=service,
-                    root_context=root_context,
-                    parent_context=current_context,
-                    rich_context=rich_context,
-                    subtask=subtask,
-                    depth=depth,
-                    branch_index=index,
-                    blackboard=blackboard,
-                )
-                for index, subtask in enumerate(subtasks)
-            ]
-            completed = await asyncio.gather(*executions)
-            for result_text, agent_name, subtask_id in completed:
-                results.append(result_text)
-                subtask_ids.append(subtask_id)
-                if agent_name:
-                    blackboard[agent_name] = result_text
-        else:
-            for index, subtask in enumerate(subtasks):
-                result_text, agent_name, subtask_id = await self._run_subtask(
-                    service=service,
-                    root_context=root_context,
-                    parent_context=current_context,
-                    rich_context=rich_context,
-                    subtask=subtask,
-                    depth=depth,
-                    branch_index=index,
-                    blackboard=blackboard,
-                )
-                results.append(result_text)
-                subtask_ids.append(subtask_id)
-                if agent_name:
-                    blackboard[agent_name] = result_text
+        results, subtask_ids = await self._execute_delegation_subtasks(
+            service=service,
+            root_context=root_context,
+            current_context=current_context,
+            rich_context=rich_context,
+            depth=depth,
+            mode=mode,
+            subtasks=subtasks,
+            blackboard=blackboard,
+        )
 
         root_context.metadata["delegation_depth"] = depth
         root_context.metadata["subtasks_executed"] = len(results)
@@ -685,16 +678,108 @@ class InferenceNode(_NodeContractMixin):
         determinism["agent_blackboard_seed_fingerprint"] = seed_fingerprint
         determinism["agent_blackboard_final_fingerprint"] = self._stable_sha256(blackboard)
         root_context.metadata["determinism"] = determinism
+        return (self._delegation_summary(results=results, failure_count=failure_count), False)
 
+    @staticmethod
+    def _delegation_mode(block: dict[str, Any]) -> str:
+        mode = str(block.get("mode") or "sequential").strip().lower()
+        if mode not in {"sequential", "parallel"}:
+            return "sequential"
+        return mode
+
+    @staticmethod
+    def _delegation_subtasks(block: dict[str, Any]) -> list[dict[str, Any]]:
+        return [
+            dict(item)
+            for item in list(block.get("subtasks") or [])[:_MAX_DELEGATION_SUBTASKS]
+            if isinstance(item, dict)
+        ]
+
+    @staticmethod
+    def _append_subtask_result(
+        *,
+        results: list[str],
+        subtask_ids: list[str],
+        blackboard: dict[str, Any],
+        result_text: str,
+        agent_name: str,
+        subtask_id: str,
+    ) -> None:
+        results.append(result_text)
+        subtask_ids.append(subtask_id)
+        if agent_name:
+            blackboard[agent_name] = result_text
+
+    async def _execute_delegation_subtasks(
+        self,
+        *,
+        service: Any,
+        root_context: TurnContext,
+        current_context: TurnContext,
+        rich_context: dict[str, Any],
+        depth: int,
+        mode: str,
+        subtasks: list[dict[str, Any]],
+        blackboard: dict[str, Any],
+    ) -> tuple[list[str], list[str]]:
+        results: list[str] = []
+        subtask_ids: list[str] = []
+        if mode == "parallel":
+            executions = [
+                self._run_subtask(
+                    service=service,
+                    root_context=root_context,
+                    parent_context=current_context,
+                    rich_context=rich_context,
+                    subtask=subtask,
+                    depth=depth,
+                    branch_index=index,
+                    blackboard=blackboard,
+                )
+                for index, subtask in enumerate(subtasks)
+            ]
+            completed = await asyncio.gather(*executions)
+            for result_text, agent_name, subtask_id in completed:
+                self._append_subtask_result(
+                    results=results,
+                    subtask_ids=subtask_ids,
+                    blackboard=blackboard,
+                    result_text=result_text,
+                    agent_name=agent_name,
+                    subtask_id=subtask_id,
+                )
+            return results, subtask_ids
+
+        for index, subtask in enumerate(subtasks):
+            result_text, agent_name, subtask_id = await self._run_subtask(
+                service=service,
+                root_context=root_context,
+                parent_context=current_context,
+                rich_context=rich_context,
+                subtask=subtask,
+                depth=depth,
+                branch_index=index,
+                blackboard=blackboard,
+            )
+            self._append_subtask_result(
+                results=results,
+                subtask_ids=subtask_ids,
+                blackboard=blackboard,
+                result_text=result_text,
+                agent_name=agent_name,
+                subtask_id=subtask_id,
+            )
+        return results, subtask_ids
+
+    @staticmethod
+    def _delegation_summary(*, results: list[str], failure_count: int) -> str:
         if failure_count:
             summary = f"I delegated {len(results)} sub-tasks. {failure_count} sub-task failed."
             failures = [item for item in results if str(item).startswith("[error:")]
             if failures:
                 summary = f"{summary} {' '.join(str(item) for item in failures)}"
-            return (summary, False)
-
-        summary = f"I delegated {len(results)} sub-tasks. Results: " + "; ".join(str(item) for item in results)
-        return (summary, False)
+            return summary
+        return f"I delegated {len(results)} sub-tasks. Results: " + "; ".join(str(item) for item in results)
 
     async def execute(self, registry: Any, turn_context: TurnContext) -> None:
         service = registry.get("agent_service")
@@ -769,6 +854,68 @@ class SafetyNode(_NodeContractMixin):
     name = "safety"
 
     @staticmethod
+    def _record_semantic_decision(turn_context: TurnContext, decision: Any) -> None:
+        semantic_trace = dict((decision.trace or {}).get("semantic_eval") or {})
+        eval_input_hash = str(semantic_trace.get("eval_input_hash") or "")
+        if not eval_input_hash:
+            return
+
+        execution_result = get_unified_execution_result(turn_context)
+        status = str(execution_result.get("status") or "").strip().lower()
+        if status == "pending":
+            execution_result = set_unified_execution_eval_hash(
+                execution_result,
+                eval_input_hash=eval_input_hash,
+            )
+            set_unified_execution_result(turn_context, execution_result)
+        else:
+            turn_context.state["semantic_eval_hash_write_skipped"] = {
+                "reason": "terminal_execution_result",
+                "status": status,
+            }
+
+        by_hash = dict(turn_context.state.get("semantic_decision_by_eval_hash") or {})
+        by_hash[eval_input_hash] = {
+            "action": decision.action,
+            "step_name": decision.step_name,
+            "details": dict(decision.details or {}),
+        }
+        turn_context.state["semantic_decision_by_eval_hash"] = by_hash
+
+    def _append_policy_trace(self, turn_context: TurnContext, decision: Any) -> None:
+        policy_events = list(turn_context.state.get("policy_trace_events") or [])
+        policy_events.append(
+            {
+                "event_type": "policy_decision",
+                "policy": "safety",
+                "node": self.name,
+                "sequence": len(policy_events) + 1,
+                "trace": dict(decision.trace or {}),
+            },
+        )
+        turn_context.state["policy_trace_events"] = policy_events
+
+    @staticmethod
+    def _policy_veto_reason_and_severity(decision: Any, details: dict[str, Any], trace: dict[str, Any]) -> tuple[str, str]:
+        reason = str(
+            details.get("reason")
+            or details.get("error")
+            or trace.get("reason")
+            or "policy_blocked_output",
+        )
+        action = str(getattr(decision, "action", "")).strip().lower()
+        severity = "critical" if action in {"denied", "deny", "blocked", "rejected"} else "high"
+        return reason, severity
+
+    @staticmethod
+    def _append_sovereign_event(state: dict[str, Any], metadata: dict[str, Any], event: SovereignEvent) -> None:
+        stream = list(state.get("sovereign_events") or [])
+        stream.append(event.to_ledger_event())
+        state["sovereign_events"] = stream
+        metadata["sovereign_event_checksum"] = event.checksum
+        metadata["sovereign_event_count"] = len(stream)
+
+    @staticmethod
     def _emit_policy_veto_event(turn_context: TurnContext, decision: Any) -> None:
         state = getattr(turn_context, "state", None)
         metadata = getattr(turn_context, "metadata", None)
@@ -777,13 +924,7 @@ class SafetyNode(_NodeContractMixin):
 
         details = dict(getattr(decision, "details", {}) or {})
         trace = dict(getattr(decision, "trace", {}) or {})
-        reason = str(
-            details.get("reason")
-            or details.get("error")
-            or trace.get("reason")
-            or "policy_blocked_output",
-        )
-        severity = "critical" if str(getattr(decision, "action", "")).strip().lower() in {"denied", "deny", "blocked", "rejected"} else "high"
+        reason, severity = SafetyNode._policy_veto_reason_and_severity(decision, details, trace)
         previous_checksum = str(metadata.get("sovereign_event_checksum") or "")
         event = SovereignEvent(
             turn_id=str(getattr(turn_context, "trace_id", "") or ""),
@@ -807,11 +948,7 @@ class SafetyNode(_NodeContractMixin):
             ),
             previous_checksum=previous_checksum,
         )
-        stream = list(state.get("sovereign_events") or [])
-        stream.append(event.to_ledger_event())
-        state["sovereign_events"] = stream
-        metadata["sovereign_event_checksum"] = event.checksum
-        metadata["sovereign_event_count"] = len(stream)
+        SafetyNode._append_sovereign_event(state, metadata, event)
 
     async def execute(self, registry: Any, turn_context: TurnContext) -> None:
         service = registry.get("safety_service")
@@ -833,40 +970,8 @@ class SafetyNode(_NodeContractMixin):
             "details": dict(decision.details or {}),
             "trace": dict(decision.trace or {}),
         }
-        semantic_trace = dict((decision.trace or {}).get("semantic_eval") or {})
-        eval_input_hash = str(semantic_trace.get("eval_input_hash") or "")
-        if eval_input_hash:
-            execution_result = get_unified_execution_result(turn_context)
-            status = str(execution_result.get("status") or "").strip().lower()
-            if status == "pending":
-                execution_result = set_unified_execution_eval_hash(
-                    execution_result,
-                    eval_input_hash=eval_input_hash,
-                )
-                set_unified_execution_result(turn_context, execution_result)
-            else:
-                turn_context.state["semantic_eval_hash_write_skipped"] = {
-                    "reason": "terminal_execution_result",
-                    "status": status,
-                }
-            by_hash = dict(turn_context.state.get("semantic_decision_by_eval_hash") or {})
-            by_hash[eval_input_hash] = {
-                "action": decision.action,
-                "step_name": decision.step_name,
-                "details": dict(decision.details or {}),
-            }
-            turn_context.state["semantic_decision_by_eval_hash"] = by_hash
-        policy_events = list(turn_context.state.get("policy_trace_events") or [])
-        policy_events.append(
-            {
-                "event_type": "policy_decision",
-                "policy": "safety",
-                "node": self.name,
-                "sequence": len(policy_events) + 1,
-                "trace": dict(decision.trace or {}),
-            },
-        )
-        turn_context.state["policy_trace_events"] = policy_events
+        self._record_semantic_decision(turn_context, decision)
+        self._append_policy_trace(turn_context, decision)
         action = str(decision.action or "").strip().lower()
         if action in {"denied", "deny", "blocked", "rejected"}:
             self._emit_policy_veto_event(turn_context, decision)

@@ -10,12 +10,14 @@ Invariants validated:
 4. No requests bypass the control plane
 """
 
+import asyncio
 from inspect import iscoroutinefunction
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from dadbot.core.control_plane import ExecutionControlPlane, ExecutionJob
+from dadbot.core.execution_resource_budget import BackpressureSignal
 from dadbot.core.orchestrator import DadBotOrchestrator
 
 pytestmark = pytest.mark.unit
@@ -174,6 +176,29 @@ class TestTraceInvariants:
         # Should call _validate_trace_invariant after job completes
         assert "_validate_trace_invariant" in source
 
+    def test_register_raises_backpressure_signal_when_capacity_is_exhausted(self):
+        async def _exercise() -> None:
+            registry = MagicMock()
+            kernel_executor = AsyncMock()
+            plane = ExecutionControlPlane(
+                registry=registry,
+                kernel_executor=kernel_executor,
+            )
+            plane._scheduler.max_inflight_jobs = 0
+
+            job = ExecutionJob(
+                session_id="test",
+                user_input="test input",
+            )
+
+            with pytest.raises(BackpressureSignal) as exc_info:
+                await plane._scheduler.register(job)
+
+            assert exc_info.value.trace_id == job.trace_id
+            assert exc_info.value.retry_after_ms > 0
+
+        asyncio.run(_exercise())
+
 
 @pytest.mark.unit
 class TestExecutionJobTraceId:
@@ -213,6 +238,26 @@ class TestExecutionJobTraceId:
         )
 
         assert job.trace_id == provided_trace_id
+
+
+@pytest.mark.unit
+class TestBackpressureHandling:
+    def test_handle_turn_returns_degraded_response_on_backpressure(self):
+        async def _exercise() -> None:
+            orchestrator = DadBotOrchestrator.__new__(DadBotOrchestrator)
+            orchestrator._submit_turn_via_control_plane = AsyncMock(
+                side_effect=BackpressureSignal(
+                    reason="max inflight jobs reached",
+                    retry_after_ms=1000.0,
+                    trace_id="tr-overloaded",
+                )
+            )
+
+            response = await orchestrator.handle_turn("hello")
+
+            assert response == ("I’m at capacity right now. Please try again shortly.", False)
+
+        asyncio.run(_exercise())
 
 
 if __name__ == "__main__":

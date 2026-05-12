@@ -167,6 +167,62 @@ def parse_args(argv=None):
     restart_parser.add_argument("--light", action="store_true", help="Restart in light mode.")
     restart_parser.add_argument("--no-signoff", action="store_true", help="Disable signoff after restart.")
 
+    heartbeat_parser = subparsers.add_parser(
+        "heartbeat-daemon",
+        help="Run a resident heartbeat/consolidation loop for sovereign maintenance.",
+    )
+    heartbeat_parser.add_argument(
+        "--interval-seconds",
+        type=int,
+        default=60,
+        help="Seconds between heartbeat cycles.",
+    )
+    heartbeat_parser.add_argument(
+        "--consolidation-interval-seconds",
+        type=int,
+        default=300,
+        help="Seconds between memory consolidation cycles.",
+    )
+    heartbeat_parser.add_argument(
+        "--session-id",
+        default="sovereign-daemon",
+        help="Session identifier for consolidation jobs.",
+    )
+    heartbeat_parser.add_argument(
+        "--window-size",
+        type=int,
+        default=10,
+        help="Window size passed to memory consolidation jobs.",
+    )
+    heartbeat_parser.add_argument(
+        "--max-cycles",
+        type=int,
+        default=0,
+        help="Optional max cycles before exit (0 runs forever).",
+    )
+
+    hud_parser = subparsers.add_parser(
+        "hud",
+        help="Render a terminal observability HUD from runtime health snapshots.",
+    )
+    hud_parser.add_argument(
+        "--interval-seconds",
+        type=int,
+        default=2,
+        help="Seconds between HUD refreshes.",
+    )
+    hud_parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Render a single HUD sample and exit.",
+    )
+    hud_parser.add_argument(
+        "--max-samples",
+        type=int,
+        default=0,
+        help="Optional max HUD samples before exit (0 runs until interrupted).",
+    )
+
     parser.add_argument(
         "--cli",
         action="store_true",
@@ -324,6 +380,94 @@ def _cli_doctor(dadbot_cls, *, as_json: bool) -> int:
     return code if preflight_ok else 1
 
 
+def _cli_heartbeat_daemon(
+    dadbot_cls,
+    *,
+    interval_seconds: int,
+    consolidation_interval_seconds: int,
+    session_id: str,
+    window_size: int,
+    max_cycles: int,
+) -> int:
+    bot = dadbot_cls(light_mode=True)
+    assistant = bot.assistant
+    heartbeat_interval = max(1, int(interval_seconds or 1))
+    consolidation_interval = max(heartbeat_interval, int(consolidation_interval_seconds or heartbeat_interval))
+    last_consolidation = 0.0
+    cycles = 0
+    max_run_cycles = max(0, int(max_cycles or 0))
+
+    print("Starting sovereign heartbeat daemon. Press Ctrl+C to stop.")
+    try:
+        while True:
+            now = time.time()
+            heartbeat_result = dict(assistant.run_heartbeat(force=True) or {})
+            consolidation_result: dict[str, Any] = {}
+            if (now - last_consolidation) >= consolidation_interval:
+                consolidation_result = dict(
+                    assistant.run_memory_consolidation(
+                        session_id=session_id,
+                        window_size=window_size,
+                        background=False,
+                        force=True,
+                    )
+                    or {}
+                )
+                last_consolidation = now
+
+            payload = {
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "cycle": cycles + 1,
+                "heartbeat": heartbeat_result,
+                "consolidation": consolidation_result,
+            }
+            print(json.dumps(payload, default=str))
+
+            cycles += 1
+            if max_run_cycles and cycles >= max_run_cycles:
+                return 0
+            time.sleep(heartbeat_interval)
+    except KeyboardInterrupt:
+        print("Sovereign heartbeat daemon stopped.")
+        return 0
+
+
+def _cli_hud_watch(
+    dadbot_cls,
+    *,
+    interval_seconds: int,
+    once: bool,
+    max_samples: int,
+) -> int:
+    bot = dadbot_cls(light_mode=True)
+    cadence = max(1, int(interval_seconds or 1))
+    sample = 0
+    max_count = max(0, int(max_samples or 0))
+
+    try:
+        while True:
+            health = dict(bot.current_runtime_health_snapshot(force=True, log_warnings=False, persist=False) or {})
+            fidelity = dict(bot.turn_fidelity_state() or {})
+            status = str(health.get("status") or "unknown")
+            score = str(health.get("health_score") or health.get("score") or "n/a")
+            contract_ok = health.get("contract_ok")
+            replay_ok = health.get("replay_determinism_ok")
+            full_pipeline = bool(fidelity.get("full_pipeline", False))
+            stamp = datetime.utcnow().strftime("%H:%M:%S")
+            print(
+                f"[{stamp}] status={status} score={score} contract_ok={contract_ok} "
+                f"replay_ok={replay_ok} full_pipeline={full_pipeline}",
+            )
+
+            sample += 1
+            if once or (max_count and sample >= max_count):
+                return 0
+            time.sleep(cadence)
+    except KeyboardInterrupt:
+        print("HUD watch stopped.")
+        return 0
+
+
 def _run_operator_command(args, *, dadbot_cls, script_path: Path) -> int | None:
     command = str(getattr(args, "command", "") or "").strip().lower()
     if not command:
@@ -347,6 +491,22 @@ def _run_operator_command(args, *, dadbot_cls, script_path: Path) -> int | None:
             append_signoff=not bool(getattr(args, "no_signoff", False)),
             light_mode=bool(getattr(args, "light", False)),
             script_path=script_path,
+        )
+    if command == "heartbeat-daemon":
+        return _cli_heartbeat_daemon(
+            dadbot_cls,
+            interval_seconds=int(getattr(args, "interval_seconds", 60) or 60),
+            consolidation_interval_seconds=int(getattr(args, "consolidation_interval_seconds", 300) or 300),
+            session_id=str(getattr(args, "session_id", "sovereign-daemon") or "sovereign-daemon"),
+            window_size=int(getattr(args, "window_size", 10) or 10),
+            max_cycles=int(getattr(args, "max_cycles", 0) or 0),
+        )
+    if command == "hud":
+        return _cli_hud_watch(
+            dadbot_cls,
+            interval_seconds=int(getattr(args, "interval_seconds", 2) or 2),
+            once=bool(getattr(args, "once", False)),
+            max_samples=int(getattr(args, "max_samples", 0) or 0),
         )
     print(f"Unknown command: {command}", file=sys.stderr)
     return 2

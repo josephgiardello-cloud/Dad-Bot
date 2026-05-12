@@ -10,7 +10,7 @@ import os
 import pickle
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -21,9 +21,32 @@ from dadbot.core.execution_context import (
     ensure_execution_trace_root,
     record_execution_step,
 )
-from dadbot.core.execution_ledger import WriteBoundaryGuard
+from dadbot.core.contracts.lifecycle_events import (
+    Claimed,
+    LeaseExpired,
+    LeaseRenewed,
+    Redelivered,
+    Released,
+    Submitted,
+)
+from dadbot.core.control_plane_projection import ExecutionProjection
+from dadbot.core.control_plane_reducer import ExecutionState, ExecutionStatus, lease_expired
+from dadbot.core.ledger_writer import LedgerWriter
 from dadbot.core.execution_replay_engine import verify_terminal_state_replay_equivalence
 from dadbot.core.kernel_locks import KernelReplaySequenceLock
+from dadbot.core.persistence_schema_config import is_strict_persistence_schema_mode
+from dadbot.core.persistence_record_schema import (
+    PersistenceSchemaError,
+    PERSISTENCE_SCHEMA_VERSION,
+    assert_valid_checkpoint_record,
+    assert_valid_replay_record,
+    checkpoint_record_errors,
+    normalize_checkpoint_record,
+    normalize_replay_record,
+    normalize_state_snapshot,
+    normalize_trace_event,
+    trace_event_errors,
+)
 
 POLICY_TRACE_EVENT_TYPE = "PolicyTraceEvent"
 _WRITE_P95_SLO_MS = 15.0
@@ -58,7 +81,16 @@ _CANONICAL_CHECKPOINT_FIELDS = {
     "prev_checkpoint_hash",
     "event_sequence_id",
     "occurred_at",
+    "execution_mode",
 }
+
+
+class ClaimConflict(RuntimeError):
+    """Raised when an execution is already owned by another active worker."""
+
+
+class NotOwner(RuntimeError):
+    """Raised when a worker attempts to renew/release without ownership."""
 
 
 class ConversationPersistenceManager:
@@ -190,7 +222,201 @@ class ConversationPersistenceManager:
                 "lock_hash": lock_hash,
                 "enforced": enforced,
             }
-        return thin
+
+        # Checkpoint is the canonical execution-state representation.
+        # Persist deterministic execution state in-checkpoint, not as side payloads.
+        execution_state = {
+            "state": copy.deepcopy(dict(source.get("state") or {})),
+            "metadata": copy.deepcopy(metadata),
+            "phase_history": copy.deepcopy(list(source.get("phase_history") or [])),
+            "stage_traces": copy.deepcopy(list(source.get("stage_traces") or [])),
+            "event_sequence": int(source.get("event_sequence") or 0),
+        }
+        if any(execution_state.values()):
+            thin["execution_state"] = execution_state
+        return normalize_checkpoint_record(thin)
+
+    @staticmethod
+    def _stable_json_sha(payload: dict[str, Any]) -> str:
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, ensure_ascii=True, default=str).encode("utf-8"),
+        ).hexdigest()
+
+    def _latest_checkpoint_for_trace(self, trace_token: str) -> dict[str, Any] | None:
+        normalized = str(trace_token or "").strip()
+        if not normalized:
+            return None
+        ledger = self._execution_ledger()
+        for event in reversed(ledger.read()):
+            if str(event.get("type") or "") != "GRAPH_CHECKPOINT":
+                continue
+            payload = dict(event.get("payload") or {})
+            if str(payload.get("trace_id") or "").strip() != normalized:
+                continue
+            checkpoint = dict(payload.get("checkpoint") or {})
+            if checkpoint:
+                return normalize_checkpoint_record(checkpoint)
+        return None
+
+    def _build_checkpoint_continuity(self, checkpoint: dict[str, Any], *, trace_token: str) -> dict[str, Any]:
+        replay = self.replay_turn_events(trace_token=trace_token)
+        determinism = dict(replay.get("determinism") or {})
+        continuity = {
+            "execution_fingerprint": str(determinism.get("execution_fingerprint") or "").strip(),
+            "strict_sequence_hash": str(replay.get("strict_sequence_hash") or "").strip(),
+            "event_count": int(replay.get("event_count") or 0),
+        }
+        checkpoint_payload = dict(checkpoint or {})
+        checkpoint_payload["continuity"] = continuity
+        return normalize_checkpoint_record(checkpoint_payload)
+
+    @staticmethod
+    def _parse_iso_timestamp(value: str) -> datetime | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        with contextlib.suppress(ValueError):
+            return datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return None
+
+    def _lease_expires_at(self, *, lease_seconds: int) -> str:
+        anchor = self._parse_iso_timestamp(self._active_turn_wall_time()) or datetime.now()
+        return (anchor + timedelta(seconds=max(int(lease_seconds or 0), 1))).isoformat(timespec="seconds")
+
+    def _current_handoff_lease(self, trace_token: str) -> dict[str, Any]:
+        normalized = str(trace_token or "").strip()
+        if not normalized:
+            return {
+                "status": "unclaimed",
+                "worker_id": "",
+                "lease_expires_at": "",
+                "lease_seconds": 0,
+                "active": False,
+            }
+
+        _execution_id, state = self._lifecycle_state_for_trace(normalized)
+        if state is None:
+            return {
+                "status": "unclaimed",
+                "worker_id": "",
+                "lease_expires_at": "",
+                "lease_seconds": 0,
+                "active": False,
+            }
+
+        now = datetime.now()
+        expiry = state.lease_expiry
+        expires_at = expiry.isoformat(timespec="seconds") if isinstance(expiry, datetime) else ""
+        is_active = bool(state.owner and expiry and not lease_expired(state, now=now))
+        status = "unclaimed"
+        if state.status == ExecutionStatus.RELEASED:
+            status = "released"
+        elif state.status == ExecutionStatus.EXPIRED or bool(state.owner and expiry and lease_expired(state, now=now)):
+            status = "expired"
+        elif is_active:
+            status = "claimed"
+
+        lease_seconds = 0
+        if expiry is not None:
+            lease_seconds = max(0, int((expiry - now).total_seconds()))
+
+        return {
+            "status": status,
+            "worker_id": str(state.owner or ""),
+            "lease_expires_at": expires_at,
+            "lease_seconds": int(lease_seconds),
+            "active": bool(is_active),
+        }
+
+    def _lifecycle_projection(self) -> ExecutionProjection:
+        projection = ExecutionProjection()
+        projection.rebuild_from_ledger(self._execution_ledger().read())
+        return projection
+
+    def _resolve_execution_id_for_trace(self, trace_token: str) -> str:
+        normalized_trace_id = str(trace_token or "").strip()
+        if not normalized_trace_id:
+            return ""
+        ledger = self._execution_ledger()
+        for event in reversed(ledger.read()):
+            if str(event.get("type") or "") == "EXECUTION_LIFECYCLE":
+                if str(event.get("trace_id") or "").strip() != normalized_trace_id:
+                    continue
+                payload = dict(event.get("payload") or {})
+                execution_id = str(payload.get("execution_id") or "").strip()
+                if execution_id:
+                    return execution_id
+            if str(event.get("type") or "") != "JOB_SUBMITTED":
+                continue
+            if str(event.get("trace_id") or "").strip() != normalized_trace_id:
+                continue
+            payload = dict(event.get("payload") or {})
+            execution_id = str(payload.get("job_id") or "").strip()
+            if execution_id:
+                return execution_id
+        return ""
+
+    def _resolve_session_id_for_trace(self, trace_token: str) -> str:
+        normalized_trace_id = str(trace_token or "").strip()
+        if not normalized_trace_id:
+            return "default"
+        ledger = self._execution_ledger()
+        for event in reversed(ledger.read()):
+            if str(event.get("trace_id") or "").strip() != normalized_trace_id:
+                continue
+            session_id = str(event.get("session_id") or "").strip()
+            if session_id:
+                return session_id
+        return "default"
+
+    def _lifecycle_state_for_trace(self, trace_token: str) -> tuple[str, ExecutionState | None]:
+        execution_id = self._resolve_execution_id_for_trace(trace_token)
+        if not execution_id:
+            return "", None
+        state = self._lifecycle_projection().get(execution_id)
+        return execution_id, state
+
+    @staticmethod
+    def _derived_execution_id(trace_token: str) -> str:
+        normalized_trace = str(trace_token or "").strip()
+        digest = hashlib.sha256(normalized_trace.encode("utf-8")).hexdigest()[:20]
+        return f"job-{digest}"
+
+    def _append_lifecycle_event_for_trace(
+        self,
+        *,
+        trace_token: str,
+        session_id: str,
+        event: Any,
+        step_key: str,
+    ) -> None:
+        self._append_ledger_event(
+            event_type="EXECUTION_LIFECYCLE",
+            trace_token=str(trace_token or "").strip(),
+            payload=event.to_payload(),
+            step_key=step_key,
+            session_id=str(session_id or "default"),
+        )
+
+    def _assert_checkpoint_runtime_transition(self, checkpoint: dict[str, Any]) -> None:
+        trace_id = str((checkpoint or {}).get("trace_id") or "").strip()
+        if not trace_id:
+            return
+        prior = self._latest_checkpoint_for_trace(trace_id)
+        if not isinstance(prior, dict):
+            return
+        current_prev = str((checkpoint or {}).get("prev_checkpoint_hash") or "").strip()
+        prior_hash = str(prior.get("checkpoint_hash") or "").strip()
+        if prior_hash and current_prev and current_prev != prior_hash:
+            raise RuntimeError(
+                "Invalid checkpoint transition: prev_checkpoint_hash does not match latest checkpoint_hash",
+            )
+        current_event_seq = int((checkpoint or {}).get("event_sequence_id") or 0)
+        prior_event_seq = int(prior.get("event_sequence_id") or 0)
+        if current_event_seq and prior_event_seq and current_event_seq < prior_event_seq:
+            raise RuntimeError(
+                "Invalid checkpoint transition: event_sequence_id regressed",
+            )
 
     def _snapshot_mutation_queue(self) -> list[dict[str, Any]]:
         queue = getattr(self.bot, "_deferred_save_boundary_snapshots", None)
@@ -274,28 +500,31 @@ class ConversationPersistenceManager:
             raise RuntimeTraceViolation("ExecutionLedger is required for conversation persistence authority")
         return ledger
 
+    def _strict_schema_reject_enabled(self) -> bool:
+        # Use centralized config resolver: checks env + bot attribute
+        return is_strict_persistence_schema_mode(
+            service_strict_mode=getattr(self.bot, "STRICT_SCHEMA_REJECT", None)
+        )
+
+    def _ledger_writer(self) -> LedgerWriter:
+        return LedgerWriter(self._execution_ledger())
+
     def _append_ledger_event(
         self,
         *,
         event_type: str,
-        trace_id: str,
+        trace_token: str,
         payload: dict[str, Any],
-        kernel_step_id: str,
+        step_key: str,
         session_id: str = "default",
     ) -> dict[str, Any]:
-        ledger = self._execution_ledger()
-        event = {
-            "type": str(event_type or "").strip() or "TURN_EVENT",
-            "session_id": str(session_id or "default"),
-            "trace_id": str(trace_id or "unknown").strip() or "unknown",
-            "timestamp": self._active_turn_wall_time(),
-            "kernel_step_id": str(kernel_step_id or "conversation_persistence"),
-            "payload": copy.deepcopy(dict(payload or {})),
-        }
-        if bool(getattr(ledger, "_strict_writes", False)):
-            with WriteBoundaryGuard(ledger):
-                return ledger.write(event)
-        return ledger.write(event)
+        return self._ledger_writer().write_event(
+            str(event_type or "").strip() or "TURN_EVENT",
+            session_id=str(session_id or "default"),
+            trace_token=str(trace_token or "unknown").strip() or "unknown",
+            step_key=str(step_key or "conversation_persistence"),
+            payload=copy.deepcopy(dict(payload or {})),
+        )
 
     def _derived_exports_enabled(self) -> bool:
         return bool(getattr(self.bot, "ENABLE_DERIVED_PERSISTENCE_EXPORTS", False))
@@ -459,18 +688,31 @@ class ConversationPersistenceManager:
         payload["trace_id"] = trace_id
         payload["stage"] = stage
         payload["status"] = status
-        payload.setdefault("occurred_at", self._active_turn_wall_time())
+        payload.setdefault("execution_mode", "live")
+        if not str(payload.get("occurred_at") or "").strip():
+            payload["occurred_at"] = self._active_turn_wall_time()
+        if self._strict_schema_reject_enabled():
+            payload = assert_valid_checkpoint_record(payload)
+        else:
+            payload = normalize_checkpoint_record(payload)
+            errors = checkpoint_record_errors(payload)
+            if errors:
+                raise PersistenceSchemaError(
+                    "Malformed checkpoint payload: " + "; ".join(errors),
+                )
+        self._assert_checkpoint_runtime_transition(payload)
+        payload = self._build_checkpoint_continuity(payload, trace_token=trace_id)
         self._assert_snapshot_invariants(payload, label="graph_checkpoint")
         self._append_ledger_event(
             event_type="GRAPH_CHECKPOINT",
-            trace_id=trace_id,
+            trace_token=trace_id,
             payload={
                 "trace_id": trace_id,
                 "stage": stage,
                 "status": status,
                 "checkpoint": payload,
             },
-            kernel_step_id="persist_graph_checkpoint",
+            step_key="persist_graph_checkpoint",
             session_id=str(payload.get("session_id") or "default"),
         )
 
@@ -508,7 +750,7 @@ class ConversationPersistenceManager:
 
     def _export_checkpoint_projection(
         self,
-        trace_id: str,
+        trace_token: str,
         stage: str,
         status: str,
         payload: dict[str, Any],
@@ -519,22 +761,22 @@ class ConversationPersistenceManager:
         )
         wrapped_payload = {
             "format": "gzip+pickle",
-            "trace_id": trace_id,
+            "trace_id": trace_token,
             "stage": stage,
             "status": status,
             "created_at": self._active_turn_wall_time(),
             "payload_b64": base64.b64encode(binary_payload).decode("ascii"),
         }
         if self.bot._tenant_document_store is not None:
-            checkpoint_key = f"graph-checkpoint:{trace_id}:{timestamp}:{stage}:{status}"
+            checkpoint_key = f"graph-checkpoint:{trace_token}:{timestamp}:{stage}:{status}"
             self.bot._tenant_document_store.save_session_state(checkpoint_key, wrapped_payload)
-            self.bot._tenant_document_store.save_session_state(f"graph-checkpoint-latest:{trace_id}", wrapped_payload)
+            self.bot._tenant_document_store.save_session_state(f"graph-checkpoint-latest:{trace_token}", wrapped_payload)
             self.bot._tenant_document_store.save_session_state("graph-checkpoint-latest", wrapped_payload)
             return
         checkpoint_dir = self.bot.SESSION_LOG_DIR / "graph_checkpoints"
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        checkpoint_path = checkpoint_dir / f"{timestamp}-{trace_id[:12]}-{stage}-{status}.bin"
-        latest_path = checkpoint_dir / f"latest-{trace_id[:12]}.bin"
+        checkpoint_path = checkpoint_dir / f"{timestamp}-{trace_token[:12]}-{stage}-{status}.bin"
+        latest_path = checkpoint_dir / f"latest-{trace_token[:12]}.bin"
         latest_global_path = checkpoint_dir / "latest.bin"
         checkpoint_path.write_bytes(binary_payload)
         latest_path.write_bytes(binary_payload)
@@ -545,31 +787,31 @@ class ConversationPersistenceManager:
         event_dir.mkdir(parents=True, exist_ok=True)
         return event_dir
 
-    def _turn_event_path(self, trace_id: str) -> Path:
-        normalized = str(trace_id or "unknown").strip() or "unknown"
+    def _turn_event_path(self, trace_token: str) -> Path:
+        normalized = str(trace_token or "unknown").strip() or "unknown"
         return self._turn_event_dir() / f"{normalized[:40]}.jsonl"
 
-    def _snapshot_path(self, trace_id: str) -> Path:
-        normalized = str(trace_id or "unknown").strip() or "unknown"
+    def _snapshot_path(self, trace_token: str) -> Path:
+        normalized = str(trace_token or "unknown").strip() or "unknown"
         return self._turn_event_dir() / f"snapshot-{normalized[:40]}.json"
 
     def _compute_next_sequence(
         self,
-        trace_id: str,
+        trace_token: str,
         *,
         events_snapshot: list[dict[str, Any]] | None = None,
     ) -> int:
-        _ = trace_id
+        _ = trace_token
         _ = events_snapshot
         ledger = self._execution_ledger()
         get_next_trace_sequence = getattr(ledger, "get_next_trace_sequence", None)
         if callable(get_next_trace_sequence):
-            return int(get_next_trace_sequence(trace_id))
+            return int(get_next_trace_sequence(trace_token))
         get_next_sequence = getattr(ledger, "get_next_sequence", None)
         if callable(get_next_sequence):
             return int(get_next_sequence())
         events = self.list_turn_events(
-            trace_id=trace_id,
+            trace_token=trace_token,
             events_snapshot=events_snapshot,
         )
         if not events:
@@ -598,11 +840,13 @@ class ConversationPersistenceManager:
             hashlib.sha256(event_id_seed.encode()).hexdigest()[:16],
         )
         payload.setdefault("occurred_at", self._active_turn_wall_time())
+        payload.setdefault("persistence_schema_version", PERSISTENCE_SCHEMA_VERSION)
+        payload = normalize_trace_event(payload)
         self._append_ledger_event(
             event_type="TURN_EVENT",
-            trace_id=trace_id,
+            trace_token=trace_id,
             payload=payload,
-            kernel_step_id="persist_turn_event",
+            step_key="persist_turn_event",
             session_id=str(payload.get("session_id") or "default"),
         )
 
@@ -617,7 +861,7 @@ class ConversationPersistenceManager:
             snapshot_full = self._use_full_compaction_snapshot(compact_sequence)
             compaction_snapshot = ledger.read(full=snapshot_full)
             replay = self.replay_turn_events(
-                trace_id=trace_id,
+                trace_token=trace_id,
                 events_snapshot=compaction_snapshot,
             )
             determinism = dict(replay.get("determinism") or {})
@@ -633,6 +877,7 @@ class ConversationPersistenceManager:
                     "consistent": bool(determinism.get("consistent", True)),
                 },
             }
+            snapshot_payload = normalize_state_snapshot(snapshot_payload)
             self._assert_snapshot_invariants(snapshot_payload, label="turn_snapshot")
             if self.bot._tenant_document_store is not None:
                 self.bot._tenant_document_store.save_session_state(
@@ -655,29 +900,29 @@ class ConversationPersistenceManager:
         self._telemetry["last_write_ms"] = float(write_ms)
         self._rolling_append(self._telemetry["write_latencies_ms"], write_ms)
 
-    def _export_turn_event_projection(self, trace_id: str, payload: dict[str, Any]) -> None:
+    def _export_turn_event_projection(self, trace_token: str, payload: dict[str, Any]) -> None:
         if self.bot._tenant_document_store is not None:
-            key = f"turn-events:{trace_id}"
+            key = f"turn-events:{trace_token}"
             existing = self.bot._tenant_document_store.load_session_state(key)
             events = list(existing) if isinstance(existing, list) else []
             events.append(payload)
             self.bot._tenant_document_store.save_session_state(key, events)
-            self.bot._tenant_document_store.save_session_state(f"turn-events-latest:{trace_id}", payload)
+            self.bot._tenant_document_store.save_session_state(f"turn-events-latest:{trace_token}", payload)
             return
-        event_path = self._turn_event_path(trace_id)
+        event_path = self._turn_event_path(trace_token)
         line = json.dumps(payload, sort_keys=True, ensure_ascii=True)
         with event_path.open("a", encoding="utf-8") as handle:
             handle.write(line + "\n")
 
     def list_turn_events(
         self,
-        trace_id: str,
+        trace_token: str,
         limit: int = 0,
         *,
         events_snapshot: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         self._require_active_trace("list_turn_events")
-        normalized = str(trace_id or "").strip()
+        normalized = str(trace_token or "").strip()
         if not normalized:
             return []
 
@@ -686,13 +931,20 @@ class ConversationPersistenceManager:
             ledger = self._execution_ledger()
             snapshot = ledger.read()
         events: list[dict[str, Any]] = []
+        strict_reject = self._strict_schema_reject_enabled()
         for event in snapshot:
             if str(event.get("type") or "") != "TURN_EVENT":
                 continue
             payload = dict(event.get("payload") or {})
             if str(payload.get("trace_id") or "").strip() != normalized:
                 continue
-            events.append(payload)
+            normalized_payload = normalize_trace_event(payload)
+            errors = trace_event_errors(normalized_payload)
+            if errors and strict_reject:
+                raise PersistenceSchemaError(
+                    "Malformed persisted turn event: " + "; ".join(errors),
+                )
+            events.append(normalized_payload)
 
         events.sort(key=lambda item: int(item.get("sequence") or 0))
         if limit and limit > 0:
@@ -702,11 +954,12 @@ class ConversationPersistenceManager:
     def list_policy_trace_events(
         self,
         *,
-        trace_id: str = "",
+        trace_token: str = "",
         limit: int = 0,
+        **legacy_kwargs: Any,
     ) -> list[dict[str, Any]]:
         self._require_active_trace("list_policy_trace_events")
-        normalized = str(trace_id or "").strip()
+        normalized = str(trace_token or legacy_kwargs.get("trace_id") or "").strip()
 
         ledger = self._execution_ledger()
         collected: list[dict[str, Any]] = []
@@ -714,10 +967,15 @@ class ConversationPersistenceManager:
             event_type = str(event.get("type") or "")
             if event_type == "TURN_EVENT":
                 payload = dict(event.get("payload") or {})
-                if str(payload.get("event_type") or "") != POLICY_TRACE_EVENT_TYPE:
+                payload_event_type = str(payload.get("event_type") or "").strip().lower()
+                if payload_event_type not in {
+                    str(POLICY_TRACE_EVENT_TYPE).strip().lower(),
+                    "policytraceevent",
+                }:
                     continue
                 if normalized and str(payload.get("trace_id") or "").strip() != normalized:
                     continue
+                payload["event_type"] = POLICY_TRACE_EVENT_TYPE
                 collected.append(payload)
                 continue
             if event_type != POLICY_TRACE_EVENT_TYPE:
@@ -744,11 +1002,13 @@ class ConversationPersistenceManager:
     def summarize_policy_trace_events(
         self,
         *,
-        trace_id: str = "",
+        trace_token: str = "",
         limit: int = 0,
+        **legacy_kwargs: Any,
     ) -> dict[str, Any]:
         self._require_active_trace("summarize_policy_trace_events")
-        events = self.list_policy_trace_events(trace_id=trace_id, limit=limit)
+        resolved_trace = str(trace_token or legacy_kwargs.get("trace_id") or "").strip()
+        events = self.list_policy_trace_events(trace_token=resolved_trace, limit=limit)
 
         action_counts: dict[str, int] = {}
         policies_seen: set[str] = set()
@@ -840,45 +1100,47 @@ class ConversationPersistenceManager:
 
     def replay_turn_events(
         self,
-        trace_id: str,
+        trace_token: str,
         *,
         events_snapshot: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         self._require_active_trace("replay_turn_events")
-        normalized = str(trace_id or "").strip()
+        normalized = str(trace_token or "").strip()
         events = self.list_turn_events(
-            trace_id=normalized,
+            trace_token=normalized,
             events_snapshot=events_snapshot,
         )
         strict_sequence_hash, strict_sequence = KernelReplaySequenceLock.strict_hash(
-            trace_id=normalized,
+            trace_token=normalized,
             events=events,
         )
         replayed_state, replayed_metadata, phase, determinism = self._fold_events(
             events,
         )
-        return {
-            "trace_id": normalized,
-            "events": events,
-            "strict_sequence_hash": strict_sequence_hash,
-            "strict_sequence": strict_sequence,
-            "phase": phase,
-            "replayed_state": replayed_state,
-            "replayed_metadata": replayed_metadata,
-            "determinism": determinism,
-            "event_count": len(events),
-        }
+        replay_record = normalize_replay_record(
+            trace_token=normalized,
+            events=events,
+            strict_sequence_hash=strict_sequence_hash,
+            strict_sequence=strict_sequence,
+            phase=phase,
+            replayed_state=replayed_state,
+            replayed_metadata=replayed_metadata,
+            determinism=determinism,
+        )
+        if self._strict_schema_reject_enabled():
+            assert_valid_replay_record(replay_record)
+        return replay_record
 
     def validate_replay_determinism(
         self,
-        trace_id: str,
+        trace_token: str,
         expected_lock_hash: str = "",
         *,
         expected_terminal_state: dict[str, Any] | None = None,
         expected_execution_trace_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         self._require_active_trace("validate_replay_determinism")
-        replay = self.replay_turn_events(trace_id=trace_id)
+        replay = self.replay_turn_events(trace_token=trace_token)
         determinism = dict(replay.get("determinism") or {})
         observed_hash = str(determinism.get("lock_hash") or "").strip()
         expected_hash = str(expected_lock_hash or "").strip()
@@ -916,7 +1178,7 @@ class ConversationPersistenceManager:
                 enforce_dag_equivalence=True,
             )
         return {
-            "trace_id": str(trace_id or "").strip(),
+            "trace_id": str(trace_token or "").strip(),
             "consistent": bool(determinism.get("consistent", True)),
             "observed_lock_hash": observed_hash,
             "expected_lock_hash": expected_hash,
@@ -935,7 +1197,7 @@ class ConversationPersistenceManager:
             "verification_path": "posthoc",
         }
 
-    def load_latest_graph_checkpoint(self, trace_id: str = "") -> dict | None:
+    def load_latest_graph_checkpoint(self, trace_token: str = "", **legacy_kwargs: Any) -> dict | None:
         with ensure_execution_trace_root(
             operation="load_latest_graph_checkpoint",
             prompt="[conversation-persistence-load-checkpoint]",
@@ -943,7 +1205,7 @@ class ConversationPersistenceManager:
             required=True,
         ):
             self._require_active_trace("load_latest_graph_checkpoint")
-            normalized_trace_id = str(trace_id or "").strip()
+            normalized_trace_id = str(trace_token or legacy_kwargs.get("trace_id") or "").strip()
             ledger = self._execution_ledger()
             for event in reversed(ledger.read()):
                 if str(event.get("type") or "") != "GRAPH_CHECKPOINT":
@@ -954,10 +1216,18 @@ class ConversationPersistenceManager:
                     continue
                 checkpoint = dict(payload.get("checkpoint") or {})
                 if checkpoint:
+                    if self._strict_schema_reject_enabled():
+                        return assert_valid_checkpoint_record(checkpoint)
+                    checkpoint = normalize_checkpoint_record(checkpoint)
+                    errors = checkpoint_record_errors(checkpoint)
+                    if errors:
+                        raise PersistenceSchemaError(
+                            "Malformed persisted checkpoint: " + "; ".join(errors),
+                        )
                     return checkpoint
             return None
 
-    def resume_graph_checkpoint(self, trace_id: str = "") -> dict | None:
+    def resume_graph_checkpoint(self, trace_token: str = "") -> dict | None:
         with ensure_execution_trace_root(
             operation="resume_graph_checkpoint",
             prompt="[conversation-persistence-resume-checkpoint]",
@@ -965,12 +1235,12 @@ class ConversationPersistenceManager:
             required=True,
         ):
             self._require_active_trace("resume_graph_checkpoint")
-            checkpoint = self.load_latest_graph_checkpoint(trace_id=trace_id)
+            checkpoint = self.load_latest_graph_checkpoint(trace_token=trace_token)
             if not isinstance(checkpoint, dict):
                 return None
             session_state = checkpoint.get("session_state")
             if not isinstance(session_state, dict):
-                events = self.list_turn_events(trace_id=trace_id)
+                events = self.list_turn_events(trace_token=trace_token)
                 for event in reversed(events):
                     if str(event.get("event_type") or "").strip().lower() != "graph_checkpoint":
                         continue
@@ -980,7 +1250,289 @@ class ConversationPersistenceManager:
                         break
             if isinstance(session_state, dict):
                 self.bot.load_session_state_snapshot(session_state)
-            return checkpoint
+            resumed = dict(checkpoint)
+            resumed["execution_mode"] = "recovery"
+            return normalize_checkpoint_record(resumed)
+
+    def export_execution_handoff(self, trace_token: str, *, worker_id: str = "") -> dict[str, Any]:
+        with ensure_execution_trace_root(
+            operation="export_execution_handoff",
+            prompt="[conversation-persistence-export-handoff]",
+            metadata={"source": "ConversationPersistenceManager.export_execution_handoff"},
+            required=True,
+        ):
+            self._require_active_trace("export_execution_handoff")
+            checkpoint = self.load_latest_graph_checkpoint(trace_token=trace_token)
+            if not isinstance(checkpoint, dict):
+                raise RuntimeError("No checkpoint available for handoff")
+            canonical = normalize_checkpoint_record(checkpoint)
+            continuity = dict(canonical.get("continuity") or {})
+            lease = self._current_handoff_lease(str(canonical.get("trace_id") or ""))
+            normalized_worker_id = str(worker_id or "").strip()
+            if normalized_worker_id and bool(lease.get("active")) and str(lease.get("worker_id") or "") != normalized_worker_id:
+                raise RuntimeError("Execution handoff claim is owned by another worker")
+            payload = {
+                "schema_version": "execution-handoff.v1",
+                "trace_id": str(canonical.get("trace_id") or ""),
+                "session_id": str(canonical.get("session_id") or "default"),
+                "worker_id": normalized_worker_id,
+                "checkpoint": canonical,
+                "continuity": continuity,
+                "lease": lease,
+                "handoff_hash": self._stable_json_sha(
+                    {
+                        "trace_id": str(canonical.get("trace_id") or ""),
+                        "checkpoint_hash": str(canonical.get("checkpoint_hash") or ""),
+                        "strict_sequence_hash": str(continuity.get("strict_sequence_hash") or ""),
+                    },
+                ),
+            }
+            self.persist_turn_event(
+                {
+                    "event_type": "execution_handoff_exported",
+                    "trace_id": str(canonical.get("trace_id") or ""),
+                    "stage": "save",
+                    "status": "after",
+                    "continuity": continuity,
+                },
+            )
+            return payload
+
+    def claim_execution_handoff(
+        self,
+        trace_token: str,
+        *,
+        worker_id: str,
+        lease_seconds: int = 60,
+    ) -> dict[str, Any]:
+        with ensure_execution_trace_root(
+            operation="claim_execution_handoff",
+            prompt="[conversation-persistence-claim-handoff]",
+            metadata={"source": "ConversationPersistenceManager.claim_execution_handoff"},
+            required=True,
+        ):
+            self._require_active_trace("claim_execution_handoff")
+            normalized_trace_id = str(trace_token or "").strip()
+            normalized_worker_id = str(worker_id or "").strip()
+            if not normalized_trace_id or not normalized_worker_id:
+                raise RuntimeError("trace_id and worker_id are required to claim execution handoff")
+
+            execution_id, state = self._lifecycle_state_for_trace(normalized_trace_id)
+            session_id = self._resolve_session_id_for_trace(normalized_trace_id)
+            if not execution_id:
+                execution_id = self._derived_execution_id(normalized_trace_id)
+                self._append_lifecycle_event_for_trace(
+                    trace_token=normalized_trace_id,
+                    session_id=session_id,
+                    event=Submitted(
+                        execution_id=execution_id,
+                        occurred_at=datetime.now(),
+                    ),
+                    step_key="conversation_persistence.claim_execution_handoff.submitted",
+                )
+                state = self._lifecycle_projection().get(execution_id)
+            if state is None:
+                raise RuntimeError("No lifecycle state found for execution handoff claim")
+            if state.status in {ExecutionStatus.COMPLETED, ExecutionStatus.FAILED}:
+                raise ClaimConflict("Execution handoff cannot be claimed from terminal state")
+
+            now = datetime.now()
+            if state.owner and not lease_expired(state, now=now) and state.owner != normalized_worker_id:
+                raise ClaimConflict("Execution handoff already claimed by another worker")
+
+            if state.owner and lease_expired(state, now=now):
+                self._append_lifecycle_event_for_trace(
+                    trace_token=normalized_trace_id,
+                    session_id=session_id,
+                    event=LeaseExpired(
+                        execution_id=execution_id,
+                        occurred_at=now,
+                        worker_id=str(state.owner),
+                    ),
+                    step_key="conversation_persistence.claim_execution_handoff.expire",
+                )
+                self._append_lifecycle_event_for_trace(
+                    trace_token=normalized_trace_id,
+                    session_id=session_id,
+                    event=Redelivered(
+                        execution_id=execution_id,
+                        occurred_at=now,
+                        previous_worker_id=str(state.owner),
+                        new_worker_id=normalized_worker_id,
+                    ),
+                    step_key="conversation_persistence.claim_execution_handoff.redeliver",
+                )
+
+            expiry = now + timedelta(seconds=max(int(lease_seconds or 0), 1))
+            self._append_lifecycle_event_for_trace(
+                trace_token=normalized_trace_id,
+                session_id=session_id,
+                event=Claimed(
+                    execution_id=execution_id,
+                    occurred_at=now,
+                    worker_id=normalized_worker_id,
+                    lease_expiry=expiry,
+                ),
+                step_key="conversation_persistence.claim_execution_handoff.claim",
+            )
+            lease_payload = self._current_handoff_lease(normalized_trace_id)
+            self.persist_turn_event(
+                {
+                    "event_type": "execution_handoff_claimed",
+                    "trace_id": normalized_trace_id,
+                    "stage": "save",
+                    "status": "after",
+                    "worker_id": normalized_worker_id,
+                    "lease_seconds": int(lease_payload.get("lease_seconds") or 0),
+                    "lease_expires_at": str(lease_payload.get("lease_expires_at") or ""),
+                },
+            )
+            return lease_payload
+
+    def renew_execution_handoff_lease(
+        self,
+        trace_token: str,
+        *,
+        worker_id: str,
+        lease_seconds: int = 60,
+    ) -> dict[str, Any]:
+        with ensure_execution_trace_root(
+            operation="renew_execution_handoff_lease",
+            prompt="[conversation-persistence-renew-handoff-lease]",
+            metadata={"source": "ConversationPersistenceManager.renew_execution_handoff_lease"},
+            required=True,
+        ):
+            self._require_active_trace("renew_execution_handoff_lease")
+            normalized_trace_id = str(trace_token or "").strip()
+            normalized_worker_id = str(worker_id or "").strip()
+            execution_id, state = self._lifecycle_state_for_trace(normalized_trace_id)
+            if not execution_id or state is None:
+                raise RuntimeError("No lifecycle state found for execution handoff lease renew")
+            now = datetime.now()
+            if state.owner != normalized_worker_id:
+                raise NotOwner("Execution handoff lease is owned by another worker")
+            if state.lease_expiry is not None and lease_expired(state, now=now):
+                raise NotOwner("Execution handoff lease is expired")
+
+            renewed_expiry = now + timedelta(seconds=max(int(lease_seconds or 0), 1))
+            self._append_lifecycle_event_for_trace(
+                trace_token=normalized_trace_id,
+                session_id=self._resolve_session_id_for_trace(normalized_trace_id),
+                event=LeaseRenewed(
+                    execution_id=execution_id,
+                    occurred_at=now,
+                    worker_id=normalized_worker_id,
+                    lease_expiry=renewed_expiry,
+                ),
+                step_key="conversation_persistence.renew_execution_handoff_lease",
+            )
+
+            renewed = self._current_handoff_lease(normalized_trace_id)
+            renewed["lease_seconds"] = int(max(int(lease_seconds or 0), 1))
+            self.persist_turn_event(
+                {
+                    "event_type": "execution_handoff_lease_renewed",
+                    "trace_id": normalized_trace_id,
+                    "stage": "save",
+                    "status": "after",
+                    "worker_id": normalized_worker_id,
+                    "lease_seconds": int(renewed.get("lease_seconds") or 0),
+                    "lease_expires_at": str(renewed.get("lease_expires_at") or ""),
+                },
+            )
+            return renewed
+
+    def release_execution_handoff_claim(self, trace_token: str, *, worker_id: str) -> dict[str, Any]:
+        with ensure_execution_trace_root(
+            operation="release_execution_handoff_claim",
+            prompt="[conversation-persistence-release-handoff-claim]",
+            metadata={"source": "ConversationPersistenceManager.release_execution_handoff_claim"},
+            required=True,
+        ):
+            self._require_active_trace("release_execution_handoff_claim")
+            normalized_trace_id = str(trace_token or "").strip()
+            normalized_worker_id = str(worker_id or "").strip()
+            execution_id, state = self._lifecycle_state_for_trace(normalized_trace_id)
+            if not execution_id or state is None:
+                raise RuntimeError("No lifecycle state found for execution handoff claim release")
+            if state.owner != normalized_worker_id:
+                raise NotOwner("Execution handoff claim is owned by another worker")
+
+            self._append_lifecycle_event_for_trace(
+                trace_token=normalized_trace_id,
+                session_id=self._resolve_session_id_for_trace(normalized_trace_id),
+                event=Released(
+                    execution_id=execution_id,
+                    occurred_at=datetime.now(),
+                    worker_id=normalized_worker_id,
+                ),
+                step_key="conversation_persistence.release_execution_handoff_claim",
+            )
+
+            released = {
+                "status": "released",
+                "worker_id": normalized_worker_id,
+                "lease_seconds": 0,
+                "lease_expires_at": "",
+                "active": False,
+            }
+            self.persist_turn_event(
+                {
+                    "event_type": "execution_handoff_claim_released",
+                    "trace_id": normalized_trace_id,
+                    "stage": "save",
+                    "status": "after",
+                    "worker_id": normalized_worker_id,
+                },
+            )
+            return released
+
+    def import_execution_handoff(self, handoff: dict[str, Any]) -> dict[str, Any]:
+        with ensure_execution_trace_root(
+            operation="import_execution_handoff",
+            prompt="[conversation-persistence-import-handoff]",
+            metadata={"source": "ConversationPersistenceManager.import_execution_handoff"},
+            required=True,
+        ):
+            self._require_active_trace("import_execution_handoff")
+            payload = dict(handoff or {})
+            checkpoint = normalize_checkpoint_record(dict(payload.get("checkpoint") or {}))
+            continuity = dict(payload.get("continuity") or {})
+            lease = dict(payload.get("lease") or {})
+            claimed_worker_id = str(lease.get("worker_id") or payload.get("worker_id") or "").strip()
+            expected_hash = str(payload.get("handoff_hash") or "").strip()
+            actual_hash = self._stable_json_sha(
+                {
+                    "trace_id": str(checkpoint.get("trace_id") or ""),
+                    "checkpoint_hash": str(checkpoint.get("checkpoint_hash") or ""),
+                    "strict_sequence_hash": str(continuity.get("strict_sequence_hash") or ""),
+                },
+            )
+            if expected_hash and expected_hash != actual_hash:
+                raise RuntimeError("Execution handoff integrity mismatch")
+
+            current_lease = self._current_handoff_lease(str(checkpoint.get("trace_id") or ""))
+            if claimed_worker_id:
+                if not bool(current_lease.get("active")):
+                    raise RuntimeError("Execution handoff import requires an active worker claim")
+                if str(current_lease.get("worker_id") or "") != claimed_worker_id:
+                    raise RuntimeError("Execution handoff claim is owned by another worker")
+
+            imported = dict(checkpoint)
+            imported["execution_mode"] = "recovery"
+            self.persist_graph_checkpoint(imported, _skip_turn_event=True)
+            self.persist_turn_event(
+                {
+                    "event_type": "execution_handoff_imported",
+                    "trace_id": str(imported.get("trace_id") or ""),
+                    "stage": "save",
+                    "status": "after",
+                    "worker_id": claimed_worker_id,
+                    "continuity": continuity,
+                },
+            )
+            return normalize_checkpoint_record(imported)
 
 
 __all__ = ["ConversationPersistenceManager"]
+

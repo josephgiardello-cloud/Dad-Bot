@@ -145,37 +145,48 @@ class MemoryDecayPolicy:
             unchanged = [str(e.get("id", "")) for e in entries if e.get("id")]
             return DecayResult(unchanged=unchanged)
 
-        result = DecayResult()
+        classified = self._classify_entries_by_score(entries, turn_epoch)
+        result = self._build_decay_result(entries, classified)
+        if result.pruned or result.weakened:
+            logger.info(
+                "MemoryDecayPolicy: pruned=%d weakened=%d unchanged=%d",
+                len(result.pruned),
+                len(result.weakened),
+                len(result.unchanged),
+            )
+        return result
+
+    def _classify_entries_by_score(
+        self, entries: list[dict], turn_epoch: float
+    ) -> dict[str, tuple[str, float]]:
         pending: list[tuple[float, int, str]] = []
         classified: dict[str, tuple[str, float]] = {}
         for entry in entries:
             entry_id = str(entry.get("id", ""))
             if not entry_id:
                 continue
-
-            # Pinned entries are immune from decay
             if bool(entry.get("pinned", False)):
                 classified[entry_id] = ("unchanged", 1.0)
                 continue
-
             cache_key = _entry_signature(entry, turn_epoch)
             score = self._score_cache.get(cache_key)
             if score is None:
                 score = round(_score_entry(entry, turn_epoch), 4)
                 self._score_cache[cache_key] = score
-
             heapq.heappush(pending, (score, len(pending), entry_id))
-
         while pending:
             score, _index, entry_id = heapq.heappop(pending)
-            result.total_score_map[entry_id] = round(score, 4)
             if score < self.prune_threshold:
                 classified[entry_id] = ("pruned", score)
             elif score < self.weaken_threshold:
                 classified[entry_id] = ("weakened", score)
             else:
                 classified[entry_id] = ("unchanged", score)
+        return classified
 
+    @staticmethod
+    def _build_decay_result(entries: list[dict], classified: dict[str, tuple[str, float]]) -> DecayResult:
+        result = DecayResult()
         for entry in entries:
             entry_id = str(entry.get("id", ""))
             if not entry_id:
@@ -188,12 +199,4 @@ class MemoryDecayPolicy:
                 result.weakened.append(entry_id)
             else:
                 result.unchanged.append(entry_id)
-
-        if result.pruned or result.weakened:
-            logger.info(
-                "MemoryDecayPolicy: pruned=%d weakened=%d unchanged=%d",
-                len(result.pruned),
-                len(result.weakened),
-                len(result.unchanged),
-            )
         return result

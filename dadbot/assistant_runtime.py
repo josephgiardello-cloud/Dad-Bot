@@ -3,6 +3,9 @@ from __future__ import annotations
 from typing import Any
 
 from dadbot.core.execution_contract import TurnDelivery, live_turn_request
+from dadbot.runtime.agent_driver_loop import AgentDriverLoop, DriverLoopPolicy, DriverLoopResult
+from dadbot.runtime.context_pruner import ContextWindowPruner, build_pruned_observation_hook
+from dadbot.runtime.semantic_memory_bridge import MemoryConsolidationJob, build_semantic_snippet_provider
 
 
 class AssistantRuntime:
@@ -179,6 +182,113 @@ class AssistantRuntime:
             return list(matches or [])
 
         return []
+
+    def run_agent_loop(
+        self,
+        initial_input: str,
+        *,
+        policy: DriverLoopPolicy | None = None,
+        session_id: str = "default",
+        reflection_hook: Any | None = None,
+        observation_hook: Any | None = None,
+        enable_semantic_memory: bool = True,
+        semantic_top_k: int = 3,
+        semantic_sync_index: bool = True,
+    ) -> DriverLoopResult:
+        loop = AgentDriverLoop(self.kernel, policy=policy)
+        effective_observation_hook = observation_hook
+
+        if effective_observation_hook is None and enable_semantic_memory:
+            snippet_provider = build_semantic_snippet_provider(
+                self.kernel,
+                top_k=max(1, int(semantic_top_k)),
+                session_id=str(session_id or "default"),
+                sync_index=bool(semantic_sync_index),
+            )
+            core_identity = ""
+            request_prompt_builder = getattr(self.kernel, "build_request_system_prompt", None)
+            if callable(request_prompt_builder):
+                try:
+                    core_identity = str(request_prompt_builder() or "")
+                except Exception:
+                    core_identity = ""
+
+            effective_observation_hook = build_pruned_observation_hook(
+                ContextWindowPruner(max_turns=10),
+                core_identity=core_identity,
+                snippet_provider=snippet_provider,
+            )
+
+        startup_observation = self._executive_startup_observation(max_tasks=8)
+        if startup_observation:
+            base_hook = effective_observation_hook
+
+            def _composed_observation_hook(ctx: dict[str, Any]) -> str:
+                if callable(base_hook):
+                    base_text = str(base_hook(ctx) or "")
+                else:
+                    turn_index = int(ctx.get("turn_index", 1) or 1)
+                    base_text = (
+                        str(ctx.get("initial_observation") or "")
+                        if turn_index == 1
+                        else str(ctx.get("last_reply") or ctx.get("initial_observation") or "")
+                    )
+
+                if int(ctx.get("turn_index", 1) or 1) != 1:
+                    return base_text
+
+                # Inject executive pending-task context once at startup so the loop can be proactive.
+                return f"{startup_observation}\n\n{base_text}".strip()
+
+            effective_observation_hook = _composed_observation_hook
+
+        return loop.run(
+            initial_input,
+            session_id=session_id,
+            reflection_hook=reflection_hook,
+            observation_hook=effective_observation_hook,
+        )
+
+    @staticmethod
+    def _executive_startup_observation(*, max_tasks: int = 8) -> str:
+        try:
+            from dadbot_system.local_mcp_server import get_pending_executive_tasks
+
+            tasks = list(get_pending_executive_tasks(limit=max(1, int(max_tasks))))
+        except Exception:
+            return ""
+
+        if not tasks:
+            return ""
+
+        lines = ["Startup executive tasks (pending):"]
+        for task in tasks:
+            task_id = str(task.get("id") or "").strip()
+            title = str(task.get("title") or "").strip()
+            due = str(task.get("due") or "").strip()
+            priority = str(task.get("priority") or "normal").strip()
+            if not title:
+                continue
+            due_fragment = f" due={due}" if due else ""
+            lines.append(f"- [{task_id}] {title} (priority={priority}{due_fragment})")
+        return "\n".join(lines).strip()
+
+    def run_memory_consolidation(
+        self,
+        *,
+        session_id: str = "default",
+        window_size: int = 10,
+        background: bool = True,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        job = MemoryConsolidationJob(
+            self.kernel,
+            session_id=str(session_id or "default"),
+            window_size=max(3, int(window_size)),
+        )
+        if background:
+            return dict(job.schedule(force=force) or {})
+        return dict(job.run_once(force=force) or {})
 
 
 __all__ = ["AssistantRuntime"]

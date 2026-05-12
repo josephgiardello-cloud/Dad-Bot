@@ -19,6 +19,9 @@ EventType = Literal[
     "thread_switch",
     "photo_request",
     "tts_request",
+    "loop_started",
+    "loop_turn_completed",
+    "loop_stopped",
 ]
 
 

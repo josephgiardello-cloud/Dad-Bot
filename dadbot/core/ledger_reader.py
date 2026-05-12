@@ -28,37 +28,57 @@ class LedgerReader:
             return []
         return [e for e in self._ledger.read() if str(e.get("type") or "") == target]
 
+    @staticmethod
+    def _resolve_policy_trace_filters(
+        *,
+        session_id: str,
+        trace_token: str,
+        legacy_kwargs: dict[str, object],
+    ) -> tuple[str, str]:
+        legacy_trace = str(legacy_kwargs.pop("trace_id", "") or "")
+        if legacy_kwargs:
+            unknown = ", ".join(sorted(str(name) for name in legacy_kwargs))
+            raise TypeError(f"Unexpected keyword argument(s): {unknown}")
+        sid = str(session_id or "").strip()
+        tid = str(trace_token or legacy_trace or "").strip()
+        return sid, tid
+
+    @staticmethod
+    def _filter_policy_events(
+        events: list[dict[str, object]],
+        *,
+        session_id: str,
+        trace_token: str,
+    ) -> list[dict[str, object]]:
+        if session_id:
+            events = [event for event in events if str(event.get("session_id") or "") == session_id]
+        if trace_token:
+            events = [event for event in events if str(event.get("trace_id") or "") == trace_token]
+        return events
+
     def policy_trace_events(
         self,
         *,
         session_id: str = "",
-        trace_id: str = "",
+        trace_token: str = "",
         limit: int = 0,
+        **legacy_kwargs: object,
     ) -> list[dict[str, object]]:
-        sid = str(session_id or "").strip()
-        tid = str(trace_id or "").strip()
+        sid, tid = self._resolve_policy_trace_filters(
+            session_id=session_id,
+            trace_token=trace_token,
+            legacy_kwargs=dict(legacy_kwargs),
+        )
         events = self.events_by_type(POLICY_TRACE_EVENT_TYPE)
-        if sid:
-            events = [event for event in events if str(event.get("session_id") or "") == sid]
-        if tid:
-            events = [event for event in events if str(event.get("trace_id") or "") == tid]
+        events = self._filter_policy_events(events, session_id=sid, trace_token=tid)
         if limit and limit > 0:
             return events[-int(limit):]
         return events
 
-    def summarize_policy_trace_events(
-        self,
-        *,
-        session_id: str = "",
-        trace_id: str = "",
-        limit: int = 0,
-    ) -> dict[str, object]:
-        events = self.policy_trace_events(
-            session_id=session_id,
-            trace_id=trace_id,
-            limit=limit,
-        )
-
+    @staticmethod
+    def _aggregate_policy_events_summary(
+        events: list[dict[str, object]],
+    ) -> tuple[dict[str, int], set[str], str, str, str]:
         action_counts: dict[str, int] = {}
         policies_seen: set[str] = set()
         latest_action = ""
@@ -89,6 +109,17 @@ class LedgerReader:
             if step_name:
                 latest_step_name = step_name
 
+        return action_counts, policies_seen, latest_action, latest_step_name, latest_trace_id
+
+    @staticmethod
+    def _build_policy_summary_dict(
+        events: list[dict[str, object]],
+        action_counts: dict[str, int],
+        policies_seen: set[str],
+        latest_action: str,
+        latest_step_name: str,
+        latest_trace_id: str,
+    ) -> dict[str, object]:
         return {
             "event_type": POLICY_TRACE_EVENT_TYPE,
             "event_count": len(events),
@@ -98,6 +129,38 @@ class LedgerReader:
             "latest_step_name": latest_step_name,
             "latest_trace_id": latest_trace_id,
         }
+
+    def summarize_policy_trace_events(
+        self,
+        *,
+        session_id: str = "",
+        trace_token: str = "",
+        limit: int = 0,
+        **legacy_kwargs: object,
+    ) -> dict[str, object]:
+        _, resolved_trace_token = self._resolve_policy_trace_filters(
+            session_id=session_id,
+            trace_token=trace_token,
+            legacy_kwargs=dict(legacy_kwargs),
+        )
+        events = self.policy_trace_events(
+            session_id=session_id,
+            trace_token=resolved_trace_token,
+            limit=limit,
+        )
+
+        action_counts, policies_seen, latest_action, latest_step_name, latest_trace_id = (
+            self._aggregate_policy_events_summary(events)
+        )
+
+        return self._build_policy_summary_dict(
+            events,
+            action_counts,
+            policies_seen,
+            latest_action,
+            latest_step_name,
+            latest_trace_id,
+        )
 
     def is_terminal(self, job_id: str) -> bool:
         for event in reversed(self.events_for_job(job_id)):

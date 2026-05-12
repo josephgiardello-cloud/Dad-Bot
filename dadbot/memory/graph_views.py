@@ -8,19 +8,15 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-def build_graph_projection(manager, turn_context=None):
-    temporal = manager._require_turn_temporal(turn_context)
-    enforce_temporal_window = turn_context is not None
-    cache_key = (
+def _projection_cache_key(manager, temporal, enforce_temporal_window):
+    return (
         int(getattr(manager._bot, "_memory_graph_generation", 0) or 0),
         str(getattr(temporal, "wall_time", "") if enforce_temporal_window else ""),
         str(getattr(temporal, "wall_date", "") if enforce_temporal_window else ""),
     )
-    cached = manager._projection_cache.get(cache_key)
-    if cached is not None:
-        return copy.deepcopy(cached)
-    node_map = {}
-    edge_map = {}
+
+
+def _project_node_state(manager, node_map, edge_map, turn_context):
     manager._project_consolidated_memories(
         node_map,
         edge_map,
@@ -29,24 +25,30 @@ def build_graph_projection(manager, turn_context=None):
     manager._project_archive_sessions(node_map, edge_map, turn_context=turn_context)
     manager._project_persona_traits(node_map, edge_map, turn_context=turn_context)
     manager._project_life_patterns(node_map, edge_map, turn_context=turn_context)
-    current_time_str = str(getattr(temporal, "wall_time", "")) if enforce_temporal_window else ""
+
+
+def _apply_view_filters(manager, edge_map, node_keys, current_time_str):
+    return [
+        e
+        for e in edge_map.values()
+        if (
+            manager.is_edge_valid(e, current_time_str)
+            if current_time_str
+            else manager.is_edge_valid(e, str(e.get("updated_at") or ""))
+        )
+        and e.get("source_key") in node_keys
+        and e.get("target_key") in node_keys
+    ]
+
+
+def _map_edge_topology(manager, node_map, edge_map, current_time_str):
     nodes = sorted(
         node_map.values(),
         key=lambda item: (item["node_type"], item["label"], item["node_key"]),
     )
     node_keys = {item.get("node_key") for item in nodes}
     edges = sorted(
-        (
-            e
-            for e in edge_map.values()
-            if (
-                manager.is_edge_valid(e, current_time_str)
-                if current_time_str
-                else manager.is_edge_valid(e, str(e.get("updated_at") or ""))
-            )
-            and e.get("source_key") in node_keys
-            and e.get("target_key") in node_keys
-        ),
+        _apply_view_filters(manager, edge_map, node_keys, current_time_str),
         key=lambda item: (
             item["source_key"],
             item["relation_type"],
@@ -56,23 +58,22 @@ def build_graph_projection(manager, turn_context=None):
     for edge in edges:
         if not edge.get("valid_from"):
             edge["valid_from"] = edge.get("updated_at") or current_time_str
+    return nodes, edges
+
+
+def _snapshot_updated_at(nodes, edges):
     updated_at = None
     for item in [*nodes, *edges]:
         value = item.get("updated_at")
         if value and (updated_at is None or str(value) > str(updated_at)):
             updated_at = value
-    snapshot = {"nodes": nodes, "edges": edges, "updated_at": updated_at}
-    manager._projection_cache[cache_key] = copy.deepcopy(snapshot)
-    return snapshot
+    return updated_at
 
 
-def preview_memory_graph(manager, snapshot=None):
-    graph = snapshot or graph_snapshot(manager)
-    nodes_by_key = {node["node_key"]: node for node in graph.get("nodes", [])}
+def _accumulate_semantic_links(manager, graph, nodes_by_key):
     semantic_weights = {}
     semantic_types = {}
     source_neighbors = {}
-
     for edge in graph.get("edges", []):
         source = nodes_by_key.get(edge.get("source_key"))
         target = nodes_by_key.get(edge.get("target_key"))
@@ -90,7 +91,10 @@ def preview_memory_graph(manager, snapshot=None):
         )
         semantic_types[label] = target.get("node_type")
         source_neighbors.setdefault(source["node_key"], []).append(label)
+    return semantic_weights, semantic_types, source_neighbors
 
+
+def _build_preview_edge_weights(source_neighbors):
     edge_weights = {}
     for labels in source_neighbors.values():
         unique = []
@@ -101,6 +105,36 @@ def preview_memory_graph(manager, snapshot=None):
             for right in unique[index + 1 :]:
                 edge_key = tuple(sorted((left, right)))
                 edge_weights[edge_key] = edge_weights.get(edge_key, 0.0) + 1.0
+    return edge_weights
+
+
+def build_graph_projection(manager, turn_context=None):
+    temporal = manager._require_turn_temporal(turn_context)
+    enforce_temporal_window = turn_context is not None
+    cache_key = _projection_cache_key(manager, temporal, enforce_temporal_window)
+    cached = manager._projection_cache.get(cache_key)
+    if cached is not None:
+        return copy.deepcopy(cached)
+    node_map = {}
+    edge_map = {}
+    _project_node_state(manager, node_map, edge_map, turn_context)
+    current_time_str = str(getattr(temporal, "wall_time", "")) if enforce_temporal_window else ""
+    nodes, edges = _map_edge_topology(manager, node_map, edge_map, current_time_str)
+    updated_at = _snapshot_updated_at(nodes, edges)
+    snapshot = {"nodes": nodes, "edges": edges, "updated_at": updated_at}
+    manager._projection_cache[cache_key] = copy.deepcopy(snapshot)
+    return snapshot
+
+
+def preview_memory_graph(manager, snapshot=None):
+    graph = snapshot or graph_snapshot(manager)
+    nodes_by_key = {node["node_key"]: node for node in graph.get("nodes", [])}
+    semantic_weights, semantic_types, source_neighbors = _accumulate_semantic_links(
+        manager,
+        graph,
+        nodes_by_key,
+    )
+    edge_weights = _build_preview_edge_weights(source_neighbors)
 
     preview_nodes = []
     for label, weight in sorted(
@@ -195,20 +229,9 @@ def graph_snapshot(manager):
         return {"nodes": [], "edges": [], "updated_at": None}
 
 
-def _score_graph_node(
-    manager,
-    node,
-    adjacency,
-    nodes,
-    query_tokens,
-    query_category,
-    query_mood,
-    mood_trend,
-    recent_topics,
-):
-    attributes = dict(node.get("attributes") or {})
+def _graph_source_text(manager, node, attributes):
     summary = manager.graph_source_summary(node)
-    text = " ".join(
+    return " ".join(
         part
         for part in [
             node.get("label", ""),
@@ -219,14 +242,33 @@ def _score_graph_node(
         ]
         if part
     )
+
+
+def _graph_overlap_seed(manager, node, query_tokens, query_category, query_mood, mood_trend, text):
     source_tokens = manager._bot.significant_tokens(text)
     overlap = len(query_tokens & source_tokens)
-    if query_category != "general" and str(node.get("category") or "general").strip().lower() == query_category:
+    node_category = str(node.get("category") or "general").strip().lower()
+    node_mood = manager._bot.normalize_mood(node.get("mood"))
+    if query_category != "general" and node_category == query_category:
         overlap += 2
-    if query_mood != "neutral" and manager._bot.normalize_mood(node.get("mood")) == query_mood:
+    if query_mood != "neutral" and node_mood == query_mood:
         overlap += 1
-    if mood_trend != "neutral" and manager._bot.normalize_mood(node.get("mood")) == mood_trend:
+    if mood_trend != "neutral" and node_mood == mood_trend:
         overlap += 0.5
+    return overlap
+
+
+def _graph_overlap_with_neighbors(
+    manager,
+    node,
+    adjacency,
+    nodes,
+    query_tokens,
+    query_category,
+    query_mood,
+    recent_topics,
+):
+    overlap = 0.0
     matched_labels = []
     for edge in adjacency.get(node["node_key"], []):
         neighbor_key = (
@@ -252,10 +294,10 @@ def _score_graph_node(
         elif query_mood != "neutral" and label == query_mood:
             matched_labels.append(label)
             overlap += 0.8
-    if overlap <= 0 and query_tokens:
-        if not any(token in text.lower() for token in query_tokens):
-            return None
-        overlap = 0.75
+    return overlap, matched_labels
+
+
+def _graph_score_value(manager, node, attributes, overlap):
     freshness = manager._bot.memory_freshness_weight(node.get("updated_at"))
     confidence = max(
         0.4,
@@ -263,16 +305,78 @@ def _score_graph_node(
     )
     contradictions = len(attributes.get("contradictions", []))
     contradiction_penalty = max(0.5, 1.0 - contradictions * 0.12)
-    score = (
+    return (
         overlap
         * freshness
         * confidence
         * contradiction_penalty
         * manager._RETRIEVAL_SOURCE_TYPE_WEIGHTS.get(node.get("node_type"), 1.0)
     )
+
+
+def _score_graph_node(
+    manager,
+    node,
+    adjacency,
+    nodes,
+    query_tokens,
+    query_category,
+    query_mood,
+    mood_trend,
+    recent_topics,
+):
+    attributes = dict(node.get("attributes") or {})
+    text = _graph_source_text(manager, node, attributes)
+    overlap = _graph_overlap_seed(
+        manager,
+        node,
+        query_tokens,
+        query_category,
+        query_mood,
+        mood_trend,
+        text,
+    )
+    neighbor_overlap, matched_labels = _graph_overlap_with_neighbors(
+        manager,
+        node,
+        adjacency,
+        nodes,
+        query_tokens,
+        query_category,
+        query_mood,
+        recent_topics,
+    )
+    overlap += neighbor_overlap
+    if overlap <= 0 and query_tokens:
+        if not any(token in text.lower() for token in query_tokens):
+            return None
+        overlap = 0.75
+    score = _graph_score_value(manager, node, attributes, overlap)
     if score <= 0.15:
         return None
     return round(score, 4), sorted(set(matched_labels))
+
+
+def _graph_edge_neighbor_key(node_key, edge):
+    if edge.get("source_key") == node_key:
+        return edge.get("target_key")
+    return edge.get("source_key")
+
+
+def _graph_companion_labels(manager, nodes, adjacency, source_neighbor, root_node_key):
+    labels = []
+    for peer_edge in adjacency.get(source_neighbor["node_key"], []):
+        peer_key = _graph_edge_neighbor_key(source_neighbor["node_key"], peer_edge)
+        peer = nodes.get(peer_key)
+        if (
+            peer is None
+            or peer.get("node_key") == root_node_key
+            or peer.get("node_type") in manager.GRAPH_SOURCE_NODE_TYPES
+            or peer.get("node_type") == "contradiction"
+        ):
+            continue
+        labels.append(str(peer.get("label") or "").strip().lower())
+    return labels
 
 
 def _rank_graph_summary_nodes(manager, nodes, adjacency):
@@ -284,9 +388,7 @@ def _rank_graph_summary_nodes(manager, nodes, adjacency):
         companion_labels = []
         total_weight = 0.0
         for edge in adjacency.get(node["node_key"], []):
-            neighbor_key = (
-                edge.get("target_key") if edge.get("source_key") == node["node_key"] else edge.get("source_key")
-            )
+            neighbor_key = _graph_edge_neighbor_key(node["node_key"], edge)
             neighbor = nodes.get(neighbor_key)
             if neighbor is None:
                 continue
@@ -296,23 +398,15 @@ def _rank_graph_summary_nodes(manager, nodes, adjacency):
                     0.4,
                     float(neighbor.get("confidence", 0.0) or 0.0),
                 )
-                for peer_edge in adjacency.get(neighbor["node_key"], []):
-                    peer_key = (
-                        peer_edge.get("target_key")
-                        if peer_edge.get("source_key") == neighbor["node_key"]
-                        else peer_edge.get("source_key")
-                    )
-                    peer = nodes.get(peer_key)
-                    if (
-                        peer is None
-                        or peer.get("node_key") == node["node_key"]
-                        or peer.get("node_type") in manager.GRAPH_SOURCE_NODE_TYPES
-                        or peer.get("node_type") == "contradiction"
-                    ):
-                        continue
-                    companion_labels.append(
-                        str(peer.get("label") or "").strip().lower(),
-                    )
+                companion_labels.extend(
+                    _graph_companion_labels(
+                        manager,
+                        nodes,
+                        adjacency,
+                        neighbor,
+                        node["node_key"],
+                    ),
+                )
         if not source_neighbors:
             continue
         source_types = sorted(

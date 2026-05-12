@@ -294,14 +294,17 @@ class TurnTrace:
 
 
 def create_turn_trace(
-    trace_id: str,
+    trace_token: str = "",
+    *,
     session_id: str = "default",
     user_input: str = "",
     metadata: dict[str, Any] | None = None,
+    **legacy_kwargs: Any,
 ) -> TurnTrace:
     """Factory to create new turn trace."""
+    resolved_trace_token = str(trace_token or legacy_kwargs.get("trace_id") or "")
     trace = TurnTrace(
-        trace_id=trace_id,
+        trace_id=resolved_trace_token,
         session_id=session_id,
         start_time=time.time(),
         input=TurnInput(

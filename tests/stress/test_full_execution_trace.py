@@ -251,6 +251,128 @@ def _normalized_committed_turn_contract(contract: dict[str, Any]) -> dict[str, A
     }
 
 
+def _first_contract_diff(left: Any, right: Any, path: str = "$") -> dict[str, Any] | None:
+    if type(left) is not type(right):
+        return {
+            "path": path,
+            "reason": "type_mismatch",
+            "left": type(left).__name__,
+            "right": type(right).__name__,
+            "left_value": left,
+            "right_value": right,
+        }
+
+    if isinstance(left, dict):
+        left_keys = set(left.keys())
+        right_keys = set(right.keys())
+        if left_keys != right_keys:
+            return {
+                "path": path,
+                "reason": "key_set_mismatch",
+                "missing_in_left": sorted(list(right_keys - left_keys)),
+                "missing_in_right": sorted(list(left_keys - right_keys)),
+            }
+        for key in sorted(left_keys):
+            child = _first_contract_diff(left.get(key), right.get(key), f"{path}.{key}")
+            if child is not None:
+                return child
+        return None
+
+    if isinstance(left, list):
+        if len(left) != len(right):
+            return {
+                "path": path,
+                "reason": "length_mismatch",
+                "left_len": len(left),
+                "right_len": len(right),
+            }
+        for idx, (left_item, right_item) in enumerate(zip(left, right, strict=True)):
+            child = _first_contract_diff(left_item, right_item, f"{path}[{idx}]")
+            if child is not None:
+                return child
+        return None
+
+    if left != right:
+        return {
+            "path": path,
+            "reason": "value_mismatch",
+            "left_value": left,
+            "right_value": right,
+        }
+    return None
+
+
+def _event_fingerprint(event: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(event.get("payload") or {})
+    return {
+        "sequence": int(event.get("sequence") or 0),
+        "event_id": str(event.get("event_id") or ""),
+        "event_type": str(event.get("event_type") or "").strip().lower(),
+        "stage": str(event.get("stage") or "").strip().lower(),
+        "status": str(event.get("status") or "").strip().lower(),
+        "occurred_at": str(event.get("occurred_at") or ""),
+        "trace_id": str(event.get("trace_id") or ""),
+        "checkpoint_hash": str(payload.get("checkpoint_hash") or ""),
+        "strict_sequence_hash": str(payload.get("strict_sequence_hash") or ""),
+        "execution_fingerprint": str(payload.get("execution_fingerprint") or ""),
+    }
+
+
+def _trace_event_diagnostic(bot: Any, trace_id: str) -> dict[str, Any]:
+    recorder = ExecutionTraceRecorder(trace_id=trace_id, prompt="stress-contract-diff")
+    with bind_execution_trace(recorder, required=True):
+        events = bot.list_turn_events(trace_id)
+        replay = bot.validate_replay_determinism(trace_id)
+
+    fingerprints = [_event_fingerprint(event) for event in list(events or [])]
+    return {
+        "trace_id": str(trace_id or ""),
+        "event_count": len(fingerprints),
+        "fingerprints": fingerprints,
+        "replay": {
+            "consistent": bool(replay.get("consistent", False)),
+            "observed_lock_hash": str(replay.get("observed_lock_hash") or ""),
+            "expected_lock_hash": str(replay.get("expected_lock_hash") or ""),
+            "event_count": int(replay.get("event_count") or 0),
+        },
+    }
+
+
+def _write_contract_diff_dump(*, failure_name: str, turn_number: int, payload: dict[str, Any]) -> Path:
+    Path("session_logs").mkdir(exist_ok=True)
+    path = Path(f"session_logs/contract_diff_{failure_name}_turn_{turn_number}.json")
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    return path
+
+
+def _write_golden_replay_diff_dump(payload: dict[str, Any]) -> Path:
+    Path("session_logs").mkdir(exist_ok=True)
+    path = Path("session_logs/golden_replay_diff.json")
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    return path
+
+
+def _canonical_ledger_events_for_replay(bot: Any) -> list[dict[str, Any]]:
+    from dadbot.core.canonical_event import CANONICAL_EVENT_FIELDS, NON_REPLAY_EVENT_TYPES
+    from dadbot.core.execution_ledger import _canonical_trace_payload
+
+    ledger_events = list(bot.turn_orchestrator.control_plane.ledger.read() or [])
+    replay_events = [
+        event for event in ledger_events if str(event.get("type") or "") not in NON_REPLAY_EVENT_TYPES
+    ]
+    canonical = [
+        {field: event.get(field) for field in CANONICAL_EVENT_FIELDS}
+        | {
+            "payload": _canonical_trace_payload(
+                str(event.get("type") or ""),
+                event.get("payload"),
+            ),
+        }
+        for event in sorted(replay_events, key=lambda item: int(item.get("sequence") or 0))
+    ]
+    return canonical
+
+
 def _assert_turn_event_integrity(bot: Any, trace_id: str, *, expect_save_after: bool) -> dict[str, Any]:
     assert trace_id, "Expected non-empty trace_id for turn event integrity audit"
     recorder = ExecutionTraceRecorder(trace_id=trace_id, prompt="stress-replay-audit")
@@ -263,7 +385,11 @@ def _assert_turn_event_integrity(bot: Any, trace_id: str, *, expect_save_after: 
     validate_trace(events)
 
     sequences = [int(event.get("sequence") or 0) for event in events]
-    assert all(sequence > 0 for sequence in sequences)
+    # Legacy/normalized events may retain sequence=0, but ordering must remain non-decreasing
+    # and at least one sequenced event must exist for deterministic replay checks.
+    assert all(sequence >= 0 for sequence in sequences)
+    assert sequences == sorted(sequences)
+    assert any(sequence > 0 for sequence in sequences)
 
     checkpoint_events = [
         event for event in events if str(event.get("event_type") or "").strip().lower() == "graph_checkpoint"
@@ -444,10 +570,25 @@ def test_golden_replay_capability_contracts_hold_for_identical_runs():
             assert right_report.get("stage_order") == CANONICAL_PIPELINE
             assert left_report.get("mutation_queue", {}).get("pending") == 0
             assert right_report.get("mutation_queue", {}).get("pending") == 0
-            assert (
-                left_bot.turn_orchestrator.control_plane.ledger.replay_hash()
-                == right_bot.turn_orchestrator.control_plane.ledger.replay_hash()
-            )
+            left_hash = left_bot.turn_orchestrator.control_plane.ledger.replay_hash()
+            right_hash = right_bot.turn_orchestrator.control_plane.ledger.replay_hash()
+            if left_hash != right_hash:
+                left_canonical = _canonical_ledger_events_for_replay(left_bot)
+                right_canonical = _canonical_ledger_events_for_replay(right_bot)
+                first_diff = _first_contract_diff(left_canonical, right_canonical)
+                dump_path = _write_golden_replay_diff_dump(
+                    {
+                        "left_hash": left_hash,
+                        "right_hash": right_hash,
+                        "first_diff": first_diff,
+                        "left_canonical": left_canonical,
+                        "right_canonical": right_canonical,
+                    }
+                )
+                pytest.fail(
+                    "Golden replay hash diverged; "
+                    f"first_diff={first_diff}; dump={dump_path.as_posix()}"
+                )
         finally:
             left_bot.shutdown()
             right_bot.shutdown()
@@ -1090,7 +1231,52 @@ def test_restart_boundary_recovery_audit_matches_clean_execution(
                 clean_record = clean_turn_records[turn_number - 1]
 
                 assert (failed_reply, failed_should_end) == (clean_record["reply"], clean_record["should_end"])
-                assert _normalized_committed_turn_contract(failed_contract) == _normalized_committed_turn_contract(clean_record["contract"])
+                failed_normalized = _normalized_committed_turn_contract(failed_contract)
+                clean_normalized = _normalized_committed_turn_contract(clean_record["contract"])
+                if failed_normalized != clean_normalized:
+                    first_diff = _first_contract_diff(failed_normalized, clean_normalized)
+                    failed_diag = _trace_event_diagnostic(failed_bot, successful_trace_id)
+                    clean_diag = _trace_event_diagnostic(clean_bot, clean_trace_ids[turn_number - 1])
+                    dump_payload = {
+                        "failure_name": failure_name,
+                        "turn": turn_number,
+                        "first_diff": first_diff,
+                        "failed_before_turn_snapshot": before_turn_snapshot,
+                        "clean_before_turn_snapshot": clean_pre_turn_snapshots[turn_number - 1],
+                        "failed_trace_id": successful_trace_id,
+                        "clean_trace_id": clean_trace_ids[turn_number - 1],
+                        "failed_contract": failed_normalized,
+                        "clean_contract": clean_normalized,
+                        "failed_memory_store_recent_moods_raw": list(
+                            dict(getattr(failed_bot, "MEMORY_STORE", {}) or {}).get("recent_moods", []) or []
+                        ),
+                        "clean_memory_store_recent_moods_raw": list(
+                            dict(getattr(clean_bot, "MEMORY_STORE", {}) or {}).get("recent_moods", []) or []
+                        ),
+                        "failed_session_recent_moods_raw": list(
+                            dict(failed_bot.snapshot_session_state().get("memory_store", {}) or {}).get(
+                                "recent_moods", []
+                            )
+                            or []
+                        ),
+                        "clean_session_recent_moods_raw": list(
+                            dict(clean_bot.snapshot_session_state().get("memory_store", {}) or {}).get(
+                                "recent_moods", []
+                            )
+                            or []
+                        ),
+                        "failed_trace_diagnostic": failed_diag,
+                        "clean_trace_diagnostic": clean_diag,
+                    }
+                    dump_path = _write_contract_diff_dump(
+                        failure_name=failure_name,
+                        turn_number=turn_number,
+                        payload=dump_payload,
+                    )
+                    pytest.fail(
+                        "Committed turn contract diverged at turn "
+                        f"{turn_number}; first_diff={first_diff}; dump={dump_path.as_posix()}"
+                    )
                 assert failed_contract["mutation_queue"] == {"pending": 0, "drained": 0, "failed": 0}
                 assert failed_contract["stage_order"] == CANONICAL_PIPELINE
                 user_turns = len(

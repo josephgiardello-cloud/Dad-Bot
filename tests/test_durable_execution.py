@@ -246,15 +246,12 @@ class TestTurnGraphConfigureResume:
         with pytest.raises(RuntimeError, match=r"configure_resume\(store_dir"):
             graph.configure_resume(tmp_path / "resume")
 
-    def test_configure_resume_store_is_noop(self, tmp_path: Path) -> None:
+    def test_configure_resume_store_is_removed(self, tmp_path: Path) -> None:
         from dadbot.core.graph import TurnGraph
 
 
         graph = TurnGraph()
-        policy = ResumabilityPolicy(enabled=False)
-        # Phase 3: configure_resume_store is a no-op (recovery is ledger-only).
-        graph.configure_resume_store(_new_resume_store(), policy=policy)
-        # No assertion needed; just verify it doesn't crash.
+        assert not hasattr(graph, "configure_resume_store")
 
 
 # ---------------------------------------------------------------------------

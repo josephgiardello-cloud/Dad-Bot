@@ -19,7 +19,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Literal, Protocol, TypeAlias
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
+
+from dadbot.core.contracts_adapter import ContractViolationError
 
 # ============================================================================
 # TYPE ALIASES (from execution_contract.py)
@@ -120,6 +122,93 @@ class AgentState(BaseModel):
         import hashlib
         state_str = f"{self.turn_id}:{','.join(self.nodes_visited)}:{','.join(self.tools_invoked)}"
         return hashlib.sha256(state_str.encode()).hexdigest()
+
+
+class SovereignLedgerState(BaseModel):
+    """Canonical ledger state used for strict turn-transition validation."""
+    session_id: str
+    trace_id: str
+    execution_mode: str
+    execution_state: str
+    execution_status: str
+    turn_truth_ok: bool | None = None
+    invariance_hash: str | None = None
+    causal_step_count: int = 0
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class SovereignLedgerTransition(BaseModel):
+    """Schema for before/after sovereign-ledger snapshots across one turn."""
+    before: SovereignLedgerState
+    after: SovereignLedgerState
+
+
+class LedgerMutationPayload(BaseModel):
+    """Schema for ledger mutation payloads emitted through SaveNode contracts."""
+
+    op: str = Field(min_length=1)
+    payload: dict[str, Any] = Field(default_factory=dict)
+    source: str = ""
+
+
+class SchemaContractValidator:
+    """Strict schema and transition validator for sovereign ledger updates."""
+
+    _ALLOWED_STATE_TRANSITIONS: dict[str, set[str]] = {
+        "": {"submitted", "claimed", "running", "completed", "failed", "reconciled", "released"},
+        "submitted": {"submitted", "claimed", "running", "completed", "failed", "reconciled", "released"},
+        "claimed": {"claimed", "running", "completed", "failed", "reconciled", "released"},
+        "running": {"running", "completed", "failed", "reconciled", "released"},
+        "completed": {"completed"},
+        "failed": {"failed", "reconciled", "released"},
+        "reconciled": {"reconciled", "released"},
+        "released": {"released"},
+    }
+    _TERMINAL_STATES = {"completed", "failed", "released", "reconciled"}
+    _TERMINAL_STATUSES = {"completed", "failed", "cancelled", "aborted", "error"}
+
+    @classmethod
+    def validate_transition(cls, transition: SovereignLedgerTransition) -> list[str]:
+        violations: list[str] = []
+        before = transition.before
+        after = transition.after
+
+        if not before.session_id:
+            violations.append("before.session_id is required")
+        if not after.session_id:
+            violations.append("after.session_id is required")
+        if before.session_id and after.session_id and before.session_id != after.session_id:
+            violations.append("session_id drift across turn boundary")
+
+        if not before.trace_id:
+            violations.append("before.trace_id is required")
+        if not after.trace_id:
+            violations.append("after.trace_id is required")
+        if before.trace_id and after.trace_id and before.trace_id != after.trace_id:
+            violations.append("trace_id drift across turn boundary")
+
+        from_state = str(before.execution_state or "").strip().lower()
+        to_state = str(after.execution_state or "").strip().lower()
+        allowed_targets = cls._ALLOWED_STATE_TRANSITIONS.get(from_state)
+        if allowed_targets is None:
+            violations.append(f"unknown execution_state in transition source: {before.execution_state!r}")
+        elif to_state not in allowed_targets:
+            violations.append(f"invalid execution_state transition: {before.execution_state!r} -> {after.execution_state!r}")
+
+        after_status = str(after.execution_status or "").strip().lower()
+        if to_state in cls._TERMINAL_STATES and after_status not in cls._TERMINAL_STATUSES:
+            violations.append(f"terminal state {after.execution_state!r} requires terminal execution_status, got {after.execution_status!r}")
+
+        if after.causal_step_count < before.causal_step_count:
+            violations.append("causal_step_count must be monotonic")
+
+        if to_state == "completed" and not bool(after.turn_truth_ok):
+            violations.append("turn_truth_ok must be true for completed turns")
+
+        return violations
+
+
+_LATEST_SOVEREIGN_LEDGER_TRANSITION: SovereignLedgerTransition | None = None
 
 
 class TurnExecutor(Protocol):
@@ -368,12 +457,18 @@ class ContractPropagationMap:
         if node.contract_id in self._validation_cache:
             return self._validation_cache[node.contract_id]
 
-        violations = []
+        violations: list[str] = []
         if node.validator_fn:
             try:
-                violations = node.validator_fn()
+                violations.extend(node.validator_fn())
             except Exception as e:
-                violations = [f"Validator error: {e!s}"]
+                raise ContractViolationError(
+                    f"Contract validator execution failure for {node.contract_id}",
+                ) from e
+
+        transition = _LATEST_SOVEREIGN_LEDGER_TRANSITION
+        if transition is not None and node.contract_id in {"runtime_contract", "persistence_contract"}:
+            violations.extend(_validate_ledger_mutation_payloads(transition))
 
         result = ContractValidationResult(
             contract_id=node.contract_id,
@@ -385,13 +480,75 @@ class ContractPropagationMap:
 
 
 def _validate_runtime_contract() -> list[str]:
-    """Validator for runtime contract."""
-    return []  # Placeholder
+    """Validator for runtime contract using the latest sovereign-ledger transition."""
+    transition = _LATEST_SOVEREIGN_LEDGER_TRANSITION
+    if transition is None:
+        return []
+    return SchemaContractValidator.validate_transition(transition)
+
+
+def _extract_ledger_mutation_candidates(transition: SovereignLedgerTransition) -> list[dict[str, Any]]:
+    """Extract ledger mutation payload candidates from transition metadata."""
+    metadata = dict(transition.after.metadata or {})
+    candidates: list[dict[str, Any]] = []
+
+    direct = metadata.get("ledger_mutations")
+    if isinstance(direct, list):
+        for item in direct:
+            if isinstance(item, dict):
+                candidates.append(dict(item))
+
+    mutation_queue = metadata.get("mutation_queue")
+    if isinstance(mutation_queue, dict):
+        for key in ("intents", "pending_intents", "drained_intents"):
+            values = mutation_queue.get(key)
+            if isinstance(values, list):
+                for item in values:
+                    if isinstance(item, dict):
+                        candidates.append(dict(item))
+
+    return candidates
+
+
+def _validate_ledger_mutation_payloads(transition: SovereignLedgerTransition) -> list[str]:
+    """Validate ledger mutation payload schema via Pydantic model_validate."""
+    violations: list[str] = []
+    for index, candidate in enumerate(_extract_ledger_mutation_candidates(transition), start=1):
+        payload = candidate.get("payload")
+        op_value = candidate.get("op")
+        if not op_value and isinstance(payload, dict):
+            op_value = payload.get("op")
+
+        try:
+            LedgerMutationPayload.model_validate(
+                {
+                    "op": str(op_value or "").strip(),
+                    "payload": payload if payload is not None else {},
+                    "source": str(candidate.get("source") or ""),
+                },
+            )
+        except ValidationError as exc:
+            violations.append(f"ledger_mutation[{index}] schema invalid: {exc}")
+    return violations
 
 
 def _validate_persistence_contract() -> list[str]:
-    """Validator for persistence contract."""
-    return []  # Placeholder
+    """Persistence guard: terminal states must include invariance and truth signals."""
+    transition = _LATEST_SOVEREIGN_LEDGER_TRANSITION
+    if transition is None:
+        return []
+
+    violations: list[str] = []
+    after = transition.after
+    state = str(after.execution_state or "").strip().lower()
+
+    if state in {"completed", "failed", "reconciled", "released"} and not str(after.invariance_hash or "").strip():
+        violations.append("terminal persistence state missing invariance_hash")
+
+    if state == "completed" and after.turn_truth_ok is not True:
+        violations.append("completed persistence state must persist turn_truth_ok=true")
+
+    return violations
 
 
 def _validate_capability(
@@ -403,6 +560,33 @@ def _validate_capability(
         if key not in contracts:
             violations.append(f"Required capability '{key}' not found")
     return violations
+
+
+def validate_sovereign_ledger_transition(
+    before_state: Mapping[str, Any],
+    after_state: Mapping[str, Any],
+) -> SovereignLedgerTransition:
+    """Validate sovereign ledger transition and raise on any strict violation."""
+    global _LATEST_SOVEREIGN_LEDGER_TRANSITION
+
+    try:
+        transition = SovereignLedgerTransition(
+            before=SovereignLedgerState.model_validate(dict(before_state or {})),
+            after=SovereignLedgerState.model_validate(dict(after_state or {})),
+        )
+    except ValidationError as exc:
+        raise ContractViolationError(
+            f"Sovereign ledger schema invalid: {exc}",
+        ) from exc
+
+    violations = SchemaContractValidator.validate_transition(transition)
+    violations.extend(_validate_ledger_mutation_payloads(transition))
+    if violations:
+        raise ContractViolationError(
+            "Sovereign ledger transition violation: " + "; ".join(violations),
+        )
+    _LATEST_SOVEREIGN_LEDGER_TRANSITION = transition
+    return transition
 
 
 def build_dadbot_contract_map() -> ContractPropagationMap:
@@ -497,6 +681,10 @@ __all__ = [
     "TurnRequest",
     "TurnResponse",
     "AgentState",
+    "SovereignLedgerState",
+    "SovereignLedgerTransition",
+    "SchemaContractValidator",
+    "validate_sovereign_ledger_transition",
     "TurnExecutor",
     "TurnRuntimeContract",
     "live_turn_request",

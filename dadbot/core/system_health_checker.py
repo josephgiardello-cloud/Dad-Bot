@@ -50,6 +50,74 @@ class SystemHealthChecker:
             session_id="__health__",
         )
 
+    @staticmethod
+    def _is_job_lifecycle_event(event_type: str) -> bool:
+        return event_type in {
+            "JOB_SUBMITTED",
+            "JOB_QUEUED",
+            "JOB_STARTED",
+            "JOB_COMPLETED",
+            "JOB_FAILED",
+        }
+
+    @staticmethod
+    def _identity_collisions(mapping: dict[str, set[str]]) -> list[str]:
+        return sorted(identity for identity, jobs in mapping.items() if len(jobs) > 1)
+
+    @staticmethod
+    def _update_job_identity(
+        *,
+        identity: str,
+        job_id: str,
+        job_map: dict[str, str],
+        reverse_map: dict[str, set[str]],
+        mismatch_sink: list[str],
+    ) -> None:
+        if not identity:
+            return
+        existing = job_map.get(job_id)
+        if existing is None:
+            job_map[job_id] = identity
+        elif existing != identity:
+            mismatch_sink.append(job_id)
+        reverse_map.setdefault(identity, set()).add(job_id)
+
+    def _process_identity_event(
+        self,
+        *,
+        event: dict[str, Any],
+        job_to_trace: dict[str, str],
+        job_to_correlation: dict[str, str],
+        trace_to_jobs: dict[str, set[str]],
+        correlation_to_jobs: dict[str, set[str]],
+        missing_trace: list[str],
+        missing_correlation: list[str],
+    ) -> None:
+        payload = dict(event.get("payload") or {})
+        job_id = str(payload.get("job_id") or "").strip()
+        if not job_id:
+            return
+        trace_id = str(event.get("trace_id") or payload.get("trace_id") or "").strip()
+        correlation_id = str(event.get("correlation_id") or payload.get("correlation_id") or "").strip()
+        if not trace_id:
+            missing_trace.append(job_id)
+        if self._strict_identity and not correlation_id:
+            missing_correlation.append(job_id)
+        self._update_job_identity(
+            identity=trace_id,
+            job_id=job_id,
+            job_map=job_to_trace,
+            reverse_map=trace_to_jobs,
+            mismatch_sink=missing_trace,
+        )
+        self._update_job_identity(
+            identity=correlation_id,
+            job_id=job_id,
+            job_map=job_to_correlation,
+            reverse_map=correlation_to_jobs,
+            mismatch_sink=missing_correlation,
+        )
+
     def check_kernel_only_mutation_enforcement(self) -> dict[str, Any]:
         offenders: list[str] = []
         for path in self.base_path.rglob("dadbot/**/*.py"):
@@ -314,13 +382,6 @@ class SystemHealthChecker:
             component="identity_propagation_correctness",
         )
         events = ledger.read()
-        lifecycle = {
-            "JOB_SUBMITTED",
-            "JOB_QUEUED",
-            "JOB_STARTED",
-            "JOB_COMPLETED",
-            "JOB_FAILED",
-        }
 
         missing_trace: list[str] = []
         missing_correlation: list[str] = []
@@ -331,44 +392,21 @@ class SystemHealthChecker:
 
         for event in events:
             event_type = str(event.get("type") or "")
-            if event_type not in lifecycle:
+            if not self._is_job_lifecycle_event(event_type):
                 continue
 
-            payload = dict(event.get("payload") or {})
-            job_id = str(payload.get("job_id") or "").strip()
-            if not job_id:
-                continue
+            self._process_identity_event(
+                event=event,
+                job_to_trace=job_to_trace,
+                job_to_correlation=job_to_correlation,
+                trace_to_jobs=trace_to_jobs,
+                correlation_to_jobs=correlation_to_jobs,
+                missing_trace=missing_trace,
+                missing_correlation=missing_correlation,
+            )
 
-            trace_id = str(
-                event.get("trace_id") or payload.get("trace_id") or "",
-            ).strip()
-            correlation_id = str(
-                event.get("correlation_id") or payload.get("correlation_id") or "",
-            ).strip()
-
-            if not trace_id:
-                missing_trace.append(job_id)
-            if self._strict_identity and not correlation_id:
-                missing_correlation.append(job_id)
-
-            existing_trace = job_to_trace.get(job_id)
-            if trace_id:
-                if existing_trace is None:
-                    job_to_trace[job_id] = trace_id
-                elif existing_trace != trace_id:
-                    missing_trace.append(job_id)
-                trace_to_jobs.setdefault(trace_id, set()).add(job_id)
-
-            existing_correlation = job_to_correlation.get(job_id)
-            if correlation_id:
-                if existing_correlation is None:
-                    job_to_correlation[job_id] = correlation_id
-                elif existing_correlation != correlation_id:
-                    missing_correlation.append(job_id)
-                correlation_to_jobs.setdefault(correlation_id, set()).add(job_id)
-
-        trace_collisions = sorted(trace_id for trace_id, jobs in trace_to_jobs.items() if len(jobs) > 1)
-        correlation_collisions = sorted(cid for cid, jobs in correlation_to_jobs.items() if len(jobs) > 1)
+        trace_collisions = self._identity_collisions(trace_to_jobs)
+        correlation_collisions = self._identity_collisions(correlation_to_jobs)
 
         ok = (
             len(missing_trace) == 0

@@ -282,3 +282,127 @@ def test_check_system_resources_raises_when_critically_low_ram(monkeypatch):
     args = _args(model="gemma3:4b")
     with pytest.raises(RuntimeError, match="Critically low RAM"):
         app_runtime.check_system_resources(args)
+
+
+def test_parse_args_heartbeat_daemon_command():
+    args = app_runtime.parse_args([
+        "heartbeat-daemon",
+        "--interval-seconds",
+        "7",
+        "--consolidation-interval-seconds",
+        "21",
+        "--session-id",
+        "ops",
+        "--window-size",
+        "12",
+        "--max-cycles",
+        "4",
+    ])
+
+    assert args.command == "heartbeat-daemon"
+    assert args.interval_seconds == 7
+    assert args.consolidation_interval_seconds == 21
+    assert args.session_id == "ops"
+    assert args.window_size == 12
+    assert args.max_cycles == 4
+
+
+def test_parse_args_hud_command():
+    args = app_runtime.parse_args([
+        "hud",
+        "--interval-seconds",
+        "3",
+        "--once",
+        "--max-samples",
+        "11",
+    ])
+
+    assert args.command == "hud"
+    assert args.interval_seconds == 3
+    assert args.once is True
+    assert args.max_samples == 11
+
+
+def test_run_operator_command_dispatches_heartbeat_daemon(monkeypatch, tmp_path):
+    captured = {}
+
+    def _fake_heartbeat(
+        dadbot_cls,
+        *,
+        interval_seconds,
+        consolidation_interval_seconds,
+        session_id,
+        window_size,
+        max_cycles,
+    ):
+        captured["dadbot_cls"] = dadbot_cls
+        captured["interval_seconds"] = interval_seconds
+        captured["consolidation_interval_seconds"] = consolidation_interval_seconds
+        captured["session_id"] = session_id
+        captured["window_size"] = window_size
+        captured["max_cycles"] = max_cycles
+        return 0
+
+    monkeypatch.setattr(app_runtime, "_cli_heartbeat_daemon", _fake_heartbeat)
+
+    args = app_runtime.parse_args([
+        "heartbeat-daemon",
+        "--interval-seconds",
+        "9",
+        "--consolidation-interval-seconds",
+        "90",
+        "--session-id",
+        "ops-core",
+        "--window-size",
+        "14",
+        "--max-cycles",
+        "5",
+    ])
+
+    result = app_runtime._run_operator_command(
+        args,
+        dadbot_cls=_RuntimeStub,
+        script_path=tmp_path / "Dad.py",
+    )
+
+    assert result == 0
+    assert captured["dadbot_cls"] is _RuntimeStub
+    assert captured["interval_seconds"] == 9
+    assert captured["consolidation_interval_seconds"] == 90
+    assert captured["session_id"] == "ops-core"
+    assert captured["window_size"] == 14
+    assert captured["max_cycles"] == 5
+
+
+def test_run_operator_command_dispatches_hud(monkeypatch, tmp_path):
+    captured = {}
+
+    def _fake_hud(dadbot_cls, *, interval_seconds, once, max_samples):
+        captured["dadbot_cls"] = dadbot_cls
+        captured["interval_seconds"] = interval_seconds
+        captured["once"] = once
+        captured["max_samples"] = max_samples
+        return 0
+
+    monkeypatch.setattr(app_runtime, "_cli_hud_watch", _fake_hud)
+
+    args = app_runtime.parse_args([
+        "hud",
+        "--interval-seconds",
+        "4",
+        "--once",
+        "--max-samples",
+        "6",
+    ])
+
+    result = app_runtime._run_operator_command(
+        args,
+        dadbot_cls=_RuntimeStub,
+        script_path=tmp_path / "Dad.py",
+    )
+
+    assert result == 0
+    assert captured["dadbot_cls"] is _RuntimeStub
+    assert captured["interval_seconds"] == 4
+    assert captured["once"] is True
+    assert captured["max_samples"] == 6

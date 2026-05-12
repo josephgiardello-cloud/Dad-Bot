@@ -1,6 +1,5 @@
 {
   "schema_version": "contract-test-manifest.v1",
-  "generated_at_utc": "2026-05-11T12:56:52+00:00",
   "contract_map": {
     "path": "docs/system_contract_map.md",
     "version": "2026-05-07.v2.",

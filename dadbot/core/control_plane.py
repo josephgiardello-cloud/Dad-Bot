@@ -10,19 +10,36 @@ import os
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Protocol
 
 from dadbot.contracts import AttachmentList, FinalizedTurnResult
+from dadbot.core.contracts.lifecycle_events import (
+    Claimed,
+    Completed,
+    Failed,
+    LeaseExpired,
+    LeaseRenewed,
+    Redelivered,
+    Released,
+    Submitted,
+)
 from dadbot.core.compaction import ArchiveTier, CompactionPolicy, EventCompactor
+from dadbot.core.contract_evaluator import validate_sovereign_ledger_transition
+from dadbot.core.control_plane_projection import ExecutionProjection
+from dadbot.core.control_plane_reducer import ExecutionState as ReducedExecutionState
+from dadbot.core.control_plane_reducer import ExecutionStatus, lease_expired
 from dadbot.core.core_state import CoreState, InputEvent, project_views, transition
 from dadbot.core.execution_boundary import ControlPlaneExecutionBoundary
 from dadbot.core.execution_context import (
     open_core_state_scope,
     close_core_state_scope,
 )
-from dadbot.core.execution_context import get_active_core_state, push_core_state_event
 from dadbot.core.execution_lease import ExecutionLease, LeaseConflictError
+from dadbot.core.execution_resource_budget import BackpressureSignal
+from dadbot.core.execution_context import get_active_core_state, push_core_state_event
 from dadbot.core.execution_ledger import ExecutionLedger
 from dadbot.core.execution_ledger_memory import InMemoryExecutionLedger
 from dadbot.core.execution_result_unified import (
@@ -32,59 +49,368 @@ from dadbot.core.execution_result_unified import (
     mark_unified_execution_failure,
     mark_unified_execution_success,
 )
+from dadbot.core.failure_taxonomy import classify_failure
 from dadbot.core.system_state_algebra import (
     evaluate_system_state_algebra,
     persist_system_state_algebra,
 )
+from dadbot.core.global_transition_invariants import (
+    TransitionBoundaryView,
+    enforce_global_transition_invariants,
+)
+from dadbot.core.distributed_correctness import (
+    DistributedCorrectnessModel,
+    NodeRole,
+)
 from dadbot.core.memory_set_invariants import (
     MemorySetInvariantViolation,
 )
+from dadbot.core.runtime_errors import (
+    AuthorityViolation,
+    ExecutionStageError,
+    InvariantViolation,
+    PersistenceFailure,
+    ReplayMismatch,
+)
 from dadbot.core.kernel_gateway import KernelGateway
 from dadbot.core.kernel_signals import get_exporter, get_metrics, get_tracer
+from dadbot.core.effect_journal import EffectJournal
+from dadbot.core.ledger_index import LedgerIndex
 from dadbot.core.ledger_reader import LedgerReader
+from dadbot.core.ledger_writer import LedgerWriter
 from dadbot.core.ledger_writer_adapter import LedgerWriterAdapter
 from dadbot.core.recovery_manager import RecoveryManager
 from dadbot.core.semantic_primitives import hash as semantic_hash
 from dadbot.core.session_store import SessionStore
+from dadbot.core._control_plane_reconciliation import ReconciliationMixin
+from dadbot.core._control_plane_compaction import CompactionMixin
 
 logger = logging.getLogger(__name__)
 
 
-def _classify_execution_failure(exc: BaseException) -> dict[str, Any]:
-    if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
-        return {
-            "failure_class": "timeout",
-            "failure_source": "infrastructure",
-            "retryable": True,
-            "exception_type": type(exc).__name__,
-        }
-    if isinstance(exc, LeaseConflictError):
-        return {
-            "failure_class": "lease_conflict",
-            "failure_source": "scheduler",
-            "retryable": True,
-            "exception_type": type(exc).__name__,
-        }
-    if isinstance(exc, asyncio.CancelledError):
-        return {
-            "failure_class": "cancelled",
-            "failure_source": "runtime",
-            "retryable": True,
-            "exception_type": type(exc).__name__,
-        }
-    if isinstance(exc, (ValueError, TypeError)):
-        return {
-            "failure_class": "contract_violation",
-            "failure_source": "input",
-            "retryable": False,
-            "exception_type": type(exc).__name__,
-        }
-    return {
-        "failure_class": "runtime_exception",
-        "failure_source": "execution",
-        "retryable": False,
-        "exception_type": type(exc).__name__,
+@dataclass(frozen=True)
+class _FailurePolicyStrategy:
+    event_type: str
+
+
+_FAILURE_POLICY_STRATEGIES: dict[str, _FailurePolicyStrategy] = {
+    "quarantine": _FailurePolicyStrategy(event_type="JOB_QUARANTINED"),
+    "reconcile": _FailurePolicyStrategy(event_type="JOB_RECONCILE_REQUIRED"),
+    "manual_retry": _FailurePolicyStrategy(event_type="JOB_MANUAL_RETRY_REQUIRED"),
+}
+
+
+def _progress_instrumentation_enabled() -> bool:
+    raw = str(os.environ.get("DADBOT_PROGRESS_INSTRUMENTATION", "0")).strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _progress_log_path() -> Path:
+    raw = str(os.environ.get("DADBOT_PROGRESS_LOG_PATH", "session_logs/progress_instrumentation.ndjson")).strip()
+    if not raw:
+        raw = "session_logs/progress_instrumentation.ndjson"
+    return Path(raw)
+
+
+def _write_progress_event(*, component: str, phase: str, payload: dict[str, Any]) -> None:
+    if not _progress_instrumentation_enabled():
+        return
+    event = {
+        "timestamp": time.time(),
+        "component": str(component or "control_plane"),
+        "phase": str(phase or "unknown"),
+        "payload": dict(payload or {}),
     }
+    try:
+        path = _progress_log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(event, sort_keys=True, default=str) + "\n")
+    except Exception as exc:
+        logger.debug("progress instrumentation write failed: %s", exc)
+
+
+class ExecutionLifecycleState(StrEnum):
+    SUBMITTED = "submitted"
+    QUEUED = "queued"
+    RECOVERY_PENDING = "recovery_pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+_ALLOWED_LIFECYCLE_TRANSITIONS: dict[ExecutionLifecycleState, frozenset[ExecutionLifecycleState]] = {
+    ExecutionLifecycleState.SUBMITTED: frozenset({
+        ExecutionLifecycleState.QUEUED,
+        ExecutionLifecycleState.RUNNING,
+        ExecutionLifecycleState.FAILED,
+    }),
+    ExecutionLifecycleState.QUEUED: frozenset({
+        ExecutionLifecycleState.RECOVERY_PENDING,
+        ExecutionLifecycleState.RUNNING,
+        ExecutionLifecycleState.FAILED,
+    }),
+    ExecutionLifecycleState.RECOVERY_PENDING: frozenset({
+        ExecutionLifecycleState.QUEUED,
+        ExecutionLifecycleState.RUNNING,
+        ExecutionLifecycleState.FAILED,
+    }),
+    ExecutionLifecycleState.RUNNING: frozenset({
+        ExecutionLifecycleState.RECOVERY_PENDING,
+        ExecutionLifecycleState.COMPLETED,
+        ExecutionLifecycleState.FAILED,
+    }),
+    ExecutionLifecycleState.COMPLETED: frozenset(),
+    ExecutionLifecycleState.FAILED: frozenset(),
+}
+
+
+def _coerce_lifecycle_state(value: Any) -> ExecutionLifecycleState:
+    raw = str(value or "").strip().lower()
+    try:
+        return ExecutionLifecycleState(raw)
+    except ValueError:
+        return ExecutionLifecycleState.SUBMITTED
+
+
+def _target_lifecycle_state_for_event(
+    event: Any,
+    *,
+    current_state: ExecutionLifecycleState,
+) -> ExecutionLifecycleState:
+    if isinstance(event, Submitted):
+        return ExecutionLifecycleState.SUBMITTED
+    if isinstance(event, Claimed):
+        return ExecutionLifecycleState.RUNNING
+    if isinstance(event, LeaseRenewed):
+        return ExecutionLifecycleState.RUNNING
+    if isinstance(event, LeaseExpired):
+        return ExecutionLifecycleState.RECOVERY_PENDING
+    if isinstance(event, Released):
+        return ExecutionLifecycleState.QUEUED
+    if isinstance(event, Completed):
+        return ExecutionLifecycleState.COMPLETED
+    if isinstance(event, Failed):
+        return ExecutionLifecycleState.FAILED
+    if isinstance(event, Redelivered):
+        # Redelivery can be a no-op state annotation in lifecycle reducer terms.
+        if current_state == ExecutionLifecycleState.RECOVERY_PENDING:
+            return ExecutionLifecycleState.QUEUED
+        return current_state
+    raise RuntimeError(f"unsupported lifecycle event type at emission boundary: {type(event).__name__}")
+
+
+def _execution_status_for_lifecycle(state: ExecutionLifecycleState) -> str:
+    if state == ExecutionLifecycleState.COMPLETED:
+        return "completed"
+    if state == ExecutionLifecycleState.FAILED:
+        return "failed"
+    if state == ExecutionLifecycleState.SUBMITTED:
+        return "submitted"
+    return "running"
+
+
+def _build_sovereign_transition_states(
+    *,
+    job: "ExecutionJob",
+    before_state: ExecutionLifecycleState,
+    after_state: ExecutionLifecycleState,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    metadata = dict(job.metadata or {})
+    execution_state = dict(metadata.get("execution_state") or {})
+    before_causal_step_count = int(execution_state.get("causal_step_count") or 0)
+    after_causal_step_count = before_causal_step_count + (1 if after_state != before_state else 0)
+    invariance_hash = str(
+        execution_state.get("invariance_hash")
+        or metadata.get("invariance_hash")
+        or f"cp:{str(job.job_id or '')}:{after_causal_step_count}",
+    )
+    after_turn_truth_ok = bool(execution_state.get("turn_truth_ok", after_state != ExecutionLifecycleState.COMPLETED or True))
+
+    before = {
+        "session_id": str(job.session_id or "default"),
+        "trace_id": str(job.trace_id or "unknown-trace"),
+        "execution_mode": _resolved_execution_mode(job),
+        "execution_state": before_state.value,
+        "execution_status": _execution_status_for_lifecycle(before_state),
+        "turn_truth_ok": bool(execution_state.get("turn_truth_ok")) if before_state == ExecutionLifecycleState.COMPLETED else None,
+        "invariance_hash": str(execution_state.get("invariance_hash") or metadata.get("invariance_hash") or ""),
+        "causal_step_count": before_causal_step_count,
+        "metadata": {},
+    }
+    after = {
+        "session_id": str(job.session_id or "default"),
+        "trace_id": str(job.trace_id or "unknown-trace"),
+        "execution_mode": _resolved_execution_mode(job),
+        "execution_state": after_state.value,
+        "execution_status": _execution_status_for_lifecycle(after_state),
+        "turn_truth_ok": after_turn_truth_ok if after_state == ExecutionLifecycleState.COMPLETED else None,
+        "invariance_hash": invariance_hash,
+        "causal_step_count": after_causal_step_count,
+        "metadata": {},
+    }
+    return before, after
+
+
+def _assert_lifecycle_emission_transition(
+    *,
+    execution_id: str,
+    event: Any,
+    current_state: ExecutionLifecycleState | None,
+) -> None:
+    if isinstance(event, Submitted):
+        if current_state is not None:
+            raise RuntimeError(
+                f"Invalid lifecycle emission transition for {execution_id!r}: "
+                "Submitted must be first event",
+            )
+        return
+
+    if current_state is None:
+        raise RuntimeError(
+            f"Invalid lifecycle emission transition for {execution_id!r}: "
+            f"{type(event).__name__} cannot be emitted before Submitted",
+        )
+
+    target_state = _target_lifecycle_state_for_event(event, current_state=current_state)
+    if target_state == current_state:
+        return
+    if target_state not in _ALLOWED_LIFECYCLE_TRANSITIONS[current_state]:
+        raise RuntimeError(
+            f"Invalid lifecycle emission transition for {execution_id!r}: "
+            f"{current_state.value!r} -> {target_state.value!r} via {type(event).__name__}",
+        )
+
+
+def _ensure_execution_state(job: "ExecutionJob") -> dict[str, Any]:
+    metadata = dict(job.metadata or {})
+    state = dict(metadata.get("execution_state") or {})
+    state.setdefault("lifecycle_state", ExecutionLifecycleState.SUBMITTED.value)
+    state.setdefault("redelivery_count", 0)
+    state.setdefault("lease_conflict_count", 0)
+    state.setdefault("last_worker_id", "")
+    state.setdefault("last_transition_reason", "")
+    state.setdefault("retry_not_before_monotonic", 0.0)
+    metadata["execution_state"] = state
+    job.metadata = metadata
+    return state
+
+
+def _transition_execution_state(
+    job: "ExecutionJob",
+    *,
+    target: ExecutionLifecycleState,
+    reason: str,
+    worker_id: str = "",
+    retry_not_before_monotonic: float | None = None,
+    redelivery_increment: int = 0,
+    lease_conflict_increment: int = 0,
+) -> dict[str, Any]:
+    state = _ensure_execution_state(job)
+    current = _coerce_lifecycle_state(state.get("lifecycle_state"))
+    before_causal_step_count = int(state.get("causal_step_count") or 0)
+    if current != target and target not in _ALLOWED_LIFECYCLE_TRANSITIONS[current]:
+        raise RuntimeError(
+            "Invalid execution lifecycle transition: "
+            f"{current.value!r} -> {target.value!r} for job {job.job_id!r}",
+        )
+    state["lifecycle_state"] = target.value
+    state["last_transition_reason"] = str(reason or "")
+    state["last_transition_at"] = float(time.time())
+    if worker_id:
+        state["last_worker_id"] = str(worker_id)
+    if retry_not_before_monotonic is None:
+        if target != ExecutionLifecycleState.RECOVERY_PENDING:
+            state["retry_not_before_monotonic"] = 0.0
+    else:
+        state["retry_not_before_monotonic"] = max(0.0, float(retry_not_before_monotonic))
+    if redelivery_increment:
+        state["redelivery_count"] = int(state.get("redelivery_count") or 0) + int(redelivery_increment)
+    if lease_conflict_increment:
+        state["lease_conflict_count"] = int(state.get("lease_conflict_count") or 0) + int(lease_conflict_increment)
+
+    # Mandatory global invariant enforcement at transition boundary.
+    state["causal_step_count"] = before_causal_step_count + (1 if target != current else 0)
+    enforce_global_transition_invariants(
+        TransitionBoundaryView(
+            session_id=str(job.session_id or "default"),
+            trace_id=str(job.trace_id or "unknown-trace"),
+            before_state=current.value,
+            after_state=target.value,
+            before_causal_step_count=before_causal_step_count,
+            after_causal_step_count=int(state.get("causal_step_count") or 0),
+            turn_truth_ok=None,
+            policy_posture=str(state.get("policy_posture") or "moderate"),
+            active_fault_count=int(state.get("active_fault_count") or 0),
+            metadata={"reason": str(reason or "")},
+        ),
+    )
+
+    job.metadata["execution_state"] = state
+    return dict(state)
+
+
+def _resolved_execution_mode(job: "ExecutionJob") -> str:
+    metadata = dict(job.metadata or {})
+    explicit = str(metadata.get("execution_mode") or "").strip().lower()
+    state = dict(metadata.get("execution_state") or {})
+    if int(state.get("redelivery_count") or 0) > 0:
+        return "recovery"
+    if _coerce_lifecycle_state(state.get("lifecycle_state")) == ExecutionLifecycleState.RECOVERY_PENDING:
+        return "recovery"
+    if explicit in {"live", "replay", "recovery"}:
+        return explicit
+    return "live"
+
+
+def _lifecycle_state_from_projection(state: ReducedExecutionState | None) -> str:
+    if state is None:
+        return ExecutionLifecycleState.SUBMITTED.value
+    if state.status == ExecutionStatus.SUBMITTED:
+        return ExecutionLifecycleState.SUBMITTED.value
+    if state.status in {ExecutionStatus.CLAIMED, ExecutionStatus.RUNNING}:
+        return ExecutionLifecycleState.RUNNING.value
+    if state.status == ExecutionStatus.EXPIRED:
+        return ExecutionLifecycleState.RECOVERY_PENDING.value
+    if state.status == ExecutionStatus.RELEASED:
+        return ExecutionLifecycleState.QUEUED.value
+    if state.status == ExecutionStatus.COMPLETED:
+        return ExecutionLifecycleState.COMPLETED.value
+    if state.status == ExecutionStatus.FAILED:
+        return ExecutionLifecycleState.FAILED.value
+    return ExecutionLifecycleState.SUBMITTED.value
+
+
+def _apply_projection_execution_state(
+    job: "ExecutionJob",
+    state: ReducedExecutionState | None,
+) -> dict[str, Any]:
+    metadata = dict(job.metadata or {})
+    prior = dict(metadata.get("execution_state") or {})
+    projected = {
+        "lifecycle_state": _lifecycle_state_from_projection(state),
+        "redelivery_count": max(0, int((state.attempt_count if state is not None else 0)) - 1),
+        "lease_conflict_count": int(prior.get("lease_conflict_count") or 0),
+        "last_worker_id": str((state.owner if state is not None else "") or prior.get("last_worker_id") or ""),
+        "last_transition_reason": str(prior.get("last_transition_reason") or "lifecycle_projection"),
+        "retry_not_before_monotonic": 0.0,
+        "failure_type": str(prior.get("failure_type") or ""),
+        "failure_action": str(prior.get("failure_action") or ""),
+        "auto_retry": bool(prior.get("auto_retry", False)),
+    }
+    metadata["execution_state"] = projected
+    job.metadata = metadata
+    return projected
+
+
+def _classify_execution_failure(exc: BaseException) -> dict[str, Any]:
+    failure = classify_failure(exc)
+    if isinstance(exc, asyncio.CancelledError):
+        # Cancellation is explicitly modeled as retryable but keeps a separate class
+        # for operational dashboards.
+        failure["failure_class"] = "cancelled"
+        failure["failure_source"] = "runtime"
+    return failure
 
 
 def _extract_execution_degradations(metadata: dict[str, Any]) -> list[dict[str, Any]]:
@@ -105,7 +431,7 @@ def _resolve_terminal_turn_truth(
     algebra = evaluate_system_state_algebra(
         state=state,
         execution_result_payload=dict(job.metadata.get("execution_result") or {}),
-        trace_id=str(job.trace_id or ""),
+        trace_token=str(job.trace_id or ""),
         context="control_plane_commit",
     )
     return dict(algebra)
@@ -182,6 +508,9 @@ class SchedulerProtocol(Protocol):
     which enforces the scheduler/control-plane boundary structurally.
     """
 
+    worker_id: str
+    lease_ttl_seconds: float
+
     async def register(self, job: ExecutionJob) -> asyncio.Future[FinalizedTurnResult]: ...
     async def drain_once(
         self,
@@ -196,7 +525,14 @@ class SchedulerOptions:
     worker_id: str = "worker-1"
     execution_token: str = ""
     enable_observability: bool = True
+    projection: ExecutionProjection | None = None
     execution_lease: ExecutionLease | None = None
+    lease_ttl_seconds: float = 30.0
+    redelivery_retry_interval_seconds: float = 0.05
+    fairness_aging_rate: float = 5.0
+    tenant_balance_weight: float = 1.0
+    on_runtime_claim_guard: Callable[[str], None] | None = None
+    on_runtime_lease_sync: Callable[[str], None] | None = None
 
 
 @dataclass(slots=True)
@@ -204,7 +540,8 @@ class ControlPlaneOptions:
     max_inflight_jobs: int = 16
     worker_id: str = "worker-1"
     enable_observability: bool = True
-    execution_lease: ExecutionLease | None = None
+    lease_ttl_seconds: float = 30.0
+    redelivery_retry_interval_seconds: float = 0.05
     ledger: ExecutionLedger | None = None
     scheduler: SchedulerProtocol | None = None
 
@@ -242,6 +579,173 @@ class SessionRegistry:
         return str(session_id or "default") in self._terminated
 
 
+class DurableReconcileQueue:
+    """Ledger-backed reconcile queue boundary.
+
+    Queue intent is persisted as ``JOB_RECONCILE_REQUIRED`` events; this helper
+    centralizes enqueue, pending projection, and bounded consume semantics.
+    """
+
+    def __init__(
+        self,
+        *,
+        ledger: ExecutionLedger,
+        write_event: Callable[..., dict[str, Any]] | None,
+        request_is_ambiguous: Callable[[str, str], bool],
+        effect_is_ambiguous: Callable[[str, str], bool],
+    ) -> None:
+        self._ledger = ledger
+        self._write_event = write_event
+        self._request_is_ambiguous = request_is_ambiguous
+        self._effect_is_ambiguous = effect_is_ambiguous
+
+    def enqueue_required(
+        self,
+        *,
+        session_id: str,
+        trace_token: str,
+        request_id: str,
+        effect_id: str,
+        reason: str,
+    ) -> None:
+        if not callable(self._write_event):
+            return
+        self._write_event(
+            event_type="JOB_RECONCILE_REQUIRED",
+            session_id=str(session_id or "default"),
+            trace_id=str(trace_token or "").strip(),
+            kernel_step_id="control_plane.reconcile_required",
+            payload={
+                "request_id": str(request_id or "").strip(),
+                "effect_id": str(effect_id or "").strip(),
+                "reason": str(reason or "ambiguous_effect_state"),
+            },
+            committed=False,
+        )
+
+    def _extract_reconcile_event_fields(self, event: dict[str, Any]) -> tuple[str, str, str, str]:
+        sid = str(event.get("session_id") or "default").strip() or "default"
+        payload = dict(event.get("payload") or {})
+        rid = str(payload.get("request_id") or "").strip()
+        eid = str(payload.get("effect_id") or "").strip()
+        reason = str(payload.get("reason") or "").strip()
+        return sid, rid, eid, reason
+
+    def _entry_needs_reconciliation(self, session_id: str, request_id: str, effect_id: str) -> bool:
+        if request_id and self._request_is_ambiguous(session_id, request_id):
+            return True
+        if effect_id and self._effect_is_ambiguous(session_id, effect_id):
+            return True
+        return False
+
+    def pending_entries(self) -> list[dict[str, Any]]:
+        pending: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for event in self._ledger.read():
+            if str(event.get("type") or "") != "JOB_RECONCILE_REQUIRED":
+                continue
+            sid, rid, eid, reason = self._extract_reconcile_event_fields(event)
+            if not rid and not eid:
+                continue
+            key = (sid, rid, eid)
+            if key in seen:
+                continue
+            seen.add(key)
+            if not self._entry_needs_reconciliation(sid, rid, eid):
+                continue
+            pending.append(
+                {
+                    "session_id": sid,
+                    "request_id": rid,
+                    "effect_id": eid,
+                    "reason": reason or "queued_reconcile_required",
+                },
+            )
+        return pending
+
+    def consume(
+        self,
+        *,
+        enabled: bool,
+        max_items: int,
+        max_rounds: int,
+        mode: str,
+        apply: Callable[..., dict[str, Any]],
+    ) -> dict[str, Any]:
+        pending = self.pending_entries()
+        if not enabled:
+            return {
+                "enabled": False,
+                "mode": mode,
+                "max_items": max_items,
+                "max_rounds": max_rounds,
+                "queued": len(pending),
+                "attempted": 0,
+                "applied": 0,
+                "failed": 0,
+                "remaining": len(pending),
+                "converged": True,
+            }
+
+        attempted = 0
+        applied = 0
+        failed = 0
+        rounds = 0
+        converged = True
+        seen_signatures: set[str] = set()
+        while attempted < max_items and rounds < max_rounds:
+            rounds += 1
+            pending = self.pending_entries()
+            if not pending:
+                break
+            signature = "|".join(
+                sorted(
+                    f"{str(item.get('session_id') or 'default')}::{str(item.get('request_id') or '')}::{str(item.get('effect_id') or '')}"
+                    for item in pending
+                ),
+            )
+            if signature in seen_signatures:
+                converged = False
+                break
+            seen_signatures.add(signature)
+
+            round_applied = 0
+            budget = max_items - attempted
+            for item in pending[:budget]:
+                attempted += 1
+                try:
+                    report = apply(
+                        session_id=str(item.get("session_id") or "default"),
+                        request_id=str(item.get("request_id") or ""),
+                        effect_id=str(item.get("effect_id") or ""),
+                        reason=str(item.get("reason") or "queued_reconcile_required"),
+                        mode=mode,
+                    )
+                except Exception:
+                    failed += 1
+                    continue
+                if bool(report.get("applied")):
+                    applied += 1
+                    round_applied += 1
+            if round_applied <= 0:
+                converged = False
+                break
+
+        remaining = len(self.pending_entries())
+        return {
+            "enabled": True,
+            "mode": mode,
+            "max_items": max_items,
+            "max_rounds": max_rounds,
+            "queued": len(pending),
+            "attempted": attempted,
+            "applied": applied,
+            "failed": failed,
+            "remaining": remaining,
+            "converged": bool(converged and remaining == 0),
+        }
+
+
 class SchedulerWriter(Protocol):
     def append_job_queued(self, job: Any) -> dict[str, Any]: ...
 
@@ -257,9 +761,39 @@ class SchedulerWriter(Protocol):
         failure: dict[str, Any] | None = None,
     ) -> dict[str, Any]: ...
 
+    def append_execution_lifecycle(
+        self,
+        event: Any,
+        *,
+        session_id: str,
+        trace_token: str,
+        step_key: str,
+        committed: bool = False,
+    ) -> dict[str, Any]: ...
+
+    def append_effect_begin(
+        self,
+        *,
+        session_id: str,
+        trace_token: str,
+        effect_id: str,
+        request_id: str = "",
+        step_key: str = "scheduler.execute.effect.begin",
+    ) -> dict[str, Any]: ...
+
+    def append_effect_commit(
+        self,
+        *,
+        session_id: str,
+        trace_token: str,
+        effect_id: str,
+        request_id: str = "",
+        step_key: str = "scheduler.execute.effect.commit",
+    ) -> dict[str, Any]: ...
+
 
 class Scheduler:
-    """Single-node async scheduler with lease-aware drain semantics."""
+    """Single-node async scheduler with lifecycle-projection drain semantics."""
 
     def __init__(
         self,
@@ -275,10 +809,20 @@ class Scheduler:
         self.reader = reader
         self.writer = writer
         self.max_inflight_jobs = int(resolved_options.max_inflight_jobs)
-        self.execution_lease = resolved_options.execution_lease or ExecutionLease()
+        self.projection = resolved_options.projection or ExecutionProjection()
         self.worker_id = str(resolved_options.worker_id or "worker-1")
         self.execution_token = str(resolved_options.execution_token or "")
         self.enable_observability = bool(resolved_options.enable_observability)
+        self.execution_lease = resolved_options.execution_lease
+        self.lease_ttl_seconds = max(0.001, float(resolved_options.lease_ttl_seconds or 30.0))
+        self.redelivery_retry_interval_seconds = max(
+            0.001,
+            float(resolved_options.redelivery_retry_interval_seconds or 0.05),
+        )
+        self.fairness_aging_rate = max(0.0, float(resolved_options.fairness_aging_rate or 0.0))
+        self.tenant_balance_weight = max(0.0, float(resolved_options.tenant_balance_weight or 0.0))
+        self._on_runtime_claim_guard = resolved_options.on_runtime_claim_guard
+        self._on_runtime_lease_sync = resolved_options.on_runtime_lease_sync
 
         self._jobs: dict[
             str,
@@ -298,24 +842,237 @@ class Scheduler:
     def _notify_work_available(self) -> None:
         self._ensure_work_event().set()
 
+    def _apply_scheduler_membership_rule(self) -> None:
+        """Option A invariant: scheduler queue contains non-terminal jobs only."""
+        if not self._pending_job_ids:
+            return
+        retained: list[str] = []
+        for job_id in list(self._pending_job_ids):
+            pair = self._jobs.get(job_id)
+            if pair is None:
+                continue
+            _job, future = pair
+            projected = self.projection.get(job_id)
+            if projected is not None and projected.status in {ExecutionStatus.COMPLETED, ExecutionStatus.FAILED}:
+                self._jobs.pop(job_id, None)
+                if not future.done():
+                    future.set_exception(
+                        RuntimeError(
+                            "scheduler membership invariant: terminal job cannot remain pending",
+                        ),
+                    )
+                continue
+            retained.append(job_id)
+        self._pending_job_ids = retained
+
     async def wait_for_work(self, *, timeout_seconds: float | None = None) -> bool:
-        if self._pending_job_ids:
+        self._apply_scheduler_membership_rule()
+        now = time.monotonic()
+        if self._ready_pending_job_ids(now):
             return True
 
         work_event = self._ensure_work_event()
         work_event.clear()
+        next_ready_delay = self._next_ready_delay(now)
 
         if timeout_seconds is not None and timeout_seconds <= 0.0:
-            return bool(self._pending_job_ids)
+            return bool(self._ready_pending_job_ids(time.monotonic()))
 
         try:
-            if timeout_seconds is None:
+            wait_timeout = timeout_seconds
+            if next_ready_delay is not None:
+                wait_timeout = next_ready_delay if wait_timeout is None else min(wait_timeout, next_ready_delay)
+            if wait_timeout is None:
                 await work_event.wait()
             else:
-                await asyncio.wait_for(work_event.wait(), timeout=timeout_seconds)
+                await asyncio.wait_for(work_event.wait(), timeout=wait_timeout)
         except TimeoutError:
-            return bool(self._pending_job_ids)
-        return bool(self._pending_job_ids)
+            return bool(self._ready_pending_job_ids(time.monotonic()))
+        return bool(self._ready_pending_job_ids(time.monotonic()))
+
+    def _job_ready(self, job: ExecutionJob, *, now: float) -> bool:
+        projected = self.projection.get(job.job_id)
+        _apply_projection_execution_state(job, projected)
+        return bool(
+            self.projection.get_runnable(
+                now=datetime.fromtimestamp(now),
+                execution_ids=[job.job_id],
+            )
+        )
+
+    def _ready_pending_job_ids(self, now: float) -> list[str]:
+        ready: list[str] = []
+        for job_id in list(self._pending_job_ids):
+            pair = self._jobs.get(job_id)
+            if pair is None:
+                continue
+            job, _future = pair
+            if self._job_ready(job, now=now):
+                ready.append(job_id)
+        return ready
+
+    def _next_ready_delay(self, now: float) -> float | None:
+        self._apply_scheduler_membership_rule()
+        active_expiries: list[float] = []
+        for job_id in list(self._pending_job_ids):
+            pair = self._jobs.get(job_id)
+            if pair is None:
+                continue
+            job, _future = pair
+            state = self.projection.get(job_id)
+            if state is not None and state.lease_expiry is not None:
+                expiry_ts = state.lease_expiry.timestamp()
+                if expiry_ts > now:
+                    active_expiries.append(expiry_ts - now)
+        if not active_expiries:
+            return None
+        return max(0.0, min(active_expiries))
+
+    def _claim_order_key(self, job_id: str) -> tuple[float, str, int, str]:
+        pair = self._jobs.get(job_id)
+        if pair is None:
+            return (float("inf"), "", 0, str(job_id or ""))
+        job, _future = pair
+        claim_order = dict(dict(job.metadata or {}).get("claim_order") or {})
+        timestamp = float(claim_order.get("timestamp") or 0.0)
+        worker_id = str(claim_order.get("worker_id") or self.worker_id or "")
+        lease_epoch = int(claim_order.get("lease_epoch") or 0)
+        return (timestamp, worker_id, lease_epoch, str(job_id or ""))
+
+    def _pop_next_ready_job_id(self) -> str | None:
+        self._apply_scheduler_membership_rule()
+        now = time.monotonic()
+        ordered_pending = sorted(set(self._pending_job_ids), key=lambda job_id: self._fairness_key(job_id, now))
+        for job_id in ordered_pending:
+            pair = self._jobs.get(job_id)
+            if pair is None:
+                self._pending_job_ids = [pending_id for pending_id in self._pending_job_ids if pending_id != job_id]
+                continue
+            job, _future = pair
+            if not self._job_ready(job, now=now):
+                continue
+            with contextlib.suppress(ValueError):
+                self._pending_job_ids.remove(job_id)
+            return job_id
+        return None
+
+    def _fairness_key(self, job_id: str, now: float) -> tuple[float, float, float, str, int, str]:
+        pair = self._jobs.get(job_id)
+        if pair is None:
+            return (float("inf"), float("inf"), float("inf"), "", 0, str(job_id or ""))
+        job, _future = pair
+        metadata = dict(job.metadata or {})
+        scheduling = dict(metadata.get("scheduling") or {})
+        raw_priority = scheduling.get("priority")
+        if raw_priority is None:
+            raw_priority = metadata.get("priority")
+        base_priority = float(100.0 if raw_priority is None else raw_priority)
+        raw_submitted_monotonic = scheduling.get("submitted_monotonic")
+        submitted_monotonic = float(now if raw_submitted_monotonic is None else raw_submitted_monotonic)
+        # Use whole-second age buckets to avoid clock jitter changing deterministic order.
+        age_seconds = float(max(0, int(now - submitted_monotonic)))
+        effective_priority = max(0.0, base_priority - (age_seconds * self.fairness_aging_rate))
+        tenant_id = str(metadata.get("tenant_id") or "global")
+        tenant_pending_count = 0.0
+        for pending_job_id in self._pending_job_ids:
+            pending_pair = self._jobs.get(pending_job_id)
+            if pending_pair is None:
+                continue
+            pending_job, _pending_future = pending_pair
+            pending_tenant_id = str(dict(pending_job.metadata or {}).get("tenant_id") or "global")
+            if pending_tenant_id == tenant_id:
+                tenant_pending_count += 1.0
+        tenant_penalty = max(0.0, tenant_pending_count - 1.0) * self.tenant_balance_weight
+        claim_key = self._claim_order_key(job_id)
+        return (effective_priority + tenant_penalty, effective_priority, *claim_key)
+
+    def _emit_scheduler_event(
+        self,
+        *,
+        event_type: str,
+        job: ExecutionJob,
+        payload: dict[str, Any],
+        step_key: str,
+    ) -> None:
+        write_event = getattr(self.writer, "write_event", None)
+        if not callable(write_event):
+            return
+        write_event(
+            event_type=event_type,
+            session_id=str(job.session_id or "default"),
+            trace_id=str(job.trace_id or ""),
+            kernel_step_id=step_key,
+            payload={
+                "job_id": str(job.job_id or ""),
+                "request_id": str(dict(job.metadata or {}).get("request_id") or ""),
+                "execution_state": dict(payload.get("execution_state") or {}),
+                **{key: value for key, value in dict(payload or {}).items() if key != "execution_state"},
+            },
+            committed=False,
+        )
+
+    def _emit_failure_policy_event(self, *, job: ExecutionJob, failure: dict[str, Any]) -> None:
+        action = str(failure.get("failure_action") or "").strip().lower()
+        strategy = _FAILURE_POLICY_STRATEGIES.get(action)
+        if strategy is None:
+            return
+        self._emit_scheduler_event(
+            event_type=strategy.event_type,
+            job=job,
+            payload={
+                "execution_state": dict(job.metadata.get("execution_state") or {}),
+                "failure_type": str(failure.get("failure_type") or ""),
+                "failure_action": str(failure.get("failure_action") or ""),
+                "auto_retry": bool(failure.get("auto_retry", False)),
+            },
+            step_key="scheduler.execute.failure_policy",
+        )
+
+    def _append_lifecycle_event(
+        self,
+        job: ExecutionJob,
+        event: Any,
+        *,
+        step_key: str,
+        committed: bool = False,
+    ) -> dict[str, Any]:
+        projected = self.projection.get(job.job_id)
+        current_state: ExecutionLifecycleState | None = None
+        if projected is not None:
+            current_state = _coerce_lifecycle_state(_lifecycle_state_from_projection(projected))
+        _assert_lifecycle_emission_transition(
+            execution_id=str(job.job_id or ""),
+            event=event,
+            current_state=current_state,
+        )
+        before_state = current_state or ExecutionLifecycleState.SUBMITTED
+        after_state = _target_lifecycle_state_for_event(event, current_state=before_state)
+        before_transition, after_transition = _build_sovereign_transition_states(
+            job=job,
+            before_state=before_state,
+            after_state=after_state,
+        )
+        validate_sovereign_ledger_transition(before_transition, after_transition)
+
+        metadata = dict(job.metadata or {})
+        execution_state = dict(metadata.get("execution_state") or {})
+        execution_state["causal_step_count"] = int(after_transition.get("causal_step_count") or 0)
+        execution_state["invariance_hash"] = str(after_transition.get("invariance_hash") or "")
+        if after_state == ExecutionLifecycleState.COMPLETED:
+            execution_state["turn_truth_ok"] = bool(after_transition.get("turn_truth_ok"))
+        metadata["execution_state"] = execution_state
+        job.metadata = metadata
+
+        payload = self.writer.append_execution_lifecycle(
+            event,
+            session_id=str(job.session_id or "default"),
+            trace_token=str(job.trace_id or ""),
+            step_key=step_key,
+            committed=committed,
+        )
+        state = self.projection.apply(event)
+        _apply_projection_execution_state(job, state)
+        return payload
 
     @staticmethod
     def _resolve_options(
@@ -325,14 +1082,30 @@ class Scheduler:
         resolved = options or SchedulerOptions()
         if "max_inflight_jobs" in legacy_options:
             resolved.max_inflight_jobs = int(legacy_options["max_inflight_jobs"])
-        if "execution_lease" in legacy_options:
-            resolved.execution_lease = legacy_options["execution_lease"]
+        if "projection" in legacy_options:
+            resolved.projection = legacy_options["projection"]
         if "worker_id" in legacy_options:
             resolved.worker_id = str(legacy_options["worker_id"] or "worker-1")
         if "execution_token" in legacy_options:
             resolved.execution_token = str(legacy_options["execution_token"] or "")
         if "enable_observability" in legacy_options:
             resolved.enable_observability = bool(legacy_options["enable_observability"])
+        if "execution_lease" in legacy_options:
+            resolved.execution_lease = legacy_options["execution_lease"]
+        if "lease_ttl_seconds" in legacy_options:
+            resolved.lease_ttl_seconds = float(legacy_options["lease_ttl_seconds"])
+        if "redelivery_retry_interval_seconds" in legacy_options:
+            resolved.redelivery_retry_interval_seconds = float(
+                legacy_options["redelivery_retry_interval_seconds"],
+            )
+        if "fairness_aging_rate" in legacy_options:
+            resolved.fairness_aging_rate = float(legacy_options["fairness_aging_rate"])
+        if "tenant_balance_weight" in legacy_options:
+            resolved.tenant_balance_weight = float(legacy_options["tenant_balance_weight"])
+        if "on_runtime_claim_guard" in legacy_options:
+            resolved.on_runtime_claim_guard = legacy_options["on_runtime_claim_guard"]
+        if "on_runtime_lease_sync" in legacy_options:
+            resolved.on_runtime_lease_sync = legacy_options["on_runtime_lease_sync"]
         return resolved
 
     async def _execute_with_boundary(
@@ -378,6 +1151,12 @@ class Scheduler:
             "scheduler.job.latency_ms",
             (time.perf_counter() - started_at) * 1000.0,
         )
+        payload: dict[str, Any] = self._observability_payload(event=event, job=job, error=error)
+        self._attach_observability_failure(payload=payload, job=job, failure=failure)
+        get_exporter().export(payload)
+
+    @staticmethod
+    def _observability_payload(*, event: str, job: ExecutionJob, error: str) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "event": f"job.{event}",
             "job_id": job.job_id,
@@ -385,6 +1164,34 @@ class Scheduler:
         }
         if error:
             payload["error"] = error
+        return payload
+
+    @staticmethod
+    def _unified_failure_payload(failure_view: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "failure_class": str(failure_view.get("class") or ""),
+            "failure_source": str(failure_view.get("source") or ""),
+            "retryable": bool(failure_view.get("retryable", False)),
+            "error_type": str(failure_view.get("type") or ""),
+            "message": str(failure_view.get("message") or ""),
+            "class": str(failure_view.get("class") or ""),
+            "source": str(failure_view.get("source") or ""),
+            "type": str(failure_view.get("type") or ""),
+        }
+
+    @staticmethod
+    def _merge_legacy_failure_fields(target: dict[str, Any], failure: dict[str, Any]) -> None:
+        target["failure_type"] = str(failure.get("failure_type") or "")
+        target["failure_action"] = str(failure.get("failure_action") or "")
+        target["auto_retry"] = bool(failure.get("auto_retry", False))
+
+    def _attach_observability_failure(
+        self,
+        *,
+        payload: dict[str, Any],
+        job: ExecutionJob,
+        failure: dict[str, Any] | None,
+    ) -> None:
         execution_result = ensure_unified_execution_result(
             dict(getattr(job, "metadata", {}).get("execution_result") or {}),
         )
@@ -395,33 +1202,288 @@ class Scheduler:
             or str(failure_view.get("message") or ""),
         )
         if has_failure:
-            payload["failure"] = {
-                "failure_class": str(failure_view.get("class") or ""),
-                "failure_source": str(failure_view.get("source") or ""),
-                "retryable": bool(failure_view.get("retryable", False)),
-                "error_type": str(failure_view.get("type") or ""),
-                "message": str(failure_view.get("message") or ""),
-                "class": str(failure_view.get("class") or ""),
-                "source": str(failure_view.get("source") or ""),
-                "type": str(failure_view.get("type") or ""),
-            }
-        elif isinstance(failure, dict) and bool(failure):
+            payload["failure"] = self._unified_failure_payload(failure_view)
+            if isinstance(failure, dict) and bool(failure):
+                self._merge_legacy_failure_fields(payload["failure"], failure)
+            return
+        if isinstance(failure, dict) and bool(failure):
             # Legacy fallback for older callers; unified execution_result is authoritative.
             payload["failure"] = dict(failure)
-        get_exporter().export(payload)
 
     async def register(self, job: ExecutionJob) -> asyncio.Future[FinalizedTurnResult]:
         if len(self._jobs) >= self.max_inflight_jobs:
-            raise RuntimeError("backpressure: max inflight jobs reached")
+            raise BackpressureSignal(
+                reason="max inflight jobs reached",
+                retry_after_ms=self.redelivery_retry_interval_seconds * 1000.0,
+                trace_id=job.trace_id,
+            )
         assert str(job.trace_id or "").strip(), "Missing trace_id at scheduler register"
 
         loop = asyncio.get_running_loop()
         future: asyncio.Future[FinalizedTurnResult] = loop.create_future()
+        _apply_projection_execution_state(job, self.projection.get(job.job_id))
+        job.metadata.setdefault("execution_state", {})["last_transition_reason"] = "scheduler.register"
+        job.metadata.setdefault("claim_order", {})
+        job.metadata.setdefault("scheduling", {})
+        job.metadata["claim_order"].setdefault(
+            "timestamp",
+            float(dict(job.metadata or {}).get("submitted_timestamp") or 0.0),
+        )
+        job.metadata["claim_order"].setdefault(
+            "worker_id",
+            str(self.worker_id or "worker-1"),
+        )
+        job.metadata["claim_order"].setdefault(
+            "lease_epoch",
+            int(dict(job.metadata.get("execution_state") or {}).get("redelivery_count") or 0),
+        )
+        raw_priority = dict(job.metadata or {}).get("priority")
+        priority_value = 100.0 if raw_priority is None else float(raw_priority)
+        job.metadata["scheduling"].setdefault(
+            "submitted_monotonic",
+            float(time.monotonic()),
+        )
+        job.metadata["scheduling"].setdefault(
+            "priority",
+            priority_value,
+        )
+        job.metadata.setdefault("tenant_id", str(dict(job.metadata or {}).get("tenant_id") or "global"))
+        job.metadata["execution_mode"] = _resolved_execution_mode(job)
         self._jobs[job.job_id] = (job, future)
         self._pending_job_ids.append(job.job_id)
         self._notify_work_available()
         self.writer.append_job_queued(job)
         return future
+
+    def _release_runtime_lease(self, *, session_id: str) -> None:
+        if self.execution_lease is not None:
+            with contextlib.suppress(Exception):
+                self.execution_lease.release(session_id=str(session_id or "default"), owner_id=self.worker_id)
+        if callable(self._on_runtime_lease_sync):
+            self._on_runtime_lease_sync("")
+
+    def _emit_redelivery_events(
+        self,
+        *,
+        job: ExecutionJob,
+        projected: ReducedExecutionState,
+        now: datetime,
+    ) -> None:
+        if projected.owner and lease_expired(projected, now=now):
+            prior_owner = str(projected.owner or "")
+            self._append_lifecycle_event(
+                job,
+                LeaseExpired(
+                    execution_id=job.job_id,
+                    occurred_at=now,
+                    worker_id=projected.owner,
+                ),
+                step_key="scheduler.lease_expired",
+            )
+            self._append_lifecycle_event(
+                job,
+                Redelivered(
+                    execution_id=job.job_id,
+                    occurred_at=now,
+                    previous_worker_id=prior_owner,
+                    new_worker_id=self.worker_id,
+                ),
+                step_key="scheduler.redelivery",
+            )
+            self._emit_scheduler_event(
+                event_type="JOB_REDELIVERY_SCHEDULED",
+                job=job,
+                payload={
+                    "execution_state": dict(job.metadata.get("execution_state") or {}),
+                    "lease_owner": str(projected.owner or ""),
+                },
+                step_key="scheduler.redelivery",
+            )
+        elif projected.attempt_count <= 0:
+            prior_owner = str(dict(job.metadata.get("execution_state") or {}).get("last_worker_id") or "")
+            if prior_owner:
+                self._append_lifecycle_event(
+                    job,
+                    Redelivered(
+                        execution_id=job.job_id,
+                        occurred_at=now,
+                        previous_worker_id=prior_owner,
+                        new_worker_id=self.worker_id,
+                    ),
+                    step_key="scheduler.redelivery.external",
+                )
+
+    def _claim_job_for_execution(
+        self,
+        *,
+        job_id: str,
+        job: ExecutionJob,
+        projected: ReducedExecutionState,
+        now: datetime,
+    ) -> bool:
+        if callable(self._on_runtime_claim_guard):
+            self._on_runtime_claim_guard("scheduler_claim")
+        lease_token: dict[str, Any] | None = None
+        if self.execution_lease is not None:
+            lease_token = self.execution_lease.acquire(
+                session_id=str(job.session_id or "default"),
+                owner_id=self.worker_id,
+                ttl_seconds=self.lease_ttl_seconds,
+            )
+        if projected.owner and not lease_expired(projected, now=now):
+            self._release_runtime_lease(session_id=job.session_id)
+            self._pending_job_ids.append(job_id)
+            self._notify_work_available()
+            return False
+        self._emit_redelivery_events(job=job, projected=projected, now=now)
+
+        self._append_lifecycle_event(
+            job,
+            Claimed(
+                execution_id=job.job_id,
+                occurred_at=now,
+                worker_id=self.worker_id,
+                lease_expiry=now + timedelta(seconds=self.lease_ttl_seconds),
+            ),
+            step_key="scheduler.claim",
+        )
+        if lease_token is not None:
+            job.metadata.setdefault("lease_fence", {})
+            job.metadata["lease_fence"]["fencing_token"] = int(lease_token.get("fencing_token") or 0)
+            job.metadata["lease_fence"]["lease_id"] = str(lease_token.get("lease_id") or "")
+        fence_token = int(lease_token.get("fencing_token") or 0) if lease_token is not None else 0
+        if callable(self._on_runtime_lease_sync):
+            self._on_runtime_lease_sync(f"{self.execution_token}:{job.job_id}:{fence_token}")
+        return True
+
+    def _record_scheduler_success(
+        self,
+        *,
+        job: ExecutionJob,
+        future: asyncio.Future[FinalizedTurnResult],
+        result: FinalizedTurnResult,
+        started_at: float,
+    ) -> None:
+        current_execution_result = ensure_unified_execution_result(
+            dict(job.metadata.get("execution_result") or {}),
+        )
+        current_execution_result = mark_unified_execution_success(
+            current_execution_result,
+            response=str(result[0] if isinstance(result, tuple) and len(result) >= 1 else ""),
+            should_end=bool(result[1] if isinstance(result, tuple) and len(result) >= 2 else False),
+        )
+        job.metadata["execution_result"] = current_execution_result
+        self._append_lifecycle_event(
+            job,
+            Completed(
+                execution_id=job.job_id,
+                occurred_at=datetime.now(),
+                result_ref=f"job:{job.job_id}:result",
+            ),
+            step_key="scheduler.execute.complete",
+            committed=True,
+        )
+        effect_id = str(dict(job.metadata or {}).get("effect_id") or "").strip()
+        request_id = str(dict(job.metadata or {}).get("request_id") or "").strip()
+        if effect_id:
+            self.writer.append_effect_commit(
+                session_id=str(job.session_id or "default"),
+                trace_token=str(job.trace_id or ""),
+                effect_id=effect_id,
+                request_id=request_id,
+                step_key="scheduler.execute.effect.commit",
+            )
+        self.writer.append_job_completed(job, result)
+        self._resolve_future(future, result=result)
+        self._release_runtime_lease(session_id=job.session_id)
+        self._record_job_observability(
+            event="completed",
+            job=job,
+            started_at=started_at,
+        )
+
+    def _record_scheduler_failure(
+        self,
+        *,
+        job: ExecutionJob,
+        future: asyncio.Future[FinalizedTurnResult],
+        exc: Exception,
+        started_at: float,
+    ) -> None:
+        failure = _classify_execution_failure(exc)
+        current_execution_result = mark_unified_execution_failure(
+            build_unified_execution_result(),
+            failure_class=str(failure.get("failure_class") or "runtime_exception"),
+            failure_source=str(failure.get("failure_source") or "execution"),
+            retryable=bool(failure.get("retryable", False)),
+            exception_type=str(failure.get("exception_type") or type(exc).__name__),
+            message=str(exc),
+        )
+        job.metadata["execution_result"] = current_execution_result
+        execution_state = dict(job.metadata.get("execution_state") or {})
+        execution_state["failure_type"] = str(failure.get("failure_type") or "")
+        execution_state["failure_action"] = str(failure.get("failure_action") or "")
+        execution_state["auto_retry"] = bool(failure.get("auto_retry", False))
+        execution_state["last_transition_reason"] = (
+            f"scheduler.execute.failed:{str(failure.get('failure_action') or 'unknown')}"
+        )
+        job.metadata["execution_state"] = execution_state
+        self._emit_failure_policy_event(job=job, failure=failure)
+        self._append_lifecycle_event(
+            job,
+            Failed(
+                execution_id=job.job_id,
+                occurred_at=datetime.now(),
+                error_ref=f"{type(exc).__name__}:{str(exc)}",
+            ),
+            step_key="scheduler.execute.failed",
+            committed=True,
+        )
+        self.writer.append_job_failed(job, exc, failure=failure)
+        self._resolve_future(future, error=exc)
+        self._release_runtime_lease(session_id=job.session_id)
+        self._record_job_observability(
+            event="failed",
+            job=job,
+            started_at=started_at,
+            error=str(exc),
+            failure=failure,
+        )
+
+    def _maybe_begin_effect(self, job: ExecutionJob) -> None:
+        effect_id = str(dict(job.metadata or {}).get("effect_id") or "").strip()
+        request_id = str(dict(job.metadata or {}).get("request_id") or "").strip()
+        if effect_id:
+            self.writer.append_effect_begin(
+                session_id=str(job.session_id or "default"),
+                trace_token=str(job.trace_id or ""),
+                effect_id=effect_id,
+                request_id=request_id,
+                step_key="scheduler.execute.effect.begin",
+            )
+
+    async def _execute_and_record_job(
+        self,
+        executor: Callable[[dict[str, Any], ExecutionJob], Awaitable[FinalizedTurnResult]],
+        job: ExecutionJob,
+        future: Any,
+        started_at: float,
+    ) -> bool:
+        job.metadata["execution_mode"] = _resolved_execution_mode(job)
+        self._maybe_begin_effect(job)
+        self.writer.append_job_started(job)
+        session = self.registry.bind(job.session_id)
+        tracer = get_tracer()
+        with tracer.span("scheduler.drain_once"):
+            result = await self._execute_with_boundary(executor, session, job)
+        _enforce_global_turn_invariant_gate(session=session, job=job)
+        self._record_scheduler_success(
+            job=job,
+            future=future,
+            result=result,
+            started_at=started_at,
+        )
+        return True
 
     async def drain_once(
         self,
@@ -433,87 +1495,70 @@ class Scheduler:
         if not self._pending_job_ids:
             return False
 
-        job_id = self._pending_job_ids.pop(0)
+        job_id = self._pop_next_ready_job_id()
+        if job_id is None:
+            return False
         job_pair = self._jobs.get(job_id)
         if job_pair is None:
             return False
         job, future = job_pair
         assert str(job.trace_id or "").strip(), "Missing trace_id at scheduler drain"
 
-        lease_acquired = False
         started_at = time.perf_counter()
+        projected = self.projection.get(job.job_id)
+        _apply_projection_execution_state(job, projected)
+        now = datetime.now()
+
+        if projected is None:
+            raise RuntimeError(f"missing lifecycle state for job {job.job_id!r}")
+
+        if projected.status in {ExecutionStatus.COMPLETED, ExecutionStatus.FAILED}:
+            self._jobs.pop(job_id, None)
+            return False
 
         try:
-            self.execution_lease.acquire(
-                session_id=job.session_id,
-                owner_id=self.worker_id,
-                ttl_seconds=30.0,
+            claimed = self._claim_job_for_execution(
+                job_id=job_id,
+                job=job,
+                projected=projected,
+                now=now,
             )
-            lease_acquired = True
-        except LeaseConflictError:
+            if not claimed:
+                return False
+        except RuntimeError:
+            self._release_runtime_lease(session_id=job.session_id)
             self._pending_job_ids.append(job_id)
             self._notify_work_available()
             return False
 
         try:
-            self.writer.append_job_started(job)
-            session = self.registry.bind(job.session_id)
-            tracer = get_tracer()
-            with tracer.span("scheduler.drain_once"):
-                result = await self._execute_with_boundary(executor, session, job)
-            _enforce_global_turn_invariant_gate(session=session, job=job)
-            current_execution_result = ensure_unified_execution_result(
-                dict(job.metadata.get("execution_result") or {}),
+            return await self._execute_and_record_job(executor, job, future, started_at)
+        except (
+            TimeoutError,
+            ExecutionStageError,
+            InvariantViolation,
+            MemorySetInvariantViolation,
+            PersistenceFailure,
+            RuntimeError,
+        ) as exc:
+            logger.exception(
+                "scheduler drain failed for job_id=%s session_id=%s",
+                str(job.job_id or ""),
+                str(job.session_id or ""),
             )
-            current_execution_result = mark_unified_execution_success(
-                current_execution_result,
-                response=str(result[0] if isinstance(result, tuple) and len(result) >= 1 else ""),
-                should_end=bool(result[1] if isinstance(result, tuple) and len(result) >= 2 else False),
-            )
-            job.metadata["execution_result"] = current_execution_result
-            self.writer.append_job_completed(job, result)
-            self._resolve_future(future, result=result)
-            self._record_job_observability(
-                event="completed",
+            self._record_scheduler_failure(
                 job=job,
+                future=future,
+                exc=exc,
                 started_at=started_at,
-            )
-            return True
-        except Exception as exc:
-            failure = _classify_execution_failure(exc)
-            # Use a fresh pending envelope — the success mark may have already
-            # been written to metadata if the exception came from a post-success
-            # step (ledger write, future resolve, observability).  Start clean.
-            current_execution_result = mark_unified_execution_failure(
-                build_unified_execution_result(),
-                failure_class=str(failure.get("failure_class") or "runtime_exception"),
-                failure_source=str(failure.get("failure_source") or "execution"),
-                retryable=bool(failure.get("retryable", False)),
-                exception_type=str(failure.get("exception_type") or type(exc).__name__),
-                message=str(exc),
-            )
-            job.metadata["execution_result"] = current_execution_result
-            self.writer.append_job_failed(job, exc, failure=failure)
-            self._resolve_future(future, error=exc)
-            self._record_job_observability(
-                event="failed",
-                job=job,
-                started_at=started_at,
-                error=str(exc),
-                failure=failure,
             )
             raise
         finally:
             if future.done():
                 self._jobs.pop(job_id, None)
-            if lease_acquired:
-                self.execution_lease.release(
-                    session_id=job.session_id,
-                    owner_id=self.worker_id,
-                )
 
 
-class ExecutionControlPlane:
+class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
     """Execution boundary around scheduler, lease, ledger, and recovery."""
 
     def __init__(
@@ -542,14 +1587,34 @@ class ExecutionControlPlane:
             self.ledger,
             scope_validator=KernelGateway.assert_scope,
         )
+        self._ledger_index = LedgerIndex(self.ledger)
+        self._effect_journal = EffectJournal(writer=self._ledger_writer, index=self._ledger_index)
+        write_event = getattr(self._ledger_writer, "write_event", None)
+        self._reconcile_queue = DurableReconcileQueue(
+            ledger=self.ledger,
+            write_event=write_event,
+            request_is_ambiguous=lambda session_id, request_id: self._request_has_ambiguous_inflight_effect_state(
+                session_id=session_id,
+                request_id=request_id,
+            ),
+            effect_is_ambiguous=lambda session_id, effect_id: self._effect_journal.is_ambiguous(
+                session_id=session_id,
+                effect_id=effect_id,
+            ),
+        )
         self.ledger_reader = LedgerReader(self.ledger)
-        self.execution_lease = resolved_options.execution_lease or ExecutionLease()
+        self._execution_lease = ExecutionLease(default_ttl_seconds=resolved_options.lease_ttl_seconds)
         scheduler_options = SchedulerOptions(
             max_inflight_jobs=resolved_options.max_inflight_jobs,
             worker_id=resolved_options.worker_id,
             execution_token=self.execution_token,
             enable_observability=resolved_options.enable_observability,
-            execution_lease=self.execution_lease,
+            projection=ExecutionProjection(),
+            execution_lease=self._execution_lease,
+            lease_ttl_seconds=resolved_options.lease_ttl_seconds,
+            redelivery_retry_interval_seconds=resolved_options.redelivery_retry_interval_seconds,
+            on_runtime_claim_guard=self._scheduler_claim_guard,
+            on_runtime_lease_sync=self._scheduler_lease_sync,
         )
         self._scheduler = resolved_options.scheduler or Scheduler(
             registry,
@@ -557,10 +1622,14 @@ class ExecutionControlPlane:
             writer=self._ledger_writer,
             options=scheduler_options,
         )
+        self.lifecycle_projection = getattr(self._scheduler, "projection", ExecutionProjection())
         self.recovery = RecoveryManager(ledger=self.ledger)
-        self._inflight_by_request: dict[tuple[str, str], asyncio.Future[FinalizedTurnResult]] = {}
+        self._inflight_by_request: dict[tuple[str, str, str], asyncio.Future[FinalizedTurnResult]] = {}
         self._inflight_lock = asyncio.Lock()
         self.graph = graph
+        bind_execution_token = getattr(self.graph, "set_required_execution_token", None)
+        if callable(bind_execution_token):
+            bind_execution_token(self.execution_token)
         self._ledger_compactor: EventCompactor | None = None
         self._last_compaction_report: dict[str, Any] = {"compacted": False, "reason": "not_run"}
         self._global_confluence_contracts: dict[str, str] = {}
@@ -572,7 +1641,11 @@ class ExecutionControlPlane:
             "mismatch": 0,
             "enforced_blocked": 0,
         }
+        self._distributed_correctness = DistributedCorrectnessModel()
+        self._distributed_epoch = 1
+        self._sync_distributed_authority(role=NodeRole.LEADER, state_hash=self.execution_token)
         self.kernel_gateway = KernelGateway(self)
+        self.bootstrap()
 
     @property
     def scheduler(self) -> SchedulerProtocol:
@@ -585,65 +1658,634 @@ class ExecutionControlPlane:
         return self._ledger_writer
 
     @staticmethod
-    def _stable_hash(payload: Any) -> str:
-        return semantic_hash(payload)
-
-    def _job_trace_events(self, job: ExecutionJob) -> list[dict[str, Any]]:
-        events = list(self.ledger.read())
-        trace_id = str(job.trace_id or "").strip()
-        job_id = str(job.job_id or "").strip()
-        filtered = [
-            dict(event)
-            for event in events
-            if (
-                str(event.get("trace_id") or "").strip() == trace_id
-                or str(dict(event.get("payload") or {}).get("job_id") or "").strip() == job_id
+    def _resolve_options(
+        options: ControlPlaneOptions | None,
+        legacy_options: dict[str, Any],
+    ) -> ControlPlaneOptions:
+        resolved = options or ControlPlaneOptions()
+        if "max_inflight_jobs" in legacy_options:
+            resolved.max_inflight_jobs = int(legacy_options["max_inflight_jobs"])
+        if "worker_id" in legacy_options:
+            resolved.worker_id = str(legacy_options["worker_id"] or "worker-1")
+        if "enable_observability" in legacy_options:
+            resolved.enable_observability = bool(legacy_options["enable_observability"])
+        if "lease_ttl_seconds" in legacy_options:
+            resolved.lease_ttl_seconds = float(legacy_options["lease_ttl_seconds"])
+        if "redelivery_retry_interval_seconds" in legacy_options:
+            resolved.redelivery_retry_interval_seconds = float(
+                legacy_options["redelivery_retry_interval_seconds"],
             )
-        ]
-        return sorted(filtered, key=lambda item: int(item.get("sequence") or 0))
+        if "ledger" in legacy_options:
+            resolved.ledger = legacy_options["ledger"]
+        if "scheduler" in legacy_options:
+            resolved.scheduler = legacy_options["scheduler"]
+        return resolved
 
-    @staticmethod
-    def _event_stream_digest(events: list[dict[str, Any]]) -> str:
-        canonical = [
-            {
-                "sequence": int(event.get("sequence") or 0),
-                "type": str(event.get("type") or ""),
-                "trace_id": str(event.get("trace_id") or ""),
-                "session_id": str(event.get("session_id") or ""),
-                "kernel_step_id": str(event.get("kernel_step_id") or ""),
-                "payload_hash": hashlib.sha256(
-                    json.dumps(dict(event.get("payload") or {}), sort_keys=True, default=str).encode("utf-8"),
-                ).hexdigest(),
-            }
-            for event in list(events or [])
-        ]
-        return hashlib.sha256(
-            json.dumps(canonical, sort_keys=True, default=str).encode("utf-8"),
-        ).hexdigest()
+    async def create_session(self, session_id: str) -> dict[str, Any]:
+        return await self.registry.create_session(session_id)
 
-    @staticmethod
-    def _event_semantic_digest(events: list[dict[str, Any]]) -> str:
-        canonical = [
-            {
-                "type": str(event.get("type") or ""),
-                "kernel_step_id": str(event.get("kernel_step_id") or ""),
+    def terminate_session(self, session_id: str) -> None:
+        self.registry.terminate_session(session_id)
+
+    def _active_lease_count(self) -> int:
+        snapshot = dict(self.lifecycle_projection.snapshot() or {})
+        count = 0
+        for _execution_id, state in snapshot.items():
+            if not isinstance(state, dict):
+                continue
+            status = str(state.get("status") or "").strip().lower()
+            owner = str(state.get("owner") or "").strip()
+            if status in {"claimed", "running"} and owner:
+                count += 1
+        return count
+
+    def _distributed_now_ms(self) -> int:
+        return int(time.time() * 1000)
+
+    def _sync_distributed_authority(self, *, role: NodeRole, state_hash: str = "") -> None:
+        self._distributed_correctness.register_node(
+            node_id=self._scheduler.worker_id,
+            epoch=int(self._distributed_epoch),
+            lease_until_ms=self._distributed_now_ms() + int(self._scheduler.lease_ttl_seconds * 1000),
+            role=role,
+            state_hash=str(state_hash or self.execution_token),
+        )
+
+    def _scheduler_claim_guard(self, operation: str) -> None:
+        self._enforce_distributed_runtime_authority(operation=str(operation or "scheduler_claim"))
+
+    def _scheduler_lease_sync(self, state_hash: str) -> None:
+        self._sync_distributed_authority(role=NodeRole.LEADER, state_hash=str(state_hash or ""))
+
+    def _enforce_distributed_runtime_authority(self, *, operation: str) -> None:
+        now_ms = self._distributed_now_ms()
+        self._distributed_correctness.enforce_no_split_brain(now_ms=now_ms)
+        if self._distributed_correctness.validate_authority(
+            node_id=self._scheduler.worker_id,
+            now_ms=now_ms,
+        ):
+            return
+        authority = self._distributed_correctness.current_authority(now_ms=now_ms)
+        raise AuthorityViolation(
+            "Distributed correctness violation: non-authoritative runtime path rejected",
+            context={
+                "operation": str(operation or "unknown"),
+                "worker_id": self._scheduler.worker_id,
+                "authority": "" if authority is None else authority.node_id,
+                "epoch": 0 if authority is None else int(authority.epoch),
+                "now_ms": now_ms,
+            },
+        )
+
+    def distributed_reconciliation_plan(self) -> dict[str, Any]:
+        plan = self._distributed_correctness.reconcile(now_ms=self._distributed_now_ms())
+        return {
+            "authoritative_node": plan.authoritative_node,
+            "authoritative_hash": plan.authoritative_hash,
+            "divergent_nodes": list(plan.divergent_nodes),
+            "converged": bool(plan.converged),
+        }
+
+    def _emit_progress_snapshot(
+        self,
+        *,
+        phase: str,
+        session_id: str,
+        trace_token: str,
+        job_id: str,
+        future_done: bool,
+        completion_expectations: dict[str, bool] | None = None,
+        note: str = "",
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        expectations = dict(completion_expectations or {})
+        unmet = [name for name, ok in expectations.items() if not bool(ok)]
+        payload = {
+            "session_id": str(session_id or "default"),
+            "trace_id": str(trace_token or ""),
+            "job_id": str(job_id or ""),
+            "future_done": bool(future_done),
+            "queue_size": int(len(getattr(self._scheduler, "_pending_job_ids", []) or [])),
+            "reconciliation_backlog_size": int(len(self._pending_reconcile_required_entries())),
+            "active_leases": int(self._active_lease_count()),
+            "pending_replay_entries": int(len(self._inflight_by_request)),
+            "expected_completion_conditions": expectations,
+            "unmet_completion_conditions": unmet,
+            "note": str(note or ""),
+            "extra": dict(extra or {}),
+        }
+        _write_progress_event(component="control_plane", phase=phase, payload=payload)
+
+    def _durable_completed_result_for_request(
+        self,
+        *,
+        session_id: str,
+        request_id: str,
+    ) -> FinalizedTurnResult | None:
+        return self._ledger_index.completed_result(
+            session_id=session_id,
+            request_id=request_id,
+        )
+
+    async def _preflight_submit_turn(
+        self,
+        *,
+        session_key: str,
+        request_id: str,
+        effect_id: str,
+        metadata: dict[str, Any],
+    ) -> tuple[str, tuple[str, str, str], asyncio.Future[FinalizedTurnResult] | None, bool, FinalizedTurnResult | None]:
+        self._emit_progress_snapshot(
+            phase="before_replay",
+            session_id=session_key,
+            trace_token=str(metadata.get("trace_id") or ""),
+            job_id="",
+            future_done=False,
+            note="submit_turn entered",
+            extra={"request_id": request_id, "effect_id": effect_id},
+        )
+        durable_result = self._durable_completed_result_for_request(
+            session_id=session_key,
+            request_id=request_id,
+        )
+        durable_short_circuit = self._durable_preflight_result(
+            session_key=session_key,
+            request_id=request_id,
+            effect_id=effect_id,
+            metadata=metadata,
+            durable_result=durable_result,
+        )
+        if durable_short_circuit is not None:
+            return durable_short_circuit
+
+        effect_id = self._resolve_preflight_effect_id(
+            session_key=session_key,
+            request_id=request_id,
+            effect_id=effect_id,
+            metadata=metadata,
+        )
+        dedupe_key = (session_key, request_id, effect_id)
+        dedupe_future, owns_dedupe_slot = await self._acquire_preflight_dedupe_slot(
+            request_id=request_id,
+            effect_id=effect_id,
+            dedupe_key=dedupe_key,
+        )
+        if not owns_dedupe_slot and dedupe_future is not None:
+            return effect_id, dedupe_key, dedupe_future, False, await dedupe_future
+
+        self._assert_preflight_not_ambiguous(
+            session_key=session_key,
+            request_id=request_id,
+            effect_id=effect_id,
+            metadata=metadata,
+        )
+
+        return effect_id, dedupe_key, dedupe_future, owns_dedupe_slot, None
+
+    def _durable_preflight_result(
+        self,
+        *,
+        session_key: str,
+        request_id: str,
+        effect_id: str,
+        metadata: dict[str, Any],
+        durable_result: FinalizedTurnResult | None,
+    ) -> tuple[str, tuple[str, str, str], None, bool, FinalizedTurnResult] | None:
+        if durable_result is None:
+            return None
+        self._emit_progress_snapshot(
+            phase="before_replay",
+            session_id=session_key,
+            trace_token=str(metadata.get("trace_id") or ""),
+            job_id="",
+            future_done=True,
+            note="durable completed result returned",
+            extra={"request_id": request_id},
+        )
+        return effect_id, (session_key, request_id, effect_id), None, False, durable_result
+
+    def _resolve_preflight_effect_id(
+        self,
+        *,
+        session_key: str,
+        request_id: str,
+        effect_id: str,
+        metadata: dict[str, Any],
+    ) -> str:
+        if not effect_id and request_id:
+            effect_id = self._effect_journal.derive_effect_id(
+                session_id=session_key,
+                request_id=request_id,
+                trace_id=str(metadata.get("trace_id") or ""),
+            )
+        if effect_id and self._effect_journal.is_committed(session_id=session_key, effect_id=effect_id):
+            raise RuntimeError(
+                "Effect already committed but no durable JOB_COMPLETED payload found; "
+                "refusing ambiguous replay",
+            )
+        return effect_id
+
+    async def _acquire_preflight_dedupe_slot(
+        self,
+        *,
+        request_id: str,
+        effect_id: str,
+        dedupe_key: tuple[str, str, str],
+    ) -> tuple[asyncio.Future[FinalizedTurnResult] | None, bool]:
+        dedupe_future: asyncio.Future[FinalizedTurnResult] | None = None
+        owns_dedupe_slot = False
+        if request_id or effect_id:
+            async with self._inflight_lock:
+                existing = self._inflight_by_request.get(dedupe_key)
+                if existing is not None:
+                    dedupe_future = existing
+                else:
+                    dedupe_future = asyncio.get_running_loop().create_future()
+                    self._inflight_by_request[dedupe_key] = dedupe_future
+                    owns_dedupe_slot = True
+        return dedupe_future, owns_dedupe_slot
+
+    def _assert_preflight_not_ambiguous(
+        self,
+        *,
+        session_key: str,
+        request_id: str,
+        effect_id: str,
+        metadata: dict[str, Any],
+    ) -> None:
+        self._enforce_distributed_runtime_authority(operation="replay_acceptance_gate")
+        if self._request_has_ambiguous_inflight_effect_state(
+            session_id=session_key,
+            request_id=request_id,
+        ):
+            self._emit_progress_snapshot(
+                phase="during_reconciliation",
+                session_id=session_key,
+                trace_token=str(metadata.get("trace_id") or ""),
+                job_id="",
+                future_done=False,
+                note="ambiguous request inflight detected",
+                extra={
+                    "request_id": request_id,
+                    "effect_id": effect_id,
+                    "classification": "replay_to_reconciliation_gate",
+                },
+            )
+            self._emit_reconcile_required_event(
+                session_id=session_key,
+                trace_token=str(metadata.get("trace_id") or ""),
+                request_id=request_id,
+                effect_id=effect_id,
+                reason="ambiguous_request_inflight",
+            )
+            raise ReplayMismatch(
+                "Ambiguous effect state for request replay: prior JOB_STARTED exists "
+                "without terminal event; refusing duplicate execution",
+            )
+
+        if effect_id and self._effect_journal.is_ambiguous(session_id=session_key, effect_id=effect_id):
+            self._emit_progress_snapshot(
+                phase="during_reconciliation",
+                session_id=session_key,
+                trace_token=str(metadata.get("trace_id") or ""),
+                job_id="",
+                future_done=False,
+                note="ambiguous effect begin without commit detected",
+                extra={
+                    "request_id": request_id,
+                    "effect_id": effect_id,
+                    "classification": "replay_to_reconciliation_gate",
+                },
+            )
+            self._emit_reconcile_required_event(
+                session_id=session_key,
+                trace_token=str(metadata.get("trace_id") or ""),
+                request_id=request_id,
+                effect_id=effect_id,
+                reason="ambiguous_effect_begin_without_commit",
+            )
+            raise ReplayMismatch(
+                "Ambiguous effect state for replay: prior EFFECT_BEGIN exists without EFFECT_COMMIT; "
+                "refusing duplicate execution",
+            )
+
+    def _resolve_submit_trace_and_effect(
+        self,
+        *,
+        session_key: str,
+        user_input: str,
+        attachments: AttachmentList | None,
+        metadata: dict[str, Any],
+        request_id: str,
+        effect_id: str,
+    ) -> tuple[str, str]:
+        trace_id = str(metadata.get("trace_id") or "").strip()
+        if not trace_id:
+            trace_seed = {
+                "session_id": session_key,
+                "request_id": str(metadata.get("request_id") or ""),
+                "user_input": str(user_input or ""),
+                "attachments": list(attachments or []),
             }
-            for event in list(events or [])
-        ]
-        canonical.sort(key=lambda item: (str(item.get("type") or ""), str(item.get("kernel_step_id") or "")))
-        return hashlib.sha256(
-            json.dumps(canonical, sort_keys=True, default=str).encode("utf-8"),
-        ).hexdigest()
+            trace_blob = json_dumps_sorted(trace_seed)
+            trace_id = f"tr-{hashlib.sha256(trace_blob.encode('utf-8')).hexdigest()[:20]}"
+        metadata["trace_id"] = trace_id
+        if not effect_id:
+            effect_id = self._effect_journal.derive_effect_id(
+                session_id=session_key,
+                request_id=request_id,
+                trace_id=trace_id,
+            )
+
+        if not request_id and not str(metadata.get("effect_id") or "").strip():
+            candidate_job_id = ExecutionJob._stable_token(session_key, trace_id, prefix="job")
+            projected_candidate = self.lifecycle_projection.get(candidate_job_id)
+            if projected_candidate is not None and projected_candidate.status in {
+                ExecutionStatus.COMPLETED,
+                ExecutionStatus.FAILED,
+            }:
+                previous_trace_id = trace_id
+                trace_id = ExecutionJob._stable_token(session_key, trace_id, time.time_ns(), prefix="tr")
+                metadata["trace_id"] = trace_id
+                effect_id = self._effect_journal.derive_effect_id(
+                    session_id=session_key,
+                    request_id=request_id,
+                    trace_id=trace_id,
+                )
+                self._emit_progress_snapshot(
+                    phase="before_replay",
+                    session_id=session_key,
+                    trace_token=trace_id,
+                    job_id="",
+                    future_done=False,
+                    note="rotated terminal trace identity for non-idempotent retry",
+                    extra={"previous_trace_id": previous_trace_id},
+                )
+        return trace_id, effect_id
+
+    def _completion_expectations(
+        self,
+        *,
+        job_id: str,
+        future_done: bool,
+        projection_terminal: bool,
+    ) -> dict[str, bool]:
+        return {
+            "future_done": bool(future_done),
+            "projection_terminal": bool(projection_terminal),
+            "job_removed_from_scheduler": bool(job_id not in getattr(self._scheduler, "_jobs", {})),
+        }
+
+    async def _drain_scheduler_until_resolved(
+        self,
+        *,
+        future: asyncio.Future[FinalizedTurnResult],
+        job: ExecutionJob,
+        session_key: str,
+        trace_token: str,
+        deadline: float,
+    ) -> int:
+        loop_iterations = 0
+        consecutive_idle_drains = 0
+        last_progress_emit = time.monotonic()
+        while not future.done():
+            loop_iterations += 1
+            if time.time() > deadline:
+                projected_at_deadline = self.lifecycle_projection.get(job.job_id)
+                projection_terminal_at_deadline = bool(
+                    projected_at_deadline is not None
+                    and projected_at_deadline.status in {ExecutionStatus.COMPLETED, ExecutionStatus.FAILED}
+                )
+                self._emit_progress_snapshot(
+                    phase="during_scheduler_drain",
+                    session_id=session_key,
+                    trace_token=trace_token,
+                    job_id=job.job_id,
+                    future_done=future.done(),
+                    completion_expectations=self._completion_expectations(
+                        job_id=job.job_id,
+                        future_done=future.done(),
+                        projection_terminal=projection_terminal_at_deadline,
+                    ),
+                    note="deadline exceeded",
+                    extra={"loop_iterations": loop_iterations, "consecutive_idle_drains": consecutive_idle_drains},
+                )
+                raise TimeoutError("submit_turn exceeded timeout")
+
+            drained = await self.scheduler.drain_once(self.kernel_executor)
+            if drained:
+                consecutive_idle_drains = 0
+                continue
+
+            consecutive_idle_drains += 1
+            remaining = max(0.0, deadline - time.time())
+            if remaining <= 0.0:
+                raise TimeoutError("submit_turn exceeded timeout")
+
+            wait_task = asyncio.create_task(
+                self.scheduler.wait_for_work(timeout_seconds=remaining),
+            )
+            done, _ = await asyncio.wait(
+                {future, wait_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            wait_ready = False
+            if wait_task in done:
+                with contextlib.suppress(Exception):
+                    wait_ready = bool(wait_task.result())
+
+            if (time.monotonic() - last_progress_emit) >= 1.0 or consecutive_idle_drains >= 5:
+                projected = self.lifecycle_projection.get(job.job_id)
+                projection_terminal = bool(
+                    projected is not None and projected.status in {ExecutionStatus.COMPLETED, ExecutionStatus.FAILED}
+                )
+                self._emit_progress_snapshot(
+                    phase="during_scheduler_drain",
+                    session_id=session_key,
+                    trace_token=trace_token,
+                    job_id=job.job_id,
+                    future_done=future.done(),
+                    completion_expectations=self._completion_expectations(
+                        job_id=job.job_id,
+                        future_done=future.done(),
+                        projection_terminal=projection_terminal,
+                    ),
+                    note="idle drain iteration",
+                    extra={
+                        "loop_iterations": loop_iterations,
+                        "consecutive_idle_drains": consecutive_idle_drains,
+                        "wait_ready": bool(wait_ready),
+                        "remaining_seconds": float(remaining),
+                        "stall_phase_candidate": "during_scheduler_drain",
+                        "potential_scheduler_ledger_cycle": bool(
+                            consecutive_idle_drains >= 5
+                            and int(len(getattr(self._scheduler, "_pending_job_ids", []) or [])) > 0
+                            and not wait_ready
+                        ),
+                    },
+                )
+                last_progress_emit = time.monotonic()
+
+            if wait_task not in done:
+                wait_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await wait_task
+        return loop_iterations
+
+    def _finalize_submit_success(
+        self,
+        *,
+        job: ExecutionJob,
+        result: FinalizedTurnResult,
+        session_key: str,
+        trace_token: str,
+        before_state_hash: str,
+        dedupe_future: asyncio.Future[FinalizedTurnResult] | None,
+        loop_iterations: int,
+    ) -> FinalizedTurnResult:
+        current_execution_result = ensure_unified_execution_result(
+            dict(job.metadata.get("execution_result") or {}),
+        )
+        if current_execution_result.get("status") not in _TERMINAL_STATUS_VALUES:
+            current_execution_result = mark_unified_execution_success(
+                current_execution_result,
+                response=str(result[0] if isinstance(result, tuple) and len(result) >= 1 else ""),
+                should_end=bool(result[1] if isinstance(result, tuple) and len(result) >= 2 else False),
+            )
+            job.metadata["execution_result"] = current_execution_result
+        session_after = self.registry.get_or_create(session_key)
+        self._validate_trace_invariant(job, result, session=session_after, state_before_hash=before_state_hash)
+        self._apply_turn_committed_core_state(
+            session=session_after,
+            job=job,
+            result=result,
+        )
+        self._maybe_compact_ledger()
+        if dedupe_future is not None and not dedupe_future.done():
+            dedupe_future.set_result(result)
+        projected = self.lifecycle_projection.get(job.job_id)
+        projection_terminal = bool(
+            projected is not None and projected.status in {ExecutionStatus.COMPLETED, ExecutionStatus.FAILED}
+        )
+        self._emit_progress_snapshot(
+            phase="during_scheduler_drain",
+            session_id=session_key,
+            trace_token=trace_token,
+            job_id=job.job_id,
+            future_done=True,
+            completion_expectations=self._completion_expectations(
+                job_id=job.job_id,
+                future_done=True,
+                projection_terminal=projection_terminal,
+            ),
+            note="submit_turn resolved",
+            extra={"loop_iterations": loop_iterations},
+        )
+        return result
+
+    def _record_submit_exception(
+        self,
+        *,
+        job: ExecutionJob,
+        future: asyncio.Future[FinalizedTurnResult],
+        dedupe_future: asyncio.Future[FinalizedTurnResult] | None,
+        session_key: str,
+        trace_token: str,
+        exc: Exception,
+    ) -> None:
+        classified = _classify_execution_failure(exc)
+        current_execution_result = mark_unified_execution_failure(
+            build_unified_execution_result(),
+            failure_class=str(classified.get("failure_class") or "runtime_exception"),
+            failure_source=str(classified.get("failure_source") or "execution"),
+            retryable=bool(classified.get("retryable", False)),
+            exception_type=str(classified.get("exception_type") or type(exc).__name__),
+            message=str(exc),
+        )
+        job.metadata["execution_result"] = current_execution_result
+        execution_state = dict(job.metadata.get("execution_state") or {})
+        execution_state["failure_type"] = str(classified.get("failure_type") or "")
+        execution_state["failure_action"] = str(classified.get("failure_action") or "")
+        execution_state["auto_retry"] = bool(classified.get("auto_retry", False))
+        execution_state["last_transition_reason"] = (
+            f"control_plane.submit.failed:{str(classified.get('failure_action') or 'unknown')}"
+        )
+        job.metadata["execution_state"] = execution_state
+        if future.done() and not future.cancelled():
+            with contextlib.suppress(Exception):
+                future.exception()
+        if dedupe_future is not None and not dedupe_future.done():
+            dedupe_future.set_exception(exc)
+        projected = self.lifecycle_projection.get(job.job_id)
+        projection_terminal = bool(
+            projected is not None and projected.status in {ExecutionStatus.COMPLETED, ExecutionStatus.FAILED}
+        )
+        self._emit_progress_snapshot(
+            phase="during_scheduler_drain",
+            session_id=session_key,
+            trace_token=trace_token,
+            job_id=job.job_id,
+            future_done=future.done(),
+            completion_expectations=self._completion_expectations(
+                job_id=job.job_id,
+                future_done=future.done(),
+                projection_terminal=projection_terminal,
+            ),
+            note="submit_turn exception",
+            extra={"exception_type": type(exc).__name__, "exception": str(exc)},
+        )
+
+    def _prepare_submit_metadata(
+        self,
+        *,
+        metadata: dict[str, Any] | None,
+        user_input: str,
+        attachments: AttachmentList | None,
+        timeout_seconds: float | None,
+    ) -> tuple[dict[str, Any], float, str, str]:
+        md = dict(metadata or {})
+        request_id = str(md.get("request_id") or "").strip()
+        effect_id = str(md.get("effect_id") or "").strip()
+        self._prepare_global_confluence_law(
+            user_input=str(user_input or ""),
+            attachments=attachments,
+            metadata=md,
+        )
+        resolved_timeout_seconds = 30.0 if timeout_seconds is None else max(0.0, float(timeout_seconds))
+        _raw_er = dict(
+            md.get("execution_result")
+            or build_unified_execution_result(
+                timeout_seconds=resolved_timeout_seconds,
+                degradation_items=_extract_execution_degradations(md),
+            ),
+        )
+        # Stamp the current resolved timeout before normalization so the
+        # canonical module owns the final sanitised form.
+        _raw_er.setdefault("timeout", {})["seconds"] = float(resolved_timeout_seconds)
+        md["execution_result"] = ensure_unified_execution_result(_raw_er)
+        md["execution_state"] = {
+            "lifecycle_state": ExecutionLifecycleState.SUBMITTED.value,
+            "redelivery_count": int(dict(md.get("execution_state") or {}).get("redelivery_count") or 0),
+            "lease_conflict_count": int(dict(md.get("execution_state") or {}).get("lease_conflict_count") or 0),
+            "last_worker_id": str(dict(md.get("execution_state") or {}).get("last_worker_id") or ""),
+            "last_transition_reason": "control_plane.submit_turn",
+            "retry_not_before_monotonic": 0.0,
+        }
+        return md, resolved_timeout_seconds, request_id, effect_id
 
     @staticmethod
     def _confluence_mode(metadata: dict[str, Any]) -> str:
         override = str(dict(metadata or {}).get("confluence_mode") or "").strip().lower()
-        if override in {"off", "audit", "enforce"}:
+        test_override = bool(
+            str(os.environ.get("PYTEST_CURRENT_TEST") or "").strip()
+            and str(os.environ.get("DADBOT_TEST_GLOBAL_CONFLUENCE_MODE") or "").strip().lower()
+            in {"off", "audit", "enforce"}
+        )
+        if test_override and override in {"off", "audit", "enforce"}:
             return override
-        raw = str(os.environ.get("DADBOT_GLOBAL_CONFLUENCE_MODE", "off")).strip().lower()
-        if raw in {"off", "audit", "enforce"}:
-            return raw
-        return "off"
+        if test_override:
+            return str(os.environ.get("DADBOT_TEST_GLOBAL_CONFLUENCE_MODE") or "enforce").strip().lower()
+        return "enforce"
 
     def _derive_confluence_key(
         self,
@@ -676,12 +2318,11 @@ class ExecutionControlPlane:
             return
         explicit_key = str(dict(metadata or {}).get("confluence_key") or "").strip()
         if mode == "enforce" and not explicit_key:
-            allow_legacy = str(os.environ.get("DADBOT_ALLOW_LEGACY_CONFLUENCE_KEY", "0")).strip().lower() in {
-                "1",
-                "true",
-                "yes",
-                "on",
-            }
+            allow_legacy = bool(
+                str(os.environ.get("PYTEST_CURRENT_TEST") or "").strip()
+                and str(os.environ.get("DADBOT_ALLOW_LEGACY_CONFLUENCE_KEY", "0")).strip().lower()
+                in {"1", "true", "yes", "on"}
+            )
             if not allow_legacy:
                 raise RuntimeError(
                     "Missing explicit confluence_key in enforce mode. "
@@ -714,33 +2355,31 @@ class ExecutionControlPlane:
                 "Control-plane lifecycle invariant violated: event order is non-monotonic",
             )
 
-    def _record_turn_composition_contract(  # noqa: PLR0915
-        self,
-        *,
-        session: dict[str, Any],
-        job: ExecutionJob,
-        result: FinalizedTurnResult,
-        state_before_hash: str,
-    ) -> dict[str, Any]:
-        state = dict(session.get("state") or {})
-        state_after_hash = self._stable_hash(state)
-        terminal_state = dict(state.get("last_terminal_state") or {})
-        trace_events = self._job_trace_events(job)
-        if any(str(event.get("type") or "").strip() for event in list(trace_events or [])):
-            self._assert_lifecycle_order(trace_events)
-
-        event_log_hash = self._event_stream_digest(trace_events)
-        output_payload = {
+    @staticmethod
+    def _result_output_payload(result: FinalizedTurnResult) -> dict[str, Any]:
+        return {
             "response": str(result[0] if isinstance(result, tuple) and len(result) >= 1 else ""),
             "should_end": bool(result[1] if isinstance(result, tuple) and len(result) >= 2 else False),
         }
+
+    def _build_composition_payload(
+        self,
+        *,
+        job: ExecutionJob,
+        terminal_state: dict[str, Any],
+        output_payload: dict[str, Any],
+        trace_events: list[dict[str, Any]],
+        state_before_hash: str,
+        state_after_hash: str,
+    ) -> dict[str, Any]:
         state_delta_hash = self._stable_hash(
             {
                 "before": str(state_before_hash or ""),
                 "after": str(state_after_hash or ""),
             },
         )
-        composition_payload = {
+        event_log_hash = self._event_stream_digest(trace_events)
+        return {
             "contract_version": "turn-composition-v1",
             "context_input_hash": self._stable_hash(
                 {
@@ -759,8 +2398,16 @@ class ExecutionControlPlane:
             "mutation_effects_hash": str(terminal_state.get("post_commit_mutation_effects_hash") or ""),
             "determinism_closure_hash": str(terminal_state.get("determinism_closure_hash") or ""),
         }
-        composition_hash = self._stable_hash(composition_payload)
-        confluence_payload = {
+
+    def _build_confluence_payload(
+        self,
+        *,
+        job: ExecutionJob,
+        terminal_state: dict[str, Any],
+        output_payload: dict[str, Any],
+        trace_events: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        return {
             "contract_version": "turn-confluence-v1",
             "semantic_input_hash": self._stable_hash(
                 {
@@ -776,24 +2423,46 @@ class ExecutionControlPlane:
             "determinism_closure_hash": str(terminal_state.get("determinism_closure_hash") or ""),
             "event_semantic_hash": self._event_semantic_digest(trace_events),
         }
-        confluence_class_hash = self._stable_hash(confluence_payload)
-        contract = dict(composition_payload)
-        contract["composition_hash"] = composition_hash
-        contract["confluence_class_hash"] = confluence_class_hash
 
-        expected = str(dict(job.metadata or {}).get("expected_execution_composition_hash") or "").strip()
+    @staticmethod
+    def _expected_hashes_from_metadata(metadata: dict[str, Any]) -> tuple[str, str]:
+        expected = str(dict(metadata or {}).get("expected_execution_composition_hash") or "").strip()
+        expected_confluence = str(
+            dict(metadata or {}).get("expected_execution_confluence_hash") or "",
+        ).strip()
+        return expected, expected_confluence
+
+    @staticmethod
+    def _confluence_config_from_metadata(metadata: dict[str, Any]) -> tuple[str, str]:
+        confluence_key = str(dict(metadata or {}).get("_global_confluence_key") or "").strip()
+        confluence_mode = str(dict(metadata or {}).get("_global_confluence_mode") or "off").strip().lower()
+        return confluence_key, confluence_mode
+
+    def _validate_composition_expectations(
+        self,
+        *,
+        expected: str,
+        expected_confluence: str,
+        composition_hash: str,
+        confluence_class_hash: str,
+    ) -> None:
         if expected and expected != composition_hash:
             raise RuntimeError(
                 f"Execution composition mismatch: expected={expected!r}, actual={composition_hash!r}",
             )
-        expected_confluence = str(dict(job.metadata or {}).get("expected_execution_confluence_hash") or "").strip()
         if expected_confluence and expected_confluence != confluence_class_hash:
             raise RuntimeError(
                 f"Execution confluence mismatch: expected={expected_confluence!r}, actual={confluence_class_hash!r}",
             )
 
-        confluence_key = str(dict(job.metadata or {}).get("_global_confluence_key") or "").strip()
-        confluence_mode = str(dict(job.metadata or {}).get("_global_confluence_mode") or "off").strip().lower()
+    def _enforce_global_confluence_law(
+        self,
+        *,
+        confluence_key: str,
+        confluence_mode: str,
+        confluence_class_hash: str,
+        expected_confluence: str,
+    ) -> dict[str, Any]:
         confluence_report = {
             "enforced": False,
             "mode": confluence_mode,
@@ -802,45 +2471,103 @@ class ExecutionControlPlane:
             "expected_hash": expected_confluence,
             "contract_version": "turn-confluence-v1",
         }
-        if confluence_key and confluence_mode != "off":
-            self._confluence_metrics["attempted"] = int(self._confluence_metrics.get("attempted", 0)) + 1
-            known = str(self._global_confluence_contracts.get(confluence_key) or "")
-            if not known:
-                self._global_confluence_contracts[confluence_key] = confluence_class_hash
-                confluence_report["enforced"] = True
-                confluence_report["action"] = "bound_first_observation"
-                self._confluence_metrics["bound_first_observation"] = int(
-                    self._confluence_metrics.get("bound_first_observation", 0),
+        if not confluence_key or confluence_mode == "off":
+            return confluence_report
+
+        self._confluence_metrics["attempted"] = int(self._confluence_metrics.get("attempted", 0)) + 1
+        known = str(self._global_confluence_contracts.get(confluence_key) or "")
+        if not known:
+            self._global_confluence_contracts[confluence_key] = confluence_class_hash
+            confluence_report["enforced"] = True
+            confluence_report["action"] = "bound_first_observation"
+            self._confluence_metrics["bound_first_observation"] = int(
+                self._confluence_metrics.get("bound_first_observation", 0),
+            ) + 1
+            return confluence_report
+
+        if known != confluence_class_hash:
+            confluence_report["enforced"] = True
+            confluence_report["expected_hash"] = known
+            confluence_report["action"] = "mismatch"
+            self._last_confluence_report = dict(confluence_report)
+            self._confluence_metrics["mismatch"] = int(self._confluence_metrics.get("mismatch", 0)) + 1
+            fail_mode = str(
+                os.environ.get("DADBOT_CONFLUENCE_VIOLATION_MODE", "fail"),
+            ).strip().lower()
+            if fail_mode != "audit":
+                self._confluence_metrics["enforced_blocked"] = int(
+                    self._confluence_metrics.get("enforced_blocked", 0),
                 ) + 1
-            elif known != confluence_class_hash:
-                confluence_report["enforced"] = True
-                confluence_report["expected_hash"] = known
-                confluence_report["action"] = "mismatch"
-                self._last_confluence_report = dict(confluence_report)
-                self._confluence_metrics["mismatch"] = int(self._confluence_metrics.get("mismatch", 0)) + 1
-                fail_mode = str(
-                    os.environ.get("DADBOT_CONFLUENCE_VIOLATION_MODE", "fail"),
-                ).strip().lower()
-                if fail_mode != "audit":
-                    self._confluence_metrics["enforced_blocked"] = int(
-                        self._confluence_metrics.get("enforced_blocked", 0),
-                    ) + 1
-                    raise RuntimeError(
-                        "Global confluence law violated for key="
-                        f"{confluence_key!r}: expected={known!r}, "
-                        f"actual={confluence_class_hash!r}",
-                    )
-                logger.warning(
-                    "Global confluence law mismatch (audit override): key=%s expected=%s actual=%s",
-                    confluence_key,
-                    known,
-                    confluence_class_hash,
+                raise RuntimeError(
+                    "Global confluence law violated for key="
+                    f"{confluence_key!r}: expected={known!r}, "
+                    f"actual={confluence_class_hash!r}",
                 )
-            else:
-                confluence_report["enforced"] = True
-                confluence_report["expected_hash"] = known
-                confluence_report["action"] = "matched"
-                self._confluence_metrics["matched"] = int(self._confluence_metrics.get("matched", 0)) + 1
+            logger.warning(
+                "Global confluence law mismatch (audit override): key=%s expected=%s actual=%s",
+                confluence_key,
+                known,
+                confluence_class_hash,
+            )
+            return confluence_report
+
+        confluence_report["enforced"] = True
+        confluence_report["expected_hash"] = known
+        confluence_report["action"] = "matched"
+        self._confluence_metrics["matched"] = int(self._confluence_metrics.get("matched", 0)) + 1
+        return confluence_report
+
+    def _record_turn_composition_contract(
+        self,
+        *,
+        session: dict[str, Any],
+        job: ExecutionJob,
+        result: FinalizedTurnResult,
+        state_before_hash: str,
+    ) -> dict[str, Any]:
+        state = dict(session.get("state") or {})
+        state_after_hash = self._stable_hash(state)
+        terminal_state = dict(state.get("last_terminal_state") or {})
+        trace_events = self._job_trace_events(job)
+        if any(str(event.get("type") or "").strip() for event in list(trace_events or [])):
+            self._assert_lifecycle_order(trace_events)
+
+        output_payload = self._result_output_payload(result)
+        composition_payload = self._build_composition_payload(
+            job=job,
+            terminal_state=terminal_state,
+            output_payload=output_payload,
+            trace_events=trace_events,
+            state_before_hash=state_before_hash,
+            state_after_hash=state_after_hash,
+        )
+        composition_hash = self._stable_hash(composition_payload)
+        confluence_payload = self._build_confluence_payload(
+            job=job,
+            terminal_state=terminal_state,
+            output_payload=output_payload,
+            trace_events=trace_events,
+        )
+        confluence_class_hash = self._stable_hash(confluence_payload)
+        contract = dict(composition_payload)
+        contract["composition_hash"] = composition_hash
+        contract["confluence_class_hash"] = confluence_class_hash
+
+        expected, expected_confluence = self._expected_hashes_from_metadata(dict(job.metadata or {}))
+        self._validate_composition_expectations(
+            expected=expected,
+            expected_confluence=expected_confluence,
+            composition_hash=composition_hash,
+            confluence_class_hash=confluence_class_hash,
+        )
+
+        confluence_key, confluence_mode = self._confluence_config_from_metadata(dict(job.metadata or {}))
+        confluence_report = self._enforce_global_confluence_law(
+            confluence_key=confluence_key,
+            confluence_mode=confluence_mode,
+            confluence_class_hash=confluence_class_hash,
+            expected_confluence=expected_confluence,
+        )
         self._last_confluence_report = dict(confluence_report)
 
         state_mut = session.setdefault("state", {})
@@ -849,154 +2576,88 @@ class ExecutionControlPlane:
             state_mut["last_execution_confluence_report"] = dict(confluence_report)
         return contract
 
-    @staticmethod
-    def _load_archived_events(archive_path: str) -> list[dict[str, Any]]:
-        events: list[dict[str, Any]] = []
-        if not archive_path:
-            return events
-        with gzip.open(archive_path, "rt", encoding="utf-8") as handle:
-            for line in handle:
-                stripped = str(line or "").strip()
-                if not stripped:
-                    continue
-                try:
-                    parsed = json.loads(stripped)
-                    if isinstance(parsed, dict):
-                        events.append(parsed)
-                except json.JSONDecodeError:
-                    continue
-        return events
-
-    def _compaction_losslessness_proof(
+    async def _register_submit_job(
         self,
         *,
-        pre_events: list[dict[str, Any]],
-        post_events: list[dict[str, Any]],
-        archive_path: str,
-    ) -> dict[str, Any]:
-        archived_events = self._load_archived_events(archive_path)
-        reconstructed = sorted(
-            [dict(event) for event in list(archived_events or [])] + [dict(event) for event in list(post_events or [])],
-            key=lambda item: int(item.get("sequence") or 0),
+        session_key: str,
+        user_input: str,
+        attachments: AttachmentList | None,
+        metadata: dict[str, Any],
+        trace_token: str,
+    ) -> tuple[ExecutionJob, asyncio.Future[FinalizedTurnResult], float]:
+        job = ExecutionJob(
+            session_id=session_key,
+            user_input=str(user_input or ""),
+            attachments=attachments,
+            metadata=metadata,
+            trace_id=trace_token,
         )
-        pre_digest = self._event_stream_digest(list(pre_events or []))
-        reconstructed_digest = self._event_stream_digest(reconstructed)
-        sequence_equivalent = [
-            int(item.get("sequence") or 0) for item in list(pre_events or [])
-        ] == [
-            int(item.get("sequence") or 0) for item in reconstructed
-        ]
-        return {
-            "contract_version": "ledger-compaction-lossless-v1",
-            "equivalent": bool(pre_digest == reconstructed_digest and sequence_equivalent),
-            "pre_digest": pre_digest,
-            "reconstructed_digest": reconstructed_digest,
-            "archived_event_count": len(archived_events),
-            "reconstructed_event_count": len(reconstructed),
-            "sequence_equivalent": bool(sequence_equivalent),
-        }
-
-    @staticmethod
-    def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
-        raw = str(os.environ.get(name, str(default))).strip()
-        value = int(raw) if raw.isdigit() else int(default)
-        return max(int(minimum), value)
-
-    def _ensure_compactor(self) -> EventCompactor:
-        if self._ledger_compactor is None:
-            max_events = self._env_int("DADBOT_LEDGER_MAX_EVENTS", 10000, minimum=100)
-            max_age_seconds = float(self._env_int("DADBOT_LEDGER_MAX_AGE_SECONDS", 86400, minimum=60))
-            min_snapshot_distance = self._env_int("DADBOT_LEDGER_MIN_SNAPSHOT_DISTANCE", 200, minimum=0)
-            archive_dir = Path(
-                str(os.environ.get("DADBOT_LEDGER_ARCHIVE_DIR", "runtime/archives")).strip()
-                or "runtime/archives"
+        current_lifecycle_state = self._coerce_projection_lifecycle_state(job.job_id)
+        if current_lifecycle_state is None:
+            _assert_lifecycle_emission_transition(
+                execution_id=str(job.job_id or ""),
+                event=Submitted(execution_id=job.job_id, occurred_at=datetime.now()),
+                current_state=current_lifecycle_state,
             )
-            self._ledger_compactor = EventCompactor(
-                policy=CompactionPolicy(
-                    max_events=max_events,
-                    max_age_seconds=max_age_seconds,
-                    min_snapshot_distance=min_snapshot_distance,
-                ),
-                archive=ArchiveTier(archive_dir),
+            self.ledger_writer.append_execution_lifecycle(
+                Submitted(execution_id=job.job_id, occurred_at=datetime.now()),
+                session_id=session_key,
+                trace_id=job.trace_id,
+                kernel_step_id="control_plane.submit_turn",
+                committed=False,
             )
-        return self._ledger_compactor
+        self.lifecycle_projection.rebuild_from_ledger(self.ledger.read())
+        _apply_projection_execution_state(job, self.lifecycle_projection.get(job.job_id))
+        job.metadata["execution_mode"] = _resolved_execution_mode(job)
 
-    def _partition_summary(self, events: list[dict[str, Any]]) -> dict[str, Any]:
-        by_session: dict[str, int] = {}
-        for event in list(events or []):
-            sid = str(event.get("session_id") or "").strip() or "unknown"
-            by_session[sid] = int(by_session.get(sid, 0)) + 1
-        top_sessions = sorted(by_session.items(), key=lambda item: (-int(item[1]), str(item[0])))[:8]
-        return {
-            "partition_count": len(by_session),
-            "top_partitions": [{"session_id": sid, "event_count": int(count)} for sid, count in top_sessions],
-        }
+        submitted_event = self.ledger_writer.append_job_submitted(job)
+        submitted_ts = float(submitted_event.get("timestamp") or 0.0)
+        job.metadata["submitted_timestamp"] = submitted_ts
+        job.metadata.setdefault("claim_order", {})
+        job.metadata["claim_order"]["timestamp"] = submitted_ts
+        job.metadata["claim_order"]["worker_id"] = str(
+            getattr(self._scheduler, "worker_id", "worker-1") or "worker-1",
+        )
+        job.metadata["claim_order"]["lease_epoch"] = int(
+            dict(job.metadata.get("execution_state") or {}).get("redelivery_count") or 0,
+        )
+        self.ledger_writer.append_session_bound(
+            session_key,
+            job.job_id,
+            trace_id=job.trace_id,
+            kernel_step_id="control_plane.bind_session",
+        )
+        future = await self.scheduler.register(job)
+        return job, future, submitted_ts
 
-    def _maybe_compact_ledger(self) -> dict[str, Any]:
-        hard_max = self._env_int("DADBOT_LEDGER_HARD_LIMIT_EVENTS", 50000, minimum=500)
-        pre_events = list(self.ledger.read())
-        event_count = len(pre_events)
+    def _initialize_submit_scope(
+        self,
+        *,
+        session_key: str,
+        trace_token: str,
+        job_id: str,
+        resolved_timeout_seconds: float,
+    ) -> tuple[str, float, object]:
+        session_before = self.registry.get_or_create(session_key)
+        before_state_hash = self._stable_hash(dict(session_before.get("state") or {}))
+        # Initialize CoreState from persisted session state; all turn mutations will
+        # flow through the event bus (push_core_state_event) and update this binding.
+        initial_core_state = CoreState.from_dict(
+            dict(session_before.get("state") or {}).get("core_state"),
+        )
+        deadline = time.time() + resolved_timeout_seconds
+        cs_token = open_core_state_scope(initial_core_state)
+        push_core_state_event(
+            "job_submitted",
+            {
+                "session_id": session_key,
+                "trace_id": trace_token,
+                "job_id": job_id,
+            },
+        )
+        return before_state_hash, deadline, cs_token
 
-        if event_count <= 0:
-            return {"compacted": False, "reason": "empty", "event_count": 0, **self._partition_summary(pre_events)}
-
-        force = bool(event_count >= hard_max)
-        compactor = self._ensure_compactor()
-        snapshot = {"head_sequence": event_count}
-        report = dict(compactor.compact(ledger=self.ledger, snapshot=snapshot, force=force) or {})
-        post_events = list(self.ledger.read())
-        lossless_proof = {
-            "contract_version": "ledger-compaction-lossless-v1",
-            "equivalent": True,
-            "pre_digest": self._event_stream_digest(pre_events),
-            "reconstructed_digest": self._event_stream_digest(post_events),
-            "archived_event_count": 0,
-            "reconstructed_event_count": len(post_events),
-            "sequence_equivalent": True,
-        }
-        archive_path = str(report.get("archive_path") or "")
-        if bool(report.get("compacted", False)) and archive_path:
-            lossless_proof = self._compaction_losslessness_proof(
-                pre_events=pre_events,
-                post_events=post_events,
-                archive_path=archive_path,
-            )
-            if not bool(lossless_proof.get("equivalent", False)):
-                raise RuntimeError("Ledger compaction losslessness invariant violated")
-        report.setdefault("event_count", event_count)
-        report.setdefault("forced", force)
-        report["lossless_proof"] = dict(lossless_proof)
-        report.update(self._partition_summary(post_events))
-        self._last_compaction_report = report
-        return report
-
-    @staticmethod
-    def _resolve_options(
-        options: ControlPlaneOptions | None,
-        legacy_options: dict[str, Any],
-    ) -> ControlPlaneOptions:
-        resolved = options or ControlPlaneOptions()
-        if "max_inflight_jobs" in legacy_options:
-            resolved.max_inflight_jobs = int(legacy_options["max_inflight_jobs"])
-        if "execution_lease" in legacy_options:
-            resolved.execution_lease = legacy_options["execution_lease"]
-        if "worker_id" in legacy_options:
-            resolved.worker_id = str(legacy_options["worker_id"] or "worker-1")
-        if "enable_observability" in legacy_options:
-            resolved.enable_observability = bool(legacy_options["enable_observability"])
-        if "ledger" in legacy_options:
-            resolved.ledger = legacy_options["ledger"]
-        if "scheduler" in legacy_options:
-            resolved.scheduler = legacy_options["scheduler"]
-        return resolved
-
-    async def create_session(self, session_id: str) -> dict[str, Any]:
-        return await self.registry.create_session(session_id)
-
-    def terminate_session(self, session_id: str) -> None:
-        self.registry.terminate_session(session_id)
-
-    async def _submit_turn_kernel(  # noqa: C901, PLR0912, PLR0915
+    async def _submit_turn_kernel(
         self,
         *,
         session_id: str,
@@ -1008,160 +2669,154 @@ class ExecutionControlPlane:
         session_key = str(session_id or "default")
         if self.registry.is_terminated(session_key):
             raise RuntimeError(f"session {session_key!r} has been terminated")
+        self._enforce_distributed_runtime_authority(operation="submit_turn_entry_gate")
 
-        md = dict(metadata or {})
-        request_id = str(md.get("request_id") or "").strip()
-        dedupe_key = (session_key, request_id)
-        dedupe_future: asyncio.Future[FinalizedTurnResult] | None = None
-        owns_dedupe_slot = False
-        if request_id:
-            async with self._inflight_lock:
-                existing = self._inflight_by_request.get(dedupe_key)
-                if existing is not None:
-                    dedupe_future = existing
-                else:
-                    dedupe_future = asyncio.get_running_loop().create_future()
-                    self._inflight_by_request[dedupe_key] = dedupe_future
-                    owns_dedupe_slot = True
-            if not owns_dedupe_slot and dedupe_future is not None:
-                return await dedupe_future
+        md, resolved_timeout_seconds, request_id, effect_id = self._prepare_submit_metadata(
+            metadata=metadata,
+            user_input=user_input,
+            attachments=attachments,
+            timeout_seconds=timeout_seconds,
+        )
+        effect_id, dedupe_key, dedupe_future, owns_dedupe_slot, immediate_result = await self._preflight_submit_turn(
+            session_key=session_key,
+            request_id=request_id,
+            effect_id=effect_id,
+            metadata=md,
+        )
+        if immediate_result is not None:
+            return immediate_result
 
-        trace_id = str(md.get("trace_id") or "").strip()
-        if not trace_id:
-            trace_seed = {
-                "session_id": session_key,
-                "request_id": str(md.get("request_id") or ""),
-                "user_input": str(user_input or ""),
-                "attachments": list(attachments or []),
-            }
-            trace_blob = json_dumps_sorted(trace_seed)
-            trace_id = f"tr-{hashlib.sha256(trace_blob.encode('utf-8')).hexdigest()[:20]}"
-        md["trace_id"] = trace_id
+        trace_id, effect_id = self._resolve_submit_trace_and_effect(
+            session_key=session_key,
+            user_input=user_input,
+            attachments=attachments,
+            metadata=md,
+            request_id=request_id,
+            effect_id=effect_id,
+        )
+        md["effect_id"] = effect_id
         assert trace_id, "Missing trace_id at control plane entry"
-        self._prepare_global_confluence_law(
-            user_input=str(user_input or ""),
+        job, future, _submitted_ts = await self._register_submit_job(
+            session_key=session_key,
+            user_input=user_input,
             attachments=attachments,
             metadata=md,
+            trace_token=trace_id,
         )
-        resolved_timeout_seconds = 30.0 if timeout_seconds is None else max(0.0, float(timeout_seconds))
-        _raw_er = dict(
-            md.get("execution_result")
-            or build_unified_execution_result(
-                timeout_seconds=resolved_timeout_seconds,
-                degradation_items=_extract_execution_degradations(md),
-            ),
-        )
-        # Stamp the current resolved timeout before normalization so the
-        # canonical module owns the final sanitised form.
-        _raw_er.setdefault("timeout", {})["seconds"] = float(resolved_timeout_seconds)
-        execution_result = ensure_unified_execution_result(_raw_er)
-        md["execution_result"] = execution_result
-
-        job = ExecutionJob(
+        self._emit_progress_snapshot(
+            phase="during_scheduler_drain",
             session_id=session_key,
-            user_input=str(user_input or ""),
-            attachments=attachments,
-            metadata=md,
-            trace_id=trace_id,
+            trace_token=trace_id,
+            job_id=job.job_id,
+            future_done=False,
+            note="job registered",
+            extra={"request_id": request_id, "effect_id": effect_id},
         )
-
-        self.ledger_writer.append_job_submitted(job)
-        self.ledger_writer.append_session_bound(
-            session_key,
-            job.job_id,
-            trace_id=job.trace_id,
-            kernel_step_id="control_plane.bind_session",
-        )
-        future = await self.scheduler.register(job)
-        session_before = self.registry.get_or_create(session_key)
-        before_state_hash = self._stable_hash(dict(session_before.get("state") or {}))
-        # Initialize CoreState from persisted session state; all turn mutations will
-        # flow through the event bus (push_core_state_event) and update this binding.
-        initial_core_state = CoreState.from_dict(
-            dict(session_before.get("state") or {}).get("core_state"),
-        )
-        max_wait_seconds = resolved_timeout_seconds
-        deadline = time.time() + max_wait_seconds
-        _cs_token = open_core_state_scope(initial_core_state)
-        push_core_state_event(
-            "job_submitted",
-            {
-                "session_id": session_key,
-                "trace_id": trace_id,
-                "job_id": job.job_id,
-            },
+        before_state_hash, deadline, _cs_token = self._initialize_submit_scope(
+            session_key=session_key,
+            trace_token=trace_id,
+            job_id=job.job_id,
+            resolved_timeout_seconds=resolved_timeout_seconds,
         )
         try:
-            while not future.done():
-                if time.time() > deadline:
-                    raise TimeoutError("submit_turn exceeded timeout")
-                drained = await self.scheduler.drain_once(self.kernel_executor)
-                if not drained:
-                    remaining = max(0.0, deadline - time.time())
-                    if remaining <= 0.0:
-                        raise TimeoutError("submit_turn exceeded timeout")
-                    wait_task = asyncio.create_task(
-                        self.scheduler.wait_for_work(timeout_seconds=remaining),
-                    )
-                    done, _ = await asyncio.wait(
-                        {future, wait_task},
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
-                    if wait_task not in done:
-                        wait_task.cancel()
-                        with contextlib.suppress(asyncio.CancelledError):
-                            await wait_task
-            result = await future
-            current_execution_result = ensure_unified_execution_result(
-                dict(job.metadata.get("execution_result") or {}),
+            loop_iterations = await self._drain_scheduler_until_resolved(
+                future=future,
+                job=job,
+                session_key=session_key,
+                trace_token=trace_id,
+                deadline=deadline,
             )
-            # drain_once marks success and stores it in metadata before resolving
-            # the future.  Only mark here if the envelope is still pending (e.g.
-            # if the job was fulfilled via a dedupe path that bypassed drain_once).
-            if current_execution_result.get("status") not in _TERMINAL_STATUS_VALUES:
-                current_execution_result = mark_unified_execution_success(
-                    current_execution_result,
-                    response=str(result[0] if isinstance(result, tuple) and len(result) >= 1 else ""),
-                    should_end=bool(result[1] if isinstance(result, tuple) and len(result) >= 2 else False),
-                )
-                job.metadata["execution_result"] = current_execution_result
-            session_after = self.registry.get_or_create(session_key)
-            self._validate_trace_invariant(job, result, session=session_after, state_before_hash=before_state_hash)
-            self._apply_turn_committed_core_state(
-                session=session_after,
+            result = await future
+            return self._finalize_submit_success(
                 job=job,
                 result=result,
+                session_key=session_key,
+                trace_token=trace_id,
+                before_state_hash=before_state_hash,
+                dedupe_future=dedupe_future,
+                loop_iterations=loop_iterations,
             )
-            self._maybe_compact_ledger()
-            if dedupe_future is not None and not dedupe_future.done():
-                dedupe_future.set_result(result)
-            return result
         except Exception as exc:
-            classified = _classify_execution_failure(exc)
-            # Use a fresh pending envelope — the kernel may have already marked ok
-            # (e.g. if _validate_trace_invariant raised after marking success).
-            # A post-success exception overrides the terminal status: start clean.
-            current_execution_result = mark_unified_execution_failure(
-                build_unified_execution_result(),
-                failure_class=str(classified.get("failure_class") or "runtime_exception"),
-                failure_source=str(classified.get("failure_source") or "execution"),
-                retryable=bool(classified.get("retryable", False)),
-                exception_type=str(classified.get("exception_type") or type(exc).__name__),
-                message=str(exc),
+            self._record_submit_exception(
+                job=job,
+                future=future,
+                dedupe_future=dedupe_future,
+                session_key=session_key,
+                trace_token=trace_id,
+                exc=exc,
             )
-            job.metadata["execution_result"] = current_execution_result
-            if future.done() and not future.cancelled():
-                with contextlib.suppress(Exception):
-                    future.exception()
-            if dedupe_future is not None and not dedupe_future.done():
-                dedupe_future.set_exception(exc)
             raise
         finally:
-            if request_id and owns_dedupe_slot:
+            if (request_id or effect_id) and owns_dedupe_slot:
                 async with self._inflight_lock:
                     if self._inflight_by_request.get(dedupe_key) is dedupe_future:
                         self._inflight_by_request.pop(dedupe_key, None)
             close_core_state_scope(_cs_token)
+
+    def _coerce_projection_lifecycle_state(self, execution_id: str) -> ExecutionLifecycleState | None:
+        projected = self.lifecycle_projection.get(str(execution_id or ""))
+        if projected is None:
+            return None
+        return _coerce_lifecycle_state(_lifecycle_state_from_projection(projected))
+
+    @staticmethod
+    def _trace_event_invariant_counts(trace_events: list[dict[str, Any]]) -> tuple[int, bool]:
+        commit_count = 0
+        has_node_events = False
+        for event in trace_events:
+            payload = dict(event.get("payload") or {}) if isinstance(event, dict) else {}
+            event_type = str(event.get("event_type") or payload.get("event_type") or "").strip().lower()
+            stage = str(
+                event.get("stage")
+                or event.get("node_type")
+                or payload.get("stage")
+                or payload.get("node_type")
+                or ""
+            ).strip().lower()
+            if event_type in {
+                "node_start",
+                "node_complete",
+                "node_completed",
+                "turn_start",
+                "turn_complete",
+                "turn_failed",
+            }:
+                has_node_events = True
+            if event_type in {"node_complete", "node_completed"} and stage == "save":
+                commit_count += 1
+        return commit_count, has_node_events
+
+    @staticmethod
+    def _fallback_commit_count_from_session(
+        *,
+        session: dict[str, Any] | None,
+        trace_token: str,
+    ) -> int:
+        if not isinstance(session, dict):
+            return 0
+        session_state = dict(session.get("state") or {})
+        turn_trace = dict(session_state.get("turn_trace") or {})
+        if str(turn_trace.get("trace_id") or "").strip() != str(trace_token).strip():
+            return 0
+        fallback_commit_count = int(turn_trace.get("commit_boundary_count") or 0)
+        return fallback_commit_count if fallback_commit_count > 0 else 0
+
+    def _record_trace_composition_contract(
+        self,
+        *,
+        session: dict[str, Any] | None,
+        job: ExecutionJob,
+        result: FinalizedTurnResult,
+        state_before_hash: str,
+    ) -> None:
+        if session is None:
+            return
+        self._record_turn_composition_contract(
+            session=session,
+            job=job,
+            result=result,
+            state_before_hash=str(state_before_hash or ""),
+        )
 
     async def submit_turn(
         self,
@@ -1214,52 +2869,43 @@ class ExecutionControlPlane:
             return
 
         # Count commit boundary markers from canonical TURN_EVENT payloads.
-        commit_count = 0
-        has_node_events = False
-        for event in trace_events:
-            payload = dict(event.get("payload") or {}) if isinstance(event, dict) else {}
-            event_type = str(event.get("event_type") or payload.get("event_type") or "").strip().lower()
-            stage = str(event.get("stage") or event.get("node_type") or payload.get("stage") or payload.get("node_type") or "").strip().lower()
-            if event_type in {"node_start", "node_complete", "node_completed", "turn_start", "turn_complete", "turn_failed"}:
-                has_node_events = True
-            if event_type in {"node_complete", "node_completed"} and stage == "save":
-                commit_count += 1
+        commit_count, has_node_events = self._trace_event_invariant_counts(trace_events)
 
         # Fallback to unified sink trace when ledger envelope normalization omits stage markers.
-        if commit_count == 0 and isinstance(session, dict):
-            session_state = dict(session.get("state") or {})
-            turn_trace = dict(session_state.get("turn_trace") or {})
-            if str(turn_trace.get("trace_id") or "").strip() == str(trace_id).strip():
-                fallback_commit_count = int(turn_trace.get("commit_boundary_count") or 0)
-                if fallback_commit_count > 0:
-                    commit_count = fallback_commit_count
+        if commit_count == 0:
+            fallback_commit_count = self._fallback_commit_count_from_session(
+                session=session,
+                trace_token=trace_id,
+            )
+            if fallback_commit_count > 0:
+                commit_count = fallback_commit_count
 
         if not has_node_events and commit_count == 0:
             # Some persistence backends store only checkpoint summaries.
             # In that mode commit-boundary cardinality cannot be derived here.
             # Still record the composition contract for confluence tracking.
-            if session is not None:
-                self._record_turn_composition_contract(
-                    session=session,
-                    job=job,
-                    result=result,
-                    state_before_hash=str(state_before_hash or ""),
-                )
+            self._record_trace_composition_contract(
+                session=session,
+                job=job,
+                result=result,
+                state_before_hash=state_before_hash,
+            )
             return
 
         if commit_count != 1:
-            logger.warning(
-                "Trace invariant violation: expected exactly 1 commit boundary, found %d for trace %s",
-                commit_count,
-                trace_id,
+            raise InvariantViolation(
+                "Trace invariant violation: expected exactly 1 commit boundary",
+                context={
+                    "trace_id": str(trace_id or ""),
+                    "job_id": str(job.job_id or ""),
+                    "commit_boundary_count": int(commit_count),
+                },
             )
-        if session is None:
-            return
-        self._record_turn_composition_contract(
+        self._record_trace_composition_contract(
             session=session,
             job=job,
             result=result,
-            state_before_hash=str(state_before_hash or ""),
+            state_before_hash=state_before_hash,
         )
 
     def _apply_turn_committed_core_state(
@@ -1319,24 +2965,13 @@ class ExecutionControlPlane:
         metadata["core_state"] = dict(session_state["core_state"])
         job.metadata = metadata
 
-    def boot_reconcile(self) -> dict[str, Any]:
-        """Phase 3: boot reconciliation is now ledger-only via direct replay."""
-        store = SessionStore(ledger=self.ledger, projection_only=True)
+    def bootstrap(self) -> dict[str, Any]:
         events = self.ledger.read()
-        store.rebuild_from_ledger(events)
-        snap = store.snapshot()
-        pending = list(store.pending_jobs())
+        self.lifecycle_projection.rebuild_from_ledger(events)
+        self._ledger_index.refresh(force=True)
         return {
-            "pending_jobs": pending,
-            "ledger_events": len(events),
-            "replay_hash": self.ledger.replay_hash(),
-            "session_count": len(dict(snap.get("sessions") or {})),
-            "session_snapshot_version": int(snap.get("version") or 0),
-            "ledger_partitioning": self._partition_summary(events),
-            "ledger_compaction": dict(self._last_compaction_report or {}),
-            "execution_confluence": dict(self._last_confluence_report or {}),
-            "execution_confluence_metrics": dict(self._confluence_metrics),
-            "ok": True,
+            "event_count": len(events),
+            "execution_lifecycle": self.lifecycle_projection.snapshot(),
         }
 
 

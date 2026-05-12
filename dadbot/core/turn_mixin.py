@@ -411,10 +411,9 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
                 chunk_callback=chunk_callback,
             )
 
-        if state is None:
-            raise RuntimeError(f"{request.mode.value} mode requires AgentState")
-
         if request.mode == ExecutionMode.REPLAY:
+            if state is None:
+                raise RuntimeError("replay mode requires AgentState")
             replay_handler = getattr(self, "_run_turn_replay", None)
             if not callable(replay_handler):
                 raise RuntimeError("Replay mode requires _run_turn_replay handler")
@@ -429,23 +428,21 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
             return self._response_from_result(request, result)
 
         if request.mode == ExecutionMode.RECOVERY:
-            recovery_handler = getattr(self, "_run_turn_recovery", None)
-            if callable(recovery_handler):
-                result = cast(
-                    TurnResult,
-                    recovery_handler(
-                        request.input,
-                        state,
-                        chunk_callback=chunk_callback,
+            # Recovery reuses the canonical live path; resume/hydration decisions
+            # are resolved by checkpoint and lifecycle infrastructure upstream.
+            normalized_request = request.model_copy(
+                update={
+                    "mode": ExecutionMode.LIVE,
+                    "context": self._build_sovereign_context(
+                        mode=ExecutionMode.LIVE,
+                        base_context=request.context,
                     ),
-                )
-            else:
-                result = self._run_turn_recovery_default(
-                    request.input,
-                    state,
-                    chunk_callback=chunk_callback,
-                )
-            return self._response_from_result(request, result)
+                },
+            )
+            return await self._execute_live_turn_async(
+                normalized_request,
+                chunk_callback=chunk_callback,
+            )
 
         raise ValueError(f"Unsupported execution mode: {request.mode}")
 
@@ -520,20 +517,55 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
         )
         return await result
 
+    def _get_pre_turn_checkin_due(self) -> bool:
+        memory = getattr(self, "memory", None)
+        should_do_daily_checkin = getattr(memory, "should_do_daily_checkin", None)
+        if callable(should_do_daily_checkin):
+            try:
+                return bool(should_do_daily_checkin())
+            except Exception:
+                return False
+        return False
+
+    def _blend_reply_with_daily_checkin(
+        self,
+        dad_reply: str | None,
+        pre_turn_checkin_due: bool,
+    ) -> str | None:
+        memory = getattr(self, "memory", None)
+        should_do_daily_checkin = getattr(memory, "should_do_daily_checkin", None)
+        tone_context = getattr(self, "tone_context", None)
+        blend_daily_checkin_reply = getattr(tone_context, "blend_daily_checkin_reply", None)
+        if not callable(should_do_daily_checkin) or not callable(blend_daily_checkin_reply):
+            return dad_reply
+        try:
+            should_blend = (
+                bool(pre_turn_checkin_due)
+                or bool(getattr(self, "_pending_daily_checkin_context", False))
+                or bool(getattr(self, "_last_should_offer_daily_checkin", False))
+                or bool(should_do_daily_checkin())
+            )
+            if should_blend:
+                self._pending_daily_checkin_context = True
+                self._last_should_offer_daily_checkin = False
+                mood = "neutral"
+                last_ctx = getattr(self, "_last_turn_context", None)
+                if last_ctx is not None:
+                    mood = str(getattr(last_ctx, "state", {}).get("mood") or "neutral")
+                dad_reply = cast(str | None, blend_daily_checkin_reply(dad_reply, mood))
+        except Exception as exc:
+            logger.debug("Daily check-in blend failed (non-fatal): %s", exc)
+            if not isinstance(dad_reply, str):
+                dad_reply = None if dad_reply is None else str(dad_reply)
+        return dad_reply
+
     def process_user_message(
         self,
         user_input: str,
         attachments: AttachmentList | None = None,
         chunk_callback: ChunkCallback | None = None,
     ) -> FinalizedTurnResult:
-        pre_turn_daily_checkin_due = False
-        memory = getattr(self, "memory", None)
-        should_do_daily_checkin = getattr(memory, "should_do_daily_checkin", None)
-        if callable(should_do_daily_checkin):
-            try:
-                pre_turn_daily_checkin_due = bool(should_do_daily_checkin())
-            except Exception:
-                pre_turn_daily_checkin_due = False
+        pre_turn_daily_checkin_due = self._get_pre_turn_checkin_due()
 
         context = self._build_sovereign_context(mode=ExecutionMode.LIVE)
         response = cast(
@@ -557,29 +589,7 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
             dad_reply = None if dad_reply is None else str(dad_reply)
             return dad_reply, should_end
 
-        memory = getattr(self, "memory", None)
-        should_do_daily_checkin = getattr(memory, "should_do_daily_checkin", None)
-        tone_context = getattr(self, "tone_context", None)
-        blend_daily_checkin_reply = getattr(tone_context, "blend_daily_checkin_reply", None)
-        if callable(should_do_daily_checkin) and callable(blend_daily_checkin_reply):
-            try:
-                should_blend = bool(pre_turn_daily_checkin_due) or bool(
-                    getattr(self, "_pending_daily_checkin_context", False),
-                ) or bool(
-                    getattr(self, "_last_should_offer_daily_checkin", False),
-                ) or bool(should_do_daily_checkin())
-                if should_blend:
-                    self._pending_daily_checkin_context = True
-                    self._last_should_offer_daily_checkin = False
-                    mood = "neutral"
-                    last_ctx = getattr(self, "_last_turn_context", None)
-                    if last_ctx is not None:
-                        mood = str(getattr(last_ctx, "state", {}).get("mood") or "neutral")
-                    dad_reply = blend_daily_checkin_reply(dad_reply, mood)
-            except Exception as exc:
-                logger.debug("Daily check-in blend failed (non-fatal): %s", exc)
-                if not isinstance(dad_reply, str):
-                    dad_reply = None if dad_reply is None else str(dad_reply)
+        dad_reply = self._blend_reply_with_daily_checkin(dad_reply, pre_turn_daily_checkin_due)
         return cast(str | None, dad_reply), should_end
 
     def run_turn(
@@ -594,7 +604,7 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
         """Canonical deterministic turn execution contract.
 
         LIVE delegates to the graph-backed process_user_message path.
-        REPLAY/RECOVERY require explicit handlers on the facade.
+        REPLAY requires an explicit replay handler on the facade.
         """
         state.recompute_invariance_hash()
         sovereign_context = context or self._build_sovereign_context(
@@ -649,6 +659,22 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
             policy_scope=str(resolved_context.policy_scope or "default"),
         )
 
+    def _load_recovery_tap_state(self) -> tuple:
+        tap = self._resolve_event_tap()
+        if tap is None:
+            raise RuntimeError("Recovery mode requires configured EventTap")
+        latest_checkpoint = getattr(tap, "latest_checkpoint", None)
+        events_after_cursor_fn = getattr(tap, "events_after_cursor", None)
+        if not callable(latest_checkpoint) or not callable(events_after_cursor_fn):
+            raise RuntimeError("Recovery mode requires checkpoint-capable EventTap")
+        checkpoint = latest_checkpoint()
+        if not isinstance(checkpoint, Mapping):
+            raise RuntimeError("Recovery mode requires a durable checkpoint (replay-only policy)")
+        apply_event = getattr(self, "_apply_recovery_event", None)
+        if not callable(apply_event):
+            raise RuntimeError("Recovery mode requires _apply_recovery_event handler")
+        return checkpoint, events_after_cursor_fn, apply_event
+
     def _run_turn_recovery_default(
         self,
         input: UserInput,
@@ -656,23 +682,7 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
         *,
         chunk_callback: ChunkCallback | None = None,
     ) -> TurnResult:
-        tap = self._resolve_event_tap()
-        if tap is None:
-            raise RuntimeError("Recovery mode requires configured EventTap")
-
-        latest_checkpoint = getattr(tap, "latest_checkpoint", None)
-        events_after_cursor = getattr(tap, "events_after_cursor", None)
-        if not callable(latest_checkpoint) or not callable(events_after_cursor):
-            raise RuntimeError("Recovery mode requires checkpoint-capable EventTap")
-
-        checkpoint = latest_checkpoint()
-        if not isinstance(checkpoint, Mapping):
-            raise RuntimeError("Recovery mode requires a durable checkpoint (replay-only policy)")
-
-        apply_event = getattr(self, "_apply_recovery_event", None)
-        if not callable(apply_event):
-            raise RuntimeError("Recovery mode requires _apply_recovery_event handler")
-
+        checkpoint, events_after_cursor, apply_event = self._load_recovery_tap_state()
         replayed = 0
         snapshot = dict(checkpoint.get("state") or {})
         self._restore_kernel_state(dict(snapshot.get("kernel_state") or snapshot))
@@ -687,7 +697,7 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
             getattr(self, "_active_turn_run_id", "") or "",
         ).strip()
         digest, canonical = KernelReplaySequenceLock.strict_hash(
-            trace_id=run_id,
+            trace_token=run_id,
             events=[dict(event) for event in events_iter],
         )
         for event in events_iter:

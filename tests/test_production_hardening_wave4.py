@@ -282,6 +282,7 @@ class TestAtomicWriteUnit:
                 event_type="JOB_QUEUED",
                 session_id="s1",
                 kernel_step_id="test.enqueue",
+                payload={"job_id": "job-1"},
             )
         events = ledger.read()
         filtered = AtomicWriteUnit.filter_committed(events)
@@ -307,7 +308,7 @@ class TestAtomicWriteUnit:
             session_id="s1",
             kernel_step_id="test.enqueue",
             trace_id="orphan-unit-id",
-            payload={"_unit_id": "orphan-unit-id"},
+            payload={"_unit_id": "orphan-unit-id", "job_id": "job-orphan"},
         )
         # No UNIT_COMMIT written.
 
@@ -359,7 +360,7 @@ class TestAtomicWriteUnit:
                 session_id="s1",
                 kernel_step_id="test",
                 trace_id="phantom",
-                payload={"_unit_id": "phantom"},
+                payload={"_unit_id": "phantom", "job_id": "job-phantom"},
             )
 
             # Reload.
@@ -382,8 +383,18 @@ class TestTransactionalAtomicity:
         writer = LedgerWriter(ledger)
         unit = AtomicWriteUnit(writer)
         with unit.transaction() as txn:
-            txn.write_event(event_type="JOB_QUEUED", session_id="s1", kernel_step_id="step")
-            txn.write_event(event_type="JOB_STARTED", session_id="s1", kernel_step_id="step")
+            txn.write_event(
+                event_type="JOB_QUEUED",
+                session_id="s1",
+                kernel_step_id="step",
+                payload={"job_id": "job-atomic-queued"},
+            )
+            txn.write_event(
+                event_type="JOB_STARTED",
+                session_id="s1",
+                kernel_step_id="step",
+                payload={"job_id": "job-atomic-queued"},
+            )
         assert txn.committed
         types = {e["type"] for e in ledger.read()}
         assert "JOB_QUEUED" in types
@@ -396,7 +407,12 @@ class TestTransactionalAtomicity:
         unit = AtomicWriteUnit(writer)
         txn = unit.transaction()
         txn.__enter__()
-        txn.write_event(event_type="JOB_QUEUED", session_id="s1", kernel_step_id="step")
+        txn.write_event(
+            event_type="JOB_QUEUED",
+            session_id="s1",
+            kernel_step_id="step",
+            payload={"job_id": "job-atomic-rollback"},
+        )
         txn.__exit__(RuntimeError, RuntimeError("boom"), None)
 
         filtered = AtomicWriteUnit.filter_committed(ledger.read())

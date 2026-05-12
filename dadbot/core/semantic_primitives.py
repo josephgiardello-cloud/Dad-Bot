@@ -25,6 +25,32 @@ def schedule(dag: Any) -> list[Any]:
     return scheduler.schedule(dag)
 
 
+def _apply_single_mutation(result: dict, mutation: object) -> None:
+    if not isinstance(mutation, dict):
+        return
+    op = str(mutation.get("op") or "set").strip().lower()
+    key = str(mutation.get("key") or "").strip()
+    value = mutation.get("value")
+    if not key:
+        return
+    if op == "set":
+        result[key] = value
+    elif op == "unset":
+        result.pop(key, None)
+    elif op == "append":
+        existing = result.get(key)
+        if isinstance(existing, list):
+            existing.append(value)
+        elif existing is None:
+            result[key] = [value]
+    elif op == "update" and isinstance(value, dict):
+        existing = result.get(key)
+        if isinstance(existing, dict):
+            existing.update(value)
+        elif existing is None:
+            result[key] = dict(value)
+
+
 def apply_mutations(state: Any) -> Any:
     """Apply deterministic mutation intents declared on state['mutations']."""
     if not isinstance(state, dict):
@@ -33,30 +59,32 @@ def apply_mutations(state: Any) -> Any:
     result = deepcopy(state)
     mutations = list(result.pop("mutations", []) or [])
     for mutation in mutations:
-        if not isinstance(mutation, dict):
-            continue
-        op = str(mutation.get("op") or "set").strip().lower()
-        key = str(mutation.get("key") or "").strip()
-        value = mutation.get("value")
-        if not key:
-            continue
-        if op == "set":
-            result[key] = value
-        elif op == "unset":
-            result.pop(key, None)
-        elif op == "append":
-            existing = result.get(key)
-            if isinstance(existing, list):
-                existing.append(value)
-            elif existing is None:
-                result[key] = [value]
-        elif op == "update" and isinstance(value, dict):
-            existing = result.get(key)
-            if isinstance(existing, dict):
-                existing.update(value)
-            elif existing is None:
-                result[key] = dict(value)
+        _apply_single_mutation(result, mutation)
     return result
+
+
+def _coerce_eval_input(input_value: Any) -> Any:
+    from dadbot.core.turn_ir import SemanticEvalInput
+
+    if isinstance(input_value, dict):
+        return SemanticEvalInput(
+            intent_hash=str(input_value.get("intent_hash") or ""),
+            policy_view_hash=str(input_value.get("policy_view_hash") or ""),
+            tool_request_count=int(input_value.get("tool_request_count") or 0),
+            session_id=str(input_value.get("session_id") or "default"),
+            mode=str(input_value.get("mode") or "live"),
+        )
+    return input_value
+
+
+def _semantic_tool_budget() -> int:
+    raw_budget = str(os.environ.get("DADBOT_SEMANTIC_TOOL_BUDGET", "8")).strip()
+    return max(1, int(raw_budget) if raw_budget.isdigit() else 8)
+
+
+def _semantic_policy_deny_set() -> set[str]:
+    raw_deny_set = str(os.environ.get("DADBOT_POLICY_DENY_SET", "")).strip()
+    return {item.strip().lower() for item in raw_deny_set.split(",") if item.strip()}
 
 
 def evaluate_policy(input: Any) -> Any:
@@ -64,27 +92,18 @@ def evaluate_policy(input: Any) -> Any:
     from dadbot.core.policy_compiler import SemanticDecision
     from dadbot.core.turn_ir import SemanticEvalInput
 
-    if isinstance(input, dict):
-        input = SemanticEvalInput(
-            intent_hash=str(input.get("intent_hash") or ""),
-            policy_view_hash=str(input.get("policy_view_hash") or ""),
-            tool_request_count=int(input.get("tool_request_count") or 0),
-            session_id=str(input.get("session_id") or "default"),
-            mode=str(input.get("mode") or "live"),
-        )
+    input = _coerce_eval_input(input)
 
     if not isinstance(input, SemanticEvalInput):
         raise TypeError(
             "evaluate_policy input must be SemanticEvalInput or dict-compatible payload",
         )
 
-    raw_budget = str(os.environ.get("DADBOT_SEMANTIC_TOOL_BUDGET", "8")).strip()
-    tool_budget = max(1, int(raw_budget) if raw_budget.isdigit() else 8)
+    tool_budget = _semantic_tool_budget()
     if int(input.tool_request_count) > tool_budget:
         return SemanticDecision.deny("tool_budget_exceeded")
 
-    raw_deny_set = str(os.environ.get("DADBOT_POLICY_DENY_SET", "")).strip()
-    deny_set = {item.strip().lower() for item in raw_deny_set.split(",") if item.strip()}
+    deny_set = _semantic_policy_deny_set()
     if str(input.intent_hash or "").strip().lower() in deny_set:
         return SemanticDecision.deny("policy_block")
 

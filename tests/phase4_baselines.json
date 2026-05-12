@@ -92,7 +92,7 @@
       "generated_at": "2026-05-03T12:19:04+00:00",
       "lanes": {
         "DEV": {
-          "command": "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\.venv\\Scripts\\python.exe -m pytest -m unit --durations=20 -q -p no:randomly --junitxml=C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\session_logs\\cert_baseline_20260503T121904+0000\\lane_dev.junit.xml",
+          "command": "${WORKSPACE_ROOT}\\.venv\\Scripts\\python.exe -m pytest -m unit --durations=20 -q -p no:randomly --junitxml=${WORKSPACE_ROOT}\\session_logs\\cert_baseline_20260503T121904+0000\\lane_dev.junit.xml",
           "elapsed_s": 24.875,
           "exit_code": 0,
           "result": "pass",
@@ -112,7 +112,7 @@
           ]
         },
         "DURABILITY_P4": {
-          "command": "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\.venv\\Scripts\\python.exe -m pytest -m durability or phase4_cert --durations=20 -q -p no:randomly --junitxml=C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\session_logs\\cert_baseline_20260503T121904+0000\\lane_durability_p4.junit.xml",
+          "command": "${WORKSPACE_ROOT}\\.venv\\Scripts\\python.exe -m pytest -m durability or phase4_cert --durations=20 -q -p no:randomly --junitxml=${WORKSPACE_ROOT}\\session_logs\\cert_baseline_20260503T121904+0000\\lane_durability_p4.junit.xml",
           "elapsed_s": 90.024,
           "exit_code": 124,
           "result": "fail",
@@ -129,7 +129,7 @@
           "top_slowest": []
         },
         "FULL_CERT": {
-          "command": "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\.venv\\Scripts\\python.exe -m pytest --durations=20 -q -p no:randomly --junitxml=C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\session_logs\\cert_baseline_20260503T121904+0000\\lane_full_cert.junit.xml",
+          "command": "${WORKSPACE_ROOT}\\.venv\\Scripts\\python.exe -m pytest --durations=20 -q -p no:randomly --junitxml=${WORKSPACE_ROOT}\\session_logs\\cert_baseline_20260503T121904+0000\\lane_full_cert.junit.xml",
           "elapsed_s": 370.003,
           "exit_code": 124,
           "result": "fail",
@@ -146,7 +146,7 @@
           "top_slowest": []
         },
         "INTEGRATION": {
-          "command": "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\.venv\\Scripts\\python.exe -m pytest -m integration --durations=20 -q -p no:randomly --junitxml=C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\session_logs\\cert_baseline_20260503T121904+0000\\lane_integration.junit.xml",
+          "command": "${WORKSPACE_ROOT}\\.venv\\Scripts\\python.exe -m pytest -m integration --durations=20 -q -p no:randomly --junitxml=${WORKSPACE_ROOT}\\session_logs\\cert_baseline_20260503T121904+0000\\lane_integration.junit.xml",
           "elapsed_s": 54.741,
           "exit_code": 0,
           "result": "pass",
@@ -174,7 +174,7 @@
           ]
         },
         "SOAK": {
-          "command": "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\.venv\\Scripts\\python.exe -m pytest -m soak --durations=20 -q -p no:randomly --junitxml=C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\session_logs\\cert_baseline_20260503T121904+0000\\lane_soak.junit.xml",
+          "command": "${WORKSPACE_ROOT}\\.venv\\Scripts\\python.exe -m pytest -m soak --durations=20 -q -p no:randomly --junitxml=${WORKSPACE_ROOT}\\session_logs\\cert_baseline_20260503T121904+0000\\lane_soak.junit.xml",
           "elapsed_s": 78.381,
           "exit_code": 0,
           "result": "pass",
@@ -195,7 +195,7 @@
           ]
         },
         "UI": {
-          "command": "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\.venv\\Scripts\\python.exe -m pytest -m ui --durations=20 -q -p no:randomly --junitxml=C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\session_logs\\cert_baseline_20260503T121904+0000\\lane_ui.junit.xml",
+          "command": "${WORKSPACE_ROOT}\\.venv\\Scripts\\python.exe -m pytest -m ui --durations=20 -q -p no:randomly --junitxml=${WORKSPACE_ROOT}\\session_logs\\cert_baseline_20260503T121904+0000\\lane_ui.junit.xml",
           "elapsed_s": 12.548,
           "exit_code": 1,
           "result": "fail",
@@ -246,7 +246,7 @@
       "generated_at": "2026-05-03T12:35:13+00:00",
       "lanes": {
         "DURABILITY_P4": {
-          "command": "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\.venv\\Scripts\\python.exe -m pytest -m durability or phase4_cert --durations=20 -q -p no:randomly --junitxml=C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\session_logs\\cert_baseline_20260503T123513+0000\\lane_durability_p4.junit.xml",
+          "command": "${WORKSPACE_ROOT}\\.venv\\Scripts\\python.exe -m pytest -m durability or phase4_cert --durations=20 -q -p no:randomly --junitxml=${WORKSPACE_ROOT}\\session_logs\\cert_baseline_20260503T123513+0000\\lane_durability_p4.junit.xml",
           "elapsed_s": 180.014,
           "exit_code": 124,
           "result": "fail",
@@ -263,7 +263,7 @@
           "top_slowest": []
         },
         "FULL_CERT": {
-          "command": "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\.venv\\Scripts\\python.exe -m pytest --durations=20 -q -p no:randomly --junitxml=C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\session_logs\\cert_baseline_20260503T123513+0000\\lane_full_cert.junit.xml",
+          "command": "${WORKSPACE_ROOT}\\.venv\\Scripts\\python.exe -m pytest --durations=20 -q -p no:randomly --junitxml=${WORKSPACE_ROOT}\\session_logs\\cert_baseline_20260503T123513+0000\\lane_full_cert.junit.xml",
           "elapsed_s": 600.006,
           "exit_code": 124,
           "result": "fail",
@@ -280,7 +280,7 @@
           "top_slowest": []
         },
         "UI": {
-          "command": "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\.venv\\Scripts\\python.exe -m pytest -m ui --durations=20 -q -p no:randomly --junitxml=C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\session_logs\\cert_baseline_20260503T123513+0000\\lane_ui.junit.xml",
+          "command": "${WORKSPACE_ROOT}\\.venv\\Scripts\\python.exe -m pytest -m ui --durations=20 -q -p no:randomly --junitxml=${WORKSPACE_ROOT}\\session_logs\\cert_baseline_20260503T123513+0000\\lane_ui.junit.xml",
           "elapsed_s": 34.598,
           "exit_code": 0,
           "result": "pass",
@@ -322,7 +322,7 @@
       "generated_at": "2026-05-03T13:03:06+00:00",
       "lanes": {
         "DURABILITY_P4": {
-          "command": "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\.venv\\Scripts\\python.exe -m pytest -m durability or phase4_cert --durations=20 -q -p no:randomly --junitxml=C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\session_logs\\cert_baseline_20260503T130306+0000\\lane_durability_p4.junit.xml",
+          "command": "${WORKSPACE_ROOT}\\.venv\\Scripts\\python.exe -m pytest -m durability or phase4_cert --durations=20 -q -p no:randomly --junitxml=${WORKSPACE_ROOT}\\session_logs\\cert_baseline_20260503T130306+0000\\lane_durability_p4.junit.xml",
           "elapsed_s": 126.736,
           "exit_code": 0,
           "result": "pass",
@@ -350,7 +350,7 @@
           ]
         },
         "FULL_CERT": {
-          "command": "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\.venv\\Scripts\\python.exe -m pytest --durations=20 -q -p no:randomly --junitxml=C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\session_logs\\cert_baseline_20260503T130306+0000\\lane_full_cert.junit.xml",
+          "command": "${WORKSPACE_ROOT}\\.venv\\Scripts\\python.exe -m pytest --durations=20 -q -p no:randomly --junitxml=${WORKSPACE_ROOT}\\session_logs\\cert_baseline_20260503T130306+0000\\lane_full_cert.junit.xml",
           "elapsed_s": 643.867,
           "exit_code": 0,
           "result": "pass",
@@ -378,7 +378,7 @@
           ]
         },
         "UI": {
-          "command": "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\.venv\\Scripts\\python.exe -m pytest -m ui --durations=20 -q -p no:randomly --junitxml=C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\session_logs\\cert_baseline_20260503T130306+0000\\lane_ui.junit.xml",
+          "command": "${WORKSPACE_ROOT}\\.venv\\Scripts\\python.exe -m pytest -m ui --durations=20 -q -p no:randomly --junitxml=${WORKSPACE_ROOT}\\session_logs\\cert_baseline_20260503T130306+0000\\lane_ui.junit.xml",
           "elapsed_s": 25.705,
           "exit_code": 0,
           "result": "pass",
@@ -427,7 +427,7 @@
       "generated_at": "2026-05-03T14:11:59+00:00",
       "lanes": {
         "DEV": {
-          "command": "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\.venv\\Scripts\\python.exe -m pytest -m unit --durations=20 -q -p no:randomly --junitxml=C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\session_logs\\cert_baseline_20260503T141159+0000\\lane_dev.junit.xml",
+          "command": "${WORKSPACE_ROOT}\\.venv\\Scripts\\python.exe -m pytest -m unit --durations=20 -q -p no:randomly --junitxml=${WORKSPACE_ROOT}\\session_logs\\cert_baseline_20260503T141159+0000\\lane_dev.junit.xml",
           "elapsed_s": 21.01,
           "exit_code": 0,
           "result": "pass",
@@ -447,7 +447,7 @@
           ]
         },
         "DURABILITY_P4": {
-          "command": "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\.venv\\Scripts\\python.exe -m pytest -m durability or phase4_cert --durations=20 -q -p no:randomly --junitxml=C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\session_logs\\cert_baseline_20260503T141159+0000\\lane_durability_p4.junit.xml",
+          "command": "${WORKSPACE_ROOT}\\.venv\\Scripts\\python.exe -m pytest -m durability or phase4_cert --durations=20 -q -p no:randomly --junitxml=${WORKSPACE_ROOT}\\session_logs\\cert_baseline_20260503T141159+0000\\lane_durability_p4.junit.xml",
           "elapsed_s": 131.043,
           "exit_code": 0,
           "result": "pass",
@@ -475,7 +475,7 @@
           ]
         },
         "FULL_CERT": {
-          "command": "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\.venv\\Scripts\\python.exe -m pytest --durations=20 -q -p no:randomly --junitxml=C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\session_logs\\cert_baseline_20260503T141159+0000\\lane_full_cert.junit.xml",
+          "command": "${WORKSPACE_ROOT}\\.venv\\Scripts\\python.exe -m pytest --durations=20 -q -p no:randomly --junitxml=${WORKSPACE_ROOT}\\session_logs\\cert_baseline_20260503T141159+0000\\lane_full_cert.junit.xml",
           "elapsed_s": 657.358,
           "exit_code": 0,
           "result": "pass",
@@ -503,7 +503,7 @@
           ]
         },
         "INTEGRATION": {
-          "command": "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\.venv\\Scripts\\python.exe -m pytest -m integration --durations=20 -q -p no:randomly --junitxml=C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\session_logs\\cert_baseline_20260503T141159+0000\\lane_integration.junit.xml",
+          "command": "${WORKSPACE_ROOT}\\.venv\\Scripts\\python.exe -m pytest -m integration --durations=20 -q -p no:randomly --junitxml=${WORKSPACE_ROOT}\\session_logs\\cert_baseline_20260503T141159+0000\\lane_integration.junit.xml",
           "elapsed_s": 47.044,
           "exit_code": 0,
           "result": "pass",
@@ -531,7 +531,7 @@
           ]
         },
         "SOAK": {
-          "command": "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\.venv\\Scripts\\python.exe -m pytest -m soak --durations=20 -q -p no:randomly --junitxml=C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\session_logs\\cert_baseline_20260503T141159+0000\\lane_soak.junit.xml",
+          "command": "${WORKSPACE_ROOT}\\.venv\\Scripts\\python.exe -m pytest -m soak --durations=20 -q -p no:randomly --junitxml=${WORKSPACE_ROOT}\\session_logs\\cert_baseline_20260503T141159+0000\\lane_soak.junit.xml",
           "elapsed_s": 71.026,
           "exit_code": 0,
           "result": "pass",
@@ -552,7 +552,7 @@
           ]
         },
         "UI": {
-          "command": "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\.venv\\Scripts\\python.exe -m pytest -m ui --durations=20 -q -p no:randomly --junitxml=C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\session_logs\\cert_baseline_20260503T141159+0000\\lane_ui.junit.xml",
+          "command": "${WORKSPACE_ROOT}\\.venv\\Scripts\\python.exe -m pytest -m ui --durations=20 -q -p no:randomly --junitxml=${WORKSPACE_ROOT}\\session_logs\\cert_baseline_20260503T141159+0000\\lane_ui.junit.xml",
           "elapsed_s": 27.012,
           "exit_code": 0,
           "result": "pass",
@@ -602,7 +602,7 @@
       "generated_at": "2026-05-06T20:51:25+00:00",
       "lanes": {
         "DEV": {
-          "command": "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\.venv\\Scripts\\python.exe -m pytest -m unit --durations=20 -q -p no:randomly --junitxml=C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\session_logs\\cert_baseline_20260506T205125+0000\\lane_dev.junit.xml",
+          "command": "${WORKSPACE_ROOT}\\.venv\\Scripts\\python.exe -m pytest -m unit --durations=20 -q -p no:randomly --junitxml=${WORKSPACE_ROOT}\\session_logs\\cert_baseline_20260506T205125+0000\\lane_dev.junit.xml",
           "elapsed_s": 17.009,
           "exit_code": 0,
           "result": "pass",
@@ -622,7 +622,7 @@
           ]
         },
         "DURABILITY_P4": {
-          "command": "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\.venv\\Scripts\\python.exe -m pytest -m durability or phase4_cert --durations=20 -q -p no:randomly --junitxml=C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\session_logs\\cert_baseline_20260506T205125+0000\\lane_durability_p4.junit.xml",
+          "command": "${WORKSPACE_ROOT}\\.venv\\Scripts\\python.exe -m pytest -m durability or phase4_cert --durations=20 -q -p no:randomly --junitxml=${WORKSPACE_ROOT}\\session_logs\\cert_baseline_20260506T205125+0000\\lane_durability_p4.junit.xml",
           "elapsed_s": 119.045,
           "exit_code": 0,
           "result": "pass",
@@ -650,7 +650,7 @@
           ]
         },
         "FULL_CERT": {
-          "command": "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\.venv\\Scripts\\python.exe -m pytest --durations=20 -q -p no:randomly --junitxml=C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\session_logs\\cert_baseline_20260506T205125+0000\\lane_full_cert.junit.xml",
+          "command": "${WORKSPACE_ROOT}\\.venv\\Scripts\\python.exe -m pytest --durations=20 -q -p no:randomly --junitxml=${WORKSPACE_ROOT}\\session_logs\\cert_baseline_20260506T205125+0000\\lane_full_cert.junit.xml",
           "elapsed_s": 385.122,
           "exit_code": 0,
           "result": "pass",
@@ -678,7 +678,7 @@
           ]
         },
         "INTEGRATION": {
-          "command": "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\.venv\\Scripts\\python.exe -m pytest -m integration --durations=20 -q -p no:randomly --junitxml=C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\session_logs\\cert_baseline_20260506T205125+0000\\lane_integration.junit.xml",
+          "command": "${WORKSPACE_ROOT}\\.venv\\Scripts\\python.exe -m pytest -m integration --durations=20 -q -p no:randomly --junitxml=${WORKSPACE_ROOT}\\session_logs\\cert_baseline_20260506T205125+0000\\lane_integration.junit.xml",
           "elapsed_s": 40.019,
           "exit_code": 0,
           "result": "pass",
@@ -706,7 +706,7 @@
           ]
         },
         "SOAK": {
-          "command": "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\.venv\\Scripts\\python.exe -m pytest -m soak --durations=20 -q -p no:randomly --junitxml=C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\session_logs\\cert_baseline_20260506T205125+0000\\lane_soak.junit.xml",
+          "command": "${WORKSPACE_ROOT}\\.venv\\Scripts\\python.exe -m pytest -m soak --durations=20 -q -p no:randomly --junitxml=${WORKSPACE_ROOT}\\session_logs\\cert_baseline_20260506T205125+0000\\lane_soak.junit.xml",
           "elapsed_s": 46.018,
           "exit_code": 0,
           "result": "pass",
@@ -727,7 +727,7 @@
           ]
         },
         "UI": {
-          "command": "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\.venv\\Scripts\\python.exe -m pytest -m ui --durations=20 -q -p no:randomly --junitxml=C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\session_logs\\cert_baseline_20260506T205125+0000\\lane_ui.junit.xml",
+          "command": "${WORKSPACE_ROOT}\\.venv\\Scripts\\python.exe -m pytest -m ui --durations=20 -q -p no:randomly --junitxml=${WORKSPACE_ROOT}\\session_logs\\cert_baseline_20260506T205125+0000\\lane_ui.junit.xml",
           "elapsed_s": 25.012,
           "exit_code": 0,
           "result": "pass",
@@ -777,7 +777,7 @@
       "generated_at": "2026-05-08T00:28:41+00:00",
       "lanes": {
         "DEV": {
-          "command": "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\.venv\\Scripts\\python.exe -m pytest -m unit --durations=20 -q -p no:randomly --junitxml=C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\session_logs\\cert_baseline_20260508T002841+0000\\lane_dev.junit.xml",
+          "command": "${WORKSPACE_ROOT}\\.venv\\Scripts\\python.exe -m pytest -m unit --durations=20 -q -p no:randomly --junitxml=${WORKSPACE_ROOT}\\session_logs\\cert_baseline_20260508T002841+0000\\lane_dev.junit.xml",
           "elapsed_s": 19.01,
           "exit_code": 0,
           "result": "pass",
@@ -797,7 +797,7 @@
           ]
         },
         "DURABILITY_P4": {
-          "command": "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\.venv\\Scripts\\python.exe -m pytest -m durability or phase4_cert --durations=20 -q -p no:randomly --junitxml=C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\session_logs\\cert_baseline_20260508T002841+0000\\lane_durability_p4.junit.xml",
+          "command": "${WORKSPACE_ROOT}\\.venv\\Scripts\\python.exe -m pytest -m durability or phase4_cert --durations=20 -q -p no:randomly --junitxml=${WORKSPACE_ROOT}\\session_logs\\cert_baseline_20260508T002841+0000\\lane_durability_p4.junit.xml",
           "elapsed_s": 111.041,
           "exit_code": 0,
           "result": "pass",
@@ -825,7 +825,7 @@
           ]
         },
         "FULL_CERT": {
-          "command": "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\.venv\\Scripts\\python.exe -m pytest --durations=20 -q -p no:randomly --junitxml=C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\session_logs\\cert_baseline_20260508T002841+0000\\lane_full_cert.junit.xml",
+          "command": "${WORKSPACE_ROOT}\\.venv\\Scripts\\python.exe -m pytest --durations=20 -q -p no:randomly --junitxml=${WORKSPACE_ROOT}\\session_logs\\cert_baseline_20260508T002841+0000\\lane_full_cert.junit.xml",
           "elapsed_s": 411.142,
           "exit_code": 0,
           "result": "pass",
@@ -853,7 +853,7 @@
           ]
         },
         "INTEGRATION": {
-          "command": "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\.venv\\Scripts\\python.exe -m pytest -m integration --durations=20 -q -p no:randomly --junitxml=C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\session_logs\\cert_baseline_20260508T002841+0000\\lane_integration.junit.xml",
+          "command": "${WORKSPACE_ROOT}\\.venv\\Scripts\\python.exe -m pytest -m integration --durations=20 -q -p no:randomly --junitxml=${WORKSPACE_ROOT}\\session_logs\\cert_baseline_20260508T002841+0000\\lane_integration.junit.xml",
           "elapsed_s": 42.016,
           "exit_code": 0,
           "result": "pass",
@@ -881,7 +881,7 @@
           ]
         },
         "SOAK": {
-          "command": "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\.venv\\Scripts\\python.exe -m pytest -m soak --durations=20 -q -p no:randomly --junitxml=C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\session_logs\\cert_baseline_20260508T002841+0000\\lane_soak.junit.xml",
+          "command": "${WORKSPACE_ROOT}\\.venv\\Scripts\\python.exe -m pytest -m soak --durations=20 -q -p no:randomly --junitxml=${WORKSPACE_ROOT}\\session_logs\\cert_baseline_20260508T002841+0000\\lane_soak.junit.xml",
           "elapsed_s": 45.018,
           "exit_code": 0,
           "result": "pass",
@@ -902,7 +902,7 @@
           ]
         },
         "UI": {
-          "command": "C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\.venv\\Scripts\\python.exe -m pytest -m ui --durations=20 -q -p no:randomly --junitxml=C:\\Users\\josep\\OneDrive\\Desktop\\Dad-Bot\\session_logs\\cert_baseline_20260508T002841+0000\\lane_ui.junit.xml",
+          "command": "${WORKSPACE_ROOT}\\.venv\\Scripts\\python.exe -m pytest -m ui --durations=20 -q -p no:randomly --junitxml=${WORKSPACE_ROOT}\\session_logs\\cert_baseline_20260508T002841+0000\\lane_ui.junit.xml",
           "elapsed_s": 29.012,
           "exit_code": 0,
           "result": "pass",

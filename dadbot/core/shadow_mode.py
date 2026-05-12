@@ -58,7 +58,7 @@ def is_enabled() -> bool:
 def shadow_log(
     *,
     snapshot: dict[str, Any],
-    trace_id: str,
+    trace_token: str,
     session_id: str,
     event_count: int,
     latency_ms: float,
@@ -87,7 +87,7 @@ def shadow_log(
             return
         _emit(
             snapshot=snapshot,
-            trace_id=trace_id,
+            trace_token=trace_token,
             session_id=session_id,
             event_count=int(event_count),
             latency_ms=float(latency_ms),
@@ -179,6 +179,43 @@ def _stable_sha256(payload: Any) -> str:
     ).hexdigest()
 
 
+def _memory_divergence_detail(snapshot: dict[str, Any]) -> str | None:
+    memory_snapshot = dict(snapshot.get("memory_snapshot") or {})
+    if not memory_snapshot:
+        return None
+    if memory_snapshot.get("retrieval_set") is None:
+        return None
+    # Compare cardinality / ordering as a coarse signal.
+    retrieval = list(memory_snapshot.get("retrieval_set") or [])
+    original_retrieval = list(
+        (snapshot.get("inputs") or {}).get("memory_context") or [],
+    )
+    if set(str(x) for x in retrieval) != set(str(x) for x in original_retrieval):
+        return "retrieval_diff"
+    if retrieval != original_retrieval:
+        return "ranking_diff"
+    if memory_snapshot.get("decay_applied"):
+        return "decay_diff"
+    return None
+
+
+def _execution_divergence_detail(snapshot: dict[str, Any]) -> str:
+    outputs_per_step = list(snapshot.get("outputs_per_step") or [])
+    baseline_steps = list((snapshot.get("inputs") or {}).get("expected_steps") or [])
+    if not baseline_steps:
+        return "hash_mismatch"
+    if len(outputs_per_step) < len(baseline_steps):
+        return "missing_event"
+    if len(outputs_per_step) > len(baseline_steps):
+        return "extra_event"
+
+    out_ids = [str(s.get("step") or s.get("node") or i) for i, s in enumerate(outputs_per_step)]
+    base_ids = [str(s.get("step") or s.get("node") or i) for i, s in enumerate(baseline_steps)]
+    if out_ids != base_ids:
+        return "ordering"
+    return "hash_mismatch"
+
+
 def _classify_divergence(
     snapshot_hash: str,
     replay_hash: str,
@@ -205,48 +242,10 @@ def _classify_divergence(
     # --- memory divergence -----------------------------------------------------
     memory_snapshot = dict(snapshot.get("memory_snapshot") or {})
     if memory_snapshot:
-        detail: str | None = None
-        if memory_snapshot.get("retrieval_set") is not None:
-            # Compare cardinality / ordering as a coarse signal.
-            retrieval = list(memory_snapshot.get("retrieval_set") or [])
-            original_retrieval = list(
-                (snapshot.get("inputs") or {}).get("memory_context") or []
-            )
-            if set(str(x) for x in retrieval) != set(str(x) for x in original_retrieval):
-                detail = "retrieval_diff"
-            elif retrieval != original_retrieval:
-                detail = "ranking_diff"
-            elif memory_snapshot.get("decay_applied"):
-                detail = "decay_diff"
-        return ("memory", detail)
+        return ("memory", _memory_divergence_detail(snapshot))
 
     # --- execution divergence --------------------------------------------------
-    outputs_per_step = list(snapshot.get("outputs_per_step") or [])
-    baseline_steps = list((snapshot.get("inputs") or {}).get("expected_steps") or [])
-    detail = None
-    if baseline_steps:
-        if len(outputs_per_step) < len(baseline_steps):
-            detail = "missing_event"
-        elif len(outputs_per_step) > len(baseline_steps):
-            detail = "extra_event"
-        else:
-            # Same length — check ordering by comparing step names/ids.
-            out_ids = [
-                str(s.get("step") or s.get("node") or i)
-                for i, s in enumerate(outputs_per_step)
-            ]
-            base_ids = [
-                str(s.get("step") or s.get("node") or i)
-                for i, s in enumerate(baseline_steps)
-            ]
-            if out_ids != base_ids:
-                detail = "ordering"
-            else:
-                detail = "hash_mismatch"
-    else:
-        detail = "hash_mismatch"
-
-    return ("execution", detail)
+    return ("execution", _execution_divergence_detail(snapshot))
 
 
 def _compute_input_hash(snapshot: dict[str, Any]) -> str:
@@ -323,7 +322,7 @@ def _compute_replay_hash(snapshot: dict[str, Any]) -> str:
 def _emit(
     *,
     snapshot: dict[str, Any],
-    trace_id: str,
+    trace_token: str,
     session_id: str,
     event_count: int,
     latency_ms: float,
@@ -351,7 +350,7 @@ def _emit(
         "latency_ms": round(latency_ms, 2),
         "event_count": event_count,
         "snapshot_version": BASELINE_SNAPSHOT_ID,
-        "trace_id": str(trace_id or ""),
+        "trace_id": str(trace_token or ""),
         "session_id": str(session_id or ""),
         "error": None,
     }

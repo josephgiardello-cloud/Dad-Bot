@@ -64,33 +64,48 @@ def _node_decision_sequence_hash(execution_trace_context: dict[str, Any]) -> str
     return _stable_sha256(sequence)
 
 
+def _failure_transition_status_signal(resolved_status: str) -> bool:
+    return resolved_status.lower() in {"error", "failed", "retry", "recover", "recovered"}
+
+
+def _has_step_failure_signal(failure_view: dict[str, Any]) -> bool:
+    return bool(
+        str(failure_view.get("class") or "")
+        or str(failure_view.get("type") or "")
+        or str(failure_view.get("message") or ""),
+    )
+
+
+def _build_step_error_string(failure_view: dict[str, Any], payload: dict[str, Any]) -> str:
+    return str(
+        failure_view.get("message")
+        or payload.get("error")
+        or failure_view.get("type")
+        or payload.get("error_type")
+        or ""
+    )
+
+
+def _failure_transition_for_step(step: dict[str, Any]) -> dict[str, Any] | None:
+    payload = dict(step.get("payload") or {})
+    execution_result = dict(payload.get("metadata", {}).get("execution_result") or {})
+    failure_view = dict(execution_result.get("failure") or {})
+    resolved_status = str(execution_result.get("status") or payload.get("status") or "")
+    if not _has_step_failure_signal(failure_view) and not _failure_transition_status_signal(resolved_status):
+        return None
+    return {
+        "operation": str(step.get("operation") or ""),
+        "status": resolved_status,
+        "error": _build_step_error_string(failure_view, payload),
+    }
+
+
 def _failure_recovery_transition_hash(execution_trace_context: dict[str, Any]) -> str:
     transitions: list[dict[str, Any]] = []
     for step in list(execution_trace_context.get("steps") or []):
-        payload = dict(step.get("payload") or {})
-        execution_result = dict(payload.get("metadata", {}).get("execution_result") or {})
-        failure_view = dict(execution_result.get("failure") or {})
-        resolved_status = str(execution_result.get("status") or payload.get("status") or "")
-        has_failure = bool(
-            str(failure_view.get("class") or "")
-            or str(failure_view.get("type") or "")
-            or str(failure_view.get("message") or ""),
-        )
-        status_signals_failure = resolved_status.lower() in {"error", "failed", "retry", "recover", "recovered"}
-        if has_failure or status_signals_failure:
-            transitions.append(
-                {
-                    "operation": str(step.get("operation") or ""),
-                    "status": resolved_status,
-                    "error": str(
-                        failure_view.get("message")
-                        or payload.get("error")
-                        or failure_view.get("type")
-                        or payload.get("error_type")
-                        or ""
-                    ),
-                },
-            )
+        transition = _failure_transition_for_step(step)
+        if transition is not None:
+            transitions.append(transition)
     return _stable_sha256(transitions)
 
 
@@ -118,6 +133,33 @@ def _post_commit_mutation_effects_hash(execution_trace_context: dict[str, Any]) 
     return _stable_sha256(payload)
 
 
+def _assemble_official_state(
+    *,
+    seed: dict[str, Any],
+    canonical_trace: dict[str, Any],
+    memory_view: "ExecutionMemoryView",
+    policy_snapshot: dict[str, Any],
+    tool_trace_hash: str,
+    claimed_final_trace_hash: str,
+    live_tool_mode: bool,
+) -> dict[str, Any]:
+    official_state = reduce_official_execution_state(
+        graph_output=str(canonical_trace.get("normalized_response") or seed.get("final_output") or ""),
+        execution_trace_context=canonical_trace,
+        memory_view=memory_view.to_dict(),
+        memory_view_state_id=memory_view.state_id,
+        policy_snapshot=policy_snapshot,
+        tool_trace_hash=tool_trace_hash,
+        final_trace_hash_fallback=derive_execution_trace_hash(canonical_trace),
+        invariant_decisions=list(seed.get("invariant_decisions") or canonical_trace.get("invariant_decisions") or []),
+        ledger_events=list(seed.get("ledger_events") or canonical_trace.get("ledger_events") or []),
+        live_tool_mode=live_tool_mode,
+    )
+    official_state["schema_version"] = str(seed.get("schema_version") or official_state.get("schema_version") or "1.0")
+    official_state["claimed_final_trace_hash"] = claimed_final_trace_hash
+    return official_state
+
+
 def reconstruct_terminal_state_from_trace(
     *,
     terminal_state_seed: dict[str, Any],
@@ -140,21 +182,15 @@ def reconstruct_terminal_state_from_trace(
 
     claimed_final_trace_hash = str(trace.get("final_hash") or "")
     tool_trace_hash = str(seed.get("tool_trace_hash") or "")
-    official_state = reduce_official_execution_state(
-        graph_output=str(canonical_trace.get("normalized_response") or seed.get("final_output") or ""),
-        execution_trace_context=canonical_trace,
-        memory_view=memory_view.to_dict(),
-        memory_view_state_id=memory_view.state_id,
+    return _assemble_official_state(
+        seed=seed,
+        canonical_trace=canonical_trace,
+        memory_view=memory_view,
         policy_snapshot=policy_snapshot,
         tool_trace_hash=tool_trace_hash,
-        final_trace_hash_fallback=derive_execution_trace_hash(canonical_trace),
-        invariant_decisions=list(seed.get("invariant_decisions") or canonical_trace.get("invariant_decisions") or []),
-        ledger_events=list(seed.get("ledger_events") or canonical_trace.get("ledger_events") or []),
+        claimed_final_trace_hash=claimed_final_trace_hash,
         live_tool_mode=live_tool_mode,
     )
-    official_state["schema_version"] = str(seed.get("schema_version") or official_state.get("schema_version") or "1.0")
-    official_state["claimed_final_trace_hash"] = claimed_final_trace_hash
-    return official_state
 
 
 def verify_terminal_state_replay_equivalence(

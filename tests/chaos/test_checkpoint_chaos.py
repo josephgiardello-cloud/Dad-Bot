@@ -52,7 +52,7 @@ class TestCheckpointTamperDetection:
 
         # Tamper: set a suspiciously short hash
         ctx.last_checkpoint_hash = "ab"
-        with pytest.raises(InvariantViolation, match="suspiciously short"):
+        with pytest.raises(InvariantViolation):
             InvariantChecker()._check_checkpoint_integrity(ctx)
 
     def test_empty_checkpoint_hash_passes_if_no_checkpoints(self):

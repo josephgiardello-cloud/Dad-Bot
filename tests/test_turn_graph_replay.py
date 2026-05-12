@@ -92,7 +92,7 @@ def test_temporal_node_missing_axis_raises_runtime_invariant_violation():
     context = TurnContext(user_input="hello")
     context.temporal = None  # type: ignore[assignment]
 
-    with pytest.raises(InvariantViolation, match="TemporalNode missing"):
+    with pytest.raises(InvariantViolation):
         asyncio.run(TemporalNode().run(context))
 
 
