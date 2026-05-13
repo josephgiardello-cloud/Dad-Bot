@@ -53,32 +53,7 @@ if ollama is None:
 logger = logging.getLogger(__name__)
 
 
-class _ManagerDescriptor:
-    """Data descriptor for a single named manager slot on DadBot.
 
-    Replaces repetitive ``@property`` / ``@<name>.setter`` pairs.  Both
-    read and write delegate to the instance helpers
-    ``_get_explicit_manager`` and ``_set_explicit_manager`` so that the
-    existing backing-store convention (``self._<name>``) and the
-    service-container fallback are preserved exactly.
-
-    The *name* argument is the *canonical* backing name.  Setting a
-    descriptor whose attribute name differs from *name* produces an alias
-    (e.g. ``context_builder`` aliased to ``context_service``).
-    """
-
-    __slots__ = ("_name",)
-
-    def __init__(self, name: str) -> None:
-        self._name = name
-
-    def __get__(self, obj: Any, objtype: Any = None) -> Any:
-        if obj is None:
-            return self  # class-level access returns the descriptor itself
-        return obj._get_explicit_manager(self._name)
-
-    def __set__(self, obj: Any, value: Any) -> None:
-        obj._set_explicit_manager(self._name, value)
 
 
 class _MemoryProjectionProxy(dict):
@@ -171,82 +146,82 @@ class DadBot(
     """
 
     # ------------------------------------------------------------------
-    # Auto-delegation registry
+    # Unified routing: combined config, runtime state, and internal maps
+    # ------------------------------------------------------------------
+    # Format: name -> (target_object, target_attr) for delegation
+
+    _UNIFIED_ROUTING: dict[str, tuple[str, str]] = {
+        # CONFIG mappings: route to self.config.<attr>
+        "MODEL_NAME": ("config", "model_name"),
+        "FALLBACK_MODELS": ("config", "fallback_models"),
+        "ACTIVE_MODEL": ("config", "active_model"),
+        "active_model": ("config", "active_model"),
+        "ACTIVE_EMBEDDING_MODEL": ("config", "active_embedding_model"),
+        "LLM_PROVIDER": ("config", "llm_provider"),
+        "LLM_MODEL": ("config", "llm_model"),
+        "TENANT_ID": ("config", "tenant_id"),
+        "tenant_id": ("config", "tenant_id"),
+        "APPEND_SIGNOFF": ("config", "append_signoff"),
+        "LIGHT_MODE": ("config", "light_mode"),
+        "PREFERRED_EMBEDDING_MODELS": ("config", "preferred_embedding_models"),
+        "RECENT_HISTORY_WINDOW": ("config", "recent_history_window"),
+        "MAX_HISTORY_MESSAGES_SCAN": ("config", "max_history_messages_scan"),
+        "SUMMARY_TRIGGER_MESSAGES": ("config", "summary_trigger_messages"),
+        "RELATIONSHIP_REFLECTION_INTERVAL": ("config", "relationship_reflection_interval"),
+        "CONTEXT_TOKEN_BUDGET": ("config", "context_token_budget"),
+        "RESERVED_RESPONSE_TOKENS": ("config", "reserved_response_tokens"),
+        "APPROX_CHARS_PER_TOKEN": ("config", "approx_chars_per_token"),
+        "MOOD_DETECTION_TEMPERATURE": ("config", "mood_detection_temperature"),
+        "STREAM_TIMEOUT_SECONDS": ("config", "stream_timeout_seconds"),
+        "STREAM_MAX_CHARS": ("config", "stream_max_chars"),
+        "PROFILE_PATH": ("config", "profile_path"),
+        "MEMORY_PATH": ("config", "memory_path"),
+        "SEMANTIC_MEMORY_DB_PATH": ("config", "semantic_memory_db_path"),
+        "GRAPH_STORE_DB_PATH": ("config", "graph_store_db_path"),
+        "SESSION_LOG_DIR": ("config", "session_log_dir"),
+        # RUNTIME_STATE mappings: route to self.runtime_state_manager.<attr>
+        "runtime_state_container": ("runtime_state_manager", "container"),
+        "history": ("runtime_state_manager", "history"),
+        "session_moods": ("runtime_state_manager", "session_moods"),
+        "session_summary": ("runtime_state_manager", "session_summary"),
+        "session_summary_updated_at": ("runtime_state_manager", "session_summary_updated_at"),
+        "session_summary_covered_messages": ("runtime_state_manager", "session_summary_covered_messages"),
+        "last_relationship_reflection_turn": ("runtime_state_manager", "last_relationship_reflection_turn"),
+        "_pending_daily_checkin_context": ("runtime_state_manager", "pending_daily_checkin_context"),
+        "_active_tool_observation_context": ("runtime_state_manager", "active_tool_observation_context"),
+        "_last_planner_debug": ("runtime_state_manager", "planner_debug"),
+        "chat_threads": ("runtime_state_manager", "chat_threads"),
+        "active_thread_id": ("runtime_state_manager", "active_thread_id"),
+        "thread_snapshots": ("runtime_state_manager", "thread_snapshots"),
+        # INTERNAL_RUNTIME mappings: route to self._internal_runtime.<attr>
+        "_prompt_guard_stats": ("_internal_runtime", "prompt_guard_stats"),
+        "_last_memory_context_stats": ("_internal_runtime", "last_memory_context_stats"),
+        "_last_output_moderation": ("_internal_runtime", "last_output_moderation"),
+        "_last_reply_supervisor": ("_internal_runtime", "last_reply_supervisor"),
+        "_last_turn_pipeline": ("_internal_runtime", "last_turn_pipeline"),
+        "_last_turn_health_state": ("_internal_runtime", "last_turn_health_state"),
+        "_last_turn_ux_feedback": ("_internal_runtime", "last_turn_ux_feedback"),
+        "_shadow_decision_bus": ("_internal_runtime", "shadow_decision_bus"),
+        "_last_shadow_decision_report": ("_internal_runtime", "last_shadow_decision_report"),
+        "_background_task_ids": ("_internal_runtime", "background_task_ids"),
+    }
+
+    # ------------------------------------------------------------------
+    # Fallback manager delegation chain
     # ------------------------------------------------------------------
 
-    _LEGACY_MANAGER_DELEGATE_CHAIN: tuple[str, ...] = (
-        "health_manager",
-        "tts_manager",
-        "avatar_manager",
-        "calendar_manager",
-        "email_manager",
-        "runtime_storage",
-        "profile_runtime",
-        "memory_manager",
-        "memory_coordinator",
-        "long_term_signals",
-        "relationship_manager",
-        "runtime_state_manager",
-        "status_reporting",
+    _MANAGER_DELEGATE_CHAIN: tuple[str, ...] = (
+        "health_manager", "tts_manager", "avatar_manager", "calendar_manager",
+        "email_manager", "runtime_storage", "profile_runtime", "memory_manager",
+        "memory_coordinator", "long_term_signals", "relationship_manager",
+        "runtime_state_manager", "status_reporting",  # legacy
+        "maintenance_scheduler", "conversation_persistence", "session_summary_manager",
+        "turn_service", "memory_query", "memory_commands", "safety_support",
+        "profile_context", "reply_supervisor", "reply_finalization", "multimodal_handler",
+        "model_runtime", "agentic_handler", "tool_registry", "context_service",
+        "tone_context", "personality_service", "conversation_surface", "prompt_assembly",
+        "runtime_client", "runtime_orchestration", "runtime_interface", "mood_manager",
     )
-
-    _SERVICE_MANAGER_DELEGATE_CHAIN: tuple[str, ...] = (
-        "maintenance_scheduler",
-        "conversation_persistence",
-        "session_summary_manager",
-        "turn_service",
-        "memory_query",
-        "memory_commands",
-        "safety_support",
-        "profile_context",
-        "reply_supervisor",
-        "reply_finalization",
-        "multimodal_handler",
-        "model_runtime",
-        "agentic_handler",
-        "tool_registry",
-        "context_service",
-        "tone_context",
-        "personality_service",
-        "conversation_surface",
-        "prompt_assembly",
-        "runtime_client",
-        "runtime_orchestration",
-        "runtime_interface",
-        "mood_manager",
-    )
-
-    _MANAGER_DELEGATE_CHAIN: tuple[str, ...] = _LEGACY_MANAGER_DELEGATE_CHAIN + _SERVICE_MANAGER_DELEGATE_CHAIN
-
-    _CONFIG_ATTR_MAP: dict[str, str] = {
-        "MODEL_NAME": "model_name",
-        "FALLBACK_MODELS": "fallback_models",
-        "ACTIVE_MODEL": "active_model",
-        "active_model": "active_model",
-        "ACTIVE_EMBEDDING_MODEL": "active_embedding_model",
-        "LLM_PROVIDER": "llm_provider",
-        "LLM_MODEL": "llm_model",
-        "TENANT_ID": "tenant_id",
-        "tenant_id": "tenant_id",
-        "APPEND_SIGNOFF": "append_signoff",
-        "LIGHT_MODE": "light_mode",
-        "PREFERRED_EMBEDDING_MODELS": "preferred_embedding_models",
-        "RECENT_HISTORY_WINDOW": "recent_history_window",
-        "MAX_HISTORY_MESSAGES_SCAN": "max_history_messages_scan",
-        "SUMMARY_TRIGGER_MESSAGES": "summary_trigger_messages",
-        "RELATIONSHIP_REFLECTION_INTERVAL": "relationship_reflection_interval",
-        "CONTEXT_TOKEN_BUDGET": "context_token_budget",
-        "RESERVED_RESPONSE_TOKENS": "reserved_response_tokens",
-        "APPROX_CHARS_PER_TOKEN": "approx_chars_per_token",
-        "MOOD_DETECTION_TEMPERATURE": "mood_detection_temperature",
-        "STREAM_TIMEOUT_SECONDS": "stream_timeout_seconds",
-        "STREAM_MAX_CHARS": "stream_max_chars",
-        "PROFILE_PATH": "profile_path",
-        "MEMORY_PATH": "memory_path",
-        "SEMANTIC_MEMORY_DB_PATH": "semantic_memory_db_path",
-        "GRAPH_STORE_DB_PATH": "graph_store_db_path",
-        "SESSION_LOG_DIR": "session_log_dir",
-    }
 
     _DEPRECATED_FACADE_ALIASES: dict[str, str] = {
         "detect_mood": "mood_manager.detect",
@@ -272,78 +247,26 @@ class DadBot(
         "living_dad_snapshot": "profile_runtime.living_dad_snapshot",
     }
 
-    _RUNTIME_STATE_ATTR_MAP: dict[str, str] = {
-        "runtime_state_container": "container",
-        "history": "history",
-        "session_moods": "session_moods",
-        "session_summary": "session_summary",
-        "session_summary_updated_at": "session_summary_updated_at",
-        "session_summary_covered_messages": "session_summary_covered_messages",
-        "last_relationship_reflection_turn": "last_relationship_reflection_turn",
-        "_pending_daily_checkin_context": "pending_daily_checkin_context",
-        "_active_tool_observation_context": "active_tool_observation_context",
-        "_last_planner_debug": "planner_debug",
-        "chat_threads": "chat_threads",
-        "active_thread_id": "active_thread_id",
-        "thread_snapshots": "thread_snapshots",
-    }
-
-    _INTERNAL_RUNTIME_ATTR_MAP: dict[str, str] = {
-        "_prompt_guard_stats": "prompt_guard_stats",
-        "_last_memory_context_stats": "last_memory_context_stats",
-        "_last_output_moderation": "last_output_moderation",
-        "_last_reply_supervisor": "last_reply_supervisor",
-        "_last_turn_pipeline": "last_turn_pipeline",
-        "_last_turn_health_state": "last_turn_health_state",
-        "_last_turn_ux_feedback": "last_turn_ux_feedback",
-        "_shadow_decision_bus": "shadow_decision_bus",
-        "_last_shadow_decision_report": "last_shadow_decision_report",
-        "_background_task_ids": "background_task_ids",
-    }
-
     # ------------------------------------------------------------------
-    # Attribute routing
+    # Unified attribute routing
     # ------------------------------------------------------------------
 
     def __getattr__(self, name: str) -> Any:
-        """Route unknown attribute lookups to registered manager objects.
-
-        After __init__ completes, lookups hit the O(1) provider map exposed by
-        self.services.  During the early-init window the chain is walked
-        directly so that manager construction can reference each other safely.
-
-        Dunder names (__foo__) are never delegated.
-        """
+        """Route attribute lookups via unified routing map or manager delegation chain."""
         if name.startswith("__"):
             raise AttributeError(name)
 
-        config_attr = self.__class__._CONFIG_ATTR_MAP.get(name)
-        if config_attr is not None:
+        # Unified routing: check config, runtime_state, internal_runtime
+        route = self.__class__._UNIFIED_ROUTING.get(name)
+        if route is not None:
+            target_obj_name, target_attr = route
             try:
-                config = object.__getattribute__(self, "config")
-                return getattr(config, config_attr)
+                target = object.__getattribute__(self, target_obj_name)
+                return getattr(target, target_attr)
             except AttributeError:
                 pass
 
-        runtime_state_attr = self.__class__._RUNTIME_STATE_ATTR_MAP.get(name)
-        if runtime_state_attr is not None:
-            try:
-                runtime_state_manager = object.__getattribute__(
-                    self,
-                    "runtime_state_manager",
-                )
-                return getattr(runtime_state_manager, runtime_state_attr)
-            except AttributeError:
-                pass
-
-        internal_runtime_attr = self.__class__._INTERNAL_RUNTIME_ATTR_MAP.get(name)
-        if internal_runtime_attr is not None:
-            try:
-                internal_runtime = object.__getattribute__(self, "_internal_runtime")
-                return getattr(internal_runtime, internal_runtime_attr)
-            except AttributeError:
-                pass
-
+        # Services provider fallback
         try:
             services = object.__getattribute__(self, "services")
             provider = services.get_provider(name)
@@ -355,6 +278,7 @@ class DadBot(
         except AttributeError:
             pass
 
+        # Manager delegation chain fallback
         _sentinel = object()
         for _mgr_attr in self.__class__._MANAGER_DELEGATE_CHAIN:
             try:
@@ -369,33 +293,14 @@ class DadBot(
         )
 
     def __setattr__(self, name: str, value: Any) -> None:
-        """Route mutations of config-mirrored names to self.config."""
-        config_attr = self.__class__._CONFIG_ATTR_MAP.get(name)
-        if config_attr is not None:
+        """Route mutations via unified routing map."""
+        # Unified routing: check config, runtime_state, internal_runtime
+        route = self.__class__._UNIFIED_ROUTING.get(name)
+        if route is not None:
+            target_obj_name, target_attr = route
             try:
-                config = object.__getattribute__(self, "config")
-                setattr(config, config_attr, value)
-                return
-            except AttributeError:
-                pass
-
-        runtime_state_attr = self.__class__._RUNTIME_STATE_ATTR_MAP.get(name)
-        if runtime_state_attr is not None:
-            try:
-                runtime_state_manager = object.__getattribute__(
-                    self,
-                    "runtime_state_manager",
-                )
-                setattr(runtime_state_manager, runtime_state_attr, value)
-                return
-            except AttributeError:
-                pass
-
-        internal_runtime_attr = self.__class__._INTERNAL_RUNTIME_ATTR_MAP.get(name)
-        if internal_runtime_attr is not None:
-            try:
-                internal_runtime = object.__getattribute__(self, "_internal_runtime")
-                setattr(internal_runtime, internal_runtime_attr, value)
+                target = object.__getattribute__(self, target_obj_name)
+                setattr(target, target_attr, value)
                 return
             except AttributeError:
                 pass
@@ -479,43 +384,26 @@ class DadBot(
         return cached
 
     # ------------------------------------------------------------------
-    # Explicit manager descriptors  (replaces property/setter boilerplate)
+    # Manager aliases (compatibility shortcuts)
     # ------------------------------------------------------------------
-    # Each line is equivalent to a @property + @<name>.setter pair that
-    # delegates to _get_explicit_manager / _set_explicit_manager.
-    # Aliases use a different canonical name than their attribute name.
 
-    runtime_storage        = _ManagerDescriptor("runtime_storage")
-    profile_runtime        = _ManagerDescriptor("profile_runtime")
-    mood_manager           = _ManagerDescriptor("mood_manager")
-    turn_service           = _ManagerDescriptor("turn_service")
-    reply_finalization     = _ManagerDescriptor("reply_finalization")
-    runtime_interface      = _ManagerDescriptor("runtime_interface")
-    status_reporting       = _ManagerDescriptor("status_reporting")
-    model_runtime          = _ManagerDescriptor("model_runtime")
-    runtime_client         = _ManagerDescriptor("runtime_client")
-    maintenance_scheduler  = _ManagerDescriptor("maintenance_scheduler")
-    health_manager         = _ManagerDescriptor("health_manager")
-    internal_state_manager = _ManagerDescriptor("internal_state_manager")
-    runtime_state_manager  = _ManagerDescriptor("runtime_state_manager")
-    prompt_assembly        = _ManagerDescriptor("prompt_assembly")
-    context_service        = _ManagerDescriptor("context_service")
-    context_builder        = _ManagerDescriptor("context_service")   # compat alias → context_service
-    tone_context           = _ManagerDescriptor("tone_context")
-    personality_service    = _ManagerDescriptor("personality_service")
-    memory_query           = _ManagerDescriptor("memory_manager")    # compat alias → memory_manager
-    memory_commands        = _ManagerDescriptor("memory_commands")
-    memory_coordinator     = _ManagerDescriptor("memory_coordinator")
-    long_term_signals      = _ManagerDescriptor("long_term_signals")
-    safety_support         = _ManagerDescriptor("safety_support")
-    reply_supervisor       = _ManagerDescriptor("reply_supervisor")
-    multimodal_handler     = _ManagerDescriptor("multimodal_handler")
-    runtime_orchestration  = _ManagerDescriptor("runtime_orchestration")
-    session_summary_manager = _ManagerDescriptor("session_summary_manager")
-    tool_registry          = _ManagerDescriptor("tool_registry")
-    agentic_handler        = _ManagerDescriptor("agentic_handler")
-    conversation_persistence = _ManagerDescriptor("conversation_persistence")
-    conversation_surface   = _ManagerDescriptor("conversation_surface")
+    @property
+    def context_builder(self) -> Any:
+        """Alias for context_service."""
+        return self._get_explicit_manager("context_service")
+
+    @context_builder.setter
+    def context_builder(self, value: Any) -> None:
+        self._set_explicit_manager("context_service", value)
+
+    @property
+    def memory_query(self) -> Any:
+        """Alias for memory_manager."""
+        return self._get_explicit_manager("memory_manager")
+
+    @memory_query.setter
+    def memory_query(self, value: Any) -> None:
+        self._set_explicit_manager("memory_manager", value)
 
     # ------------------------------------------------------------------
     # Config properties
