@@ -62,6 +62,172 @@ def _print_kv(key: str, value: object, indent: int = 2) -> None:
         print(f"{prefix}{key}: {value}")
 
 
+def _mean(values: list[float]) -> float:
+    clean = [float(value) for value in values if value is not None]
+    if not clean:
+        return 0.0
+    return float(sum(clean) / float(len(clean)))
+
+
+def _dominant_signal_from_share(share: dict[str, object]) -> str:
+    cleaned = {
+        "safety": float(share.get("safety", 0.0) or 0.0),
+        "tools": float(share.get("tools", 0.0) or 0.0),
+        "memory": float(share.get("memory", 0.0) or 0.0),
+        "coherence": float(share.get("coherence", 0.0) or 0.0),
+    }
+    return max(cleaned, key=cleaned.get)
+
+
+def _compact_diagnostic_snapshot(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+
+    diagnostics = dict(payload.get("response_engine_diagnostics") or {})
+    if not diagnostics:
+        diagnostics = dict(payload.get("response_engine_drift_monitor") or {})
+    if not diagnostics and isinstance(payload.get("signals"), dict):
+        signals = dict(payload.get("signals") or {})
+        diagnostics = dict(signals.get("response_engine_diagnostics") or signals.get("response_engine_drift_monitor") or {})
+
+    if not diagnostics:
+        selected = dict((payload.get("response_engine_decision_report") or {}).get("selected") or {})
+        if selected:
+            influence_share = dict(selected.get("influence_share") or {})
+            if not influence_share:
+                components = dict(selected.get("components") or {})
+                influence_share = {
+                    "safety": abs(float(components.get("safety_weight", 0.0) or 0.0)),
+                    "tools": abs(float(components.get("tool_weight", 0.0) or 0.0)),
+                    "memory": abs(float(components.get("memory_weight", 0.0) or 0.0)),
+                    "coherence": abs(float(components.get("coherence_weight", 0.0) or 0.0)),
+                }
+                total = float(sum(float(value) for value in influence_share.values()))
+                if total > 1e-9:
+                    influence_share = {key: float(value) / total for key, value in influence_share.items()}
+                else:
+                    influence_share = {"safety": 0.0, "tools": 0.0, "memory": 0.0, "coherence": 0.0}
+            confidence = float(selected.get("decision_confidence", 0.0) or 0.0)
+            dominant_signal = _dominant_signal_from_share(influence_share)
+            return {
+                "confidence_avg": round(confidence, 3),
+                "confidence_trend": 0.0,
+                "fallback_rate": 0.0,
+                "dominant_signal": dominant_signal,
+                "anomalies": [],
+                "last_turn": {
+                    "confidence": round(confidence, 3),
+                    "dominant_signal": dominant_signal,
+                },
+                "stability": "stable" if confidence >= 0.12 else "unstable",
+            }
+        return None
+
+    if diagnostics:
+        selected = dict((payload.get("response_engine_decision_report") or {}).get("selected") or {})
+        influence_share = dict(diagnostics.get("influence_share") or selected.get("influence_share") or {})
+        dominant_signal = str(diagnostics.get("dominant_signal") or "").strip().lower()
+        if dominant_signal not in {"safety", "tools", "memory", "coherence"}:
+            if not influence_share:
+                components = dict(selected.get("components") or {})
+                influence_share = {
+                    "safety": abs(float(components.get("safety_weight", 0.0) or 0.0)),
+                    "tools": abs(float(components.get("tool_weight", 0.0) or 0.0)),
+                    "memory": abs(float(components.get("memory_weight", 0.0) or 0.0)),
+                    "coherence": abs(float(components.get("coherence_weight", 0.0) or 0.0)),
+                }
+                total = float(sum(float(value) for value in influence_share.values()))
+                if total > 1e-9:
+                    influence_share = {key: float(value) / total for key, value in influence_share.items()}
+                else:
+                    influence_share = {"safety": 0.0, "tools": 0.0, "memory": 0.0, "coherence": 0.0}
+            dominant_signal = _dominant_signal_from_share(influence_share)
+
+        last_turn = dict(diagnostics.get("last_turn") or {})
+        if "confidence" not in last_turn:
+            last_turn["confidence"] = float(selected.get("decision_confidence", diagnostics.get("confidence_avg", 0.0)) or 0.0)
+        if not str(last_turn.get("dominant_signal") or "").strip():
+            last_turn["dominant_signal"] = dominant_signal
+
+        anomalies = list(diagnostics.get("anomalies") or [])
+        stability = str(diagnostics.get("stability") or "").strip().lower()
+        if stability not in {"stable", "drifting", "unstable"}:
+            confidence_avg = float(diagnostics.get("confidence_avg", 0.0) or 0.0)
+            confidence_trend = float(diagnostics.get("confidence_trend", 0.0) or 0.0)
+            stability = (
+                "unstable"
+                if confidence_avg < 0.12
+                else ("drifting" if len(anomalies) > 1 or abs(confidence_trend) >= 0.05 else "stable")
+            )
+
+        return {
+            "confidence_avg": round(float(diagnostics.get("confidence_avg", 0.0) or 0.0), 3),
+            "confidence_trend": round(float(diagnostics.get("confidence_trend", 0.0) or 0.0), 3),
+            "fallback_rate": round(float(diagnostics.get("fallback_rate", 0.0) or 0.0), 3),
+            "dominant_signal": dominant_signal,
+            "anomalies": anomalies[:8],
+            "last_turn": {
+                "confidence": round(float(last_turn.get("confidence", 0.0) or 0.0), 3),
+                "dominant_signal": str(last_turn.get("dominant_signal") or dominant_signal),
+            },
+            "stability": stability,
+        }
+
+    history = list(diagnostics.get("history") or [])
+    window = history[-50:]
+    selected = dict((payload.get("response_engine_decision_report") or {}).get("selected") or {})
+    influence_share = dict(selected.get("influence_share") or {})
+    if not influence_share:
+        components = dict(selected.get("components") or {})
+        influence_share = {
+            "safety": abs(float(components.get("safety_weight", 0.0) or 0.0)),
+            "tools": abs(float(components.get("tool_weight", 0.0) or 0.0)),
+            "memory": abs(float(components.get("memory_weight", 0.0) or 0.0)),
+            "coherence": abs(float(components.get("coherence_weight", 0.0) or 0.0)),
+        }
+        total = float(sum(float(value) for value in influence_share.values()))
+        if total > 1e-9:
+            influence_share = {key: float(value) / total for key, value in influence_share.items()}
+        else:
+            influence_share = {"safety": 0.0, "tools": 0.0, "memory": 0.0, "coherence": 0.0}
+
+    confidence_values = [float(item.get("decision_confidence", 0.0) or 0.0) for item in window]
+    confidence_avg = _mean(confidence_values)
+    if confidence_avg <= 0.0:
+        confidence_avg = float(selected.get("decision_confidence", diagnostics.get("confidence_avg", 0.0)) or 0.0)
+
+    if len(window) >= 4:
+        half = max(1, len(window) // 2)
+        recent = window[-half:]
+        prior = window[:-half]
+        confidence_trend = _mean([float(item.get("decision_confidence", 0.0) or 0.0) for item in recent]) - _mean(
+            [float(item.get("decision_confidence", 0.0) or 0.0) for item in prior]
+        )
+    else:
+        confidence_trend = float(diagnostics.get("confidence_trend", 0.0) or 0.0)
+
+    fallback_rate = _mean([1.0 if bool(item.get("is_fallback")) else 0.0 for item in window])
+    anomalies = list(diagnostics.get("anomalies") or [])
+    dominant_signal = _dominant_signal_from_share(influence_share)
+    last_turn_confidence = float(selected.get("decision_confidence", confidence_avg) or confidence_avg)
+    stability = diagnostics.get("stability") or (
+        "unstable" if confidence_avg < 0.12 else ("drifting" if len(anomalies) > 1 or abs(confidence_trend) >= 0.05 else "stable")
+    )
+
+    return {
+        "confidence_avg": round(float(confidence_avg), 3),
+        "confidence_trend": round(float(confidence_trend), 3),
+        "fallback_rate": round(float(fallback_rate), 3),
+        "dominant_signal": dominant_signal,
+        "anomalies": anomalies[:8],
+        "last_turn": {
+            "confidence": round(float(last_turn_confidence), 3),
+            "dominant_signal": dominant_signal,
+        },
+        "stability": str(stability),
+    }
+
+
 def _live_health() -> dict | None:
     """Try to fetch /health from the running API server.  Returns None if unreachable."""
     try:
@@ -106,44 +272,33 @@ def _load_event_store_events(run_id: str) -> list[dict] | None:
 # ── Commands ─────────────────────────────────────────────────────────────────
 
 def cmd_health(args: argparse.Namespace) -> int:
-    _print_header("System Health")
-
     live = _live_health()
-    if live:
-        print("  source: live API server")
-        _print_kv("health_score", live.get("health_score", "n/a"))
-        _print_kv("status", live.get("status", "n/a"))
-        warnings = live.get("warnings") or []
-        if warnings:
-            _print_kv("warnings", warnings)
-        return 0
+    snapshot = _compact_diagnostic_snapshot(live)
 
     # Offline path — use the last persisted report + static scorer
-    print("  source: offline (API server not reachable)")
-    last_report = _load_last_report(_REPO_ROOT / "artifacts")
+    if snapshot is None:
+        last_report = _load_last_report(_REPO_ROOT / "artifacts")
+        snapshot = _compact_diagnostic_snapshot(last_report)
 
-    scorer = SystemHealthScorer()
-    report = scorer.score()   # No live gates available offline
-    _print_kv("overall_score", report.overall_score)
-    _print_kv("is_healthy", report.is_healthy)
-    _print_kv("failure_modes", report.failure_modes)
-    _print_kv("invariant_violations", report.invariant_violations)
-    _print_kv("captured_at", report.captured_at)
+    if snapshot is None:
+        scorer = SystemHealthScorer()
+        report = scorer.score()   # No live gates available offline
+        snapshot = {
+            "confidence_avg": 0.0,
+            "confidence_trend": 0.0,
+            "fallback_rate": 0.0,
+            "dominant_signal": "coherence",
+            "anomalies": [
+                "diagnostic_data_unavailable",
+            ],
+            "last_turn": {
+                "confidence": 0.0,
+                "dominant_signal": "coherence",
+            },
+            "stability": "unstable" if not report.is_healthy else "stable",
+        }
 
-    if last_report:
-        print()
-        _print_header("Last Scale Validation")
-        schema = last_report.get("schema_version", "unknown")
-        ts = last_report.get("timestamp_utc") or last_report.get("captured_at", "unknown")
-        groups = last_report.get("groups", {})
-        pass_count = sum(1 for v in groups.values() if v.get("passed") is True)
-        total_groups = len(groups)
-        print(f"  schema:  {schema}")
-        print(f"  captured_at: {ts}")
-        print(f"  groups:  {pass_count}/{total_groups} PASS")
-        for name, info in groups.items():
-            status_label = "PASS" if info.get("passed") is True else ("FAIL" if info.get("passed") is False else "UNKNOWN")
-            _print_kv(name, status_label)
+    print(json.dumps(snapshot, indent=2, sort_keys=True))
 
     return 0
 

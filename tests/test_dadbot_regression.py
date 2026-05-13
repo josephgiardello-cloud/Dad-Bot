@@ -838,12 +838,14 @@ class DadBotRegressionTests(unittest.TestCase):
         self.assertEqual(settings["grounding_lines"], ["Stay with me.", "Call someone now."])
         self.assertEqual(settings["resource_line"], "Call emergency services now.")
 
-    def test_safety_support_manager_direct_reply_returns_finalized_support_message(self):
+    def test_safety_support_manager_direct_reply_returns_shadow_signal(self):
         reply = self.bot.safety_support.direct_reply_for_input("I want to kill myself tonight.")
 
-        self.assertIsNotNone(reply)
-        self.assertIn("988", reply)
-        self.assertTrue(reply.endswith("Love you, buddy."))
+        self.assertIsNone(reply)
+        shadow = getattr(self.bot, "_last_safety_shadow_signal", {})
+        self.assertEqual(shadow.get("signal"), "crisis")
+        self.assertIn("988", str(shadow.get("proposed_reply") or ""))
+        self.assertFalse(bool(shadow.get("applied", True)))
 
     def test_safety_support_manager_direct_reply_returns_none_without_crisis_signal(self):
         reply = self.bot.safety_support.direct_reply_for_input("I had a long day and feel off.")

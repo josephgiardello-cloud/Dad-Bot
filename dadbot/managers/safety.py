@@ -239,15 +239,63 @@ class SafetySupportManager:
     def direct_reply_for_input(self, user_input):
         if self.detect_prompt_injection(user_input):
             logger.warning("Prompt injection attempt detected and blocked.")
-            # PHASE 1: Crisis path is OBSERVER (non-binding signal for control-plane gating)
             logger.info("Safety: Injection detected (OBSERVER PATH signal)")
-            return self.bot.reply_finalization.append_signoff(_INJECTION_REPLY)
+            recorder = getattr(self.bot, "record_shadow_decision", None)
+            event = (
+                recorder(
+                    source="safety",
+                    type="veto",
+                    content_preview=_INJECTION_REPLY,
+                    reason="Prompt-injection pattern detected in user input.",
+                    would_replace=True,
+                    priority=1.0,
+                    metadata={"signal": "prompt_injection"},
+                )
+                if callable(recorder)
+                else None
+            )
+            setattr(
+                self.bot,
+                "_last_safety_shadow_signal",
+                {
+                    "signal": "prompt_injection",
+                    "user_input": str(user_input or ""),
+                    "proposed_reply": _INJECTION_REPLY,
+                    "applied": False,
+                    "bus_event": event,
+                },
+            )
+            return None
         if not self.detect_crisis_signal(user_input):
             return None
-        # PHASE 1: Crisis signal detected — this is an OBSERVER PATH
-        # Control-plane gating layer will decide if/how to use this signal
         logger.info("Safety: Crisis signal detected (OBSERVER PATH signal)")
-        return self.bot.reply_finalization.append_signoff(self.crisis_support_reply())
+        crisis_reply = self.crisis_support_reply()
+        recorder = getattr(self.bot, "record_shadow_decision", None)
+        event = (
+            recorder(
+                source="safety",
+                type="veto",
+                content_preview=crisis_reply,
+                reason="Crisis-risk phrase detected in user input.",
+                would_replace=True,
+                priority=1.0,
+                metadata={"signal": "crisis"},
+            )
+            if callable(recorder)
+            else None
+        )
+        setattr(
+            self.bot,
+            "_last_safety_shadow_signal",
+            {
+                "signal": "crisis",
+                "user_input": str(user_input or ""),
+                "proposed_reply": crisis_reply,
+                "applied": False,
+                "bus_event": event,
+            },
+        )
+        return None
 
     @staticmethod
     def detect_prompt_injection(user_input: str) -> bool:

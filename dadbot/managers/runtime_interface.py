@@ -789,23 +789,13 @@ class RuntimeInterfaceManager:
                         break
                 except KeyboardInterrupt:
                     self.bot.persist_conversation()
-                    self.bot.print_speaker_message(
-                        "Dad",
-                        self.bot.reply_finalization.append_signoff(
-                            "Hey Tony, you okay? I'm right here.",
-                        ),
-                    )
+                    print("[runtime] Session interrupted. Conversation state saved.")
                     break
                 except EOFError:
                     self.bot.persist_conversation()
                     break
                 except Exception:
-                    self.bot.print_speaker_message(
-                        "Dad",
-                        self.bot.reply_finalization.append_signoff(
-                            "Sorry buddy, something went a bit wonky there. Try again?",
-                        ),
-                    )
+                    print("[runtime] Turn failed due to an internal error. Please retry.")
         finally:
             self._stop_sovereign_monitor()
 
@@ -852,29 +842,17 @@ class RuntimeInterfaceManager:
                         break
                 except KeyboardInterrupt:
                     self.bot.persist_conversation()
-                    # PHASE 1: LEGACY PATH (CLI fallback, not in hot control-plane execution)
                     import logging
                     logging.getLogger(__name__).debug("runtime_interface service: KeyboardInterrupt handler (LEGACY PATH)")
-                    self.bot.print_speaker_message(
-                        "Dad",
-                        self.bot.reply_finalization.append_signoff(
-                            "Hey Tony, you okay? I'm right here.",
-                        ),
-                    )
+                    print("[runtime] Session interrupted. Conversation state saved.")
                     break
                 except EOFError:
                     self.bot.persist_conversation()
                     break
                 except Exception:
-                    # PHASE 1: LEGACY PATH (CLI fallback, not in hot control-plane execution)
                     import logging
                     logging.getLogger(__name__).debug("runtime_interface service: Exception handler (LEGACY PATH)")
-                    self.bot.print_speaker_message(
-                        "Dad",
-                        self.bot.reply_finalization.append_signoff(
-                            "Sorry buddy, something went a bit wonky there. Try again?",
-                        ),
-                    )
+                    print("[runtime] Service turn failed due to an internal error. Please retry.")
         finally:
             self._stop_sovereign_monitor()
 

@@ -21,6 +21,7 @@ The remaining body of this class is pure delegation plumbing:
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, cast
 
 try:
@@ -295,6 +296,8 @@ class DadBot(
         "_last_turn_pipeline": "last_turn_pipeline",
         "_last_turn_health_state": "last_turn_health_state",
         "_last_turn_ux_feedback": "last_turn_ux_feedback",
+        "_shadow_decision_bus": "shadow_decision_bus",
+        "_last_shadow_decision_report": "last_shadow_decision_report",
         "_background_task_ids": "background_task_ids",
     }
 
@@ -605,6 +608,73 @@ class DadBot(
 
     def _apply_thread_snapshot_unlocked(self, snapshot: Any) -> Any:
         return self.runtime_state_manager.apply_thread_snapshot_unlocked(snapshot)
+
+    def record_shadow_decision(
+        self,
+        *,
+        source: str,
+        type: str,
+        content_preview: str = "",
+        reason: str = "",
+        would_replace: bool = False,
+        priority: float = 0.0,
+        timestamp: float | None = None,
+        metadata: dict[str, Any] | None = None,
+        turn_context: Any | None = None,
+    ) -> dict[str, Any]:
+        """Record a normalized observational shadow-decision event.
+
+        This event stream is strictly telemetry and does not participate in
+        response selection authority.
+        """
+        raw_type = str(type or "suggestion").strip().lower()
+        allowed_types = {"override_attempt", "veto", "suggestion", "transform"}
+        normalized_type = raw_type if raw_type in allowed_types else "suggestion"
+
+        event: dict[str, Any] = {
+            "source": str(source or "unknown").strip().lower() or "unknown",
+            "type": normalized_type,
+            "content_preview": str(content_preview or "")[:280],
+            "reason": str(reason or "")[:320],
+            "would_replace": bool(would_replace),
+            "priority": float(priority or 0.0),
+            "timestamp": float(timestamp if timestamp is not None else time.time()),
+        }
+        if isinstance(metadata, dict) and metadata:
+            event["metadata"] = dict(metadata)
+
+        bus = list(getattr(self, "_shadow_decision_bus", []) or [])
+        bus.append(event)
+        # Keep bounded in memory for diagnostics without unbounded growth.
+        self._shadow_decision_bus = bus[-256:]
+
+        context_meta = getattr(turn_context, "metadata", None)
+        if isinstance(context_meta, dict):
+            context_stream = list(context_meta.get("shadow_decision_bus") or [])
+            context_stream.append(dict(event))
+            context_meta["shadow_decision_bus"] = context_stream[-128:]
+
+        return event
+
+    def peek_shadow_decisions(self, limit: int = 64) -> list[dict[str, Any]]:
+        stream = list(getattr(self, "_shadow_decision_bus", []) or [])
+        max_items = max(1, int(limit or 1))
+        return stream[-max_items:]
+
+    def consume_shadow_decisions(self, limit: int = 128) -> list[dict[str, Any]]:
+        stream = list(getattr(self, "_shadow_decision_bus", []) or [])
+        max_items = max(1, int(limit or 1))
+        consumed = stream[-max_items:]
+        self._shadow_decision_bus = []
+        return consumed
+
+    def record_shadow_decision_report(self, report: dict[str, Any]) -> dict[str, Any]:
+        payload = dict(report or {})
+        self._last_shadow_decision_report = payload
+        return payload
+
+    def shadow_decision_report(self) -> dict[str, Any]:
+        return dict(getattr(self, "_last_shadow_decision_report", {}) or {})
 
     @property
     def script_path(self):

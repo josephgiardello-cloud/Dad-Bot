@@ -61,11 +61,33 @@ class SafetyService:
         turn_context.metadata["tony_score"] = tony_score
         turn_context.metadata["tony_level"] = level
 
-        # Guarded relationship: run reply finalization to normalize tone
+        # Guarded relationship: run legacy finalization in shadow mode only.
+        # Authority remains centralized in control-plane response selection.
         if level == "guarded":
             mood = turn_context.state.get("mood", "neutral")
             try:
-                reply = self.bot.reply_finalization.finalize(reply, mood, user_input)
+                shadow_reply = self.bot.reply_finalization.finalize(reply, mood, user_input)
+                recorder = getattr(self.bot, "record_shadow_decision", None)
+                event = (
+                    recorder(
+                        source="safety",
+                        type="veto",
+                        content_preview=str(shadow_reply or ""),
+                        reason="Guarded trust level requested safety normalization transform.",
+                        would_replace=True,
+                        priority=0.90,
+                        metadata={"tony_level": level, "tony_score": tony_score},
+                        turn_context=turn_context,
+                    )
+                    if callable(recorder)
+                    else None
+                )
+                turn_context.metadata["safety_shadow_finalization"] = {
+                    "enabled": True,
+                    "applied": False,
+                    "shadow_reply_preview": str(shadow_reply or "")[:240],
+                    "bus_event": event,
+                }
             except Exception as exc:
                 logger.debug(
                     "SafetyService: reply finalization (guarded) failed: %s",

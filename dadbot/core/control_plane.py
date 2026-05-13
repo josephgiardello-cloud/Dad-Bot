@@ -596,6 +596,120 @@ def _write_progress_event(*, component: str, phase: str, payload: dict[str, Any]
         logger.debug("progress instrumentation write failed: %s", exc)
 
 
+def _response_influence_share(selected: dict[str, Any]) -> dict[str, float]:
+    existing = dict(selected.get("influence_share") or {})
+    if existing:
+        return {
+            "safety": float(existing.get("safety", 0.0) or 0.0),
+            "tools": float(existing.get("tools", 0.0) or 0.0),
+            "memory": float(existing.get("memory", 0.0) or 0.0),
+            "coherence": float(existing.get("coherence", 0.0) or 0.0),
+        }
+
+    components = dict(selected.get("components") or {})
+    magnitudes = {
+        "safety": abs(float(components.get("safety_weight", 0.0) or 0.0)),
+        "tools": abs(float(components.get("tool_weight", 0.0) or 0.0)),
+        "memory": abs(float(components.get("memory_weight", 0.0) or 0.0)),
+        "coherence": abs(float(components.get("coherence_weight", 0.0) or 0.0)),
+    }
+    total = float(sum(magnitudes.values()))
+    if total <= 1e-9:
+        return {"safety": 0.0, "tools": 0.0, "memory": 0.0, "coherence": 0.0}
+    return {name: float(value / total) for name, value in magnitudes.items()}
+
+
+def _update_response_engine_drift_monitor(
+    *,
+    monitor: dict[str, Any],
+    selected: dict[str, Any],
+    selected_reasoning: dict[str, Any],
+    shadow_event_count: int,
+    trace_id: str,
+) -> dict[str, Any]:
+    history = list(monitor.get("history") or [])
+    influence_share = _response_influence_share(selected)
+    decision_confidence = max(0.0, float(selected.get("decision_confidence", 0.0) or 0.0))
+    selected_source = str(selected.get("source") or "unknown")
+    required_reasoning = ("safety", "tools", "memory", "coherence")
+    missing_reasoning = any(not str(selected_reasoning.get(name) or "").strip() for name in required_reasoning)
+
+    history.append(
+        {
+            "trace_id": str(trace_id or ""),
+            "timestamp": float(time.time()),
+            "selected_source": selected_source,
+            "influence_share": influence_share,
+            "decision_confidence": float(decision_confidence),
+            "shadow_event_count": int(max(0, shadow_event_count)),
+            "is_fallback": "fallback" in selected_source,
+            "missing_reasoning": bool(missing_reasoning),
+        },
+    )
+    history = history[-200:]
+
+    window_size = min(50, len(history))
+    window = history[-window_size:] if window_size > 0 else []
+
+    def _mean(values: list[float]) -> float:
+        if not values:
+            return 0.0
+        return float(sum(values) / float(len(values)))
+
+    rolling = {
+        "safety": _mean([float(dict(item.get("influence_share") or {}).get("safety", 0.0) or 0.0) for item in window]),
+        "tools": _mean([float(dict(item.get("influence_share") or {}).get("tools", 0.0) or 0.0) for item in window]),
+        "memory": _mean([float(dict(item.get("influence_share") or {}).get("memory", 0.0) or 0.0) for item in window]),
+        "coherence": _mean([float(dict(item.get("influence_share") or {}).get("coherence", 0.0) or 0.0) for item in window]),
+    }
+    rates = {
+        "fallback_rate": _mean([1.0 if bool(item.get("is_fallback")) else 0.0 for item in window]),
+        "veto_presence_rate": _mean([1.0 if int(item.get("shadow_event_count", 0) or 0) > 0 else 0.0 for item in window]),
+        "missing_reasoning_rate": _mean([1.0 if bool(item.get("missing_reasoning")) else 0.0 for item in window]),
+        "avg_decision_confidence": _mean([float(item.get("decision_confidence", 0.0) or 0.0) for item in window]),
+    }
+
+    trend = {"safety": 0.0, "tools": 0.0, "memory": 0.0, "coherence": 0.0}
+    if window_size >= 10:
+        half = max(1, window_size // 2)
+        recent = window[-half:]
+        prior = window[:-half]
+        if prior:
+            for key in trend:
+                recent_mean = _mean(
+                    [float(dict(item.get("influence_share") or {}).get(key, 0.0) or 0.0) for item in recent],
+                )
+                prior_mean = _mean(
+                    [float(dict(item.get("influence_share") or {}).get(key, 0.0) or 0.0) for item in prior],
+                )
+                trend[key] = float(recent_mean - prior_mean)
+
+    anomalies: list[str] = []
+    if rolling["safety"] >= 0.55 and rates["veto_presence_rate"] >= 0.35:
+        anomalies.append("safety_overriding_too_often")
+    if rolling["tools"] >= 0.60:
+        anomalies.append("tools_over_contributing")
+    if rolling["memory"] <= 0.08:
+        anomalies.append("memory_underutilized")
+    if rates["fallback_rate"] >= 0.15:
+        anomalies.append("fallback_frequency_high")
+    if rates["avg_decision_confidence"] <= 0.08:
+        anomalies.append("decision_confidence_low")
+    if rates["missing_reasoning_rate"] >= 0.10:
+        anomalies.append("reasoning_attribution_missing")
+
+    return {
+        "history": history,
+        "window_size": int(window_size),
+        "rolling_averages": rolling,
+        "rates": rates,
+        "trend": trend,
+        "anomalies": anomalies,
+        "last_entry": history[-1] if history else {},
+        "updated_at": float(time.time()),
+    }
+
+
 class ExecutionLifecycleState(StrEnum):
     SUBMITTED = "submitted"
     QUEUED = "queued"
@@ -3258,13 +3372,22 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
             # Only ResponseEngine may influence which response is selected.
             # All other systems are telemetry-only observers.
             ranked_response = self._response_engine.run(engine_context)
-            final_response = ranked_response if ranked_response else initial_response
+            final_response = str(ranked_response or "")
+            if not final_response:
+                fallback_response = getattr(self._response_engine, "_fallback_response", None)
+                if callable(fallback_response):
+                    final_response = str(fallback_response(engine_context) or "")
+            final_response = final_response or initial_response
             telemetry = getattr(engine_context, "response_engine_telemetry", None)
             if isinstance(telemetry, dict) and telemetry:
                 job.metadata["response_engine_telemetry"] = telemetry
         except Exception as exc:
-            logger.warning(f"ResponseEngine ranking failed: {exc}; using initial response")
-            final_response = initial_response
+            logger.warning(f"ResponseEngine ranking failed: {exc}; using ResponseEngine fallback")
+            fallback_response = getattr(self._response_engine, "_fallback_response", None)
+            if callable(fallback_response):
+                final_response = str(fallback_response(engine_context) or "")
+            else:
+                final_response = initial_response
             telemetry = None
         
         if current_execution_result.get("status") not in _TERMINAL_STATUS_VALUES:
@@ -3275,6 +3398,114 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
             )
             job.metadata["execution_result"] = current_execution_result
             job.metadata["response_authority"] = "response_engine"
+            telemetry_container = dict(job.metadata.get("response_engine_telemetry") or {})
+            selected = dict(telemetry_container.get("selected") or {})
+            if not selected:
+                selected = {
+                    "source": "response_engine_fallback",
+                    "score": 0.0,
+                    "reason": "No ranked candidate metadata available; fallback selected by response engine.",
+                }
+                telemetry_container["selected"] = selected
+                telemetry_container.setdefault("selected_text_preview", str(final_response or "")[:240])
+                job.metadata["response_engine_telemetry"] = telemetry_container
+
+            if str(job.metadata.get("response_authority") or "") != "response_engine":
+                raise RuntimeError("Final response authority invariant violated: expected response_engine")
+
+            if str(selected.get("source") or "").strip() == "":
+                raise RuntimeError("Final response source invariant violated: missing response_engine source")
+
+            shadow_events = list(
+                dict(job.metadata.get("response_engine_telemetry") or {}).get("shadow_decision_bus")
+                or dict(getattr(engine_context, "job_metadata", {}) or {}).get("shadow_decision_bus")
+                or []
+            )
+            selected_source = str(selected.get("source") or "response_engine_fallback")
+            selected_influence_share = _response_influence_share(selected)
+            decision_confidence = max(
+                0.0,
+                float(selected.get("decision_confidence", telemetry_container.get("decision_confidence", 0.0)) or 0.0),
+            )
+            selected_score = float(selected.get("selected_score", selected.get("final_score", selected.get("score", 0.0))) or 0.0)
+            second_best_score = float(
+                selected.get(
+                    "second_best_score",
+                    telemetry_container.get("second_best_score", selected_score),
+                )
+                or selected_score,
+            )
+            selected["influence_share"] = selected_influence_share
+            selected["decision_confidence"] = decision_confidence
+            selected["selected_score"] = selected_score
+            selected["second_best_score"] = second_best_score
+            telemetry_container["selected"] = selected
+            telemetry_container["decision_confidence"] = decision_confidence
+            telemetry_container["selected_score"] = selected_score
+            telemetry_container["second_best_score"] = second_best_score
+            candidates = list(telemetry_container.get("candidates") or [])
+            rejected = [
+                {
+                    "source": str(item.get("source") or "unknown"),
+                    "score": float(item.get("final_score", 0.0) or 0.0),
+                    "reason": "ranked_but_not_selected",
+                }
+                for item in candidates
+                if str(item.get("source") or "") != selected_source
+            ]
+            vetoed = [
+                {
+                    "source": str(event.get("source") or "unknown"),
+                    "type": str(event.get("type") or ""),
+                    "content_preview": str(event.get("content_preview") or "")[:280],
+                    "reason": str(event.get("reason") or "")[:320],
+                    "would_replace": bool(event.get("would_replace", False)),
+                    "priority": float(event.get("priority", 0.0) or 0.0),
+                    "timestamp": float(event.get("timestamp", 0.0) or 0.0),
+                }
+                for event in shadow_events
+                if str(event.get("type") or "").strip().lower() == "veto"
+            ]
+            selected_reasoning = dict(selected.get("reasoning") or {})
+            if not selected_reasoning:
+                components = dict(selected.get("components") or {})
+                selected_reasoning = {
+                    "safety": "Derived from safety_weight component",
+                    "tools": "Derived from tool_weight component",
+                    "memory": "Derived from memory_weight component",
+                    "coherence": "Derived from coherence_weight component",
+                }
+                if not components:
+                    selected_reasoning = {
+                        "safety": "No structured safety rationale available",
+                        "tools": "No structured tool rationale available",
+                        "memory": "No structured memory rationale available",
+                        "coherence": "No structured coherence rationale available",
+                    }
+            decision_report = {
+                "selected": {
+                    "source": selected_source,
+                    "score": float(selected.get("final_score", selected.get("score", 0.0)) or 0.0),
+                    "reason": str(selected.get("reason") or "response_engine_selection"),
+                    "decision_confidence": float(decision_confidence),
+                    "selected_score": float(selected_score),
+                    "second_best_score": float(second_best_score),
+                    "influence_share": dict(selected_influence_share),
+                    "reasoning": selected_reasoning,
+                },
+                "rejected": rejected,
+                "vetoed": vetoed,
+                "reasoning": selected_reasoning,
+                "decision_confidence": float(decision_confidence),
+                "influence_share": dict(selected_influence_share),
+                "final_output": str(final_response or ""),
+                "shadow_event_count": len(shadow_events),
+                "generated_at": float(time.time()),
+            }
+            job.metadata["response_engine_decision_report"] = decision_report
+            telemetry_container["decision_report"] = dict(decision_report)
+            job.metadata["response_engine_telemetry"] = telemetry_container
+
             # Update result tuple with ranked response
             result = (final_response, result[1] if isinstance(result, tuple) and len(result) >= 2 else False)
         session_after = self.registry.get_or_create(session_key)
@@ -3304,6 +3535,38 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
                         ),
                         "feedback_attempts": 0,
                     }
+                state["response_engine_decision_report"] = dict(
+                    job.metadata.get("response_engine_decision_report") or {},
+                )
+                report = dict(job.metadata.get("response_engine_decision_report") or {})
+                selected_for_drift = dict(report.get("selected") or selected or {})
+                reasoning_for_drift = dict(report.get("reasoning") or selected_for_drift.get("reasoning") or {})
+                drift_monitor = _update_response_engine_drift_monitor(
+                    monitor=dict(state.get("response_engine_drift_monitor") or {}),
+                    selected=selected_for_drift,
+                    selected_reasoning=reasoning_for_drift,
+                    shadow_event_count=int(report.get("shadow_event_count", 0) or 0),
+                    trace_id=str(trace_token or job.trace_id or ""),
+                )
+                state["response_engine_drift_monitor"] = drift_monitor
+                report["drift_monitor"] = {
+                    "window_size": int(drift_monitor.get("window_size", 0) or 0),
+                    "rolling_averages": dict(drift_monitor.get("rolling_averages") or {}),
+                    "rates": dict(drift_monitor.get("rates") or {}),
+                    "trend": dict(drift_monitor.get("trend") or {}),
+                    "anomalies": list(drift_monitor.get("anomalies") or []),
+                }
+                state["response_engine_decision_report"] = report
+                job.metadata["response_engine_decision_report"] = report
+                job.metadata["response_engine_drift_monitor"] = {
+                    "window_size": int(drift_monitor.get("window_size", 0) or 0),
+                    "rolling_averages": dict(drift_monitor.get("rolling_averages") or {}),
+                    "rates": dict(drift_monitor.get("rates") or {}),
+                    "trend": dict(drift_monitor.get("trend") or {}),
+                    "anomalies": list(drift_monitor.get("anomalies") or []),
+                    "last_entry": dict(drift_monitor.get("last_entry") or {}),
+                    "updated_at": float(drift_monitor.get("updated_at", 0.0) or 0.0),
+                }
         self._maybe_compact_ledger()
         if dedupe_future is not None and not dedupe_future.done():
             dedupe_future.set_result(result)

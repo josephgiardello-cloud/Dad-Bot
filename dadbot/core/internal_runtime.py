@@ -61,4 +61,6 @@ class DadBotInternalRuntime:
             "mood_hint": "neutral",
             "status": "OK",
         }
+        self.shadow_decision_bus: list[dict[str, object]] = []
+        self.last_shadow_decision_report: dict[str, object] = {}
         self.background_task_ids = deque(maxlen=32)

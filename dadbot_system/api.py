@@ -573,6 +573,106 @@ def create_api_app(
         state = session.get("state")
         return dict(state) if isinstance(state, dict) else {}
 
+    def _mean(values: list[float]) -> float:
+        clean = [float(value) for value in values if value is not None]
+        if not clean:
+            return 0.0
+        return float(sum(clean) / float(len(clean)))
+
+    def _dominant_signal(influence_share: dict[str, Any]) -> str:
+        cleaned = {
+            "safety": float(influence_share.get("safety", 0.0) or 0.0),
+            "tools": float(influence_share.get("tools", 0.0) or 0.0),
+            "memory": float(influence_share.get("memory", 0.0) or 0.0),
+            "coherence": float(influence_share.get("coherence", 0.0) or 0.0),
+        }
+        return max(cleaned, key=cleaned.get)
+
+    def _confidence_trend(history: list[dict[str, Any]]) -> float:
+        if len(history) < 4:
+            return 0.0
+        half = max(1, len(history) // 2)
+        recent = history[-half:]
+        prior = history[:-half]
+        if not prior:
+            return 0.0
+        recent_avg = _mean([float(item.get("decision_confidence", 0.0) or 0.0) for item in recent])
+        prior_avg = _mean([float(item.get("decision_confidence", 0.0) or 0.0) for item in prior])
+        return float(recent_avg - prior_avg)
+
+    def _stability_classification(*, confidence_avg: float, confidence_trend: float, anomaly_count: int) -> str:
+        if confidence_avg < 0.12:
+            return "unstable"
+        if anomaly_count > 1 or abs(confidence_trend) >= 0.05:
+            return "drifting"
+        return "stable"
+
+    def _compact_response_engine_diagnostics(session_state: dict[str, Any]) -> dict[str, Any] | None:
+        monitor = dict(session_state.get("response_engine_drift_monitor") or {})
+        report = dict(session_state.get("response_engine_decision_report") or {})
+        selected = dict(report.get("selected") or {})
+        if not monitor and not report and not selected:
+            return None
+
+        history = list(monitor.get("history") or [])
+        window = history[-50:]
+        influence_share = dict(selected.get("influence_share") or {})
+        if not influence_share:
+            influence_share = {
+                "safety": abs(float(dict(selected.get("components") or {}).get("safety_weight", 0.0) or 0.0)),
+                "tools": abs(float(dict(selected.get("components") or {}).get("tool_weight", 0.0) or 0.0)),
+                "memory": abs(float(dict(selected.get("components") or {}).get("memory_weight", 0.0) or 0.0)),
+                "coherence": abs(float(dict(selected.get("components") or {}).get("coherence_weight", 0.0) or 0.0)),
+            }
+            total = float(sum(float(value) for value in influence_share.values()))
+            if total > 1e-9:
+                influence_share = {key: float(value) / total for key, value in influence_share.items()}
+            else:
+                influence_share = {"safety": 0.0, "tools": 0.0, "memory": 0.0, "coherence": 0.0}
+
+        confidence_values = [float(item.get("decision_confidence", 0.0) or 0.0) for item in window]
+        confidence_avg = _mean(confidence_values)
+        if confidence_avg <= 0.0:
+            confidence_avg = float(selected.get("decision_confidence", report.get("decision_confidence", 0.0)) or 0.0)
+        confidence_trend = _confidence_trend(window)
+
+        fallback_rate = _mean([1.0 if bool(item.get("is_fallback")) else 0.0 for item in window])
+        anomalies = list(monitor.get("anomalies") or [])
+        dominant_signal = _dominant_signal(influence_share)
+        last_turn = {
+            "confidence": float(selected.get("decision_confidence", report.get("decision_confidence", confidence_avg)) or confidence_avg),
+            "dominant_signal": dominant_signal,
+        }
+        return {
+            "confidence_avg": round(float(confidence_avg), 3),
+            "confidence_trend": round(float(confidence_trend), 3),
+            "fallback_rate": round(float(fallback_rate), 3),
+            "dominant_signal": dominant_signal,
+            "anomalies": anomalies[:8],
+            "last_turn": {
+                "confidence": round(float(last_turn["confidence"]), 3),
+                "dominant_signal": last_turn["dominant_signal"],
+            },
+            "stability": _stability_classification(
+                confidence_avg=float(confidence_avg),
+                confidence_trend=float(confidence_trend),
+                anomaly_count=len(anomalies),
+            ),
+        }
+
+    def _latest_response_engine_diagnostics() -> dict[str, Any] | None:
+        registry = getattr(orchestrator, "session_registry", None) or getattr(_control_plane, "registry", None)
+        sessions = getattr(registry, "_sessions", None)
+        if not isinstance(sessions, dict) or not sessions:
+            return None
+        for session in reversed(list(sessions.values())):
+            state = session.get("state") if isinstance(session, dict) else None
+            if isinstance(state, dict):
+                snapshot = _compact_response_engine_diagnostics(state)
+                if snapshot is not None:
+                    return snapshot
+        return None
+
     def _integrity_metadata_from_state(session_state: dict[str, Any]) -> dict[str, Any]:
         last_integrity_status = dict(session_state.get("last_integrity_status") or {})
         return {
@@ -620,7 +720,11 @@ def create_api_app(
             state_backend=type(orchestrator.state_store).__name__,
             service_name=service_config.telemetry.service_name,
         )
-        return health.to_dict()
+        payload = health.to_dict()
+        diagnostics = _latest_response_engine_diagnostics()
+        if diagnostics is not None:
+            payload["response_engine_diagnostics"] = diagnostics
+        return payload
 
     @router.post("/sessions/{session_id}/chat")
     async def submit_chat(session_id: str, payload: dict, principal: ServicePrincipal = Depends(_http_principal)):

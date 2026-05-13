@@ -987,12 +987,22 @@ Return ONLY valid JSON (no extra text):
                 planner_tool="set_reminder",
                 planner_parameters=params,
             )
-            failure_reply = "I tried to set that reminder, but something failed during execution."
-            return self.bot.reply_finalization.finalize(
-                failure_reply,
-                current_mood,
-                stripped_input,
-            ), None
+            failure_observation = (
+                "Reminder tool execution failed before a confirmation could be generated."
+            )
+            recorder = getattr(self.bot, "record_shadow_decision", None)
+            if callable(recorder):
+                recorder(
+                    source="tool",
+                    type="suggestion",
+                    content_preview=failure_observation,
+                    reason="Reminder tool failed; observation emitted for ResponseEngine consideration.",
+                    would_replace=False,
+                    priority=0.35,
+                    metadata={"tool": "set_reminder", "status": "failed", "path": "sync"},
+                    turn_context=turn_context,
+                )
+            return None, failure_observation
         reminder = record.result
         if reminder:
             self.bot.update_planner_debug(
@@ -1002,24 +1012,42 @@ Return ONLY valid JSON (no extra text):
                 planner_parameters=params,
                 final_path="planner_tool",
             )
-            reply = self._reminder_confirmation_reply(reminder)
-            return self.bot.reply_finalization.finalize(
-                reply,
-                current_mood,
-                stripped_input,
-            ), None
+            observation = self._reminder_confirmation_reply(reminder)
+            recorder = getattr(self.bot, "record_shadow_decision", None)
+            if callable(recorder):
+                recorder(
+                    source="tool",
+                    type="suggestion",
+                    content_preview=observation,
+                    reason="Reminder tool succeeded; observation emitted for ResponseEngine consideration.",
+                    would_replace=False,
+                    priority=0.55,
+                    metadata={"tool": "set_reminder", "status": "success", "path": "sync"},
+                    turn_context=turn_context,
+                )
+            return None, observation
         self.bot.update_planner_debug(
             planner_status="execution_failed",
             planner_reason="Planner selected set_reminder, but Dad couldn't create the reminder cleanly.",
             planner_tool="set_reminder",
             planner_parameters=params,
         )
-        failure_reply = "I couldn't confirm that reminder was created, so I need you to try once more."
-        return self.bot.reply_finalization.finalize(
-            failure_reply,
-            current_mood,
-            stripped_input,
-        ), None
+        failure_observation = (
+            "Reminder tool returned no usable confirmation payload for this turn."
+        )
+        recorder = getattr(self.bot, "record_shadow_decision", None)
+        if callable(recorder):
+            recorder(
+                source="tool",
+                type="suggestion",
+                content_preview=failure_observation,
+                reason="Reminder tool returned no usable payload; observation emitted for ResponseEngine consideration.",
+                would_replace=False,
+                priority=0.30,
+                metadata={"tool": "set_reminder", "status": "empty", "path": "sync"},
+                turn_context=turn_context,
+            )
+        return None, failure_observation
 
     async def _execute_set_reminder_tool_async(
         self,
@@ -1049,12 +1077,22 @@ Return ONLY valid JSON (no extra text):
                 planner_tool="set_reminder",
                 planner_parameters=params,
             )
-            failure_reply = "I tried to set that reminder, but something failed during execution."
-            return await self.bot.reply_finalization.finalize_async(
-                failure_reply,
-                current_mood,
-                stripped_input,
-            ), None
+            failure_observation = (
+                "Reminder tool execution failed before a confirmation could be generated."
+            )
+            recorder = getattr(self.bot, "record_shadow_decision", None)
+            if callable(recorder):
+                recorder(
+                    source="tool",
+                    type="suggestion",
+                    content_preview=failure_observation,
+                    reason="Reminder tool failed; async observation emitted for ResponseEngine consideration.",
+                    would_replace=False,
+                    priority=0.35,
+                    metadata={"tool": "set_reminder", "status": "failed", "path": "async"},
+                    turn_context=turn_context,
+                )
+            return None, failure_observation
         reminder = record.result
         if reminder:
             self.bot.update_planner_debug(
@@ -1064,24 +1102,42 @@ Return ONLY valid JSON (no extra text):
                 planner_parameters=params,
                 final_path="planner_tool",
             )
-            reply = self._reminder_confirmation_reply(reminder)
-            return await self.bot.reply_finalization.finalize_async(
-                reply,
-                current_mood,
-                stripped_input,
-            ), None
+            observation = self._reminder_confirmation_reply(reminder)
+            recorder = getattr(self.bot, "record_shadow_decision", None)
+            if callable(recorder):
+                recorder(
+                    source="tool",
+                    type="suggestion",
+                    content_preview=observation,
+                    reason="Reminder tool succeeded; async observation emitted for ResponseEngine consideration.",
+                    would_replace=False,
+                    priority=0.55,
+                    metadata={"tool": "set_reminder", "status": "success", "path": "async"},
+                    turn_context=turn_context,
+                )
+            return None, observation
         self.bot.update_planner_debug(
             planner_status="execution_failed",
             planner_reason="Planner selected set_reminder, but Dad couldn't create the reminder cleanly.",
             planner_tool="set_reminder",
             planner_parameters=params,
         )
-        failure_reply = "I couldn't confirm that reminder was created, so I need you to try once more."
-        return await self.bot.reply_finalization.finalize_async(
-            failure_reply,
-            current_mood,
-            stripped_input,
-        ), None
+        failure_observation = (
+            "Reminder tool returned no usable confirmation payload for this turn."
+        )
+        recorder = getattr(self.bot, "record_shadow_decision", None)
+        if callable(recorder):
+            recorder(
+                source="tool",
+                type="suggestion",
+                content_preview=failure_observation,
+                reason="Reminder tool returned no usable payload; async observation emitted for ResponseEngine consideration.",
+                would_replace=False,
+                priority=0.30,
+                metadata={"tool": "set_reminder", "status": "empty", "path": "async"},
+                turn_context=turn_context,
+            )
+        return None, failure_observation
 
     def _execute_web_search_tool_sync(
         self,

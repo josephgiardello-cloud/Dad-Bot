@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 from dadbot.core.turn_coherence import assert_personality_applied_exactly_once, mark_turn_coherence
 from dadbot.managers.advice_audit import ShadowAuditManager
 
@@ -18,6 +19,26 @@ class ReplyFinalizationManager:
 
     def __init__(self, bot):
         self.bot = bot
+
+    def _record_shadow_pipeline(self, payload: dict[str, Any]) -> None:
+        try:
+            setattr(self.bot, "_last_reply_finalization_shadow", payload)
+            recorder = getattr(self.bot, "record_shadow_decision", None)
+            if callable(recorder):
+                recorder(
+                    source="finalization",
+                    type="transform",
+                    content_preview=str(payload.get("shadow_moderated_reply") or payload.get("shadow_voiced_reply") or ""),
+                    reason="Finalization transform observed; response authority remains in ResponseEngine.",
+                    would_replace=True,
+                    priority=0.45,
+                    metadata={
+                        "path": str(payload.get("path") or "unknown"),
+                        "base_reply_preview": str(payload.get("base_reply") or "")[:220],
+                    },
+                )
+        except Exception:
+            logger.debug("Failed to record reply finalization shadow payload", exc_info=True)
 
     def append_signoff(self, reply: str) -> str:
         # Defense: if reply is somehow a Pydantic response object, extract content first
@@ -75,18 +96,36 @@ class ReplyFinalizationManager:
             except Exception:
                 pass
         mark_turn_coherence(self.bot, "finalizer_called")
-        voiced_reply = self.bot.personality_service.apply_authoritative_voice(
-            str(reply or ""),
-            str(current_mood or "neutral"),
-            user_input,
-        )
+        base_reply = str(reply or "")
+        shadow_voiced = base_reply
+        shadow_moderated = base_reply
+        try:
+            shadow_voiced = self.bot.personality_service.apply_authoritative_voice(
+                base_reply,
+                str(current_mood or "neutral"),
+                user_input,
+            )
+            shadow_moderated = self.bot.moderate_output_reply(
+                user_input,
+                shadow_voiced,
+                current_mood,
+            )
+            self._record_shadow_pipeline(
+                {
+                    "path": "sync",
+                    "base_reply": base_reply,
+                    "shadow_voiced_reply": str(shadow_voiced or ""),
+                    "shadow_moderated_reply": str(shadow_moderated or ""),
+                    "applied": False,
+                },
+            )
+        except Exception:
+            logger.debug("reply_finalization shadow transforms failed", exc_info=True)
+        # Phase 1 authority collapse: finalization cannot change reply meaning/content.
+        # Keep only delivery-level suffix formatting.
         mark_turn_coherence(self.bot, "personality_applied")
         assert_personality_applied_exactly_once(self.bot)
-        final_reply = self.bot.moderate_output_reply(
-            user_input,
-            voiced_reply,
-            current_mood,
-        )
+        final_reply = base_reply
         try:
             ShadowAuditManager(self.bot).audit_and_record(
                 user_input=str(user_input or ""),
@@ -124,18 +163,36 @@ class ReplyFinalizationManager:
             except Exception:
                 pass
         mark_turn_coherence(self.bot, "finalizer_called")
-        voiced_reply = self.bot.personality_service.apply_authoritative_voice(
-            str(reply or ""),
-            str(current_mood or "neutral"),
-            user_input,
-        )
+        base_reply = str(reply or "")
+        shadow_voiced = base_reply
+        shadow_moderated = base_reply
+        try:
+            shadow_voiced = self.bot.personality_service.apply_authoritative_voice(
+                base_reply,
+                str(current_mood or "neutral"),
+                user_input,
+            )
+            shadow_moderated = await self.bot.moderate_output_reply_async(
+                user_input,
+                shadow_voiced,
+                current_mood,
+            )
+            self._record_shadow_pipeline(
+                {
+                    "path": "async",
+                    "base_reply": base_reply,
+                    "shadow_voiced_reply": str(shadow_voiced or ""),
+                    "shadow_moderated_reply": str(shadow_moderated or ""),
+                    "applied": False,
+                },
+            )
+        except Exception:
+            logger.debug("reply_finalization async shadow transforms failed", exc_info=True)
+        # Phase 1 authority collapse: finalization cannot change reply meaning/content.
+        # Keep only delivery-level suffix formatting.
         mark_turn_coherence(self.bot, "personality_applied")
         assert_personality_applied_exactly_once(self.bot)
-        final_reply = await self.bot.moderate_output_reply_async(
-            user_input,
-            voiced_reply,
-            current_mood,
-        )
+        final_reply = base_reply
         try:
             ShadowAuditManager(self.bot).audit_and_record(
                 user_input=str(user_input or ""),

@@ -240,7 +240,31 @@ class TurnService(ToolPipelineMixin):
 
         crisis_reply = self.bot.safety_support.direct_reply_for_input(stripped_input)
         if crisis_reply is not None:
-            return crisis_reply
+            recorder = getattr(self.bot, "record_shadow_decision", None)
+            event = (
+                recorder(
+                    source="legacy",
+                    type="override_attempt",
+                    content_preview=str(crisis_reply or ""),
+                    reason="Safety direct reply path produced a response candidate outside ResponseEngine.",
+                    would_replace=True,
+                    priority=0.95,
+                    metadata={"path": "turn_service.direct_reply_for_input", "kind": "safety"},
+                )
+                if callable(recorder)
+                else None
+            )
+            setattr(
+                self.bot,
+                "_last_direct_reply_shadow",
+                {
+                    "source": "safety",
+                    "user_input": stripped_input,
+                    "proposed_reply": str(crisis_reply or ""),
+                    "applied": False,
+                    "bus_event": event,
+                },
+            )
 
         for direct_reply in (
             self.bot.handle_memory_command(stripped_input),
@@ -249,11 +273,36 @@ class TurnService(ToolPipelineMixin):
             self.bot.get_fact_reply(stripped_input),
         ):
             if direct_reply is not None:
-                return self.bot.reply_finalization.finalize(
-                    direct_reply,
-                    current_mood,
-                    stripped_input,
+                recorder = getattr(self.bot, "record_shadow_decision", None)
+                event = (
+                    recorder(
+                        source="legacy",
+                        type="override_attempt",
+                        content_preview=str(direct_reply or ""),
+                        reason="Legacy direct-reply surface produced a response candidate outside ResponseEngine.",
+                        would_replace=True,
+                        priority=0.75,
+                        metadata={"path": "turn_service.direct_reply_for_input", "kind": "direct_reply"},
+                    )
+                    if callable(recorder)
+                    else None
                 )
+                setattr(
+                    self.bot,
+                    "_last_direct_reply_shadow",
+                    {
+                        "source": "legacy_direct_reply",
+                        "user_input": stripped_input,
+                        "proposed_reply": str(direct_reply or ""),
+                        "current_mood": str(current_mood or "neutral"),
+                        "applied": False,
+                        "bus_event": event,
+                    },
+                )
+                logger.debug(
+                    "direct_reply_for_input proposed reply captured in shadow mode; control-plane remains authoritative",
+                )
+                return None
         return None
 
     def prepare_user_turn(
@@ -833,40 +882,21 @@ class TurnService(ToolPipelineMixin):
         if not stripped_input and not attachments:
             return None, False
         if self._legacy_pipeline_overridden():
-            current_mood, direct_reply, should_end, turn_text, normalized_attachments = self.prepare_user_turn(
-                stripped_input,
-                attachments,
+            logger.debug(
+                "legacy pipeline override detected; preserving as shadow-only while routing authoritative output through orchestrator",
             )
-            if should_end:
-                return str(direct_reply or ""), True
-            if direct_reply is None:
-                dad_reply = self.reply_generation.generate_validated_reply(
-                    stripped_input,
-                    turn_text,
-                    str(current_mood or "neutral"),
-                    normalized_attachments,
-                )
-            else:
-                dad_reply = str(direct_reply)
-            return self.finalize_user_turn(
-                stripped_input,
-                current_mood,
-                dad_reply,
-                attachments=normalized_attachments,
+            self._append_turn_pipeline_step(
+                "legacy_pipeline_override_shadow",
+                detail="legacy override detected; ignored for authoritative output",
             )
+
         self._append_turn_pipeline_step(
             "spine_delegate",
             status="running",
-            detail="delegating turn execution to execute_turn spine",
+            detail="delegating sync turn execution to execute_turn spine",
         )
         result = self._run_orchestrator_sync(stripped_input, attachments)
-        self._ensure_compat_pipeline_steps(
-            (
-                "detect_mood",
-                "generate_reply",
-                "finalize_turn",
-            ),
-        )
+        self._ensure_compat_pipeline_steps(("prepare_turn", "generate_reply", "finalize_turn"))
         self._append_turn_pipeline_step(
             "spine_delegate",
             detail="execute_turn spine completed",
@@ -930,41 +960,14 @@ class TurnService(ToolPipelineMixin):
         if not stripped_input and not attachments:
             return None, False
 
-        # Compatibility branch for test harnesses that monkeypatch the stream
-        # implementation directly on the bot instance. In production runtime,
-        # stream execution stays on the execute_turn/control-plane spine.
-        stream_impl = getattr(self.bot, "call_ollama_chat_stream_async", None)
-        if callable(stream_impl) and not inspect.ismethod(stream_impl):
-            current_mood, direct_reply, should_end, turn_text, normalized_attachments = await self.prepare_user_turn_async(
-                stripped_input,
-                attachments,
-            )
-            if should_end:
-                return str(direct_reply or ""), True
-            if direct_reply is None:
-                dad_reply = await self.reply_generation.generate_validated_reply_async(
-                    stripped_input,
-                    turn_text,
-                    str(current_mood or "neutral"),
-                    normalized_attachments,
-                    stream=True,
-                    chunk_callback=chunk_callback,
-                )
-            else:
-                dad_reply = str(direct_reply)
-
-            self.bot.history.append({"role": "user", "content": stripped_input})
-            self.bot.history.append({"role": "assistant", "content": str(dad_reply or "")})
-            return str(dad_reply or ""), False
-
         streamed = False
 
-        async def _emit_chunk(chunk: str) -> None:
+        async def _emit_chunk(chunk_text: str) -> None:
             if not callable(chunk_callback):
                 return
-            emitted = chunk_callback(chunk)
-            if inspect.isawaitable(emitted):
-                await cast("Any", emitted)
+            maybe_result = chunk_callback(chunk_text)
+            if inspect.isawaitable(maybe_result):
+                await cast("Any", maybe_result)
 
         async def _wrapped_chunk_callback(chunk: str) -> None:
             nonlocal streamed
@@ -972,6 +975,15 @@ class TurnService(ToolPipelineMixin):
                 return
             streamed = True
             await _emit_chunk(str(chunk))
+
+        if self._legacy_pipeline_overridden():
+            logger.debug(
+                "legacy pipeline override detected in stream path; preserving as shadow-only while routing authoritative output through orchestrator",
+            )
+            self._append_turn_pipeline_step(
+                "legacy_stream_override_shadow",
+                detail="legacy stream override detected; ignored for authoritative output",
+            )
 
         self._update_turn_pipeline(mode="stream_async")
         self._append_turn_pipeline_step(

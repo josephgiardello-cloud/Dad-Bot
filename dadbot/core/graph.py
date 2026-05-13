@@ -1284,11 +1284,23 @@ class TurnGraph:
             mutation_outside_save_node=mutation_outside_save_node,
         )
         if not bool(getattr(validate_result, "ok", True)):
+            reason = str(
+                getattr(validate_result, "reason", "kernel validation failed")
+                or "kernel validation failed"
+            )
+            if not bool(getattr(self._execution_kernel, "strict", False)):
+                logger.warning(
+                    "[KERNEL SHADOW VIOLATION] stage=%s operation=%s reason=%s",
+                    str(stage or ""),
+                    str(operation or ""),
+                    reason,
+                )
+                return
             raise ExecutionStageError(
                 "Kernel validation failed",
                 context={
                     "stage": str(stage or ""),
-                    "reason": str(getattr(validate_result, "reason", "kernel validation failed") or "kernel validation failed"),
+                    "reason": reason,
                 },
             )
 
