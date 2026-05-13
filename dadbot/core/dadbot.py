@@ -279,15 +279,22 @@ class DadBot(
             pass
 
         # Manager delegation chain fallback
+        # Managers are stored in services, so we access them through there
         _sentinel = object()
-        for _mgr_attr in self.__class__._MANAGER_DELEGATE_CHAIN:
-            try:
-                _mgr = object.__getattribute__(self, _mgr_attr)
-            except AttributeError:
-                continue
-            _val = getattr(_mgr, name, _sentinel)
-            if _val is not _sentinel:
-                return _val
+        try:
+            services = object.__getattribute__(self, "services")
+            for _mgr_attr in self.__class__._MANAGER_DELEGATE_CHAIN:
+                try:
+                    _mgr = getattr(services, _mgr_attr, _sentinel)
+                    if _mgr is not _sentinel:
+                        _val = getattr(_mgr, name, _sentinel)
+                        if _val is not _sentinel:
+                            return _val
+                except AttributeError:
+                    continue
+        except AttributeError:
+            pass
+        
         raise AttributeError(
             f"'{type(self).__name__}' object has no attribute '{name!r}'",
         )
@@ -383,18 +390,28 @@ class DadBot(
             object.__setattr__(self, "_phase_closure_runtime", cached)
         return cached
 
-    # ------------------------------------------------------------------
-    # Manager aliases (compatibility shortcuts)
-    # ------------------------------------------------------------------
-
     @property
     def context_builder(self) -> Any:
-        """Alias for context_service."""
-        return self._get_explicit_manager("context_service")
+        """On-demand ContextBuilder for prompt composition during boot and runtime.
+        
+        This ensures build_core_persona_prompt() is always available even if
+        context_service isn't fully wired during early boot phases.
+        """
+        cached = getattr(self, "_context_builder", None)
+        if cached is None:
+            from dadbot.context import ContextBuilder
+            cached = ContextBuilder(self)
+            object.__setattr__(self, "_context_builder", cached)
+        return cached
 
     @context_builder.setter
     def context_builder(self, value: Any) -> None:
-        self._set_explicit_manager("context_service", value)
+        """Allow setting context_builder during wiring."""
+        object.__setattr__(self, "_context_builder", value)
+
+    def build_core_persona_prompt(self) -> str:
+        """Delegate to context_builder for persona prompt composition."""
+        return self.context_builder.build_core_persona_prompt()
 
     @property
     def memory_query(self) -> Any:
