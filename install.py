@@ -16,8 +16,9 @@ OPTIONAL_MODELS = ["flux"]  # large image model — skip if slow
 
 
 def check_python():
-    if sys.version_info < (3, 10):
-        print("❌ Python 3.10+ required")
+    if sys.version_info < (3, 13):
+        print(f"❌ Python 3.13+ required (you have {sys.version_info.major}.{sys.version_info.minor})")
+        print("   Download from: https://www.python.org/downloads/")
         sys.exit(1)
     print(f"✅ Python {sys.version_info.major}.{sys.version_info.minor} OK")
 
@@ -26,8 +27,14 @@ def install_dependencies():
     print("\n📦 Installing dependencies...")
     try:
         subprocess.check_call([sys.executable, "-m", "pip", "install", "-e", ".[voice,service]"])
-    except subprocess.CalledProcessError:
-        print("❌ pip install failed — check the error above and try again.")
+    except subprocess.CalledProcessError as e:
+        print("❌ Dependency installation failed.")
+        print("   Error:", str(e))
+        print("\n   Troubleshooting:")
+        print("   1. Ensure you're using a fresh Python virtual environment")
+        print("   2. Check that pip is up-to-date: python -m pip install --upgrade pip")
+        print("   3. On Windows, you may need Visual Studio Build Tools for C++ support")
+        print("   4. Run again with: python install.py")
         sys.exit(1)
     print("✅ Dependencies installed")
 
@@ -66,25 +73,35 @@ def setup_static_and_profile():
 def _run_ollama(*args):
     try:
         return subprocess.check_output(["ollama", *args], text=True, stderr=subprocess.DEVNULL).strip()
-    except (FileNotFoundError, subprocess.CalledProcessError):
+    except FileNotFoundError:
+        return None
+    except subprocess.CalledProcessError:
         return None
 
 
 def check_ollama():
     print("\n🔍 Checking Ollama...")
-    if _run_ollama("--version") is None:
-        print("⚠️  Ollama not detected or not running.")
-        print("   Please install Ollama from https://ollama.com and run it.")
-        print("   Then pull recommended models: ollama pull llama3.2")
+    version = _run_ollama("--version")
+    if version is None:
+        print("⚠️  Ollama not found or not running.")
+        print("\n   📥 Install Ollama:")
+        print("      • macOS/Linux: https://ollama.com/download")
+        print("      • Windows: https://ollama.com/download/windows")
+        print("\n   After installation, run:")
+        print("      ollama pull llama3.2")
+        print("      ollama pull nomic-embed-text")
+        print("\n   Then run this installer again:")
+        print("      python install.py")
         return False
-    print(f"✅ Ollama detected: {_run_ollama('--version')}")
+    print(f"✅ Ollama {version.strip()}")
     return True
 
 
 def pull_models():
-    print("\n📥 Pulling required models (may take a few minutes on first run)...")
+    print("\n📥 Pulling required models...")
+    print("   (This may take several minutes on first run)\n")
     for model in REQUIRED_MODELS:
-        print(f"   Pulling {model}...", end=" ", flush=True)
+        print(f"   • {model}...", end=" ", flush=True)
         try:
             subprocess.check_call(
                 ["ollama", "pull", model],
@@ -92,11 +109,14 @@ def pull_models():
                 stderr=subprocess.DEVNULL,
             )
             print("✅")
-        except Exception:
-            print("⚠️  Failed — will retry on next launch.")
+        except Exception as e:
+            print(f"❌\n      Error: {e}")
+            print("      Try manually: ollama pull " + model)
+            print("      Then re-run: python install.py")
 
+    print("\n   Optional models:")
     for model in OPTIONAL_MODELS:
-        print(f"   Pulling {model} (optional)...", end=" ", flush=True)
+        print(f"   • {model} (large, ~5GB)...", end=" ", flush=True)
         try:
             subprocess.check_call(
                 ["ollama", "pull", model],
@@ -105,20 +125,30 @@ def pull_models():
             )
             print("✅")
         except Exception:
-            print("⚠️  Skipped (not required for text chat).")
+            print("⏭️  Skipped (optional, not required for chat)")
 
 
 def launch():
     print("\n🚀 Launching DadBot...")
+    print("   Opening browser to http://localhost:8501")
     time.sleep(1)
     try:
-        # Route through Dad.py so app_runtime.main() enforces all startup
-        # safety checks, contract validation, and resource guards.
-        subprocess.Popen([sys.executable, "Dad.py"])
-        print("✅ DadBot should open in your browser shortly at http://localhost:8501")
-        print("   If it doesn't open automatically, navigate there manually.")
+        # Use streamlit command for better subprocess management
+        subprocess.check_call([
+            sys.executable, "-m", "streamlit", "run", 
+            "dad_streamlit.py", 
+            "--logger.level=info"
+        ])
+    except subprocess.CalledProcessError as e:
+        print(f"❌ Launch failed with error code {e.returncode}")
+        print("\n   Troubleshooting:")
+        print("   • Check that Ollama is running: ollama serve")
+        print("   • Port 8501 already in use? Check: lsof -i :8501")
+        print("   • Try launching manually: streamlit run dad_streamlit.py")
+        sys.exit(1)
     except Exception as e:
         print(f"❌ Failed to launch: {e}")
+        print("\n   Try manually: python launch.py")
 
 
 def main():
