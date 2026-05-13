@@ -205,6 +205,8 @@ class MemoryLifecycleManager:
         current = self.bot.MEMORY_STORE.get("relationship_state")
         normalized = self._manager.normalize_relationship_state(current)
         if normalized != current:
+            from dadbot.core.write_plane import get_write_plane
+            get_write_plane().write("RelationshipState", "memory.relationship_state", normalized)
             self._manager.mutate_memory_store(relationship_state=normalized)
         return normalized
 

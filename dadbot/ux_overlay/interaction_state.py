@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from dadbot.core.write_plane import get_write_plane
 from dadbot.ux_overlay.models import InteractionState
 
 
@@ -44,11 +45,13 @@ class InteractionStateEngine:
             tone = "friendly"
             engagement = self._state.engagement_level
 
-        self._state = replace(
+        new_state = replace(
             self._state,
             user_affinity=new_affinity,
             emotional_tone=tone,
             engagement_level=engagement,
             continuity_score=new_continuity,
         )
+        get_write_plane().write("InteractionStateEngine", "interaction_state._state", new_state)
+        self._state = new_state
         return self._state

@@ -3,6 +3,8 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from dadbot.core.write_plane import get_write_plane
+
 
 class BeliefStateEngine:
     """Persistent probabilistic belief state across turns."""
@@ -55,6 +57,7 @@ class BeliefStateEngine:
             "sample_size": int(len(recent)),
             "updated_at": float(time.time()),
         }
+        get_write_plane().write("BeliefStateEngine", "memory.belief_state", belief)
         state["belief_state"] = belief
         return belief
 

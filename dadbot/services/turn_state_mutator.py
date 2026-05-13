@@ -15,6 +15,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from dadbot.core.write_plane import get_write_plane
 from dadbot.models import TurnPipelineSnapshot, TurnPipelineStep
 
 
@@ -45,7 +46,9 @@ class TurnStateMutator:
 
     def store_turn_pipeline(self, payload: dict[str, object]) -> dict[str, object]:
         validated = TurnPipelineSnapshot.model_validate(payload)
-        self._bot._last_turn_pipeline = validated.model_dump(mode="python")
+        result = validated.model_dump(mode="python")
+        get_write_plane().write("TurnStateMutator", "bot._last_turn_pipeline", result)
+        self._bot._last_turn_pipeline = result
         return self._bot._last_turn_pipeline
 
     def start_turn_pipeline(self, mode: str, user_input: str) -> dict[str, object]:

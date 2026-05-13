@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from dadbot.core.write_plane import get_write_plane
+
 
 class InternalStateManager:
     """Maintains a lightweight persistent internal belief/goal state across turns."""
@@ -49,6 +51,7 @@ class InternalStateManager:
         raw = store.get("internal_state") if isinstance(store, dict) else None
         if not isinstance(raw, dict):
             normalized = self.default_state()
+            get_write_plane().write("InternalStateManager", "memory.internal_state", normalized)
             self.bot.mutate_memory_store(internal_state=normalized, save=False)
             return dict(normalized)
 
@@ -263,6 +266,7 @@ class InternalStateManager:
             "last_user_input": str(user_input or "")[:180],
             "last_reply_excerpt": str(dad_reply or "")[:180],
         }
+        get_write_plane().write("InternalStateManager", "memory.internal_state", payload)
         self.bot.mutate_memory_store(internal_state=payload, save=True)
         return payload
 
