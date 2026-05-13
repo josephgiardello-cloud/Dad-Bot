@@ -97,6 +97,16 @@ class MockRegistry:
             resp = self._response
 
             class _Agent:
+                class _ControlPlane:
+                    def __init__(self, owner: "_Agent") -> None:
+                        self._owner = owner
+
+                    async def execute_from_graph_context(self, ctx: Any, rich_context: Any) -> tuple[str, bool]:
+                        return await self._owner.run_agent(ctx, rich_context)
+
+                def __init__(self) -> None:
+                    self.control_plane = self._ControlPlane(self)
+
                 async def run_agent(self, ctx: Any, rich_context: Any) -> tuple[str, bool]:
                     return (resp, False)
 

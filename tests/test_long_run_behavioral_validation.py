@@ -46,6 +46,16 @@ def _expected_contracts_hash() -> str:
 class _StubService:
     """Minimal stub service that satisfies all node contracts without live I/O."""
 
+    def __init__(self) -> None:
+        self.control_plane = self._ControlPlane(self)
+
+    class _ControlPlane:
+        def __init__(self, owner: "_StubService") -> None:
+            self._owner = owner
+
+        async def execute_from_graph_context(self, ctx, rich_context):
+            return await self._owner.run_agent(ctx, rich_context)
+
     def tick(self, ctx):
         return {"ok": True}
 

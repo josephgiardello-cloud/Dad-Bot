@@ -41,6 +41,16 @@ pytestmark = pytest.mark.unit
 # ---------------------------------------------------------------------------
 
 class _StubService:
+    def __init__(self):
+        self.control_plane = self._ControlPlane(self)
+
+    class _ControlPlane:
+        def __init__(self, owner: "_StubService") -> None:
+            self._owner = owner
+
+        async def execute_from_graph_context(self, ctx, rich_context):
+            return await self._owner.run_agent(ctx, rich_context)
+
     def tick(self, ctx): return {"ok": True}
     def build_context(self, ctx): return {"rich_context": "stub"}
     async def run_agent(self, ctx, rich_context): return "stub_reply"

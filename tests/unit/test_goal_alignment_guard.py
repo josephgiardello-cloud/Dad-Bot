@@ -22,6 +22,14 @@ class _RegistryStub:
 class _AgentServiceStub:
     def __init__(self) -> None:
         self.calls = 0
+        self.control_plane = self._ControlPlane(self)
+
+    class _ControlPlane:
+        def __init__(self, owner: "_AgentServiceStub") -> None:
+            self._owner = owner
+
+        async def execute_from_graph_context(self, turn_context, rich_context):
+            return await self._owner.run_agent(turn_context, rich_context)
 
     async def run_agent(self, _turn_context, _rich_context):
         self.calls += 1
