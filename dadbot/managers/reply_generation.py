@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dadbot.contracts import (
     AttachmentList,
     ChunkCallback,
@@ -7,9 +8,16 @@ from dadbot.contracts import (
     SupportsTurnProcessingRuntime,
 )
 
+logger = logging.getLogger(__name__)
+
 
 class ReplyGenerationManager:
-    """Owns Ollama reply generation, supervision, validation, and finalization before turn persistence."""
+    """Owns Ollama reply generation, supervision, validation, and finalization before turn persistence.
+    
+    PHASE 1 NOTE: reply_generation is an OBSERVER PATH (telemetry-only in hot execution).
+    In main control-plane execution, ResponseEngine is the sole selection authority.
+    This manager is preserved for backward compatibility and non-hot-path uses (agent_service, testing).
+    """
 
     def __init__(self, bot: DadBotContext | SupportsTurnProcessingRuntime):
         self.context = DadBotContext.from_runtime(bot)
@@ -24,7 +32,19 @@ class ReplyGenerationManager:
         stream: bool = False,
         chunk_callback: ChunkCallback | None = None,
     ) -> str:
+        """Generate and finalize a reply (OBSERVER PATH — not authoritative in hot execution).
+        
+        This method is preserved for backward compatibility and non-hot-path execution contexts.
+        In the main control-plane hot path, ResponseEngine is the sole selection authority.
+        """
         validation_input = stripped_input or turn_text
+        
+        # PHASE 1: Track observer-path invocation
+        logger.debug(
+            "reply_generation.generate_validated_reply invoked (OBSERVER PATH); "
+            "main hot path uses ResponseEngine"
+        )
+        
         if stream:
             raw_reply = self.bot.call_ollama_chat_stream(
                 messages=self.bot.build_chat_request_messages(
@@ -68,7 +88,15 @@ class ReplyGenerationManager:
         stream: bool = False,
         chunk_callback: ChunkCallback | None = None,
     ) -> str:
+        """Generate and finalize a reply (async variant — OBSERVER PATH)."""
         validation_input = stripped_input or turn_text
+        
+        # PHASE 1: Track observer-path invocation
+        logger.debug(
+            "reply_generation.generate_validated_reply_async invoked (OBSERVER PATH); "
+            "main hot path uses ResponseEngine"
+        )
+        
         if stream:
             raw_reply = await self.bot.call_ollama_chat_stream_async(
                 messages=self.bot.build_chat_request_messages(

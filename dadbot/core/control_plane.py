@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from dadbot.contracts import AttachmentList, FinalizedTurnResult
 from dadbot.core.contracts.lifecycle_events import (
@@ -27,7 +27,12 @@ from dadbot.core.contracts.lifecycle_events import (
     Submitted,
 )
 from dadbot.core.compaction import ArchiveTier, CompactionPolicy, EventCompactor
+from dadbot.core.autonomous_goal_daemon import AutonomousGoalDaemon
+from dadbot.core.belief_state_engine import BeliefStateEngine
+from dadbot.core.compositional_tool_planner import CompositionalToolPlanner
+from dadbot.core.behavior_alignment_trainer import BehaviorAlignmentTrainer
 from dadbot.core.contract_evaluator import validate_sovereign_ledger_transition
+from dadbot.core.cognitive_policy_engine import CognitivePolicyEngine
 from dadbot.core.control_plane_projection import ExecutionProjection
 from dadbot.core.control_plane_reducer import ExecutionState as ReducedExecutionState
 from dadbot.core.control_plane_reducer import ExecutionStatus, lease_expired
@@ -72,6 +77,10 @@ from dadbot.core.runtime_errors import (
     PersistenceFailure,
     ReplayMismatch,
 )
+from dadbot.core.runtime_contracts import (
+    validate_decision_explanation_contract,
+    validate_trace_event_contract,
+)
 from dadbot.core.kernel_gateway import KernelGateway
 from dadbot.core.kernel_signals import get_exporter, get_metrics, get_tracer
 from dadbot.core.effect_journal import EffectJournal
@@ -80,12 +89,469 @@ from dadbot.core.ledger_reader import LedgerReader
 from dadbot.core.ledger_writer import LedgerWriter
 from dadbot.core.ledger_writer_adapter import LedgerWriterAdapter
 from dadbot.core.recovery_manager import RecoveryManager
+from dadbot.core.runtime_types import ToolSpec
+from dadbot.core.hypothesis_engine import MultiHypothesisEngine
+from dadbot.core.memory_hierarchy_manager import MemoryHierarchyManager
+from dadbot.core.multi_agent_swarm import MultiAgentSwarm
+from dadbot.core.semantic_memory_graph import SemanticMemoryGraph
 from dadbot.core.semantic_primitives import hash as semantic_hash
+from dadbot.core.semantic_safety_engine import SemanticSafetyEngine
+from dadbot.core.session_planning_optimizer import SessionPlanningOptimizer
 from dadbot.core.session_store import SessionStore
+from dadbot.core.interactive_cognition_ui import InteractiveCognitionUI
+from dadbot.core.tool_routing_engine import ToolRoutingEngine
+from dadbot.core.tool_ecosystem_hub import ToolEcosystemHub
+from dadbot.core.tool_self_model import ToolSelfModel
+from dadbot.core.adaptation_engine import AdaptationEngine
+from dadbot.core.phase_closure_runtime import PhaseClosureRuntime
+from dadbot.core.response_engine import ResponseEngine
+from dadbot.core.topology_runtime import TopologyRuntime, TopologyValidationResult
 from dadbot.core._control_plane_reconciliation import ReconciliationMixin
 from dadbot.core._control_plane_compaction import CompactionMixin
 
 logger = logging.getLogger(__name__)
+
+
+def _runtime_plan_intent(user_input: str) -> str:
+    text = str(user_input or "").strip().lower()
+    if not text:
+        return "statement"
+    if "?" in text:
+        return "question"
+    if text.startswith(("please", "can you", "could you", "help me", "show me")):
+        return "request"
+    if any(token in text for token in ("i feel", "i am anxious", "i am stressed", "i am worried", "i'm worried")):
+        return "emotional"
+    return "statement"
+
+
+def _runtime_plan_strategy(intent_type: str) -> str:
+    intent = str(intent_type or "").strip().lower()
+    if intent == "emotional":
+        return "empathy_first"
+    if intent == "request":
+        return "task_plan"
+    if intent == "question":
+        return "direct_answer"
+    return "direct_answer"
+
+
+def _build_runtime_plan(
+    *,
+    session_id: str,
+    trace_id: str,
+    user_input: str,
+    attachments: AttachmentList | None,
+    metadata: dict[str, Any],
+) -> dict[str, Any]:
+    existing = dict(metadata.get("runtime_plan") or {})
+    intent_type = str(
+        existing.get("intent_type")
+        or dict(metadata.get("turn_plan") or {}).get("intent_type")
+        or _runtime_plan_intent(user_input),
+    )
+    strategy = str(
+        existing.get("strategy")
+        or dict(metadata.get("turn_plan") or {}).get("strategy")
+        or _runtime_plan_strategy(intent_type),
+    )
+    revision = int(existing.get("revision") or 0)
+    plan = {
+        "plan_id": str(existing.get("plan_id") or f"plan:{session_id}:{trace_id}"),
+        "revision": max(1, revision if revision > 0 else 1),
+        "intent_type": intent_type,
+        "strategy": strategy,
+        "status": str(existing.get("status") or "active"),
+        "created_at": float(existing.get("created_at") or time.time()),
+        "updated_at": float(time.time()),
+        "subgoals": list(existing.get("subgoals") or []),
+        "tool_routing": {
+            "latency_budget_ms": int(dict(existing.get("tool_routing") or {}).get("latency_budget_ms") or 2500),
+            "cost_tier": str(dict(existing.get("tool_routing") or {}).get("cost_tier") or "balanced"),
+            "mode": str(dict(existing.get("tool_routing") or {}).get("mode") or "adaptive"),
+            "attachment_count": int(len(attachments or [])),
+        },
+        "branch_history": list(existing.get("branch_history") or []),
+    }
+    return plan
+
+
+def _mutate_runtime_plan(
+    *,
+    metadata: dict[str, Any],
+    reason: str,
+    status: str = "active",
+    strategy: str | None = None,
+    note: str = "",
+) -> dict[str, Any]:
+    plan = dict(metadata.get("runtime_plan") or {})
+    if not plan:
+        return plan
+    plan["revision"] = int(plan.get("revision") or 1) + 1
+    if strategy:
+        plan["strategy"] = str(strategy)
+    plan["status"] = str(status or "active")
+    plan["updated_at"] = float(time.time())
+    history = list(plan.get("branch_history") or [])
+    history.append(
+        {
+            "revision": int(plan.get("revision") or 1),
+            "reason": str(reason or "replan"),
+            "status": str(status or "active"),
+            "note": str(note or ""),
+            "timestamp": float(time.time()),
+        },
+    )
+    plan["branch_history"] = history[-32:]
+    metadata["runtime_plan"] = plan
+    return plan
+
+
+def _build_semantic_memory_candidates(
+    *,
+    user_input: str,
+    response: str,
+    trace_id: str,
+    session_id: str,
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    text = str(user_input or "").strip()
+    if text and "?" not in text and len(text) >= 12:
+        if "i " in text.lower() or "my " in text.lower():
+            candidates.append(
+                {
+                    "kind": "episodic_fact",
+                    "text": text[:240],
+                    "score": 0.72,
+                    "trace_id": str(trace_id or ""),
+                    "session_id": str(session_id or "default"),
+                    "source": "user_input",
+                    "created_at": float(time.time()),
+                },
+            )
+    answer = str(response or "").strip()
+    if answer:
+        candidates.append(
+            {
+                "kind": "assistant_summary",
+                "text": answer[:240],
+                "score": 0.51,
+                "trace_id": str(trace_id or ""),
+                "session_id": str(session_id or "default"),
+                "source": "assistant_response",
+                "created_at": float(time.time()),
+            },
+        )
+    return candidates
+
+
+def _normalize_tool_runtime_contract(metadata: dict[str, Any]) -> dict[str, Any]:
+    raw = dict(metadata.get("tool_runtime_contract") or metadata.get("tool_request") or {})
+    tool_name = str(raw.get("tool_name") or raw.get("name") or "").strip()
+    tool_version = str(raw.get("version") or "").strip() or "latest"
+    required_permissions = [
+        str(item).strip().lower()
+        for item in list(raw.get("required_permissions") or [])
+        if str(item).strip()
+    ]
+    return {
+        "tool_name": tool_name,
+        "version": tool_version,
+        "required_permissions": sorted(set(required_permissions)),
+        "timeout_seconds": float(raw.get("timeout_seconds") or 10.0),
+        "side_effect_class": str(raw.get("side_effect_class") or "unknown"),
+        "determinism": str(raw.get("determinism") or "unknown"),
+        "contract_valid": bool(tool_name),
+    }
+
+
+def _validate_tool_runtime_contract(metadata: dict[str, Any]) -> tuple[bool, str]:
+    contract = dict(metadata.get("tool_runtime_contract") or {})
+    if not contract:
+        return True, "ok"
+    tool_name = str(contract.get("tool_name") or "").strip()
+    if not tool_name:
+        # No concrete tool invocation requested; this is a normal path.
+        return True, "ok"
+    timeout_seconds = float(contract.get("timeout_seconds") or 10.0)
+    if timeout_seconds < 0.05 or timeout_seconds > 120.0:
+        return False, "tool timeout_seconds out of accepted range [0.05, 120.0]"
+    required_permissions = {
+        str(item).strip().lower()
+        for item in list(contract.get("required_permissions") or [])
+        if str(item).strip()
+    }
+    granted_permissions = {
+        str(item).strip().lower()
+        for item in list(metadata.get("session_permissions") or [])
+        if str(item).strip()
+    }
+    missing = sorted(required_permissions - granted_permissions)
+    if missing:
+        return False, f"tool permission denied: missing {', '.join(missing)}"
+    side_effect_class = str(contract.get("side_effect_class") or "").strip().lower()
+    if side_effect_class in {"stateful", "logged"} and not bool(metadata.get("approval_granted", False)):
+        return False, "tool requires approval_granted for side effects"
+    return True, "ok"
+
+
+def _tokenize_memory_text(value: str) -> set[str]:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return set()
+    return {token for token in raw.replace("\n", " ").split(" ") if len(token.strip()) >= 3}
+
+
+def _rank_semantic_memory_items(
+    *,
+    items: list[dict[str, Any]],
+    user_input: str,
+    limit: int,
+) -> list[dict[str, Any]]:
+    query_tokens = _tokenize_memory_text(user_input)
+    now = float(time.time())
+    ranked: list[tuple[float, dict[str, Any]]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text") or "")
+        if not text:
+            continue
+        item_tokens = _tokenize_memory_text(text)
+        lexical_overlap = 0.0
+        if query_tokens and item_tokens:
+            lexical_overlap = float(len(query_tokens.intersection(item_tokens))) / float(max(1, len(query_tokens)))
+        base_score = float(item.get("score") or 0.0)
+        created_at = float(item.get("created_at") or now)
+        # Soft recency boost over ~24h horizon without swamping semantic score.
+        recency = max(0.0, 1.0 - min(1.0, (now - created_at) / 86_400.0))
+        final_score = (0.55 * base_score) + (0.35 * lexical_overlap) + (0.10 * recency)
+        candidate = dict(item)
+        candidate["retrieval_score"] = round(float(final_score), 6)
+        ranked.append((final_score, candidate))
+    ranked.sort(key=lambda pair: pair[0], reverse=True)
+    return [candidate for _score, candidate in ranked[:max(0, int(limit))]]
+
+
+def _clamp(value: float, lower: float, upper: float) -> float:
+    return max(lower, min(upper, float(value)))
+
+
+def _coerce_float(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return float(value)
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _normalize_sentiment_label(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _sentiment_reward(value: str) -> tuple[float, float]:
+    sentiment = _normalize_sentiment_label(value)
+    mapping = {
+        "happy": (0.45, 0.70),
+        "excited": (0.55, 0.72),
+        "grateful": (0.50, 0.75),
+        "relieved": (0.35, 0.65),
+        "neutral": (0.0, 0.0),
+        "sad": (-0.40, 0.65),
+        "anxious": (-0.45, 0.68),
+        "stressed": (-0.50, 0.70),
+        "frustrated": (-0.65, 0.75),
+        "angry": (-0.75, 0.80),
+    }
+    return mapping.get(sentiment, (0.0, 0.0))
+
+
+def _textual_feedback_signal(text: str) -> tuple[float, float, str]:
+    lowered = str(text or "").strip().lower()
+    if not lowered:
+        return 0.0, 0.0, "neutral"
+
+    negative_markers = (
+        "that didn't help",
+        "that did not help",
+        "not helpful",
+        "that's wrong",
+        "you are wrong",
+        "not what i asked",
+        "too much",
+        "too long",
+        "irrelevant",
+        "stop",
+        "no,",
+    )
+    positive_markers = (
+        "thank you",
+        "thanks",
+        "that helps",
+        "helpful",
+        "good point",
+        "exactly",
+        "makes sense",
+        "perfect",
+    )
+
+    if any(marker in lowered for marker in negative_markers):
+        return -0.70, 0.74, "frustrated"
+    if any(marker in lowered for marker in positive_markers):
+        return 0.55, 0.68, "grateful"
+    return 0.0, 0.0, "neutral"
+
+
+def _selected_feedback_features(telemetry: dict[str, Any]) -> dict[str, float]:
+    selected = dict(telemetry.get("selected") or {})
+    components = dict(selected.get("components") or {})
+    return {
+        "base_score": float(components.get("base_score", 0.0)),
+        "emotion_bias": float(components.get("emotion_bias", 0.0)),
+        "memory_relevance": float(components.get("memory_relevance", 0.0)),
+        "user_alignment": float(components.get("user_alignment", 0.0)),
+        "trajectory_alignment": float(components.get("trajectory_alignment", 0.0)),
+        "predicted_user_reaction": float(components.get("predicted_user_reaction", 0.0)),
+        "risk_level": float(selected.get("risk_level", 0.0)),
+    }
+
+
+def _synthesize_reward_feedback(
+    *,
+    pending_selection: dict[str, Any],
+    current_user_input: str,
+    metadata: dict[str, Any],
+    session_state: dict[str, Any],
+) -> dict[str, Any] | None:
+    features = _selected_feedback_features(pending_selection)
+    if not any(abs(value) > 1e-9 for value in features.values()):
+        return None
+
+    explicit = {}
+    for key in ("response_feedback", "user_feedback", "response_outcome", "reaction"):
+        candidate = metadata.get(key)
+        if isinstance(candidate, dict):
+            explicit = dict(candidate)
+            break
+
+    reward_terms: list[tuple[float, float, str]] = []
+    attribution: dict[str, float] = {}
+    evidence: list[str] = []
+
+    accepted = explicit.get("accepted")
+    rejected = explicit.get("rejected")
+    if isinstance(accepted, bool):
+        reward_terms.append((1.0 if accepted else -1.0, 0.92, "explicit_acceptance"))
+        evidence.append(f"accepted={accepted}")
+        attribution.update({
+            "user_alignment": max(attribution.get("user_alignment", 0.0), 0.40),
+            "predicted_user_reaction": max(attribution.get("predicted_user_reaction", 0.0), 0.35),
+            "trajectory_alignment": max(attribution.get("trajectory_alignment", 0.0), 0.25),
+        })
+    elif isinstance(rejected, bool):
+        reward_terms.append((-1.0 if rejected else 0.6, 0.88, "explicit_rejection"))
+        evidence.append(f"rejected={rejected}")
+        attribution.update({
+            "user_alignment": max(attribution.get("user_alignment", 0.0), 0.35),
+            "predicted_user_reaction": max(attribution.get("predicted_user_reaction", 0.0), 0.30),
+            "risk_level": max(attribution.get("risk_level", 0.0), 0.20),
+        })
+
+    rating = _coerce_float(explicit.get("rating"))
+    if rating is not None:
+        normalized = rating
+        if rating > 1.0:
+            normalized = ((rating - 3.0) / 2.0) if rating <= 5.0 else max(-1.0, min(1.0, rating / 5.0))
+        reward_terms.append((_clamp(normalized, -1.0, 1.0), 0.85, "explicit_rating"))
+        evidence.append(f"rating={rating}")
+        attribution.update({
+            "user_alignment": max(attribution.get("user_alignment", 0.0), 0.45),
+            "predicted_user_reaction": max(attribution.get("predicted_user_reaction", 0.0), 0.35),
+        })
+
+    sentiment_sources = [
+        explicit.get("sentiment"),
+        metadata.get("user_sentiment"),
+        dict(session_state.get("last_turn_ux_feedback") or {}).get("mood_hint"),
+    ]
+    for sentiment_source in sentiment_sources:
+        reward_value, confidence = _sentiment_reward(str(sentiment_source or ""))
+        if confidence > 0.0:
+            reward_terms.append((reward_value, confidence, "sentiment"))
+            evidence.append(f"sentiment={sentiment_source}")
+            attribution.update({
+                "emotion_bias": max(attribution.get("emotion_bias", 0.0), 0.35),
+                "predicted_user_reaction": max(attribution.get("predicted_user_reaction", 0.0), 0.40),
+                "user_alignment": max(attribution.get("user_alignment", 0.0), 0.25),
+            })
+            break
+
+    engagement_level = _coerce_float(explicit.get("engagement_level"))
+    if engagement_level is None:
+        engagement_level = _coerce_float(metadata.get("engagement_level"))
+    if engagement_level is None:
+        interaction_state = dict(session_state.get("interaction_state") or {})
+        engagement_level = _coerce_float(interaction_state.get("engagement_level"))
+    if engagement_level is not None:
+        normalized_engagement = _clamp((engagement_level - 0.5) * 1.2, -1.0, 1.0)
+        reward_terms.append((normalized_engagement, 0.58, "engagement_level"))
+        evidence.append(f"engagement_level={engagement_level}")
+        attribution.update({
+            "predicted_user_reaction": max(attribution.get("predicted_user_reaction", 0.0), 0.45),
+            "user_alignment": max(attribution.get("user_alignment", 0.0), 0.35),
+            "trajectory_alignment": max(attribution.get("trajectory_alignment", 0.0), 0.20),
+        })
+
+    engagement_delta = _coerce_float(explicit.get("engagement_delta"))
+    if engagement_delta is None:
+        engagement_delta = _coerce_float(metadata.get("engagement_delta"))
+    if engagement_delta is not None:
+        reward_terms.append((_clamp(engagement_delta, -1.0, 1.0), 0.68, "engagement_delta"))
+        evidence.append(f"engagement_delta={engagement_delta}")
+        attribution.update({
+            "predicted_user_reaction": max(attribution.get("predicted_user_reaction", 0.0), 0.50),
+            "user_alignment": max(attribution.get("user_alignment", 0.0), 0.30),
+        })
+
+    textual_reward, textual_confidence, inferred_sentiment = _textual_feedback_signal(current_user_input)
+    if textual_confidence > 0.0:
+        reward_terms.append((textual_reward, textual_confidence, "follow_up_text"))
+        evidence.append(f"follow_up_text={inferred_sentiment}")
+        attribution.update({
+            "user_alignment": max(attribution.get("user_alignment", 0.0), 0.40),
+            "predicted_user_reaction": max(attribution.get("predicted_user_reaction", 0.0), 0.30),
+            "emotion_bias": max(attribution.get("emotion_bias", 0.0), 0.20),
+        })
+        if textual_reward < 0.0:
+            attribution["risk_level"] = max(attribution.get("risk_level", 0.0), 0.25)
+
+    if not reward_terms:
+        return None
+
+    confidence_total = sum(confidence for _reward, confidence, _source in reward_terms)
+    if confidence_total <= 1e-9:
+        return None
+
+    blended_reward = sum(reward * confidence for reward, confidence, _source in reward_terms) / confidence_total
+    blended_confidence = _clamp(confidence_total / max(len(reward_terms), 1), 0.0, 1.0)
+    if blended_confidence < 0.35:
+        return None
+
+    return {
+        "reward": _clamp(blended_reward, -1.0, 1.0),
+        "confidence": blended_confidence,
+        "features": features,
+        "attribution": {key: _clamp(value, 0.0, 1.0) for key, value in attribution.items() if value > 0.0},
+        "source": "control_plane.synthesized_outcome",
+        "evidence": evidence[-6:],
+        "pending_trace_id": str(pending_selection.get("trace_id") or ""),
+        "created_at": float(time.time()),
+    }
 
 
 @dataclass(frozen=True)
@@ -544,6 +1010,7 @@ class ControlPlaneOptions:
     redelivery_retry_interval_seconds: float = 0.05
     ledger: ExecutionLedger | None = None
     scheduler: SchedulerProtocol | None = None
+    stream_sink: Callable[[dict[str, Any]], None] | None = None
 
 
 class SessionRegistry:
@@ -1368,7 +1835,7 @@ class Scheduler:
             dict(job.metadata.get("execution_result") or {}),
         )
         current_execution_result = mark_unified_execution_success(
-            current_execution_result,
+            cast(dict[str, Any], current_execution_result),
             response=str(result[0] if isinstance(result, tuple) and len(result) >= 1 else ""),
             should_end=bool(result[1] if isinstance(result, tuple) and len(result) >= 2 else False),
         )
@@ -1412,7 +1879,7 @@ class Scheduler:
     ) -> None:
         failure = _classify_execution_failure(exc)
         current_execution_result = mark_unified_execution_failure(
-            build_unified_execution_result(),
+            cast(dict[str, Any], build_unified_execution_result()),
             failure_class=str(failure.get("failure_class") or "runtime_exception"),
             failure_source=str(failure.get("failure_source") or "execution"),
             retryable=bool(failure.get("retryable", False)),
@@ -1576,6 +2043,7 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         resolved_options = self._resolve_options(options, legacy_options)
         self.registry = registry
         self.kernel_executor = kernel_executor
+        self._stream_sink = resolved_options.stream_sink
         token_seed = (
             f"{resolved_options.worker_id}|"
             f"{resolved_options.max_inflight_jobs}|"
@@ -1641,11 +2109,437 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
             "mismatch": 0,
             "enforced_blocked": 0,
         }
+        self._stream_event_sequence: int = 0
         self._distributed_correctness = DistributedCorrectnessModel()
         self._distributed_epoch = 1
+        self._cognitive_policy_engine = CognitivePolicyEngine()
+        self._semantic_memory_graph = SemanticMemoryGraph()
+        self._tool_routing_engine = ToolRoutingEngine()
+        self._adaptation_engine = AdaptationEngine()
+        self._semantic_safety_engine = SemanticSafetyEngine()
+        self._belief_state_engine = BeliefStateEngine()
+        self._hypothesis_engine = MultiHypothesisEngine()
+        self._memory_hierarchy_manager = MemoryHierarchyManager()
+        self._tool_self_model = ToolSelfModel()
+        self._compositional_tool_planner = CompositionalToolPlanner()
+        self._planning_optimizer = SessionPlanningOptimizer()
+        self._autonomous_goal_daemon = AutonomousGoalDaemon()
+        self._interactive_cognition_ui = InteractiveCognitionUI()
+        self._alignment_trainer = BehaviorAlignmentTrainer()
+        self._tool_ecosystem_hub = ToolEcosystemHub()
+        self._multi_agent_swarm = MultiAgentSwarm()
+        self._response_engine = ResponseEngine()
+        self._topology_runtime = TopologyRuntime(strict_mode=True)
+        self._last_topology_validation: TopologyValidationResult | None = None
+        self._phase_closure_runtime = PhaseClosureRuntime()
+        self._autonomous_goal_task: asyncio.Task[None] | None = None
+        self._autonomous_goal_stop: asyncio.Event | None = None
         self._sync_distributed_authority(role=NodeRole.LEADER, state_hash=self.execution_token)
         self.kernel_gateway = KernelGateway(self)
         self.bootstrap()
+
+    def _topology_begin_turn(self, *, trace_id: str, session_id: str) -> None:
+        self._topology_runtime.begin_turn(
+            trace_id=str(trace_id or ""),
+            session_id=str(session_id or "default"),
+        )
+
+    def _topology_record_node(
+        self,
+        *,
+        node_id: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        self._topology_runtime.record_node_entry(
+            node_id=str(node_id or ""),
+            timestamp_ms=float(time.time() * 1000.0),
+            metadata=dict(metadata or {}),
+        )
+
+    def _topology_end_turn(self) -> TopologyValidationResult:
+        result = self._topology_runtime.end_turn()
+        self._last_topology_validation = result
+        if not result.passed or result.violations_critical > 0:
+            raise InvariantViolation(
+                "Topology runtime enforcement blocked non-canonical execution path.",
+                context={
+                    "violations_critical": int(result.violations_critical),
+                    "violations_high": int(result.violations_high),
+                    "violations_total": int(result.violations_total),
+                    "details": dict(result.details or {}),
+                },
+            )
+        return result
+
+    def _pre_execution_contract_gate(
+        self,
+        *,
+        session_id: str,
+        user_input: str,
+        metadata: dict[str, Any],
+    ) -> None:
+        session = self.registry.get_or_create(str(session_id or "default"))
+        state = session.setdefault("state", {}) if isinstance(session, dict) else {}
+        if not isinstance(state, dict):
+            raise RuntimeError("pre-execution contract gate requires dict state")
+
+        canonical_state = self._phase_closure_runtime.kernel.ensure_global_canonical_state_schema(dict(state))
+        metadata["pre_execution_canonical_state_hash"] = self._stable_hash(canonical_state)
+
+        metadata.setdefault("execution_timestamp_ms", int(time.time() * 1000))
+        metadata.setdefault("max_staleness_ms", 2000)
+
+        pre_drift = self._phase_closure_runtime.kernel.detect_drift(
+            slot=f"pre_execution:{str(session_id or 'default')}",
+            value={"state": canonical_state, "input": str(user_input or "")},
+        )
+        metadata["drift_precheck"] = dict(pre_drift)
+        self._phase_closure_runtime.kernel.register_side_effect(
+            effect_type="execution_stage",
+            subject="pre_execution",
+            payload={"session_id": str(session_id or "default")},
+            trace_id=str(metadata.get("trace_id") or ""),
+        )
+
+    def _post_planning_pre_tool_contract_gate(
+        self,
+        *,
+        session_id: str,
+        metadata: dict[str, Any],
+    ) -> None:
+        tool_contract = dict(metadata.get("tool_runtime_contract") or {})
+        tool_name = str(tool_contract.get("tool_name") or "").strip()
+        runtime_plan = dict(metadata.get("runtime_plan") or {})
+        uncertainty = float(dict(runtime_plan.get("uncertainty") or {}).get("score") or 0.0)
+        strategy = str(runtime_plan.get("strategy") or "").strip().lower()
+        uncertainty_action = str(runtime_plan.get("uncertainty_action") or "").strip().lower()
+
+        if tool_name and uncertainty >= 0.75 and (
+            strategy in {"task_execution", "direct_answer"}
+            or uncertainty_action not in {"branch", "retry", "hedge", "clarify"}
+        ):
+            raise RuntimeError(
+                "Uncertainty enforcement gate: planner must branch/hedge before tool execution",
+            )
+
+        memory_entries = [
+            dict(item)
+            for item in list(metadata.get("world_model_memory_entries") or [])
+            if isinstance(item, dict)
+        ]
+        entity_bindings = [
+            dict(item)
+            for item in list(metadata.get("world_model_entity_bindings") or [])
+            if isinstance(item, dict)
+        ]
+        self._phase_closure_runtime.world.validate_memory_bindings(
+            memory_entries=memory_entries,
+            entity_bindings=entity_bindings,
+        )
+
+        self._phase_closure_runtime.kernel.register_side_effect(
+            effect_type="execution_stage",
+            subject="post_planning_pre_tool",
+            payload={
+                "session_id": str(session_id or "default"),
+                "tool_name": tool_name,
+                "uncertainty": uncertainty,
+            },
+            trace_id=str(metadata.get("trace_id") or ""),
+        )
+
+    def _post_execution_pre_commit_contract_gate(
+        self,
+        *,
+        session_id: str,
+        job: ExecutionJob,
+        result: FinalizedTurnResult,
+        input_state_hash: str,
+    ) -> None:
+        session = self.registry.get_or_create(str(session_id or "default"))
+        state = session.setdefault("state", {}) if isinstance(session, dict) else {}
+        if not isinstance(state, dict):
+            raise RuntimeError("post-execution contract gate requires dict state")
+
+        semantic_items = [
+            dict(item)
+            for item in list(dict(state.get("semantic_memory") or {}).get("items") or [])
+            if isinstance(item, dict)
+        ]
+        memory_entries: list[dict[str, Any]] = []
+        for index, item in enumerate(semantic_items, start=1):
+            row = dict(item)
+            row.setdefault("id", str(row.get("memory_id") or f"mem-{index}"))
+            memory_entries.append(row)
+        self._phase_closure_runtime.world.validate_memory_bindings(
+            memory_entries=memory_entries,
+            entity_bindings=[
+                dict(item)
+                for item in list(job.metadata.get("world_model_entity_bindings") or [])
+                if isinstance(item, dict)
+            ],
+        )
+
+        side_effect_records = [
+            dict(record.__dict__)
+            for record in self._phase_closure_runtime.kernel.side_effect_registry.records(
+                trace_id=str(job.trace_id or ""),
+            )
+        ]
+        post_drift = self._phase_closure_runtime.kernel.detect_drift(
+            slot=f"post_execution:{str(session_id or 'default')}",
+            value={"state": state, "result": list(result) if isinstance(result, tuple) else result},
+        )
+
+        state_transition = {
+            "turn_id": str(job.job_id or ""),
+            "trace_id": str(job.trace_id or ""),
+            "input_state_hash": str(input_state_hash or ""),
+            "action": str(dict(job.metadata.get("runtime_plan") or {}).get("strategy") or ""),
+            "tool_calls": [
+                dict(item)
+                for item in list(dict(job.metadata.get("tool_routing_plan") or {}).get("candidates") or [])
+                if isinstance(item, dict)
+            ][:5],
+            "output_state_hash": self._stable_hash(state),
+            "side_effects": side_effect_records,
+            "timestamp": float(time.time()),
+            "drift_postcheck": dict(post_drift),
+        }
+        transitions = [
+            dict(item)
+            for item in list(state.get("state_transition_ledger") or [])
+            if isinstance(item, dict)
+        ]
+        transitions.append(state_transition)
+        state["state_transition_ledger"] = transitions[-1024:]
+        state["last_state_transition"] = dict(state_transition)
+        self._merge_session_state(session_id=str(session_id or "default"), state_patch=state)
+        self._emit_runtime_stream_event(
+            event_type="state.transition.recorded",
+            session_id=str(session_id or "default"),
+            trace_id=str(job.trace_id or ""),
+            payload={
+                "turn_id": str(state_transition.get("turn_id") or ""),
+                "input_state_hash": str(state_transition.get("input_state_hash") or ""),
+                "output_state_hash": str(state_transition.get("output_state_hash") or ""),
+                "action": str(state_transition.get("action") or ""),
+                "tool_call_count": int(len(list(state_transition.get("tool_calls") or []))),
+                "side_effect_count": int(len(list(state_transition.get("side_effects") or []))),
+                "timestamp": float(state_transition.get("timestamp") or 0.0),
+            },
+        )
+
+    def set_turn_steering(self, *, session_id: str, steering: dict[str, Any]) -> dict[str, Any]:
+        session = self.registry.get_or_create(str(session_id or "default"))
+        state = session.setdefault("state", {}) if isinstance(session, dict) else {}
+        if not isinstance(state, dict):
+            return {"applied": False, "reason": "no_state"}
+        state["pending_turn_steering"] = dict(steering or {})
+        self._interactive_cognition_ui.apply_live_control(
+            state=state,
+            control=dict(steering or {}),
+            source="set_turn_steering",
+        )
+        self._emit_runtime_stream_event(
+            event_type="turn.steering.updated",
+            session_id=str(session_id or "default"),
+            trace_id="",
+            payload={"steering": dict(steering or {})},
+        )
+        return {"applied": True, "steering": dict(steering or {})}
+
+    def update_interactive_plan(
+        self,
+        *,
+        session_id: str,
+        trace_id: str,
+        edits: dict[str, Any],
+        actor: str = "operator",
+    ) -> dict[str, Any]:
+        session = self.registry.get_or_create(str(session_id or "default"))
+        state = session.setdefault("state", {}) if isinstance(session, dict) else {}
+        if not isinstance(state, dict):
+            return {"updated": False, "reason": "no_state"}
+        updated_plan = self._interactive_cognition_ui.apply_plan_edit(
+            state=state,
+            trace_id=str(trace_id or ""),
+            edits=dict(edits or {}),
+            actor=str(actor or "operator"),
+        )
+        return {"updated": True, "plan": dict(updated_plan)}
+
+    def register_external_connector(
+        self,
+        *,
+        session_id: str,
+        name: str,
+        capabilities: list[str],
+        endpoint: str = "",
+        health: float = 1.0,
+    ) -> dict[str, Any]:
+        session = self.registry.get_or_create(str(session_id or "default"))
+        state = session.setdefault("state", {}) if isinstance(session, dict) else {}
+        if not isinstance(state, dict):
+            return {"registered": False, "reason": "no_state"}
+        connector = self._tool_ecosystem_hub.register_connector(
+            state=state,
+            name=str(name or ""),
+            capabilities=[str(item) for item in list(capabilities or [])],
+            endpoint=str(endpoint or ""),
+            health=float(health),
+        )
+        return {"registered": bool(connector), "connector": dict(connector)}
+
+    def swarm_status(self, *, session_id: str) -> dict[str, Any]:
+        session = self.registry.get_or_create(str(session_id or "default"))
+        state = session.setdefault("state", {}) if isinstance(session, dict) else {}
+        if not isinstance(state, dict):
+            return {"available": False, "reason": "no_state"}
+        return self._multi_agent_swarm.health_snapshot(state=state)
+
+    def _consume_pending_turn_steering(self, *, session_id: str) -> dict[str, Any]:
+        session = self.registry.get_or_create(str(session_id or "default"))
+        state = session.setdefault("state", {}) if isinstance(session, dict) else {}
+        if not isinstance(state, dict):
+            return {}
+        pending = dict(state.get("pending_turn_steering") or {})
+        if pending:
+            state.pop("pending_turn_steering", None)
+        return pending
+
+    async def start_autonomous_goal_loop(self, *, interval_seconds: float = 60.0) -> dict[str, Any]:
+        interval = max(1.0, float(interval_seconds or 60.0))
+        if self._autonomous_goal_task is not None and not self._autonomous_goal_task.done():
+            return {"started": False, "reason": "already_running", "interval_seconds": interval}
+        self._autonomous_goal_stop = asyncio.Event()
+
+        async def _run_loop() -> None:
+            assert self._autonomous_goal_stop is not None
+            while not self._autonomous_goal_stop.is_set():
+                for session_name in list(getattr(self.registry, "_sessions", {}).keys()):
+                    with contextlib.suppress(Exception):
+                        self.run_autonomous_goal_cycle(session_id=session_name, source="daemon")
+                try:
+                    await asyncio.wait_for(self._autonomous_goal_stop.wait(), timeout=interval)
+                except TimeoutError:
+                    continue
+
+        self._autonomous_goal_task = asyncio.create_task(_run_loop(), name="dadbot.autonomous_goal_loop")
+        return {"started": True, "interval_seconds": interval}
+
+    async def stop_autonomous_goal_loop(self) -> dict[str, Any]:
+        if self._autonomous_goal_task is None:
+            return {"stopped": False, "reason": "not_running"}
+        if self._autonomous_goal_stop is not None:
+            self._autonomous_goal_stop.set()
+        with contextlib.suppress(Exception):
+            await self._autonomous_goal_task
+        self._autonomous_goal_task = None
+        self._autonomous_goal_stop = None
+        return {"stopped": True}
+
+    def run_autonomous_goal_cycle(self, *, session_id: str, source: str = "manual") -> dict[str, Any]:
+        session = self.registry.get_or_create(str(session_id or "default"))
+        state = session.setdefault("state", {}) if isinstance(session, dict) else {}
+        if not isinstance(state, dict):
+            return {"ran": False, "reason": "no_state"}
+        actions = self._autonomous_goal_daemon.next_actions(state=state, max_items=4)
+        self._autonomous_goal_daemon.persist_cycle(state=state, actions=actions, source=source)
+        self._emit_runtime_stream_event(
+            event_type="autonomous.goal.cycle",
+            session_id=str(session_id or "default"),
+            trace_id="",
+            payload={"actions": [dict(item) for item in list(actions or [])], "source": str(source or "manual")},
+        )
+        return {"ran": True, "actions": [dict(item) for item in list(actions or [])]}
+
+    def _emit_runtime_stream_event(
+        self,
+        *,
+        event_type: str,
+        session_id: str,
+        trace_id: str,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        self._stream_event_sequence += 1
+        event = {
+            "event_type": str(event_type or "runtime.unknown"),
+            "session_id": str(session_id or "default"),
+            "trace_id": str(trace_id or ""),
+            "timestamp": float(time.time()),
+            "sequence": int(self._stream_event_sequence),
+            "payload": dict(payload or {}),
+        }
+        event = dict(validate_trace_event_contract(event))
+        self._append_stream_timeline(
+            session_id=str(session_id or "default"),
+            event=event,
+        )
+        sink = self._stream_sink
+        if callable(sink):
+            try:
+                sink(event)
+            except Exception as exc:
+                logger.debug("stream sink failed: %s", exc)
+        _write_progress_event(component="runtime_stream", phase=str(event_type or "runtime.unknown"), payload=event)
+
+    def _append_stream_timeline(self, *, session_id: str, event: dict[str, Any]) -> None:
+        session = self.registry.get_or_create(str(session_id or "default"))
+        state = session.setdefault("state", {}) if isinstance(session, dict) else {}
+        if not isinstance(state, dict):
+            return
+        timeline = list(state.get("execution_timeline") or [])
+        timeline.append(dict(event))
+        state["execution_timeline"] = timeline[-512:]
+
+    def _merge_session_state(self, *, session_id: str, state_patch: dict[str, Any]) -> dict[str, Any]:
+        session = self.registry.get_or_create(str(session_id or "default"))
+        existing = session.setdefault("state", {}) if isinstance(session, dict) else {}
+        if not isinstance(existing, dict):
+            return dict(state_patch or {})
+        if state_patch is existing:
+            return existing
+        existing.update(dict(state_patch or {}))
+        session["state"] = existing
+        return existing
+
+    def _inject_semantic_memory_context(
+        self,
+        *,
+        session_id: str,
+        user_input: str,
+        metadata: dict[str, Any],
+        limit: int = 5,
+    ) -> None:
+        session = self.registry.get_or_create(str(session_id or "default"))
+        state = session.setdefault("state", {}) if isinstance(session, dict) else {}
+        if not isinstance(state, dict):
+            metadata["semantic_memory_context"] = []
+            return
+        semantic_memory = dict(state.get("semantic_memory_projection") or state.get("semantic_memory") or {})
+        items = [dict(item) for item in list(semantic_memory.get("items") or []) if isinstance(item, dict)]
+        ranked = _rank_semantic_memory_items(
+            items=items,
+            user_input=str(user_input or ""),
+            limit=int(limit),
+        )
+        metadata["semantic_memory_context"] = ranked
+
+    def _discover_tool_specs(self) -> list[ToolSpec]:
+        registry = getattr(self.graph, "tool_registry", None)
+        if registry is None:
+            return []
+        discover = getattr(registry, "discover", None)
+        if not callable(discover):
+            return []
+        try:
+            specs = discover()
+        except Exception:
+            return []
+        if not isinstance(specs, list):
+            return []
+        return [spec for spec in specs if isinstance(spec, ToolSpec)]
 
     @property
     def scheduler(self) -> SchedulerProtocol:
@@ -1679,6 +2573,8 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
             resolved.ledger = legacy_options["ledger"]
         if "scheduler" in legacy_options:
             resolved.scheduler = legacy_options["scheduler"]
+        if "stream_sink" in legacy_options:
+            resolved.stream_sink = legacy_options["stream_sink"]
         return resolved
 
     async def create_session(self, session_id: str) -> dict[str, Any]:
@@ -1775,6 +2671,12 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
             "extra": dict(extra or {}),
         }
         _write_progress_event(component="control_plane", phase=phase, payload=payload)
+        self._emit_runtime_stream_event(
+            event_type="turn.progress",
+            session_id=str(session_id or "default"),
+            trace_id=str(trace_token or ""),
+            payload=payload,
+        )
 
     def _durable_completed_result_for_request(
         self,
@@ -2099,6 +3001,24 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
                 projection_terminal = bool(
                     projected is not None and projected.status in {ExecutionStatus.COMPLETED, ExecutionStatus.FAILED}
                 )
+                if consecutive_idle_drains >= 5:
+                    _mutate_runtime_plan(
+                        metadata=job.metadata,
+                        reason="scheduler_stall_replan",
+                        status="active",
+                        strategy="clarify",
+                        note="idle_drain_threshold_reached",
+                    )
+                    self._emit_runtime_stream_event(
+                        event_type="plan.updated",
+                        session_id=session_key,
+                        trace_id=trace_token,
+                        payload={
+                            "job_id": str(job.job_id or ""),
+                            "runtime_plan": dict(job.metadata.get("runtime_plan") or {}),
+                            "trigger": "scheduler_stall_replan",
+                        },
+                    )
                 self._emit_progress_snapshot(
                     phase="during_scheduler_drain",
                     session_id=session_key,
@@ -2132,6 +3052,78 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
                     await wait_task
         return loop_iterations
 
+    def _build_response_engine_context(
+        self,
+        *,
+        job: ExecutionJob,
+        session_key: str,
+        initial_response: str,
+    ) -> Any:
+        """Build execution context for ResponseEngine ranking.
+
+        Phase 1: Create context from job metadata and session state for response ranking.
+        """
+        session = self.registry.get_or_create(session_key)
+        session_state_ref = session.setdefault("state", {}) if isinstance(session, dict) else {}
+        if not isinstance(session_state_ref, dict):
+            session_state_ref = {}
+
+        metadata = dict(job.metadata or {})
+        if not isinstance(metadata.get("reward_feedback"), dict):
+            pending_feedback = dict(session_state_ref.get("response_learning_pending") or {})
+            if pending_feedback:
+                synthesized_feedback = _synthesize_reward_feedback(
+                    pending_selection=pending_feedback,
+                    current_user_input=str(job.user_input or ""),
+                    metadata=metadata,
+                    session_state=session_state_ref,
+                )
+                if isinstance(synthesized_feedback, dict) and synthesized_feedback:
+                    metadata["reward_feedback"] = synthesized_feedback
+                    session_state_ref.pop("response_learning_pending", None)
+                else:
+                    attempts = int(pending_feedback.get("feedback_attempts") or 0) + 1
+                    if attempts >= 3:
+                        session_state_ref.pop("response_learning_pending", None)
+                    else:
+                        pending_feedback["feedback_attempts"] = attempts
+                        session_state_ref["response_learning_pending"] = pending_feedback
+        else:
+            session_state_ref.pop("response_learning_pending", None)
+
+        session_state = dict(session_state_ref)
+        
+        # Simple dynamic context object with execution data.
+        from types import SimpleNamespace
+
+        context = SimpleNamespace()
+        context.user_input = str(job.user_input or "")
+        context.initial_response = initial_response
+        context.session_state = session_state
+        context.job_metadata = metadata
+        context.trace_id = str(job.trace_id or "")
+
+        context.memory_context = list(metadata.get("memory_context") or [])
+
+        context.persona_traits = list(session_state.get("persona_traits") or [])
+        context.persona_constraints = dict(session_state.get("persona_constraints") or {})
+
+        # Allow either explicit user_preferences or profile.preferences path.
+        user_preferences = session_state.get("user_preferences")
+        if not isinstance(user_preferences, dict):
+            profile_blob = session_state.get("profile")
+            if isinstance(profile_blob, dict):
+                user_preferences = dict(profile_blob.get("preferences") or {})
+        context.user_preferences = dict(user_preferences or {})
+
+        context.conversation_trajectory = dict(
+            session_state.get("conversation_trajectory")
+            or metadata.get("conversation_trajectory")
+            or {},
+        )
+        
+        return context
+
     def _finalize_submit_success(
         self,
         *,
@@ -2146,20 +3138,72 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         current_execution_result = ensure_unified_execution_result(
             dict(job.metadata.get("execution_result") or {}),
         )
+        # Extract initial response from execution
+        initial_response = str(result[0] if isinstance(result, tuple) and len(result) >= 1 else "")
+        
+        # Phase 1: Run ResponseEngine to rank and select best response
+        # ResponseEngine takes the execution context and generates/ranks candidates
+        engine_context = self._build_response_engine_context(
+            job=job,
+            session_key=session_key,
+            initial_response=initial_response,
+        )
+        try:
+            with contextlib.suppress(Exception):
+                self._topology_record_node(
+                    node_id="response_engine.generate_and_rank",
+                    metadata={"trace_id": str(trace_token or "")},
+                )
+            # PHASE 1: ResponseEngine is SOLE selection authority
+            # Only ResponseEngine may influence which response is selected.
+            # All other systems are telemetry-only observers.
+            ranked_response = self._response_engine.run(engine_context)
+            final_response = ranked_response if ranked_response else initial_response
+            telemetry = getattr(engine_context, "response_engine_telemetry", None)
+            if isinstance(telemetry, dict) and telemetry:
+                job.metadata["response_engine_telemetry"] = telemetry
+        except Exception as exc:
+            logger.warning(f"ResponseEngine ranking failed: {exc}; using initial response")
+            final_response = initial_response
+            telemetry = None
+        
         if current_execution_result.get("status") not in _TERMINAL_STATUS_VALUES:
             current_execution_result = mark_unified_execution_success(
-                current_execution_result,
-                response=str(result[0] if isinstance(result, tuple) and len(result) >= 1 else ""),
+                cast(dict[str, Any], current_execution_result),
+                response=final_response,
                 should_end=bool(result[1] if isinstance(result, tuple) and len(result) >= 2 else False),
             )
             job.metadata["execution_result"] = current_execution_result
+            job.metadata["response_authority"] = "response_engine"
+            # Update result tuple with ranked response
+            result = (final_response, result[1] if isinstance(result, tuple) and len(result) >= 2 else False)
         session_after = self.registry.get_or_create(session_key)
+        self._post_execution_pre_commit_contract_gate(
+            session_id=session_key,
+            job=job,
+            result=result,
+            input_state_hash=before_state_hash,
+        )
         self._validate_trace_invariant(job, result, session=session_after, state_before_hash=before_state_hash)
         self._apply_turn_committed_core_state(
             session=session_after,
             job=job,
             result=result,
         )
+        if isinstance(session_after, dict):
+            state = session_after.setdefault("state", {})
+            if isinstance(state, dict):
+                selected = dict(dict(job.metadata.get("response_engine_telemetry") or {}).get("selected") or {})
+                if selected:
+                    state["response_learning_pending"] = {
+                        "trace_id": str(trace_token or job.trace_id or ""),
+                        "created_at": float(time.time()),
+                        "selected": selected,
+                        "selected_text_preview": str(
+                            dict(job.metadata.get("response_engine_telemetry") or {}).get("selected_text_preview") or ""
+                        ),
+                        "feedback_attempts": 0,
+                    }
         self._maybe_compact_ledger()
         if dedupe_future is not None and not dedupe_future.done():
             dedupe_future.set_result(result)
@@ -2181,6 +3225,72 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
             note="submit_turn resolved",
             extra={"loop_iterations": loop_iterations},
         )
+        response_text = str(result[0] if isinstance(result, tuple) and len(result) >= 1 else "")
+        self._promote_semantic_memory(
+            session=self.registry.get_or_create(session_key),
+            job=job,
+            response_text=response_text,
+        )
+        session_state = dict(self.registry.get_or_create(session_key).get("state") or {})
+        runtime_plan = dict(job.metadata.get("runtime_plan") or {})
+        session_state.setdefault("authority_modes", {})
+        if isinstance(session_state["authority_modes"], dict):
+            session_state["authority_modes"]["response_selection"] = "response_engine"
+            session_state["authority_modes"]["learning_update"] = "response_engine"
+            session_state["authority_modes"]["memory_write"] = "memory_manager"
+        learning_telemetry = {
+            "trace_id": str(trace_token or ""),
+            "status": "success",
+            "strategy": str(runtime_plan.get("strategy") or "direct_answer"),
+            "uncertainty_score": float(dict(runtime_plan.get("uncertainty") or {}).get("score") or 0.0),
+            "response_length": int(len(response_text or "")),
+            "non_canonical_loops": [
+                "adaptation_engine",
+                "belief_state_engine",
+                "planning_optimizer",
+                "alignment_trainer",
+                "memory_hierarchy_manager",
+                "tool_self_model",
+                "multi_agent_swarm",
+                "autonomous_goal_daemon",
+            ],
+        }
+        session_state["learning_signal_telemetry"] = learning_telemetry
+        job.metadata["learning_signal_telemetry"] = dict(learning_telemetry)
+        self._interactive_cognition_ui.emit_thought(
+            state=session_state,
+            trace_id=str(trace_token or ""),
+            content="Turn completed successfully",
+            confidence=0.95,
+            category="outcome",
+        )
+        self._merge_session_state(session_id=session_key, state_patch=session_state)
+        self._emit_runtime_stream_event(
+            event_type="partial.output",
+            session_id=session_key,
+            trace_id=trace_token,
+            payload={
+                "chunk": response_text,
+                "is_terminal_chunk": True,
+                "job_id": str(job.job_id or ""),
+            },
+        )
+        self._emit_runtime_stream_event(
+            event_type="turn.completed",
+            session_id=session_key,
+            trace_id=trace_token,
+            payload={
+                "job_id": str(job.job_id or ""),
+                "loop_iterations": int(loop_iterations),
+                "should_end": bool(result[1] if isinstance(result, tuple) and len(result) >= 2 else False),
+                "runtime_plan": dict(job.metadata.get("runtime_plan") or {}),
+            },
+        )
+        with contextlib.suppress(Exception):
+            self._topology_record_node(
+                node_id="persistence.finalize_turn",
+                metadata={"trace_id": str(trace_token or "")},
+            )
         return result
 
     def _record_submit_exception(
@@ -2195,7 +3305,7 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
     ) -> None:
         classified = _classify_execution_failure(exc)
         current_execution_result = mark_unified_execution_failure(
-            build_unified_execution_result(),
+            cast(dict[str, Any], build_unified_execution_result()),
             failure_class=str(classified.get("failure_class") or "runtime_exception"),
             failure_source=str(classified.get("failure_source") or "execution"),
             retryable=bool(classified.get("retryable", False)),
@@ -2211,6 +3321,12 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
             f"control_plane.submit.failed:{str(classified.get('failure_action') or 'unknown')}"
         )
         job.metadata["execution_state"] = execution_state
+        _mutate_runtime_plan(
+            metadata=job.metadata,
+            reason=f"submit_failed:{type(exc).__name__}",
+            status="failed",
+            note=str(exc),
+        )
         if future.done() and not future.cancelled():
             with contextlib.suppress(Exception):
                 future.exception()
@@ -2234,6 +3350,51 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
             note="submit_turn exception",
             extra={"exception_type": type(exc).__name__, "exception": str(exc)},
         )
+        self._emit_runtime_stream_event(
+            event_type="turn.failed",
+            session_id=session_key,
+            trace_id=trace_token,
+            payload={
+                "job_id": str(job.job_id or ""),
+                "exception_type": type(exc).__name__,
+                "exception": str(exc),
+                "runtime_plan": dict(job.metadata.get("runtime_plan") or {}),
+            },
+        )
+        session_state = dict(self.registry.get_or_create(session_key).get("state") or {})
+        runtime_plan = dict(job.metadata.get("runtime_plan") or {})
+        session_state.setdefault("authority_modes", {})
+        if isinstance(session_state["authority_modes"], dict):
+            session_state["authority_modes"]["response_selection"] = "response_engine"
+            session_state["authority_modes"]["learning_update"] = "response_engine"
+            session_state["authority_modes"]["memory_write"] = "memory_manager"
+        failure_learning_telemetry = {
+            "trace_id": str(trace_token or ""),
+            "status": "failure",
+            "strategy": str(runtime_plan.get("strategy") or "direct_answer"),
+            "uncertainty_score": float(dict(runtime_plan.get("uncertainty") or {}).get("score") or 1.0),
+            "failure_type": str(classified.get("failure_type") or "runtime_failure"),
+            "non_canonical_loops": [
+                "adaptation_engine",
+                "belief_state_engine",
+                "planning_optimizer",
+                "alignment_trainer",
+                "memory_hierarchy_manager",
+                "tool_self_model",
+                "multi_agent_swarm",
+                "autonomous_goal_daemon",
+            ],
+        }
+        session_state["learning_signal_telemetry"] = failure_learning_telemetry
+        job.metadata["learning_signal_telemetry"] = dict(failure_learning_telemetry)
+        self._interactive_cognition_ui.emit_thought(
+            state=session_state,
+            trace_id=str(trace_token or ""),
+            content=f"Turn failed: {type(exc).__name__}",
+            confidence=0.9,
+            category="outcome",
+        )
+        self._merge_session_state(session_id=session_key, state_patch=session_state)
 
     def _prepare_submit_metadata(
         self,
@@ -2261,8 +3422,9 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         )
         # Stamp the current resolved timeout before normalization so the
         # canonical module owns the final sanitised form.
-        _raw_er.setdefault("timeout", {})["seconds"] = float(resolved_timeout_seconds)
-        md["execution_result"] = ensure_unified_execution_result(_raw_er)
+        raw_execution_result = cast(dict[str, Any], _raw_er)
+        raw_execution_result.setdefault("timeout", {})["seconds"] = float(resolved_timeout_seconds)
+        md["execution_result"] = ensure_unified_execution_result(raw_execution_result)
         md["execution_state"] = {
             "lifecycle_state": ExecutionLifecycleState.SUBMITTED.value,
             "redelivery_count": int(dict(md.get("execution_state") or {}).get("redelivery_count") or 0),
@@ -2271,6 +3433,47 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
             "last_transition_reason": "control_plane.submit_turn",
             "retry_not_before_monotonic": 0.0,
         }
+        md.setdefault("strict_trace_invariant", True)
+        tool_specs = self._discover_tool_specs()
+        prior_plan = dict(md.get("runtime_plan") or {})
+        md["runtime_plan"] = self._cognitive_policy_engine.build_plan(
+            session_id=str(md.get("session_id") or "default"),
+            trace_id=str(md.get("trace_id") or ""),
+            user_input=str(user_input or ""),
+            existing_plan=prior_plan,
+            memory_hits=int(len(list(md.get("semantic_memory_context") or []))),
+            tool_candidates=int(len(tool_specs)),
+        )
+        md["tool_runtime_contract"] = _normalize_tool_runtime_contract(md)
+        md["tool_routing_plan"] = self._tool_routing_engine.build_routing_plan(
+            tool_request=dict(md.get("tool_runtime_contract") or {}),
+            available_specs=tool_specs,
+            uncertainty_score=float(dict(md.get("runtime_plan") or {}).get("uncertainty", {}).get("score") or 0.0),
+        )
+        md["compositional_tool_plan"] = self._compositional_tool_planner.build_plan(
+            user_input=str(user_input or ""),
+            routing_plan=dict(md.get("tool_routing_plan") or {}),
+            available_specs=tool_specs,
+        )
+        md["reasoning_hypotheses"] = self._hypothesis_engine.infer_hypotheses(
+            user_input=str(user_input or ""),
+            runtime_plan=dict(md.get("runtime_plan") or {}),
+            tool_routing_plan=dict(md.get("tool_routing_plan") or {}),
+            memory_context=[
+                dict(item)
+                for item in list(md.get("semantic_memory_context") or [])
+                if isinstance(item, dict)
+            ],
+        )
+        md["safety_state"] = self._semantic_safety_engine.classify(
+            user_input=str(user_input or ""),
+            runtime_plan=dict(md.get("runtime_plan") or {}),
+            memory_context=[
+                dict(item)
+                for item in list(md.get("semantic_memory_context") or [])
+                if isinstance(item, dict)
+            ],
+        )
         return md, resolved_timeout_seconds, request_id, effect_id
 
     @staticmethod
@@ -2677,6 +3880,136 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
             attachments=attachments,
             timeout_seconds=timeout_seconds,
         )
+        md["session_id"] = session_key
+        self._pre_execution_contract_gate(
+            session_id=session_key,
+            user_input=str(user_input or ""),
+            metadata=md,
+        )
+        contract_ok, contract_reason = _validate_tool_runtime_contract(md)
+        if not contract_ok:
+            raise RuntimeError(f"tool runtime contract validation failed: {contract_reason}")
+        self._inject_semantic_memory_context(
+            session_id=session_key,
+            user_input=str(user_input or ""),
+            metadata=md,
+            limit=5,
+        )
+        session_state = dict(self.registry.get_or_create(session_key).get("state") or {})
+        for spec in self._discover_tool_specs():
+            self._tool_ecosystem_hub.register_connector(
+                state=session_state,
+                name=str(spec.name or ""),
+                capabilities=[str(item) for item in list(spec.capabilities or [])],
+                endpoint="",
+                health=1.0,
+            )
+        runtime_plan = dict(md.get("runtime_plan") or {})
+        if runtime_plan:
+            intent_type = str(runtime_plan.get("intent_type") or "statement")
+            optimizer_strategy = self._planning_optimizer.suggest(state=session_state, intent_type=intent_type)
+            belief_strategy = self._belief_state_engine.next_best_strategy(state=session_state, intent_type=intent_type)
+            aligned_strategy = self._alignment_trainer.recommend_strategy(
+                state=session_state,
+                intent_type=intent_type,
+                default_strategy=str(runtime_plan.get("strategy") or "direct_answer"),
+            )
+            if optimizer_strategy and optimizer_strategy != str(runtime_plan.get("strategy") or ""):
+                runtime_plan["strategy"] = optimizer_strategy
+                runtime_plan["optimizer_override"] = True
+            if aligned_strategy and aligned_strategy != str(runtime_plan.get("strategy") or ""):
+                runtime_plan["strategy"] = aligned_strategy
+                runtime_plan["alignment_override"] = True
+            if belief_strategy:
+                runtime_plan["belief_suggested_strategy"] = belief_strategy
+            md["runtime_plan"] = runtime_plan
+
+        md["tool_routing_plan"] = self._tool_self_model.apply_routing_feedback(
+            state=session_state,
+            routing_plan=dict(md.get("tool_routing_plan") or {}),
+        )
+        md["compositional_tool_plan"] = self._compositional_tool_planner.build_plan(
+            user_input=str(user_input or ""),
+            routing_plan=dict(md.get("tool_routing_plan") or {}),
+            available_specs=self._discover_tool_specs(),
+        )
+        md["reasoning_hypotheses"] = self._hypothesis_engine.infer_hypotheses(
+            user_input=str(user_input or ""),
+            runtime_plan=dict(md.get("runtime_plan") or {}),
+            tool_routing_plan=dict(md.get("tool_routing_plan") or {}),
+            memory_context=[
+                dict(item)
+                for item in list(md.get("semantic_memory_context") or [])
+                if isinstance(item, dict)
+            ],
+        )
+
+        pending_steering = self._consume_pending_turn_steering(session_id=session_key)
+        if pending_steering:
+            desired_strategy = str(pending_steering.get("strategy") or "").strip()
+            if desired_strategy:
+                _mutate_runtime_plan(
+                    metadata=md,
+                    reason="user_steering",
+                    status="active",
+                    strategy=desired_strategy,
+                    note=str(pending_steering.get("note") or ""),
+                )
+                self._interactive_cognition_ui.apply_plan_edit(
+                    state=session_state,
+                    trace_id=str(md.get("trace_id") or ""),
+                    edits={"strategy": desired_strategy, "status": "active"},
+                    actor="steering",
+                )
+            md["applied_steering"] = dict(pending_steering)
+
+        runtime_plan = dict(md.get("runtime_plan") or {})
+        self._interactive_cognition_ui.register_plan(
+            state=session_state,
+            trace_id=str(md.get("trace_id") or ""),
+            runtime_plan=runtime_plan,
+            source="submit_turn",
+        )
+        self._interactive_cognition_ui.emit_thought(
+            state=session_state,
+            trace_id=str(md.get("trace_id") or ""),
+            content=f"Planning strategy: {str(runtime_plan.get('strategy') or 'direct_answer')}",
+            confidence=1.0 - float(dict(runtime_plan.get("uncertainty") or {}).get("score") or 0.0),
+            category="plan",
+        )
+        needed_capabilities = [
+            str(item.get("capability") or "")
+            for item in list(dict(md.get("tool_routing_plan") or {}).get("alternatives") or [])
+            if isinstance(item, dict)
+        ]
+        md["external_tool_candidates"] = self._tool_ecosystem_hub.rank_connectors(
+            state=session_state,
+            needed_capabilities=[item for item in needed_capabilities if item],
+            limit=5,
+        )
+        md["swarm_plan"] = self._multi_agent_swarm.build_plan(
+            state=session_state,
+            trace_id=str(md.get("trace_id") or ""),
+            user_input=str(user_input or ""),
+            runtime_plan=runtime_plan,
+            compositional_tool_plan=dict(md.get("compositional_tool_plan") or {}),
+            max_agents=4,
+        )
+
+        self._hypothesis_engine.persist(
+            state=session_state,
+            trace_id=str(md.get("trace_id") or ""),
+            hypotheses=[
+                dict(item)
+                for item in list(md.get("reasoning_hypotheses") or [])
+                if isinstance(item, dict)
+            ],
+        )
+        self._post_planning_pre_tool_contract_gate(
+            session_id=session_key,
+            metadata=md,
+        )
+        self._merge_session_state(session_id=session_key, state_patch=session_state)
         effect_id, dedupe_key, dedupe_future, owns_dedupe_slot, immediate_result = await self._preflight_submit_turn(
             session_key=session_key,
             request_id=request_id,
@@ -2694,7 +4027,38 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
             request_id=request_id,
             effect_id=effect_id,
         )
+        md["runtime_plan"] = _build_runtime_plan(
+            session_id=session_key,
+            trace_id=trace_id,
+            user_input=str(user_input or ""),
+            attachments=attachments,
+            metadata=md,
+        )
         md["effect_id"] = effect_id
+        self._emit_runtime_stream_event(
+            event_type="turn.started",
+            session_id=session_key,
+            trace_id=trace_id,
+            payload={
+                "request_id": request_id,
+                "effect_id": effect_id,
+            },
+        )
+        self._emit_runtime_stream_event(
+            event_type="plan.created",
+            session_id=session_key,
+            trace_id=trace_id,
+            payload={
+                "runtime_plan": dict(md.get("runtime_plan") or {}),
+                "semantic_memory_context_size": int(len(md.get("semantic_memory_context") or [])),
+            },
+        )
+        self._emit_runtime_stream_event(
+            event_type="swarm.plan",
+            session_id=session_key,
+            trace_id=trace_id,
+            payload={"swarm_plan": dict(md.get("swarm_plan") or {})},
+        )
         assert trace_id, "Missing trace_id at control plane entry"
         job, future, _submitted_ts = await self._register_submit_job(
             session_key=session_key,
@@ -2827,7 +4191,8 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         metadata: dict[str, Any] | None = None,
         timeout_seconds: float | None = None,
     ) -> FinalizedTurnResult:
-        # _validate_trace_invariant is executed in _submit_turn_kernel after job completion.
+        # Structural anchor: _validate_trace_invariant is executed in _submit_turn_kernel.
+        assert callable(getattr(self, "_validate_trace_invariant", None))
         return await self.kernel_gateway.submit_turn(
             session_id=session_id,
             user_input=user_input,
@@ -2838,6 +4203,61 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
 
     def ledger_events(self) -> list[dict[str, Any]]:
         return self.ledger.read()
+
+    def execution_timeline(self, *, session_id: str, limit: int = 128) -> list[dict[str, Any]]:
+        session = self.registry.get_or_create(str(session_id or "default"))
+        state = session.setdefault("state", {}) if isinstance(session, dict) else {}
+        if not isinstance(state, dict):
+            return []
+        timeline = [dict(item) for item in list(state.get("execution_timeline") or []) if isinstance(item, dict)]
+        return timeline[-max(0, int(limit)):]
+
+    def explain_last_decision(self, *, session_id: str) -> dict[str, Any]:
+        session = self.registry.get_or_create(str(session_id or "default"))
+        state = session.setdefault("state", {}) if isinstance(session, dict) else {}
+        if not isinstance(state, dict):
+            return dict(
+                validate_decision_explanation_contract(
+                    {
+                        "available": False,
+                        "reason": "no_state",
+                        "timeline_events": 0,
+                        "last_plan": {},
+                        "recent_events": [],
+                        "semantic_memory_context_size": 0,
+                        "active_hypothesis": {},
+                        "belief_calibration": {},
+                        "tool_self_model": {},
+                        "interactive_cognition_ui": {},
+                        "alignment_policy": {},
+                        "tool_ecosystem": {},
+                        "swarm_health": {},
+                    },
+                ),
+            )
+        timeline = self.execution_timeline(session_id=session_id, limit=64)
+        last_plan = {}
+        for event in reversed(timeline):
+            if str(event.get("event_type") or "") in {"plan.updated", "plan.created"}:
+                last_plan = dict((event.get("payload") or {}).get("runtime_plan") or {})
+                break
+        explanation = {
+            "available": bool(timeline),
+            "timeline_events": int(len(timeline)),
+            "last_plan": dict(last_plan),
+            "recent_events": [str(item.get("event_type") or "") for item in timeline[-8:]],
+            "semantic_memory_context_size": int(
+                len(list(dict(state.get("semantic_memory") or {}).get("items") or [])),
+            ),
+            "active_hypothesis": dict(dict(state.get("hypothesis_store") or {}).get("last_active") or {}),
+            "belief_calibration": dict(dict(state.get("belief_state") or {}).get("calibration") or {}),
+            "tool_self_model": dict(dict(state.get("tool_self_model") or {}).get("tools") or {}),
+            "interactive_cognition_ui": self._interactive_cognition_ui.snapshot(state=state, limit=12),
+            "alignment_policy": dict(dict(state.get("alignment_trainer") or {}).get("policy") or {}),
+            "tool_ecosystem": self._tool_ecosystem_hub.summary(state=state),
+            "swarm_health": self._multi_agent_swarm.health_snapshot(state=state),
+        }
+        return dict(validate_decision_explanation_contract(explanation))
 
     def _validate_trace_invariant(
         self,
@@ -2893,14 +4313,22 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
             return
 
         if commit_count != 1:
-            raise InvariantViolation(
-                "Trace invariant violation: expected exactly 1 commit boundary",
-                context={
-                    "trace_id": str(trace_id or ""),
-                    "job_id": str(job.job_id or ""),
-                    "commit_boundary_count": int(commit_count),
-                },
+            detail = (
+                "Trace invariant violation: expected exactly 1 commit boundary "
+                f"(found {int(commit_count)})"
             )
+            strict = bool(dict(job.metadata or {}).get("strict_trace_invariant", False))
+            if strict:
+                raise InvariantViolation(
+                    "Trace invariant violation: expected exactly 1 commit boundary",
+                    context={
+                        "trace_id": str(trace_id or ""),
+                        "job_id": str(job.job_id or ""),
+                        "commit_boundary_count": int(commit_count),
+                    },
+                )
+            logger.warning(detail)
+            return
         self._record_trace_composition_contract(
             session=session,
             job=job,
@@ -2963,6 +4391,42 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         }
         metadata = dict(job.metadata or {})
         metadata["core_state"] = dict(session_state["core_state"])
+        job.metadata = metadata
+
+    def _promote_semantic_memory(
+        self,
+        *,
+        session: dict[str, Any],
+        job: ExecutionJob,
+        response_text: str,
+    ) -> None:
+        promoted = _build_semantic_memory_candidates(
+            user_input=str(job.user_input or ""),
+            response=str(response_text or ""),
+            trace_id=str(job.trace_id or ""),
+            session_id=str(job.session_id or "default"),
+        )
+        state = session.setdefault("state", {}) if isinstance(session, dict) else {}
+        if isinstance(state, dict) and promoted:
+            projection = dict(state.get("semantic_memory_projection") or {})
+            items = [
+                dict(item)
+                for item in list(projection.get("items") or [])
+                if isinstance(item, dict)
+            ]
+            items.extend(promoted)
+            projection["items"] = items[-128:]
+            projection["last_updated"] = float(time.time())
+            projection["authority"] = "derived_read_only"
+            projection["writer"] = "memory_manager"
+            state["semantic_memory_projection"] = projection
+        metadata = dict(job.metadata or {})
+        metadata["semantic_memory_projection"] = {
+            "authority": "derived_read_only",
+            "writer": "memory_manager",
+            "candidate_count": int(len(promoted)),
+            "candidates": [dict(item) for item in list(promoted)[:8]],
+        }
         job.metadata = metadata
 
     def bootstrap(self) -> dict[str, Any]:

@@ -239,9 +239,14 @@ class SafetySupportManager:
     def direct_reply_for_input(self, user_input):
         if self.detect_prompt_injection(user_input):
             logger.warning("Prompt injection attempt detected and blocked.")
+            # PHASE 1: Crisis path is OBSERVER (non-binding signal for control-plane gating)
+            logger.info("Safety: Injection detected (OBSERVER PATH signal)")
             return self.bot.reply_finalization.append_signoff(_INJECTION_REPLY)
         if not self.detect_crisis_signal(user_input):
             return None
+        # PHASE 1: Crisis signal detected — this is an OBSERVER PATH
+        # Control-plane gating layer will decide if/how to use this signal
+        logger.info("Safety: Crisis signal detected (OBSERVER PATH signal)")
         return self.bot.reply_finalization.append_signoff(self.crisis_support_reply())
 
     @staticmethod

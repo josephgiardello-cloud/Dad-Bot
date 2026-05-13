@@ -852,6 +852,9 @@ class RuntimeInterfaceManager:
                         break
                 except KeyboardInterrupt:
                     self.bot.persist_conversation()
+                    # PHASE 1: LEGACY PATH (CLI fallback, not in hot control-plane execution)
+                    import logging
+                    logging.getLogger(__name__).debug("runtime_interface service: KeyboardInterrupt handler (LEGACY PATH)")
                     self.bot.print_speaker_message(
                         "Dad",
                         self.bot.reply_finalization.append_signoff(
@@ -863,6 +866,9 @@ class RuntimeInterfaceManager:
                     self.bot.persist_conversation()
                     break
                 except Exception:
+                    # PHASE 1: LEGACY PATH (CLI fallback, not in hot control-plane execution)
+                    import logging
+                    logging.getLogger(__name__).debug("runtime_interface service: Exception handler (LEGACY PATH)")
                     self.bot.print_speaker_message(
                         "Dad",
                         self.bot.reply_finalization.append_signoff(

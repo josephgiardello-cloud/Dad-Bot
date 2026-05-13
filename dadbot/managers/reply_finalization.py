@@ -1,11 +1,20 @@
 from __future__ import annotations
 
+import logging
 from dadbot.core.turn_coherence import assert_personality_applied_exactly_once, mark_turn_coherence
 from dadbot.managers.advice_audit import ShadowAuditManager
 
+logger = logging.getLogger(__name__)
+
 
 class ReplyFinalizationManager:
-    """Owns the post-generation reply pipeline before the final message reaches Tony."""
+    """Owns the post-generation reply pipeline before the final message reaches Tony.
+    
+    PHASE 1 NOTE: reply_finalization is an ENFORCEMENT LAYER (formatting-only).
+    Formatting operations (personality voice, moderation, audit, signoff) are applied
+    AFTER ResponseEngine selects the response. reply_finalization does NOT influence
+    which response is selected — only how it is delivered.
+    """
 
     def __init__(self, bot):
         self.bot = bot
@@ -47,7 +56,17 @@ class ReplyFinalizationManager:
         )
 
     def finalize(self, reply, current_mood, user_input=None):
-        # DEBUG: Log what we're receiving
+        """Apply formatting pipeline to response (ENFORCEMENT LAYER — NOT a selection authority).
+        
+        PHASE 1: This method is only invoked by control-plane post-ResponseEngine selection.
+        All formatting operations here are non-binding (they do not change which response was selected).
+        """
+        # PHASE 1: Audit logging for enforcement layer
+        logger.debug(
+            "reply_finalization.finalize invoked (ENFORCEMENT LAYER formatting); "
+            f"applying personality/moderation/audit to response"
+        )
+        
         # Defense: if reply is somehow a Pydantic response object, extract content first
         if hasattr(reply, "model_dump") and not isinstance(reply, str):
             try:
@@ -82,6 +101,13 @@ class ReplyFinalizationManager:
         return self.finalize(reply, current_mood, user_input)
 
     async def finalize_async(self, reply, current_mood, user_input=None):
+        """Apply formatting pipeline to response (async variant — ENFORCEMENT LAYER)."""
+        # PHASE 1: Audit logging for enforcement layer
+        logger.debug(
+            "reply_finalization.finalize_async invoked (ENFORCEMENT LAYER formatting); "
+            f"applying personality/moderation/audit to response (async)"
+        )
+        
         # Defense: if reply is somehow a Pydantic response object, extract content first
         if hasattr(reply, "model_dump") and not isinstance(reply, str):
             try:
