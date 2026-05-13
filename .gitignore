@@ -62,6 +62,7 @@ _full_suite_enforce_verbose_latest.txt
 .DS_Store
 Thumbs.db
 .vscode/settings.json
+.tmp/
 
 # Local benchmark sandboxes and generated outputs
 .venv-bfcl312/
