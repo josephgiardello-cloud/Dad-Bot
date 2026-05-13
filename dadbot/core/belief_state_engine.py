@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import time
 from typing import Any
 
 from dadbot.core.write_plane import get_write_plane
+from dadbot.core.event_clock import now as _now
 
 
 class BeliefStateEngine:
@@ -43,7 +43,7 @@ class BeliefStateEngine:
                 "uncertainty": float(uncertainty),
                 "confidence": float(confidence),
                 "input_length": int(len(str(user_input or ""))),
-                "timestamp": float(time.time()),
+                "timestamp": float(_now()),
             },
         )
 
@@ -55,7 +55,7 @@ class BeliefStateEngine:
         belief["calibration"] = {
             "success_rate": round(float(success_rate), 6),
             "sample_size": int(len(recent)),
-            "updated_at": float(time.time()),
+              "updated_at": float(_now()),
         }
         get_write_plane().write("BeliefStateEngine", "memory.belief_state", belief)
         state["belief_state"] = belief

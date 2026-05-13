@@ -429,6 +429,7 @@ class TestReplayComparison:
         """Build, stub, run one turn, capture write log, shutdown."""
         import hashlib
         from dadbot.core.write_plane import get_write_plane, reset_write_plane
+        from dadbot.core.event_clock import set_event_clock, reset_event_clock
 
         bot = _build_isolated_bot(bot_dir)
         orch = bot.turn_orchestrator
@@ -442,6 +443,8 @@ class TestReplayComparison:
 
         plane = reset_write_plane()
         plane.begin_turn(turn_label)
+        # Freeze event time so timestamp-bearing writes are bit-identical across runs
+        set_event_clock(lambda: 1_700_000_000.0)
         try:
             result = await orch.handle_turn(
                 self.USER_INPUT,
@@ -450,6 +453,7 @@ class TestReplayComparison:
             )
         finally:
             plane.end_turn()
+            reset_event_clock()
 
         log = plane.drain_log()
 
