@@ -14,7 +14,7 @@
 |---|---|---|---|---|
 | `control_plane._finalize_turn_with_response_engine()` L3144-3165 | Invokes ResponseEngine.run(), persists telemetry, commits response | **HOT PATH** | ✅ Preserve, enforce single decision source | ✅ COMPLETE |
 | `response_engine.run()` L589-650 | Orchestrates generate→score→select, attaches telemetry | **HOT PATH - DECISION** | ✅ Preserve, this is the selection authority | ✅ COMPLETE |
-| `reply_generation.generate_validated_reply()` L56, L102 | Calls `reply_finalization.finalize()` directly, produces response outside control-plane | **OBSERVER PATH** | ⏳ Convert to telemetry-only, route through control-plane | ⏳ IN PROGRESS |
+| `reply_generation.generate_validated_reply()` / `generate_validated_reply_async()` | Fail-fast compatibility shim; records telemetry and raises authority-disabled error | **NON-AUTHORITY PATH** | ✅ Preserve for compatibility telemetry; block output production | ✅ COMPLETE |
 | `reply_finalization.finalize()` L45-150 | Post-generation formatting: personality voice, moderation, audit, signoff | **ENFORCEMENT PATH** | ⏳ Keep callable, but enforce gating rule: only control-plane invokes | ⏳ IN PROGRESS |
 | `reply_finalization.append_signoff()` L15-30 | Appends style signoff to reply text | **ENFORCEMENT LAYER** | ✅ Keep, but restrict to formatting-only calls from control-plane | ⏳ IN PROGRESS |
 | `runtime_interface.append_signoff()` L794, 805, 857, 868 | Four fallback signoff calls in chat loop error handlers | **LEGACY PATH** | ⏳ Disable hot-path routing, preserve for compatibility, emit telemetry | ⏳ IN PROGRESS |

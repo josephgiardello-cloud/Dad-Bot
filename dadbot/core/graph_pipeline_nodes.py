@@ -454,6 +454,17 @@ class InferenceNode(_NodeContractMixin):
         return blend(str(candidate or ""), current_mood)
 
     @staticmethod
+    def _resolve_control_plane(service: Any) -> Any | None:
+        control_plane = getattr(service, "control_plane", None)
+        if control_plane is not None:
+            return control_plane
+        bot = getattr(service, "bot", None)
+        orchestrator = getattr(bot, "turn_orchestrator", None)
+        if orchestrator is None:
+            return None
+        return getattr(orchestrator, "control_plane", None)
+
+    @staticmethod
     def _stable_sha256(payload: Any) -> str:
         return hashlib.sha256(
             json.dumps(payload, sort_keys=True, ensure_ascii=True, default=str).encode("utf-8"),
@@ -511,13 +522,21 @@ class InferenceNode(_NodeContractMixin):
         context: TurnContext,
         rich_context: dict[str, Any],
     ) -> Any:
-        candidate_or_awaitable = service.run_agent(context, rich_context)
+        control_plane = self._resolve_control_plane(service)
+        execute_from_graph_context = getattr(control_plane, "execute_from_graph_context", None)
+        if not callable(execute_from_graph_context):
+            raise RuntimeError(
+                "Graph inference requires control_plane.execute_from_graph_context; "
+                "legacy agent_service.run_agent fallback is disabled",
+            )
+
+        authoritative_result = execute_from_graph_context(context, rich_context)
         candidate = (
-            await candidate_or_awaitable
-            if inspect.isawaitable(candidate_or_awaitable)
-            else candidate_or_awaitable
+            await authoritative_result
+            if inspect.isawaitable(authoritative_result)
+            else authoritative_result
         )
-        return self._blend_daily_checkin_reply(service, context, candidate)
+        return candidate
 
     async def _resolve_candidate_blocks(
         self,

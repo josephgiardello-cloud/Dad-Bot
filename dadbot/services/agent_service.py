@@ -4,29 +4,57 @@ import logging
 import math
 from typing import Any
 
-from dadbot.core.determinism import (
-    DeterminismBoundary,
-    DeterminismViolation,
-)
-
 logger = logging.getLogger(__name__)
+
+AGENT_SERVICE_DEPRECATED = True
 
 
 class AgentService:
     """Service wrapper for primary LLM/tool turn execution.
 
-    Drives the InferenceNode of the TurnGraph: runs mood detection, direct reply
-    checks, agentic tool planning, and LLM generation.  The turn is NOT finalized
-    here â€” history append, maintenance scheduling, and persistence are the
-    SaveNode / PersistenceService responsibility.
+    Legacy compatibility surface for inference-era call sites.
+    AgentService no longer has output authority: control-plane + ResponseEngine
+    decide final output. This service records telemetry only.
 
     Calling ``bot.process_user_message*`` here would re-enter the graph and cause
-    infinite recursion.  Instead, we call ``bot.turn_service.prepare_user_turn_async``
-    directly (which bypasses the graph check) and then ``reply_generation.generate_validated_reply``.
+    infinite recursion. Legacy callers are preserved, but they receive a
+    non-authoritative empty candidate and metadata for observability.
     """
 
     def __init__(self, bot: Any):
         self.bot = bot
+
+    def _record_deprecated_usage(self, turn_context: Any, *, reason: str) -> None:
+        if not AGENT_SERVICE_DEPRECATED:
+            return
+        logger.warning("AgentService is a deprecated execution surface")
+        recorder = getattr(self.bot, "record_shadow_decision", None)
+        if callable(recorder):
+            try:
+                recorder(
+                    source="agent_service",
+                    type="suggestion",
+                    content_preview="",
+                    reason=reason,
+                    would_replace=False,
+                    priority=0.05,
+                    metadata={"path": "agent_service.run_agent", "deprecated": True},
+                    turn_context=turn_context,
+                )
+            except Exception:
+                logger.debug("AgentService deprecation telemetry failed", exc_info=True)
+
+    def _emit_telemetry_only(self, turn_context: Any, *, stage: str, reason: str) -> tuple[str, bool]:
+        self._record_deprecated_usage(turn_context, reason=reason)
+        try:
+            turn_context.state["agent_service_deprecated"] = {
+                "stage": stage,
+                "reason": reason,
+                "deprecated": True,
+            }
+        except Exception:
+            pass
+        return "", False
 
     @staticmethod
     def _policy_for_hypothesis(hypothesis_name: str) -> dict[str, str]:
@@ -237,35 +265,7 @@ class AgentService:
         mood: Any,
         norm_attachments: Any,
     ) -> str:
-        reply_gen = getattr(bot, "reply_generation", None)
-        if reply_gen is None:
-            logger.error("AgentService: bot.reply_generation is not wired")
-            return "I can't generate a reply right now. Try again."
-
-        boundary: DeterminismBoundary = getattr(turn_context, "determinism_boundary", None) or DeterminismBoundary()
-
-        def _llm_call():
-            return reply_gen.generate_validated_reply(
-                stripped,
-                turn_text or stripped,
-                mood or "neutral",
-                norm_attachments,
-                stream=False,
-            )
-
-        try:
-            reply = boundary.capture("inference.llm_reply", _llm_call)
-        except DeterminismViolation as exc:
-            logger.error("AgentService: determinism boundary violated: %s", exc)
-            reply = "I'm having trouble saving my thoughts right now - let me try again in a moment."
-        except Exception as exc:
-            logger.error("AgentService: LLM inference failed: %s", exc)
-            reply = "I'm having trouble saving my thoughts right now - let me try again in a moment."
-
-        boundary_snapshot = boundary.snapshot()
-        turn_context.state["determinism_boundary"] = boundary_snapshot
-        turn_context.metadata["determinism_boundary"] = boundary_snapshot
-        return reply
+        raise RuntimeError("Deprecated: use ResponseEngine via control_plane")
 
     async def run_agent(
         self,
@@ -274,6 +274,11 @@ class AgentService:
     ):
         bot = self.bot
         _user_input, attachments, stripped = self._normalize_turn_input(turn_context)
+
+        self._record_deprecated_usage(
+            turn_context,
+            reason="AgentService.run_agent is deprecated; control_plane must own final response authority.",
+        )
 
         if not stripped and not attachments:
             turn_context.state["already_finalized"] = True
@@ -286,10 +291,7 @@ class AgentService:
             turn_context,
         )
         if prepared is None:
-            return (
-                "I'm having trouble saving my thoughts right now - let me try again in a moment.",
-                False,
-            )
+            return ("", False)
         mood, early_reply, should_end, turn_text, norm_attachments = prepared
 
         self._record_turn_preinference_state(
@@ -314,32 +316,20 @@ class AgentService:
             turn_context.state["tool_execution_envelope"] = self._tool_execution_envelope(
                 bot,
                 turn_context,
-                reply_source="session_exit",
+                reply_source="agent_service_deprecated",
             )
-            return (early_reply or "", True)
-
-        # Direct reply (safety intercept, memory command, tool command, fact reply)
-        if early_reply is not None:
-            turn_context.state["tool_execution_envelope"] = self._tool_execution_envelope(
-                bot,
-                turn_context,
-                reply_source="direct_or_tool_reply",
-            )
-            return (early_reply, False)
-
-        reply = self._llm_reply_with_boundary(
-            bot=bot,
-            turn_context=turn_context,
-            stripped=stripped,
-            turn_text=turn_text,
-            mood=mood,
-            norm_attachments=norm_attachments,
-        )
+            return ("", True)
 
         turn_context.state["tool_execution_envelope"] = self._tool_execution_envelope(
             bot,
             turn_context,
-            reply_source="model_generation",
+            reply_source="agent_service_deprecated",
         )
-
-        return (reply, False)
+        if early_reply is not None:
+            turn_context.state["agent_service_legacy_reply_candidate"] = str(early_reply or "")
+        self._emit_telemetry_only(
+            turn_context,
+            stage="run_agent",
+            reason="AgentService returns telemetry only; control_plane owns final output.",
+        )
+        return ("", False)

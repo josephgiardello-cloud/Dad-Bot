@@ -689,9 +689,24 @@ class InferenceNode:
 
     async def run(self, context: TurnContext) -> TurnContext:
         # LEDGER_EXEMPT: InferenceNode predates ledger protocol; LLM candidate written to context.state["candidate"]
-        run_agent = getattr(self.mgr, "run_agent", None)
-        if not callable(run_agent):
-            raise RuntimeError("InferenceNode requires manager.run_agent")
+        control_plane = getattr(
+            getattr(getattr(self.mgr, "bot", None), "turn_orchestrator", None),
+            "control_plane",
+            None,
+        )
+        execute_from_graph_context = getattr(control_plane, "execute_from_graph_context", None)
+        if not callable(execute_from_graph_context):
+            raise RuntimeError(
+                "InferenceNode requires control_plane.execute_from_graph_context; "
+                "legacy manager.run_agent authority is disabled",
+            )
+
+        async def run_agent(candidate_context: TurnContext, candidate_rich_context: dict[str, Any]) -> Any:
+            result = execute_from_graph_context(candidate_context, candidate_rich_context)
+            if inspect.isawaitable(result):
+                return await result
+            return result
+
         rich_context = context.state.get("rich_context", {})
         candidate: Any = None
         for iteration in range(self._max_loop_iterations):

@@ -7,7 +7,9 @@ Core validations:
 - Determinism
 """
 
+import asyncio
 import pytest
+from types import SimpleNamespace
 from unittest.mock import Mock, patch, MagicMock
 from dadbot.core.response_engine import ResponseEngine, ResponseCandidate
 
@@ -27,6 +29,9 @@ class TestPhase1ResponseAuthority:
         ctx.user_input = "How are you?"
         ctx.execution_results = {"status": "success"}
         ctx.persona_state = {"mood": "neutral"}
+        ctx.persona_traits = []
+        ctx.felt_persona_state = {}
+        ctx.conversation_trajectory = {}
         ctx.response_engine_telemetry = {}
         return ctx
 
@@ -56,6 +61,11 @@ class TestPhase1ResponseAuthority:
             engine = ResponseEngine()
             ctx = Mock()
             ctx.user_input = "test"
+            ctx.execution_results = {}
+            ctx.persona_state = {}
+            ctx.persona_traits = []
+            ctx.felt_persona_state = {}
+            ctx.conversation_trajectory = {}
             ctx.response_engine_telemetry = {}
             
             # Simulate control-plane single invocation
@@ -104,6 +114,9 @@ class TestPhase1ResponseAuthority:
         ctx.user_input = "Tell me a joke"
         ctx.execution_results = {}
         ctx.persona_state = {}
+        ctx.persona_traits = []
+        ctx.felt_persona_state = {}
+        ctx.conversation_trajectory = {}
         ctx.response_engine_telemetry = {}
         
         # Run 3 times with same input
@@ -134,12 +147,51 @@ class TestPhase1ResponseAuthority:
         # Assert: finalize only adds signoff, does not change selection
         assert "—Dad" in output_reply, "append_signoff() must add configured signoff"
         assert input_reply in output_reply, "Original response must be preserved"
+
+    def test_personality_influences_scoring(self):
+        """Assert: personality traits influence scoring, not output authority."""
+        engine = ResponseEngine()
+        candidate_text = "I hear you with supportive, steady advice."
+
+        neutral_context = Mock()
+        neutral_context.user_input = "I need advice"
+        neutral_context.persona_traits = []
+
+        personality_context = Mock()
+        personality_context.user_input = "I need advice"
+        personality_context.persona_traits = ["supportive"]
+
+        neutral_score = engine._score_persona_consistency(candidate_text, neutral_context)
+        personality_score = engine._score_persona_consistency(candidate_text, personality_context)
+
+        assert personality_score != neutral_score
+        assert personality_score > neutral_score
+
+    def test_personality_does_not_modify_output_text(self):
+        """Assert: personality may influence ranking, but not directly rewrite the final reply text."""
+        from dadbot.managers.reply_finalization import ReplyFinalizationManager
+
+        mock_bot = Mock()
+        mock_bot.APPEND_SIGNOFF = False
+        mock_bot.STYLE = {"signoff": "—Dad"}
+        mock_bot.personality_service = Mock()
+        mock_bot.personality_service.apply_authoritative_voice = Mock(return_value="voiced shadow text")
+        mock_bot.moderate_output_reply = Mock(side_effect=lambda user_input, candidate_reply, current_mood: candidate_reply)
+
+        finalize_mgr = ReplyFinalizationManager(mock_bot)
+        base_reply = "Base reply text"
+
+        final_reply = finalize_mgr.finalize(base_reply, "neutral", "keep it short")
+
+        assert final_reply == base_reply
+        assert getattr(mock_bot, "_last_reply_finalization_shadow", {}).get("base_reply") == base_reply
+        assert getattr(mock_bot, "_last_reply_finalization_shadow", {}).get("shadow_voiced_reply") == "voiced shadow text"
     
     def test_telemetry_only_compliance_reply_generation(self):
-        """Assert: reply_generation paths emit telemetry but do NOT affect final_response."""
+        """Assert: reply_generation direct calls fail fast and cannot produce output."""
         from dadbot.managers.reply_generation import ReplyGenerationManager
         
-        mock_bot = Mock()
+        mock_bot = SimpleNamespace()
         mock_bot.LIGHT_MODE = True
         mock_bot.reply_finalization = Mock()
         mock_bot.call_ollama_chat = Mock(return_value={"message": {"content": "Generated reply"}})
@@ -148,13 +200,61 @@ class TestPhase1ResponseAuthority:
         mock_bot.validate_reply = Mock(return_value="Generated reply")
         
         gen = ReplyGenerationManager(mock_bot)
-        
-        # reply_generation should call finalize() but NOT control final_response
-        # This test verifies no side effects on response selection
-        
-        # Assert: reply_generation routes through reply_finalization (formatting)
-        # but does NOT control which response is selected (that's ResponseEngine's job)
+
+        with pytest.raises(RuntimeError, match="authority is disabled"):
+            gen.generate_validated_reply(
+                stripped_input="hello",
+                turn_text="hello",
+                current_mood="neutral",
+                normalized_attachments=[],
+                stream=False,
+            )
+
+        assert getattr(mock_bot, "_last_reply_generation_shadow", {}).get("authority_disabled") is True
         mock_bot.reply_finalization.finalize.assert_not_called()  # Not called yet
+
+    def test_contract_single_callable_output_authority(self):
+        """Assert: only control-plane authority path may produce user-visible output."""
+        from dadbot.core.control_plane import ExecutionControlPlane
+        from dadbot.managers.reply_generation import ReplyGenerationManager
+        from dadbot.services.agent_service import AgentService
+
+        # Authority path remains callable on control-plane.
+        assert callable(getattr(ExecutionControlPlane, "execute_from_graph_context", None))
+
+        # ReplyGeneration is fail-fast and cannot produce a direct reply.
+        reply_bot = Mock()
+        reply_mgr = ReplyGenerationManager(reply_bot)
+        with pytest.raises(RuntimeError, match="authority is disabled"):
+            reply_mgr.generate_validated_reply(
+                stripped_input="hello",
+                turn_text="hello",
+                current_mood="neutral",
+                normalized_attachments=[],
+                stream=False,
+            )
+
+        # AgentService remains non-authoritative and returns telemetry-only sentinel output.
+        class _TurnServiceStub:
+            async def prepare_user_turn_async(self, *_args, **_kwargs):
+                return ("neutral", None, False, "hello", [])
+
+        class _RelationshipStub:
+            def current_state(self):
+                return {"score": 60, "level": "steady"}
+
+            def build_hypothesis_posteriors(self, _state, _turn_text, _mood):
+                return [{"name": "supportive_baseline", "probability": 1.0}]
+
+        service_bot = SimpleNamespace(
+            turn_service=_TurnServiceStub(),
+            relationship_manager=_RelationshipStub(),
+            planner_debug_snapshot=lambda: {"planner_status": "idle", "final_path": "model_reply"},
+        )
+        service = AgentService(service_bot)
+        turn_context = SimpleNamespace(user_input="hello", attachments=None, state={}, metadata={})
+        result = asyncio.run(service.run_agent(turn_context, rich_context={}))
+        assert result == ("", False)
     
     def test_safety_crisis_path_is_signal_only(self):
         """Assert: safety.py crisis intervention is observer-only."""
@@ -235,6 +335,9 @@ class TestPhase1ControlPlaneIntegration:
         ctx.user_input = "test"
         ctx.execution_results = {}
         ctx.persona_state = {}
+        ctx.persona_traits = []
+        ctx.felt_persona_state = {}
+        ctx.conversation_trajectory = {}
         ctx.response_engine_telemetry = {"test": "telemetry"}
         
         result = engine.run(ctx)
@@ -257,6 +360,9 @@ class TestPhase1FailFastDeterminism:
             ctx.user_input = "Determinism test"
             ctx.execution_results = {}
             ctx.persona_state = {}
+            ctx.persona_traits = []
+            ctx.felt_persona_state = {}
+            ctx.conversation_trajectory = {}
             ctx.response_engine_telemetry = {}
             
             result = engine.run(ctx)
