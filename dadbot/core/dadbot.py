@@ -514,6 +514,7 @@ class DadBot(
     tool_registry          = _ManagerDescriptor("tool_registry")
     agentic_handler        = _ManagerDescriptor("agentic_handler")
     conversation_persistence = _ManagerDescriptor("conversation_persistence")
+    conversation_surface   = _ManagerDescriptor("conversation_surface")
 
     # ------------------------------------------------------------------
     # Config properties

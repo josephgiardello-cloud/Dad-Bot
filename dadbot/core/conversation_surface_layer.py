@@ -98,7 +98,7 @@ class _NarrativeArc:
 
     def observe(self, mood: ConversationMood) -> None:
         self._total_turns += 1
-        if mood in self._depth_moods:
+        if mood in self._DEPTH_MOODS:
             self._depth_streak += 1
         else:
             self._depth_streak = 0
@@ -193,7 +193,7 @@ class ConversationSurfaceLayer:
 
         # Coherence drift check
         drift_warning = ""
-        drift = self._coherence.tone_drift_score()
+        drift = self._coherence.compute_window_coherence()
         if drift is not None and drift < _COHERENCE_DRIFT_THRESHOLD:
             drift_warning = "\nTone drift detected across recent replies — maintain your consistent warm dad voice."
 
@@ -208,10 +208,10 @@ class ConversationSurfaceLayer:
 
         # Narrative arc
         arc_note = ""
-        if self._arc.depth_streak >= 3:
-            arc_note = f"\nNarrative depth: {self._arc.depth_streak} turns of engaged conversation — let your response reflect that connection."
-        elif self._arc.depth_streak >= 6:
+        if self._arc.depth_streak >= 6:
             arc_note = f"\nDeep session arc ({self._arc.depth_streak} turns) — this is a meaningful exchange, treat it with full presence."
+        elif self._arc.depth_streak >= 3:
+            arc_note = f"\nNarrative depth: {self._arc.depth_streak} turns of engaged conversation — let your response reflect that connection."
 
         section = (
             "[CONVERSATION SURFACE DIRECTIVE]\n"

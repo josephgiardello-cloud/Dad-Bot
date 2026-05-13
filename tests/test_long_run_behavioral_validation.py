@@ -486,6 +486,74 @@ class TestMemoryPersonalityBoundary:
             "Private _last_memory_retrieval_diagnostics must not be accessed when accessor is present"
         )
 
+    def test_prompt_assembly_cscl_directive_delegates_to_conversation_surface(self):
+        """Prompt assembly should include CSCL directive when conversation_surface is available."""
+        from dadbot.managers.prompt_assembly import PromptAssemblyManager
+
+        class _Cscl:
+            def __init__(self):
+                self.calls = []
+
+            def compute_turn_directive(self, user_input: str, current_mood: str) -> str:
+                self.calls.append((user_input, current_mood))
+                return "[CONVERSATION SURFACE DIRECTIVE]\nKeep steady tone."
+
+        class _MinimalBot:
+            conversation_surface = _Cscl()
+
+        pm = PromptAssemblyManager.__new__(PromptAssemblyManager)
+        pm.bot = _MinimalBot()
+        section = pm._cscl_directive_section("need help", "neutral")
+        assert section and "CONVERSATION SURFACE DIRECTIVE" in section
+        assert pm.bot.conversation_surface.calls == [("need help", "neutral")]
+
+    def test_reply_finalization_records_cscl_output(self):
+        """Finalization should feed final reply text back into CSCL for coherence tracking."""
+        from dadbot.managers.reply_finalization import ReplyFinalizationManager
+
+        class _Personality:
+            def apply_authoritative_voice(self, reply: str, current_mood: str, user_input: str | None = None) -> str:
+                return reply
+
+        class _Cscl:
+            def __init__(self):
+                self.recorded = []
+
+            def record_output(self, reply: str) -> None:
+                self.recorded.append(reply)
+
+        class _MinimalBot:
+            APPEND_SIGNOFF = True
+            STYLE = {"signoff": "- Dad"}
+            personality_service = _Personality()
+            conversation_surface = _Cscl()
+
+            @staticmethod
+            def moderate_output_reply(user_input: str | None, reply: str, current_mood: str) -> str:
+                return reply
+
+        mgr = ReplyFinalizationManager(_MinimalBot())
+        finalized = mgr.finalize("You've got this", "neutral", "thanks")
+        assert finalized.endswith("- Dad")
+        assert mgr.bot.conversation_surface.recorded
+        assert mgr.bot.conversation_surface.recorded[-1] == finalized
+
+
+class TestConversationSurfaceLayerBehavior:
+    """CSCL layer maintains narrative arc state across engaged turns."""
+
+    def test_narrative_arc_depth_tracks_engaged_streak(self):
+        from dadbot.core.conversation_surface_layer import _NarrativeArc
+        from dadbot.core.ux_behavioral_tuning import ConversationMood
+
+        arc = _NarrativeArc()
+        for _ in range(6):
+            arc.observe(ConversationMood.ENGAGED)
+
+        assert arc.depth_streak == 6
+        arc.observe(ConversationMood.CALM)
+        assert arc.depth_streak == 0
+
 
 # ---------------------------------------------------------------------------
 # Section 5 — SafetyNode passthrough annotation
