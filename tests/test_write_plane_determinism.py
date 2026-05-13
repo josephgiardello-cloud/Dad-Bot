@@ -299,3 +299,260 @@ class TestMutationLogCompleteness:
         written = set(plane.paths_written())
         missing = self.EXPECTED_PATHS - written
         assert not missing, f"Write paths not captured: {missing}"
+
+
+# ---------------------------------------------------------------------------
+# Step 2.1 — Full replay comparison: two runs, same state_0, compare logs
+# ---------------------------------------------------------------------------
+#
+# Spec (verbatim from Phase 2 plan):
+#
+#   state_0 = snapshot_full_state()
+#   result_1 = run_turn(input, state_0)
+#   log_1 = write_plane.drain_turn_log()
+#   reset_system()
+#   result_2 = run_turn(input, state_0)
+#   log_2 = write_plane.drain_turn_log()
+#   assert result_1.output == result_2.output
+#   assert result_1.state == result_2.state
+#   assert log_1 == log_2
+#
+# Two completely independent bot instances both starting from default_memory_store()
+# serve as "same state_0" without requiring a snapshot/restore mechanism.  This is
+# strictly more conservative: if either bot has hidden non-determinism it will surface.
+#
+# EXPECTED: this test will FAIL on first run, revealing hidden writers.
+# That failure is the output.  The diff printed in the AssertionError is the map.
+# ---------------------------------------------------------------------------
+
+import difflib as _difflib
+from pathlib import Path as _Path
+from tempfile import TemporaryDirectory as _TempDir
+
+import pytest
+
+
+def _diff_logs(
+    log_a: list,
+    log_b: list,
+) -> str:
+    """Return a human-readable diff of two mutation log lists."""
+    lines_a = [f"  {i:3d}: ({r.source!r}, {r.path!r}, {r.value_repr[:60]!r})" for i, r in enumerate(log_a)]
+    lines_b = [f"  {i:3d}: ({r.source!r}, {r.path!r}, {r.value_repr[:60]!r})" for i, r in enumerate(log_b)]
+    diff = list(_difflib.unified_diff(lines_a, lines_b, fromfile="run_1", tofile="run_2", lineterm=""))
+    return "\n".join(diff) if diff else "(no textual diff — check ordering or turn_id)"
+
+
+def _build_isolated_bot(tmp_path: _Path):
+    """Create a DadBot instance with a fully isolated temp directory."""
+    from dadbot.core.dadbot import DadBot
+    bot = DadBot()
+    bot.MEMORY_PATH = tmp_path / "dad_memory.json"
+    bot.SEMANTIC_MEMORY_DB_PATH = tmp_path / "dad_memory_semantic.sqlite3"
+    bot.GRAPH_STORE_DB_PATH = tmp_path / "dad_memory_graph.sqlite3"
+    bot.SESSION_LOG_DIR = tmp_path / "session_logs"
+    bot.MEMORY_STORE = bot.default_memory_store()
+    bot.save_memory_store()
+    # deterministic stub for semantic embedding
+    bot.embed_texts = lambda texts, **kw: [
+        [0.0] * 12 for _ in ([texts] if isinstance(texts, str) else list(texts))
+    ]
+    return bot
+
+
+def _stub_bot_for_replay(orch, monkeypatch, *, fixed_reply: str) -> None:
+    """Patch out all non-deterministic / expensive subsystems.
+
+    The goal is a fast, repeatable turn whose writes are driven purely by the
+    deterministic pipeline logic, not by LLM sampling or wall-clock effects.
+    """
+    service = orch.registry.get("agent_service")
+    if service is not None:
+        async def _fixed_agent(context, _rich):
+            return (fixed_reply, False)
+        monkeypatch.setattr(service, "run_agent", _fixed_agent)
+
+    bot = orch.bot
+    # Memory consolidation / forgetting
+    mc = getattr(bot, "memory_coordinator", None)
+    if mc is not None:
+        for method in ("consolidate_memories", "apply_controlled_forgetting"):
+            if hasattr(mc, method):
+                monkeypatch.setattr(mc, method, lambda **kw: None)
+
+    # Relationship materialisation
+    rm = getattr(bot, "relationship_manager", None)
+    if rm is not None and hasattr(rm, "materialize_projection"):
+        monkeypatch.setattr(rm, "materialize_projection", lambda **kw: None)
+
+    # Graph store sync
+    mm = getattr(bot, "memory_manager", None)
+    gm = getattr(mm, "graph_manager", None) if mm is not None else None
+    if gm is not None and hasattr(gm, "sync_graph_store"):
+        monkeypatch.setattr(gm, "sync_graph_store", lambda **kw: None)
+
+    # Reply validation (can hit regex/LLM paths)
+    if hasattr(bot, "validate_reply"):
+        monkeypatch.setattr(bot, "validate_reply", lambda _u, r: r)
+
+    # Health snapshot (can touch time-varying data)
+    if hasattr(bot, "current_runtime_health_snapshot"):
+        monkeypatch.setattr(bot, "current_runtime_health_snapshot", lambda **kw: {})
+
+
+@pytest.mark.dev
+@pytest.mark.asyncio
+class TestReplayComparison:
+    """Phase 2 Step 2.1: two independent runs from identical initial state.
+
+    Compares mutation logs to reveal:
+    - Hidden writers (paths present in only one run)
+    - Order instability (same paths, different sequence)
+    - Value drift (same path, different value_repr)
+
+    Each run uses a completely fresh bot instance so there is zero shared
+    mutable state between runs.  Both start from default_memory_store()
+    which is deterministic.
+    """
+
+    USER_INPUT = "Hey dad, just wanted to check in."
+    SESSION_ID = "replay-determinism-test"
+    FIXED_REPLY = "Hey! Good to hear from you. Things are great here."
+
+    async def _run_one(
+        self,
+        bot_dir: _Path,
+        monkeypatch,
+        *,
+        turn_label: str,
+    ) -> tuple[object, list]:
+        """Build, stub, run one turn, capture write log, shutdown."""
+        import hashlib
+        from dadbot.core.write_plane import get_write_plane, reset_write_plane
+
+        bot = _build_isolated_bot(bot_dir)
+        orch = bot.turn_orchestrator
+        _stub_bot_for_replay(orch, monkeypatch, fixed_reply=self.FIXED_REPLY)
+
+        # Confluence key required in enforce mode — derive deterministically
+        digest = hashlib.sha256(
+            f"{self.SESSION_ID}:{self.USER_INPUT}".encode()
+        ).hexdigest()[:24]
+        confluence_key = f"replay-test:{digest}"
+
+        plane = reset_write_plane()
+        plane.begin_turn(turn_label)
+        try:
+            result = await orch.handle_turn(
+                self.USER_INPUT,
+                session_id=self.SESSION_ID,
+                confluence_key=confluence_key,
+            )
+        finally:
+            plane.end_turn()
+
+        log = plane.drain_log()
+
+        try:
+            bot.shutdown()
+        except Exception:
+            pass
+
+        return result, log
+
+    async def test_write_log_nonempty_and_attributed(self, tmp_path, monkeypatch):
+        """Basic gate: the instrumentation must capture at least one attributed write."""
+        bot_dir = tmp_path / "bot_a"
+        bot_dir.mkdir()
+        _, log = await self._run_one(bot_dir, monkeypatch, turn_label="t-attr")
+
+        assert len(log) > 0, (
+            "Write plane captured zero records for a full turn — "
+            "instrumentation is not wired to the pipeline execution path."
+        )
+        anonymous = [r for r in log if not r.source]
+        assert not anonymous, (
+            f"Anonymous writes (no source) detected: "
+            f"{[(r.path, r.value_repr[:40]) for r in anonymous]}"
+        )
+
+    async def test_two_runs_produce_same_output(self, tmp_path, monkeypatch):
+        """Same input + same state_0 → same output text."""
+        dir_a = tmp_path / "bot_a"
+        dir_b = tmp_path / "bot_b"
+        dir_a.mkdir()
+        dir_b.mkdir()
+
+        result_1, _ = await self._run_one(dir_a, monkeypatch, turn_label="t1-output")
+        result_2, _ = await self._run_one(dir_b, monkeypatch, turn_label="t2-output")
+
+        # FinalizedTurnResult is (response_text, bool) or similar
+        out_1 = result_1[0] if isinstance(result_1, tuple) else str(result_1)
+        out_2 = result_2[0] if isinstance(result_2, tuple) else str(result_2)
+        assert out_1 == out_2, (
+            f"Output diverged between two deterministic runs:\n"
+            f"  Run 1: {out_1!r}\n"
+            f"  Run 2: {out_2!r}"
+        )
+
+    async def test_two_runs_produce_same_write_paths(self, tmp_path, monkeypatch):
+        """Same input + same state_0 → same write paths (set equality).
+
+        This is a weaker form of the full log comparison — it passes even if
+        ordering differs.  Use this to get a partial signal before ordering
+        is stabilized.
+        """
+        dir_a = tmp_path / "bot_a"
+        dir_b = tmp_path / "bot_b"
+        dir_a.mkdir()
+        dir_b.mkdir()
+
+        _, log_1 = await self._run_one(dir_a, monkeypatch, turn_label="t1-paths")
+        _, log_2 = await self._run_one(dir_b, monkeypatch, turn_label="t2-paths")
+
+        paths_1 = [r.path for r in log_1]
+        paths_2 = [r.path for r in log_2]
+        set_1 = set(paths_1)
+        set_2 = set(paths_2)
+
+        only_in_1 = set_1 - set_2
+        only_in_2 = set_2 - set_1
+
+        assert not only_in_1 and not only_in_2, (
+            f"Write path sets diverged — hidden writers detected!\n"
+            f"  Only in run 1: {sorted(only_in_1)}\n"
+            f"  Only in run 2: {sorted(only_in_2)}\n"
+            f"  Run 1 path sequence: {paths_1}\n"
+            f"  Run 2 path sequence: {paths_2}"
+        )
+
+    async def test_two_runs_produce_identical_log(self, tmp_path, monkeypatch):
+        """Full replay invariant: (source, path, value_repr) must be identical.
+
+        This is the strictest form.  It will FAIL until Phase 2.3 enforces
+        single-writer order.  The failure message is the diagnostic output.
+        """
+        dir_a = tmp_path / "bot_a"
+        dir_b = tmp_path / "bot_b"
+        dir_a.mkdir()
+        dir_b.mkdir()
+
+        _, log_1 = await self._run_one(dir_a, monkeypatch, turn_label="t1-full")
+        _, log_2 = await self._run_one(dir_b, monkeypatch, turn_label="t2-full")
+
+        sig_1 = [(r.source, r.path, r.value_repr) for r in log_1]
+        sig_2 = [(r.source, r.path, r.value_repr) for r in log_2]
+
+        # Always print counts even on pass for visibility
+        count_msg = f"Run 1: {len(sig_1)} writes | Run 2: {len(sig_2)} writes"
+
+        assert sig_1 == sig_2, (
+            f"Mutation log divergence — non-deterministic writes detected!\n"
+            f"{count_msg}\n\n"
+            f"Diff (run_1 → run_2):\n"
+            f"{_diff_logs(log_1, log_2)}\n\n"
+            f"Full run 1 log:\n"
+            + "\n".join(f"  [{i}] {r.source} → {r.path}: {r.value_repr[:80]}" for i, r in enumerate(log_1))
+            + "\n\nFull run 2 log:\n"
+            + "\n".join(f"  [{i}] {r.source} → {r.path}: {r.value_repr[:80]}" for i, r in enumerate(log_2))
+        )
