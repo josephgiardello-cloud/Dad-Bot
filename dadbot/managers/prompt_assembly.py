@@ -240,6 +240,18 @@ class PromptAssemblyManager:
             "Use only what is actually visible or already described by Tony. If the image is ambiguous, say what you can and cannot see."
         )
 
+    def _cscl_directive_section(
+        self, user_input: str, current_mood: str
+    ) -> str | None:
+        """Compute and return the CSCL surface directive for this turn, or None."""
+        cscl = getattr(self.bot, "conversation_surface", None)
+        if cscl is None:
+            return None
+        try:
+            return cscl.compute_turn_directive(user_input, current_mood)
+        except Exception:
+            return None
+
     def contextual_request_sections(
         self,
         user_input: str,
@@ -259,6 +271,7 @@ class PromptAssemblyManager:
                 current_mood,
                 self.bot.session_moods,
             ),
+            self._cscl_directive_section(user_input, current_mood),
         ]
 
     def build_request_system_prompt(

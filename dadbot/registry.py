@@ -485,6 +485,14 @@ def wire_runtime_managers(bot: Any) -> None:
             ),
         ),
         ServiceDescriptor(
+            "conversation_surface",
+            lambda: _instantiate(
+                "dadbot.core.conversation_surface_layer:ConversationSurfaceLayer",
+                bot,
+            ),
+            depends_on=("personality_service", "tone_context"),
+        ),
+        ServiceDescriptor(
             "mood_manager",
             lambda: _instantiate("dadbot.mood:MoodManager", bot),
         ),

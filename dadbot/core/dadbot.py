@@ -40,6 +40,7 @@ from dadbot.core.health_mixin import DadBotHealthMixin
 from dadbot.core.llm_mixin import DadBotLlmMixin
 from dadbot.core.mcp_mixin import DadBotMcpMixin
 from dadbot.core.turn_mixin import DadBotTurnMixin
+from dadbot.core.execution_contract import ExecutionEntry
 from dadbot.core.ux_projection_gateway import TurnUxProjectionGateway
 from dadbot.runtime.model import ModelPort
 
@@ -206,6 +207,7 @@ class DadBot(
         "context_service",
         "tone_context",
         "personality_service",
+        "conversation_surface",
         "prompt_assembly",
         "runtime_client",
         "runtime_orchestration",
@@ -459,9 +461,19 @@ class DadBot(
     def assistant(self) -> AssistantRuntime:
         cached = getattr(self, "_assistant_runtime", None)
         if cached is None:
-            cached = AssistantRuntime(self)
+            cached = AssistantRuntime(self, entrypoint=ExecutionEntry(self.execute_turn))
             object.__setattr__(self, "_assistant_runtime", cached)
         return cast(AssistantRuntime, cached)
+
+    @property
+    def phase_closure_runtime(self) -> Any:
+        cached = getattr(self, "_phase_closure_runtime", None)
+        if cached is None:
+            from dadbot.core.phase_closure_runtime import PhaseClosureRuntime
+
+            cached = PhaseClosureRuntime()
+            object.__setattr__(self, "_phase_closure_runtime", cached)
+        return cached
 
     # ------------------------------------------------------------------
     # Explicit manager descriptors  (replaces property/setter boilerplate)
@@ -576,8 +588,17 @@ class DadBot(
         """Explicit facade delegate for runtime session reset."""
         mgr = getattr(self, "runtime_state_manager", None)
         if mgr is not None:
-            return mgr.reset_session_state()
-        return None
+            result = mgr.reset_session_state()
+        else:
+            result = None
+        # Reset CSCL session arc/pacing/coherence state for the new session
+        cscl = getattr(self, "conversation_surface", None)
+        if cscl is not None:
+            try:
+                cscl.reset_session()
+            except Exception:
+                pass
+        return result
 
     def _thread_timestamp(self) -> Any:
         return self.runtime_state_manager.thread_timestamp()

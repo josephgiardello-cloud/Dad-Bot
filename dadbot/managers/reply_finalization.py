@@ -95,7 +95,15 @@ class ReplyFinalizationManager:
             )
         except Exception:
             pass
-        return self.append_signoff(final_reply)
+        final_reply = self.append_signoff(final_reply)
+        # CSCL post-turn feedback: feed voiced reply to coherence tracker
+        try:
+            cscl = getattr(self.bot, "conversation_surface", None)
+            if cscl is not None:
+                cscl.record_output(final_reply)
+        except Exception:
+            pass
+        return final_reply
 
     def prepare_final_reply(self, reply, current_mood, user_input=None):
         return self.finalize(reply, current_mood, user_input)
@@ -136,7 +144,15 @@ class ReplyFinalizationManager:
             )
         except Exception:
             pass
-        return self.append_signoff(final_reply)
+        final_reply = self.append_signoff(final_reply)
+        # CSCL post-turn feedback: feed voiced reply to coherence tracker (async path)
+        try:
+            cscl = getattr(self.bot, "conversation_surface", None)
+            if cscl is not None:
+                cscl.record_output(final_reply)
+        except Exception:
+            pass
+        return final_reply
 
     async def prepare_final_reply_async(self, reply, current_mood, user_input=None):
         return await self.finalize_async(reply, current_mood, user_input)
