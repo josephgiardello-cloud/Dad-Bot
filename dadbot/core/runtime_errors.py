@@ -59,6 +59,14 @@ class ExecutionStageError(RuntimeErrorBase):
     """Raised for failures scoped to a specific execution stage or pipeline step."""
 
 
+class PartialCommitError(RuntimeErrorBase):
+    """Raised when effects were partially committed and reconciliation is required."""
+
+
+class PoisonExecutionError(RuntimeErrorBase):
+    """Raised when a poisoned payload/tool result is detected and must be quarantined."""
+
+
 NON_FATAL_RUNTIME_EXCEPTIONS = (
     RuntimeError,
     ValueError,
@@ -79,7 +87,9 @@ __all__ = [
     "ExecutionStageError",
     "InvariantViolation",
     "InvariantError",
+    "PartialCommitError",
     "PersistenceFailure",
+    "PoisonExecutionError",
     "ProjectionMismatch",
     "ReplayError",
     "ReplayMismatch",

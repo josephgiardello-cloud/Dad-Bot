@@ -7,7 +7,7 @@ pytestmark = pytest.mark.unit
 from dadbot.core.control_plane import ExecutionControlPlane, SessionRegistry
 from dadbot.core.distributed_correctness import NodeRole
 from dadbot.core.ledger_writer import LedgerWriter
-from dadbot.core.runtime_errors import AuthorityViolation, InvariantViolation
+from dadbot.core.runtime_errors import AuthorityViolation, InvariantViolation, PoisonExecutionError
 
 
 @pytest.mark.asyncio
@@ -290,11 +290,11 @@ async def test_submit_turn_failure_writes_typed_failure_payload() -> None:
 @pytest.mark.asyncio
 async def test_submit_turn_failure_emits_quarantine_policy_event() -> None:
     async def _executor(_session: dict, _job) -> tuple[str, bool]:
-        raise RuntimeError("poison payload from downstream tool")
+        raise PoisonExecutionError("poison payload from downstream tool")
 
     plane = ExecutionControlPlane(registry=SessionRegistry(), kernel_executor=_executor)
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(PoisonExecutionError):
         await plane.submit_turn(session_id="s-poison", user_input="hello")
 
     events = list(plane.ledger_events())
@@ -557,3 +557,182 @@ async def test_submit_turn_starts_live_without_projection_redelivery() -> None:
     events = list(plane.ledger_events())
     redeliveries = [e for e in events if str(e.get("type") or "") == "JOB_REDELIVERY_SCHEDULED"]
     assert not redeliveries, "unexpected redelivery event for initial live execution"
+
+
+@pytest.mark.asyncio
+async def test_submit_turn_rejects_tool_contract_with_missing_permissions() -> None:
+    async def _executor(_session: dict, _job) -> tuple[str, bool]:
+        return ("ok", False)
+
+    plane = ExecutionControlPlane(registry=SessionRegistry(), kernel_executor=_executor)
+
+    with pytest.raises(RuntimeError, match="tool runtime contract validation failed"):
+        await plane.submit_turn(
+            session_id="s-tool-perm",
+            user_input="run privileged tool",
+            metadata={
+                "tool_request": {
+                    "name": "filesystem.delete",
+                    "required_permissions": ["dangerous_write"],
+                    "side_effect_class": "stateful",
+                    "timeout_seconds": 3,
+                },
+                "session_permissions": ["read_only"],
+                "approval_granted": False,
+            },
+        )
+
+
+@pytest.mark.asyncio
+async def test_submit_turn_injects_ranked_semantic_memory_context() -> None:
+    seen_context_sizes: list[int] = []
+    seen_top_texts: list[str] = []
+
+    async def _executor(_session: dict, job) -> tuple[str, bool]:
+        context_items = list(dict(job.metadata or {}).get("semantic_memory_context") or [])
+        seen_context_sizes.append(len(context_items))
+        if context_items:
+            seen_top_texts.append(str(context_items[0].get("text") or ""))
+        return ("ok", False)
+
+    plane = ExecutionControlPlane(registry=SessionRegistry(), kernel_executor=_executor)
+
+    # First turn promotes memory.
+    await plane.submit_turn(
+        session_id="s-semantic",
+        user_input="My daughter prefers strawberry pancakes on weekends.",
+    )
+    # Second turn should retrieve ranked context.
+    await plane.submit_turn(
+        session_id="s-semantic",
+        user_input="What breakfast does my daughter prefer?",
+    )
+
+    assert len(seen_context_sizes) >= 2
+    assert seen_context_sizes[-1] >= 1
+    assert any("daughter" in text.lower() for text in seen_top_texts)
+
+
+@pytest.mark.asyncio
+async def test_submit_turn_emits_ordered_stream_timeline_and_explainability() -> None:
+    stream_events: list[dict[str, object]] = []
+
+    async def _executor(_session: dict, _job) -> tuple[str, bool]:
+        return ("hello from control plane", False)
+
+    plane = ExecutionControlPlane(
+        registry=SessionRegistry(),
+        kernel_executor=_executor,
+        stream_sink=stream_events.append,
+    )
+
+    await plane.submit_turn(session_id="s-stream", user_input="give me a status update")
+
+    assert stream_events
+    sequences = [int(event.get("sequence") or 0) for event in stream_events]
+    assert sequences == sorted(sequences)
+    event_types = [str(event.get("event_type") or "") for event in stream_events]
+    assert "turn.started" in event_types
+    assert "plan.created" in event_types
+    assert "state.transition.recorded" in event_types
+    assert "turn.completed" in event_types
+
+    timeline = plane.execution_timeline(session_id="s-stream")
+    assert timeline
+    assert len(timeline) >= len(stream_events)
+    explanation = plane.explain_last_decision(session_id="s-stream")
+    assert bool(explanation.get("available")) is True
+    assert int(explanation.get("timeline_events", 0)) >= 1
+
+
+@pytest.mark.asyncio
+async def test_submit_turn_emits_state_transition_recorded_payload_shape() -> None:
+    stream_events: list[dict[str, object]] = []
+
+    async def _executor(_session: dict, _job) -> tuple[str, bool]:
+        return ("transition payload", False)
+
+    plane = ExecutionControlPlane(
+        registry=SessionRegistry(),
+        kernel_executor=_executor,
+        stream_sink=stream_events.append,
+    )
+
+    await plane.submit_turn(session_id="s-transition-stream", user_input="record transition event")
+
+    transition_events = [
+        event
+        for event in stream_events
+        if str(event.get("event_type") or "") == "state.transition.recorded"
+    ]
+    assert transition_events
+    payload = dict(transition_events[-1].get("payload") or {})
+    assert bool(str(payload.get("turn_id") or ""))
+    assert bool(str(payload.get("input_state_hash") or ""))
+    assert bool(str(payload.get("output_state_hash") or ""))
+    assert "action" in payload
+    assert isinstance(payload.get("tool_call_count"), int)
+    assert isinstance(payload.get("side_effect_count"), int)
+
+
+@pytest.mark.asyncio
+async def test_submit_turn_uncertainty_gate_blocks_naive_tool_execution() -> None:
+    async def _executor(_session: dict, _job) -> tuple[str, bool]:
+        return ("ok", False)
+
+    plane = ExecutionControlPlane(registry=SessionRegistry(), kernel_executor=_executor)
+
+    with pytest.raises(RuntimeError, match="Uncertainty enforcement gate"):
+        await plane.submit_turn(
+            session_id="s-uncertainty-gate",
+            user_input="",
+            metadata={
+                "tool_request": {
+                    "name": "calendar.write",
+                    "required_permissions": ["calendar_write"],
+                },
+                "session_permissions": ["calendar_write"],
+                "approval_granted": True,
+            },
+        )
+
+
+@pytest.mark.asyncio
+async def test_submit_turn_world_model_binding_gate_runs_pre_tool() -> None:
+    async def _executor(_session: dict, _job) -> tuple[str, bool]:
+        return ("ok", False)
+
+    plane = ExecutionControlPlane(registry=SessionRegistry(), kernel_executor=_executor)
+
+    with pytest.raises(RuntimeError, match="non-existent memory entry"):
+        await plane.submit_turn(
+            session_id="s-world-bindings",
+            user_input="hello",
+            metadata={
+                "world_model_memory_entries": [{"id": "m1"}],
+                "world_model_entity_bindings": [
+                    {"entity_id": "e1", "memory_id": "missing", "source": "memory"},
+                ],
+            },
+        )
+
+
+@pytest.mark.asyncio
+async def test_submit_turn_writes_linear_state_transition_ledger() -> None:
+    async def _executor(_session: dict, _job) -> tuple[str, bool]:
+        return ("ledger-ok", False)
+
+    plane = ExecutionControlPlane(registry=SessionRegistry(), kernel_executor=_executor)
+    await plane.submit_turn(session_id="s-transition-ledger", user_input="track this")
+
+    session = plane.registry.get_or_create("s-transition-ledger")
+    state = dict(session.get("state") or {})
+    transitions = [dict(item) for item in list(state.get("state_transition_ledger") or []) if isinstance(item, dict)]
+    assert transitions, "expected at least one state transition record"
+    last = transitions[-1]
+    assert bool(str(last.get("turn_id") or ""))
+    assert bool(str(last.get("input_state_hash") or ""))
+    assert bool(str(last.get("output_state_hash") or ""))
+    assert "action" in last
+    assert isinstance(last.get("tool_calls"), list)
+    assert isinstance(last.get("side_effects"), list)

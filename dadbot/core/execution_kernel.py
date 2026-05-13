@@ -17,11 +17,21 @@ class KernelValidationResult:
     reason: str = ""
 
 
+class KernelValidationError(RuntimeError):
+    """Raised when kernel validation fails at invariant/firewall enforcement."""
+
+    def __init__(self, *, stage: str, operation: str, reason: str) -> None:
+        super().__init__(f"Kernel validation failed at {stage}:{operation}: {reason}")
+        self.stage = str(stage or "")
+        self.operation = str(operation or "")
+        self.reason = str(reason or "")
+
+
 class ExecutionKernel:
     """Central authority layer for runtime execution validation.
 
-    In shadow mode (strict=False), callers should wrap validate() and log
-    violations without propagating them.
+    In strict mode (strict=True), validate() raises KernelValidationError.
+    In shadow mode (strict=False), validate() returns ok=False with reason.
     """
 
     def __init__(
@@ -79,7 +89,11 @@ class ExecutionKernel:
             )
         except Exception as exc:
             if self.strict:
-                raise
+                raise KernelValidationError(
+                    stage=str(stage or ""),
+                    operation=str(operation or ""),
+                    reason=str(exc),
+                ) from exc
             return KernelValidationResult(
                 ok=False,
                 stage=str(stage or ""),
@@ -110,4 +124,4 @@ class ExecutionKernel:
         return turn_context
 
 
-__all__ = ["ExecutionKernel", "KernelValidationResult"]
+__all__ = ["ExecutionKernel", "KernelValidationError", "KernelValidationResult"]

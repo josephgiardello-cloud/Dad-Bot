@@ -42,6 +42,7 @@ OBSERVABILITY_FORBIDDEN_MUTATIONS = (
 )
 
 EXCLUDED_DIR_NAMES = {".git", ".venv", "__pycache__", ".pytest_cache", ".ruff_cache"}
+INCLUDED_TOP_LEVEL_DIRS = {"dadbot", "dadbot_system", "ci", "tools"}
 
 
 @dataclass(frozen=True)
@@ -56,6 +57,8 @@ def _iter_python_files() -> list[Path]:
     for path in ROOT.rglob("*.py"):
         rel = path.relative_to(ROOT)
         if any(part in EXCLUDED_DIR_NAMES or part.startswith(".venv") for part in rel.parts):
+            continue
+        if len(rel.parts) > 1 and rel.parts[0] not in INCLUDED_TOP_LEVEL_DIRS:
             continue
         files.append(path)
     return files

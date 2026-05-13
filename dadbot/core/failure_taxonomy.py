@@ -4,6 +4,9 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
+from dadbot.core.runtime_errors import PartialCommitError, PoisonExecutionError
+from dadbot.core.runtime_contracts import validate_failure_contract
+
 
 class FailureType(StrEnum):
     RETRYABLE = "retryable"
@@ -87,10 +90,9 @@ def _failure_type_for_exception(exc: BaseException) -> FailureType:
     except Exception:
         pass
 
-    message = str(exc or "").lower()
-    if "partial commit" in message or "effect already committed" in message:
+    if isinstance(exc, PartialCommitError):
         return FailureType.PARTIAL_COMMIT
-    if "poison" in message:
+    if isinstance(exc, PoisonExecutionError):
         return FailureType.POISON
     if isinstance(exc, (ValueError, TypeError, AssertionError)):
         return FailureType.NON_RETRYABLE
@@ -100,6 +102,7 @@ def _failure_type_for_exception(exc: BaseException) -> FailureType:
 def classify_failure(exc: BaseException) -> dict[str, Any]:
     failure_type = _failure_type_for_exception(exc)
     policy = _POLICY_BY_FAILURE_TYPE[failure_type]
+    validate_failure_contract(failure_type=policy.failure_type.value, failure_action=policy.action.value)
     return {
         "failure_type": policy.failure_type.value,
         "failure_class": policy.failure_class,

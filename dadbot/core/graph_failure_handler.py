@@ -11,11 +11,14 @@ Handles:
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from dadbot.contracts import AttachmentList
 from dadbot.core.execution_contract import SovereignContext
 from dadbot.core.kernel_signals import CorrelationContext, TracingContext
+
+if TYPE_CHECKING:
+    from dadbot.core.mixin_protocols import GraphFailureHandlerProvider
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +67,7 @@ class DadBotGraphFailureHandlerMixin:
         return str(value)[:limit]
 
     def _emit_graph_failure_event(
-        self,
+        self: GraphFailureHandlerProvider,
         *,
         mode: str,
         correlation_id: str,
@@ -77,7 +80,7 @@ class DadBotGraphFailureHandlerMixin:
         orchestrator = getattr(self, "_turn_orchestrator", None)
         if orchestrator is None:
             try:
-                orchestrator = self._get_turn_orchestrator()  # type: ignore[attr-defined]
+                orchestrator = self._get_turn_orchestrator()
             except Exception:  # noqa: BLE001
                 orchestrator = None
         control_plane = getattr(orchestrator, "control_plane", None)
@@ -138,9 +141,9 @@ class DadBotGraphFailureHandlerMixin:
                 return
             raise
 
-    def _graph_failure_reply(self, correlation_id: str) -> str:
+    def _graph_failure_reply(self: GraphFailureHandlerProvider, correlation_id: str) -> str:
         """Format a user-facing failure message with reference ID."""
-        return self._append_signoff_compat(  # type: ignore[attr-defined]
+        return self._append_signoff_compat(
             "I hit an internal graph error and stopped before touching memory or state. "
             f"Please try again. Reference ID: {correlation_id}",
         )

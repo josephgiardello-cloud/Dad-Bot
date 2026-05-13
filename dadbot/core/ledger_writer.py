@@ -8,6 +8,7 @@ from dadbot.core.execution_ledger import ExecutionLedger, WriteBoundaryGuard
 from dadbot.core.execution_result_unified import ensure_unified_execution_result
 from dadbot.core.invariant_gate import InvariantGate, InvariantViolationError
 from dadbot.core.kernel_signals import get_metrics
+from dadbot.core.runtime_contracts import validate_ledger_entry_contract
 
 
 class LedgerWriter:
@@ -93,6 +94,7 @@ class LedgerWriter:
             )
 
     def _write(self, payload: dict[str, Any]) -> dict[str, Any]:
+        payload = dict(validate_ledger_entry_contract(payload))
         self._validate_semantic_payload(
             event_type=str(payload.get("type") or ""),
             step_key=str(payload.get("kernel_step_id") or ""),

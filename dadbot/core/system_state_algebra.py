@@ -19,7 +19,7 @@ SYSTEM_STATE_ALGEBRA_TRACE_SCHEMA_VERSION = "1.0.0"
 SYSTEM_STATE_ALGEBRA_SNAPSHOT_SCHEMA_VERSION = "1.0.0"
 
 
-class _ReadOnlyProjection(dict):  # type: ignore[type-arg]
+class _ReadOnlyProjection(dict[str, Any]):
     """Dict projection that blocks in-place mutation to preserve purity."""
 
     def __setitem__(self, key: Any, value: Any) -> None:

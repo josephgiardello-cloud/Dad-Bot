@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import copy
-from typing import Any
+from typing import Any, cast
+
+from dadbot.core.execution_result_schema import ExecutionResultEnvelopeCompat
+from dadbot.core.runtime_contracts import validate_execution_result_contract
 
 
 _UNIFIED_STATUS_VALUES = {"pending", "ok", "failed"}
@@ -12,8 +15,8 @@ class ExecutionResultInvariantError(ValueError):
     """Raised when an execution_result envelope violates a semantic invariant."""
 
 
-class _FrozenExecutionResult(dict):  # type: ignore[type-arg]
-    """A dict subclass that refuses writes once a terminal status has been set.
+class _FrozenExecutionResult(dict[str, Any]):
+    """A sealed dict subclass that refuses writes once a terminal status has been set.
 
     * ``isinstance(x, dict)`` → True — existing callers that pass dicts through
       without modification continue to work.
@@ -133,7 +136,7 @@ def build_unified_execution_result(
     *,
     timeout_seconds: float = 0.0,
     degradation_items: list[dict[str, Any]] | None = None,
-) -> dict[str, Any]:
+) -> ExecutionResultEnvelopeCompat:
     items = [dict(item) for item in list(degradation_items or []) if isinstance(item, dict)]
     return {
         "status": "pending",
@@ -225,9 +228,9 @@ def _preserve_legacy_execution_fields(raw: dict[str, Any], baseline: dict[str, A
             baseline[key] = raw[key]
 
 
-def ensure_unified_execution_result(payload: dict[str, Any] | None) -> dict[str, Any]:
+def ensure_unified_execution_result(payload: dict[str, Any] | None) -> ExecutionResultEnvelopeCompat:
     raw = dict(payload or {})
-    baseline = build_unified_execution_result()
+    baseline = cast(dict[str, Any], build_unified_execution_result())
 
     baseline["status"] = _normalize_status(raw)
     _normalize_degradation(raw, baseline)
@@ -237,10 +240,11 @@ def ensure_unified_execution_result(payload: dict[str, Any] | None) -> dict[str,
     _preserve_legacy_execution_fields(raw, baseline)
 
     assert_execution_result_invariants(baseline, context="ensure_unified_execution_result")
-    return baseline
+    validate_execution_result_contract(baseline)
+    return cast(ExecutionResultEnvelopeCompat, baseline)
 
 
-def get_unified_execution_result(turn_context: Any) -> dict[str, Any]:
+def get_unified_execution_result(turn_context: Any) -> ExecutionResultEnvelopeCompat:
     if turn_context is None:
         return ensure_unified_execution_result(None)
 
@@ -290,7 +294,7 @@ def mark_unified_execution_success(
     *,
     response: str,
     should_end: bool,
-) -> dict[str, Any]:
+) -> ExecutionResultEnvelopeCompat:
     _current_status = str((dict(execution_result) if execution_result else {}).get("status") or "").lower()
     if _current_status in _TERMINAL_STATUS_VALUES:
         raise ExecutionResultInvariantError(
@@ -308,8 +312,8 @@ def mark_unified_execution_success(
         "source": "",
         "retryable": False,
     }
-    assert_execution_result_invariants(normalized, context="mark_unified_execution_success")
-    return _FrozenExecutionResult(normalized)
+    assert_execution_result_invariants(cast(dict[str, Any], normalized), context="mark_unified_execution_success")
+    return cast(ExecutionResultEnvelopeCompat, _FrozenExecutionResult(normalized))
 
 
 def mark_unified_execution_failure(
@@ -320,7 +324,7 @@ def mark_unified_execution_failure(
     retryable: bool,
     exception_type: str,
     message: str,
-) -> dict[str, Any]:
+) -> ExecutionResultEnvelopeCompat:
     _current_status = str((dict(execution_result) if execution_result else {}).get("status") or "").lower()
     if _current_status in _TERMINAL_STATUS_VALUES:
         raise ExecutionResultInvariantError(
@@ -338,15 +342,15 @@ def mark_unified_execution_failure(
     }
     if str(failure_class or "").strip().lower() == "timeout":
         normalized["timeout"]["timed_out"] = True
-    assert_execution_result_invariants(normalized, context="mark_unified_execution_failure")
-    return _FrozenExecutionResult(normalized)
+    assert_execution_result_invariants(cast(dict[str, Any], normalized), context="mark_unified_execution_failure")
+    return cast(ExecutionResultEnvelopeCompat, _FrozenExecutionResult(normalized))
 
 
 def set_unified_execution_eval_hash(
     execution_result: dict[str, Any],
     *,
     eval_input_hash: str,
-) -> dict[str, Any]:
+) -> ExecutionResultEnvelopeCompat:
     normalized = ensure_unified_execution_result(execution_result)
     normalized["outputs"]["semantic_eval_input_hash"] = str(eval_input_hash or "")
     return normalized

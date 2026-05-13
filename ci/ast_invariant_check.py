@@ -46,6 +46,11 @@ RULE18_TURN_ENTRYPOINT_CLOSURE
     ``execute_turn(...)`` adapter. Direct calls to legacy turn entrypoints
     (``process_user_message*``, ``handle_turn*``) are compatibility-only and
     restricted to the owning wrapper modules.
+
+RULE20_SERVICE_SHELL_FORWARD_ONLY
+    The ``dadbot_system/`` outer shell is non-authoritative. It may translate,
+    forward, and observe, but it must not call legacy turn entrypoints,
+    ``graph.execute()``, or instantiate persistence internals directly.
 """
 
 from __future__ import annotations
@@ -68,6 +73,8 @@ KERNEL_OWNED_NAMES: frozenset[str] = frozenset(
     {"bot", "runtime", "kernel", "state", "graph", "memory", "session", "context"}
 )
 
+INCLUDED_TOP_LEVEL_DIRS: frozenset[str] = frozenset({"dadbot", "dadbot_system", "ci", "tools"})
+
 
 @dataclass(frozen=True)
 class Violation:
@@ -86,6 +93,8 @@ def _iter_python_files() -> list[Path]:
     for path in ROOT.rglob("*.py"):
         rel = path.relative_to(ROOT)
         if any(part.startswith(".venv") or part in EXCLUDED_DIR_NAMES for part in rel.parts):
+            continue
+        if len(rel.parts) > 1 and rel.parts[0] not in INCLUDED_TOP_LEVEL_DIRS:
             continue
         files.append(path)
     return files
@@ -551,6 +560,22 @@ _TURN_ENTRYPOINT_ALLOWLIST: frozenset[str] = frozenset(
     }
 )
 
+_SERVICE_SHELL_FORBIDDEN_CALL_NAMES: frozenset[str] = frozenset(
+    {
+        "process_user_message",
+        "process_user_message_async",
+        "handle_turn",
+        "handle_turn_async",
+    },
+)
+
+_SERVICE_SHELL_FORBIDDEN_TYPES: frozenset[str] = frozenset(
+    {
+        "SQLiteCheckpointer",
+        "ExecutionKernel",
+    },
+)
+
 
 def _scan_legacy_turn_calls(tree: ast.AST) -> list[tuple[int, str]]:
     found: list[tuple[int, str]] = []
@@ -582,6 +607,59 @@ def check_turn_entrypoint_closure() -> list[Violation]:
         for lineno, detail in _scan_legacy_turn_calls(tree):
             violations.append(Violation(
                 rule="RULE18_TURN_ENTRYPOINT_CLOSURE",
+                path=f"{rel}:{lineno}",
+                detail=detail,
+            ))
+    return violations
+
+
+def _scan_service_shell_bypass(tree: ast.AST) -> list[tuple[int, str]]:
+    found: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Attribute) and node.func.attr in _SERVICE_SHELL_FORBIDDEN_CALL_NAMES:
+            found.append((
+                node.lineno,
+                f"service shell must forward through execute_turn(); legacy call .{node.func.attr}() is forbidden (line {node.lineno})",
+            ))
+            continue
+        if (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr == "execute"
+            and isinstance(node.func.value, ast.Attribute)
+            and node.func.value.attr == "graph"
+        ):
+            found.append((
+                node.lineno,
+                f"service shell must not call graph.execute() directly (line {node.lineno})",
+            ))
+            continue
+        callee_name = None
+        if isinstance(node.func, ast.Name):
+            callee_name = node.func.id
+        elif isinstance(node.func, ast.Attribute):
+            callee_name = node.func.attr
+        if callee_name in _SERVICE_SHELL_FORBIDDEN_TYPES:
+            found.append((
+                node.lineno,
+                f"service shell must not instantiate {callee_name} directly (line {node.lineno})",
+            ))
+    return found
+
+
+def check_service_shell_forward_only() -> list[Violation]:
+    violations: list[Violation] = []
+    for file_path in _iter_python_files():
+        rel = _rel(file_path)
+        if not rel.startswith("dadbot_system/"):
+            continue
+        tree = _parse(file_path)
+        if tree is None:
+            continue
+        for lineno, detail in _scan_service_shell_bypass(tree):
+            violations.append(Violation(
+                rule="RULE20_SERVICE_SHELL_FORWARD_ONLY",
                 path=f"{rel}:{lineno}",
                 detail=detail,
             ))
@@ -665,6 +743,7 @@ def run_checks() -> list[Violation]:
         *check_tool_sandbox_isolation(),
         *check_llm_commit_separation(),
         *check_turn_entrypoint_closure(),
+        *check_service_shell_forward_only(),
         *check_no_synthesis_in_execution_path(),
     ]
 

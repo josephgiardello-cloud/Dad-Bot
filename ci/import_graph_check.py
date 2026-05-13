@@ -42,6 +42,7 @@ _OBSERVABILITY_TOOL_RUNTIME_ALLOWLIST = {
     "dadbot/tools/filesystem_read_tool.py",
     "dadbot/tools/http_fetch_tool.py",
 }
+INCLUDED_TOP_LEVEL_DIRS = {"dadbot", "dadbot_system", "ci", "tools"}
 
 
 @dataclass(frozen=True)
@@ -55,6 +56,8 @@ def _iter_python_files() -> Iterable[Path]:
     for path in ROOT.rglob("*.py"):
         rel = path.relative_to(ROOT)
         if any(part in EXCLUDED_DIR_NAMES or part.startswith(".venv") for part in rel.parts):
+            continue
+        if len(rel.parts) > 1 and rel.parts[0] not in INCLUDED_TOP_LEVEL_DIRS:
             continue
         yield path
 

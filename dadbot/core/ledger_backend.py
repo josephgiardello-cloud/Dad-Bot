@@ -11,6 +11,7 @@ Usage:
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import threading
@@ -24,8 +25,15 @@ if TYPE_CHECKING:
 
 
 def _coerce_event_record(event: dict[str, Any] | SovereignEvent) -> dict[str, Any]:
+    """Convert event to dict, handling Pydantic v1 and v2."""
     if hasattr(event, "model_dump"):
-        payload = event.model_dump(mode="json")  # type: ignore[call-arg]
+        # Pydantic v2: check if mode parameter is supported
+        sig = inspect.signature(event.model_dump)
+        if "mode" in sig.parameters:
+            payload = event.model_dump(mode="json")
+        else:
+            # Pydantic v1 fallback
+            payload = event.model_dump()
         return dict(payload)
     return dict(event)
 

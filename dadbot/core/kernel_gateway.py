@@ -106,14 +106,33 @@ class KernelGateway:
         md.setdefault("confluence_key", f"kgw:{trace.semantic_input_hash[:24]}")
         md.setdefault("trace_id", trace.trace_id)
         md["kernel_trace"] = trace.to_dict()
+        self._control_plane._topology_begin_turn(
+            trace_id=trace.trace_id,
+            session_id=str(session_id or "default"),
+        )
+        self._control_plane._topology_record_node(
+            node_id="control_plane.submit_turn",
+            metadata={"source": "kernel_gateway.submit_turn"},
+        )
+        self._control_plane._topology_record_node(
+            node_id="kernel_gateway.submit_turn",
+            metadata={"kernel_trace": trace.to_dict()},
+        )
+        self._control_plane._topology_record_node(
+            node_id="orchestrator.handle_turn",
+            metadata={"session_id": str(session_id or "default")},
+        )
         with self._scope():
-            return await self._control_plane._submit_turn_kernel(
-                session_id=session_id,
-                user_input=user_input,
-                attachments=attachments,
-                metadata=md,
-                timeout_seconds=timeout_seconds,
-            )
+            try:
+                return await self._control_plane._submit_turn_kernel(
+                    session_id=session_id,
+                    user_input=user_input,
+                    attachments=attachments,
+                    metadata=md,
+                    timeout_seconds=timeout_seconds,
+                )
+            finally:
+                self._control_plane._topology_end_turn()
 
 
 __all__ = ["KernelGateway", "KernelTrace"]

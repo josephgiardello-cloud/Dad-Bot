@@ -160,11 +160,11 @@ class _LedgerOpsMixin:
             runtime._pending_daily_checkin_context = should_offer_daily_checkin
 
     @staticmethod
-    def _ledger_op_sync_thread_snapshot(runtime: Any, _payload: dict[str, Any]) -> None:
+    def _ledger_op_sync_thread_snapshot(runtime: Any, payload: dict[str, Any]) -> None:
         runtime.sync_active_thread_snapshot()
 
     @staticmethod
-    def _ledger_op_clear_turn_context(runtime: Any, _payload: dict[str, Any]) -> None:
+    def _ledger_op_clear_turn_context(runtime: Any, payload: dict[str, Any]) -> None:
         with runtime._session_lock:
             runtime._pending_daily_checkin_context = False
             runtime._active_tool_observation_context = None

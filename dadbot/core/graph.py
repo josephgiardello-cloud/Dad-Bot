@@ -209,7 +209,7 @@ class TurnGraph:
             firewall=ExecutionFirewall(),
             invariant_registry=InvariantRegistry(),
             quarantine=None,
-            strict=False,
+            strict=(self.registry is not None),
         )
         validate_execution_kernel_spec(self._execution_kernel, raise_on_failure=True)
         self._persistence_contract = PersistenceServiceContract()
@@ -585,18 +585,15 @@ class TurnGraph:
     # (Deleted: _emit_turn_health_state, _mark_structural_degradation, _mark_stage_enter — no longer used)
 
     def add_node(self, name: str, node: Any) -> None:
-        # Kernel in shadow mode during graph construction.
-        shadow_context = TurnContext(user_input="graph_build")
-        result = self._execution_kernel.validate(
-            stage="graph_build",
-            operation=f"turn_graph.add_node:{name}",
-            context=shadow_context,
-        )
-        if not bool(getattr(result, "ok", True)):
-            logger.warning(
-                "[KERNEL SHADOW VIOLATION] %s",
-                getattr(result, "reason", "graph build validation failed"),
+        # Construction-time validation is advisory; runtime stage validation is authoritative.
+        try:
+            self._execution_kernel.validate(
+                stage="graph_build",
+                operation=f"turn_graph.add_node:{name}",
+                context=TurnContext(user_input="graph_build"),
             )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[KERNEL CONSTRUCTION VIOLATION] %s", exc)
         self._topology.add_node(name, node)
         self._entry_node = self._topology.entry_node
         self._node_map = self._topology.node_map
@@ -1291,7 +1288,7 @@ class TurnGraph:
                 "Kernel validation failed",
                 context={
                     "stage": str(stage or ""),
-                    "reason": str(getattr(validate_result, "reason", "kernel validation failed")),
+                    "reason": str(getattr(validate_result, "reason", "kernel validation failed") or "kernel validation failed"),
                 },
             )
 

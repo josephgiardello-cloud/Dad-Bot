@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import multiprocessing as mp
 import queue
 import time
 from dataclasses import dataclass
+
+from dadbot.core.execution_contract import SovereignContext, TurnDelivery, live_turn_request
 
 from .contracts import (
     DEFAULT_TENANT_ID,
@@ -21,6 +24,18 @@ from .contracts import (
 from .runtime_signals import configure_logging, start_span
 
 logger = logging.getLogger(__name__)
+
+
+def _coerce_turn_result(response_obj: object) -> tuple[str, bool]:
+    if hasattr(response_obj, "as_result") and callable(getattr(response_obj, "as_result", None)):
+        result = response_obj.as_result()
+        if isinstance(result, tuple) and len(result) >= 2:
+            return str(result[0] or ""), bool(result[1])
+    if isinstance(response_obj, tuple) and len(response_obj) >= 2:
+        return str(response_obj[0] or ""), bool(response_obj[1])
+    reply = str(getattr(response_obj, "reply", "") or "")
+    should_end = bool(getattr(response_obj, "should_end", False))
+    return reply, should_end
 
 
 @dataclass(slots=True)
@@ -144,9 +159,29 @@ class DadBotTaskProcessor:
         if request_policy is not None:
             bot._service_request_policy = request_policy
         try:
-            if hasattr(bot, "process_user_message_async"):
-                return await bot.process_user_message_async(request.user_input, attachments=attachments)
-            return bot.process_user_message(request.user_input, attachments=attachments)
+            try:
+                execute_turn = bot.execute_turn
+            except AttributeError as exc:
+                raise RuntimeError("service shell requires bot.execute_turn") from exc
+            if not callable(execute_turn):
+                raise RuntimeError("service shell requires bot.execute_turn")
+
+            turn_request = live_turn_request(
+                request.user_input,
+                attachments=attachments,
+                delivery=TurnDelivery.ASYNC,
+                context=SovereignContext(
+                    session_id=str(request.session_id or "default"),
+                    tenant_id=str(request.tenant_id or DEFAULT_TENANT_ID),
+                    request_id=str(request.request_id or ""),
+                    trace_id=str(request.request_id or ""),
+                    policy_scope="dadbot_system.worker",
+                ),
+            )
+            response_obj = execute_turn(turn_request)
+            if inspect.isawaitable(response_obj):
+                response_obj = await response_obj
+            return _coerce_turn_result(response_obj)
         finally:
             if request_policy is not None:
                 bot._service_request_policy = previous_policy

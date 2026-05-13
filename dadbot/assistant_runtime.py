@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import inspect
 from typing import Any
 
-from dadbot.core.execution_contract import TurnDelivery, live_turn_request
+from dadbot.core.execution_contract import ExecutionEntry, TurnDelivery, live_turn_request
 from dadbot.runtime.agent_driver_loop import AgentDriverLoop, DriverLoopPolicy, DriverLoopResult
 from dadbot.runtime.context_pruner import ContextWindowPruner, build_pruned_observation_hook
 from dadbot.runtime.semantic_memory_bridge import MemoryConsolidationJob, build_semantic_snippet_provider
@@ -11,34 +12,52 @@ from dadbot.runtime.semantic_memory_bridge import MemoryConsolidationJob, build_
 class AssistantRuntime:
     """Stable, minimal assistant-facing facade over the execution kernel."""
 
-    def __init__(self, kernel: Any):
+    def __init__(self, kernel: Any, *, entrypoint: ExecutionEntry | None = None):
         self.kernel = kernel
+        if entrypoint is not None:
+            self._entrypoint = entrypoint
+            return
+        try:
+            execute_turn = self.kernel.execute_turn
+        except AttributeError as exc:
+            raise RuntimeError("AssistantRuntime requires kernel.execute_turn at initialization") from exc
+        self._entrypoint = ExecutionEntry(execute_turn)
+
+    async def _invoke_turn(self, message: str, *, delivery: TurnDelivery) -> tuple[str, bool]:
+        response_obj = self._entrypoint.execute_turn(
+            live_turn_request(str(message or ""), delivery=delivery),
+        )
+        if inspect.isawaitable(response_obj):
+            response_obj = await response_obj
+
+        if hasattr(response_obj, "as_result"):
+            result_payload = response_obj.as_result()
+            if isinstance(result_payload, tuple) and len(result_payload) >= 2:
+                return str(result_payload[0] or ""), bool(result_payload[1])
+            return str(getattr(response_obj, "reply", "") or ""), bool(getattr(response_obj, "should_end", False))
+
+        if isinstance(response_obj, tuple):
+            return str(response_obj[0] if len(response_obj) >= 1 else ""), bool(response_obj[1] if len(response_obj) >= 2 else False)
+
+        return str(getattr(response_obj, "reply", "") or ""), bool(getattr(response_obj, "should_end", False))
 
     def chat(self, message: str, *, debug: bool = False) -> dict[str, Any]:
-        execute_turn = getattr(self.kernel, "execute_turn", None)
-        if callable(execute_turn):
-            response_obj = execute_turn(
-                live_turn_request(str(message or ""), delivery=TurnDelivery.SYNC),
-            )
-            if hasattr(response_obj, "as_result"):
-                result_payload = response_obj.as_result()
-                if isinstance(result_payload, tuple) and len(result_payload) >= 2:
-                    final_output, _should_save = result_payload
-                else:
-                    final_output = str(getattr(response_obj, "reply", "") or "")
-                    _should_save = bool(getattr(response_obj, "should_end", False))
-            elif isinstance(response_obj, tuple):
-                final_output, _should_save = response_obj
+        response_obj = self._entrypoint.execute_turn(
+            live_turn_request(str(message or ""), delivery=TurnDelivery.SYNC),
+        )
+        if inspect.isawaitable(response_obj):
+            raise RuntimeError("AssistantRuntime.chat requires a synchronous execute_turn entry")
+
+        if hasattr(response_obj, "as_result"):
+            result_payload = response_obj.as_result()
+            if isinstance(result_payload, tuple) and len(result_payload) >= 2:
+                final_output = str(result_payload[0] or "")
             else:
                 final_output = str(getattr(response_obj, "reply", "") or "")
-                _should_save = bool(getattr(response_obj, "should_end", False))
+        elif isinstance(response_obj, tuple):
+            final_output = str(response_obj[0] if len(response_obj) >= 1 else "")
         else:
-            legacy_turn = getattr(self.kernel, "process_user_message", None)
-            if callable(legacy_turn):
-                final_output, _should_save = legacy_turn(str(message or ""))
-            else:
-                final_output = ""
-                _should_save = False
+            final_output = str(getattr(response_obj, "reply", "") or "")
         response = {
             "response": str(final_output or ""),
             "memory_updates": None,
@@ -58,16 +77,8 @@ class AssistantRuntime:
         orchestration = getattr(self.kernel, "runtime_orchestration", None)
         if orchestration is None:
             raise RuntimeError("runtime_orchestration manager is not available")
-        execute_turn = getattr(self.kernel, "execute_turn", None)
-        legacy_turn = getattr(self.kernel, "process_user_message", None)
-        task_fn = execute_turn if callable(execute_turn) else legacy_turn
-        if not callable(task_fn):
-            raise RuntimeError("kernel does not expose execute_turn or process_user_message")
-        task_arg = (
-            live_turn_request(str(message or ""), delivery=TurnDelivery.SYNC)
-            if callable(execute_turn)
-            else str(message or "")
-        )
+        task_fn = self._entrypoint.execute_turn
+        task_arg = live_turn_request(str(message or ""), delivery=TurnDelivery.SYNC)
         future = orchestration.submit_background_task(
             task_fn,
             task_arg,

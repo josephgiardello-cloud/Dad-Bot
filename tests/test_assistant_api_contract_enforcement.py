@@ -24,7 +24,9 @@ pytestmark = pytest.mark.unit
 def mock_kernel():
     """Provide a mocked kernel for testing without full initialization."""
     kernel = MagicMock()
-    kernel.process_user_message.return_value = ("test response", False)
+    response = MagicMock()
+    response.as_result.return_value = ("test response", False)
+    kernel.execute_turn.return_value = response
     kernel.runtime_orchestration = MagicMock()
     kernel.runtime_orchestration.submit_background_task.return_value = MagicMock(dadbot_task_id="task-123")
     kernel.runtime_state_manager = MagicMock()

@@ -28,14 +28,76 @@ from dadbot.core.persistence.base import (
     CheckpointIntegrityError,
     CheckpointNotFoundError,
 )
+from dadbot.core.runtime_contracts import validate_checkpoint_contract
 
 logger = logging.getLogger(__name__)
+
+_REQUIRED_CHECKPOINT_FIELDS: frozenset[str] = frozenset(
+    {
+        "checkpoint_hash",
+        "prev_checkpoint_hash",
+        "status",
+        "state",
+        "metadata",
+    },
+)
+
+_REQUIRED_MANIFEST_FIELDS: frozenset[str] = frozenset(
+    {
+        "python_version",
+        "env_hash",
+        "dependency_versions",
+        "timezone",
+    },
+)
+
+_MANIFEST_DEFAULTS: dict[str, Any] = {
+    "python_version": "unknown",
+    "env_hash": "unknown",
+    "dependency_versions": {},
+    "timezone": "UTC",
+}
+
+_CHECKPOINT_DEFAULTS: dict[str, Any] = {
+    "status": "ok",
+}
 
 
 def _stable_sha256(payload: dict[str, Any]) -> str:
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, default=str).encode("utf-8"),
     ).hexdigest()
+
+
+def _require_mapping(name: str, value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise CheckpointError(f"{name} must be a dict")
+    return dict(value)
+
+
+def _require_fields(name: str, payload: dict[str, Any], required_fields: frozenset[str]) -> dict[str, Any]:
+    missing = sorted(field for field in required_fields if field not in payload)
+    if missing:
+        raise CheckpointError(f"{name} missing required field(s): {', '.join(missing)}")
+    return payload
+
+
+def _normalize_manifest_payload(manifest: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(manifest or {})
+    for key, default_value in _MANIFEST_DEFAULTS.items():
+        if key not in normalized:
+            normalized[key] = default_value
+    if not isinstance(normalized.get("dependency_versions"), dict):
+        normalized["dependency_versions"] = {}
+    return normalized
+
+
+def _normalize_checkpoint_payload(checkpoint: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(checkpoint or {})
+    for key, default_value in _CHECKPOINT_DEFAULTS.items():
+        if key not in normalized:
+            normalized[key] = default_value
+    return normalized
 
 
 @dataclass(frozen=True)
@@ -144,38 +206,49 @@ class SQLiteCheckpointer(AbstractCheckpointer):
         except sqlite3.Error as exc:
             raise CheckpointError(f"Checkpoint schema migration failed: {exc}") from exc
 
-    def _resolve_checkpoint_trace_id(self, trace_token: str, legacy_kwargs: dict[str, Any]) -> str:
-        legacy_trace = legacy_kwargs.pop("trace_id", "")
-        if legacy_kwargs:
-            unknown = ", ".join(sorted(str(name) for name in legacy_kwargs))
-            raise TypeError(f"Unexpected keyword argument(s): {unknown}")
-        return str(trace_token or legacy_trace or "").strip()
-
     def _checkpoint_payload_parts(
         self,
+        trace_id: str,
         checkpoint: dict[str, Any],
         manifest: dict[str, Any],
     ) -> tuple[str, str, str, str, str]:
-        checkpoint_hash = str(checkpoint.get("checkpoint_hash") or "").strip()
-        prev_checkpoint_hash = str(checkpoint.get("prev_checkpoint_hash") or "").strip()
+        checkpoint_payload = _require_fields(
+            "checkpoint",
+            _normalize_checkpoint_payload(_require_mapping("checkpoint", checkpoint)),
+            _REQUIRED_CHECKPOINT_FIELDS,
+        )
+        manifest_payload = _require_fields(
+            "manifest",
+            _normalize_manifest_payload(_require_mapping("manifest", manifest)),
+            _REQUIRED_MANIFEST_FIELDS,
+        )
+
+        checkpoint_hash = str(checkpoint_payload.get("checkpoint_hash") or "").strip()
+        prev_checkpoint_hash = str(checkpoint_payload.get("prev_checkpoint_hash") or "").strip()
         if not checkpoint_hash:
             raise CheckpointError("checkpoint.checkpoint_hash is required")
-
-        manifest_payload = dict(manifest or {})
         manifest_hash = str(
             manifest_payload.get("manifest_hash") or _stable_sha256(manifest_payload),
         )
         payload = {
-            "checkpoint": dict(checkpoint or {}),
+            "checkpoint": checkpoint_payload,
             "manifest": manifest_payload,
         }
+        validate_checkpoint_contract(
+            {
+                "trace_id": str(trace_id or ""),
+                "state": dict(checkpoint_payload.get("state") or {}),
+                "manifest": manifest_payload,
+                "checksum": checkpoint_hash,
+            },
+        )
         payload_json = json.dumps(payload, sort_keys=True, default=str)
         return checkpoint_hash, prev_checkpoint_hash, manifest_hash, payload_json, manifest_payload.get("manifest_hash", "")
 
     def _write_checkpoint_row(
         self,
         session_id: str,
-        trace_token: str,
+        trace_id: str,
         checkpoint_hash: str,
         prev_checkpoint_hash: str,
         manifest_hash: str,
@@ -194,7 +267,7 @@ class SQLiteCheckpointer(AbstractCheckpointer):
                     """,
                     (
                         session_id,
-                        trace_token,
+                        trace_id,
                         checkpoint_hash,
                         prev_checkpoint_hash,
                         manifest_hash,
@@ -210,7 +283,7 @@ class SQLiteCheckpointer(AbstractCheckpointer):
                     """,
                     (
                         session_id,
-                        trace_token,
+                        trace_id,
                         checkpoint_hash,
                         "ok",
                         "",
@@ -222,17 +295,17 @@ class SQLiteCheckpointer(AbstractCheckpointer):
     def save_checkpoint(
         self,
         session_id: str,
+        trace_id: str,
         checkpoint: dict[str, Any],
         manifest: dict[str, Any],
-        trace_token: str = "",
-        **legacy_kwargs: Any,
     ) -> bool:
         session_id = str(session_id or "").strip()
-        trace_id = self._resolve_checkpoint_trace_id(trace_token, legacy_kwargs)
+        trace_id = str(trace_id or "").strip()
         if not session_id or not trace_id:
             raise CheckpointError("session_id and trace_id are required")
 
         checkpoint_hash, prev_checkpoint_hash, manifest_hash, payload_json, _ = self._checkpoint_payload_parts(
+            trace_id,
             checkpoint,
             manifest,
         )
@@ -241,7 +314,7 @@ class SQLiteCheckpointer(AbstractCheckpointer):
         try:
             self._write_checkpoint_row(
                 session_id=session_id,
-                trace_token=trace_id,
+                trace_id=trace_id,
                 checkpoint_hash=checkpoint_hash,
                 prev_checkpoint_hash=prev_checkpoint_hash,
                 manifest_hash=manifest_hash,
@@ -288,15 +361,10 @@ class SQLiteCheckpointer(AbstractCheckpointer):
         self,
         *,
         session_id: str,
-        trace_token: str = "",
+        trace_id: str,
         checkpoint_hash: str,
-        **legacy_kwargs: Any,
     ) -> None:
-        legacy_trace = legacy_kwargs.pop("trace_id", "")
-        if legacy_kwargs:
-            unknown = ", ".join(sorted(str(name) for name in legacy_kwargs))
-            raise TypeError(f"Unexpected keyword argument(s): {unknown}")
-        trace_id = str(trace_token or legacy_trace or "").strip()
+        trace_id = str(trace_id or "").strip()
         with self._io_lock:
             with contextlib.closing(self._connect()) as conn:
                 row = conn.execute(
@@ -321,15 +389,10 @@ class SQLiteCheckpointer(AbstractCheckpointer):
         self,
         *,
         session_id: str,
-        trace_token: str = "",
+        trace_id: str,
         error: str,
-        **legacy_kwargs: Any,
     ) -> None:
-        legacy_trace = legacy_kwargs.pop("trace_id", "")
-        if legacy_kwargs:
-            unknown = ", ".join(sorted(str(name) for name in legacy_kwargs))
-            raise TypeError(f"Unexpected keyword argument(s): {unknown}")
-        trace_id = str(trace_token or legacy_trace or "").strip()
+        trace_id = str(trace_id or "").strip()
         try:
             with self._io_lock:
                 with contextlib.closing(self._connect()) as conn:
@@ -347,13 +410,11 @@ class SQLiteCheckpointer(AbstractCheckpointer):
     def load_checkpoint(
         self,
         session_id: str,
-        trace_token: str | None = None,
+        trace_id: str | None = None,
         *,
         current_manifest: dict[str, Any] | None = None,
         strict: bool = False,
-        **legacy_kwargs: Any,
     ) -> dict[str, Any]:
-        trace_id = self._resolve_load_trace_id(trace_token, legacy_kwargs)
         session_id = str(session_id or "").strip()
         if not session_id:
             raise CheckpointNotFoundError("session_id is required")
@@ -364,7 +425,7 @@ class SQLiteCheckpointer(AbstractCheckpointer):
                     row = self._fetch_checkpoint_row(
                         conn=conn,
                         session_id=session_id,
-                        trace_token=trace_id,
+                        trace_id=trace_id,
                     )
                     if row is None:
                         raise CheckpointNotFoundError(
@@ -388,28 +449,20 @@ class SQLiteCheckpointer(AbstractCheckpointer):
             raise CheckpointError(f"Checkpoint load failed: {exc}") from exc
 
     @staticmethod
-    def _resolve_load_trace_id(trace_token: str | None, legacy_kwargs: dict[str, Any]) -> Any:
-        legacy_trace = legacy_kwargs.pop("trace_id", None)
-        if legacy_kwargs:
-            unknown = ", ".join(sorted(str(name) for name in legacy_kwargs))
-            raise TypeError(f"Unexpected keyword argument(s): {unknown}")
-        return trace_token if trace_token is not None else legacy_trace
-
-    @staticmethod
     def _fetch_checkpoint_row(
         *,
         conn: sqlite3.Connection,
         session_id: str,
-        trace_token: Any,
+        trace_id: str | None,
     ) -> sqlite3.Row | None:
-        if trace_token:
+        if trace_id:
             cursor = conn.execute(
                 """
                 SELECT * FROM checkpoints
                 WHERE session_id = ? AND trace_id = ?
                 LIMIT 1
                 """,
-                (session_id, str(trace_token)),
+                (session_id, str(trace_id)),
             )
         else:
             cursor = conn.execute(
@@ -710,22 +763,22 @@ class AsyncSQLiteCheckpointer(AbstractAsyncCheckpointer):
     async def save_checkpoint(
         self,
         session_id: str,
-        trace_token: str,
+        trace_id: str,
         checkpoint: dict[str, Any],
         manifest: dict[str, Any],
     ) -> bool:
         return await asyncio.to_thread(
             self._sync.save_checkpoint,
             session_id=session_id,
+            trace_id=trace_id,
             checkpoint=checkpoint,
             manifest=manifest,
-            trace_token=trace_token,
         )
 
     async def load_checkpoint(
         self,
         session_id: str,
-        trace_token: str | None = None,
+        trace_id: str | None = None,
         *,
         current_manifest: dict[str, Any] | None = None,
         strict: bool = False,
@@ -733,7 +786,7 @@ class AsyncSQLiteCheckpointer(AbstractAsyncCheckpointer):
         return await asyncio.to_thread(
             self._sync.load_checkpoint,
             session_id,
-            trace_token,
+            trace_id,
             current_manifest=current_manifest,
             strict=strict,
         )

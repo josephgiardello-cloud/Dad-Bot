@@ -605,6 +605,35 @@ class ExecutionLifecycleState(StrEnum):
     FAILED = "failed"
 
 
+class TurnTerminalState(StrEnum):
+    SUCCESS = "SUCCESS"
+    CANCELLED = "CANCELLED"
+    TIMEOUT = "TIMEOUT"
+    FAILED = "FAILED"
+    RECOVERED = "RECOVERED"
+
+
+class SchedulerExceptionMapper:
+    """Canonical scheduler exception -> terminal turn state mapper."""
+
+    @staticmethod
+    def from_exception(exc: BaseException) -> TurnTerminalState:
+        if isinstance(exc, asyncio.CancelledError):
+            return TurnTerminalState.CANCELLED
+        if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+            return TurnTerminalState.TIMEOUT
+        return TurnTerminalState.FAILED
+
+    @staticmethod
+    def from_success(*, recovered: bool) -> TurnTerminalState:
+        if recovered:
+            return TurnTerminalState.RECOVERED
+        return TurnTerminalState.SUCCESS
+
+
+_SCHEDULER_EXCEPTION_MAPPER = SchedulerExceptionMapper()
+
+
 _ALLOWED_LIFECYCLE_TRANSITIONS: dict[ExecutionLifecycleState, frozenset[ExecutionLifecycleState]] = {
     ExecutionLifecycleState.SUBMITTED: frozenset({
         ExecutionLifecycleState.QUEUED,
@@ -877,6 +906,38 @@ def _classify_execution_failure(exc: BaseException) -> dict[str, Any]:
         failure["failure_class"] = "cancelled"
         failure["failure_source"] = "runtime"
     return failure
+
+
+def _set_terminal_turn_state(
+    job: "ExecutionJob",
+    *,
+    terminal_state: TurnTerminalState,
+    reason: str,
+    strict: bool = True,
+) -> None:
+    metadata = dict(job.metadata or {})
+    execution_state = dict(metadata.get("execution_state") or {})
+    existing = str(
+        execution_state.get("terminal_turn_state") or metadata.get("terminal_turn_state") or "",
+    ).strip().upper()
+    incoming = str(terminal_state.value or "").strip().upper()
+    if existing and existing != incoming:
+        if not strict:
+            return
+        raise InvariantViolation(
+            "Terminal turn state transition is not idempotent",
+            context={
+                "job_id": str(job.job_id or ""),
+                "trace_id": str(job.trace_id or ""),
+                "existing": existing,
+                "incoming": incoming,
+            },
+        )
+    execution_state["terminal_turn_state"] = incoming
+    execution_state["terminal_transition_reason"] = str(reason or "")
+    metadata["execution_state"] = execution_state
+    metadata["terminal_turn_state"] = incoming
+    job.metadata = metadata
 
 
 def _extract_execution_degradations(metadata: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1591,7 +1652,7 @@ class Scheduler:
         future: asyncio.Future[FinalizedTurnResult],
         *,
         result: FinalizedTurnResult | None = None,
-        error: Exception | None = None,
+        error: BaseException | None = None,
     ) -> None:
         if future.done():
             return
@@ -1860,6 +1921,13 @@ class Scheduler:
                 request_id=request_id,
                 step_key="scheduler.execute.effect.commit",
             )
+        _set_terminal_turn_state(
+            job,
+            terminal_state=_SCHEDULER_EXCEPTION_MAPPER.from_success(
+                recovered=(_resolved_execution_mode(job) == "recovery"),
+            ),
+            reason="scheduler.execute.complete",
+        )
         self.writer.append_job_completed(job, result)
         self._resolve_future(future, result=result)
         self._release_runtime_lease(session_id=job.session_id)
@@ -1874,7 +1942,7 @@ class Scheduler:
         *,
         job: ExecutionJob,
         future: asyncio.Future[FinalizedTurnResult],
-        exc: Exception,
+        exc: BaseException,
         started_at: float,
     ) -> None:
         failure = _classify_execution_failure(exc)
@@ -1895,6 +1963,11 @@ class Scheduler:
             f"scheduler.execute.failed:{str(failure.get('failure_action') or 'unknown')}"
         )
         job.metadata["execution_state"] = execution_state
+        _set_terminal_turn_state(
+            job,
+            terminal_state=_SCHEDULER_EXCEPTION_MAPPER.from_exception(exc),
+            reason=f"scheduler.execute.failed:{type(exc).__name__}",
+        )
         self._emit_failure_policy_event(job=job, failure=failure)
         self._append_lifecycle_event(
             job,
@@ -2000,6 +2073,19 @@ class Scheduler:
 
         try:
             return await self._execute_and_record_job(executor, job, future, started_at)
+        except asyncio.CancelledError as exc:
+            logger.exception(
+                "scheduler drain cancelled for job_id=%s session_id=%s",
+                str(job.job_id or ""),
+                str(job.session_id or ""),
+            )
+            self._record_scheduler_failure(
+                job=job,
+                future=future,
+                exc=exc,
+                started_at=started_at,
+            )
+            raise
         except (
             TimeoutError,
             ExecutionStageError,
@@ -2022,6 +2108,9 @@ class Scheduler:
             raise
         finally:
             if future.done():
+                if not future.cancelled():
+                    with contextlib.suppress(BaseException):
+                        future.exception()
                 self._jobs.pop(job_id, None)
 
 
@@ -3135,6 +3224,13 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         dedupe_future: asyncio.Future[FinalizedTurnResult] | None,
         loop_iterations: int,
     ) -> FinalizedTurnResult:
+        finalization = dict(job.metadata.get("submit_finalization") or {})
+        if bool(finalization.get("done", False)):
+            return (
+                str(finalization.get("response") or (result[0] if isinstance(result, tuple) and len(result) >= 1 else "")),
+                bool(finalization.get("should_end", result[1] if isinstance(result, tuple) and len(result) >= 2 else False)),
+            )
+
         current_execution_result = ensure_unified_execution_result(
             dict(job.metadata.get("execution_result") or {}),
         )
@@ -3291,6 +3387,11 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
                 node_id="persistence.finalize_turn",
                 metadata={"trace_id": str(trace_token or "")},
             )
+        job.metadata["submit_finalization"] = {
+            "done": True,
+            "response": str(result[0] if isinstance(result, tuple) and len(result) >= 1 else ""),
+            "should_end": bool(result[1] if isinstance(result, tuple) and len(result) >= 2 else False),
+        }
         return result
 
     def _record_submit_exception(
@@ -3301,7 +3402,7 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         dedupe_future: asyncio.Future[FinalizedTurnResult] | None,
         session_key: str,
         trace_token: str,
-        exc: Exception,
+        exc: BaseException,
     ) -> None:
         classified = _classify_execution_failure(exc)
         current_execution_result = mark_unified_execution_failure(
@@ -3321,6 +3422,12 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
             f"control_plane.submit.failed:{str(classified.get('failure_action') or 'unknown')}"
         )
         job.metadata["execution_state"] = execution_state
+        _set_terminal_turn_state(
+            job,
+            terminal_state=_SCHEDULER_EXCEPTION_MAPPER.from_exception(exc),
+            reason=f"control_plane.submit.failed:{type(exc).__name__}",
+            strict=False,
+        )
         _mutate_runtime_plan(
             metadata=job.metadata,
             reason=f"submit_failed:{type(exc).__name__}",

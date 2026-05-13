@@ -6,6 +6,9 @@ It consumes FailureClass + context and returns a deterministic action (retry, es
 
 from __future__ import annotations
 
+import hashlib
+import os
+import time
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
@@ -121,6 +124,7 @@ class FailurePolicyRules:
         base_delay_ms: float = TRANSIENT_BASE_DELAY_MS,
         max_delay_seconds: float = TRANSIENT_MAX_DELAY_SECONDS,
         jitter_ratio: float = 0.2,
+        deterministic_replay: bool | None = None,
     ) -> float:
         """Compute exponential backoff with jitter.
 
@@ -137,9 +141,22 @@ class FailurePolicyRules:
         exponential_ms = base_delay_ms * (2.0 ** max(0, attempt - 1))
         capped_ms = min(exponential_ms, max_delay_seconds * 1000.0)
 
-        # Add jitter: ±(jitter_ratio * capped_ms)
-        jitter_ms = capped_ms * jitter_ratio * 0.5  # Simple: add up to jitter_ratio of capped_ms
-        result_ms = capped_ms + jitter_ms
+        if deterministic_replay is None:
+            deterministic_replay = str(
+                os.environ.get("DADBOT_DETERMINISTIC_REPLAY", "0"),
+            ).strip().lower() in {"1", "true", "on", "yes"}
+
+        # Add bounded symmetric jitter in [-ratio, +ratio] * capped_ms.
+        # Deterministic-source friendly: no use of the random module.
+        span = max(0.0, min(1.0, float(jitter_ratio))) * capped_ms
+        if deterministic_replay:
+            seed_raw = f"det:{int(attempt)}:{int(base_delay_ms)}:{int(capped_ms)}:{int(max_delay_seconds * 1000.0)}"
+        else:
+            seed_raw = f"rt:{int(time.perf_counter_ns())}:{int(attempt)}:{int(capped_ms)}"
+        seed = seed_raw.encode("utf-8")
+        ratio = int(hashlib.sha256(seed).hexdigest()[:8], 16) / float(0xFFFFFFFF)
+        jitter_ms = ((ratio * 2.0) - 1.0) * span
+        result_ms = max(0.0, min(max_delay_seconds * 1000.0, capped_ms + jitter_ms))
         return result_ms / 1000.0
 
 

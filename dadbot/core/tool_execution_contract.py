@@ -176,6 +176,7 @@ class ToolInputSchema:
     optional_fields: frozenset[str]  # e.g., {"timeout_seconds", "metadata"}
     field_types: dict[str, type | tuple[type, ...]]  # Validation: {field_name: (str, int, ...)}
     max_payload_bytes: int = 1_000_000  # Default 1MB
+    allow_additional_fields: bool = False
 
     def validate(self, payload: dict[str, Any]) -> tuple[bool, str]:
         """Validate input against schema; return (valid, error_message)."""
@@ -189,7 +190,11 @@ class ToolInputSchema:
                 return False, f"missing required field: {field}"
 
         for field, value in payload.items():
-            if field not in self.required_fields and field not in self.optional_fields:
+            if (
+                not self.allow_additional_fields
+                and field not in self.required_fields
+                and field not in self.optional_fields
+            ):
                 return False, f"unexpected field: {field}"
 
             expected_types = self.field_types.get(field)
@@ -209,6 +214,7 @@ class ToolOutputSchema:
     optional_fields: frozenset[str]
     field_types: dict[str, type | tuple[type, ...]]
     max_output_bytes: int = 10_000_000  # Default 10MB
+    allow_additional_fields: bool = False
 
     def validate(self, output: Any) -> tuple[bool, str]:
         """Validate output against schema."""
@@ -222,7 +228,11 @@ class ToolOutputSchema:
                 return False, f"missing required field in output: {field}"
 
         for field, value in output.items():
-            if field not in self.required_fields and field not in self.optional_fields:
+            if (
+                not self.allow_additional_fields
+                and field not in self.required_fields
+                and field not in self.optional_fields
+            ):
                 return False, f"unexpected field in output: {field}"
 
             expected_types = self.field_types.get(field)
@@ -312,11 +322,13 @@ DEFAULT_GENERIC_TOOL_CONTRACT = ToolExecutionContract(
         required_fields=frozenset(),
         optional_fields=frozenset({"_idempotency_key", "_timeout_seconds", "metadata"}),
         field_types={},
+        allow_additional_fields=True,
     ),
     output_schema=ToolOutputSchema(
         required_fields=frozenset(),
         optional_fields=frozenset({"result", "metadata", "status"}),
         field_types={},
+        allow_additional_fields=True,
     ),
     replay_semantics=ReplaySemantics(
         idempotency_key_factors=frozenset({"tool_name", "_idempotency_key"}),

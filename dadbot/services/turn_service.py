@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import asyncio
 import json
+import inspect
 import logging
 import warnings
 from typing import Any, cast
@@ -15,6 +15,7 @@ from dadbot.contracts import (
     SupportsTurnProcessingRuntime,
 )
 from dadbot.core.execution_context import ensure_execution_trace_root
+from dadbot.core.execution_contract import TurnDelivery, TurnResponse, live_turn_request
 from dadbot.core.execution_result_unified import get_unified_execution_result
 from dadbot.core.memory_set_invariants import (
     assert_memory_set_invariants,
@@ -723,16 +724,63 @@ class TurnService(ToolPipelineMixin):
         self,
         user_input: str,
         attachments: AttachmentList | None,
+        *,
+        chunk_callback: ChunkCallback | None = None,
+        stream: bool = False,
     ) -> FinalizedTurnResult:
-        response = self.bot.execute_turn(
+        response_obj = self.bot.execute_turn(
             live_turn_request(
                 user_input,
                 attachments=list(attachments or []),
-                delivery=TurnDelivery.SYNC,
+                delivery=TurnDelivery.STREAM if stream else TurnDelivery.SYNC,
                 session_id=str(getattr(self.bot, "active_thread_id", "") or "default"),
             ),
+            chunk_callback=chunk_callback,
         )
-        return cast(TurnResponse, response).as_result()
+        if inspect.isawaitable(response_obj):
+            raise RuntimeError("execute_turn returned an awaitable in sync mode")
+        return self._coerce_turn_response(response_obj)
+
+    @staticmethod
+    def _coerce_turn_response(response_obj: Any) -> FinalizedTurnResult:
+        if hasattr(response_obj, "as_result"):
+            result_payload = response_obj.as_result()
+            if isinstance(result_payload, tuple) and len(result_payload) >= 2:
+                return str(result_payload[0] or ""), bool(result_payload[1])
+            return str(getattr(response_obj, "reply", "") or ""), bool(
+                getattr(response_obj, "should_end", False),
+            )
+
+        if isinstance(response_obj, tuple):
+            return (
+                str(response_obj[0] if len(response_obj) >= 1 else ""),
+                bool(response_obj[1] if len(response_obj) >= 2 else False),
+            )
+
+        return str(getattr(response_obj, "reply", "") or ""), bool(
+            getattr(response_obj, "should_end", False),
+        )
+
+    async def _run_orchestrator_async(
+        self,
+        user_input: str,
+        attachments: AttachmentList | None,
+        *,
+        chunk_callback: ChunkCallback | None = None,
+        stream: bool = False,
+    ) -> FinalizedTurnResult:
+        response_obj = self.bot.execute_turn(
+            live_turn_request(
+                user_input,
+                attachments=list(attachments or []),
+                delivery=TurnDelivery.STREAM_ASYNC if stream else TurnDelivery.ASYNC,
+                session_id=str(getattr(self.bot, "active_thread_id", "") or "default"),
+            ),
+            chunk_callback=chunk_callback,
+        )
+        if inspect.isawaitable(response_obj):
+            response_obj = await cast("Any", response_obj)
+        return self._coerce_turn_response(response_obj)
 
     def process_user_message(
         self,
@@ -742,38 +790,17 @@ class TurnService(ToolPipelineMixin):
         stripped_input = user_input.strip()
         if not stripped_input and not attachments:
             return None, False
-        turn_context = self._compat_turn_context(stripped_input, attachments)
-        current_mood, dad_reply, should_end, turn_text, normalized_attachments = self.prepare_user_turn(
-            stripped_input,
-            attachments=attachments,
-            turn_context=turn_context,
+        self._append_turn_pipeline_step(
+            "spine_delegate",
+            status="running",
+            detail="delegating turn execution to execute_turn spine",
         )
-        if should_end:
-            return dad_reply, True
-        if dad_reply is None:
-            self._append_turn_pipeline_step(
-                "generate_reply",
-                status="running",
-                detail="generating sync reply",
-            )
-            dad_reply = self.reply_generation.generate_validated_reply(
-                stripped_input,
-                turn_text,
-                current_mood or "neutral",
-                normalized_attachments,
-                stream=False,
-            )
-            self._append_turn_pipeline_step(
-                "generate_reply",
-                detail="generated sync reply",
-            )
-        return self._finalize_turn_compat_context(
-            turn_text,
-            current_mood,
-            dad_reply,
-            normalized_attachments,
-            turn_context=turn_context,
+        result = self._run_orchestrator_sync(stripped_input, attachments)
+        self._append_turn_pipeline_step(
+            "spine_delegate",
+            detail="execute_turn spine completed",
         )
+        return result
 
     async def process_user_message_async(
         self,
@@ -783,44 +810,17 @@ class TurnService(ToolPipelineMixin):
         stripped_input = user_input.strip()
         if not stripped_input and not attachments:
             return None, False
-        turn_context = self._compat_turn_context(stripped_input, attachments)
-        (
-            current_mood,
-            dad_reply,
-            should_end,
-            turn_text,
-            normalized_attachments,
-        ) = await self.prepare_user_turn_async(
-            stripped_input,
-            attachments=attachments,
-            turn_context=turn_context,
+        self._append_turn_pipeline_step(
+            "spine_delegate",
+            status="running",
+            detail="delegating async turn execution to execute_turn spine",
         )
-        if should_end:
-            return dad_reply, True
-        if dad_reply is None:
-            self._append_turn_pipeline_step(
-                "generate_reply",
-                status="running",
-                detail="generating async reply",
-            )
-            dad_reply = await self.reply_generation.generate_validated_reply_async(
-                stripped_input,
-                turn_text,
-                current_mood or "neutral",
-                normalized_attachments,
-                stream=False,
-            )
-            self._append_turn_pipeline_step(
-                "generate_reply",
-                detail="generated async reply",
-            )
-        return self._finalize_turn_compat_context(
-            turn_text,
-            current_mood,
-            dad_reply,
-            normalized_attachments,
-            turn_context=turn_context,
+        result = await self._run_orchestrator_async(stripped_input, attachments)
+        self._append_turn_pipeline_step(
+            "spine_delegate",
+            detail="async execute_turn spine completed",
         )
+        return result
 
     def process_user_message_stream(
         self,
@@ -831,42 +831,23 @@ class TurnService(ToolPipelineMixin):
         stripped_input = user_input.strip()
         if not stripped_input and not attachments:
             return None, False
-        turn_context = self._compat_turn_context(stripped_input, attachments)
-        current_mood, dad_reply, should_end, turn_text, normalized_attachments = self.prepare_user_turn(
+        self._update_turn_pipeline(mode="stream_sync")
+        self._append_turn_pipeline_step(
+            "spine_delegate",
+            status="running",
+            detail="delegating streamed sync turn to execute_turn spine",
+        )
+        result = self._run_orchestrator_sync(
             stripped_input,
-            attachments=attachments,
-            turn_context=turn_context,
+            attachments,
+            chunk_callback=chunk_callback,
+            stream=True,
         )
-        if should_end:
-            return dad_reply, True
-        if dad_reply is None:
-            self._update_turn_pipeline(mode="stream_sync")
-            self._append_turn_pipeline_step(
-                "generate_reply",
-                status="running",
-                detail="generating streamed sync reply",
-            )
-            dad_reply = self.reply_generation.generate_validated_reply(
-                stripped_input,
-                turn_text,
-                current_mood or "neutral",
-                normalized_attachments,
-                stream=True,
-                chunk_callback=chunk_callback,
-            )
-            self._append_turn_pipeline_step(
-                "generate_reply",
-                detail="generated streamed sync reply",
-            )
-        elif callable(chunk_callback) and dad_reply:
-            chunk_callback(dad_reply)
-        return self._finalize_turn_compat_context(
-            turn_text,
-            current_mood,
-            dad_reply,
-            normalized_attachments,
-            turn_context=turn_context,
+        self._append_turn_pipeline_step(
+            "spine_delegate",
+            detail="streamed sync execute_turn spine completed",
         )
+        return result
 
     async def process_user_message_stream_async(
         self,
@@ -877,50 +858,23 @@ class TurnService(ToolPipelineMixin):
         stripped_input = user_input.strip()
         if not stripped_input and not attachments:
             return None, False
-        turn_context = self._compat_turn_context(stripped_input, attachments)
-        (
-            current_mood,
-            dad_reply,
-            should_end,
-            turn_text,
-            normalized_attachments,
-        ) = await self.prepare_user_turn_async(
+        self._update_turn_pipeline(mode="stream_async")
+        self._append_turn_pipeline_step(
+            "spine_delegate",
+            status="running",
+            detail="delegating streamed async turn to execute_turn spine",
+        )
+        result = await self._run_orchestrator_async(
             stripped_input,
-            attachments=attachments,
-            turn_context=turn_context,
+            attachments,
+            chunk_callback=chunk_callback,
+            stream=True,
         )
-        if should_end:
-            return dad_reply, True
-        if dad_reply is None:
-            self._update_turn_pipeline(mode="stream_async")
-            self._append_turn_pipeline_step(
-                "generate_reply",
-                status="running",
-                detail="generating streamed async reply",
-            )
-            dad_reply = await self.reply_generation.generate_validated_reply_async(
-                stripped_input,
-                turn_text,
-                current_mood or "neutral",
-                normalized_attachments,
-                stream=True,
-                chunk_callback=chunk_callback,
-            )
-            self._append_turn_pipeline_step(
-                "generate_reply",
-                detail="generated streamed async reply",
-            )
-        elif callable(chunk_callback) and dad_reply:
-            maybe_coro = chunk_callback(dad_reply)
-            if asyncio.iscoroutine(maybe_coro):
-                await maybe_coro
-        return self._finalize_turn_compat_context(
-            turn_text,
-            current_mood,
-            dad_reply,
-            normalized_attachments,
-            turn_context=turn_context,
+        self._append_turn_pipeline_step(
+            "spine_delegate",
+            detail="streamed async execute_turn spine completed",
         )
+        return result
 
 
 __all__ = ["TurnService"]

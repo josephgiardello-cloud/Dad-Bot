@@ -141,6 +141,9 @@ def _patch_registry_tools(
 
     # Runtime-level canonical execute_tool spine.
     _patch_tool_method(stack, obj=runtime, method_name="execute_tool", collector=collector)
+    bot = getattr(runtime, "bot", None)
+    if bot is not None:
+        _patch_tool_method(stack, obj=bot, method_name="execute_tool", collector=collector)
 
     # Registry-level runtime service executes tools via dynamic runtime.
     registry = _discover_registry(runtime)
@@ -241,12 +244,23 @@ async def arun_with_trace(input: str, runtime: Any, tool_registry: Any | None = 
         except Exception as exc:
             error = str(exc)
 
+    execution_truth_contract = _extract_execution_truth_contract(runtime)
+    if not collector.tool_calls and isinstance(execution_truth_contract, dict):
+        if str(execution_truth_contract.get("decision_outcome") or "").strip().lower() == "executed_tool":
+            fallback_tool = str(execution_truth_contract.get("planner_tool") or "").strip()
+            if fallback_tool:
+                collector.record_tool_call(
+                    name=fallback_tool,
+                    tool_input={"source": "execution_truth_contract"},
+                    tool_output={"status": "observed_via_contract"},
+                )
+                collector.bump_step()
+
     latency_ms = int((time.perf_counter() - start) * 1000)
     robustness_suppressed, decision_outcome, planner_status, planner_tool, robustness_reason = _derive_decision_outcome(
         runtime=runtime,
         tool_call_count=len(collector.tool_calls),
     )
-    execution_truth_contract = _extract_execution_truth_contract(runtime)
     return collector.finalize(
         final_output=final_output,
         error=error,

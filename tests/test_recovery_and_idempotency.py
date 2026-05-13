@@ -15,7 +15,7 @@ from dadbot.core.control_plane import (
 from dadbot.core.contracts.lifecycle_events import Completed
 from dadbot.core.ledger_writer import LedgerWriter
 from dadbot.core.replay_verifier import ReplayVerifier
-from dadbot.core.runtime_errors import ReplayMismatch
+from dadbot.core.runtime_errors import PartialCommitError, PoisonExecutionError, ReplayMismatch
 from dadbot.core.session_store import SessionStore
 
 pytestmark = pytest.mark.integration
@@ -508,14 +508,14 @@ def test_failure_taxonomy_unknown_state_is_explicit_and_non_retryable():
 
 
 def test_failure_taxonomy_partial_commit_maps_to_reconcile_action():
-    failure = _classify_execution_failure(RuntimeError("partial commit detected in external sink"))
+    failure = _classify_execution_failure(PartialCommitError("partial commit"))
     assert failure.get("failure_type") == "partial_commit"
     assert failure.get("failure_action") == "reconcile"
     assert bool(failure.get("auto_retry")) is False
 
 
 def test_failure_taxonomy_poison_maps_to_quarantine_action():
-    failure = _classify_execution_failure(RuntimeError("poison payload from upstream"))
+    failure = _classify_execution_failure(PoisonExecutionError("poison payload"))
     assert failure.get("failure_type") == "poison"
     assert failure.get("failure_action") == "quarantine"
     assert bool(failure.get("auto_retry")) is False

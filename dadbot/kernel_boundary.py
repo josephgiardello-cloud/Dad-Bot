@@ -6,6 +6,10 @@ from contextvars import ContextVar
 _KERNEL_SCOPE: ContextVar[bool] = ContextVar("dadbot_kernel_scope", default=False)
 
 
+class KernelBoundaryViolation(RuntimeError):
+    """Raised when runtime execution escapes the enforced kernel scope."""
+
+
 class KernelBoundary:
     """Shared kernel-boundary scope primitive across layers.
 
@@ -20,7 +24,7 @@ class KernelBoundary:
     @staticmethod
     def assert_scope(operation: str) -> None:
         if not KernelBoundary.in_scope():
-            raise RuntimeError(
+            raise KernelBoundaryViolation(
                 f"Kernel boundary violation: {operation} is illegal outside KernelGateway scope",
             )
 
@@ -32,3 +36,6 @@ class KernelBoundary:
             yield
         finally:
             _KERNEL_SCOPE.reset(token)
+
+
+__all__ = ["KernelBoundary", "KernelBoundaryViolation"]

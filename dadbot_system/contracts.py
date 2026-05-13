@@ -5,11 +5,36 @@ import re
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, TypedDict, cast
 from uuid import uuid4
 
 DEFAULT_TENANT_ID = "default"
 DEFAULT_CHANNEL_NAME = "chat"
+
+
+class ChatRequestEnvelope(TypedDict):
+    session_id: str
+    user_input: str
+    tenant_id: str
+    attachments: list[dict[str, Any]]
+    requested_model: str
+    request_id: str
+    created_at: str
+    metadata: dict[str, Any]
+
+
+class ChatResponseEnvelope(TypedDict):
+    session_id: str
+    request_id: str
+    reply: str
+    tenant_id: str
+    should_end: bool
+    active_model: str
+    mood: str
+    status: str
+    created_at: str
+    error: str
+    metadata: dict[str, Any]
 
 
 def normalize_tenant_id(value: str | None) -> str:
@@ -187,10 +212,10 @@ class ChatRequest:
             metadata=metadata,
         )
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> ChatRequestEnvelope:
         payload = asdict(self)
         payload["attachments"] = [attachment.to_dict() for attachment in self.attachments]
-        return payload
+        return cast(ChatRequestEnvelope, payload)
 
 
 @dataclass(slots=True)
@@ -207,8 +232,8 @@ class ChatResponse:
     error: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
 
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+    def to_dict(self) -> ChatResponseEnvelope:
+        return cast(ChatResponseEnvelope, asdict(self))
 
 
 @dataclass(slots=True)

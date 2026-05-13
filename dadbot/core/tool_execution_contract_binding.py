@@ -110,7 +110,7 @@ def validate_tool_execution_input(
     """
     valid, msg = contract.validate_input(payload)
     if not valid:
-        return False, f"Input contract violation: {msg}"
+        return False, f"Contract violation: input {msg}"
     return True, "ok"
 
 
@@ -124,7 +124,7 @@ def validate_tool_execution_output(
     """
     valid, msg = contract.validate_output(output)
     if not valid:
-        return False, f"Output contract violation: {msg}"
+        return False, f"Contract violation: output {msg}"
     return True, "ok"
 
 

@@ -418,7 +418,7 @@ Return only JSON:
         )
         if total_delta > 0:
             latest_entry["strength"] = round(
-                min(3.0, self.trait_strength(latest_entry) + 0.12 * total_delta),
+                min(3.0, max(1.01, self.trait_strength(latest_entry) + 0.12 * total_delta)),
                 2,
             )
             latest_entry["last_reinforced_at"] = datetime.now().isoformat(
@@ -431,6 +431,15 @@ Return only JSON:
             )
 
         consolidated = self.consolidate_persona_evolution_history(refreshed)
+        if total_delta > 0 and consolidated:
+            latest_trait = str(latest_entry.get("trait") or "")
+            reinforced_strength = self.trait_strength(latest_entry)
+            for entry in consolidated:
+                if str(entry.get("trait") or "") != latest_trait:
+                    continue
+                entry["strength"] = round(max(self.trait_strength(entry), reinforced_strength), 2)
+                entry["last_reinforced_at"] = str(latest_entry.get("last_reinforced_at") or entry.get("last_reinforced_at") or "")
+                break
         self.bot.mutate_memory_store(persona_evolution=consolidated)
         self.bot.mark_memory_graph_dirty()
         return consolidated

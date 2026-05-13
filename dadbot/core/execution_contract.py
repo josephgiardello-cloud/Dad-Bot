@@ -152,6 +152,24 @@ class TurnRuntimeContract(Protocol):
     ) -> TurnResponse | Awaitable[TurnResponse]: ...
 
 
+class ExecutionEntry:
+    """Single authoritative runtime execution entry surface.
+
+    Runtime adapters must bind this at construction and call ``execute_turn`` only.
+    """
+
+    def __init__(
+        self,
+        execute_turn: Callable[[TurnRequest], TurnResponse | Awaitable[TurnResponse]] | None,
+    ) -> None:
+        if not callable(execute_turn):
+            raise RuntimeError("ExecutionEntry requires a callable execute_turn at initialization")
+        self._execute_turn = execute_turn
+
+    def execute_turn(self, request: TurnRequest) -> TurnResponse | Awaitable[TurnResponse]:
+        return self._execute_turn(request)
+
+
 def live_turn_request(
     text: str,
     attachments: list[dict[str, Any]] | None = None,

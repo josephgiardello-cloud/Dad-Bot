@@ -1,5 +1,6 @@
 import pytest
 
+from dadbot.core.execution_contract import TurnResponse
 from dadbot.core.dadbot import DadBot
 from dadbot_system.contracts import ChatRequest, ChatResponse, ServiceConfig, WorkerResult, WorkerTask
 from dadbot_system.orchestration import DadBotOrchestrator
@@ -34,15 +35,12 @@ class FakeBot:
     def load_session_state_snapshot(self, snapshot):
         self.loaded_snapshot = dict(snapshot or {})
 
-    async def process_user_message_async(self, user_input, attachments=None):
+    async def execute_turn(self, request, *, state=None, chunk_callback=None):
         self.async_calls += 1
         if self.async_calls == 1:
             raise RuntimeError("transient worker failure")
-        return f"Dad heard: {user_input}", False
-
-    def process_user_message(self, user_input, attachments=None):
         self.sync_calls += 1
-        return f"Dad heard: {user_input}", False
+        return TurnResponse(reply=f"Dad heard: {request.input.text}", should_end=False)
 
     def snapshot_session_state(self):
         return {
@@ -300,23 +298,18 @@ def test_worker_processor_retries_and_returns_response_with_fake_bot():
     assert result.response is not None
     assert result.response.reply == "Dad heard: hello there"
     assert fake_bot.async_calls == 2
-    assert fake_bot.sync_calls == 0
+    assert fake_bot.sync_calls == 1
     assert fake_bot.loaded_snapshot["history"][0]["role"] == "system"
 
 
-def test_worker_processor_falls_back_to_sync_bot_entrypoint():
+def test_worker_processor_requires_execute_turn_entrypoint():
     class LegacySyncBot:
         def __init__(self):
             self.MODEL_NAME = "legacy-sync"
             self.ACTIVE_MODEL = "legacy-sync"
-            self.calls = 0
 
         def load_session_state_snapshot(self, snapshot):
             return dict(snapshot or {})
-
-        def process_user_message(self, user_input, attachments=None):
-            self.calls += 1
-            return f"Legacy heard: {user_input}", False
 
         def snapshot_session_state(self):
             return {"history": [{"role": "system", "content": "Dad system prompt"}]}
@@ -328,10 +321,8 @@ def test_worker_processor_falls_back_to_sync_bot_entrypoint():
 
     result = processor.process(task)
 
-    assert result.status == "completed"
-    assert result.response is not None
-    assert result.response.reply == "Legacy heard: hello there"
-    assert legacy_bot.calls == 1
+    assert result.status == "failed"
+    assert "bot.execute_turn" in str(result.error or "")
 
 
 def test_service_config_from_environment_reads_external_state_backends(monkeypatch):

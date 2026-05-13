@@ -30,6 +30,7 @@ from dadbot.core.control_plane import (
     SessionRegistry,
 )
 from dadbot.core.execution_binder import TraceBinder
+from dadbot.core.execution_boundary import ControlPlaneExecutionBoundary
 from dadbot.core.execution_resource_budget import BackpressureSignal
 from dadbot.core.execution_result_unified import ensure_unified_execution_result
 from dadbot.core.execution_terminal_state import build_execution_terminal_state
@@ -322,6 +323,14 @@ class _OrchestratorStateCoordinator:
 class DadBotOrchestrator:
     """Graph-governed turn orchestrator routed through ExecutionControlPlane."""
 
+    @staticmethod
+    def _callable_identity(target: Any) -> str:
+        func = getattr(target, "__func__", None)
+        owner = getattr(target, "__self__", None)
+        if func is not None and owner is not None:
+            return f"bound:{id(owner)}:{id(func)}"
+        return f"callable:{id(target)}"
+
     def __init__(
         self,
         registry: ServiceRegistry | None = None,
@@ -353,10 +362,38 @@ class DadBotOrchestrator:
             graph=self.graph,
             enable_observability=self._enable_observability,
         )
+        self._execution_spine_token = str(getattr(self.control_plane, "execution_token", "") or "")
+        self._execution_surface_fingerprint: dict[str, str] = {
+            "graph_execute": self._callable_identity(getattr(self.graph, "execute", None)),
+            "control_plane_submit_turn": self._callable_identity(getattr(self.control_plane, "submit_turn", None)),
+            "kernel_gateway_submit_turn": self._callable_identity(
+                getattr(self.control_plane.kernel_gateway, "submit_turn", None)
+            ),
+        }
         self.session_registry = self.control_plane.registry
         self._reflection_engine = DriftReflectionEngine()  # Lazy initialization; ledger path set per-session
         self._friction_engine = CompositeFrictionEngine()
         self._goal_recalibration_engine = GoalRecalibrationEngine()
+
+    def _assert_execution_surface_intact(self) -> None:
+        current = {
+            "graph_execute": self._callable_identity(getattr(self.graph, "execute", None)),
+            "control_plane_submit_turn": self._callable_identity(getattr(self.control_plane, "submit_turn", None)),
+            "kernel_gateway_submit_turn": self._callable_identity(
+                getattr(self.control_plane.kernel_gateway, "submit_turn", None)
+            ),
+        }
+        for key, expected in self._execution_surface_fingerprint.items():
+            observed = current.get(key)
+            if observed != expected:
+                raise InvariantViolation(
+                    "Execution isolation boundary violation: execution surface mutated at runtime.",
+                    context={
+                        "surface": str(key),
+                        "expected_callable_id": str(expected),
+                        "observed_callable_id": str(observed or ""),
+                    },
+                )
 
     def _goal_alignment_guard_enabled(self) -> bool:
         config = getattr(self.bot, "config", None)
@@ -808,8 +845,25 @@ class DadBotOrchestrator:
         context: TurnContext,
         job: ExecutionJob,
     ) -> FinalizedTurnResult:
+        self._assert_execution_surface_intact()
+        self.control_plane._topology_record_node(
+            node_id="orchestrator._run_graph_with_trace_binding",
+            metadata={
+                "trace_id": str(context.trace_id or ""),
+                "session_id": str(job.session_id or "default"),
+            },
+        )
+
         async def _run() -> FinalizedTurnResult:
-            result = await self.graph.execute(context)
+            self.control_plane._topology_record_node(
+                node_id="graph.execute",
+                metadata={
+                    "trace_id": str(context.trace_id or ""),
+                    "session_id": str(job.session_id or "default"),
+                },
+            )
+            with ControlPlaneExecutionBoundary.bind(str(self.control_plane.execution_token or "")):
+                result = await self.graph.execute(context)
             return result
 
         try:
@@ -1344,6 +1398,7 @@ class DadBotOrchestrator:
         This is the single authoritative execution path. No shortcuts or delegation branches.
         Every request produces: (1) complete ordered trace, (2) exactly one commit boundary.
         """
+        self._assert_execution_surface_intact()
         try:
             normalized_timeout = _normalize_timeout_seconds(timeout_seconds)
             return await self._submit_turn_via_control_plane(
