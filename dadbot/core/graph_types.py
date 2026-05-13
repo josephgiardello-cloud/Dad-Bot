@@ -22,9 +22,9 @@ def _json_safe(value: Any) -> Any:
     if isinstance(value, bytes):
         return {"type": "bytes", "size": len(value)}
     if isinstance(value, dict):
-        return {str(key): _json_safe(item) for key, item in value.items()}
+        return {str(key): _json_safe(item) for key, item in list(value.items())}
     if isinstance(value, (list, tuple, set)):
-        return [_json_safe(item) for item in value]
+        return [_json_safe(item) for item in list(value)]
     return repr(value)
 
 

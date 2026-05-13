@@ -2248,6 +2248,10 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
     def _topology_end_turn(self) -> TopologyValidationResult:
         result = self._topology_runtime.end_turn()
         self._last_topology_validation = result
+        # "no_active_trace" means a concurrent turn already ended the shared trace
+        # (deduplicated concurrent requests land here); treat as a no-op, not a violation.
+        if result.details.get("reason") == "no_active_trace":
+            return result
         if not result.passed or result.violations_critical > 0:
             raise InvariantViolation(
                 "Topology runtime enforcement blocked non-canonical execution path.",
@@ -3329,6 +3333,46 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         )
         session_state = dict(self.registry.get_or_create(session_key).get("state") or {})
         runtime_plan = dict(job.metadata.get("runtime_plan") or {})
+        self._semantic_memory_graph.update_from_turn(
+            state=session_state,
+            session_id=session_key,
+            trace_id=str(trace_token or ""),
+            user_input=str(job.user_input or ""),
+            response_text=response_text,
+        )
+        self._adaptation_engine.record_outcome(
+            state=session_state,
+            trace_id=str(trace_token or ""),
+            strategy=str(runtime_plan.get("strategy") or "direct_answer"),
+            success=True,
+            uncertainty_score=float(dict(runtime_plan.get("uncertainty") or {}).get("score") or 0.0),
+            explicit_feedback=None,
+        )
+        self._belief_state_engine.update_from_turn(
+            state=session_state,
+            trace_id=str(trace_token or ""),
+            user_input=str(job.user_input or ""),
+            runtime_plan=runtime_plan,
+            success=True,
+        )
+        semantic_items = [
+            dict(item)
+            for item in list(job.metadata.get("semantic_memory_context") or [])
+            if isinstance(item, dict)
+        ]
+        self._memory_hierarchy_manager.promote_turn(
+            state=session_state,
+            trace_id=str(trace_token or ""),
+            user_input=str(job.user_input or ""),
+            response_text=response_text,
+            semantic_items=semantic_items,
+        )
+        self._memory_hierarchy_manager.lifecycle_maintenance(state=session_state)
+        self._planning_optimizer.record_plan_outcome(
+            state=session_state,
+            plan=runtime_plan,
+            success=True,
+        )
         session_state.setdefault("authority_modes", {})
         if isinstance(session_state["authority_modes"], dict):
             session_state["authority_modes"]["response_selection"] = "response_engine"
