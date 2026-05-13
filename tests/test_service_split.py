@@ -238,14 +238,23 @@ def test_reply_finalization_keeps_memory_facts_while_personality_controls_style(
     monkeypatch.setattr(bot, "moderate_output_reply", lambda user_input, candidate_reply, current_mood: candidate_reply)
     bot.APPEND_SIGNOFF = False
 
+    base_reply = "Tony prefers direct advice about emergency fund contributions."
     final = bot.reply_finalization.finalize(
-        "Tony prefers direct advice about emergency fund contributions.",
+        base_reply,
         "positive",
         "keep it light",
     )
 
-    assert final.startswith("Playful style:")
-    assert "emergency fund contributions" in final
+    shadow_pipeline = getattr(bot, "_last_reply_finalization_shadow", {})
+
+    assert final == base_reply
+    assert shadow_pipeline.get("base_reply") == base_reply
+    assert str(shadow_pipeline.get("shadow_voiced_reply") or "").startswith("Playful style:")
+    assert "emergency fund contributions" in str(shadow_pipeline.get("shadow_voiced_reply") or "")
+
+
+def test_personality_service_is_an_explicit_facade_seam(bot):
+    assert bot.personality_service is bot.services.personality_service
 
 
 def test_turn_service_helper_methods_delegate_to_manager(bot, monkeypatch):
@@ -270,7 +279,7 @@ def test_turn_service_helper_methods_delegate_to_manager(bot, monkeypatch):
     assert reply == "reply::Where was I born?::neutral"
 
 
-def test_turn_service_uses_reply_generation_manager(bot, monkeypatch):
+def test_turn_service_reply_generation_patch_does_not_override_output_authority(bot, monkeypatch):
     monkeypatch.setattr(
         bot.reply_generation,
         "generate_validated_reply",
@@ -292,7 +301,9 @@ def test_turn_service_uses_reply_generation_manager(bot, monkeypatch):
     reply, should_end = bot.turn_service.process_user_message("Need a hand.")
 
     assert should_end is False
-    assert reply == "generated::Need a hand.::Need a hand.::neutral::False::0"
+    assert isinstance(reply, str)
+    assert reply
+    assert not reply.startswith("generated::")
 
 
 def test_dependency_registry_can_override_runtime_interface(monkeypatch, tmp_path):

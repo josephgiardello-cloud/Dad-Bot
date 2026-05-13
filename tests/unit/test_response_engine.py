@@ -265,6 +265,84 @@ class TestResponseEngineScoring:
 
         assert engine.score_candidate(aligned, context) > engine.score_candidate(misaligned, context)
 
+    def test_score_candidate_trajectory_continuity_pressure_prefers_structural_match(self):
+        engine = ResponseEngine()
+        context = MockContext(user_input="I need help with this next step")
+        context.conversation_trajectory = {
+            "desired_goal": "clarify",
+            "preferred_response_goal": "clarify",
+            "preferred_tone": "calm",
+            "continuity_pressure": 0.9,
+            "emotional_target": {"arousal": 0.3},
+            "continuity_markers": ["next step", "plan"],
+            "felt_state": {
+                "narrative_phase": "stabilizing",
+                "target_stance": "supportive",
+                "emotional_momentum": -0.1,
+            },
+        }
+
+        continuity_aligned = ResponseCandidate(
+            text="Let's keep this steady. Here is the next step plan.",
+            source="aligned",
+            tone="calm",
+            intensity=0.35,
+            response_goal="clarify",
+            risk_level=0.2,
+        )
+        continuity_misaligned = ResponseCandidate(
+            text="Honestly, this is random and we should jump topics immediately.",
+            source="misaligned",
+            tone="engaging",
+            intensity=0.9,
+            response_goal="engage",
+            risk_level=0.2,
+        )
+
+        aligned_score = engine.score_candidate(continuity_aligned, context)
+        misaligned_score = engine.score_candidate(continuity_misaligned, context)
+
+        assert aligned_score > misaligned_score
+
+    def test_score_candidate_felt_state_guides_narrative_causality(self):
+        engine = ResponseEngine()
+        context = MockContext(user_input="I feel overwhelmed")
+        context.felt_persona_state = {
+            "narrative_phase": "stabilizing",
+            "preferred_response_goal": "engage",
+            "target_stance": "supportive",
+            "emotional_momentum": -0.2,
+        }
+        context.conversation_trajectory = {
+            "desired_goal": "engage",
+            "preferred_response_goal": "engage",
+            "preferred_tone": "warm",
+            "continuity_pressure": 0.85,
+            "emotional_target": {"arousal": 0.25},
+            "continuity_markers": ["with you", "next step"],
+        }
+
+        causality_aligned = ResponseCandidate(
+            text="I hear you. I'm with you. Let's take one next step together.",
+            source="aligned",
+            tone="warm",
+            intensity=0.3,
+            stance="supportive",
+            response_goal="engage",
+            risk_level=0.2,
+        )
+        causality_misaligned = ResponseCandidate(
+            text="Let's jump to a risky immediate action with no context.",
+            source="misaligned",
+            tone="engaging",
+            intensity=0.9,
+            stance="forward",
+            response_goal="inform",
+            risk_level=0.7,
+        )
+
+        assert engine.score_candidate(causality_aligned, context) > engine.score_candidate(causality_misaligned, context)
+
     def test_score_candidate_redundancy_penalty(self):
         """Redundancy penalty: repeated responses score lower."""
         engine = ResponseEngine()
@@ -628,6 +706,7 @@ class TestResponseEngineTelemetry:
             "emotion_score",
             "emotion_weight",
             "emotion_bias",
+            "persona_signal",
             "memory_relevance",
             "user_alignment",
             "trajectory_alignment",
@@ -640,6 +719,32 @@ class TestResponseEngineTelemetry:
 
         reward_model = dict(telemetry.get("reward_model") or {})
         assert isinstance(reward_model.get("weights"), dict)
+
+        persona_calibration = dict(telemetry.get("persona_calibration") or {})
+        assert 0.70 <= float(persona_calibration.get("factor", 0.0)) <= 1.10
+
+    def test_persona_calibration_reflects_traits_and_constraints(self):
+        engine = ResponseEngine()
+
+        unconstrained = MockContext(user_input="Help me decide")
+        constrained = MockContext(user_input="Help me decide", persona_traits=["supportive"])
+        constrained.persona_constraints = {"required_tone": "warm"}
+
+        _ = engine.run(unconstrained)
+        unconstrained_factor = float(
+            dict(getattr(unconstrained, "response_engine_telemetry", {}) or {})
+            .get("persona_calibration", {})
+            .get("factor", 0.0),
+        )
+
+        _ = engine.run(constrained)
+        constrained_factor = float(
+            dict(getattr(constrained, "response_engine_telemetry", {}) or {})
+            .get("persona_calibration", {})
+            .get("factor", 0.0),
+        )
+
+        assert constrained_factor > unconstrained_factor
 
     def test_feedback_update_adjusts_learned_reward_weights(self):
         engine = ResponseEngine()

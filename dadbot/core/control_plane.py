@@ -3313,7 +3313,23 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         context.memory_context = list(metadata.get("memory_context") or [])
 
         context.persona_traits = list(session_state.get("persona_traits") or [])
-        context.persona_constraints = dict(session_state.get("persona_constraints") or {})
+        persona_constraints = dict(session_state.get("persona_constraints") or {})
+        persona_state = dict(session_state.get("persona_state") or {})
+        stability = dict(persona_state.get("identity_stability") or {})
+        drift_guard = float(stability.get("drift_guard_level", 0.0) or 0.0)
+        if drift_guard >= 0.60:
+            required_tone = str(persona_state.get("tone_baseline") or "").strip().lower()
+            if required_tone and not str(persona_constraints.get("required_tone") or "").strip().lower():
+                persona_constraints["required_tone"] = required_tone
+            max_risk = persona_constraints.get("max_risk")
+            bounded_risk = 0.45
+            if isinstance(max_risk, (int, float)):
+                bounded_risk = min(float(max_risk), bounded_risk)
+            persona_constraints["max_risk"] = bounded_risk
+        context.persona_constraints = persona_constraints
+        context.persona_state = dict(session_state.get("persona_state") or {})
+        context.emotion_state = dict(session_state.get("emotion_state") or {})
+        context.felt_persona_state = dict(session_state.get("felt_persona_state") or {})
 
         # Allow either explicit user_preferences or profile.preferences path.
         user_preferences = session_state.get("user_preferences")
@@ -3330,6 +3346,355 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         )
         
         return context
+
+    @staticmethod
+    def _estimate_emotion_signal(*, user_input: str, response_text: str) -> dict[str, float]:
+        text = f"{str(user_input or '')} {str(response_text or '')}".lower()
+        positive = ("glad", "great", "thank", "good", "helpful", "better")
+        negative = ("worried", "anxious", "sad", "stressed", "overwhelmed", "angry")
+        connective = ("we", "together", "with you", "i hear", "i'm with you")
+        confidence = ("can", "will", "next", "plan", "step")
+
+        valence = 0.5
+        if any(token in text for token in positive):
+            valence += 0.20
+        if any(token in text for token in negative):
+            valence -= 0.25
+
+        arousal = 0.35
+        arousal += min(text.count("!"), 3) * 0.08
+        arousal += min(text.count("?"), 3) * 0.05
+
+        attachment = 0.35
+        if any(token in text for token in connective):
+            attachment += 0.25
+
+        confidence_score = 0.40
+        if any(token in text for token in confidence):
+            confidence_score += 0.25
+
+        return {
+            "valence": max(0.0, min(1.0, valence)),
+            "arousal": max(0.0, min(1.0, arousal)),
+            "attachment": max(0.0, min(1.0, attachment)),
+            "confidence": max(0.0, min(1.0, confidence_score)),
+        }
+
+    def _update_identity_state(
+        self,
+        *,
+        session_state: dict[str, Any],
+        user_input: str,
+        response_text: str,
+        semantic_items: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        now = float(time.time())
+        signal = self._estimate_emotion_signal(user_input=user_input, response_text=response_text)
+
+        memory_bias = min(len(list(semantic_items or [])), 6) * 0.01
+        emotion_memory = dict(session_state.get("emotion_state_memory") or {})
+        prev_emotion = dict(emotion_memory.get("state") or session_state.get("emotion_state") or {})
+        alpha = 0.15
+
+        updated_emotion = {
+            "valence": (1.0 - alpha) * float(prev_emotion.get("valence", 0.5) or 0.5)
+            + alpha * float(signal["valence"]),
+            "arousal": (1.0 - alpha) * float(prev_emotion.get("arousal", 0.35) or 0.35)
+            + alpha * float(signal["arousal"]),
+            "attachment": (1.0 - alpha) * float(prev_emotion.get("attachment", 0.35) or 0.35)
+            + alpha * min(1.0, float(signal["attachment"]) + memory_bias),
+            "confidence": (1.0 - alpha) * float(prev_emotion.get("confidence", 0.40) or 0.40)
+            + alpha * min(1.0, float(signal["confidence"]) + (memory_bias * 0.5)),
+        }
+        for key in ("valence", "arousal", "attachment", "confidence"):
+            updated_emotion[key] = max(0.0, min(1.0, float(updated_emotion[key])))
+
+        emotion_turns = int(emotion_memory.get("turns", 0) or 0) + 1
+        session_state["emotion_state"] = dict(updated_emotion)
+        session_state["emotion_state_memory"] = {
+            "state": dict(updated_emotion),
+            "turns": emotion_turns,
+            "updated_at": now,
+            "source": "control_plane",
+        }
+
+        persona_state = dict(session_state.get("persona_state") or {})
+        persona_turns = int(persona_state.get("turns", 0) or 0) + 1
+        response_len = int(len(str(response_text or "")))
+        verbosity_ema_prev = float(persona_state.get("verbosity_ema", 120.0) or 120.0)
+        verbosity_ema = (0.9 * verbosity_ema_prev) + (0.1 * float(response_len))
+        if verbosity_ema < 90:
+            proposed_style_anchor = "concise"
+        elif verbosity_ema > 220:
+            proposed_style_anchor = "expanded"
+        else:
+            proposed_style_anchor = "balanced"
+
+        prior_stability = dict(persona_state.get("identity_stability") or {})
+        prior_guard = float(prior_stability.get("drift_guard_level", 0.0) or 0.0)
+        drift_anchor = str(persona_state.get("drift_anchor") or proposed_style_anchor)
+        style_anchor = proposed_style_anchor
+        drift_attempts = int(persona_state.get("drift_attempts", 0) or 0)
+        if drift_anchor and prior_guard >= 0.65 and proposed_style_anchor != drift_anchor:
+            # In guarded mode, preserve identity anchor against transient style pressure.
+            style_anchor = drift_anchor
+            drift_attempts += 1
+
+        baseline_prev = float(persona_state.get("emotional_baseline_tendency", 0.5) or 0.5)
+        emotional_baseline = (0.92 * baseline_prev) + (0.08 * float(updated_emotion["valence"]))
+        tone_baseline = "steady" if float(updated_emotion["arousal"]) < 0.55 else "engaged"
+
+        mismatch = 1 if (drift_anchor and drift_anchor != style_anchor) else 0
+        drift_violations = int(persona_state.get("drift_violations", 0) or 0) + mismatch
+        stability_score = max(0.0, min(1.0, 1.0 - (0.08 * float(drift_violations))))
+        drift_guard_level = 0.40 + (0.50 * stability_score)
+
+        session_state["persona_state"] = {
+            "tone_baseline": tone_baseline,
+            "conversational_style_anchor": style_anchor,
+            "emotional_baseline_tendency": max(0.0, min(1.0, emotional_baseline)),
+            "drift_anchor": drift_anchor,
+            "verbosity_ema": float(verbosity_ema),
+            "drift_attempts": drift_attempts,
+            "drift_violations": drift_violations,
+            "identity_stability": {
+                "score": float(stability_score),
+                "drift_guard_level": float(max(0.0, min(1.0, drift_guard_level))),
+            },
+            "turns": persona_turns,
+            "updated_at": now,
+            "source": "control_plane",
+        }
+
+        return {
+            "emotion_state": dict(updated_emotion),
+            "persona_state": dict(session_state.get("persona_state") or {}),
+        }
+
+    @staticmethod
+    def _extract_continuity_markers(*, user_input: str, response_text: str) -> list[str]:
+        pool = f"{str(user_input or '')} {str(response_text or '')}".lower()
+        markers = [
+            "next step",
+            "together",
+            "steady",
+            "plan",
+            "outcome",
+            "tradeoff",
+            "safest",
+            "with you",
+        ]
+        selected = [marker for marker in markers if marker in pool]
+        return selected[:4]
+
+    def _update_conversation_trajectory(
+        self,
+        *,
+        session_state: dict[str, Any],
+        user_input: str,
+        response_text: str,
+        identity_state: dict[str, Any],
+        felt_state: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        trajectory = dict(session_state.get("conversation_trajectory") or {})
+        persona_state = dict(identity_state.get("persona_state") or session_state.get("persona_state") or {})
+        emotion_state = dict(identity_state.get("emotion_state") or session_state.get("emotion_state") or {})
+        stability = dict(persona_state.get("identity_stability") or {})
+        pressure = 0.35 + (0.55 * float(stability.get("score", 0.5) or 0.5))
+
+        desired_goal = str(trajectory.get("desired_goal") or "").strip().lower()
+        if not desired_goal:
+            intent = _runtime_plan_intent(str(user_input or ""))
+            if intent == "emotional":
+                desired_goal = "engage"
+            elif intent == "question":
+                desired_goal = "clarify"
+            else:
+                desired_goal = "inform"
+
+        updated = {
+            "desired_goal": desired_goal,
+            "preferred_tone": str(persona_state.get("tone_baseline") or "steady"),
+            "continuity_pressure": float(max(0.0, min(1.0, pressure))),
+            "emotional_target": {
+                "valence": float(emotion_state.get("valence", 0.5) or 0.5),
+                "arousal": float(emotion_state.get("arousal", 0.35) or 0.35),
+            },
+            "felt_state": dict(felt_state or {}),
+            "narrative_phase": str(dict(felt_state or {}).get("narrative_phase") or "steady"),
+            "preferred_response_goal": str(dict(felt_state or {}).get("preferred_response_goal") or desired_goal),
+            "continuity_markers": self._extract_continuity_markers(
+                user_input=str(user_input or ""),
+                response_text=str(response_text or ""),
+            ),
+            "last_user_preview": str(user_input or "")[:180],
+            "last_response_preview": str(response_text or "")[:220],
+            "updated_at": float(time.time()),
+        }
+        session_state["conversation_trajectory"] = dict(updated)
+        return updated
+
+    def _update_felt_persona_stream(
+        self,
+        *,
+        session_state: dict[str, Any],
+        user_input: str,
+        response_text: str,
+        identity_state: dict[str, Any],
+        semantic_items: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        prior = dict(session_state.get("felt_persona_state") or {})
+        emotion = dict(identity_state.get("emotion_state") or session_state.get("emotion_state") or {})
+        persona = dict(identity_state.get("persona_state") or session_state.get("persona_state") or {})
+        stability = dict(persona.get("identity_stability") or {})
+
+        valence = float(emotion.get("valence", 0.5) or 0.5)
+        arousal = float(emotion.get("arousal", 0.35) or 0.35)
+        confidence = float(emotion.get("confidence", 0.4) or 0.4)
+        previous_valence = float(prior.get("last_valence", valence) or valence)
+        delta_valence = valence - previous_valence
+
+        momentum_raw = (0.55 * delta_valence) + (0.30 * confidence) - (0.25 * arousal)
+        emotional_momentum = (0.78 * float(prior.get("emotional_momentum", 0.0) or 0.0)) + (0.22 * momentum_raw)
+        memory_resonance = min(len(list(semantic_items or [])), 8) / 8.0
+        blended_resonance = (0.75 * float(prior.get("memory_resonance", 0.0) or 0.0)) + (0.25 * memory_resonance)
+
+        if arousal >= 0.62 and valence < 0.50:
+            narrative_phase = "stabilizing"
+            preferred_goal = "engage"
+            target_stance = "supportive"
+        elif emotional_momentum >= 0.08:
+            narrative_phase = "building"
+            preferred_goal = "inform"
+            target_stance = "forward"
+        elif emotional_momentum <= -0.06:
+            narrative_phase = "repairing"
+            preferred_goal = "clarify"
+            target_stance = "balanced"
+        else:
+            narrative_phase = "steady"
+            preferred_goal = "clarify"
+            target_stance = "balanced"
+
+        coherence_pressure = 0.35 + (0.45 * float(stability.get("score", 0.5) or 0.5)) + (0.20 * blended_resonance)
+        coherence_pressure = max(0.0, min(1.0, coherence_pressure))
+
+        updated = {
+            "narrative_phase": narrative_phase,
+            "preferred_response_goal": preferred_goal,
+            "target_stance": target_stance,
+            "emotional_momentum": float(max(-1.0, min(1.0, emotional_momentum))),
+            "memory_resonance": float(max(0.0, min(1.0, blended_resonance))),
+            "coherence_pressure": float(coherence_pressure),
+            "style_anchor": str(persona.get("conversational_style_anchor") or "balanced"),
+            "last_valence": float(valence),
+            "last_user_preview": str(user_input or "")[:140],
+            "last_response_preview": str(response_text or "")[:180],
+            "updated_at": float(time.time()),
+        }
+        session_state["felt_persona_state"] = dict(updated)
+        return updated
+
+    @staticmethod
+    def _apply_continuity_shaping(
+        *,
+        response_text: str,
+        session_state: dict[str, Any],
+    ) -> tuple[str, dict[str, Any]]:
+        raw = str(response_text or "")
+        shaped = " ".join(raw.split())
+
+        persona_state = dict(session_state.get("persona_state") or {})
+        emotion_state = dict(session_state.get("emotion_state") or {})
+        tone_baseline = str(persona_state.get("tone_baseline") or "steady")
+        style_anchor = str(persona_state.get("conversational_style_anchor") or "balanced")
+        arousal = float(emotion_state.get("arousal", 0.35) or 0.35)
+
+        # Continuity shaping is style-only: punctuation and pacing, not content meaning.
+        while "!!" in shaped:
+            shaped = shaped.replace("!!", "!")
+        while "??" in shaped:
+            shaped = shaped.replace("??", "?")
+        if tone_baseline == "steady" and arousal < 0.45 and shaped.endswith("!"):
+            shaped = shaped[:-1] + "."
+        if style_anchor == "concise" and len(shaped) > 320:
+            shaped = shaped[:320].rstrip() + "..."
+
+        continuity = {
+            "tone_baseline": tone_baseline,
+            "style_anchor": style_anchor,
+            "emotional_alignment": {
+                "valence": float(emotion_state.get("valence", 0.5) or 0.5),
+                "arousal": float(arousal),
+                "attachment": float(emotion_state.get("attachment", 0.35) or 0.35),
+                "confidence": float(emotion_state.get("confidence", 0.40) or 0.40),
+            },
+            "continuity_applied": shaped != raw,
+        }
+        return shaped, continuity
+
+    def execute_from_graph_context(
+        self,
+        turn_context: Any,
+        rich_context: dict[str, Any] | None = None,
+    ) -> FinalizedTurnResult:
+        from types import SimpleNamespace
+
+        metadata = dict(getattr(turn_context, "metadata", {}) or {})
+        state = dict(getattr(turn_context, "state", {}) or {})
+        if isinstance(rich_context, dict) and rich_context:
+            metadata.setdefault("rich_context", dict(rich_context))
+
+        job = cast(
+            ExecutionJob,
+            SimpleNamespace(
+            user_input=str(getattr(turn_context, "user_input", "") or ""),
+            metadata=metadata,
+            trace_id=str(getattr(turn_context, "trace_id", "") or ""),
+            ),
+        )
+        session_key = str(
+            metadata.get("session_id")
+            or dict(metadata.get("control_plane") or {}).get("session_id")
+            or getattr(turn_context, "trace_id", "")
+            or "default",
+        )
+        initial_response = str(
+            state.get("candidate")
+            or state.get("initial_response")
+            or getattr(turn_context, "user_input", "")
+            or "",
+        )
+
+        engine_context = self._build_response_engine_context(
+            job=job,
+            session_key=session_key,
+            initial_response=initial_response,
+        )
+        ranked_response = self._response_engine.run(engine_context)
+        final_response = str(ranked_response or "")
+        if not final_response:
+            fallback_response = getattr(self._response_engine, "_fallback_response", None)
+            if callable(fallback_response):
+                final_response = str(fallback_response(engine_context) or "")
+        final_response = final_response or initial_response
+
+        telemetry = getattr(engine_context, "response_engine_telemetry", None)
+        if isinstance(telemetry, dict) and telemetry:
+            metadata["response_engine_telemetry"] = dict(telemetry)
+
+        metadata["response_authority"] = "response_engine"
+        state["response_authority"] = "response_engine"
+        if isinstance(telemetry, dict) and telemetry:
+            state["response_engine_telemetry"] = dict(telemetry)
+
+        try:
+            turn_context.metadata.update(metadata)
+            turn_context.state.update(state)
+        except Exception:
+            pass
+
+        return str(final_response or ""), False
 
     def _finalize_submit_success(
         self,
@@ -3362,6 +3727,7 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
             session_key=session_key,
             initial_response=initial_response,
         )
+        continuity_state = dict(getattr(engine_context, "session_state", {}) or {})
         try:
             with contextlib.suppress(Exception):
                 self._topology_record_node(
@@ -3389,6 +3755,13 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
             else:
                 final_response = initial_response
             telemetry = None
+
+        shaped_response, continuity_telemetry = self._apply_continuity_shaping(
+            response_text=final_response,
+            session_state=continuity_state,
+        )
+        final_response = str(shaped_response or final_response)
+        job.metadata["response_continuity"] = dict(continuity_telemetry)
         
         if current_execution_result.get("status") not in _TERMINAL_STATUS_VALUES:
             current_execution_result = mark_unified_execution_success(
@@ -3623,6 +3996,31 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
             for item in list(job.metadata.get("semantic_memory_context") or [])
             if isinstance(item, dict)
         ]
+
+        identity_state = self._update_identity_state(
+            session_state=session_state,
+            user_input=str(job.user_input or ""),
+            response_text=response_text,
+            semantic_items=semantic_items,
+        )
+        job.metadata["identity_state"] = dict(identity_state)
+        felt_state = self._update_felt_persona_stream(
+            session_state=session_state,
+            user_input=str(job.user_input or ""),
+            response_text=response_text,
+            identity_state=identity_state,
+            semantic_items=semantic_items,
+        )
+        job.metadata["felt_persona_state"] = dict(felt_state)
+        trajectory_state = self._update_conversation_trajectory(
+            session_state=session_state,
+            user_input=str(job.user_input or ""),
+            response_text=response_text,
+            identity_state=identity_state,
+            felt_state=felt_state,
+        )
+        job.metadata["conversation_trajectory"] = dict(trajectory_state)
+
         self._memory_hierarchy_manager.promote_turn(
             state=session_state,
             trace_id=str(trace_token or ""),
@@ -3647,6 +4045,10 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
             "strategy": str(runtime_plan.get("strategy") or "direct_answer"),
             "uncertainty_score": float(dict(runtime_plan.get("uncertainty") or {}).get("score") or 0.0),
             "response_length": int(len(response_text or "")),
+            "identity_state": dict(identity_state),
+            "felt_persona_state": dict(felt_state),
+            "conversation_trajectory": dict(trajectory_state),
+            "response_continuity": dict(job.metadata.get("response_continuity") or {}),
             "non_canonical_loops": [
                 "adaptation_engine",
                 "belief_state_engine",

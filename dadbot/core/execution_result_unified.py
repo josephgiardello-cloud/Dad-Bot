@@ -228,7 +228,9 @@ def _preserve_legacy_execution_fields(raw: dict[str, Any], baseline: dict[str, A
             baseline[key] = raw[key]
 
 
-def ensure_unified_execution_result(payload: dict[str, Any] | None) -> ExecutionResultEnvelopeCompat:
+def ensure_unified_execution_result(
+    payload: ExecutionResultEnvelopeCompat | dict[str, Any] | None,
+) -> ExecutionResultEnvelopeCompat:
     raw = dict(payload or {})
     baseline = cast(dict[str, Any], build_unified_execution_result())
 
@@ -268,7 +270,10 @@ def get_unified_execution_result(turn_context: Any) -> ExecutionResultEnvelopeCo
     return ensure_unified_execution_result(None)
 
 
-def set_unified_execution_result(turn_context: Any, execution_result: dict[str, Any]) -> None:
+def set_unified_execution_result(
+    turn_context: Any,
+    execution_result: ExecutionResultEnvelopeCompat | dict[str, Any],
+) -> None:
     normalized = ensure_unified_execution_result(execution_result)
 
     if turn_context is None:
@@ -347,7 +352,7 @@ def mark_unified_execution_failure(
 
 
 def set_unified_execution_eval_hash(
-    execution_result: dict[str, Any],
+    execution_result: ExecutionResultEnvelopeCompat | dict[str, Any],
     *,
     eval_input_hash: str,
 ) -> ExecutionResultEnvelopeCompat:

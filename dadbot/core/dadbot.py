@@ -502,6 +502,7 @@ class DadBot(
     context_service        = _ManagerDescriptor("context_service")
     context_builder        = _ManagerDescriptor("context_service")   # compat alias → context_service
     tone_context           = _ManagerDescriptor("tone_context")
+    personality_service    = _ManagerDescriptor("personality_service")
     memory_query           = _ManagerDescriptor("memory_manager")    # compat alias → memory_manager
     memory_commands        = _ManagerDescriptor("memory_commands")
     memory_coordinator     = _ManagerDescriptor("memory_coordinator")

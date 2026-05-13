@@ -404,11 +404,14 @@ class ResponseEngine:
         Returns:
             float score in approximate range [0–1] after weighting
         """
+        persona_calibration = self._persona_calibration_factor(context)
+        raw_persona_score = self._score_persona_consistency(candidate.text, context)
+        persona_signal = max(0.0, min(1.0, raw_persona_score * persona_calibration))
         emotion_state = self._resolve_emotion_state(context)
         base_score = self._base_score(
             coherence=self._score_coherence(candidate.text),
             relevance=self._score_relevance(candidate.text, context),
-            persona=self._score_persona_consistency(candidate.text, context),
+            persona=persona_signal,
             novelty=self._score_novelty(candidate.text),
             redundancy=self._score_redundancy(candidate.text),
         )
@@ -461,6 +464,7 @@ class ResponseEngine:
 
         emotion_state = self._resolve_emotion_state(context)
         emotion_weight = self.compute_emotion_weight(emotion_state)
+        persona_calibration = self._persona_calibration_factor(context)
 
         raw: dict[str, list[float]] = {
             "coherence": [self._score_coherence(c.text) for c in candidates],
@@ -486,7 +490,7 @@ class ResponseEngine:
             base_score = self._base_score(
                 coherence=normalized["coherence"][idx],
                 relevance=normalized["relevance"][idx],
-                persona=normalized["persona"][idx],
+                persona=max(0.0, min(1.0, normalized["persona"][idx] * persona_calibration)),
                 novelty=normalized["novelty"][idx],
                 redundancy=normalized["redundancy"][idx],
             )
@@ -551,6 +555,7 @@ class ResponseEngine:
                         "emotion_score": float(emotion_score),
                         "emotion_weight": float(emotion_weight),
                         "emotion_bias": float(emotion_bias),
+                        "persona_signal": float(max(0.0, min(1.0, normalized["persona"][idx] * persona_calibration))),
                         "coherence_weight": float(coherence_weight),
                         "memory_weight": float(memory_weight),
                         "tool_weight": float(tool_weight),
@@ -589,6 +594,11 @@ class ResponseEngine:
             "behavioral_closure": {
                 "source_entropy_before": float(entropy_before),
                 "dominant_source_ratio_before": float(self._dominant_source_ratio()),
+            },
+            "persona_calibration": {
+                "factor": float(persona_calibration),
+                "traits_count": int(len(list(getattr(context, "persona_traits", []) or []))),
+                "has_constraints": bool(isinstance(getattr(context, "persona_constraints", None), dict) and bool(getattr(context, "persona_constraints", None))),
             },
             "shadow_event_count": len(shadow_events),
         }
@@ -945,6 +955,18 @@ class ResponseEngine:
             )
         return min((matches / 5.0) * 0.7 + trait_bonus * 0.3, 1.0)
 
+    def _persona_calibration_factor(self, context: Any) -> float:
+        traits = list(getattr(context, "persona_traits", []) or [])
+        constraints = getattr(context, "persona_constraints", None)
+        has_constraints = isinstance(constraints, dict) and bool(constraints)
+
+        # Personality is influence-only: damp when no persona context exists,
+        # modestly boost when explicit constraints are present.
+        factor = 0.80 if not traits else 1.0
+        if has_constraints:
+            factor += 0.10
+        return max(0.70, min(1.10, float(factor)))
+
     def _satisfies_persona_constraints(self, candidate: ResponseCandidate, context: Any) -> bool:
         """Persona as constraints, not only a soft score."""
         text = candidate.text.lower()
@@ -1270,8 +1292,22 @@ class ResponseEngine:
     def _score_trajectory_alignment(self, candidate: ResponseCandidate, context: Any) -> float:
         trajectory = getattr(context, "conversation_trajectory", None)
         desired_goal = ""
+        preferred_response_goal = ""
+        preferred_tone = ""
+        continuity_pressure = 0.0
+        emotional_target: dict[str, Any] = {}
+        continuity_markers: list[str] = []
+        felt_state: dict[str, Any] = {}
         if isinstance(trajectory, dict):
             desired_goal = str(trajectory.get("desired_goal") or "").strip().lower()
+            preferred_response_goal = str(trajectory.get("preferred_response_goal") or "").strip().lower()
+            preferred_tone = str(trajectory.get("preferred_tone") or "").strip().lower()
+            continuity_pressure = float(trajectory.get("continuity_pressure", 0.0) or 0.0)
+            emotional_target = dict(trajectory.get("emotional_target") or {})
+            continuity_markers = [str(item).lower() for item in list(trajectory.get("continuity_markers") or [])]
+            felt_state = dict(trajectory.get("felt_state") or {})
+        if not felt_state:
+            felt_state = dict(getattr(context, "felt_persona_state", None) or {})
 
         if not desired_goal:
             intent = self._infer_intent(str(getattr(context, "user_input", "") or ""))
@@ -1283,12 +1319,58 @@ class ResponseEngine:
                 desired_goal = "inform"
 
         if candidate.response_goal == desired_goal:
-            return 1.0
-        if desired_goal == "clarify" and candidate.response_goal == "inform":
-            return 0.7
-        if desired_goal == "engage" and candidate.response_goal in {"inform", "clarify"}:
-            return 0.6
-        return 0.45
+            score = 1.0
+        elif desired_goal == "clarify" and candidate.response_goal == "inform":
+            score = 0.7
+        elif desired_goal == "engage" and candidate.response_goal in {"inform", "clarify"}:
+            score = 0.6
+        else:
+            score = 0.45
+
+        pressure = max(0.0, min(1.0, continuity_pressure))
+        if preferred_tone:
+            if str(candidate.tone or "").strip().lower() == preferred_tone:
+                score += 0.14 * pressure
+            else:
+                score -= 0.08 * pressure
+
+        if continuity_markers:
+            text = str(candidate.text or "").lower()
+            marker_match = any(marker and marker in text for marker in continuity_markers)
+            if marker_match:
+                score += 0.10 * pressure
+            else:
+                score -= 0.05 * pressure
+
+        if preferred_response_goal:
+            if candidate.response_goal == preferred_response_goal:
+                score += 0.08 * pressure
+            else:
+                score -= 0.03 * pressure
+
+        target_stance = str(felt_state.get("target_stance") or "").strip().lower()
+        if target_stance:
+            if str(candidate.stance or "").strip().lower() == target_stance:
+                score += 0.07 * pressure
+            else:
+                score -= 0.03 * pressure
+
+        narrative_phase = str(felt_state.get("narrative_phase") or "").strip().lower()
+        if narrative_phase == "stabilizing" and float(candidate.risk_level) > 0.45:
+            score -= 0.10 * pressure
+        if narrative_phase == "building" and str(candidate.stance or "").strip().lower() == "forward":
+            score += 0.05 * pressure
+
+        emotional_momentum = float(felt_state.get("emotional_momentum", 0.0) or 0.0)
+        target_arousal = float(emotional_target.get("arousal", 0.35) or 0.35)
+        target_arousal += max(-0.15, min(0.15, emotional_momentum * 0.20))
+        target_arousal = max(0.0, min(1.0, target_arousal))
+
+        target_intensity = max(0.0, min(1.0, 0.15 + (0.8 * target_arousal)))
+        intensity_gap = abs(float(candidate.intensity) - target_intensity)
+        score -= 0.10 * pressure * intensity_gap
+
+        return max(0.0, min(1.0, score))
 
     def _simulate_user_reaction(self, candidate: ResponseCandidate, context: Any, emotion_state: EmotionState) -> float:
         """Lightweight internal simulation: likely user affect to this response."""
