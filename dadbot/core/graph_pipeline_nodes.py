@@ -975,14 +975,17 @@ class SafetyNode(_NodeContractMixin):
         plan = PolicyCompiler.compile_safety(service)
         metadata = getattr(turn_context, "metadata", None)
         audit_mode = bool((metadata or {}).get("audit_mode")) if isinstance(metadata, dict) else False
-        decision = PolicyCompiler.evaluate_safety(
+        decision = PolicyCompiler.evaluate_safety_with_repair(
             plan,
             turn_context,
             candidate,
-            fast_gate=False,
+            service,
             audit_full=audit_mode,
         )
         turn_context.state["safe_result"] = decision.output
+        repair_trace = dict((decision.trace or {}).get("repair") or {})
+        if repair_trace:
+            turn_context.state["safety_recovery"] = repair_trace
         turn_context.state["safety_policy_decision"] = {
             "action": decision.action,
             "step_name": decision.step_name,

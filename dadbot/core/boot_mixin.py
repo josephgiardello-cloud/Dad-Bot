@@ -26,6 +26,7 @@ except ImportError:  # pragma: no cover
     ollama = None  # type: ignore[assignment]
 
 from dadbot.core.facade_compat import DadBotFacadeCompat
+from dadbot.core.runtime_service_provider import DefaultCoreRuntimeServices
 from dadbot.defaults import default_planner_debug_state as _default_planner_debug_state
 from dadbot.utils import env_truthy, json_dump, json_load
 
@@ -275,6 +276,10 @@ class DadBotBootMixin:
             ),
         }
         self.services = DadBotServiceContainer(self)
+        self.runtime_services = self._resolve_dependency(
+            "core_runtime_services",
+            lambda: DefaultCoreRuntimeServices(self),
+        )
 
         # Bootstrap managers required before profile/memory hydration.
         self.services.wire_bootstrap()
@@ -411,8 +416,23 @@ class DadBotBootMixin:
         tenant_id: str = "",
         document_store: Any = None,
         dependency_registry: Any = None,
+        service_overrides: dict[str, Any] | None = None,
+        memory_service: Any = None,
+        personality_service: Any = None,
+        policy_service: Any = None,
+        runtime_services: Any = None,
     ) -> None:
         self._dependency_registry = dependency_registry
+        explicit_dependencies = dict(service_overrides or {})
+        if memory_service is not None:
+            explicit_dependencies["memory_manager"] = memory_service
+        if personality_service is not None:
+            explicit_dependencies["personality_service"] = personality_service
+        if policy_service is not None:
+            explicit_dependencies["safety_service"] = policy_service
+        if runtime_services is not None:
+            explicit_dependencies["core_runtime_services"] = runtime_services
+        self._explicit_dependencies = explicit_dependencies
         self._facade_compat = DadBotFacadeCompat(
             self.__class__._DEPRECATED_FACADE_ALIASES,
         )

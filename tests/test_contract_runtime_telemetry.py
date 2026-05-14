@@ -27,12 +27,16 @@ class _FakeBot:
             session_log_dir=session_log_dir,
         )
         self.session_summary = ""
+        self.MEMORY_STORE = {"last_memory_compaction_summary": "capture durable themes and age out stale chatter"}
 
     def snapshot_session_state(self) -> dict:
         return {}
 
     def relationship_state(self) -> dict:
         return {}
+
+    def consolidated_memories(self) -> list[dict[str, str]]:
+        return [{"summary": "Durable insight about steady support"}]
 
 
 def test_execution_ledger_telemetry_snapshot_tracks_cache_rebuilds():
@@ -71,3 +75,28 @@ def test_persistence_telemetry_snapshot_exposes_slo_and_policy(tmp_path: Path):
     policy = dict(telemetry.get("policy") or {})
     assert int(policy.get("active_compaction_interval_events") or 0) > 0
     assert int(policy.get("recommended_retention_events") or 0) > 0
+
+
+def test_persist_turn_event_writes_versioned_compaction_report(tmp_path: Path):
+    ledger = ExecutionLedger()
+    manager = ConversationPersistenceManager(_FakeBot(ledger, tmp_path))
+
+    recorder = ExecutionTraceRecorder(trace_id="compaction-trace", prompt="compaction")
+    with bind_execution_trace(recorder, required=True):
+        for sequence in range(25):
+            manager.persist_turn_event(
+                {
+                    "event_type": "phase_transition",
+                    "trace_id": "compaction-trace",
+                    "phase": f"ACT-{sequence}",
+                },
+            )
+
+    report_path = tmp_path / "turn_events" / "compaction-compaction-trace.json"
+    assert report_path.exists()
+
+    report = __import__("json").loads(report_path.read_text(encoding="utf-8"))
+    assert report["schema_version"] == "turn-compaction.v1"
+    assert str(report["persistence_schema_version"] or "").strip()
+    assert report["recommended_retention_events"] > 0
+    assert "durable themes" in report["semantic_compaction_summary"]

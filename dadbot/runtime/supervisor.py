@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -126,6 +127,22 @@ class RuntimeSupervisor:
             logger.error("Failed to write lock file %s: %s", self.lock_file, exc)
             return False
 
+    @staticmethod
+    def _is_pid_alive(pid: int) -> bool:
+        """Best-effort cross-platform liveness check for a process id."""
+        normalized_pid = int(pid or 0)
+        if normalized_pid <= 0:
+            return False
+        try:
+            os.kill(normalized_pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except OSError:
+            return False
+        return True
+
     def _delete_lock(self) -> bool:
         """Delete lock file."""
         if not self.lock_file.exists():
@@ -138,6 +155,27 @@ class RuntimeSupervisor:
         except Exception as exc:
             logger.error("Failed to delete lock file %s: %s", self.lock_file, exc)
             return False
+
+    def attempt_self_heal(self) -> tuple[bool, list[str]]:
+        """Attempt automatic recovery from recoverable runtime-lock failures."""
+        actions: list[str] = []
+        existing_lock = self._read_lock()
+        if existing_lock is None:
+            return False, actions
+
+        if existing_lock.is_stale(self.stale_timeout):
+            if self._delete_lock():
+                actions.append(
+                    f"Removed stale lock: PID {existing_lock.pid} on port {existing_lock.port}",
+                )
+            return bool(actions), actions
+
+        if not self._is_pid_alive(existing_lock.pid):
+            if self._delete_lock():
+                actions.append(
+                    f"Removed orphaned lock: PID {existing_lock.pid} on port {existing_lock.port}",
+                )
+        return bool(actions), actions
 
     def acquire_lock(
         self,
@@ -158,6 +196,16 @@ class RuntimeSupervisor:
         5. Transition to RUNNING
         """
         existing_lock = self._read_lock()
+
+        if existing_lock is not None and not existing_lock.is_stale(self.stale_timeout):
+            if not self._is_pid_alive(existing_lock.pid):
+                logger.info(
+                    "Recovering orphaned lock from dead PID %d on port %d.",
+                    existing_lock.pid,
+                    existing_lock.port,
+                )
+                self._delete_lock()
+                existing_lock = None
 
         if existing_lock is not None and not existing_lock.is_stale(self.stale_timeout):
             msg = (
@@ -269,6 +317,11 @@ class RuntimeSupervisor:
                 issues.append(
                     f"Stale lock detected: PID {existing_lock.pid} (age {age}s, "
                     f"state: {existing_lock.state})"
+                )
+            elif not self._is_pid_alive(existing_lock.pid):
+                issues.append(
+                    f"Orphaned lock detected: PID {existing_lock.pid} on port {existing_lock.port} "
+                    f"(state: {existing_lock.state})"
                 )
             else:
                 issues.append(

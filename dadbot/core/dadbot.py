@@ -34,9 +34,6 @@ from dadbot.core.action_mixin import DadBotActionMixin
 from dadbot.core.boot_mixin import DadBotBootMixin
 from dadbot.core.compat_mixin import DadBotCompatMixin
 from dadbot.core.convenience_helpers import ConvenienceHelpers
-from dadbot.core.facade_compat import (
-    DadBotFacadeCompat,  # noqa: F401  # type: ignore[reportUnusedImport]
-)
 from dadbot.core.health_mixin import DadBotHealthMixin
 from dadbot.core.llm_mixin import DadBotLlmMixin
 from dadbot.core.mcp_mixin import DadBotMcpMixin
@@ -277,9 +274,6 @@ class DadBot(
             services = object.__getattribute__(self, "services")
             provider = services.get_provider(name)
             if provider is not None:
-                compat = self.__dict__.get("_facade_compat")
-                if compat is not None:
-                    compat.warn_if_deprecated(name)
                 return getattr(provider, name)
         except AttributeError:
             pass
@@ -337,10 +331,27 @@ class DadBot(
 
     def _resolve_dependency(self, name: str, factory: Any) -> Any:
         """Resolve a runtime dependency from the optional injection registry."""
+        explicit = getattr(self, "_explicit_dependencies", None)
+        candidate = None
+        if isinstance(explicit, dict):
+            candidate = explicit.get(name)
+        if callable(candidate):
+            candidate = candidate()
+        if candidate is not None:
+            return candidate
+
         registry = getattr(self, "_dependency_registry", None)
         candidate = None
         if registry is not None and hasattr(registry, "get"):
-            candidate = registry.get(name)
+            try:
+                candidate = registry.get(name)
+            except KeyError:
+                candidate = None
+            except TypeError:
+                try:
+                    candidate = registry.get(name, optional=True)
+                except Exception:
+                    candidate = None
         if callable(candidate):
             candidate = candidate()
         if candidate is not None:
@@ -442,7 +453,7 @@ class DadBot(
         cached = getattr(self, "_context_builder", None)
         if cached is None:
             from dadbot.context import ContextBuilder
-            cached = ContextBuilder(self)
+            cached = ContextBuilder(cast(Any, self))
             object.__setattr__(self, "_context_builder", cached)
         return cached
 

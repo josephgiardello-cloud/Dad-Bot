@@ -743,8 +743,16 @@ class SafetyNode:
         # TRACE_EXEMPT: Policy evaluation (deterministic); decisions written to context.state, no ledger, no node calls.
         candidate = context.state.get("candidate")
         plan = PolicyCompiler.compile_safety(self.mgr)
-        decision = PolicyCompiler.evaluate_safety(plan, context, candidate)
+        decision = PolicyCompiler.evaluate_safety_with_repair(
+            plan,
+            context,
+            candidate,
+            self.mgr,
+        )
         context.state["safe_result"] = decision.output
+        repair_trace = dict((decision.trace or {}).get("repair") or {})
+        if repair_trace:
+            context.state["safety_recovery"] = repair_trace
         context.state["safety_policy_decision"] = {
             "action": decision.action,
             "step_name": decision.step_name,

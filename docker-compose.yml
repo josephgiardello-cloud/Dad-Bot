@@ -37,17 +37,27 @@ services:
     ports:
       - "8501:8501"
     volumes:
-      - ./dad_profile.json:/var/lib/dadbot/dad_profile.json
-      - ./dad_memory.json:/var/lib/dadbot/dad_memory.json
-      - ./dad_memory_semantic.sqlite3:/var/lib/dadbot/dad_memory_semantic.sqlite3
+      - dadbot_dev_data:/var/lib/dadbot
+      - dadbot_dev_logs:/var/log/dadbot
       - ./static:/app/static
-      - ./session_logs:/app/session_logs
     environment:
       - DADBOT_MODE=streamlit
       - DADBOT_TENANT_ID=local
       - OLLAMA_HOST=http://ollama:11434
       - DADBOT_GLOBAL_CONFLUENCE_MODE=enforce
       - DADBOT_ALLOW_LEGACY_CONFLUENCE_KEY=0
+      - DADBOT_PROFILE_PATH=/var/lib/dadbot/dad_profile.json
+      - DADBOT_MEMORY_PATH=/var/lib/dadbot/dad_memory.json
+      - DADBOT_SEMANTIC_DB_PATH=/var/lib/dadbot/dad_memory_semantic.sqlite3
+      - DADBOT_SESSION_LOG_DIR=/var/log/dadbot/session_logs
+      - DADBOT_RELATIONAL_LEDGER_PATH=/var/log/dadbot/session_logs/relational_ledger.jsonl
+    command: ["streamlit"]
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8501/_stcore/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 25s
     restart: unless-stopped
 
   # ── Production API server ───────────────────────────────────────────────────
@@ -72,6 +82,7 @@ services:
     volumes:
       - dadbot_data:/var/lib/dadbot
       - dadbot_logs:/var/log/dadbot
+    command: ["api"]
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import json, urllib.request; data = json.load(urllib.request.urlopen('http://127.0.0.1:8010/health')); raise SystemExit(0 if data.get('status') == 'ok' else 1)"]
@@ -109,6 +120,9 @@ services:
       retries: 5
 
 volumes:
+  ollama_data:
+  dadbot_dev_data:
+  dadbot_dev_logs:
   dadbot_data:
   dadbot_logs:
   redis_data:

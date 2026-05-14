@@ -58,6 +58,7 @@ _DEFAULT_COMPACTION_INTERVAL_EVENTS = 25
 _ELEVATED_COMPACTION_INTERVAL_EVENTS = 50
 _DEFAULT_RECOMMENDED_RETENTION_EVENTS = 1600
 _HIGH_PRESSURE_RECOMMENDED_RETENTION_EVENTS = 1200
+_COMPACTION_REPORT_SCHEMA_VERSION = "turn-compaction.v1"
 _MAX_SNAPSHOT_BYTES = 256_000
 _BANNED_SNAPSHOT_KEYS = {
     "state",
@@ -795,6 +796,49 @@ class ConversationPersistenceManager:
         normalized = str(trace_token or "unknown").strip() or "unknown"
         return self._turn_event_dir() / f"snapshot-{normalized[:40]}.json"
 
+    def _compaction_report_path(self, trace_token: str) -> Path:
+        normalized = str(trace_token or "unknown").strip() or "unknown"
+        return self._turn_event_dir() / f"compaction-{normalized[:40]}.json"
+
+    def _current_recommended_retention_events(self) -> int:
+        writes = list(self._telemetry.get("write_latencies_ms") or [])
+        compactions = list(self._telemetry.get("compaction_latencies_ms") or [])
+        write_p95 = self._percentile(writes, 0.95)
+        write_p99 = self._percentile(writes, 0.99)
+        compaction_p95 = self._percentile(compactions, 0.95)
+        compaction_p99 = self._percentile(compactions, 0.99)
+        under_pressure = not (
+            bool(write_p95 <= _WRITE_P95_SLO_MS)
+            and bool(write_p99 <= _WRITE_P99_SLO_MS)
+            and bool(compaction_p95 <= _COMPACTION_P95_SLO_MS)
+            and bool(compaction_p99 <= _COMPACTION_P99_SLO_MS)
+        )
+        return (
+            _HIGH_PRESSURE_RECOMMENDED_RETENTION_EVENTS
+            if under_pressure
+            else _DEFAULT_RECOMMENDED_RETENTION_EVENTS
+        )
+
+    def _semantic_compaction_summary(self) -> str:
+        memory_store = getattr(self.bot, "MEMORY_STORE", None)
+        if hasattr(memory_store, "get"):
+            summary = str(memory_store.get("last_memory_compaction_summary") or "").strip()
+            if summary:
+                return summary
+
+        consolidated_getter = getattr(self.bot, "consolidated_memories", None)
+        if callable(consolidated_getter):
+            entries = list(consolidated_getter() or [])[-3:]
+            snippets = [
+                str(entry.get("summary") or "").strip()
+                for entry in entries
+                if isinstance(entry, dict) and str(entry.get("summary") or "").strip()
+            ]
+            if snippets:
+                return " | ".join(snippets)
+
+        return ""
+
     def _compute_next_sequence(
         self,
         trace_token: str,
@@ -870,6 +914,7 @@ class ConversationPersistenceManager:
                 "created_at": self._active_turn_wall_time(),
                 "last_sequence": compact_sequence,
                 "phase": replay.get("phase"),
+                "persistence_schema_version": PERSISTENCE_SCHEMA_VERSION,
                 "strict_sequence_hash": str(replay.get("strict_sequence_hash") or ""),
                 "event_count": int(replay.get("event_count") or 0),
                 "determinism_lock": {
@@ -894,6 +939,25 @@ class ConversationPersistenceManager:
             self._telemetry["compaction_count"] = int(self._telemetry.get("compaction_count") or 0) + 1
             self._telemetry["last_compaction_ms"] = float(compaction_ms)
             self._rolling_append(self._telemetry["compaction_latencies_ms"], compaction_ms)
+
+            compaction_report = {
+                "schema_version": _COMPACTION_REPORT_SCHEMA_VERSION,
+                "persistence_schema_version": PERSISTENCE_SCHEMA_VERSION,
+                "trace_id": trace_id,
+                "created_at": snapshot_payload["created_at"],
+                "last_sequence": compact_sequence,
+                "snapshot_mode": "full" if snapshot_full else "tail",
+                "event_count": int(replay.get("event_count") or 0),
+                "strict_sequence_hash": str(replay.get("strict_sequence_hash") or ""),
+                "recommended_retention_events": self._current_recommended_retention_events(),
+                "semantic_compaction_summary": self._semantic_compaction_summary(),
+                "consolidated_memory_count": len(list(getattr(self.bot, "consolidated_memories", lambda: [])() or [])),
+                "compaction_latency_ms": float(compaction_ms),
+            }
+            self._compaction_report_path(trace_id).write_text(
+                json.dumps(compaction_report, sort_keys=True, ensure_ascii=True),
+                encoding="utf-8",
+            )
 
         write_ms = (time.perf_counter() - write_started) * 1000.0
         self._telemetry["write_count"] = int(self._telemetry.get("write_count") or 0) + 1

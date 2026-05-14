@@ -18,6 +18,7 @@ from dadbot.core.policy_compiler import (
     PolicyIntentGraph,
     PolicyPlan,
     PolicyStep,
+    SemanticDecision,
 )
 from dadbot.core.turn_ir import build_policy_input
 
@@ -41,6 +42,43 @@ class _SafetyService:
 class _ValidateOnlyService:
     def validate(self, candidate: object) -> str:
         return f"validated::{candidate}"
+
+
+class _RepairingValidateService(_ValidateOnlyService):
+    def __init__(self, repaired_candidate: object, *, safe_mode_output: object | None = None) -> None:
+        self.repaired_candidate = repaired_candidate
+        self.safe_mode_output = safe_mode_output
+
+    def safety_repair_budget(self) -> int:
+        return 1
+
+    def build_repair_prompt(self, _turn_context: TurnContext, _candidate: object, *, reason: str, attempt: int) -> str:
+        return f"repair::{attempt}::{reason}"
+
+    def repair_candidate(
+        self,
+        turn_context: TurnContext,
+        _candidate: object,
+        *,
+        reason: str,
+        attempt: int,
+        localized_prompt: str = "",
+    ) -> object:
+        turn_context.state["repair_reason"] = reason
+        turn_context.state["repair_attempt"] = attempt
+        turn_context.state["repair_prompt"] = localized_prompt
+        return self.repaired_candidate
+
+    def build_safe_mode_output(
+        self,
+        _turn_context: TurnContext,
+        *,
+        reason: str,
+        attempts: tuple[dict[str, object], ...],
+    ) -> object | None:
+        _ = reason
+        _ = attempts
+        return self.safe_mode_output
 
 
 class _Registry:
@@ -156,6 +194,58 @@ def test_policy_trace_is_deterministic_for_same_inputs() -> None:
     decision_b = PolicyCompiler.evaluate_safety(plan, context_b, "candidate")
 
     assert decision_a.trace == decision_b.trace
+
+
+def test_pipeline_safety_node_repairs_semantic_deny_before_returning(monkeypatch) -> None:
+    context = TurnContext(user_input="same")
+    context.state["candidate"] = "candidate"
+    context.state["reflection_summary"] = {
+        "current_risk_level": "high",
+        "recommended_intervention": "de-escalate and offer a safe alternative",
+    }
+
+    service = _RepairingValidateService("repaired")
+    decisions = iter([
+        SemanticDecision.deny("policy_block"),
+        SemanticDecision.allow(),
+    ])
+    monkeypatch.setattr(
+        PolicyCompiler,
+        "evaluate_semantics",
+        staticmethod(lambda _inp: next(decisions)),
+    )
+
+    asyncio.run(PipelineSafetyNode().execute(_Registry(service), context))
+
+    assert context.state["safe_result"] == "validated::repaired"
+    recovery = dict(context.state.get("safety_recovery") or {})
+    assert recovery.get("status") == "repaired"
+    assert context.state["repair_prompt"] == "repair::1::policy_block"
+    decision = dict(context.state.get("safety_policy_decision") or {})
+    assert decision.get("action") == "handled"
+
+
+def test_pipeline_safety_node_pivots_to_safe_mode_when_repair_stays_blocked(monkeypatch) -> None:
+    context = TurnContext(user_input="same")
+    context.state["candidate"] = "candidate"
+    service = _RepairingValidateService(
+        "still-blocked",
+        safe_mode_output=("safe-mode", False),
+    )
+    monkeypatch.setattr(
+        PolicyCompiler,
+        "evaluate_semantics",
+        staticmethod(lambda _inp: SemanticDecision.deny("policy_block")),
+    )
+
+    asyncio.run(PipelineSafetyNode().execute(_Registry(service), context))
+
+    assert context.state["safe_result"] == ("safe-mode", False)
+    recovery = dict(context.state.get("safety_recovery") or {})
+    assert recovery.get("status") == "safe_mode"
+    decision = dict(context.state.get("safety_policy_decision") or {})
+    assert decision.get("action") == "degraded"
+    assert decision.get("step_name") == "safe_mode_pivot"
 
 
 def test_compile_entrypoint_uses_explicit_intent_graph() -> None:

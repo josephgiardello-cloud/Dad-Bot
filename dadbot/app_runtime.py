@@ -15,6 +15,7 @@ from socket import AF_INET, SO_REUSEADDR, SOCK_STREAM, SOL_SOCKET, socket
 from urllib.request import urlopen
 
 from dadbot.runtime.supervisor import get_runtime_supervisor
+from dadbot.runtime.env_loader import bootstrap_environment, validate_startup_environment
 from dadbot.runtime_adapter import runtime_contract_errors
 from dadbot_system import (
     CompositeStateStore,
@@ -569,6 +570,8 @@ def launch_streamlit_app(
     light_mode=False,
     script_path: str | Path | None = None,
 ):
+    supervisor = get_runtime_supervisor()
+
     def required_streamlit_port():
         configured_port = os.environ.get("DADBOT_STREAMLIT_PORT", "8501")
         try:
@@ -614,6 +617,17 @@ def launch_streamlit_app(
         print(
             f"dad_streamlit.py was missing, so a minimal stub was created at {streamlit_app_path}.",
         )
+
+    preflight_ok, preflight_issues = supervisor.preflight_check()
+    if not preflight_ok:
+        healed, actions = supervisor.attempt_self_heal()
+        if healed:
+            for action in actions:
+                logger.warning("Runtime self-heal: %s", action)
+            preflight_ok, preflight_issues = supervisor.preflight_check()
+        if not preflight_ok:
+            raise RuntimeError(f"Startup preflight failed: {'; '.join(preflight_issues)}")
+
     chosen_port = required_streamlit_port()
     local_url = f"http://localhost:{chosen_port}"
     command_env = os.environ.copy()
@@ -638,32 +652,58 @@ def launch_streamlit_app(
         "--server.port",
         str(chosen_port),
     ]
-    process = subprocess.Popen(
-        command,
-        cwd=str(streamlit_app_path.parent),
-        env=command_env,
+
+    lock_acquired, lock_message = supervisor.acquire_lock(
+        pid=os.getpid(),
+        port=chosen_port,
+        owner_id=f"streamlit-launcher-{os.getpid()}",
     )
+    if not lock_acquired:
+        raise RuntimeError(f"Failed to acquire runtime lock: {lock_message}")
+
+    max_start_attempts = 2 if env_truthy("DADBOT_STREAMLIT_AUTO_RECOVER", default=True) else 1
+    process = None
     try:
-        if wait_for_streamlit(local_url, process):
-            try:
-                webbrowser.open(local_url)
-            except Exception:
-                logger.warning(
-                    "Could not open browser automatically for %s",
-                    local_url,
-                    exc_info=True,
-                )
-        return process.wait()
+        for attempt in range(1, max_start_attempts + 1):
+            process = subprocess.Popen(
+                command,
+                cwd=str(streamlit_app_path.parent),
+                env=command_env,
+            )
+            if wait_for_streamlit(local_url, process):
+                supervisor.set_state("RUNNING")
+                try:
+                    webbrowser.open(local_url)
+                except Exception:
+                    logger.warning(
+                        "Could not open browser automatically for %s",
+                        local_url,
+                        exc_info=True,
+                    )
+                return process.wait()
+
+            exit_code = process.wait()
+            supervisor.set_state("DEGRADED")
+            logger.error(
+                "Streamlit runtime exited before readiness on attempt %d/%d with code %s.",
+                attempt,
+                max_start_attempts,
+                exit_code,
+            )
+            if attempt >= max_start_attempts:
+                return exit_code
+            logger.warning("Attempting automatic Streamlit recovery restart.")
     except KeyboardInterrupt:
-        if process.poll() is None:
+        if process is not None and process.poll() is None:
             process.terminate()
             try:
                 return process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 process.kill()
                 return process.wait()
-        return process.returncode or 0
-
+        return (process.returncode if process is not None else 0) or 0
+    finally:
+        supervisor.release_lock()
 
 def stop_streamlit_app(script_path: str | Path | None = None):
     workspace = str(
@@ -924,6 +964,7 @@ def main(
     service_client_cls=DadServiceClient,
     script_path: str | Path | None = None,
 ):
+    bootstrap_environment()
     args = parse_args(sys.argv[1:] if argv is None else argv)
     initialize_startup_logging(force=False)
     resolved_dadbot_cls = dadbot_cls
@@ -944,6 +985,10 @@ def main(
     )
     if operator_result is not None:
         return operator_result
+
+    startup_errors = validate_startup_environment(serve_api=bool(args.serve_api))
+    if startup_errors:
+        raise RuntimeError("Startup configuration validation failed: " + "; ".join(startup_errors))
 
     check_dependencies(
         args,

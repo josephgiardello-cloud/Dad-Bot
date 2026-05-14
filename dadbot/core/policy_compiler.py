@@ -85,6 +85,8 @@ class PolicyCompilationError(RuntimeError):
 class PolicyCompiler:
     """Compiles runtime policy handlers into an explicit, testable plan."""
 
+    _DENY_ACTIONS = {"denied", "deny", "blocked", "rejected"}
+
     @staticmethod
     def _strict_mode() -> bool:
         raw = str(os.environ.get("DADBOT_STRICT_SAFETY_POLICY", "")).strip().lower()
@@ -102,6 +104,29 @@ class PolicyCompiler:
         if not raw:
             return set()
         return {item.strip().lower() for item in raw.split(",") if item.strip()}
+
+    @staticmethod
+    def _safety_repair_budget(service: Any) -> int:
+        getter = getattr(service, "safety_repair_budget", None)
+        if not callable(getter):
+            return 0
+        try:
+            budget = int(getter() or 0)
+        except Exception:
+            return 0
+        return max(0, min(2, budget))
+
+    @staticmethod
+    def _attach_repair_trace(decision: PolicyDecision, repair_trace: dict[str, Any]) -> PolicyDecision:
+        trace = dict(decision.trace or {})
+        trace["repair"] = dict(repair_trace or {})
+        return PolicyDecision(
+            action=decision.action,
+            output=decision.output,
+            step_name=decision.step_name,
+            details=dict(decision.details or {}),
+            trace=trace,
+        )
 
     @staticmethod
     def evaluate_semantics(inp: SemanticEvalInput) -> SemanticDecision:
@@ -548,6 +573,153 @@ class PolicyCompiler:
             },
         })
         return decision
+
+    @staticmethod
+    def evaluate_safety_with_repair(
+        plan: PolicyPlan,
+        turn_context: Any,
+        candidate: Any,
+        service: Any,
+        *,
+        audit_full: bool = False,
+    ) -> PolicyDecision:
+        decision = PolicyCompiler.evaluate_safety(
+            plan,
+            turn_context,
+            candidate,
+            fast_gate=False,
+            audit_full=audit_full,
+        )
+        action = str(decision.action or "").strip().lower()
+        if action not in PolicyCompiler._DENY_ACTIONS:
+            return decision
+
+        repair_budget = PolicyCompiler._safety_repair_budget(service)
+        repair_candidate = getattr(service, "repair_candidate", None)
+        build_repair_prompt = getattr(service, "build_repair_prompt", None)
+        build_safe_mode_output = getattr(service, "build_safe_mode_output", None)
+        if repair_budget <= 0 or not callable(repair_candidate):
+            return decision
+
+        deny_reason = str((decision.details or {}).get("reason") or "policy_block")
+        current_candidate = candidate
+        attempts: list[dict[str, Any]] = []
+
+        for attempt in range(1, repair_budget + 1):
+            localized_prompt = ""
+            if callable(build_repair_prompt):
+                try:
+                    localized_prompt = str(
+                        build_repair_prompt(
+                            turn_context,
+                            current_candidate,
+                            reason=deny_reason,
+                            attempt=attempt,
+                        )
+                        or ""
+                    )
+                except Exception as exc:
+                    attempts.append({
+                        "attempt": attempt,
+                        "status": "prompt_error",
+                        "error": type(exc).__name__,
+                    })
+                    continue
+
+            try:
+                repaired_candidate = repair_candidate(
+                    turn_context,
+                    current_candidate,
+                    reason=deny_reason,
+                    attempt=attempt,
+                    localized_prompt=localized_prompt,
+                )
+            except Exception as exc:
+                attempts.append({
+                    "attempt": attempt,
+                    "status": "repair_error",
+                    "error": type(exc).__name__,
+                })
+                continue
+
+            if repaired_candidate is None:
+                attempts.append({
+                    "attempt": attempt,
+                    "status": "no_candidate",
+                })
+                continue
+
+            reevaluated = PolicyCompiler.evaluate_safety(
+                plan,
+                turn_context,
+                repaired_candidate,
+                fast_gate=False,
+                audit_full=audit_full,
+            )
+            repaired_action = str(reevaluated.action or "").strip().lower()
+            attempt_record = {
+                "attempt": attempt,
+                "status": "repaired" if repaired_action not in PolicyCompiler._DENY_ACTIONS else "blocked",
+                "localized_prompt": localized_prompt,
+                "result_action": repaired_action,
+            }
+            attempts.append(attempt_record)
+            current_candidate = repaired_candidate
+
+            if repaired_action not in PolicyCompiler._DENY_ACTIONS:
+                repaired_details = dict(reevaluated.details or {})
+                repaired_details["repair_status"] = "repaired"
+                repaired_details["repair_attempts"] = attempt
+                return PolicyDecision(
+                    action=reevaluated.action,
+                    output=reevaluated.output,
+                    step_name=reevaluated.step_name,
+                    details=repaired_details,
+                    trace=dict(reevaluated.trace or {}) | {
+                        "repair": {
+                            "status": "repaired",
+                            "reason": deny_reason,
+                            "attempts": attempts,
+                        },
+                    },
+                )
+
+        if callable(build_safe_mode_output):
+            try:
+                safe_mode_output = build_safe_mode_output(
+                    turn_context,
+                    reason=deny_reason,
+                    attempts=tuple(attempts),
+                )
+            except Exception:
+                safe_mode_output = None
+            if safe_mode_output is not None:
+                return PolicyDecision(
+                    action="degraded",
+                    output=safe_mode_output,
+                    step_name="safe_mode_pivot",
+                    details={
+                        "reason": deny_reason,
+                        "repair_status": "safe_mode",
+                        "repair_attempts": len(attempts),
+                    },
+                    trace=dict(decision.trace or {}) | {
+                        "repair": {
+                            "status": "safe_mode",
+                            "reason": deny_reason,
+                            "attempts": attempts,
+                        },
+                    },
+                )
+
+        return PolicyCompiler._attach_repair_trace(
+            decision,
+            {
+                "status": "blocked",
+                "reason": deny_reason,
+                "attempts": attempts,
+            },
+        )
 
     @staticmethod
     def evaluate_safety_input(plan: PolicyPlan, policy_input: PolicyInput) -> PolicyDecision:

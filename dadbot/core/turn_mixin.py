@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import inspect
 import json
 import logging
 from collections.abc import Awaitable, Callable, Iterable, Mapping
@@ -33,16 +32,21 @@ from dadbot.core.execution_contract import (
 from dadbot.core.graph_failure_handler import DadBotGraphFailureHandlerMixin
 from dadbot.core.kernel_locks import KernelReplaySequenceLock
 from dadbot.core.kernel_signals import CorrelationContext, TracingContext
-from dadbot.memory.ledger import InMemoryAsyncMemoryLedgerPersistence, MemoryLedger
-from dadbot.core.policy_store import DadPolicyStore, InMemoryAsyncPolicyPersistence
+from dadbot.memory.ledger import MemoryLedger
+from dadbot.core.policy_store import DadPolicyStore
+from dadbot.core.runtime_service_provider import DefaultCoreRuntimeServices
 from dadbot.core.runtime_errors import (
     CanonicalInvariantViolation,
     ConfigurationError,
     TransientExecutionError,
 )
-from dadbot.core.turn_handler import TurnContext, TurnHandler, thin_turn_handler_enabled
+from dadbot.core.turn_handler import TurnContext, TurnHandler
+from dadbot.core.world_model import WorldModelStore
 
 logger = logging.getLogger(__name__)
+
+SYNC_DELIVERIES: set[TurnDelivery] = {TurnDelivery.SYNC, TurnDelivery.STREAM}
+ASYNC_DELIVERIES: set[TurnDelivery] = {TurnDelivery.ASYNC, TurnDelivery.STREAM_ASYNC}
 
 
 class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
@@ -54,13 +58,22 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
     services: Any
     turn_orchestrator: Any
 
+    def _get_runtime_services(self) -> Any:
+        runtime_services = getattr(self, "runtime_services", None)
+        if runtime_services is not None:
+            return runtime_services
+        runtime_services = DefaultCoreRuntimeServices(self)
+        self.runtime_services = runtime_services
+        return runtime_services
+
     def _get_policy_store(self) -> DadPolicyStore:
-        policy_store = getattr(self, "_turn_policy_store", None)
-        if isinstance(policy_store, DadPolicyStore):
-            return policy_store
-        policy_store = DadPolicyStore(InMemoryAsyncPolicyPersistence())
-        self._turn_policy_store = policy_store
-        return policy_store
+        services = self._get_runtime_services()
+        getter = getattr(services, "get_policy_store", None)
+        if callable(getter):
+            policy_store = getter()
+            if isinstance(policy_store, DadPolicyStore):
+                return policy_store
+        raise ConfigurationError("Core runtime services must provide a valid policy store.")
 
     def _get_prompt_builder(self) -> Callable[[], str] | None:
         relationship_manager = getattr(self, "relationship_manager", None)
@@ -77,18 +90,22 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
         return None
 
     def _get_memory_ledger(self) -> MemoryLedger:
-        ledger = getattr(self, "_turn_memory_ledger", None)
-        if isinstance(ledger, MemoryLedger):
-            return ledger
+        services = self._get_runtime_services()
+        getter = getattr(services, "get_memory_ledger", None)
+        if callable(getter):
+            ledger = getter()
+            if isinstance(ledger, MemoryLedger):
+                return ledger
+        raise ConfigurationError("Core runtime services must provide a valid memory ledger.")
 
-        persistence = getattr(self, "_turn_memory_ledger_persistence", None)
-        if persistence is None:
-            persistence = InMemoryAsyncMemoryLedgerPersistence()
-            self._turn_memory_ledger_persistence = persistence
-
-        ledger = MemoryLedger(persistence)
-        self._turn_memory_ledger = ledger
-        return ledger
+    def _get_world_model_store(self) -> WorldModelStore:
+        services = self._get_runtime_services()
+        getter = getattr(services, "get_world_model_store", None)
+        if callable(getter):
+            store = getter()
+            if isinstance(store, WorldModelStore):
+                return store
+        raise ConfigurationError("Core runtime services must provide a valid world model store.")
 
     # ------------------------------------------------------------------
     # Orchestrator resolution
@@ -150,10 +167,6 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
             attachments=attachments,
         )
         submit_turn = getattr(orchestrator, "_submit_turn_via_control_plane", None)
-        if not thin_turn_handler_enabled():
-            raise CanonicalInvariantViolation(
-                "Canonical execution gate violation: thin turn handler must be enabled.",
-            )
         if not callable(submit_turn):
             raise ConfigurationError(
                 "Canonical execution gate violation: control-plane submit entrypoint missing.",
@@ -165,6 +178,7 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
             prompt_builder=self._get_prompt_builder(),
             memory_ledger=self._get_memory_ledger(),
             relationship_snapshotter=self._get_relationship_snapshotter(),
+            world_model_store=self._get_world_model_store(),
         )
         return await handler.process_turn(
             TurnContext(
@@ -358,18 +372,15 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
             chunk_callback(reply)
 
     # ------------------------------------------------------------------
-    # Signoff compat helper (used by failure reply + stream variants)
+    # Signoff helper used by failure reply + stream variants
     # ------------------------------------------------------------------
 
-    def _append_signoff_compat(self, text: str) -> str:
-        """Apply reply signoff using manager-first compatibility resolution."""
+    def _append_signoff(self, text: str) -> str:
+        """Apply reply signoff via reply finalization manager when available."""
         finalization = getattr(self, "reply_finalization", None)
         append_signoff = getattr(finalization, "append_signoff", None)
         if callable(append_signoff):
             return str(append_signoff(text))
-        compat_finalize = getattr(self, "finalize_reply", None)
-        if callable(compat_finalize):
-            return str(compat_finalize(text))
         return str(text or "")
 
     @staticmethod
@@ -384,9 +395,11 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
 
     @staticmethod
     def _delivery_event_mode(delivery: TurnDelivery) -> str:
-        if delivery in {TurnDelivery.ASYNC, TurnDelivery.STREAM_ASYNC}:
+        if delivery in ASYNC_DELIVERIES:
             return "async"
-        return "sync"
+        if delivery in SYNC_DELIVERIES:
+            return "sync"
+        raise ValueError(f"Unsupported turn delivery: {delivery}")
 
     async def _execute_live_turn_async(
         self,
@@ -410,18 +423,20 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
             attachment_count=len(attachments),
         )
         try:
-            if request.delivery in {TurnDelivery.SYNC, TurnDelivery.STREAM}:
-                result = self._run_graph_turn_sync_compat(
+            if request.delivery in SYNC_DELIVERIES:
+                result = self._run_graph_turn_sync(
                     user_input,
-                    attachments,
-                    chunk_callback,
+                    attachments=attachments,
+                    chunk_callback=chunk_callback,
+                )
+            elif request.delivery in ASYNC_DELIVERIES:
+                result = await self._run_graph_turn_async(
+                    user_input,
+                    attachments=attachments,
+                    chunk_callback=chunk_callback,
                 )
             else:
-                result = await self._run_graph_turn_async_compat(
-                    user_input,
-                    attachments,
-                    chunk_callback,
-                )
+                raise ValueError(f"Unsupported turn delivery: {request.delivery}")
             self._emit_turn_event(
                 "TURN_END",
                 mode=event_mode,
@@ -507,69 +522,23 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
         state: AgentState | None = None,
         chunk_callback: ChunkCallback | None = None,
     ) -> TurnResponse | Awaitable[TurnResponse]:
-        if request.delivery in {TurnDelivery.ASYNC, TurnDelivery.STREAM_ASYNC}:
+        if request.delivery in ASYNC_DELIVERIES:
             return self._execute_turn_async(
                 request,
                 state=state,
                 chunk_callback=chunk_callback,
             )
-        return self._run_turn_request_sync(
-            request,
-            state=state,
-            chunk_callback=chunk_callback,
-        )
+        if request.delivery in SYNC_DELIVERIES:
+            return self._run_turn_request_sync(
+                request,
+                state=state,
+                chunk_callback=chunk_callback,
+            )
+        raise ValueError(f"Unsupported turn delivery: {request.delivery}")
 
     # ------------------------------------------------------------------
     # Public turn entry-points
     # ------------------------------------------------------------------
-
-    @staticmethod
-    def _callable_accepts_chunk_callback(fn: Any) -> bool:
-        try:
-            signature = inspect.signature(fn)
-        except (TypeError, ValueError):
-            return True
-
-        parameters = signature.parameters.values()
-        return any(
-            parameter.kind is inspect.Parameter.VAR_KEYWORD
-            or parameter.name == "chunk_callback"
-            for parameter in parameters
-        )
-
-    @classmethod
-    def _invoke_chunk_callback_compat(cls, fn: Any, /, *args: Any, **kwargs: Any):
-        if cls._callable_accepts_chunk_callback(fn):
-            return fn(*args, **kwargs)
-        trimmed_kwargs = {key: value for key, value in kwargs.items() if key != "chunk_callback"}
-        return fn(*args, **trimmed_kwargs)
-
-    def _run_graph_turn_sync_compat(
-        self,
-        user_input: str,
-        attachments: AttachmentList | None,
-        chunk_callback: ChunkCallback | None,
-    ) -> FinalizedTurnResult:
-        return self._invoke_chunk_callback_compat(
-            self._run_graph_turn_sync,
-            user_input,
-            attachments=attachments,
-            chunk_callback=chunk_callback,
-        )
-
-    async def _run_graph_turn_async_compat(
-        self,
-        user_input: str,
-        attachments: AttachmentList | None,
-        chunk_callback: ChunkCallback | None,
-    ) -> FinalizedTurnResult:
-        result = self._invoke_chunk_callback_compat(
-            self._run_graph_turn_async,
-            user_input,
-            attachments=attachments,
-            chunk_callback=chunk_callback,
-        )
-        return await result
 
     def _get_pre_turn_checkin_due(self) -> bool:
         memory = getattr(self, "memory", None)
