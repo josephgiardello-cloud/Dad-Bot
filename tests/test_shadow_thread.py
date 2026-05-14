@@ -1,6 +1,11 @@
 from datetime import datetime
 
+import pytest
 
+pytestmark = pytest.mark.unit
+
+
+@pytest.mark.slow
 def test_finalize_records_shadow_audit(bot):
     bot.MEMORY_STORE["advice_audits"] = []
 

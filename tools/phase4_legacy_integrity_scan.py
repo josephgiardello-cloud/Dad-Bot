@@ -3,11 +3,12 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import os
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-
 
 LEGACY_TERMS = [
     "turn_service",
@@ -46,6 +47,10 @@ EXCLUDE_DIRS = {
     "node_modules",
     "session_logs",
     "runtime",
+    "artifacts",
+    "evaluation",
+    "external",
+    "dadbot-hud",
 }
 
 
@@ -152,7 +157,55 @@ def run_scan(repo_root: Path) -> dict[str, Any]:
         re.IGNORECASE,
     )
 
+    max_scan_files = max(int(os.environ.get("PHASE4_SCAN_MAX_FILES", "5000")), 100)
+    max_scan_seconds = max(float(os.environ.get("PHASE4_SCAN_MAX_SECONDS", "45")), 1.0)
+    debug_progress = str(os.environ.get("PHASE4_SCAN_DEBUG", "0")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    scan_start = time.monotonic()
+    scanned_files = 0
+
+    def _scan_progress() -> dict[str, Any]:
+        return {
+            "files_scanned": scanned_files,
+            "legacy_hits": len(legacy_paths),
+            "dual_path_hits": len(dual_execution_paths),
+            "temporal_hits": len(temporal_violations),
+            "unsafe_mutation_hits": len(unsafe_mutations),
+            "elapsed_s": round(time.monotonic() - scan_start, 3),
+        }
+
     for file_path, rel_path in _iter_python_files(repo_root):
+        scanned_files += 1
+        elapsed = time.monotonic() - scan_start
+        if scanned_files > max_scan_files:
+            dead_code.append(
+                Finding(
+                    file="tools/phase4_legacy_integrity_scan.py",
+                    line=1,
+                    kind="scan_guard_max_files",
+                    detail=f"Scan stopped at max file budget ({max_scan_files})",
+                    snippet=json.dumps(_scan_progress(), sort_keys=True),
+                )
+            )
+            break
+        if elapsed > max_scan_seconds:
+            dead_code.append(
+                Finding(
+                    file="tools/phase4_legacy_integrity_scan.py",
+                    line=1,
+                    kind="scan_guard_timeout",
+                    detail=f"Scan stopped at max duration ({max_scan_seconds}s)",
+                    snippet=json.dumps(_scan_progress(), sort_keys=True),
+                )
+            )
+            break
+        if debug_progress and scanned_files % 100 == 0:
+            print(json.dumps(_scan_progress(), sort_keys=True))
+
         text = file_path.read_text(encoding="utf-8", errors="replace")
 
         # 1) Legacy path markers

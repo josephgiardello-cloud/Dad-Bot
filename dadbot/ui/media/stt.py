@@ -1,9 +1,7 @@
-﻿from __future__ import annotations
-
-import tempfile
-from pathlib import Path
+from __future__ import annotations
 
 import streamlit as st
+from dadbot.utils import create_temp_file_path, safe_unlink
 
 try:
     from faster_whisper import WhisperModel
@@ -30,19 +28,30 @@ def load_openai_whisper_model(model_name):
     return openai_whisper.load_model(model_name)
 
 
-def transcribe_audio_bytes(audio_bytes, *, backend, model_name: str = "base", language: str = "en"):
+def transcribe_audio_bytes(
+    audio_bytes,
+    *,
+    backend,
+    model_name: str = "base",
+    language: str = "en",
+):
     if not audio_bytes:
         return "", "No audio data received."
 
     temp_path = None
     try:
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as handle:
+        temp_path = create_temp_file_path(suffix=".wav", prefix="dadbot_stt_")
+        with open(temp_path, "wb") as handle:
             handle.write(audio_bytes)
-            temp_path = handle.name
 
         if backend == "faster_whisper":
             model = load_faster_whisper_model(model_name)
-            segments, _info = model.transcribe(temp_path, language=language or None, vad_filter=True, beam_size=1)
+            segments, _info = model.transcribe(
+                temp_path,
+                language=language or None,
+                vad_filter=True,
+                beam_size=1,
+            )
             transcript = " ".join((segment.text or "").strip() for segment in segments).strip()
             return transcript, ""
 
@@ -57,7 +66,4 @@ def transcribe_audio_bytes(audio_bytes, *, backend, model_name: str = "base", la
         return "", f"Transcription failed: {exc}"
     finally:
         if temp_path:
-            try:
-                Path(temp_path).unlink(missing_ok=True)
-            except Exception:
-                pass
+            safe_unlink(temp_path)

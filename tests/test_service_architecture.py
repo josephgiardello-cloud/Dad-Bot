@@ -1,8 +1,13 @@
+import pytest
+
+from dadbot.core.execution_contract import TurnResponse
+from dadbot.core.dadbot import DadBot
 from dadbot_system.contracts import ChatRequest, ChatResponse, ServiceConfig, WorkerResult, WorkerTask
 from dadbot_system.orchestration import DadBotOrchestrator
 from dadbot_system.state import InMemoryStateStore
 from dadbot_system.worker import DadBotTaskProcessor
-from dadbot.core.dadbot import DadBot
+
+pytestmark = pytest.mark.integration
 
 
 class FakeBroker:
@@ -30,15 +35,12 @@ class FakeBot:
     def load_session_state_snapshot(self, snapshot):
         self.loaded_snapshot = dict(snapshot or {})
 
-    async def process_user_message_async(self, user_input, attachments=None):
+    async def execute_turn(self, request, *, state=None, chunk_callback=None):
         self.async_calls += 1
         if self.async_calls == 1:
             raise RuntimeError("transient worker failure")
-        return f"Dad heard: {user_input}", False
-
-    def process_user_message(self, user_input, attachments=None):
         self.sync_calls += 1
-        return f"Dad heard: {user_input}", False
+        return TurnResponse(reply=f"Dad heard: {request.input.text}", should_end=False)
 
     def snapshot_session_state(self):
         return {
@@ -55,7 +57,9 @@ class FakeBot:
             "active_tool_observation_context": None,
             "planner_debug": {},
             "memory_store": {
-                "pending_proactive_messages": [{"message": "Check in tonight.", "source": "life-pattern", "created_at": "2026-04-19T18:00:00"}],
+                "pending_proactive_messages": [
+                    {"message": "Check in tonight.", "source": "life-pattern", "created_at": "2026-04-19T18:00:00"}
+                ],
                 "recent_moods": ["stressed", "positive"],
                 "last_mood": "positive",
             },
@@ -90,7 +94,9 @@ def test_dadbot_session_snapshot_roundtrip_restores_runtime_state(bot):
     bot._pending_daily_checkin_context = True
     bot._active_tool_observation_context = "Fresh web lookup result"
     bot._last_planner_debug = {"planner_status": "used-tool", "planner_parameters": {"query": "weather"}}
-    bot.MEMORY_STORE["pending_proactive_messages"] = [{"message": "Check in tonight.", "source": "life-pattern", "created_at": "2026-04-19T18:00:00"}]
+    bot.MEMORY_STORE["pending_proactive_messages"] = [
+        {"message": "Check in tonight.", "source": "life-pattern", "created_at": "2026-04-19T18:00:00"}
+    ]
     bot.MEMORY_STORE["recent_moods"] = ["stressed", "positive"]
     bot.MEMORY_STORE["last_mood"] = "positive"
 
@@ -132,6 +138,32 @@ def test_dadbot_runtime_state_attr_maps_read_and_write_through(bot):
     assert bot._prompt_guard_stats == {"checked": 2}
     assert "history" not in bot.__dict__
     assert "_last_turn_pipeline" not in bot.__dict__
+
+
+def test_dadbot_attribute_map_roundtrip_parity(bot):
+    # Some routed names are intentionally read-only aliases.
+    exemptions = {
+        "runtime_state_container": "runtime state container alias is provider-owned/read-only",
+    }
+
+    unexpected_failures: list[str] = []
+    maps = [
+        DadBot._CONFIG_ATTR_MAP,
+        DadBot._RUNTIME_STATE_ATTR_MAP,
+        DadBot._INTERNAL_RUNTIME_ATTR_MAP,
+    ]
+
+    for attr_map in maps:
+        for external_name in attr_map:
+            value = getattr(bot, external_name)
+            try:
+                setattr(bot, external_name, value)
+                assert getattr(bot, external_name) == value
+            except Exception as exc:  # noqa: BLE001
+                if external_name not in exemptions:
+                    unexpected_failures.append(f"{external_name}: {type(exc).__name__}: {exc}")
+
+    assert not unexpected_failures, "Unexpected map roundtrip failures:\n" + "\n".join(unexpected_failures)
 
 
 def test_action_methods_are_mixin_owned_not_declared_on_dadbot():
@@ -200,7 +232,9 @@ def test_orchestrator_tracks_task_status_response_and_events():
                 "history": [{"role": "system", "content": "Dad system prompt"}],
                 "planner_debug": planner_debug_factory(),
                 "memory_store": {
-                    "pending_proactive_messages": [{"message": "Check in tonight.", "source": "life-pattern", "created_at": "2026-04-19T18:00:00"}],
+                    "pending_proactive_messages": [
+                        {"message": "Check in tonight.", "source": "life-pattern", "created_at": "2026-04-19T18:00:00"}
+                    ],
                     "recent_moods": ["stressed"],
                     "last_mood": "stressed",
                 },
@@ -221,7 +255,9 @@ def test_orchestrator_tracks_task_status_response_and_events():
     assert response["reply"] == "Love you, buddy."
     assert task_status["status"] == "completed"
     assert task_status["session_state"]["history"][0]["role"] == "system"
-    assert task_status["session_state"]["memory_store"]["pending_proactive_messages"][0]["message"] == "Check in tonight."
+    assert (
+        task_status["session_state"]["memory_store"]["pending_proactive_messages"][0]["message"] == "Check in tonight."
+    )
     assert any(event["event_type"] == "response.ready" for event in events)
 
 
@@ -262,23 +298,18 @@ def test_worker_processor_retries_and_returns_response_with_fake_bot():
     assert result.response is not None
     assert result.response.reply == "Dad heard: hello there"
     assert fake_bot.async_calls == 2
-    assert fake_bot.sync_calls == 0
+    assert fake_bot.sync_calls == 1
     assert fake_bot.loaded_snapshot["history"][0]["role"] == "system"
 
 
-def test_worker_processor_falls_back_to_sync_bot_entrypoint():
+def test_worker_processor_requires_execute_turn_entrypoint():
     class LegacySyncBot:
         def __init__(self):
             self.MODEL_NAME = "legacy-sync"
             self.ACTIVE_MODEL = "legacy-sync"
-            self.calls = 0
 
         def load_session_state_snapshot(self, snapshot):
             return dict(snapshot or {})
-
-        def process_user_message(self, user_input, attachments=None):
-            self.calls += 1
-            return f"Legacy heard: {user_input}", False
 
         def snapshot_session_state(self):
             return {"history": [{"role": "system", "content": "Dad system prompt"}]}
@@ -290,10 +321,8 @@ def test_worker_processor_falls_back_to_sync_bot_entrypoint():
 
     result = processor.process(task)
 
-    assert result.status == "completed"
-    assert result.response is not None
-    assert result.response.reply == "Legacy heard: hello there"
-    assert legacy_bot.calls == 1
+    assert result.status == "failed"
+    assert "bot.execute_turn" in str(result.error or "")
 
 
 def test_service_config_from_environment_reads_external_state_backends(monkeypatch):

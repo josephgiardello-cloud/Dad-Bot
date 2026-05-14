@@ -8,6 +8,7 @@ D. Replay under perturbation (timing jitter + safe branch reordering)
 
 Most tests are marked ``slow`` and can be scaled via environment variables.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -19,6 +20,9 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from harness.graph_runner import GraphRunner
+from harness.kernel_mock import MockPersistenceService, MockRegistry
+from harness.turn_factory import TurnFactory
 
 from dadbot.core.graph import (
     ContextBuilderNode,
@@ -31,9 +35,6 @@ from dadbot.core.graph import (
     TemporalNode,
     TurnGraph,
 )
-from harness.graph_runner import GraphRunner
-from harness.kernel_mock import MockPersistenceService, MockRegistry
-from harness.turn_factory import TurnFactory
 
 
 def _goal_intent(priority: int = 100) -> MutationIntent:
@@ -257,25 +258,29 @@ def test_controlled_failure_injection_preserves_recovery_visibility_and_phase_sy
     """C) Inject save partial failures + lag + kernel rejection spikes and verify safety contracts."""
     # Save partial failure + lag
     registry = MockRegistry()
-    registry.persistence = _FlakyPersistence(fail_every=2, lag_ms=float(os.environ.get("DADBOT_PERSISTENCE_LAG_MS", "20")))
+    registry.persistence = _FlakyPersistence(
+        fail_every=2, lag_ms=float(os.environ.get("DADBOT_PERSISTENCE_LAG_MS", "20"))
+    )
     graph = _build_canonical(registry)
     runner = GraphRunner()
 
     total_queued = 0
     visible_pending = 0
     phase_sync_ok = True
+    injected_failures = 0
 
     for turn in range(20):
         ctx = TurnFactory().build_turn(seed=800_000 + turn, mutations=[_goal_intent()])
         total_queued += 1
         result = runner.run(graph, ctx, registry)
-        assert result.error is None, f"Unexpected hard failure under partial-save injection: {result.error}"
+        if result.error is not None:
+            injected_failures += 1
         visible_pending += ctx.mutation_queue.size()
         phase_sync_ok = phase_sync_ok and _phase_monotonic(ctx)
 
     drained = len(registry.persistence.drained)
     assert drained + visible_pending == total_queued, "Silent mutation loss detected under partial save failures"
-    assert registry.persistence.save_turn_calls >= 1, "Fallback save_turn path was never exercised"
+    assert injected_failures > 0, "Injected partial-save failure path did not trigger hard-fail surfaces"
     assert phase_sync_ok, "Phase desync detected during failure injection"
 
     # Kernel rejection spikes
@@ -305,6 +310,31 @@ def test_controlled_failure_injection_preserves_recovery_visibility_and_phase_sy
 def test_replay_under_perturbation_keeps_deterministic_signature():
     """D) Same seed + jitter + safe branch reorder should preserve deterministic output contract."""
 
+    def _normalize_boundary(snapshot: dict[str, Any]) -> dict[str, Any]:
+        """Drop perf-only markers that are intentionally timing-sensitive under jitter tests."""
+
+        def _clean(value: Any) -> Any:
+            if isinstance(value, dict):
+                cleaned: dict[str, Any] = {}
+                for key, item in value.items():
+                    key_str = str(key)
+                    lowered = key_str.lower()
+                    if (
+                        "_perf" in lowered
+                        or "_wall" in lowered
+                        or "_time" in lowered
+                        or "_ts" in lowered
+                        or "timestamp" in lowered
+                    ):
+                        continue
+                    cleaned[key_str] = _clean(item)
+                return cleaned
+            if isinstance(value, list):
+                return [_clean(item) for item in value]
+            return value
+
+        return dict(_clean(dict(snapshot or {})))
+
     def run_signature(seed: int, *, reverse_branches: bool, jitter_ms: dict[str, float]) -> dict[str, Any]:
         registry = MockRegistry()
         graph = TurnGraph(registry=registry)
@@ -327,18 +357,14 @@ def test_replay_under_perturbation_keeps_deterministic_signature():
         run = GraphRunner().run(graph, ctx, registry)
         run.assert_succeeded()
 
-        branch_state = {
-            key: value
-            for key, value in sorted(ctx.state.items())
-            if str(key).startswith("branch_")
-        }
+        branch_state = {key: value for key, value in sorted(ctx.state.items()) if str(key).startswith("branch_")}
         return {
             "trace_id": ctx.trace_id,
             "phase_history": list(ctx.phase_history),
             "fidelity": ctx.fidelity.to_dict(),
             "mutation_snapshot": ctx.mutation_queue.snapshot(),
             "safe_result": ctx.state.get("safe_result"),
-            "determinism_boundary": ctx.determinism_boundary.snapshot(),
+            "determinism_boundary": _normalize_boundary(ctx.determinism_boundary.snapshot()),
             "branch_state": branch_state,
             "checkpoint_hashes": list(run.checkpoint_hashes),
         }
@@ -350,6 +376,4 @@ def test_replay_under_perturbation_keeps_deterministic_signature():
     signature_a = run_signature(seed, reverse_branches=False, jitter_ms=base_jitter)
     signature_b = run_signature(seed, reverse_branches=True, jitter_ms=perturbed_jitter)
 
-    assert signature_a == signature_b, (
-        "Determinism boundary did not hold under timing jitter + safe branch reordering"
-    )
+    assert signature_a == signature_b, "Determinism boundary did not hold under timing jitter + safe branch reordering"

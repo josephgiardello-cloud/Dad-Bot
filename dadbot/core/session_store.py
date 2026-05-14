@@ -1,153 +1,135 @@
-﻿from threading import RLock
+from __future__ import annotations
+
 from copy import deepcopy
 from typing import Any
 
+from dadbot.core.execution_ledger import ExecutionLedger
+
 
 class SessionMutationError(RuntimeError):
-    pass
+    """Raised when a projection-only session store is mutated directly."""
 
 
 class SessionStore:
-    """
-    In-memory session state store with:
-    - thread safety
-    - immutable read snapshots
-    - optional ledger hook integration
-    """
+    """Projection helper over ledger events for recovery operations."""
 
-    def __init__(self, ledger=None, *, projection_only: bool = False):
-        self._sessions = {}
-        self._lock = RLock()
-        self._ledger = ledger  # optional execution ledger hook
+    def __init__(
+        self,
+        ledger: ExecutionLedger | None = None,
+        projection_only: bool = False,
+    ):
+        self.ledger = ledger
+        self.projection_only = bool(projection_only)
+        self._sessions: dict[str, dict[str, Any]] = {}
         self._version = 0
-        self._projection_only = bool(projection_only)
 
-    def set_projection_only(self, enabled: bool = True) -> None:
-        self._projection_only = bool(enabled)
+    def _guard_mutation(self) -> None:
+        if self.projection_only:
+            raise SessionMutationError(
+                "projection-only session store rejects direct mutation",
+            )
 
-    def get(self, session_id: str):
-        with self._lock:
-            state = self._sessions.get(session_id)
-            return deepcopy(state) if state is not None else None
+    def get(self, session_id: str) -> dict[str, Any] | None:
+        payload = self._sessions.get(str(session_id or "default"))
+        return deepcopy(payload) if payload is not None else None
 
-    def set(self, session_id: str, state: dict):
-        if self._projection_only:
-            raise SessionMutationError("SessionStore is projection-only; direct set() is blocked")
-        with self._lock:
-            self._sessions[session_id] = deepcopy(state)
-            self._version += 1
+    def _set(self, session_id: str, state: dict[str, Any]) -> None:
+        self._guard_mutation()
+        self._sessions[str(session_id or "default")] = deepcopy(dict(state or {}))
+        self._version += 1
 
-        # optional: emit to ledger if present
-        if self._ledger is not None:
-            try:
-                self._ledger.write({
-                    "type": "SESSION_STATE_UPDATED",
-                    "session_id": session_id,
-                    "trace_id": "",
-                    "timestamp": 0,
-                    "kernel_step_id": "session_store.set",
-                    "payload": {"version": self._version},
-                })
-            except Exception:
-                pass
+    def _delete(self, session_id: str) -> None:
+        self._guard_mutation()
+        self._sessions.pop(str(session_id or "default"), None)
+        self._version += 1
 
-    def delete(self, session_id: str):
-        if self._projection_only:
-            raise SessionMutationError("SessionStore is projection-only; direct delete() is blocked")
-        with self._lock:
-            self._sessions.pop(session_id, None)
-            self._version += 1
+    def __getattr__(self, name: str) -> Any:
+        if name == "set":
+            return self._set
+        if name == "delete":
+            return self._delete
+        raise AttributeError(name)
 
-        if self._ledger is not None:
-            try:
-                self._ledger.write({
-                    "type": "SESSION_STATE_DELETED",
-                    "session_id": session_id,
-                    "trace_id": "",
-                    "timestamp": 0,
-                    "kernel_step_id": "session_store.delete",
-                    "payload": {"version": self._version},
-                })
-            except Exception:
-                pass
+    def snapshot(self) -> dict[str, Any]:
+        return {"version": self._version, "sessions": deepcopy(self._sessions)}
 
-    def list_sessions(self):
-        with self._lock:
-            return list(self._sessions.keys())
-
-    def apply_kernel_mutation(
+    def _apply_kernel_mutation(
         self,
         *,
         session_id: str,
         state_patch: dict[str, Any],
-        kernel_step_id: str,
-        trace_id: str,
+        step_key: str,
+        trace_token: str,
     ) -> None:
-        if not str(kernel_step_id or "").strip():
-            raise SessionMutationError("kernel_step_id is required")
-        if not str(trace_id or "").strip():
-            raise SessionMutationError("trace_id is required")
+        state = dict(self._sessions.get(str(session_id or "default")) or {})
+        state.update(deepcopy(dict(state_patch or {})))
+        self._sessions[str(session_id or "default")] = state
+        self._version += 1
 
-        with self._lock:
-            current = dict(self._sessions.get(session_id) or {})
-            current.update(deepcopy(dict(state_patch or {})))
-            self._sessions[session_id] = current
-            self._version += 1
-
-        if self._ledger is not None:
-            self._ledger.write(
-                {
-                    "type": "SESSION_STATE_UPDATED",
-                    "session_id": session_id,
-                    "trace_id": str(trace_id),
-                    "timestamp": 0,
-                    "kernel_step_id": str(kernel_step_id),
-                    "payload": {
-                        "state": deepcopy(dict(state_patch or {})),
-                        "version": self._version,
-                    },
-                }
-            )
-
-    def apply_event(self, event: dict[str, Any]) -> None:
-        """Apply a ledger event into this store as a read-model projection."""
+    def _apply_event(self, event: dict[str, Any]) -> None:
         event_type = str(event.get("type") or "")
-        session_id = str(event.get("session_id") or "").strip()
+        session_id = str(event.get("session_id") or "default")
         payload = dict(event.get("payload") or {})
-        if not session_id:
-            return
-
-        with self._lock:
-            if event_type == "SESSION_STATE_UPDATED":
-                state = payload.get("state")
-                if isinstance(state, dict):
-                    existing = dict(self._sessions.get(session_id) or {})
-                    existing.update(deepcopy(state))
-                    self._sessions[session_id] = existing
-            elif event_type == "SESSION_STATE_DELETED":
-                self._sessions.pop(session_id, None)
-            elif event_type == "JOB_COMPLETED":
-                result = payload.get("result")
-                existing = dict(self._sessions.get(session_id) or {})
-                existing["last_result"] = deepcopy(result)
-                self._sessions[session_id] = existing
+        if event_type == "SESSION_STATE_UPDATED":
+            self._apply_kernel_mutation(
+                session_id=session_id,
+                state_patch=dict(payload.get("state") or {}),
+                step_key=str(
+                    event.get("kernel_step_id") or "session_store.apply",
+                ),
+                trace_token=str(event.get("trace_id") or ""),
+            )
+        elif event_type == "SESSION_STATE_DELETED":
+            self._sessions.pop(session_id, None)
+            self._version += 1
+        elif event_type == "JOB_COMPLETED":
+            state = dict(self._sessions.get(session_id) or {})
+            state["last_result"] = deepcopy(payload.get("result"))
+            self._sessions[session_id] = state
             self._version += 1
 
     def rebuild_from_ledger(self, events: list[dict[str, Any]]) -> None:
-        """Reconstruct session state exclusively from ordered ledger events."""
-        ordered = sorted(
-            [dict(event) for event in list(events or []) if isinstance(event, dict)],
-            key=lambda event: int(event.get("sequence") or 0),
+        self._sessions = {}
+        self._version = 0
+        sorted_events = sorted(
+            list(events or []),
+            key=lambda e: int(e.get("sequence") or e.get("_seq") or 0),
         )
-        with self._lock:
-            self._sessions = {}
-            self._version = 0
-        for event in ordered:
-            self.apply_event(event)
+        for event in sorted_events:
+            self._apply_event(event)
 
-    def snapshot(self) -> dict[str, Any]:
-        with self._lock:
-            return {
-                "sessions": deepcopy(self._sessions),
-                "version": int(self._version),
-            }
+    def pending_jobs(self) -> list[dict[str, Any]]:
+        events = self.ledger.read() if self.ledger is not None else []
+        latest_by_job: dict[str, dict[str, Any]] = {}
+        for event in events:
+            payload = dict(event.get("payload") or {})
+            job_id = str(payload.get("job_id") or event.get("job_id") or "")
+            if not job_id:
+                continue
+            latest_by_job[job_id] = dict(event)
+
+        pending: list[dict[str, Any]] = []
+        for job_id, event in latest_by_job.items():
+            event_type = str(event.get("type") or "")
+            payload = dict(event.get("payload") or {})
+            if event_type in {"JOB_SUBMITTED", "JOB_QUEUED", "JOB_STARTED"}:
+                pending.append(
+                    {
+                        "job_id": job_id,
+                        "session_id": str(event.get("session_id") or "default"),
+                        "status": event_type,
+                        "request_id": str(payload.get("request_id") or ""),
+                    },
+                )
+        return pending
+
+    @classmethod
+    def projected_from_ledger(
+        cls,
+        *,
+        ledger: ExecutionLedger,
+    ) -> SessionStore:
+        """Build a projection-only SessionStore derived from ledger events."""
+        store = cls(ledger=ledger, projection_only=True)
+        store.rebuild_from_ledger(ledger.read())
+        return store

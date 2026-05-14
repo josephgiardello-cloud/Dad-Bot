@@ -66,8 +66,8 @@ async def run_phase4a_real():
         # Compute summary statistics
         successes = sum(1 for r in results if r["execution"].get("completed"))
         total = len(results)
-        print(f"\n📊 PHASE 4A SUMMARY:")
-        print(f"  Success Rate: {successes}/{total} ({100*successes/total:.1f}%)")
+        print("\n📊 PHASE 4A SUMMARY:")
+        print(f"  Success Rate: {successes}/{total} ({100 * successes / total:.1f}%)")
 
         # By category
         by_cat = {}
@@ -79,7 +79,7 @@ async def run_phase4a_real():
             if r["execution"].get("completed"):
                 by_cat[cat]["success"] += 1
 
-        print(f"\n  By Category:")
+        print("\n  By Category:")
         for cat in sorted(by_cat.keys()):
             s = by_cat[cat]["success"]
             t = by_cat[cat]["total"]

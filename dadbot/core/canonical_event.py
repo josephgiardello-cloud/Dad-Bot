@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-
 # ---------------------------------------------------------------------------
 # Canonical event boundary — system-wide policy
 # ---------------------------------------------------------------------------
@@ -10,14 +9,16 @@ from typing import Any
 # Fields that uniquely identify an event in the causal chain and determine
 # replay equivalence.  These are the ONLY fields projected into canonical
 # hashes (replay_hash, trace_hash).
-CANONICAL_EVENT_FIELDS: frozenset[str] = frozenset({
-    "type",
-    "session_id",
-    "session_index",
-    "event_id",
-    "parent_event_id",
-    "kernel_step_id",
-})
+CANONICAL_EVENT_FIELDS: frozenset[str] = frozenset(
+    {
+        "type",
+        "session_id",
+        "session_index",
+        "event_id",
+        "parent_event_id",
+        "kernel_step_id",
+    },
+)
 
 # Operational / wall-clock payload fields that MUST NOT appear in canonical
 # hashes.  These values are machine-local timestamps that vary between runs
@@ -26,46 +27,72 @@ CANONICAL_EVENT_FIELDS: frozenset[str] = frozenset({
 # Enforcement:
 #   - canonicalize_event_payload() strips these from any payload dict.
 #   - validate_trace() raises AssertionError if any survive into a trace.
-NON_CANONICAL_PAYLOAD_FIELDS: frozenset[str] = frozenset({
-    "submitted_at",
-    "acquired_at",
-    "expires_at",
-    "last_checked_at",
-    "occurred_at",
-    "created_at",
-    "updated_at",
-    "trace_id",
-    "correlation_id",
-    "job_id",
-    "request_id",
-    "lease_id",
-})
+NON_CANONICAL_PAYLOAD_FIELDS: frozenset[str] = frozenset(
+    {
+        "timestamp",
+        "submitted_at",
+        "submitted_timestamp",
+        "submitted_monotonic",
+        "acquired_at",
+        "expires_at",
+        "lease_expiry",
+        "last_checked_at",
+        "retry_not_before_monotonic",
+        "occurred_at",
+        "created_at",
+        "updated_at",
+        "duration_ms",
+        "elapsed_ms",
+        "checkpoint",
+        "identity",
+        "execution_trace_contract",
+        "leaf_hash",
+        "merkle_root",
+        "inclusion_proof",
+        "trace_id",
+        "correlation_id",
+        "job_id",
+        "request_id",
+        "lease_id",
+    },
+)
 
-FORBIDDEN_TRACE_FIELDS: frozenset[str] = frozenset({
-    "submitted_at",
-    "acquired_at",
-    "expires_at",
-    "last_checked_at",
-})
+FORBIDDEN_TRACE_FIELDS: frozenset[str] = frozenset(
+    {
+        "submitted_at",
+        "acquired_at",
+        "expires_at",
+        "last_checked_at",
+    },
+)
 
 # Event types that are persisted for observability/reporting only and must not
 # participate in replay equivalence hashing.
-NON_REPLAY_EVENT_TYPES: frozenset[str] = frozenset({
-    "CAPABILITY_AUDIT_EVENT",
-})
+NON_REPLAY_EVENT_TYPES: frozenset[str] = frozenset(
+    {
+        "CAPABILITY_AUDIT_EVENT",
+        "PolicyTraceEvent",
+    },
+)
 
 
-def _strip_non_canonical(value: Any) -> Any:
+def _strip_non_canonical(value: Any, *, depth: int = 0) -> Any:
     if isinstance(value, dict):
-        return {
-            key: _strip_non_canonical(item)
-            for key, item in value.items()
-            if key not in NON_CANONICAL_PAYLOAD_FIELDS
-        }
+        cleaned: dict[str, Any] = {}
+        for key, item in value.items():
+            if key in NON_CANONICAL_PAYLOAD_FIELDS:
+                # Preserve semantic temporal fields nested inside canonical domain payloads
+                # (e.g., memory/session entries) while still stripping top-level operational
+                # timestamp metadata from the event envelope itself.
+                if depth > 0 and key in {"created_at", "updated_at"}:
+                    cleaned[key] = _strip_non_canonical(item, depth=depth + 1)
+                continue
+            cleaned[key] = _strip_non_canonical(item, depth=depth + 1)
+        return cleaned
     if isinstance(value, list):
-        return [_strip_non_canonical(item) for item in value]
+        return [_strip_non_canonical(item, depth=depth + 1) for item in value]
     if isinstance(value, tuple):
-        return [_strip_non_canonical(item) for item in value]
+        return [_strip_non_canonical(item, depth=depth + 1) for item in value]
     return value
 
 
@@ -83,13 +110,18 @@ def canonicalize_event_payload(payload: Any) -> dict[str, Any]:
 
     Returns:
         A new ``dict`` containing only the canonical keys.
+
     """
     if not isinstance(payload, dict):
         return {}
     return _strip_non_canonical(payload)
 
 
-def validate_trace(trace: list[dict[str, Any]]) -> None:
+def validate_trace(
+    trace: list[dict[str, Any]],
+    *,
+    enforce_full_policy: bool = False,
+) -> None:
     """Assert that no event payload in *trace* carries forbidden non-canonical fields.
 
     Raises:
@@ -98,15 +130,17 @@ def validate_trace(trace: list[dict[str, Any]]) -> None:
 
     Usage: hook this into stress tests and turn-graph invariant assertions to
     catch regressions before they reach production.
+
     """
+    disallowed_fields = NON_CANONICAL_PAYLOAD_FIELDS if enforce_full_policy else FORBIDDEN_TRACE_FIELDS
     for i, event in enumerate(trace or []):
         payload = event.get("payload") or {}
         if not isinstance(payload, dict):
             continue
-        for field in FORBIDDEN_TRACE_FIELDS:
+        for field in disallowed_fields:
             if field in payload:
                 raise AssertionError(
                     f"Non-canonical field {field!r} found in event[{i}] payload "
                     f"(type={event.get('type')!r}, "
-                    f"kernel_step_id={event.get('kernel_step_id')!r})"
+                    f"kernel_step_id={event.get('kernel_step_id')!r})",
                 )

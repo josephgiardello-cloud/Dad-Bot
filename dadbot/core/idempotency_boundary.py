@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 from threading import RLock
@@ -53,7 +53,13 @@ class IdempotencyBoundary:
         if inflight is not None and not inflight.done():
             inflight.set_result(result)
 
-    def store_error(self, *, session_id: str, request_id: str, error: Exception) -> None:
+    def store_error(
+        self,
+        *,
+        session_id: str,
+        request_id: str,
+        error: Exception,
+    ) -> None:
         key = self._key(session_id=session_id, request_id=request_id)
         if not key[0] or not key[1]:
             return
@@ -66,8 +72,7 @@ class IdempotencyBoundary:
         with self._lock:
             return {
                 "completed": {
-                    f"{session_id}:{request_id}": value
-                    for (session_id, request_id), value in self._completed.items()
+                    f"{session_id}:{request_id}": value for (session_id, request_id), value in self._completed.items()
                 },
                 "inflight_count": len(self._inflight),
             }

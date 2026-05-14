@@ -2,8 +2,10 @@ from types import SimpleNamespace
 
 import pytest
 
-import dadbot.app_runtime as app_runtime
+from dadbot import app_runtime
 from dadbot.runtime_adapter import runtime_contract_errors
+
+pytestmark = pytest.mark.unit
 
 
 class _RuntimeStub:
@@ -55,6 +57,73 @@ def test_runtime_contract_errors_reports_missing_and_non_callable():
 
     assert "attribute is not callable: initialize_profile_file" in errors
     assert "missing attribute: default_planner_debug_state" in errors
+
+
+def test_runtime_contract_errors_reports_descriptor_mismatch():
+    class _BadDescriptorRuntime:
+        def initialize_profile_file(cls, profile_path=None, force=False):
+            return True
+
+        @classmethod
+        def default_planner_debug_state(cls):
+            return {}
+
+        def clear_memory_store(self):
+            return None
+
+        def export_memory_store(self, export_path):
+            return None
+
+        def print_system_message(self, message):
+            return None
+
+        def chat_loop(self):
+            return None
+
+        def chat_loop_via_service(self, service_client, session_id=None):
+            return None
+
+    errors = runtime_contract_errors(_BadDescriptorRuntime)
+
+    assert "attribute has wrong descriptor: initialize_profile_file (expected classmethod)" in errors
+    assert "attribute has wrong descriptor: default_planner_debug_state (expected staticmethod)" in errors
+
+
+def test_runtime_contract_errors_reports_required_parameter_mismatch():
+    class _BadSignatureRuntime:
+        @classmethod
+        def initialize_profile_file(cls, profile_path=None, force=False):
+            return True
+
+        @staticmethod
+        def default_planner_debug_state():
+            return {}
+
+        def __init__(self, model_name="llama3.2", *, append_signoff=True):
+            return None
+
+        def clear_memory_store(self):
+            return None
+
+        def export_memory_store(self):
+            return None
+
+        def print_system_message(self):
+            return None
+
+        def chat_loop(self):
+            return None
+
+        def chat_loop_via_service(self, session_id=None):
+            return None
+
+    errors = runtime_contract_errors(_BadSignatureRuntime)
+
+    assert "attribute missing parameter: export_memory_store.export_path" in errors
+    assert "attribute missing parameter: print_system_message.message" in errors
+    assert "attribute missing parameter: chat_loop_via_service.service_client" in errors
+    assert "attribute missing parameter: __init__.light_mode" in errors
+    assert "attribute missing parameter: __init__.tenant_id" in errors
 
 
 def test_check_dependencies_skips_when_pytest_env_set(monkeypatch, tmp_path):
@@ -183,12 +252,12 @@ def test_initialize_startup_logging_configures_logging(monkeypatch):
 
 
 def test_check_system_resources_warns_when_ram_low(monkeypatch, caplog):
+    import logging
     import sys
     import types
-    import logging
 
     fake_psutil = types.SimpleNamespace(
-        virtual_memory=lambda: types.SimpleNamespace(available=3.2 * 1024 ** 3, total=16 * 1024 ** 3)
+        virtual_memory=lambda: types.SimpleNamespace(available=3.2 * 1024**3, total=16 * 1024**3)
     )
     monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
 
@@ -204,11 +273,136 @@ def test_check_system_resources_raises_when_critically_low_ram(monkeypatch):
     import sys
     import types
 
+
     fake_psutil = types.SimpleNamespace(
-        virtual_memory=lambda: types.SimpleNamespace(available=1.5 * 1024 ** 3, total=16 * 1024 ** 3)
+        virtual_memory=lambda: types.SimpleNamespace(available=1.5 * 1024**3, total=16 * 1024**3)
     )
     monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
 
     args = _args(model="gemma3:4b")
     with pytest.raises(RuntimeError, match="Critically low RAM"):
         app_runtime.check_system_resources(args)
+
+
+def test_parse_args_heartbeat_daemon_command():
+    args = app_runtime.parse_args([
+        "heartbeat-daemon",
+        "--interval-seconds",
+        "7",
+        "--consolidation-interval-seconds",
+        "21",
+        "--session-id",
+        "ops",
+        "--window-size",
+        "12",
+        "--max-cycles",
+        "4",
+    ])
+
+    assert args.command == "heartbeat-daemon"
+    assert args.interval_seconds == 7
+    assert args.consolidation_interval_seconds == 21
+    assert args.session_id == "ops"
+    assert args.window_size == 12
+    assert args.max_cycles == 4
+
+
+def test_parse_args_hud_command():
+    args = app_runtime.parse_args([
+        "hud",
+        "--interval-seconds",
+        "3",
+        "--once",
+        "--max-samples",
+        "11",
+    ])
+
+    assert args.command == "hud"
+    assert args.interval_seconds == 3
+    assert args.once is True
+    assert args.max_samples == 11
+
+
+def test_run_operator_command_dispatches_heartbeat_daemon(monkeypatch, tmp_path):
+    captured = {}
+
+    def _fake_heartbeat(
+        dadbot_cls,
+        *,
+        interval_seconds,
+        consolidation_interval_seconds,
+        session_id,
+        window_size,
+        max_cycles,
+    ):
+        captured["dadbot_cls"] = dadbot_cls
+        captured["interval_seconds"] = interval_seconds
+        captured["consolidation_interval_seconds"] = consolidation_interval_seconds
+        captured["session_id"] = session_id
+        captured["window_size"] = window_size
+        captured["max_cycles"] = max_cycles
+        return 0
+
+    monkeypatch.setattr(app_runtime, "_cli_heartbeat_daemon", _fake_heartbeat)
+
+    args = app_runtime.parse_args([
+        "heartbeat-daemon",
+        "--interval-seconds",
+        "9",
+        "--consolidation-interval-seconds",
+        "90",
+        "--session-id",
+        "ops-core",
+        "--window-size",
+        "14",
+        "--max-cycles",
+        "5",
+    ])
+
+    result = app_runtime._run_operator_command(
+        args,
+        dadbot_cls=_RuntimeStub,
+        script_path=tmp_path / "Dad.py",
+    )
+
+    assert result == 0
+    assert captured["dadbot_cls"] is _RuntimeStub
+    assert captured["interval_seconds"] == 9
+    assert captured["consolidation_interval_seconds"] == 90
+    assert captured["session_id"] == "ops-core"
+    assert captured["window_size"] == 14
+    assert captured["max_cycles"] == 5
+
+
+def test_run_operator_command_dispatches_hud(monkeypatch, tmp_path):
+    captured = {}
+
+    def _fake_hud(dadbot_cls, *, interval_seconds, once, max_samples):
+        captured["dadbot_cls"] = dadbot_cls
+        captured["interval_seconds"] = interval_seconds
+        captured["once"] = once
+        captured["max_samples"] = max_samples
+        return 0
+
+    monkeypatch.setattr(app_runtime, "_cli_hud_watch", _fake_hud)
+
+    args = app_runtime.parse_args([
+        "hud",
+        "--interval-seconds",
+        "4",
+        "--once",
+        "--max-samples",
+        "6",
+    ])
+
+    result = app_runtime._run_operator_command(
+        args,
+        dadbot_cls=_RuntimeStub,
+        script_path=tmp_path / "Dad.py",
+    )
+
+    assert result == 0
+    assert captured["dadbot_cls"] is _RuntimeStub
+    assert captured["interval_seconds"] == 4
+    assert captured["once"] is True
+    assert captured["max_samples"] == 6

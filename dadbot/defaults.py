@@ -1,13 +1,12 @@
-﻿"""
-Static configuration and initial state profiles for the DadBot ecosystem.
+"""Static configuration and initial state profiles for the DadBot ecosystem.
 Moving these here keeps Dadbot.py focused on orchestration logic.
 """
+
 from __future__ import annotations
 
 from collections import deque
 from copy import deepcopy
 from datetime import date, datetime
-
 
 # The 'Soul' of the bot's initial memory
 DEFAULT_MEMORY_STORE = {
@@ -184,7 +183,7 @@ def default_memory_store() -> dict:
             "last_continuous_learning_at": None,
             "last_learning_turn": 0,
             "last_ical_sync": None,
-        }
+        },
     )
     interaction_stats = dict(store.get("interaction_stats") or {})
     interaction_stats.setdefault("last_interaction", None)
@@ -210,7 +209,7 @@ def default_planner_debug_state() -> dict:
             "fallback_tool": "",
             "fallback_observation": "",
             "final_path": "idle",
-        }
+        },
     )
     return state
 
@@ -222,6 +221,7 @@ __all__ = [
     "RELATIONSHIP_HYPOTHESIS_PROFILES",
     "RUNTIME_RELATIONSHIP_HYPOTHESIS_PROFILES",
     "base_memory_store",
+    "datetime",
     "default_memory_graph",
     "default_memory_store",
     "default_planner_debug_state",
@@ -229,5 +229,4 @@ __all__ = [
     "default_relationship_state",
     "planner_debug_state",
     "relationship_hypothesis_profiles",
-    "datetime",
 ]

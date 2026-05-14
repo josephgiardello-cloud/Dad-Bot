@@ -1,318 +1,424 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import hashlib
 import json
-import time
-from contextvars import ContextVar
+import threading
+import warnings
+from collections.abc import Callable
+from contextlib import AbstractContextManager
 from copy import deepcopy
-from threading import RLock
 from typing import Any
 
-from dadbot.core.canonical_event import NON_REPLAY_EVENT_TYPES, canonicalize_event_payload
-from dadbot.core.ledger.enforcement import LedgerEnforcer, LedgerEnforcementError
-from dadbot.core.ledger_backend import LedgerBackend, InMemoryLedgerBackend
-from dadbot.core.event_schema import stamp_schema_version
+from dadbot.core.canonical_event import (
+    CANONICAL_EVENT_FIELDS,
+    NON_REPLAY_EVENT_TYPES,
+    canonicalize_event_payload,
+)
+from dadbot.core.event_schema import get_migrator, stamp_schema_version
+from dadbot.core.ledger_backend import InMemoryLedgerBackend, SequenceValidator
+
+_TAIL_LIMIT = 256
 
 
-# ContextVar used by WriteBoundaryGuard (Step 7) to authorise writes.
-_ledger_write_token: ContextVar[str] = ContextVar("_ledger_write_token", default="")
+class IntegrityBreachError(RuntimeError):
+    """Raised when integrity checks require an immediate hard abort."""
 
 
-def _canonical_trace_payload(event_type: str, payload: Any) -> dict[str, Any]:  # noqa: ARG001
-    """Strip all non-canonical fields from *payload*.
+class WriteBoundaryViolationError(RuntimeError):
+    """Raised when strict ledger mode rejects a write outside the boundary guard."""
 
-    Delegates to the system-wide ``canonicalize_event_payload`` function so
-    that the canonical boundary is defined in exactly one place.
-    The *event_type* parameter is retained for call-site compatibility but is
-    no longer needed — canonicalization is unconditional and field-based, not
-    event-type-based.
-    """
+
+class WriteBoundaryGuard(AbstractContextManager["WriteBoundaryGuard"]):
+    """Temporarily allow writes to a strict-mode ledger."""
+
+    def __init__(self, ledger: ExecutionLedger) -> None:
+        self._ledger = ledger
+
+    def __enter__(self) -> WriteBoundaryGuard:
+        self._ledger._write_guard_depth += 1
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, _tb: Any) -> None:
+        self._ledger._write_guard_depth = max(0, self._ledger._write_guard_depth - 1)
+
+
+def _canonical_trace_payload(event_type: str, payload: Any) -> dict[str, Any]:
+    if str(event_type or "") in NON_REPLAY_EVENT_TYPES:
+        return {}
     return canonicalize_event_payload(payload)
 
 
+def _deterministic_event_id(payload: dict[str, Any]) -> str:
+    seed = {
+        "type": str(payload.get("type") or ""),
+        "session_id": str(payload.get("session_id") or ""),
+        "session_index": int(payload.get("session_index") or 0),
+        "kernel_step_id": str(payload.get("kernel_step_id") or ""),
+        "payload": _canonical_trace_payload(
+            str(payload.get("type") or ""),
+            payload.get("payload"),
+        ),
+    }
+    return (
+        "evt-"
+        + hashlib.sha256(
+            json.dumps(seed, sort_keys=True, default=str).encode("utf-8"),
+        ).hexdigest()[:24]
+    )
+
+
+def _canonical_event_for_hash(event: dict[str, Any]) -> dict[str, Any]:
+    event_type = str(event.get("type") or "")
+    return {
+        "type": event_type,
+        "session_id": str(event.get("session_id") or ""),
+        "session_index": int(event.get("session_index") or 0),
+        "kernel_step_id": str(event.get("kernel_step_id") or ""),
+        "parent_event_id": str(event.get("parent_event_id") or ""),
+        "event_id": str(event.get("event_id") or ""),
+        "payload": _canonical_trace_payload(event_type, event.get("payload")),
+    }
+
+
+def _event_sha256(event: dict[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(_canonical_event_for_hash(event), sort_keys=True, default=str).encode("utf-8"),
+    ).hexdigest()
+
+
+def _chain_hash(prev_chain_hash: str, event_sha256: str) -> str:
+    return hashlib.sha256(
+        f"{prev_chain_hash or ''!s}:{event_sha256 or ''!s}".encode(),
+    ).hexdigest()
+
+
+def _verify_persisted_chain(events: list[dict[str, Any]]) -> list[str]:
+    violations: list[str] = []
+    prev_chain = ""
+    for idx, event in enumerate(list(events or [])):
+        expected_event_sha = _event_sha256(event)
+        expected_prev = prev_chain
+        expected_chain = _chain_hash(expected_prev, expected_event_sha)
+
+        actual_event_sha = str(event.get("event_sha256") or "")
+        actual_prev = str(event.get("prev_chain_hash") or "")
+        actual_chain = str(event.get("chain_hash") or "")
+
+        if actual_event_sha and actual_event_sha != expected_event_sha:
+            violations.append(f"event[{idx}].event_sha256_mismatch")
+        if actual_prev and actual_prev != expected_prev:
+            violations.append(f"event[{idx}].prev_chain_hash_mismatch")
+        if actual_chain and actual_chain != expected_chain:
+            violations.append(f"event[{idx}].chain_hash_mismatch")
+
+        prev_chain = expected_chain
+    return violations
+
+
 class ExecutionLedger:
-    """Authoritative append-only execution history.
-
-    All runtime event systems should derive from this ledger, not vice versa.
-    Required event envelope keys:
-      - type
-      - session_id
-      - trace_id
-      - timestamp
-      - kernel_step_id
-
-    Args:
-        backend: pluggable durability tier (default: InMemoryLedgerBackend).
-        strict_writes: when True, only writes via LedgerWriter (carrying the
-            correct _ledger_write_token) are accepted.  Direct ledger.write()
-            calls from other code raise WriteBoundaryViolationError.
-    """
-
-    _REQUIRED_KEYS = ("type", "session_id", "trace_id", "timestamp", "kernel_step_id")
+    """In-memory append-only execution ledger with replay-hash support."""
 
     def __init__(
         self,
+        backend: Any | None = None,
         *,
-        backend: LedgerBackend | None = None,
         strict_writes: bool = False,
     ) -> None:
-        self._backend: LedgerBackend = backend or InMemoryLedgerBackend()
-        self._strict_writes = bool(strict_writes)
-        self._write_token: str = ""  # set by WriteBoundaryGuard
+        self._backend = backend or InMemoryLedgerBackend()
         self._events: list[dict[str, Any]] = []
-        self._sequence = 0
-        self._session_indexes: dict[str, int] = {}
+        self._cache: dict[str, Any] = {
+            "sequence_counter": 0,
+            "event_count": 0,
+            "last_event_hash": None,
+            "recent_tail": [],
+            "trace_sequence_counters": {},
+            "cache_rebuild_count": 0,
+            "version": 0,
+        }
+        self._lock = threading.RLock()
         self._session_heads: dict[str, str] = {}
-        self._event_session: dict[str, str] = {}
-        self._lock = RLock()
-        self.enforcer = LedgerEnforcer()        # Optional replay filters applied during load_from_backend().
-        # Each filter is a callable(list[dict]) -> list[dict].
-        self._replay_filters: list[Any] = []
-    def write(self, event: dict[str, Any], *, committed: bool = False) -> dict[str, Any]:
-        # Step 7: strict-write boundary check.
-        if self._strict_writes:
-            token = _ledger_write_token.get()
-            if token != self._write_token or not self._write_token:
-                raise WriteBoundaryViolationError(
-                    "Direct ledger.write() is blocked in strict mode. "
-                    "Use LedgerWriter â€” the authorised write boundary."
-                )
-
-        normalized = self._normalize_event(event)
-        self.enforcer.validate(normalized)
-        with self._lock:
-            self._enforce_session_causality(normalized)
-
-            normalized["_seq"] = self._sequence
-            self._sequence += 1
-            normalized["sequence"] = self._sequence
-
-            session_id = str(normalized.get("session_id") or "default")
-            next_session_index = int(self._session_indexes.get(session_id) or 0) + 1
-            normalized["session_index"] = next_session_index
-
-            if not str(normalized.get("event_id") or "").strip():
-                normalized["event_id"] = f"evt-{normalized['sequence']}"
-
-            event_id = str(normalized.get("event_id") or "").strip()
-            if not event_id:
-                raise LedgerEnforcementError("event_id cannot be empty")
-
-            if event_id in self._event_session:
-                raise LedgerEnforcementError(f"Duplicate event_id detected: {event_id}")
-
-            self._session_indexes[session_id] = next_session_index
-            self._session_heads[session_id] = event_id
-            self._event_session[event_id] = session_id
-            self._events.append(normalized)
-
-        # Persist to backend outside the in-memory lock to avoid blocking reads.
-        self._backend.append(normalized, committed=committed)
-
-        return deepcopy(normalized)
-
-    def append(self, event: dict[str, Any], *, committed: bool = False) -> dict[str, Any]:
-        return self.write(event, committed=committed)
+        self._session_indices: dict[str, int] = {}
+        self._write_guard_depth = 0
+        self._strict_writes = bool(strict_writes)
+        self._replay_filters: list[Callable[[list[dict[str, Any]]], list[dict[str, Any]]]] = []
 
     @property
     def sealed_events(self) -> tuple[dict[str, Any], ...]:
-        """Read-only tuple snapshot of the current event list.  Callers cannot
-        mutate the ledger through this view."""
+        return tuple(self.read())
+
+    def add_replay_filter(
+        self,
+        filter_fn: Callable[[list[dict[str, Any]]], list[dict[str, Any]]],
+    ) -> None:
+        self._replay_filters.append(filter_fn)
+
+    def _ensure_write_allowed(self) -> None:
+        if self._strict_writes and self._write_guard_depth <= 0:
+            raise WriteBoundaryViolationError(
+                "ExecutionLedger strict mode requires WriteBoundaryGuard",
+            )
+
+    def get_next_sequence(self) -> int:
         with self._lock:
-            return tuple(deepcopy(self._events))
+            return int(self._cache.get("sequence_counter") or 0) + 1
 
-    def add_replay_filter(self, fn) -> None:
-        """Register a replay filter applied during load_from_backend().
-
-        Example â€” discard uncommitted AtomicWriteUnit events::
-
-            from dadbot.core.durability import AtomicWriteUnit
-            ledger.add_replay_filter(AtomicWriteUnit.filter_committed)
-        """
-        self._replay_filters.append(fn)
-
-    def load_from_backend(self) -> int:
-        """Reload events from the backend into memory.
-
-        Applies registered replay filters (e.g. AtomicWriteUnit.filter_committed)
-        and runs SequenceValidator to detect ordering anomalies.
-        Returns the number of events loaded.
-        """
-        from dadbot.core.ledger_backend import SequenceValidator
-        from dadbot.core.event_schema import get_migrator
-        events = self._backend.load()
-
-        # Upgrade schema versions before applying events.
-        migrator = get_migrator()
-        events = migrator.migrate_all(events)
-
-        # Apply replay filters (e.g. discard uncommitted write units).
-        for fn in self._replay_filters:
-            events = fn(events)
-
-        # Validate backend ordering.
-        report = SequenceValidator.validate(events)
-        if not report["ok"]:
-            import warnings
-            for v in report["violations"]:
-                warnings.warn(
-                    f"ExecutionLedger.load_from_backend: sequence anomaly: {v}",
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
+    def get_next_trace_sequence(self, trace_token: str = "", **legacy_kwargs: Any) -> int:
+        legacy_trace = legacy_kwargs.pop("trace_id", "")
+        if legacy_kwargs:
+            unknown = ", ".join(sorted(str(name) for name in legacy_kwargs))
+            raise TypeError(f"Unexpected keyword argument(s): {unknown}")
         with self._lock:
-            self._events.clear()
-            self._sequence = 0
-            self._session_indexes.clear()
-            self._session_heads.clear()
-            self._event_session.clear()
+            counters = dict(self._cache.get("trace_sequence_counters") or {})
+            key = str(trace_token or legacy_trace or "").strip()
+            return int(counters.get(key, 0)) + 1
 
-        for event in events:
-            # Replay through the normalisation + causal chain without re-persisting.
-            normalized = self._normalize_event(event)
-            with self._lock:
-                self._enforce_session_causality(normalized)
-                normalized["_seq"] = self._sequence
-                self._sequence += 1
-                normalized["sequence"] = int(event.get("sequence") or self._sequence)
-                session_id = str(normalized.get("session_id") or "default")
-                session_index = int(event.get("session_index") or 0) or (
-                    int(self._session_indexes.get(session_id) or 0) + 1
-                )
-                normalized["session_index"] = session_index
-                if not str(normalized.get("event_id") or "").strip():
-                    normalized["event_id"] = str(event.get("event_id") or f"evt-{normalized['sequence']}")
-                event_id = str(normalized.get("event_id") or "").strip()
-                self._session_indexes[session_id] = session_index
-                self._session_heads[session_id] = event_id
-                if event_id:
-                    self._event_session[event_id] = session_id
-                self._events.append(normalized)
-
-        return len(self._events)
-
-    def read(self) -> list[dict[str, Any]]:
+    def event_count(self) -> int:
         with self._lock:
-            return deepcopy(self._events)
+            return int(self._cache.get("event_count") or 0)
 
-    def snapshot(self) -> list[dict[str, Any]]:
-        return self.read()
+    def _rebuild_cache(self) -> None:
+        trace_sequence_counters: dict[str, int] = {}
+        for event in self._events:
+            if str(event.get("type") or "") != "TURN_EVENT":
+                continue
+            payload = dict(event.get("payload") or {})
+            trace_id = str(payload.get("trace_id") or "").strip()
+            if not trace_id:
+                continue
+            seq = int(payload.get("sequence") or 0)
+            if seq > int(trace_sequence_counters.get(trace_id, 0)):
+                trace_sequence_counters[trace_id] = seq
 
-    def events_since(self, cursor: int) -> tuple[list[dict[str, Any]], int]:
+        self._cache["sequence_counter"] = len(self._events)
+        self._cache["event_count"] = len(self._events)
+        self._cache["last_event_hash"] = (
+            str(self._events[-1].get("chain_hash") or "") if self._events else None
+        )
+        self._cache["recent_tail"] = list(self._events[-_TAIL_LIMIT:])
+        self._cache["trace_sequence_counters"] = trace_sequence_counters
+        self._cache["cache_rebuild_count"] = int(self._cache.get("cache_rebuild_count") or 0) + 1
+        self._cache["version"] = int(self._cache.get("version") or 0) + 1
+
+    def telemetry_snapshot(self) -> dict[str, Any]:
         with self._lock:
-            safe = max(0, int(cursor or 0))
-            tail = deepcopy(self._events[safe:])
-            return tail, len(self._events)
+            self.validate_cache()
+            return {
+                "sequence_counter": int(self._cache.get("sequence_counter") or 0),
+                "event_count": int(self._cache.get("event_count") or 0),
+                "cache_rebuild_count": int(self._cache.get("cache_rebuild_count") or 0),
+                "tail_size": len(self._cache.get("recent_tail") or []),
+                "version": int(self._cache.get("version") or 0),
+            }
 
-    def filter(self, *, event_type: str = "", session_id: str = "") -> list[dict[str, Any]]:
-        events = self.read()
-        if event_type:
-            events = [event for event in events if str(event.get("type") or "") == str(event_type)]
+    def validate_cache(self) -> None:
+        if int(self._cache.get("event_count") or 0) != len(self._events):
+            self._rebuild_cache()
+
+    def _apply_session_lineage(self, payload: dict[str, Any]) -> tuple[str, str]:
+        session_id = str(payload.get("session_id") or "")
+        parent_event_id = str(payload.get("parent_event_id") or "")
+        current_head = str(self._session_heads.get(session_id) or "")
         if session_id:
-            events = [event for event in events if str(event.get("session_id") or "") == str(session_id)]
-        return events
+            if parent_event_id:
+                if current_head and parent_event_id != current_head:
+                    raise RuntimeError(
+                        f"causal chain violation: session_id={session_id!r} parent={parent_event_id!r} head={current_head!r}",
+                    )
+            else:
+                payload["parent_event_id"] = current_head
+            payload["session_index"] = int(self._session_indices.get(session_id, 0)) + 1
+        else:
+            payload.setdefault("parent_event_id", "")
+            payload.setdefault("session_index", 0)
+        return session_id, current_head
 
-    def replay_hash(self, *, session_id: str = "") -> str:
-        events = self.filter(session_id=session_id) if session_id else self.read()
-        events = [
-            event for event in events
-            if str(event.get("type") or "") not in NON_REPLAY_EVENT_TYPES
-        ]
+    def _seal_payload_hash_chain(self, payload: dict[str, Any], next_sequence: int) -> None:
+        payload.setdefault("payload", {})
+        payload["_seq"] = len(self._events)
+        payload.setdefault("sequence", next_sequence)
+        payload.setdefault("event_id", _deterministic_event_id(payload))
+        stamp_schema_version(payload)
+
+        event_sha256 = _event_sha256(payload)
+        prev_chain_hash = str(self._events[-1].get("chain_hash") or "") if self._events else ""
+        payload["event_sha256"] = event_sha256
+        payload["prev_chain_hash"] = prev_chain_hash
+        payload["chain_hash"] = _chain_hash(prev_chain_hash, event_sha256)
+
+    def _update_session_heads(self, payload: dict[str, Any], session_id: str) -> None:
+        if not session_id:
+            return
+        event_id = str(payload.get("event_id") or "")
+        self._session_heads[session_id] = event_id
+        self._session_indices[session_id] = int(payload.get("session_index") or 0)
+
+    def _update_trace_sequence_cache(self, payload: dict[str, Any], cache: dict[str, Any]) -> None:
+        if str(payload.get("type") or "") != "TURN_EVENT":
+            return
+        turn_payload = dict(payload.get("payload") or {})
+        trace_id = str(turn_payload.get("trace_id") or "").strip()
+        if not trace_id:
+            return
+        counters = dict(cache.get("trace_sequence_counters") or {})
+        counters[trace_id] = int(turn_payload.get("sequence") or 0)
+        cache["trace_sequence_counters"] = counters
+
+    def _update_recent_tail_cache(self, payload: dict[str, Any], cache: dict[str, Any]) -> None:
+        tail = list(cache.get("recent_tail") or [])
+        tail.append(payload)
+        if len(tail) > _TAIL_LIMIT:
+            tail = tail[-_TAIL_LIMIT:]
+        cache["recent_tail"] = tail
+
+    def write(self, event: dict[str, Any]) -> dict[str, Any]:
+        from dadbot.core.ledger.enforcement import LedgerEnforcer
+
+        self._ensure_write_allowed()
+        LedgerEnforcer().validate(dict(event or {}))
+        with self._lock:
+            payload = dict(event or {})
+            cache = self._cache
+            next_sequence = int(cache.get("sequence_counter") or 0) + 1
+            session_id, _ = self._apply_session_lineage(payload)
+            self._seal_payload_hash_chain(payload, next_sequence)
+            self._update_session_heads(payload, session_id)
+
+            self._events.append(payload)
+            self._backend.append(
+                deepcopy(payload),
+                committed=bool(payload.get("committed", False)),
+            )
+
+            cache["sequence_counter"] = int(payload.get("sequence") or next_sequence)
+            cache["event_count"] = int(cache.get("event_count") or 0) + 1
+            cache["last_event_hash"] = str(payload.get("chain_hash") or "")
+            self._update_trace_sequence_cache(payload, cache)
+            self._update_recent_tail_cache(payload, cache)
+            cache["version"] = int(cache.get("version") or 0) + 1
+            self.validate_cache()
+            return payload
+
+    def append(self, event: dict[str, Any]) -> dict[str, Any]:
+        return self.write(event)
+
+    def read(self, full: bool = True) -> list[dict[str, Any]]:
+        with self._lock:
+            self.validate_cache()
+            if full:
+                return self._events
+            return list(self._cache.get("recent_tail") or [])
+
+    def replay_hash(self) -> str:
+        events = [event for event in self.read() if str(event.get("type") or "") not in NON_REPLAY_EVENT_TYPES]
         canonical = [
-            {
-                "type": str(event.get("type") or ""),
-                "session_id": str(event.get("session_id") or ""),
-                "session_index": int(event.get("session_index") or 0),
-                "event_id": str(event.get("event_id") or ""),
-                "parent_event_id": str(event.get("parent_event_id") or ""),
-                "kernel_step_id": str(event.get("kernel_step_id") or ""),
+            {field: event.get(field) for field in CANONICAL_EVENT_FIELDS}
+            | {
                 "payload": _canonical_trace_payload(
                     str(event.get("type") or ""),
                     event.get("payload"),
                 ),
             }
-            for event in events
+            for event in sorted(events, key=lambda item: int(item.get("sequence") or 0))
         ]
-        digest = hashlib.sha256(json.dumps(canonical, sort_keys=True, default=str).encode("utf-8")).hexdigest()
-        return digest
+        return hashlib.sha256(
+            json.dumps(canonical, sort_keys=True, default=str).encode("utf-8"),
+        ).hexdigest()
 
-    def _normalize_event(self, event: dict[str, Any] | None) -> dict[str, Any]:
-        payload = dict(event or {})
-        payload.setdefault("type", "UNKNOWN")
-        payload.setdefault("session_id", "default")
-        payload.setdefault("trace_id", "")
-        payload.setdefault("timestamp", time.time())
-        payload.setdefault("kernel_step_id", "")
-        payload.setdefault("event_id", "")
-        payload.setdefault("parent_event_id", "")
-        # Stamp schema version (no-op if already present).
-        stamp_schema_version(payload)
+    def chain_hash(self) -> str:
+        events = self.read()
+        if not events:
+            return ""
+        return str(events[-1].get("chain_hash") or "")
 
-        missing = [key for key in self._REQUIRED_KEYS if key not in payload]
-        if missing:
-            raise ValueError(f"ExecutionLedger event missing required keys: {missing}")
-        return payload
+    def verify_replay(self, *, mode: str = "basic") -> dict[str, Any]:
+        events = list(self.read())
+        violations: list[str] = []
 
-    def _enforce_session_causality(self, event: dict[str, Any]) -> None:
-        session_id = str(event.get("session_id") or "default")
-        parent_event_id = str(event.get("parent_event_id") or "").strip()
-        current_head = str(self._session_heads.get(session_id) or "").strip()
+        if str(mode or "basic").strip().lower() == "chain":
+            prev = ""
+            for idx, event in enumerate(events):
+                expected_event_sha = _event_sha256(event)
+                expected_prev = prev
+                expected_chain = _chain_hash(expected_prev, expected_event_sha)
 
-        if parent_event_id:
-            parent_session = str(self._event_session.get(parent_event_id) or "").strip()
-            if not parent_session:
-                raise LedgerEnforcementError(f"Unknown parent_event_id: {parent_event_id}")
-            if parent_session != session_id:
-                raise LedgerEnforcementError(
-                    f"Cross-session leakage: parent {parent_event_id!r} belongs to {parent_session!r}, event is {session_id!r}"
+                actual_event_sha = str(event.get("event_sha256") or "")
+                actual_prev = str(event.get("prev_chain_hash") or "")
+                actual_chain = str(event.get("chain_hash") or "")
+
+                if actual_event_sha != expected_event_sha:
+                    violations.append(f"event[{idx}].event_sha256_mismatch")
+                if actual_prev != expected_prev:
+                    violations.append(f"event[{idx}].prev_chain_hash_mismatch")
+                if actual_chain != expected_chain:
+                    violations.append(f"event[{idx}].chain_hash_mismatch")
+                prev = expected_chain
+
+        return {
+            "ok": len(violations) == 0,
+            "mode": str(mode or "basic"),
+            "event_count": len(events),
+            "replay_hash": self.replay_hash(),
+            "chain_hash": self.chain_hash(),
+            "violations": violations,
+        }
+
+    @staticmethod
+    def _has_persisted_chain(events: list[dict[str, Any]]) -> bool:
+        return any(
+            str(event.get("chain_hash") or "")
+            or str(event.get("event_sha256") or "")
+            or str(event.get("prev_chain_hash") or "")
+            for event in events
+        )
+
+    def _apply_replay_filters(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        filtered = list(events)
+        for replay_filter in self._replay_filters:
+            filtered = list(replay_filter(list(filtered)))
+        return filtered
+
+    def _rehydrate_loaded_events(self, events: list[dict[str, Any]]) -> None:
+        self._events = deepcopy(events)
+        self._session_heads.clear()
+        self._session_indices.clear()
+        prev_chain = ""
+        for event in self._events:
+            if not str(event.get("event_id") or ""):
+                event["event_id"] = _deterministic_event_id(event)
+            event_sha256 = _event_sha256(event)
+            event["event_sha256"] = event_sha256
+            event["prev_chain_hash"] = prev_chain
+            prev_chain = _chain_hash(prev_chain, event_sha256)
+            event["chain_hash"] = prev_chain
+            session_id = str(event.get("session_id") or "")
+            event_id = str(event.get("event_id") or "")
+            if session_id and event_id:
+                self._session_heads[session_id] = event_id
+                self._session_indices[session_id] = int(
+                    event.get("session_index") or 0,
                 )
 
-        # Enforce a strict single-chain causal head per session.
-        if current_head:
-            if not parent_event_id:
-                event["parent_event_id"] = current_head
-            elif parent_event_id != current_head:
-                raise LedgerEnforcementError(
-                    f"Ambiguous ancestry for session {session_id!r}: expected parent {current_head!r}, got {parent_event_id!r}"
+    def load_from_backend(self) -> int:
+        with self._lock:
+            events = list(get_migrator().migrate_all(list(self._backend.load())))
+            if self._has_persisted_chain(events):
+                violations = _verify_persisted_chain(events)
+                if violations:
+                    raise RuntimeError(
+                        "Sovereign checksum chain verification failed while loading ledger: "
+                        + ", ".join(violations),
+                    )
+            report = SequenceValidator.validate(events)
+            if not bool(report.get("ok")):
+                warnings.warn(
+                    f"sequence anomaly: {report.get('violations') or []}",
+                    RuntimeWarning,
+                    stacklevel=2,
                 )
-        elif parent_event_id:
-            raise LedgerEnforcementError(
-                f"Session {session_id!r} has no head yet but parent_event_id {parent_event_id!r} was provided"
-            )
+            events = self._apply_replay_filters(events)
+            self._rehydrate_loaded_events(events)
+            self._rebuild_cache()
+            self.validate_cache()
+            return len(self._events)
 
-
-# ---------------------------------------------------------------------------
-# Step 7 â€” Strict write boundary
-# ---------------------------------------------------------------------------
-
-class WriteBoundaryViolationError(RuntimeError):
-    """Raised when code bypasses LedgerWriter to write directly to the ledger
-    while strict_writes=True is active."""
-
-
-class WriteBoundaryGuard:
-    """Context manager that authorises writes to a strict-mode ExecutionLedger.
-
-    Only LedgerWriter (and code explicitly wrapped in this guard) may call
-    ledger.write() when the ledger is in strict_writes mode.
-
-    Usage:
-        with WriteBoundaryGuard(ledger) as guard:
-            ledger.write(event)  # allowed
-    """
-
-    def __init__(self, ledger: ExecutionLedger) -> None:
-        self._ledger = ledger
-        self._token = None
-
-    def __enter__(self) -> "WriteBoundaryGuard":
-        import uuid
-        write_token = uuid.uuid4().hex
-        self._ledger._write_token = write_token
-        self._token = _ledger_write_token.set(write_token)
-        return self
-
-    def __exit__(self, *_) -> None:
-        self._ledger._write_token = ""
-        if self._token is not None:
-            _ledger_write_token.reset(self._token)
+InMemoryExecutionLedger = ExecutionLedger

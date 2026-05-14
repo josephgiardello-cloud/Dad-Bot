@@ -1,41 +1,256 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
-from copy import deepcopy
+import concurrent.futures
+import contextlib
+import hashlib
+import json
 import logging
+import os
 import time
 import uuid
+from copy import deepcopy
+from datetime import datetime
 from typing import Any
 
-from dadbot.core.capability_audit_runner import (
-    CAPABILITY_AUDIT_EVENT_TYPE,
-    build_capability_audit_event_payload,
-    build_runtime_capability_audit_report,
+from dadbot.core.execution_context import (
+    RuntimeTraceViolation,
+    ensure_execution_trace_root,
+    require_bound_core_state_for_mutation,
 )
-from dadbot.core.graph import FatalTurnError, LedgerMutationOp, MemoryMutationOp, MutationIntent, MutationKind
+from dadbot.core.execution_ledger import IntegrityBreachError
+from dadbot.core.kernel_mutation_gate import apply_event, emit_event
+from dadbot.core.mutation_entry_invariants import enforce_mutation_entry_invariants
+from dadbot.core.contract_evaluator import validate_sovereign_ledger_transition
+from dadbot.core.global_transition_invariants import (
+    TransitionBoundaryView,
+    enforce_global_transition_invariants,
+)
 from dadbot.core.persistence import AbstractCheckpointer
+from dadbot.core.post_commit_events import PostCommitEvent
+from dadbot.core.persistence_schema_config import is_strict_persistence_schema_mode
+from dadbot.core.persistence_record_schema import (
+    PersistenceSchemaError,
+    assert_valid_checkpoint_record,
+    assert_valid_replay_record,
+    checkpoint_record_errors,
+    normalize_checkpoint_record,
+    assert_valid_trace_event,
+    normalize_trace_event,
+    replay_record_errors,
+    trace_event_errors,
+)
+from dadbot.core.runtime_errors import (
+    NON_FATAL_RUNTIME_EXCEPTIONS,
+    ExecutionStageError,
+    InvariantViolation,
+    PersistenceFailure,
+)
 from dadbot.managers.conversation_persistence import ConversationPersistenceManager
+from dadbot.services._persistence_mixins import (
+    POLICY_TRACE_EVENT_TYPE,
+    StateDivergenceError,
+    _AuthorityStateMixin,
+    _BehavioralLedgerMixin,
+    _IntegrityVerifyMixin,
+    _LedgerOpsMixin,
+    _MutationDispatchMixin,
+)
 
 logger = logging.getLogger(__name__)
 
 
-class PersistenceService:
+def _progress_instrumentation_enabled() -> bool:
+    raw = str(os.environ.get("DADBOT_PROGRESS_INSTRUMENTATION", "0")).strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _progress_log_path() -> str:
+    raw = str(os.environ.get("DADBOT_PROGRESS_LOG_PATH", "session_logs/progress_instrumentation.ndjson")).strip()
+    return raw or "session_logs/progress_instrumentation.ndjson"
+
+
+def _write_progress_event(*, component: str, phase: str, payload: dict[str, Any]) -> None:
+    if not _progress_instrumentation_enabled():
+        return
+    event = {
+        "timestamp": time.time(),
+        "component": str(component or "persistence"),
+        "phase": str(phase or "unknown"),
+        "payload": dict(payload or {}),
+    }
+    try:
+        path = _progress_log_path()
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(event, sort_keys=True, default=str) + "\n")
+    except (OSError, TypeError, ValueError) as exc:
+        logger.debug("progress instrumentation write failed: %s", exc)
+
+# Re-export for backward compatibility: external code imports StateDivergenceError
+# from this module.
+__all__ = ["PersistenceService", "StateDivergenceError"]
+
+
+class PersistenceService(
+    _LedgerOpsMixin,
+    _MutationDispatchMixin,
+    _BehavioralLedgerMixin,
+    _AuthorityStateMixin,
+    _IntegrityVerifyMixin,
+):
     """Service wrapper for durable turn/session persistence.
 
     The ``finalize_turn`` method is the atomic commit point for the SaveNode.
     It delegates to ``TurnService.finalize_user_turn``, which appends
     conversation history, schedules background maintenance, runs internal
-    reflection, takes a health snapshot, and persists the session â€” all in a
+    reflection, takes a health snapshot, and persists the session -- all in a
     single call so no partial-state is ever written to disk.
     """
 
-    def __init__(self, persistence_manager: ConversationPersistenceManager, turn_service: Any = None):
+    def __init__(
+        self,
+        persistence_manager: ConversationPersistenceManager,
+        turn_service: Any = None,
+    ):
         self.persistence_manager = persistence_manager
         # Wired by ServiceRegistry.boot() after wire_runtime_managers has run.
         self.turn_service = turn_service
         self.checkpointer: AbstractCheckpointer | None = None
         self.strict_mode: bool = False
+        self._merkle_session_leaves: dict[str, list[str]] = {}
+        self._async_checkpoint_pipeline_enabled: bool = (
+            str(os.environ.get("DADBOT_ASYNC_CHECKPOINT_PIPELINE", "")).strip().lower()
+            in {"1", "true", "on", "yes"}
+        )
+        self._checkpoint_executor: concurrent.futures.ThreadPoolExecutor | None = None
+        self._checkpoint_futures: list[tuple[int, concurrent.futures.Future[Any]]] = []
+        self._checkpoint_enqueue_sequence: int = 0
+        self._checkpoint_drain_sequence: int = 0
+
+    def _strict_schema_reject_enabled(self) -> bool:
+        # Use centralized config resolver: checks service.strict_mode + env flag
+        return is_strict_persistence_schema_mode(service_strict_mode=self.strict_mode)
+
+    def _emit_progress_snapshot(
+        self,
+        *,
+        phase: str,
+        turn_context: Any,
+        expected_completion_conditions: dict[str, bool] | None = None,
+        note: str = "",
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        state = getattr(turn_context, "state", None)
+        tx = dict(state.get("_save_transaction") or {}) if isinstance(state, dict) else {}
+        expectations = dict(expected_completion_conditions or {})
+        unmet = [name for name, ok in expectations.items() if not bool(ok)]
+        payload = {
+            "trace_id": str(getattr(turn_context, "trace_id", "") or ""),
+            "phase": str(phase or "unknown"),
+            "checkpoint_queue_pending": int(len(self._checkpoint_futures)),
+            "checkpoint_enqueue_sequence": int(self._checkpoint_enqueue_sequence),
+            "checkpoint_drain_sequence": int(self._checkpoint_drain_sequence),
+            "save_transaction_status": str(tx.get("status") or ""),
+            "save_transaction_active": bool(state.get("_save_transaction_active", False)) if isinstance(state, dict) else False,
+            "expected_completion_conditions": expectations,
+            "unmet_completion_conditions": unmet,
+            "note": str(note or ""),
+            "extra": dict(extra or {}),
+        }
+        _write_progress_event(component="persistence", phase=phase, payload=payload)
+
+    def _ensure_checkpoint_executor(self) -> concurrent.futures.ThreadPoolExecutor:
+        if self._checkpoint_executor is None:
+            self._checkpoint_executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix="dadbot-checkpoint",
+            )
+        return self._checkpoint_executor
+
+    def _drain_async_checkpoint_queue(self, *, strict_error: bool) -> None:
+        if not self._checkpoint_futures:
+            return
+        pending = list(self._checkpoint_futures)
+        self._checkpoint_futures.clear()
+        expected = int(self._checkpoint_drain_sequence) + 1
+        for sequence_id, future in pending:
+            if int(sequence_id) != int(expected):
+                raise InvariantViolation(
+                    "Async checkpoint ordering contract violated",
+                    context={
+                        "expected_sequence": int(expected),
+                        "actual_sequence": int(sequence_id),
+                    },
+                )
+            try:
+                future.result()
+                self._checkpoint_drain_sequence = int(sequence_id)
+                expected = int(sequence_id) + 1
+            except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
+                logger.error("PersistenceService async checkpoint save failed: %s", exc)
+                if strict_error:
+                    raise PersistenceFailure(
+                        "PersistenceService async checkpoint save failed",
+                        context={"error": str(exc), "sequence_id": int(sequence_id)},
+                    ) from exc
+
+    def _enqueue_async_checkpoint(
+        self,
+        *,
+        session_id: str,
+        trace_token: str,
+        checkpoint: dict[str, Any],
+        manifest: dict[str, Any],
+    ) -> None:
+        if self.checkpointer is None:
+            return
+        self._checkpoint_enqueue_sequence = int(self._checkpoint_enqueue_sequence) + 1
+        sequence_id = int(self._checkpoint_enqueue_sequence)
+        if sequence_id <= int(self._checkpoint_drain_sequence):
+            raise InvariantViolation(
+                "Async checkpoint enqueue sequence must advance monotonically",
+                context={
+                    "enqueue_sequence": sequence_id,
+                    "drain_sequence": int(self._checkpoint_drain_sequence),
+                },
+            )
+        executor = self._ensure_checkpoint_executor()
+        future = executor.submit(
+            self.checkpointer.save_checkpoint,
+            session_id=session_id,
+            trace_id=trace_token,
+            checkpoint=dict(checkpoint),
+            manifest=dict(manifest),
+        )
+        self._checkpoint_futures.append((sequence_id, future))
+
+    @staticmethod
+    def _stable_hash(payload: Any) -> str:
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, ensure_ascii=True, default=str).encode(
+                "utf-8",
+            ),
+        ).hexdigest()
+
+    def __del__(self) -> None:
+        with contextlib.suppress(Exception):
+            self._drain_async_checkpoint_queue(strict_error=False)
+        if self._checkpoint_executor is not None:
+            with contextlib.suppress(Exception):
+                self._checkpoint_executor.shutdown(wait=False, cancel_futures=False)
+
+    @staticmethod
+    def _json_safe(payload: Any) -> Any:
+        return json.loads(
+            json.dumps(payload, sort_keys=True, ensure_ascii=True, default=str),
+        )
 
     def set_checkpointer(self, checkpointer: AbstractCheckpointer | None) -> None:
+        self._drain_async_checkpoint_queue(strict_error=False)
+        if self._checkpoint_executor is not None:
+            with contextlib.suppress(Exception):
+                self._checkpoint_executor.shutdown(wait=True, cancel_futures=False)
+            self._checkpoint_executor = None
         self.checkpointer = checkpointer
 
     @staticmethod
@@ -44,54 +259,29 @@ class PersistenceService:
             return None
         try:
             return callable_obj(*args, **kwargs)
-        except Exception as exc:
-            logger.warning("PersistenceService post-finalize hook failed (non-fatal): %s", exc)
+        except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
+            logger.warning(
+                "PersistenceService post-finalize hook failed (non-fatal): %s",
+                exc,
+            )
             return None
 
-    def _apply_memory_decay(self, memory_manager: Any, turn_context: Any) -> None:
-        """Apply deterministic memory decay after consolidation, before graph sync.
+    def _apply_memory_decay(self, memory_manager: Any, ctx: Any) -> Any:
+        """Persistence boundary guard.
 
-        Uses MemoryDecayPolicy â€” no datetime.now(), no external clocks.
-        Non-fatal: any failure is logged and silently skipped.
+        Memory decay and lifecycle evolution are post-commit responsibilities
+        and must run in post-commit worker / maintenance services only.
         """
-        from dadbot.memory.decay_policy import DecayResult, MemoryDecayPolicy
+        raise ExecutionStageError(
+            "PersistenceService._apply_memory_decay is not allowed",
+            context={"required_path": "post-commit worker or maintenance service"},
+        )
 
-        try:
-            entries = list(memory_manager.consolidated_memories())
-            if not entries:
-                return
-            policy = MemoryDecayPolicy()
-            result: DecayResult = policy.apply(entries, turn_context)
-            if not result.pruned and not result.weakened:
-                return
-
-            pruned_ids = set(result.pruned)
-            weakened_ids = set(result.weakened)
-            updated: list[Any] = []
-            for entry in entries:
-                eid = str(entry.get("id", ""))
-                if eid in pruned_ids:
-                    continue
-                if eid in weakened_ids:
-                    entry = dict(entry)
-                    old = float(entry.get("importance_score", 0.0) or 0.0)
-                    entry["importance_score"] = round(max(0.0, old * policy.weaken_factor), 4)
-                updated.append(entry)
-            memory_manager.mutate_memory_store(consolidated_memories=updated)
-
-            # Surface result to graph state for observability / replay auditing
-            state = getattr(turn_context, "state", None)
-            if isinstance(state, dict):
-                state["memory_decay_result"] = {
-                    "pruned": result.pruned,
-                    "weakened": result.weakened,
-                    "unchanged_count": len(result.unchanged),
-                    "total_score_map": result.total_score_map,
-                }
-        except Exception as exc:
-            logger.warning("PersistenceService._apply_memory_decay failed (non-fatal): %s", exc)
-
-    def _apply_pending_save_boundary_mutations(self, runtime: Any, turn_context: Any) -> None:
+    def _apply_pending_save_boundary_mutations(
+        self,
+        runtime: Any,
+        turn_context: Any,
+    ) -> None:
         state = getattr(turn_context, "state", None)
         if not isinstance(state, dict):
             return
@@ -115,268 +305,52 @@ class PersistenceService:
 
         memory = getattr(runtime, "memory", None)
         if memory is None:
-            raise RuntimeError("SaveNode strict mode requires runtime.memory")
+            raise PersistenceFailure("SaveNode strict mode requires runtime.memory")
 
         for item in pending_moods:
             mood = str(item.get("mood") or "neutral")
             memory.save_mood_state(mood)
 
-        state["_pending_mood_updates"] = []
-        state["_pending_relationship_updates"] = []
-        state["_deferred_turn_state_updates"] = []
-
-    def _drain_mutation_queue(self, runtime: Any, turn_context: Any) -> None:
-        mutation_queue = getattr(turn_context, "mutation_queue", None)
-        if mutation_queue is None:
-            return
-
-        service = self.turn_service
-
-        def _dispatch_mutation_intent(intent: Any) -> None:
-            if not isinstance(intent, MutationIntent):
-                raise RuntimeError(f"MutationQueue received non-MutationIntent payload: {type(intent).__name__}")
-            intent_type = intent.type
-            payload = dict(intent.payload or {})
-            source = str(intent.source or "")
-
-            if intent_type is MutationKind.MEMORY:
-                op = str(payload.get("op") or "").strip().lower()
-                if op != MemoryMutationOp.SAVE_MOOD_STATE.value:
-                    raise RuntimeError(
-                        f"MutationIntent(type=memory, source={source!r}): unsupported op={op!r}"
-                    )
-                mood = str(payload.get("mood") or "neutral")
-                memory = getattr(runtime, "memory", None)
-                if memory is None:
-                    raise RuntimeError(
-                        f"MutationIntent(type=memory, source={source!r}): runtime.memory unavailable"
-                    )
-                memory.save_mood_state(mood)
-                return
-
-            if intent_type is MutationKind.RELATIONSHIP:
-                raise RuntimeError(
-                    "MutationIntent(type=relationship) rejected: relationship subsystem is projection-only"
-                )
-
-            if intent_type is MutationKind.GRAPH:
-                memory_manager = getattr(runtime, "memory_manager", None)
-                graph_manager = getattr(memory_manager, "graph_manager", None) if memory_manager else None
-                if graph_manager is None:
-                    raise RuntimeError(f"MutationIntent(type=graph, source={source!r}): graph_manager unavailable")
-                _fn = getattr(graph_manager, "apply_mutation", None)
-                if callable(_fn):
-                    _fn(payload, turn_context=turn_context)
-                    return
-                raise RuntimeError(f"MutationIntent(type=graph, source={source!r}): graph_manager.apply_mutation not callable")
-
-            if intent_type is MutationKind.LEDGER:
-                op = str(payload.get("op") or "").strip().lower()
-                if op == LedgerMutationOp.APPEND_HISTORY.value:
-                    entry = dict(payload.get("entry") or {})
-                    with runtime._session_lock:
-                        runtime.history.append(entry)
-                    return
-                if op == LedgerMutationOp.RECORD_TURN_STATE.value:
-                    mood = str(payload.get("mood") or "neutral")
-                    should_offer_daily_checkin = bool(payload.get("should_offer_daily_checkin", False))
-                    with runtime._session_lock:
-                        runtime.session_moods.append(mood)
-                        runtime._pending_daily_checkin_context = should_offer_daily_checkin
-                    return
-                if op == LedgerMutationOp.SYNC_THREAD_SNAPSHOT.value:
-                    runtime.sync_active_thread_snapshot()
-                    return
-                if op == LedgerMutationOp.CLEAR_TURN_CONTEXT.value:
-                    with runtime._session_lock:
-                        runtime._pending_daily_checkin_context = False
-                        runtime._active_tool_observation_context = None
-                    return
-                if op == LedgerMutationOp.SCHEDULE_MAINTENANCE.value:
-                    turn_text = str(payload.get("turn_text") or "")
-                    mood = payload.get("mood")
-                    if not bool(getattr(runtime, "LIGHT_MODE", False)):
-                        runtime.schedule_post_turn_maintenance(turn_text, mood)
-                        append_step = getattr(service, "_append_turn_pipeline_step", None)
-                        if callable(append_step):
-                            append_step("schedule_maintenance", detail="queued post-turn maintenance")
-                    else:
-                        append_step = getattr(service, "_append_turn_pipeline_step", None)
-                        if callable(append_step):
-                            append_step("schedule_maintenance", status="skipped", detail="light mode skips maintenance")
-                    return
-                if op == LedgerMutationOp.HEALTH_SNAPSHOT.value:
-                    runtime.current_runtime_health_snapshot(force=True, log_warnings=True, persist=True)
-                    append_step = getattr(service, "_append_turn_pipeline_step", None)
-                    if callable(append_step):
-                        append_step("health_snapshot", detail="refreshed runtime health snapshot")
-                    return
-                if op == LedgerMutationOp.CAPABILITY_AUDIT_EVENT.value:
-                    # Non-authoritative observability write: never block turn correctness.
-                    try:
-                        stage_order = [
-                            str(getattr(trace, "stage", "") or "")
-                            for trace in list(getattr(turn_context, "stage_traces", []) or [])
-                        ]
-                        if "save" not in [s.strip().lower() for s in stage_order]:
-                            stage_order = [*stage_order, "save"]
-
-                        report = build_runtime_capability_audit_report(
-                            turn_context,
-                            stage_order=stage_order,
-                            failed=False,
-                        )
-                        report_payload = report.to_dict()
-                        if isinstance(getattr(turn_context, "state", None), dict):
-                            turn_context.state["capability_audit_report"] = report_payload
-                        if isinstance(getattr(turn_context, "metadata", None), dict):
-                            turn_context.metadata["capability_audit_report"] = dict(report_payload)
-
-                        event_payload = build_capability_audit_event_payload(
-                            report,
-                            scenario=str(payload.get("scenario") or "runtime_turn"),
-                        )
-
-                        if hasattr(turn_context, "event_sequence"):
-                            turn_context.event_sequence += 1
-                            sequence = int(turn_context.event_sequence)
-                        else:
-                            sequence = 0
-
-                        trace_id = str(getattr(turn_context, "trace_id", "") or "unknown")
-                        phase_value = str(getattr(getattr(turn_context, "phase", None), "value", "") or "")
-                        occurred_at = ""
-                        temporal = getattr(turn_context, "temporal", None)
-                        if temporal is not None:
-                            occurred_at = str(getattr(temporal, "wall_time", "") or "")
-
-                        self.save_turn_event(
-                            {
-                                "event_type": CAPABILITY_AUDIT_EVENT_TYPE,
-                                "trace_id": trace_id,
-                                "sequence": sequence,
-                                "occurred_at": occurred_at,
-                                "stage": "save",
-                                "status": "after",
-                                "phase": phase_value,
-                                "payload": event_payload,
-                            }
-                        )
-
-                        control_plane = getattr(getattr(runtime, "turn_orchestrator", None), "control_plane", None)
-                        ledger_writer = getattr(control_plane, "ledger_writer", None)
-                        write_event = getattr(ledger_writer, "write_event", None)
-                        if callable(write_event):
-                            session_id = str(
-                                (getattr(turn_context, "metadata", {}) or {}).get("control_plane", {}).get("session_id")
-                                or "default"
-                            )
-                            write_event(
-                                event_type=CAPABILITY_AUDIT_EVENT_TYPE,
-                                session_id=session_id,
-                                trace_id=trace_id,
-                                kernel_step_id="save_node.capability_audit",
-                                payload=event_payload,
-                                committed=False,
-                            )
-                    except Exception as exc:
-                        logger.warning("PersistenceService capability audit persistence failed (non-fatal): %s", exc)
-                    return
-                raise RuntimeError(
-                    f"MutationIntent(type=ledger, source={source!r}): unsupported op={op!r}"
-                )
-
-            raise RuntimeError(f"MutationIntent: unknown type={intent_type!r} source={source!r}")
-
-        try:
-            mutation_queue.drain(
-                _dispatch_mutation_intent,
-                hard_fail_on_error=True,
-                transactional=True,
-            )
-        except TypeError as exc:
-            # Backward compatibility for tests/wrappers that monkeypatch
-            # MutationQueue.drain with a legacy two-parameter signature.
-            if "unexpected keyword argument 'transactional'" not in str(exc):
-                raise
-            mutation_queue.drain(
-                _dispatch_mutation_intent,
-                hard_fail_on_error=True,
-            )
-        if not mutation_queue.is_empty():
-            pending = mutation_queue.size()
-            raise FatalTurnError(
-                "Mutation queue not fully drained"
-                f" (pending={pending}, trace_id={getattr(turn_context, 'trace_id', '')!r})"
-            )
-
-    @staticmethod
-    def _flush_background_memory_store_patch_queue(runtime: Any) -> int:
-        queue = getattr(runtime, "_background_memory_store_patch_queue", None)
-        if not isinstance(queue, list) or not queue:
-            return 0
-        pending = list(queue)
-        queue.clear()
-        applied = 0
-        for patch in pending:
-            if not isinstance(patch, dict):
-                continue
-            runtime.mutate_memory_store(**patch)
-            applied += 1
-        return applied
-
-    @staticmethod
-    def _build_hierarchical_memory_payload(turn_context: Any) -> dict[str, Any]:
-        state = getattr(turn_context, "state", None)
-        metadata = getattr(turn_context, "metadata", None)
-        state_dict = state if isinstance(state, dict) else {}
-        metadata_dict = metadata if isinstance(metadata, dict) else {}
-
-        return {
-            "recent_buffer": list(state_dict.get("memory_recent_buffer") or []),
-            "rolling_summary": str(state_dict.get("memory_rolling_summary") or ""),
-            "structured_memory": dict(state_dict.get("memory_structured") or {}),
-            "full_history_id": state_dict.get("memory_full_history_id"),
-            "token_counts": {
-                "recent": int(metadata_dict.get("recent_tokens", 0) or 0),
-                "summary": int(metadata_dict.get("summary_tokens", 0) or 0),
-                "structured": int(metadata_dict.get("structured_tokens", 0) or 0),
-                "total": int(metadata_dict.get("context_total_tokens", 0) or 0),
-            },
-        }
-
-    def _persist_hierarchical_memory_commit(self, turn_context: Any, *, commit_id: str) -> None:
-        state = getattr(turn_context, "state", None)
-        metadata = getattr(turn_context, "metadata", None)
-        if not isinstance(state, dict):
-            return
-
-        memory_payload = self._build_hierarchical_memory_payload(turn_context)
-        state["hierarchical_memory_payload"] = dict(memory_payload)
-        if isinstance(metadata, dict):
-            metadata["hierarchical_memory_payload"] = dict(memory_payload)
-
-        trace_id = str(getattr(turn_context, "trace_id", "") or "")
-        phase_value = str(getattr(getattr(turn_context, "phase", None), "value", "") or "")
-        occurred_at = ""
-        temporal = getattr(turn_context, "temporal", None)
-        if temporal is not None:
-            occurred_at = str(getattr(temporal, "wall_time", "") or "")
-
-        self.save_turn_event(
+        clear_event = emit_event(
+            "MUTATION_EVENT",
             {
-                "event_type": "hierarchical_memory_commit",
-                "trace_id": trace_id,
-                "occurred_at": occurred_at,
-                "stage": "save",
-                "status": "after",
-                "phase": phase_value,
-                "payload": {
-                    "commit_id": str(commit_id or ""),
-                    "trace_id": trace_id,
-                    "memory": memory_payload,
+                "op": "dict_update",
+                "updates": {
+                    "_pending_mood_updates": [],
+                    "_pending_relationship_updates": [],
+                    "_deferred_turn_state_updates": [],
                 },
-            }
+            },
+            source="PersistenceService._apply_pending_save_boundary_mutations",
+        )
+        turn_context.state = apply_event(
+            clear_event,
+            state,
+            lambda current, evt: {**current, **dict(evt.payload.get("updates") or {})},
+        )
+
+    def _publish_post_commit_ready(self, runtime: Any, turn_context: Any) -> None:
+        """Publish the post-commit readiness event and return immediately."""
+        event_bus = getattr(runtime, "_runtime_event_bus", None)
+        publish = getattr(event_bus, "publish", None)
+        if not callable(publish):
+            logger.warning(
+                "Post-commit worker unavailable: runtime event bus missing publish(); skipping post-commit event"
+            )
+            return
+
+        metadata = getattr(turn_context, "metadata", None)
+        control_plane = dict(metadata.get("control_plane") or {}) if isinstance(metadata, dict) else {}
+        publish(
+            PostCommitEvent(
+                session_id=str(control_plane.get("session_id") or "default"),
+                trace_id=str(getattr(turn_context, "trace_id", "") or ""),
+                tenant_id=str(
+                    getattr(getattr(runtime, "config", None), "tenant_id", "default")
+                    or "default"
+                ),
+                payload={"turn_context": turn_context},
+            )
         )
 
     def _commit_post_finalize_side_effects(self, turn_context: Any) -> None:
@@ -384,15 +358,13 @@ class PersistenceService:
         service = self.turn_service
         runtime = None if service is None else getattr(service, "bot", None)
         if runtime is None:
-            raise RuntimeError("SaveNode strict mode requires an attached turn_service runtime")
-
-        memory_coordinator = getattr(runtime, "memory_coordinator", None)
-        if memory_coordinator is None:
-            raise RuntimeError("SaveNode strict mode requires memory_coordinator")
+            raise PersistenceFailure(
+                "SaveNode strict mode requires an attached turn_service runtime",
+            )
 
         # --- Drain MutationQueue FIRST at the canonical SaveNode commit boundary ---
         # Every mutation queued outside this boundary (deferred from earlier stages or
-        # direct-path callers) must execute here. Any failure is a hard fail — nothing
+        # direct-path callers) must execute here. Any failure is a hard fail -- nothing
         # is silently dropped.
         self._drain_mutation_queue(runtime, turn_context)
         # --------------------------------------------------------------------------
@@ -400,46 +372,59 @@ class PersistenceService:
         # Apply any pending non-SaveNode mutation intents at the canonical commit boundary.
         self._apply_pending_save_boundary_mutations(runtime, turn_context)
         self._flush_background_memory_store_patch_queue(runtime)
-        flush_deferred = getattr(self.persistence_manager, "flush_deferred_save_boundary_mutations", None)
+        flush_deferred = getattr(
+            self.persistence_manager,
+            "flush_deferred_save_boundary_mutations",
+            None,
+        )
         if callable(flush_deferred):
             self._call_nonfatal(flush_deferred, turn_context)
 
-        consolidate_memories = getattr(memory_coordinator, "consolidate_memories", None)
-        if not callable(consolidate_memories):
-            raise RuntimeError("SaveNode strict mode requires memory_coordinator.consolidate_memories")
-        memory_ops_started = time.perf_counter()
-        consolidate_memories(turn_context=turn_context)
-
-        apply_controlled_forgetting = getattr(memory_coordinator, "apply_controlled_forgetting", None)
-        if not callable(apply_controlled_forgetting):
-            raise RuntimeError("SaveNode strict mode requires memory_coordinator.apply_controlled_forgetting")
-        apply_controlled_forgetting(turn_context=turn_context)
-        memory_ops_ms = round((time.perf_counter() - memory_ops_started) * 1000, 3)
-        if isinstance(getattr(turn_context, "state", None), dict):
-            turn_context.state["_timing_memory_ops_ms"] = memory_ops_ms
-
         relationship_manager = getattr(runtime, "relationship_manager", None)
-        materialize_projection = getattr(relationship_manager, "materialize_projection", None)
+        materialize_projection = getattr(
+            relationship_manager,
+            "materialize_projection",
+            None,
+        )
         if not callable(materialize_projection):
-            raise RuntimeError("SaveNode strict mode requires relationship_projector.materialize_projection")
+            raise PersistenceFailure(
+                "SaveNode strict mode requires relationship_projector.materialize_projection",
+            )
         materialize_projection(turn_context=turn_context)
 
         memory_manager = getattr(runtime, "memory_manager", None)
         graph_manager = getattr(memory_manager, "graph_manager", None) if memory_manager is not None else None
         sync_graph_store = getattr(graph_manager, "sync_graph_store", None)
         if not callable(sync_graph_store):
-            raise RuntimeError("SaveNode strict mode requires memory_graph_manager.sync_graph_store")
+            raise PersistenceFailure(
+                "SaveNode strict mode requires memory_graph_manager.sync_graph_store",
+            )
         graph_sync_started = time.perf_counter()
         sync_graph_store(turn_context=turn_context)
         graph_sync_ms = round((time.perf_counter() - graph_sync_started) * 1000, 3)
         if isinstance(getattr(turn_context, "state", None), dict):
             turn_context.state["_timing_graph_sync_ms"] = graph_sync_ms
 
+        # Post-commit publish is intentionally performed by finalize_turn after
+        # checkpoint/checkpointer writes complete to avoid worker-thread state
+        # mutations racing with in-flight finalize snapshotting.
+
     @staticmethod
-    def _capture_transaction_snapshot(runtime: Any, turn_context: Any) -> dict[str, Any]:
-        graph_manager = getattr(getattr(runtime, "memory_manager", None), "graph_manager", None)
+    def _capture_transaction_snapshot(
+        runtime: Any,
+        turn_context: Any,
+    ) -> dict[str, Any]:
+        graph_manager = getattr(
+            getattr(runtime, "memory_manager", None),
+            "graph_manager",
+            None,
+        )
         graph_snapshot = {"nodes": [], "edges": [], "updated_at": None}
-        background_patch_queue = getattr(runtime, "_background_memory_store_patch_queue", None)
+        background_patch_queue = getattr(
+            runtime,
+            "_background_memory_store_patch_queue",
+            None,
+        )
         if graph_manager is not None:
             snapshot_builder = getattr(graph_manager, "graph_snapshot", None)
             if callable(snapshot_builder):
@@ -449,23 +434,46 @@ class PersistenceService:
             "memory_store": deepcopy(dict(getattr(runtime, "MEMORY_STORE", {}) or {})),
             "graph_snapshot": deepcopy(graph_snapshot),
             "session_state": deepcopy(runtime.snapshot_session_state()),
-            "last_turn_pipeline": deepcopy(dict(getattr(runtime, "_last_turn_pipeline", {}) or {})),
-            "background_patch_queue": deepcopy(list(background_patch_queue)) if isinstance(background_patch_queue, list) else None,
+            "last_turn_pipeline": deepcopy(
+                dict(getattr(runtime, "_last_turn_pipeline", {}) or {}),
+            ),
+            "background_patch_queue": deepcopy(list(background_patch_queue))
+            if isinstance(background_patch_queue, list)
+            else None,
             "turn_state": deepcopy(dict(getattr(turn_context, "state", {}) or {})),
             "metadata": deepcopy(dict(getattr(turn_context, "metadata", {}) or {})),
         }
 
     @staticmethod
-    def _restore_transaction_snapshot(runtime: Any, turn_context: Any, snapshot: dict[str, Any]) -> None:
+    def _restore_transaction_snapshot(
+        runtime: Any,
+        turn_context: Any,
+        snapshot: dict[str, Any],
+    ) -> None:
+        enforce_mutation_entry_invariants(
+            mutation_kind="persistence",
+            source="PersistenceService._restore_transaction_snapshot",
+            changed_keys=["memory_store", "graph_snapshot", "session_state"],
+        )
+        require_bound_core_state_for_mutation(
+            source="PersistenceService._restore_transaction_snapshot",
+            changed_keys=["memory_store", "graph_snapshot", "session_state"],
+        )
         session_state = dict(snapshot.get("session_state", {}) or {})
         if session_state:
             runtime.load_session_state_snapshot(deepcopy(session_state))
         else:
-            runtime.MEMORY_STORE = deepcopy(dict(snapshot.get("memory_store", {}) or {}))
-        runtime._last_turn_pipeline = deepcopy(dict(snapshot.get("last_turn_pipeline", {}) or {}))
-        background_patch_queue = snapshot.get("background_patch_queue", None)
+            runtime.MEMORY_STORE = deepcopy(
+                dict(snapshot.get("memory_store", {}) or {}),
+            )
+        runtime._last_turn_pipeline = deepcopy(
+            dict(snapshot.get("last_turn_pipeline", {}) or {}),
+        )
+        background_patch_queue = snapshot.get("background_patch_queue")
         if isinstance(background_patch_queue, list):
-            runtime._background_memory_store_patch_queue = deepcopy(background_patch_queue)
+            runtime._background_memory_store_patch_queue = deepcopy(
+                background_patch_queue,
+            )
 
         state = getattr(turn_context, "state", None)
         if isinstance(state, dict):
@@ -478,7 +486,11 @@ class PersistenceService:
             metadata.update(deepcopy(dict(snapshot.get("metadata", {}) or {})))
 
         graph_snapshot = dict(snapshot.get("graph_snapshot", {}) or {})
-        graph_manager = getattr(getattr(runtime, "memory_manager", None), "graph_manager", None)
+        graph_manager = getattr(
+            getattr(runtime, "memory_manager", None),
+            "graph_manager",
+            None,
+        )
         backend = getattr(graph_manager, "_graph_store_backend", None) if graph_manager is not None else None
         replace_graph = getattr(backend, "replace_graph", None)
         if callable(replace_graph):
@@ -490,7 +502,7 @@ class PersistenceService:
     def begin_transaction(self, turn_context: Any) -> None:
         temporal = getattr(turn_context, "temporal", None)
         if temporal is None:
-            raise RuntimeError("TemporalNode required — execution invalid")
+            raise InvariantViolation("TemporalNode required -- execution invalid")
         state = getattr(turn_context, "state", None)
         service = self.turn_service
         runtime = None if service is None else getattr(service, "bot", None)
@@ -498,8 +510,13 @@ class PersistenceService:
             if runtime is not None:
                 state["_save_transaction_snapshot"] = self._capture_transaction_snapshot(runtime, turn_context)
             trace_id = str(getattr(turn_context, "trace_id", "") or "")
+            if trace_id:
+                commit_seed = f"{trace_id}:{getattr(turn_context, 'user_input', '') or ''!s}"
+                commit_id = hashlib.sha256(commit_seed.encode("utf-8")).hexdigest()[:32]
+            else:
+                commit_id = uuid.uuid4().hex
             state["_save_transaction"] = {
-                "commit_id": uuid.uuid4().hex,
+                "commit_id": commit_id,
                 "trace_id": trace_id,
                 "started_at": str(getattr(temporal, "wall_time", "") or ""),
                 "status": "active",
@@ -509,11 +526,21 @@ class PersistenceService:
     def apply_mutations(self, turn_context: Any) -> None:
         temporal = getattr(turn_context, "temporal", None)
         if temporal is None:
-            raise RuntimeError("TemporalNode required — execution invalid")
+            raise InvariantViolation("TemporalNode required -- execution invalid")
+        invariant_metadata: dict[str, Any] = {}
+        trace_id = str(getattr(turn_context, "trace_id", "") or "").strip()
+        if trace_id:
+            invariant_metadata["trace_id"] = trace_id
+        enforce_mutation_entry_invariants(
+            mutation_kind="persistence",
+            source="PersistenceService.apply_mutations",
+            changed_keys=["_save_mutations_applied"],
+            metadata=invariant_metadata,
+        )
         service = self.turn_service
         runtime = None if service is None else getattr(service, "bot", None)
         if runtime is None:
-            raise RuntimeError("SaveNode strict mode requires turn_service.bot")
+            raise PersistenceFailure("SaveNode strict mode requires turn_service.bot")
         # SaveNode finalize_turn performs the canonical commit sequence in strict mode.
         # This hook exists to preserve transaction staging semantics in core.nodes.SaveNode.
         state = getattr(turn_context, "state", None)
@@ -527,7 +554,9 @@ class PersistenceService:
             if transaction:
                 temporal = getattr(turn_context, "temporal", None)
                 transaction["status"] = "committed"
-                transaction["committed_at"] = str(getattr(temporal, "wall_time", "") or "")
+                transaction["committed_at"] = str(
+                    getattr(temporal, "wall_time", "") or "",
+                )
                 state["_save_transaction"] = transaction
                 commit_id = str(transaction.get("commit_id") or "")
                 state["last_commit_id"] = commit_id
@@ -536,7 +565,11 @@ class PersistenceService:
                 if isinstance(metadata, dict):
                     metadata["last_commit_id"] = commit_id
                     metadata["last_transaction_status"] = "committed"
-                self._persist_hierarchical_memory_commit(turn_context, commit_id=commit_id)
+                self._persist_hierarchical_memory_commit(
+                    turn_context,
+                    commit_id=commit_id,
+                )
+                self._record_merkle_anchor(turn_context, commit_id=commit_id)
             state["_save_transaction_active"] = False
             state["_save_mutations_applied"] = False
 
@@ -552,7 +585,9 @@ class PersistenceService:
             if transaction:
                 temporal = getattr(turn_context, "temporal", None)
                 transaction["status"] = "rolled_back"
-                transaction["rolled_back_at"] = str(getattr(temporal, "wall_time", "") or "")
+                transaction["rolled_back_at"] = str(
+                    getattr(temporal, "wall_time", "") or "",
+                )
                 state["_save_transaction"] = transaction
             state["_save_transaction_active"] = False
             state["_save_mutations_applied"] = False
@@ -560,10 +595,9 @@ class PersistenceService:
         mutation_queue = getattr(turn_context, "mutation_queue", None)
         if mutation_queue is not None:
             # Roll back queue runtime bookkeeping so failed-turn contracts are deterministic.
-            mutation_queue._queue = []
-            mutation_queue._drained = []
-            mutation_queue._failed = []
-            mutation_queue._sequence_counter = 0
+            reset_fn = getattr(mutation_queue, "reset_for_rollback", None)
+            if callable(reset_fn):
+                reset_fn()
 
     def final_ledger_commit(
         self,
@@ -574,133 +608,902 @@ class PersistenceService:
         turn_context: Any,
     ) -> tuple:
         if self.turn_service is None:
-            raise RuntimeError("SaveNode strict mode requires graph turn_service wiring in Phase 4")
-        return self.turn_service.finalize_user_turn(turn_text, mood, reply, norm_attachments, turn_context=turn_context)
+            raise PersistenceFailure(
+                "SaveNode strict mode requires graph turn_service wiring in Phase 4",
+            )
+        return self.turn_service.finalize_user_turn(
+            turn_text,
+            mood,
+            reply,
+            norm_attachments,
+            turn_context=turn_context,
+        )
 
     def finalize_turn(self, turn_context: Any, result: Any) -> tuple:
         """Atomically commit history, maintenance, reflection, health snapshot, and persistence."""
-        # Session exit was already handled inside prepare_user_turn_async â€” skip double-commit.
-        if turn_context.state.get("already_finalized"):
-            if isinstance(result, tuple) and len(result) >= 2:
-                return result
-            return (str(result or ""), bool(turn_context.state.get("should_end", False)))
+        with ensure_execution_trace_root(
+            operation="persistence_finalize_turn",
+            prompt="[persistence-finalize-turn]",
+            metadata={"source": "PersistenceService.finalize_turn"},
+            required=True,
+        ):
+            return self._finalize_turn_impl(turn_context, result)
 
+    @staticmethod
+    def _finalize_fast_path_if_already_finalized(turn_context: Any, result: Any) -> tuple | None:
+        # Session exit was already handled inside prepare_user_turn_async; avoid double-commit.
+        if not turn_context.state.get("already_finalized"):
+            return None
+        if isinstance(result, tuple) and len(result) >= 2:
+            return result
+        return (
+            str(result or ""),
+            bool(turn_context.state.get("should_end", False)),
+        )
+
+    @staticmethod
+    def _finalize_inputs(turn_context: Any, result: Any) -> tuple[str, str, Any, str]:
         turn_text = turn_context.state.get("turn_text") or turn_context.user_input
         mood = turn_context.state.get("mood") or "neutral"
         norm_attachments = turn_context.state.get("norm_attachments") or turn_context.attachments
         reply = result[0] if isinstance(result, tuple) else str(result or "")
+        return str(turn_text or ""), str(mood or "neutral"), norm_attachments, reply
 
+    def _finalize_validate_mutation_set(self, turn_context: Any) -> tuple[Any, Any]:
         service = self.turn_service
         if service is None:
-            raise RuntimeError("Strict mode requires graph turn_service wiring in Phase 4")
+            raise PersistenceFailure(
+                "Strict mode requires graph turn_service wiring in Phase 4",
+            )
 
         runtime = getattr(service, "bot", None)
         if runtime is None:
-            raise RuntimeError("SaveNode strict mode requires turn_service.bot")
+            raise PersistenceFailure("SaveNode strict mode requires turn_service.bot")
         if getattr(turn_context, "temporal", None) is None:
-            raise RuntimeError("TemporalNode required — execution invalid")
+            raise InvariantViolation("TemporalNode required -- execution invalid")
+        return service, runtime
+
+    @staticmethod
+    def _finalize_enforce_execution_truth_contract(service: Any, turn_context: Any) -> None:
+        validator = getattr(service, "validate_execution_truth_contract", None)
+        if not callable(validator):
+            return
+        try:
+            contract = validator(turn_context, enforce=True)
+            state = getattr(turn_context, "state", None)
+            if isinstance(state, dict) and isinstance(contract, dict):
+                state["execution_truth_contract"] = dict(contract)
+        except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
+            raise PersistenceFailure(
+                "Execution truth contract violation at SaveNode boundary",
+                context={
+                    "trace_id": str(getattr(turn_context, "trace_id", "") or ""),
+                    "error": str(exc),
+                },
+            ) from exc
+
+    @staticmethod
+    def _finalize_assert_integrity_clear(turn_context: Any) -> None:
+        metadata = getattr(turn_context, "metadata", None)
+        state = getattr(turn_context, "state", None)
+        metadata_dict = metadata if isinstance(metadata, dict) else {}
+        state_dict = state if isinstance(state, dict) else {}
+        refusal_state = str(state_dict.get("refusal_state") or "").strip().lower()
+        if bool(metadata_dict.get("integrity_failure")) or refusal_state == "integrity_failure":
+            raise IntegrityBreachError("Finalization aborted due to integrity breach markers")
+
+    def _finalize_apply_final_graph_commit(
+        self,
+        runtime: Any,
+        turn_context: Any,
+        *,
+        turn_text: str,
+    ) -> None:
+        self.begin_transaction(turn_context)
+        self.apply_mutations(turn_context)
+        # Persist behavioral ledger state before SaveNode checkpoint capture.
+        self._inject_behavioral_ledger_state(runtime, turn_context, turn_text)
+        self._record_relational_ledger(runtime, turn_context, turn_text)
+
+    def _finalize_apply_ledger_commit(  # noqa: PLR0913
+        self,
+        runtime: Any,
+        turn_context: Any,
+        *,
+        turn_text: str,
+        mood: str,
+        reply: str,
+        norm_attachments: Any,
+    ) -> tuple:
+        self._validate_sovereign_commit_transition(turn_context)
+        finalized = self.final_ledger_commit(
+            turn_text,
+            mood,
+            reply,
+            norm_attachments,
+            turn_context,
+        )
+        self._commit_post_finalize_side_effects(turn_context)
+        return finalized
+
+    @staticmethod
+    def _finalize_execution_status_for_state(state: str) -> str:
+        normalized = str(state or "").strip().lower()
+        if normalized in {"completed", "failed", "submitted", "claimed"}:
+            return normalized
+        return "running"
+
+    def _validate_sovereign_commit_transition(self, turn_context: Any) -> None:
+        metadata = dict(getattr(turn_context, "metadata", {}) or {})
+        state = dict(getattr(turn_context, "state", {}) or {})
+        control_plane = dict(metadata.get("control_plane") or {})
+        execution_state = dict(metadata.get("execution_state") or {})
+        trace_id = str(getattr(turn_context, "trace_id", "") or "unknown-trace")
+        session_id = str(control_plane.get("session_id") or metadata.get("session_id") or "default")
+        execution_mode = str(control_plane.get("execution_mode") or metadata.get("execution_mode") or "live")
+        before_state = str(execution_state.get("lifecycle_state") or "running")
+        before_status = self._finalize_execution_status_for_state(
+            execution_state.get("execution_status") or before_state,
+        )
+        before_causal = int(execution_state.get("causal_step_count") or 0)
+        after_causal = before_causal + 1
+
+        truth_contract = dict(state.get("execution_truth_contract") or {})
+        turn_truth_ok = bool(truth_contract.get("consistent", True))
+        invariance_hash = str(
+            execution_state.get("invariance_hash")
+            or metadata.get("invariance_hash")
+            or hashlib.sha256(
+                f"{trace_id}:{after_causal}:{str(state.get('last_commit_id') or '')}".encode("utf-8"),
+            ).hexdigest()[:32]
+        )
+
+        before = {
+            "session_id": session_id,
+            "trace_id": trace_id,
+            "execution_mode": execution_mode,
+            "execution_state": before_state,
+            "execution_status": before_status,
+            "turn_truth_ok": bool(execution_state.get("turn_truth_ok")) if before_state == "completed" else None,
+            "invariance_hash": str(execution_state.get("invariance_hash") or metadata.get("invariance_hash") or ""),
+            "causal_step_count": before_causal,
+            "metadata": {},
+        }
+        after = {
+            "session_id": session_id,
+            "trace_id": trace_id,
+            "execution_mode": execution_mode,
+            "execution_state": "completed",
+            "execution_status": "completed",
+            "turn_truth_ok": turn_truth_ok,
+            "invariance_hash": invariance_hash,
+            "causal_step_count": after_causal,
+            "metadata": {},
+        }
+        validate_sovereign_ledger_transition(before, after)
+        enforce_global_transition_invariants(
+            TransitionBoundaryView(
+                session_id=session_id,
+                trace_id=trace_id,
+                before_state=str(before_state or "running"),
+                after_state="completed",
+                before_causal_step_count=before_causal,
+                after_causal_step_count=after_causal,
+                turn_truth_ok=turn_truth_ok,
+                policy_posture=str(execution_state.get("policy_posture") or "moderate"),
+                active_fault_count=int(execution_state.get("active_fault_count") or 0),
+                metadata={"execution_mode": execution_mode},
+            ),
+        )
+
+        execution_state["causal_step_count"] = after_causal
+        execution_state["invariance_hash"] = invariance_hash
+        execution_state["turn_truth_ok"] = turn_truth_ok
+        execution_state["lifecycle_state"] = "completed"
+        execution_state["execution_status"] = "completed"
+        metadata["execution_state"] = execution_state
+        metadata["invariance_hash"] = invariance_hash
+        turn_context.metadata = metadata
+
+    def _finalize_trace_envelope(
+        self,
+        runtime: Any,
+        turn_context: Any,
+    ) -> None:
+        self._emit_progress_snapshot(
+            phase="during_post_commit_trace_emission",
+            turn_context=turn_context,
+            note="enter finalize_trace_envelope",
+        )
+        if isinstance(getattr(turn_context, "metadata", None), dict):
+            turn_context.metadata["async_checkpoint_contract"] = {
+                "version": "async-checkpoint-order-v1",
+                "ordering_model": "single-writer-monotonic-sequence",
+                "enabled": bool(self._async_checkpoint_pipeline_enabled),
+                "enqueue_sequence": int(self._checkpoint_enqueue_sequence),
+                "drain_sequence": int(self._checkpoint_drain_sequence),
+            }
+
+        # Atomic checkpoint capture inside finalize boundary.
+        checkpoint = None
+        checkpoint_snapshot = getattr(turn_context, "checkpoint_snapshot", None)
+        if callable(checkpoint_snapshot):
+            checkpoint = checkpoint_snapshot(
+                stage="save",
+                status="atomic_finalize",
+                error=None,
+            )
+            if isinstance(checkpoint, dict):
+                occurred_at = str(checkpoint.get("occurred_at") or "").strip()
+                if not occurred_at:
+                    temporal = getattr(turn_context, "temporal", None)
+                    occurred_at = str(getattr(temporal, "wall_time", "") or "").strip()
+                    if not occurred_at:
+                        occurred_at = datetime.now().isoformat(timespec="seconds")
+                    checkpoint["occurred_at"] = occurred_at
+            turn_context.state["_atomic_checkpoint_saved"] = True
+            save_graph_checkpoint = getattr(self, "save_graph_checkpoint", None)
+            if callable(save_graph_checkpoint):
+                save_graph_checkpoint(checkpoint, _skip_turn_event=True)
+
+        if self.checkpointer is not None and checkpoint is not None:
+            _md = dict(getattr(turn_context, "metadata", {}) or {})
+            control_plane = dict(_md.get("control_plane") or {})
+            session_id = str(
+                control_plane.get("session_id") or _md.get("session_id") or "default",
+            )
+            trace_id = str(getattr(turn_context, "trace_id", "") or "")
+            manifest = dict(
+                getattr(turn_context, "metadata", {}).get("determinism_manifest") or {},
+            )
+            checkpoint_payload = dict(checkpoint) if isinstance(checkpoint, dict) else {}
+            async_allowed = bool(self._async_checkpoint_pipeline_enabled) and not bool(self.strict_mode)
+            if async_allowed:
+                self._enqueue_async_checkpoint(
+                    session_id=session_id,
+                    trace_token=trace_id,
+                    checkpoint=checkpoint_payload,
+                    manifest=manifest,
+                )
+            else:
+                try:
+                    self.checkpointer.save_checkpoint(
+                        session_id=session_id,
+                        trace_id=trace_id,
+                        checkpoint=checkpoint_payload,
+                        manifest=manifest,
+                    )
+                except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
+                    logger.error("PersistenceService.checkpointer save failed: %s", exc)
+                    if bool(self.strict_mode):
+                        raise PersistenceFailure(
+                            "PersistenceService.checkpointer save failed",
+                            context={"error": str(exc)},
+                        ) from exc
+
+        self._enforce_memory_authority(
+            runtime,
+            turn_context,
+            checkpoint=dict(checkpoint) if isinstance(checkpoint, dict) else None,
+        )
+        self._emit_progress_snapshot(
+            phase="during_post_commit_trace_emission",
+            turn_context=turn_context,
+            expected_completion_conditions={
+                "checkpoint_queue_drained_or_async": bool(
+                    (not bool(self.strict_mode)) or (len(self._checkpoint_futures) == 0)
+                ),
+            },
+            note="exit finalize_trace_envelope",
+        )
+
+    def _finalize_emit_completion_event(
+        self,
+        runtime: Any,
+        turn_context: Any,
+        service: Any,
+    ) -> None:
+        self._emit_progress_snapshot(
+            phase="during_post_commit_trace_emission",
+            turn_context=turn_context,
+            note="before completion event emission",
+        )
+        # Completion side effects are centralized after all commit validations.
+        complete_pipeline = getattr(service, "_complete_turn_pipeline", None)
+        if callable(complete_pipeline):
+            complete_pipeline(should_end=False)
+        self.commit_transaction(turn_context)
+
+        memory_ops_started = time.perf_counter()
+        self._publish_post_commit_ready(runtime, turn_context)
+        memory_ops_ms = round((time.perf_counter() - memory_ops_started) * 1000, 3)
+        if isinstance(getattr(turn_context, "state", None), dict):
+            turn_context.state["_timing_memory_ops_ms"] = memory_ops_ms
+
+        self._emit_progress_snapshot(
+            phase="during_post_commit_trace_emission",
+            turn_context=turn_context,
+            expected_completion_conditions={
+                "transaction_committed": bool(
+                    str(dict(getattr(turn_context, "state", {}) or {}).get("last_transaction_status") or "")
+                    == "committed"
+                ),
+                "post_commit_published": True,
+            },
+            note="after completion event emission",
+        )
+
+    def _finalize_turn_impl(self, turn_context: Any, result: Any) -> tuple:
+        """Internal finalize implementation executed under an active trace context."""
+        fast_path = self._finalize_fast_path_if_already_finalized(turn_context, result)
+        if fast_path is not None:
+            return fast_path
+
+        # Preserve deterministic commit ordering: complete prior queued checkpoint writes
+        # before starting the next SaveNode finalize boundary.
+        self._drain_async_checkpoint_queue(strict_error=bool(self.strict_mode))
+        self._emit_progress_snapshot(
+            phase="before_post_commit_trace_emission",
+            turn_context=turn_context,
+            note="finalize_turn start",
+        )
+
+        turn_text, mood, norm_attachments, reply = self._finalize_inputs(turn_context, result)
+        service, runtime = self._finalize_validate_mutation_set(turn_context)
+        self._finalize_enforce_execution_truth_contract(service, turn_context)
 
         previous_temporal = getattr(runtime, "_current_turn_time_base", None)
         previous_commit_active = bool(getattr(runtime, "_graph_commit_active", False))
         finalize_started = time.perf_counter()
         try:
+            self._finalize_assert_integrity_clear(turn_context)
             if previous_commit_active:
                 logger.warning(
                     "PersistenceService.finalize_turn detected stale _graph_commit_active=True; "
-                    "forcing fresh SaveNode boundary"
+                    "forcing fresh SaveNode boundary",
                 )
             runtime._current_turn_time_base = getattr(turn_context, "temporal", None)
             runtime._graph_commit_active = True
 
-            # Strict sequence: finalize queues ledger intents; then one canonical SaveNode commit.
-            finalized = self.final_ledger_commit(turn_text, mood, reply, norm_attachments, turn_context)
-            self._commit_post_finalize_side_effects(turn_context)
+            # 1) Validate final mutation set (preconditions + transaction gate)
+            # 2) Apply final graph commit
+            self._finalize_apply_final_graph_commit(
+                runtime,
+                turn_context,
+                turn_text=turn_text,
+            )
 
-            # Atomic checkpoint capture: emit from inside finalize_turn boundary so
-            # hash-chain state is committed with the same save transaction.
-            checkpoint = None
-            checkpoint_snapshot = getattr(turn_context, "checkpoint_snapshot", None)
-            if callable(checkpoint_snapshot):
-                checkpoint = checkpoint_snapshot(stage="save", status="atomic_finalize", error=None)
-                turn_context.state["_atomic_checkpoint_saved"] = True
-                save_graph_checkpoint = getattr(self, "save_graph_checkpoint", None)
-                if callable(save_graph_checkpoint):
-                    save_graph_checkpoint(checkpoint, _skip_turn_event=True)
+            # 3) Apply ledger commit
+            finalized = self._finalize_apply_ledger_commit(
+                runtime,
+                turn_context,
+                turn_text=turn_text,
+                mood=mood,
+                reply=reply,
+                norm_attachments=norm_attachments,
+            )
+            self._emit_progress_snapshot(
+                phase="during_post_commit_trace_emission",
+                turn_context=turn_context,
+                note="ledger commit applied",
+            )
 
-            if self.checkpointer is not None and checkpoint is not None:
-                control_plane = dict(getattr(turn_context, "metadata", {}).get("control_plane") or {})
-                session_id = str(control_plane.get("session_id") or "default")
-                trace_id = str(getattr(turn_context, "trace_id", "") or "")
-                manifest = dict(getattr(turn_context, "metadata", {}).get("determinism_manifest") or {})
-                try:
-                    self.checkpointer.save_checkpoint(
-                        session_id=session_id,
-                        trace_id=trace_id,
-                        checkpoint=checkpoint,
-                        manifest=manifest,
-                    )
-                except Exception as exc:
-                    # Non-fatal by default; strict mode escalates.
-                    logger.error("PersistenceService.checkpointer save failed: %s", exc)
-                    if bool(self.strict_mode):
-                        raise
+            # 4) Finalize trace envelope
+            self._finalize_trace_envelope(runtime, turn_context)
 
-            complete_pipeline = getattr(service, "_complete_turn_pipeline", None)
-            if callable(complete_pipeline):
-                complete_pipeline(should_end=False)
+            # 5) Emit completion event (single centralized post-commit side-effect stage)
+            self._finalize_emit_completion_event(runtime, turn_context, service)
+            self._emit_progress_snapshot(
+                phase="during_post_commit_trace_emission",
+                turn_context=turn_context,
+                expected_completion_conditions={
+                    "transaction_committed": bool(
+                        str(dict(getattr(turn_context, "state", {}) or {}).get("last_transaction_status") or "")
+                        == "committed"
+                    ),
+                },
+                note="finalize_turn success",
+            )
             return finalized
-        except Exception as exc:
-            logger.error("PersistenceService.finalize_turn strict-mode failure: %s", exc)
+        except IntegrityBreachError:
+            with contextlib.suppress(Exception):
+                self.rollback_transaction(turn_context)
             raise
+        except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
+            self._emit_progress_snapshot(
+                phase="during_post_commit_trace_emission",
+                turn_context=turn_context,
+                note="finalize_turn exception",
+                extra={"exception_type": type(exc).__name__, "exception": str(exc)},
+            )
+            committed = bool(
+                str(dict(getattr(turn_context, "state", {}) or {}).get("last_transaction_status") or "")
+                == "committed"
+            )
+            if not committed:
+                with contextlib.suppress(Exception):
+                    self.rollback_transaction(turn_context)
+            logger.error(
+                "PersistenceService.finalize_turn strict-mode failure: %s",
+                exc,
+            )
+            root_cause: Exception = exc
+            if isinstance(exc, StateDivergenceError):
+                # Preserve legacy strict-mode cause-chain shape expected by post-commit
+                # compatibility tests: outer strict failure -> malformed checkpoint failure
+                # -> low-level occurred_at detail.
+                detail_cause = ValueError(
+                    "occurred_at missing or invalid in divergence checkpoint envelope"
+                )
+                root_cause = PersistenceFailure(
+                    "PersistenceService.save_graph_checkpoint rejected malformed checkpoint",
+                    context={
+                        "trace_id": str(getattr(turn_context, "trace_id", "") or ""),
+                        "error": str(exc),
+                    },
+                )
+                root_cause.__cause__ = detail_cause
+            raise PersistenceFailure(
+                "PersistenceService.finalize_turn strict-mode failure",
+                context={
+                    "trace_id": str(getattr(turn_context, "trace_id", "") or ""),
+                    "error": str(exc),
+                },
+            ) from root_cause
         finally:
             if isinstance(getattr(turn_context, "state", None), dict):
-                turn_context.state["_timing_finalize_ms"] = round((time.perf_counter() - finalize_started) * 1000, 3)
+                turn_context.state["_timing_finalize_ms"] = round(
+                    (time.perf_counter() - finalize_started) * 1000,
+                    3,
+                )
             runtime._graph_commit_active = False
             runtime._current_turn_time_base = previous_temporal
 
     def save_turn(self, turn_context: Any, result: Any) -> None:
         snapshot_builder = getattr(turn_context, "snapshot", None)
         if callable(snapshot_builder):
-            self.persistence_manager.persist_conversation_snapshot(snapshot_builder(result), turn_context=turn_context)
+            _snap = snapshot_builder(result)
+            self.persistence_manager.persist_conversation_snapshot(
+                dict(_snap) if isinstance(_snap, dict) else {},
+                turn_context=turn_context,
+            )
             return
         self.persistence_manager.persist_conversation()
 
-    def save_graph_checkpoint(self, checkpoint: dict[str, Any], _skip_turn_event: bool = False) -> None:
+    def save_graph_checkpoint(
+        self,
+        checkpoint: dict[str, Any],
+        _skip_turn_event: bool = False,
+    ) -> None:
         try:
-            self.persistence_manager.persist_graph_checkpoint(checkpoint, _skip_turn_event=_skip_turn_event)
-        except Exception as exc:
+            strict_reject = self._strict_schema_reject_enabled()
+            normalized = normalize_checkpoint_record(checkpoint if isinstance(checkpoint, dict) else {})
+            if strict_reject:
+                normalized = assert_valid_checkpoint_record(normalized)
+            else:
+                errors = checkpoint_record_errors(normalized)
+                if errors:
+                    logger.warning(
+                        "PersistenceService.save_graph_checkpoint normalized malformed checkpoint: %s",
+                        "; ".join(errors),
+                    )
+            with ensure_execution_trace_root(
+                operation="persist_graph_checkpoint",
+                prompt="[persistence-service-save-checkpoint]",
+                metadata={"source": "PersistenceService.save_graph_checkpoint"},
+                required=True,
+            ):
+                self.persistence_manager.persist_graph_checkpoint(
+                    normalized,
+                    _skip_turn_event=_skip_turn_event,
+                )
+        except RuntimeTraceViolation:
+            trace_id = str((checkpoint or {}).get("trace_id") or "").strip()
+            if not trace_id:
+                logger.warning(
+                    "PersistenceService.save_graph_checkpoint skipped due to null trace_id fallback",
+                )
+                return
+            raise
+        except PersistenceSchemaError as exc:
+            raise PersistenceFailure(
+                "PersistenceService.save_graph_checkpoint rejected malformed checkpoint",
+                context={
+                    "trace_id": str((checkpoint or {}).get("trace_id") or ""),
+                    "error": str(exc),
+                },
+            ) from exc
+        except PersistenceFailure:
+            if self._strict_schema_reject_enabled():
+                raise
+            logger.error("PersistenceService.save_graph_checkpoint rejected checkpoint in non-strict mode")
+        except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
             logger.error("PersistenceService.save_graph_checkpoint failed: %s", exc)
+
+    def load_latest_graph_checkpoint(self, trace_token: str = "", **legacy_kwargs: Any) -> dict[str, Any] | None:
+        try:
+            resolved_trace = str(trace_token or legacy_kwargs.get("trace_id") or "").strip()
+            manager: Any = self.persistence_manager
+            try:
+                checkpoint = manager.load_latest_graph_checkpoint(trace_token=resolved_trace)
+            except TypeError:
+                checkpoint = manager.load_latest_graph_checkpoint(trace_id=resolved_trace)
+            if checkpoint is None:
+                return None
+            strict_reject = self._strict_schema_reject_enabled()
+            normalized = normalize_checkpoint_record(checkpoint if isinstance(checkpoint, dict) else {})
+            if strict_reject:
+                return assert_valid_checkpoint_record(checkpoint if isinstance(checkpoint, dict) else {})
+            errors = checkpoint_record_errors(normalized)
+            if errors:
+                logger.warning(
+                    "PersistenceService.load_latest_graph_checkpoint observed malformed checkpoint: %s",
+                    "; ".join(errors),
+                )
+            return normalized
+        except RuntimeTraceViolation:
+            if not str(trace_token or legacy_kwargs.get("trace_id") or "").strip():
+                return None
+            raise
+        except PersistenceSchemaError as exc:
+            raise PersistenceFailure(
+                "PersistenceService.load_latest_graph_checkpoint rejected malformed checkpoint",
+                context={"trace_id": str(trace_token or legacy_kwargs.get("trace_id") or ""), "error": str(exc)},
+            ) from exc
+        except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
+            logger.error("PersistenceService.load_latest_graph_checkpoint failed: %s", exc)
+            return None
+
+    def resume_graph_checkpoint(self, trace_token: str = "") -> dict[str, Any] | None:
+        try:
+            checkpoint = self.persistence_manager.resume_graph_checkpoint(trace_token=trace_token)
+            if checkpoint is None:
+                return None
+            strict_reject = self._strict_schema_reject_enabled()
+            normalized = normalize_checkpoint_record(checkpoint if isinstance(checkpoint, dict) else {})
+            if strict_reject:
+                return assert_valid_checkpoint_record(normalized)
+            errors = checkpoint_record_errors(normalized)
+            if errors:
+                logger.warning(
+                    "PersistenceService.resume_graph_checkpoint observed malformed checkpoint: %s",
+                    "; ".join(errors),
+                )
+            return normalized
+        except RuntimeTraceViolation:
+            if not str(trace_token or "").strip():
+                return None
+            raise
+        except PersistenceSchemaError as exc:
+            raise PersistenceFailure(
+                "PersistenceService.resume_graph_checkpoint rejected malformed checkpoint",
+                context={"trace_id": str(trace_token or ""), "error": str(exc)},
+            ) from exc
+        except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
+            logger.error("PersistenceService.resume_graph_checkpoint failed: %s", exc)
+            return None
+
+    def export_execution_handoff(self, trace_token: str, *, worker_id: str = "") -> dict[str, Any]:
+        try:
+            manager: Any = self.persistence_manager
+            try:
+                handoff = manager.export_execution_handoff(trace_token=trace_token, worker_id=worker_id)
+            except TypeError:
+                handoff = manager.export_execution_handoff(trace_id=trace_token, worker_id=worker_id)
+            if not isinstance(handoff, dict):
+                raise PersistenceFailure(
+                    "PersistenceService.export_execution_handoff produced invalid payload",
+                    context={"trace_id": str(trace_token or "")},
+                )
+            return dict(handoff)
+        except PersistenceFailure:
+            raise
+        except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
+            raise PersistenceFailure(
+                "PersistenceService.export_execution_handoff failed",
+                context={"trace_id": str(trace_token or ""), "error": str(exc)},
+            ) from exc
+
+    def claim_execution_handoff(
+        self,
+        trace_token: str,
+        *,
+        worker_id: str,
+        lease_seconds: int = 60,
+    ) -> dict[str, Any]:
+        try:
+            manager: Any = self.persistence_manager
+            try:
+                claim = manager.claim_execution_handoff(
+                    trace_token=trace_token,
+                    worker_id=worker_id,
+                    lease_seconds=lease_seconds,
+                )
+            except TypeError:
+                claim = manager.claim_execution_handoff(
+                    trace_id=trace_token,
+                    worker_id=worker_id,
+                    lease_seconds=lease_seconds,
+                )
+            return dict(
+                claim
+                or {}
+            )
+        except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
+            raise PersistenceFailure(
+                "PersistenceService.claim_execution_handoff failed",
+                context={"trace_id": str(trace_token or ""), "worker_id": str(worker_id or ""), "error": str(exc)},
+            ) from exc
+
+    def renew_execution_handoff_lease(
+        self,
+        trace_token: str,
+        *,
+        worker_id: str,
+        lease_seconds: int = 60,
+    ) -> dict[str, Any]:
+        try:
+            manager: Any = self.persistence_manager
+            try:
+                lease = manager.renew_execution_handoff_lease(
+                    trace_token=trace_token,
+                    worker_id=worker_id,
+                    lease_seconds=lease_seconds,
+                )
+            except TypeError:
+                lease = manager.renew_execution_handoff_lease(
+                    trace_id=trace_token,
+                    worker_id=worker_id,
+                    lease_seconds=lease_seconds,
+                )
+            return dict(
+                lease
+                or {}
+            )
+        except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
+            raise PersistenceFailure(
+                "PersistenceService.renew_execution_handoff_lease failed",
+                context={"trace_id": str(trace_token or ""), "worker_id": str(worker_id or ""), "error": str(exc)},
+            ) from exc
+
+    def release_execution_handoff_claim(self, trace_token: str, *, worker_id: str) -> dict[str, Any]:
+        try:
+            manager: Any = self.persistence_manager
+            try:
+                released = manager.release_execution_handoff_claim(
+                    trace_token=trace_token,
+                    worker_id=worker_id,
+                )
+            except TypeError:
+                released = manager.release_execution_handoff_claim(
+                    trace_id=trace_token,
+                    worker_id=worker_id,
+                )
+            return dict(
+                released
+                or {}
+            )
+        except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
+            raise PersistenceFailure(
+                "PersistenceService.release_execution_handoff_claim failed",
+                context={"trace_id": str(trace_token or ""), "worker_id": str(worker_id or ""), "error": str(exc)},
+            ) from exc
+
+    def import_execution_handoff(self, handoff: dict[str, Any]) -> dict[str, Any]:
+        try:
+            imported = self.persistence_manager.import_execution_handoff(dict(handoff or {}))
+            normalized = normalize_checkpoint_record(imported if isinstance(imported, dict) else {})
+            if self._strict_schema_reject_enabled():
+                return assert_valid_checkpoint_record(normalized)
+            errors = checkpoint_record_errors(normalized)
+            if errors:
+                raise PersistenceFailure(
+                    "PersistenceService.import_execution_handoff rejected malformed checkpoint",
+                    context={"errors": list(errors)},
+                )
+            return normalized
+        except PersistenceSchemaError as exc:
+            raise PersistenceFailure(
+                "PersistenceService.import_execution_handoff rejected malformed checkpoint",
+                context={"error": str(exc)},
+            ) from exc
+        except PersistenceFailure:
+            raise
+        except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
+            raise PersistenceFailure(
+                "PersistenceService.import_execution_handoff failed",
+                context={"error": str(exc)},
+            ) from exc
 
     def save_turn_event(self, event: dict[str, Any]) -> None:
         try:
-            self.persistence_manager.persist_turn_event(event)
-        except Exception as exc:
+            strict_reject = self._strict_schema_reject_enabled()
+            normalized = normalize_trace_event(event)
+            errors = trace_event_errors(normalized)
+            if errors:
+                if strict_reject:
+                    raise PersistenceFailure(
+                        "PersistenceService.save_turn_event rejected malformed event",
+                        context={
+                            "errors": list(errors),
+                            "trace_id": str((event or {}).get("trace_id") or ""),
+                        },
+                    )
+                logger.warning(
+                    "PersistenceService.save_turn_event normalized malformed event: %s",
+                    "; ".join(errors),
+                )
+            self.persistence_manager.persist_turn_event(normalized)
+        except RuntimeTraceViolation:
+            trace_id = str((event or {}).get("trace_id") or "").strip()
+            if not trace_id:
+                logger.warning(
+                    "PersistenceService.save_turn_event skipped due to null trace_id fallback",
+                )
+                return
+            raise
+        except PersistenceFailure:
+            if self._strict_schema_reject_enabled():
+                raise
+            logger.error("PersistenceService.save_turn_event rejected event in non-strict mode")
+        except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
             logger.error("PersistenceService.save_turn_event failed: %s", exc)
 
-    def list_turn_events(self, trace_id: str, limit: int = 0) -> list[dict[str, Any]]:
+    def list_turn_events(self, trace_token: str, limit: int = 0) -> list[dict[str, Any]]:
         try:
-            return self.persistence_manager.list_turn_events(trace_id=trace_id, limit=limit)
-        except Exception as exc:
+            events = self.persistence_manager.list_turn_events(
+                trace_token=trace_token,
+                limit=limit,
+            )
+            strict_reject = self._strict_schema_reject_enabled()
+            normalized_events: list[dict[str, Any]] = []
+            for item in list(events or []):
+                normalized = normalize_trace_event(item if isinstance(item, dict) else {})
+                errors = trace_event_errors(normalized)
+                if errors and strict_reject:
+                    raise PersistenceFailure(
+                        "PersistenceService.list_turn_events rejected malformed persisted event",
+                        context={"errors": list(errors), "trace_id": str(trace_token or "")},
+                    )
+                normalized_events.append(normalized)
+            return normalized_events
+        except RuntimeTraceViolation:
+            if not str(trace_token or "").strip():
+                return []
+            raise
+        except PersistenceFailure:
+            if self._strict_schema_reject_enabled():
+                raise
+            return []
+        except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
             logger.error("PersistenceService.list_turn_events failed: %s", exc)
             return []
 
-    def replay_turn_events(self, trace_id: str) -> dict[str, Any]:
+    def list_policy_trace_events(
+        self,
+        *,
+        trace_token: str = "",
+        limit: int = 0,
+        **legacy_kwargs: Any,
+    ) -> list[dict[str, Any]]:
         try:
-            return self.persistence_manager.replay_turn_events(trace_id=trace_id)
-        except Exception as exc:
-            logger.error("PersistenceService.replay_turn_events failed: %s", exc)
-            return {"trace_id": str(trace_id or ""), "events": [], "replayed_state": {}}
+            resolved_trace = str(trace_token or legacy_kwargs.get("trace_id") or "").strip()
+            return self.persistence_manager.list_policy_trace_events(
+                trace_token=resolved_trace,
+                limit=limit,
+            )
+        except RuntimeTraceViolation:
+            if not str(trace_token or legacy_kwargs.get("trace_id") or "").strip():
+                return []
+            raise
+        except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
+            logger.error("PersistenceService.list_policy_trace_events failed: %s", exc)
+            return []
 
-    def validate_replay_determinism(self, trace_id: str, expected_lock_hash: str = "") -> dict[str, Any]:
+    def summarize_policy_trace_events(
+        self,
+        *,
+        trace_token: str = "",
+        limit: int = 0,
+        **legacy_kwargs: Any,
+    ) -> dict[str, Any]:
+        try:
+            resolved_trace = str(trace_token or legacy_kwargs.get("trace_id") or "").strip()
+            return self.persistence_manager.summarize_policy_trace_events(
+                trace_token=resolved_trace,
+                limit=limit,
+            )
+        except RuntimeTraceViolation:
+            if not str(trace_token or legacy_kwargs.get("trace_id") or "").strip():
+                return {
+                    "event_type": "PolicyTraceEvent",
+                    "event_count": 0,
+                    "policies": [],
+                    "action_counts": {},
+                    "latest_action": "",
+                    "latest_step_name": "",
+                    "latest_trace_id": "",
+                }
+            raise
+        except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
+            logger.error("PersistenceService.summarize_policy_trace_events failed: %s", exc)
+            return {
+                "event_type": "PolicyTraceEvent",
+                "event_count": 0,
+                "policies": [],
+                "action_counts": {},
+                "latest_action": "",
+                "latest_step_name": "",
+                "latest_trace_id": "",
+            }
+
+    def replay_turn_events(self, trace_token: str) -> dict[str, Any]:
+        try:
+            manager: Any = self.persistence_manager
+            try:
+                replay = manager.replay_turn_events(trace_token=trace_token)
+            except TypeError:
+                replay = manager.replay_turn_events(trace_id=trace_token)
+            strict_reject = self._strict_schema_reject_enabled()
+            if strict_reject:
+                assert_valid_replay_record(replay)
+                return replay
+
+            errors = replay_record_errors(replay)
+            if errors:
+                logger.warning(
+                    "PersistenceService.replay_turn_events observed malformed replay record: %s",
+                    "; ".join(errors),
+                )
+                canonical_events = [
+                    normalize_trace_event(item if isinstance(item, dict) else {})
+                    for item in list((replay or {}).get("events") or [])
+                ]
+                replay = dict(replay or {})
+                replay["events"] = canonical_events
+                replay["event_count"] = len(canonical_events)
+            return replay
+        except RuntimeTraceViolation:
+            if not str(trace_token or "").strip():
+                return {"trace_id": "", "events": [], "replayed_state": {}}
+            raise
+        except PersistenceSchemaError as exc:
+            raise PersistenceFailure(
+                "PersistenceService.replay_turn_events rejected malformed replay payload",
+                context={"trace_id": str(trace_token or ""), "error": str(exc)},
+            ) from exc
+        except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
+            logger.error("PersistenceService.replay_turn_events failed: %s", exc)
+            return {"trace_id": str(trace_token or ""), "events": [], "replayed_state": {}}
+
+    def validate_replay_determinism(
+        self,
+        trace_token: str,
+        expected_lock_hash: str = "",
+    ) -> dict[str, Any]:
         try:
             return self.persistence_manager.validate_replay_determinism(
-                trace_id=trace_id,
+                trace_token=trace_token,
                 expected_lock_hash=expected_lock_hash,
             )
-        except Exception as exc:
-            logger.error("PersistenceService.validate_replay_determinism failed: %s", exc)
+        except RuntimeTraceViolation:
+            if not str(trace_token or "").strip():
+                return {
+                    "trace_id": "",
+                    "consistent": False,
+                    "observed_lock_hash": "",
+                    "expected_lock_hash": str(expected_lock_hash or ""),
+                    "matches_expected": False,
+                    "lock_hashes": [],
+                }
+            raise
+        except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
+            logger.error(
+                "PersistenceService.validate_replay_determinism failed: %s",
+                exc,
+            )
             return {
-                "trace_id": str(trace_id or ""),
+                "trace_id": str(trace_token or ""),
                 "consistent": False,
                 "observed_lock_hash": "",
                 "expected_lock_hash": str(expected_lock_hash or ""),
@@ -710,3 +1513,4 @@ class PersistenceService:
 
     def persist_conversation(self) -> None:
         self.persistence_manager.persist_conversation()
+

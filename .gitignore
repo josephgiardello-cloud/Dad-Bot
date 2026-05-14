@@ -19,15 +19,23 @@ dad_profile.json.bak
 *.sqlite3-wal
 
 # Runtime directory (created to hold mutable state in production)
-runtime/
+/runtime/
 data/
-memory/
+/memory/
 
 # Session logs (ephemeral turn records)
 session_logs/
+*.jsonl
 
 # Export / import artefacts
 memory_export*.json
+
+# Memory forgetting snapshots (belt-and-suspenders for repo-root stragglers)
+memory_forgetting_backup_*.json
+
+# System snapshots / runtime backups (canonical home: artifacts/backups/)
+artifacts/backups/
+artifacts/
 
 # Diagnostic / process logs
 _dad_stop_stdout.txt
@@ -40,15 +48,36 @@ dad_run_stderr.log
 _tmp_pytest_*.py
 .pytest_slice_output.txt
 .unittest_regression_verbose.log
+_full_suite_enforce_latest.txt
+_full_suite_enforce_verbose_latest.txt
 
 # Secrets / env
 .env
 .env.*
 !.env.example
 !.env.production.example
+!.env.template
 
 # OS / editor
 .DS_Store
 Thumbs.db
 .vscode/settings.json
+.tmp/
+
+# Local benchmark sandboxes and generated outputs
+.venv-bfcl312/
+external/
+artifacts/external_benchmark/
+artifacts/external_benchmark_examples/
+artifacts/official_benchmarks/
+artifacts/mvf_clean_patch.diff
+artifacts/memory_manager_method_inventory.tsv
+unit_out.txt
+unit_full.txt
+integration_out.txt
+durability_out.txt
+
+# ── Shell interpolation escape artifacts ───────────────────────────────────
+# PowerShell $(Join-Path ...) unevaluated as filename (Case A artifact)
+$(Join-Path $env
 

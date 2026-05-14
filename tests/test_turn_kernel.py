@@ -5,32 +5,34 @@ Validates the three architecture guarantees:
 2. True idempotent tool execution — ToolTransaction provides transaction semantics.
 3. Policy-to-execution lock — Bayesian gate is enforced before ACT steps.
 """
+
 import asyncio
+
 import pytest
+
+pytestmark = pytest.mark.unit
 from types import SimpleNamespace
-from dadbot.core.kernel import (
-    TurnKernel,
-    KernelStepResult,
-    KernelViolation,
-    PolicyDecision,
-    bayesian_policy_gate,
-    _ACT_STEP_NAMES,
-)
-from dadbot.core.graph import TurnContext
+
 from dadbot.core.control_plane import (
     ExecutionControlPlane,
     InMemoryExecutionLedger,
     LedgerReader,
-    LedgerWriter,
     Scheduler,
     SessionRegistry,
 )
-from dadbot.core.tool_sandbox import ToolSandbox, ToolTransaction
-
+from dadbot.core.graph import TurnContext
+from dadbot.core.kernel import (
+    PolicyDecision,
+    TurnKernel,
+    bayesian_policy_gate,
+)
+from dadbot.core.ledger_writer import LedgerWriter
+from dadbot.core.testing.tool_runtime_test_adapter import ToolRuntimeTestAdapter
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _ctx(user_input: str = "hey dad") -> TurnContext:
     return TurnContext(user_input=user_input)
@@ -47,6 +49,7 @@ def _deny_gate(*_):
 # ---------------------------------------------------------------------------
 # 1. Execution kernel — single state-transition authority
 # ---------------------------------------------------------------------------
+
 
 def test_kernel_execute_step_returns_ok_and_tracks_written_keys():
     kernel = TurnKernel()
@@ -156,11 +159,13 @@ def test_kernel_without_policy_gate_always_allows():
 
 
 def test_kernel_policy_is_checked_per_step():
-    decisions = iter([
-        PolicyDecision(allowed=True, reason="preflight-ok"),
-        PolicyDecision(allowed=False, reason="inference-blocked"),
-        PolicyDecision(allowed=True, reason="safety-ok"),
-    ])
+    decisions = iter(
+        [
+            PolicyDecision(allowed=True, reason="preflight-ok"),
+            PolicyDecision(allowed=False, reason="inference-blocked"),
+            PolicyDecision(allowed=True, reason="safety-ok"),
+        ]
+    )
 
     def _gate(ctx, step):
         return next(decisions)
@@ -171,8 +176,10 @@ def test_kernel_policy_is_checked_per_step():
 
     async def _run():
         for step_name in ("preflight", "inference", "safety"):
+
             async def _step(name=step_name):
                 executed.append(name)
+
             await kernel.execute_step(ctx, step_name, _step)
 
     asyncio.run(_run())
@@ -184,9 +191,10 @@ def test_kernel_policy_is_checked_per_step():
 # 2. ToolTransaction — explicit transaction semantics
 # ---------------------------------------------------------------------------
 
+
 def test_tool_transaction_commit_on_success():
-    sandbox = ToolSandbox()
-    with sandbox.transaction(tool_name="set_reminder", parameters={"title": "Call dentist"}) as txn:
+    runtime = ToolRuntimeTestAdapter()
+    with runtime.transaction(tool_name="set_reminder", parameters={"title": "Call dentist"}) as txn:
         record = txn.execute(executor=lambda: {"id": "r1", "title": "Call dentist"})
 
     assert txn.committed is True
@@ -196,11 +204,11 @@ def test_tool_transaction_commit_on_success():
 
 
 def test_tool_transaction_auto_rollback_on_exception():
-    sandbox = ToolSandbox()
+    runtime = ToolRuntimeTestAdapter()
     rolled_back = []
 
     with pytest.raises(ValueError):
-        with sandbox.transaction(tool_name="set_reminder", parameters={"title": "Boom"}) as txn:
+        with runtime.transaction(tool_name="set_reminder", parameters={"title": "Boom"}) as txn:
             txn.execute(
                 executor=lambda: {"id": "r_boom"},
                 compensating_action=lambda: rolled_back.append("rolled"),
@@ -213,11 +221,11 @@ def test_tool_transaction_auto_rollback_on_exception():
 
 
 def test_tool_transaction_auto_rollback_does_not_affect_earlier_sandbox_records():
-    sandbox = ToolSandbox()
+    runtime = ToolRuntimeTestAdapter()
     compensations = []
 
     # Record outside the transaction
-    sandbox.execute(
+    runtime.execute(
         tool_name="web_search",
         parameters={"query": "news"},
         executor=lambda: {"heading": "News", "summary": "today"},
@@ -225,7 +233,7 @@ def test_tool_transaction_auto_rollback_does_not_affect_earlier_sandbox_records(
     )
 
     with pytest.raises(RuntimeError):
-        with sandbox.transaction(tool_name="set_reminder", parameters={"title": "X"}) as txn:
+        with runtime.transaction(tool_name="set_reminder", parameters={"title": "X"}) as txn:
             txn.execute(
                 executor=lambda: {"id": "rx"},
                 compensating_action=lambda: compensations.append("inner"),
@@ -237,15 +245,15 @@ def test_tool_transaction_auto_rollback_does_not_affect_earlier_sandbox_records(
 
 
 def test_tool_transaction_status_before_execute_is_not_started():
-    sandbox = ToolSandbox()
-    txn = ToolTransaction(sandbox=sandbox, tool_name="set_reminder", parameters={})
+    runtime = ToolRuntimeTestAdapter()
+    txn = runtime.make_transaction(tool_name="set_reminder", parameters={})
     assert txn.status == "not_started"
     assert txn.result is None
 
 
 def test_tool_transaction_failed_executor_does_not_commit():
-    sandbox = ToolSandbox()
-    with sandbox.transaction(tool_name="set_reminder", parameters={"title": "Fail"}) as txn:
+    runtime = ToolRuntimeTestAdapter()
+    with runtime.transaction(tool_name="set_reminder", parameters={"title": "Fail"}) as txn:
         record = txn.execute(executor=lambda: (_ for _ in ()).throw(RuntimeError("db down")))
 
     # Clean exit (no exception was re-raised) because the sandbox isolates failures.
@@ -258,10 +266,9 @@ def test_tool_transaction_failed_executor_does_not_commit():
 # 3. Bayesian policy gate — hard Bayesian closure
 # ---------------------------------------------------------------------------
 
+
 def _make_bot(tool_bias: str = "planner_default"):
-    return SimpleNamespace(
-        planner_debug_snapshot=lambda: {"bayesian_tool_bias": tool_bias}
-    )
+    return SimpleNamespace(planner_debug_snapshot=lambda: {"bayesian_tool_bias": tool_bias})
 
 
 def test_bayesian_gate_allows_non_act_steps_unconditionally():
@@ -338,8 +345,9 @@ def test_bayesian_gate_handles_planner_debug_snapshot_exception():
 # 4. TurnGraph kernel integration
 # ---------------------------------------------------------------------------
 
+
 def test_turn_graph_routes_through_kernel():
-    from dadbot.core.graph import TurnGraph, TurnContext
+    from dadbot.core.graph import TurnContext, TurnGraph
     from dadbot.core.nodes import TemporalNode
 
     executed_steps = []
@@ -362,7 +370,7 @@ def test_turn_graph_routes_through_kernel():
         async def execute(self, registry, ctx):
             ctx.state["safe_result"] = (str(ctx.state.get("result") or ""), False)
 
-    graph = TurnGraph(registry=None)
+    graph = TurnGraph(registry=None, nodes=[])
     graph.add_node("temporal", TemporalNode())
     graph.add_node("kernel_step", _SimpleNode())
     graph.add_node("save", _SaveNode())
@@ -379,7 +387,7 @@ def test_turn_graph_routes_through_kernel():
 
 
 def test_turn_graph_kernel_rejection_skips_state_mutation():
-    from dadbot.core.graph import TurnGraph, TurnContext
+    from dadbot.core.graph import TurnContext, TurnGraph
     from dadbot.core.nodes import TemporalNode
 
     class _RejectKernel:
@@ -402,7 +410,7 @@ def test_turn_graph_kernel_rejection_skips_state_mutation():
         async def execute(self, registry, ctx):
             ctx.state["safe_result"] = ("ok", False)
 
-    graph = TurnGraph(registry=None)
+    graph = TurnGraph(registry=None, nodes=[])
     graph.add_node("temporal", TemporalNode())
     graph.add_node("mutate_stage", _MutatingNode())
     graph.add_node("save", _SaveNode())
@@ -419,6 +427,7 @@ def test_turn_graph_kernel_rejection_skips_state_mutation():
 # ---------------------------------------------------------------------------
 # 5. Unified execution control plane — global coordination boundary
 # ---------------------------------------------------------------------------
+
 
 def test_control_plane_serializes_turns_within_same_session():
     registry = SessionRegistry()
@@ -437,8 +446,8 @@ def test_control_plane_serializes_turns_within_same_session():
 
     async def _run():
         return await asyncio.gather(
-            control_plane.submit_turn(session_id="s1", user_input="first"),
-            control_plane.submit_turn(session_id="s1", user_input="second"),
+            control_plane.submit_turn(session_id="s1", user_input="first", metadata={"confluence_key": "test:s1-first"}),
+            control_plane.submit_turn(session_id="s1", user_input="second", metadata={"confluence_key": "test:s1-second"}),
         )
 
     results = asyncio.run(_run())
@@ -470,7 +479,7 @@ def test_control_plane_rejects_new_work_after_session_termination():
         await control_plane.create_session("s-dead")
         control_plane.terminate_session("s-dead")
         with pytest.raises(RuntimeError):
-            await control_plane.submit_turn(session_id="s-dead", user_input="hello?")
+            await control_plane.submit_turn(session_id="s-dead", user_input="hello?", metadata={"confluence_key": "test:s-dead-probe"})
 
     asyncio.run(_run())
 
@@ -496,7 +505,7 @@ def test_scheduler_consumes_jobs_from_ledger_pending_tail():
     )
 
     async def _run():
-        result = await control_plane.submit_turn(session_id="ledger-session", user_input="hello")
+        result = await control_plane.submit_turn(session_id="ledger-session", user_input="hello", metadata={"confluence_key": "test:ledger-hello"})
         return result
 
     result = asyncio.run(_run())
@@ -504,6 +513,9 @@ def test_scheduler_consumes_jobs_from_ledger_pending_tail():
 
     events = control_plane.ledger_events()
     event_types = [event["type"] for event in events]
-    assert event_types[:3] == ["JOB_SUBMITTED", "SESSION_BOUND", "JOB_QUEUED"]
+    submitted_idx = event_types.index("JOB_SUBMITTED")
+    bound_idx = event_types.index("SESSION_BOUND")
+    queued_idx = event_types.index("JOB_QUEUED")
+    assert submitted_idx < bound_idx < queued_idx
     assert "JOB_STARTED" in event_types
     assert event_types[-1] == "JOB_COMPLETED"

@@ -1,4 +1,4 @@
-﻿"""Shared UI utility helpers that depend on streamlit + external libs only.
+"""Shared UI utility helpers that depend on streamlit + external libs only.
 
 These functions are safe to import from any dadbot.ui submodule because they
 never import from dad_streamlit (no circular deps).
@@ -9,7 +9,6 @@ from __future__ import annotations
 import re
 import shutil
 from datetime import datetime
-from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.error import URLError
 from urllib.request import urlopen
@@ -39,16 +38,16 @@ except Exception:
     pyttsx3 = None
 
 __all__ = [
-    "voice_profile_catalog",
-    "render_voice_dependency_help",
-    "local_stt_backend_status",
-    "local_tts_backend_status",
     "apply_power_mode",
     "apply_ui_preferences",
-    "find_available_image_model",
-    "fetch_ical_events",
     "export_bundle_payload",
+    "fetch_ical_events",
+    "find_available_image_model",
     "heritage_files_with_limits",
+    "local_stt_backend_status",
+    "local_tts_backend_status",
+    "render_voice_dependency_help",
+    "voice_profile_catalog",
 ]
 
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
@@ -67,7 +66,7 @@ def render_voice_dependency_help(*, context_key: str) -> None:
         "Check installed packages: "
         "[faster-whisper](https://pypi.org/project/faster-whisper/), "
         "[openai-whisper](https://pypi.org/project/openai-whisper/), "
-        "[pyttsx3](https://pypi.org/project/pyttsx3/)."
+        "[pyttsx3](https://pypi.org/project/pyttsx3/).",
     )
     st.caption("Install optional local voice dependencies in your environment:")
     st.code("pip install .[voice]", language="bash")
@@ -91,18 +90,26 @@ def local_stt_backend_status(preferences) -> tuple[bool, str, str]:
         return True, "faster_whisper", "Using local faster-whisper STT."
     if openai_whisper is not None:
         return True, "openai_whisper", "Using local openai-whisper STT."
-    return False, "none", "Install faster-whisper or openai-whisper for local transcription."
+    return (
+        False,
+        "none",
+        "Install faster-whisper or openai-whisper for local transcription.",
+    )
 
 
 def local_tts_backend_status() -> tuple[bool, str, str]:
     if pyttsx3 is None and not shutil.which("piper"):
-        return False, "none", "Install pyttsx3 or Piper for local text-to-speech playback."
+        return (
+            False,
+            "none",
+            "Install pyttsx3 or Piper for local text-to-speech playback.",
+        )
     if shutil.which("piper"):
         return True, "piper", "Piper neural TTS is available (high-quality)."
     return True, "pyttsx3", "Using local pyttsx3 text-to-speech."
 
 
-def apply_power_mode(bot: "DadBot", mode: str) -> str:
+def apply_power_mode(bot: DadBot, mode: str) -> str:
     normalized_mode = str(mode or "turbo").strip().lower()
     preferences = ui_preferences()
     if normalized_mode == "battery":
@@ -119,7 +126,7 @@ def apply_power_mode(bot: "DadBot", mode: str) -> str:
     return "Turbo mode enabled"
 
 
-def apply_ui_preferences(bot: "DadBot") -> None:
+def apply_ui_preferences(bot: DadBot) -> None:
     preferences = ui_preferences()
     power_mode = str(preferences.get("power_mode") or "turbo").strip().lower()
     if power_mode == "battery":
@@ -141,7 +148,8 @@ def find_available_image_model(candidates: tuple[str, ...]) -> str | None:
 
 def fetch_ical_events(url: str, max_events: int = 10) -> tuple[list[dict], str]:
     """Fetch and parse upcoming events from a public iCal/ICS feed URL.
-    Returns (events_list, error_message). No external deps â€” pure stdlib."""
+    Returns (events_list, error_message). No external deps â€” pure stdlib.
+    """
     events: list[dict] = []
     try:
         with urlopen(url, timeout=8) as response:
@@ -171,25 +179,33 @@ def fetch_ical_events(url: str, max_events: int = 10) -> tuple[list[dict], str]:
             raw_dt = re.sub(r"T.*", "", raw_dt[:8])
             try:
                 from datetime import date as _dc
-                return _dc(int(raw_dt[:4]), int(raw_dt[4:6]), int(raw_dt[6:8])).isoformat()
+
+                return _dc(
+                    int(raw_dt[:4]),
+                    int(raw_dt[4:6]),
+                    int(raw_dt[6:8]),
+                ).isoformat()
             except Exception:
                 return raw_dt
 
         event_date = _format_dt(dtstart_raw) if dtstart_raw else ""
         try:
             from datetime import date as _dc2
+
             if event_date and _dc2.fromisoformat(event_date) < _dc2.today():
                 continue
         except Exception:
             pass
 
-        events.append({
-            "summary": summary,
-            "start": event_date,
-            "end": _format_dt(dtend_raw) if dtend_raw else "",
-            "location": location,
-            "description": description[:120] if description else "",
-        })
+        events.append(
+            {
+                "summary": summary,
+                "start": event_date,
+                "end": _format_dt(dtend_raw) if dtend_raw else "",
+                "location": location,
+                "description": description[:120] if description else "",
+            },
+        )
         if len(events) >= max_events:
             break
 
@@ -197,7 +213,7 @@ def fetch_ical_events(url: str, max_events: int = 10) -> tuple[list[dict], str]:
     return events, ""
 
 
-def export_bundle_payload(bot: "DadBot") -> dict:
+def export_bundle_payload(bot: DadBot) -> dict:
     snapshot = bot.snapshot_session_state()
     return {
         "exported_at": datetime.now().isoformat(timespec="seconds"),
@@ -221,14 +237,18 @@ def heritage_files_with_limits(uploaded_files) -> tuple[list, list[str]]:
         try:
             raw = uploaded_file.getvalue() or b""
         except Exception as exc:
-            issues.append(f"{getattr(uploaded_file, 'name', 'upload')}: could not read file ({exc}).")
+            issues.append(
+                f"{getattr(uploaded_file, 'name', 'upload')}: could not read file ({exc}).",
+            )
             continue
         if not raw:
-            issues.append(f"{getattr(uploaded_file, 'name', 'upload')}: file was empty.")
+            issues.append(
+                f"{getattr(uploaded_file, 'name', 'upload')}: file was empty.",
+            )
             continue
         if len(raw) > MAX_UPLOAD_BYTES:
             issues.append(
-                f"{getattr(uploaded_file, 'name', 'upload')}: file is larger than {MAX_UPLOAD_BYTES // (1024 * 1024)}MB limit."
+                f"{getattr(uploaded_file, 'name', 'upload')}: file is larger than {MAX_UPLOAD_BYTES // (1024 * 1024)}MB limit.",
             )
             continue
         accepted.append(uploaded_file)

@@ -1,10 +1,15 @@
 """Integration coverage for memory persistence PII scrubbing."""
+
 from __future__ import annotations
 
 from datetime import date, datetime
 from types import SimpleNamespace
 
+import pytest
+
 from dadbot.managers.memory_coordination import MemoryCoordinator
+
+pytestmark = pytest.mark.unit
 
 
 class DummyBot:
@@ -22,6 +27,7 @@ class DummyBot:
 
     def days_since_iso_date(self, value):
         from datetime import date, datetime
+
         if not value:
             return None
         try:
@@ -32,9 +38,14 @@ class DummyBot:
 
     def normalize_mood(self, mood):
         _MOOD_MAP = {
-            "happy": "positive", "great": "positive", "good": "positive",
-            "sad": "low", "depressed": "low", "tired": "tired",
-            "anxious": "anxious", "stressed": "anxious",
+            "happy": "positive",
+            "great": "positive",
+            "good": "positive",
+            "sad": "low",
+            "depressed": "low",
+            "tired": "tired",
+            "anxious": "anxious",
+            "stressed": "anxious",
         }
         return _MOOD_MAP.get(str(mood or "").lower().strip(), "neutral")
 
@@ -79,3 +90,27 @@ def test_update_memory_store_scrubs_pii_before_saving(monkeypatch):
     assert "_pii_scrubbed" in saved
     assert "email" in saved["_pii_scrubbed"]
     assert "phone" in saved["_pii_scrubbed"]
+
+
+def test_update_memory_store_skips_without_turn_context_even_if_commit_active(monkeypatch):
+    bot = DummyBot()
+    bot._graph_commit_active = True
+    coordinator = MemoryCoordinator(bot)
+
+    called = {"extract": 0}
+
+    def fake_extract_session_memories(history):
+        called["extract"] += 1
+        return [
+            {
+                "summary": "This should never be processed without turn context.",
+                "category": "test",
+                "mood": "neutral",
+            }
+        ]
+
+    monkeypatch.setattr(coordinator, "extract_session_memories", fake_extract_session_memories)
+    coordinator.update_memory_store([{"role": "user", "content": "remember this"}], turn_context=None)
+
+    assert called["extract"] == 0
+    assert bot.saved_catalog is None

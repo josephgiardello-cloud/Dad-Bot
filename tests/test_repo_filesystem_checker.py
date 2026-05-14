@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from tools.repo_filesystem_checker import build_repo_filesystem_report
+
+pytestmark = pytest.mark.unit
 
 
 def test_repo_filesystem_checker_reports_expected_gaps_and_optimizations() -> None:

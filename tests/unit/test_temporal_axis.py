@@ -1,4 +1,5 @@
 """Unit tests for TurnTemporalAxis — from_now(), from_lock_hash(), to_dict()."""
+
 from __future__ import annotations
 
 import datetime as dt
@@ -6,8 +7,10 @@ import json
 
 import pytest
 
-from dadbot.core.graph import TurnTemporalAxis
+pytestmark = pytest.mark.unit
 from harness.deterministic_seeds import REPLAY_A, REPLAY_B, TEMPORAL_FREEZE
+
+from dadbot.core.graph import TurnTemporalAxis
 
 
 class TestFromNow:
@@ -57,6 +60,7 @@ class TestFromLockHash:
 
     def test_seed_derived_hashes_reproducible(self):
         import hashlib
+
         lock = hashlib.sha256(f"temporal-lock-seed-{TEMPORAL_FREEZE}".encode()).hexdigest()[:16]
         a = TurnTemporalAxis.from_lock_hash(lock)
         b = TurnTemporalAxis.from_lock_hash(lock)
@@ -65,6 +69,7 @@ class TestFromLockHash:
 
     def test_replay_pair_seeds_produce_different_axes(self):
         import hashlib
+
         lock_a = hashlib.sha256(f"temporal-lock-seed-{REPLAY_A}".encode()).hexdigest()[:16]
         lock_b = hashlib.sha256(f"temporal-lock-seed-{REPLAY_B}".encode()).hexdigest()[:16]
         a = TurnTemporalAxis.from_lock_hash(lock_a)

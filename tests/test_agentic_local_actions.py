@@ -1,5 +1,6 @@
-from pathlib import Path
+import pytest
 
+pytestmark = pytest.mark.unit
 
 def test_tool_registry_parses_calendar_and_email_commands(bot):
     calendar_command = bot.parse_tool_command("add to calendar project sync tomorrow 2pm")

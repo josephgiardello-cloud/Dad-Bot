@@ -1,4 +1,4 @@
-﻿"""Memory formatting, sorting, and naturalization utilities.
+"""Memory formatting, sorting, and naturalization utilities.
 
 Pure functions with no DadBot dependency::
 
@@ -33,7 +33,13 @@ def naturalize_memory_summary(summary: str) -> str:
 
     lowered = summary.lower()
     for pattern, replacement in pattern_replacements:
-        rewritten, replacement_count = re.subn(pattern, replacement, summary, count=1, flags=re.IGNORECASE)
+        rewritten, replacement_count = re.subn(
+            pattern,
+            replacement,
+            summary,
+            count=1,
+            flags=re.IGNORECASE,
+        )
         if replacement_count:
             summary = rewritten
             break

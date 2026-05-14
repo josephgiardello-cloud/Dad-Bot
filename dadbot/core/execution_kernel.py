@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-import logging
+import os
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Iterable
+from typing import Any
 
 from dadbot.core.execution_firewall import ExecutionFirewall, FirewallContext
 from dadbot.core.invariant_registry import InvariantRegistry
-
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -19,14 +17,31 @@ class KernelValidationResult:
     reason: str = ""
 
 
+class KernelValidationError(RuntimeError):
+    """Raised when kernel validation fails at invariant/firewall enforcement."""
+
+    def __init__(self, *, stage: str, operation: str, reason: str) -> None:
+        super().__init__(f"Kernel validation failed at {stage}:{operation}: {reason}")
+        self.stage = str(stage or "")
+        self.operation = str(operation or "")
+        self.reason = str(reason or "")
+
+
 class ExecutionKernel:
     """Central authority layer for runtime execution validation.
 
-    In shadow mode (strict=False), callers should wrap validate() and log
-    violations without propagating them.
+    In strict mode (strict=True), validate() raises KernelValidationError.
+    In shadow mode (strict=False), validate() returns ok=False with reason.
     """
 
-    def __init__(self, firewall: ExecutionFirewall, invariant_registry: InvariantRegistry, quarantine: Any, *, strict: bool = False):
+    def __init__(
+        self,
+        firewall: ExecutionFirewall,
+        invariant_registry: InvariantRegistry,
+        quarantine: Any,
+        *,
+        strict: bool = False,
+    ):
         self.firewall = firewall
         self.invariants = invariant_registry
         self.quarantine = quarantine
@@ -67,10 +82,18 @@ class ExecutionKernel:
                 metadata=dict(getattr(context, "metadata", {}) or {}),
             )
             self.firewall.enforce_execution_firewall(operation, firewall_context)
-            return KernelValidationResult(ok=True, stage=str(stage or ""), operation=str(operation or ""))
+            return KernelValidationResult(
+                ok=True,
+                stage=str(stage or ""),
+                operation=str(operation or ""),
+            )
         except Exception as exc:
             if self.strict:
-                raise
+                raise KernelValidationError(
+                    stage=str(stage or ""),
+                    operation=str(operation or ""),
+                    reason=str(exc),
+                ) from exc
             return KernelValidationResult(
                 ok=False,
                 stage=str(stage or ""),
@@ -84,47 +107,21 @@ class ExecutionKernel:
         pipeline: Iterable[tuple[str, Any]],
         execute_stage: Callable[[str, Any, Any], Awaitable[Any]],
     ) -> Any:
-        """Kernel-driven execution loop for graph stages.
+        """Experimental-only kernel loop.
 
-        The kernel becomes the authority that decides when each phase may run.
-        In shadow mode it logs violations and continues; in strict mode it raises.
+        Production graph execution must not use this path. It remains only to
+        satisfy legacy contracts that require an async ``run`` surface.
         """
-        preflight = self.validate(
-            stage="pre_execute",
-            operation="execution_kernel.run",
-            context=turn_context,
-        )
-        if not preflight.ok:
-            logger.warning("[KERNEL SHADOW VIOLATION] %s", preflight.reason)
-
-        for stage_name, stage_obj in pipeline:
-            result = self.validate(
-                stage=stage_name,
-                operation=f"kernel.phase:{stage_name}",
-                context=turn_context,
+        if str(os.getenv("DADBOT_ENABLE_EXPERIMENTAL_KERNEL_RUN", "")).strip().lower() not in {"1", "true", "yes"}:
+            raise RuntimeError(
+                "ExecutionKernel.run is experimental and disabled. "
+                "Use TurnGraph canonical execution path."
             )
-            if not result.ok:
-                logger.warning("[KERNEL SHADOW VIOLATION] %s", result.reason)
+        for stage_name, stage_obj in pipeline:
             turn_context = await execute_stage(stage_name, stage_obj, turn_context)
             if bool(getattr(turn_context, "short_circuit", False)):
-                post = self.validate(
-                    stage="post_execute",
-                    operation="execution_kernel.run.short_circuit",
-                    context=turn_context,
-                )
-                if not post.ok:
-                    logger.warning("[KERNEL SHADOW VIOLATION] %s", post.reason)
                 return turn_context
-
-        post = self.validate(
-            stage="post_execute",
-            operation="execution_kernel.run.complete",
-            context=turn_context,
-        )
-        if not post.ok:
-            logger.warning("[KERNEL SHADOW VIOLATION] %s", post.reason)
-
         return turn_context
 
 
-__all__ = ["ExecutionKernel", "KernelValidationResult"]
+__all__ = ["ExecutionKernel", "KernelValidationError", "KernelValidationResult"]

@@ -1,4 +1,8 @@
+import pytest
+
 from dadbot.heritage_import import build_heritage_memories
+
+pytestmark = pytest.mark.unit
 
 
 class UploadedStub:
@@ -13,7 +17,7 @@ class UploadedStub:
 def test_build_heritage_memories_extracts_json_and_text_entries():
     files = [
         UploadedStub("journal.txt", b"I felt stressed at work\nI slept better after a walk"),
-        UploadedStub("history.json", b"[{\"summary\": \"I moved to a new city\", \"category\": \"life\"}]"),
+        UploadedStub("history.json", b'[{"summary": "I moved to a new city", "category": "life"}]'),
     ]
 
     result = build_heritage_memories(files, notes="Focus on patterns", max_items_per_file=10)

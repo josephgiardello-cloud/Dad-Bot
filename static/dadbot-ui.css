@@ -290,6 +290,23 @@ button[data-baseweb="tab"][aria-selected="true"] {
     margin-top: 0.65rem;
 }
 
+.dad-step-graph {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.42rem;
+    margin: 0.45rem 0 0.8rem;
+}
+
+.dad-step-chip {
+    border: 1px solid var(--dad-border);
+    border-radius: 999px;
+    padding: 0.2rem 0.62rem;
+    font-size: 0.78rem;
+    font-weight: 600;
+    background: color-mix(in srgb, var(--dad-accent) 10%, var(--dad-surface));
+    color: var(--dad-text);
+}
+
 .dad-workshop-shell {
     border: 1px solid var(--dad-border);
     border-radius: 20px;
@@ -359,7 +376,7 @@ div[data-testid="stRadio"] label p {
         left: 0;
         right: 0;
         bottom: 0;
-        z-index: 9999;
+        z-index: 1200;
         padding: 0.5rem 0.7rem calc(0.6rem + env(safe-area-inset-bottom));
         background: color-mix(in srgb, var(--dad-bg) 84%, transparent);
         border-top: 1px solid color-mix(in srgb, var(--dad-border) 70%, transparent);
@@ -390,6 +407,10 @@ div[data-testid="stRadio"] label p {
 
     div[data-testid="stChatInput"] {
         border-radius: 14px;
+        margin-bottom: calc(5.25rem + env(safe-area-inset-bottom));
+        position: sticky;
+        bottom: calc(5rem + env(safe-area-inset-bottom));
+        z-index: 1300;
     }
 
     div[data-baseweb="tab-list"] {

@@ -1,0 +1,58 @@
+{
+  "session_id": "zero-g-demo",
+  "request_id": "fixture-turn-001",
+  "tenant_id": "family-a",
+  "response_text": "Fixture mode response: The cockpit is rendering contract data from local payloads while runtime services are offline.",
+  "subconscious_metadata": [
+    {
+      "fragment_id": "fx-frag-001",
+      "memory_id": "mem-442",
+      "similarity_score": 0.91,
+      "checksum": "a84f3e38",
+      "sovereign_event_checksum": "",
+      "summary": "User values direct, practical guidance during system bring-up.",
+      "category": "operator-profile",
+      "mood": "focused",
+      "event": "startup",
+      "timestamp": "2026-05-08T12:00:00Z",
+      "source": "subconscious_reflex"
+    }
+  ],
+  "integrity_status": {
+    "merkle_check_passed": true,
+    "reason": "",
+    "diagnostics": {},
+    "checked_at": "2026-05-08T12:00:00Z"
+  },
+  "trust_meter": {
+    "trust_level": 74,
+    "openness_level": 68,
+    "trust_credit": 0.74,
+    "alignment_score": 0.71,
+    "label": "steady"
+  },
+  "drift_alarm": {
+    "active": false,
+    "current_risk_level": "low",
+    "predicted_drift_probability": 0.12,
+    "likely_trigger_category": "none",
+    "confidence_score": 0.43,
+    "recommended_intervention": "",
+    "intervention_justification": ""
+  },
+  "thinking_state": [
+    {
+      "step_id": "fx-step-1",
+      "thought_trace": "Rendering fixture telemetry for cockpit validation.",
+      "target_node": "hud",
+      "confidence_score": 0.84,
+      "emitted_at": 1715179200.0
+    }
+  ],
+  "active_model": "fixture-mode",
+  "should_end": false,
+  "status": "completed",
+  "metadata": {
+    "fixture": true
+  }
+}

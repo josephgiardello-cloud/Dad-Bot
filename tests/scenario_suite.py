@@ -7,17 +7,18 @@ PRINCIPLE: Scenarios define truth. Scoring quantifies truth. Benchmarks compare 
 """
 
 from dataclasses import dataclass, field
-from typing import List, Dict, Any
+from typing import Any
 
 
 @dataclass
 class Scenario:
     """Single capability evaluation scenario."""
+
     name: str
     category: str
     input_text: str
-    expected_capabilities: List[str] = field(default_factory=list)
-    success_criteria: Dict[str, Any] = field(default_factory=dict)
+    expected_capabilities: list[str] = field(default_factory=list)
+    success_criteria: dict[str, Any] = field(default_factory=dict)
     description: str = ""
     # Behavioral constraints for scoring engine:
     # expected_tool_use: bool - should tools be invoked?
@@ -29,7 +30,7 @@ class Scenario:
     # max_steps: int - step efficiency upper bound
     # quality_threshold: float - minimum overall score to pass (0.0-1.0)
     # acceptable_failure_paths: list[str] - named acceptable degradation modes
-    behavioral_spec: Dict[str, Any] = field(default_factory=dict)
+    behavioral_spec: dict[str, Any] = field(default_factory=dict)
 
 
 # ============================================================================
@@ -128,10 +129,7 @@ TOOL_SCENARIOS = [
     Scenario(
         name="correct_tool_selection",
         category="tool",
-        input_text=(
-            "What's the current time in Tokyo? "
-            "Also tell me what day of the week it is there."
-        ),
+        input_text=("What's the current time in Tokyo? Also tell me what day of the week it is there."),
         expected_capabilities=[
             "tool_identification",
             "correct_tool_selection",
@@ -176,6 +174,7 @@ TOOL_SCENARIOS = [
             "expected_tool_use": True,
             "min_retries": 1,
             "max_retries": 3,
+            "expects_canonical_recovery": True,
             "quality_threshold": 0.6,
             "acceptable_failure_paths": ["graceful_fallback", "alternative_method"],
             "unacceptable_behaviors": ["silent_fail", "crash", "hallucinate_data"],
@@ -233,6 +232,36 @@ TOOL_SCENARIOS = [
             "quality_threshold": 0.6,
             "acceptable_failure_paths": ["honest_limitation", "suggest_alternative"],
             "unacceptable_behaviors": ["hallucinate_tool", "false_claims"],
+        },
+    ),
+    Scenario(
+        name="redundant_tool_loop_guard",
+        category="tool",
+        input_text=(
+            "What time is it right now? Redundancy stress: please triple-check time and cross-check "
+            "time three times before answering. This is a redundancy stress request."
+        ),
+        expected_capabilities=[
+            "redundant_tool_detection",
+            "early_convergence",
+            "tool_loop_guard",
+        ],
+        success_criteria={
+            "completed": True,
+            "redundant_calls_detected": True,
+            "early_convergence_triggered": True,
+            "no_unbounded_loop": True,
+        },
+        description="Forces repeated same-tool requests to validate convergence guard behavior",
+        behavioral_spec={
+            "expected_tool_use": True,
+            "min_tool_calls": 3,
+            "max_steps": 6,
+            "quality_threshold": 0.4,
+            "expects_redundancy_detection": True,
+            "expects_early_convergence": True,
+            "acceptable_failure_paths": ["partial_result_with_guard"],
+            "unacceptable_behaviors": ["runaway_tool_loop"],
         },
     ),
 ]
@@ -484,16 +513,10 @@ ROBUSTNESS_SCENARIOS = [
 # SCENARIO REGISTRY
 # ============================================================================
 
-SCENARIOS: List[Scenario] = (
-    PLANNING_SCENARIOS
-    + TOOL_SCENARIOS
-    + MEMORY_SCENARIOS
-    + UX_SCENARIOS
-    + ROBUSTNESS_SCENARIOS
-)
+SCENARIOS: list[Scenario] = PLANNING_SCENARIOS + TOOL_SCENARIOS + MEMORY_SCENARIOS + UX_SCENARIOS + ROBUSTNESS_SCENARIOS
 
 
-def get_scenarios_by_category(category: str) -> List[Scenario]:
+def get_scenarios_by_category(category: str) -> list[Scenario]:
     """Get all scenarios in a specific category."""
     return [s for s in SCENARIOS if s.category == category]
 

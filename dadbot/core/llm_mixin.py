@@ -8,6 +8,7 @@ Extracted from the DadBot god-class. Owns:
 - chat_loop / chat_loop_via_service (routes through runtime_interface)
 - Background task recording shim
 """
+
 from __future__ import annotations
 
 from dadbot.contracts import ChunkCallback
@@ -109,33 +110,61 @@ class DadBotLlmMixin:
     # Backward-compatible Ollama-named wrappers
     # ------------------------------------------------------------------
 
-    def call_ollama_chat(self, messages, options=None, response_format=None, purpose="chat"):
-        return self.runtime_client.call_llm(
-            messages, purpose=purpose, options=options, response_format=response_format
+    def call_ollama_chat(
+        self,
+        messages,
+        options=None,
+        response_format=None,
+        purpose="chat",
+    ):
+        content = self.model_port.generate(
+            messages,
+            purpose=purpose,
+            response_format=response_format,
+            options=options,
         )
+        return {"message": {"content": str(content or "")}}
 
     async def call_ollama_chat_async(
-        self, messages, options=None, response_format=None, purpose="chat"
+        self,
+        messages,
+        options=None,
+        response_format=None,
+        purpose="chat",
     ):
-        return await self.runtime_client.call_llm_async(
-            messages, purpose=purpose, options=options, response_format=response_format
+        content = await self.model_port.generate_async(
+            messages,
+            purpose=purpose,
+            response_format=response_format,
+            options=options,
         )
+        return {"message": {"content": str(content or "")}}
 
     def call_ollama_chat_with_model(
-        self, model_name, messages, options=None, response_format=None, purpose="chat"
+        self,
+        model_name,
+        messages,
+        options=None,
+        response_format=None,
+        purpose="chat",
     ):
-        return self.runtime_client.call_llm(
+        content = self.model_port.generate(
             messages,
             model=model_name,
             purpose=purpose,
             options=options,
             response_format=response_format,
         )
+        return {"message": {"content": str(content or "")}}
 
     def call_ollama_chat_stream(
-        self, messages, options=None, purpose="chat", chunk_callback=None
+        self,
+        messages,
+        options=None,
+        purpose="chat",
+        chunk_callback=None,
     ):
-        return self.runtime_client.call_llm(
+        return self.model_port.generate(
             messages,
             stream=True,
             purpose=purpose,
@@ -144,9 +173,13 @@ class DadBotLlmMixin:
         )
 
     async def call_ollama_chat_stream_async(
-        self, messages, options=None, purpose="chat", chunk_callback=None
+        self,
+        messages,
+        options=None,
+        purpose="chat",
+        chunk_callback=None,
     ):
-        return await self.runtime_client.call_llm_async(
+        return await self.model_port.generate_async(
             messages,
             stream=True,
             purpose=purpose,
@@ -179,7 +212,8 @@ class DadBotLlmMixin:
 
     def chat_loop_via_service(self, service_client, session_id=None):
         return self.runtime_interface.chat_loop_via_service(
-            service_client, session_id=session_id
+            service_client,
+            session_id=session_id,
         )
 
     # ------------------------------------------------------------------
@@ -187,7 +221,13 @@ class DadBotLlmMixin:
     # ------------------------------------------------------------------
 
     def _record_background_task(
-        self, task_id, *, task_kind, status, metadata=None, error=""
+        self,
+        task_id,
+        *,
+        task_kind,
+        status,
+        metadata=None,
+        error="",
     ):
         return self.runtime_orchestration.record_background_task(
             task_id,

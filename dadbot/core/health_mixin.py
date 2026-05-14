@@ -6,6 +6,7 @@ Extracted from the DadBot god-class. Owns:
   (all read from cached state stamped by TurnUxProjectionGateway)
 - Checkpoint/replay delegates (conversation_persistence + OfflineReplayValidator)
 """
+
 from __future__ import annotations
 
 import time
@@ -19,7 +20,12 @@ class DadBotHealthMixin:
     # Runtime health snapshot
     # ------------------------------------------------------------------
 
-    def runtime_health_snapshot(self, *, log_warnings: bool = True, persist: bool = True) -> dict:
+    def runtime_health_snapshot(
+        self,
+        *,
+        log_warnings: bool = True,
+        persist: bool = True,
+    ) -> dict:
         health_manager = getattr(self, "health_manager", None)
         snapshot_fn = getattr(health_manager, "runtime_health_snapshot", None)
         if callable(snapshot_fn):
@@ -113,22 +119,49 @@ class DadBotHealthMixin:
     # Checkpoint and replay delegates
     # ------------------------------------------------------------------
 
-    def load_latest_graph_checkpoint(self, trace_id: str = "") -> dict[str, Any] | None:
-        return self.conversation_persistence.load_latest_graph_checkpoint(trace_id=trace_id)
-
-    def resume_turn_from_checkpoint(self, trace_id: str = "") -> dict[str, Any] | None:
-        return self.conversation_persistence.resume_graph_checkpoint(trace_id=trace_id)
-
-    def list_turn_events(self, trace_id: str, limit: int = 0) -> list[dict[str, Any]]:
-        return self.conversation_persistence.list_turn_events(
-            trace_id=trace_id, limit=limit
+    def load_latest_graph_checkpoint(self, trace_token: str = "") -> dict[str, Any] | None:
+        return self.conversation_persistence.load_latest_graph_checkpoint(
+            trace_token=trace_token,
         )
 
-    def replay_turn_events(self, trace_id: str) -> dict[str, Any]:
-        return self.conversation_persistence.replay_turn_events(trace_id=trace_id)
+    def resume_turn_from_checkpoint(self, trace_token: str = "") -> dict[str, Any] | None:
+        return self.conversation_persistence.resume_graph_checkpoint(trace_token=trace_token)
+
+    def list_turn_events(self, trace_token: str, limit: int = 0) -> list[dict[str, Any]]:
+        return self.conversation_persistence.list_turn_events(
+            trace_token=trace_token,
+            limit=limit,
+        )
+
+    def replay_turn_events(self, trace_token: str) -> dict[str, Any]:
+        return self.conversation_persistence.replay_turn_events(trace_token=trace_token)
+
+    def list_policy_trace_events(
+        self,
+        *,
+        trace_token: str = "",
+        limit: int = 0,
+    ) -> list[dict[str, Any]]:
+        return self.conversation_persistence.list_policy_trace_events(
+            trace_token=trace_token,
+            limit=limit,
+        )
+
+    def summarize_policy_trace_events(
+        self,
+        *,
+        trace_token: str = "",
+        limit: int = 0,
+    ) -> dict[str, Any]:
+        return self.conversation_persistence.summarize_policy_trace_events(
+            trace_token=trace_token,
+            limit=limit,
+        )
 
     def validate_replay_determinism(
-        self, trace_id: str, expected_lock_hash: str = ""
+        self,
+        trace_token: str,
+        expected_lock_hash: str = "",
     ) -> dict[str, Any]:
         """Validate replay determinism using OfflineReplayValidator.
 
@@ -136,7 +169,7 @@ class DadBotHealthMixin:
         """
         from dadbot.core.offline_replay_validator import OfflineReplayValidator
 
-        replay = self.conversation_persistence.replay_turn_events(trace_id=trace_id)
+        replay = self.conversation_persistence.replay_turn_events(trace_token=trace_token)
         determinism = dict(replay.get("determinism") or {})
 
         events = list(replay.get("events") or [])
@@ -148,7 +181,7 @@ class DadBotHealthMixin:
             contract=contract,
             events=events,
             identity=identity,
-            trace_id=str(trace_id or "").strip(),
+            trace_token=str(trace_token or "").strip(),
         )
 
         observed_hash = str(determinism.get("lock_hash") or "").strip()
@@ -158,7 +191,7 @@ class DadBotHealthMixin:
             matches_expected = observed_hash == expected_hash
 
         return {
-            "trace_id": str(trace_id or "").strip(),
+            "trace_id": str(trace_token or "").strip(),
             "replay_valid": report.passed,
             "replay_verdict": report.verdict,
             "replay_violations": report.violations,
@@ -168,5 +201,7 @@ class DadBotHealthMixin:
             "matches_expected": matches_expected,
             "lock_hashes": list(determinism.get("lock_hashes") or []),
             "execution_identity": identity,
-            "execution_fingerprint": str(determinism.get("execution_fingerprint") or ""),
+            "execution_fingerprint": str(
+                determinism.get("execution_fingerprint") or "",
+            ),
         }

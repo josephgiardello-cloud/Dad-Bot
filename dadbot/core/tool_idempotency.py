@@ -18,6 +18,7 @@ This enables:
     - Cache hit detection (same request → skip re-execution)
     - Audit: "was this the same computation as before?"
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -26,7 +27,6 @@ from dataclasses import dataclass
 from threading import RLock
 from typing import Any
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -34,7 +34,7 @@ from typing import Any
 
 def _sha256(payload: Any) -> str:
     return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        json.dumps(payload, sort_keys=True, default=str).encode("utf-8"),
     ).hexdigest()
 
 
@@ -43,7 +43,11 @@ def _sha256(payload: Any) -> str:
 # ---------------------------------------------------------------------------
 
 
-def canonical_request_hash(tool_name: str, args: dict[str, Any], intent: str = "") -> str:
+def canonical_request_hash(
+    tool_name: str,
+    args: dict[str, Any],
+    intent: str = "",
+) -> str:
     """Compute the canonical hash of a tool request.
 
     The hash is computed from:
@@ -56,9 +60,7 @@ def canonical_request_hash(tool_name: str, args: dict[str, Any], intent: str = "
     """
     normalized = {
         "tool_name": str(tool_name or "").strip().lower(),
-        "args": {
-            k: v for k, v in sorted((dict(args or {})).items())
-        },
+        "args": {k: v for k, v in sorted((dict(args or {})).items())},
         "intent": str(intent or "").strip().lower(),
     }
     return _sha256(normalized)
@@ -75,6 +77,7 @@ def canonical_result_class(tool_name: str, status: str, output_type: str = "") -
         ("memory_lookup", "ok", "list")   → class A
         ("memory_lookup", "ok", "dict")   → class B
         ("memory_lookup", "error", "")    → class C
+
     """
     normalized = {
         "tool_name": str(tool_name or "").strip().lower(),
@@ -113,6 +116,7 @@ class IdempotencyRecord:
     Used by ToolIdempotencyRegistry to enforce the invariant:
         same request_hash → same result_class (on replay)
     """
+
     request_hash: str
     result_class: str
     tool_name: str
@@ -136,7 +140,14 @@ class IdempotencyRecord:
 class IdempotencyViolationError(ValueError):
     """Raised when a result class mismatch violates the idempotency invariant."""
 
-    def __init__(self, message: str, *, request_hash: str, stored_class: str, new_class: str) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        request_hash: str,
+        stored_class: str,
+        new_class: str,
+    ) -> None:
         super().__init__(message)
         self.request_hash = request_hash
         self.stored_class = stored_class
@@ -225,18 +236,33 @@ class ToolIdempotencyRegistry:
             self._registry[req_hash] = updated
             return updated
 
-    def is_cache_hit(self, tool_name: str, args: dict[str, Any], intent: str = "") -> bool:
+    def is_cache_hit(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        intent: str = "",
+    ) -> bool:
         """True iff this exact request was seen before."""
         req_hash = canonical_request_hash(tool_name, args, intent)
         with self._lock:
             return req_hash in self._registry
 
-    def get_record(self, tool_name: str, args: dict[str, Any], intent: str = "") -> IdempotencyRecord | None:
+    def get_record(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        intent: str = "",
+    ) -> IdempotencyRecord | None:
         req_hash = canonical_request_hash(tool_name, args, intent)
         with self._lock:
             return self._registry.get(req_hash)
 
-    def get_class(self, tool_name: str, args: dict[str, Any], intent: str = "") -> str | None:
+    def get_class(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        intent: str = "",
+    ) -> str | None:
         record = self.get_record(tool_name, args, intent)
         return record.result_class if record else None
 

@@ -1,7 +1,11 @@
 from dataclasses import dataclass, field
 
+import pytest
+
 from tests.scoring_engine import ScoringEngine
 from tests.trace_schema import MemoryAccess, MemoryType, NormalizedTrace
+
+pytestmark = pytest.mark.unit
 
 
 @dataclass

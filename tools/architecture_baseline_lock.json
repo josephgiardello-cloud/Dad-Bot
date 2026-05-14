@@ -1,0 +1,128 @@
+{
+  "baseline_tag": "baseline/audit-start",
+  "locked_artifacts": {
+    "god_class": "tools/baseline_metrics.json",
+    "complexity": "tools/complexity_baseline.json",
+    "contract_guard": "tools/contract_guard_baseline.json",
+    "reconciliation_report": "audit/baseline_reconciliation_report.json"
+  },
+  "thresholds": {
+    "block_new_trace_signature_params": true,
+    "block_new_kernel_step_signature_params": true,
+    "prevent_hotpath_growth_without_complexity_reduction": true,
+    "prevent_decision_point_growth": true
+  },
+  "reconciliation": {
+    "generated_at": "2026-05-12T02:14:46.247981+00:00",
+    "migration_inflation_allowlist": [
+      {
+        "source": "complexity_diff_gate",
+        "file": "dadbot/core/graph_mutation.py",
+        "reason": "Contract migration inflation in known transition hotfile"
+      },
+      {
+        "source": "complexity_diff_gate",
+        "file": "dadbot/core/graph_pipeline_nodes.py",
+        "reason": "Contract migration inflation in known transition hotfile"
+      },
+      {
+        "source": "complexity_diff_gate",
+        "file": "dadbot/core/graph_pipeline_nodes.py",
+        "reason": "Contract migration inflation in known transition hotfile"
+      },
+      {
+        "source": "god_class_audit",
+        "file": "dadbot/core/graph_mutation.py",
+        "reason": "Contract migration inflation in known transition hotfile"
+      },
+      {
+        "source": "god_class_audit",
+        "file": "dadbot/core/graph_mutation.py",
+        "reason": "Contract migration inflation in known transition hotfile"
+      },
+      {
+        "source": "god_class_audit",
+        "file": "dadbot/core/graph_pipeline_nodes.py",
+        "reason": "Contract migration inflation in known transition hotfile"
+      },
+      {
+        "source": "god_class_audit",
+        "file": "dadbot/core/graph_pipeline_nodes.py",
+        "reason": "Contract migration inflation in known transition hotfile"
+      }
+    ],
+    "baseline_invalidations": [
+      {
+        "source": "complexity_diff_gate",
+        "file": "dadbot/core/graph.py",
+        "detail": "dadbot/core/graph.py: LOC 1089->1353 and CC 171->275",
+        "reason": "Compared against pre-migration complexity baseline"
+      },
+      {
+        "source": "complexity_diff_gate",
+        "file": "dadbot/core/orchestrator.py",
+        "detail": "dadbot/core/orchestrator.py: LOC 331->1268 and CC 94->392",
+        "reason": "Compared against pre-migration complexity baseline"
+      },
+      {
+        "source": "complexity_diff_gate",
+        "file": "dadbot/core/orchestrator.py",
+        "detail": "dadbot/core/orchestrator.py: decision_points 25->117",
+        "reason": "Compared against pre-migration complexity baseline"
+      },
+      {
+        "source": "complexity_diff_gate",
+        "file": "dadbot/core/graph_context.py",
+        "detail": "dadbot/core/graph_context.py: LOC 182->225 and CC 41->52",
+        "reason": "Compared against pre-migration complexity baseline"
+      },
+      {
+        "source": "complexity_diff_gate",
+        "file": "dadbot/core/graph_context.py",
+        "detail": "dadbot/core/graph_context.py: decision_points 7->13",
+        "reason": "Compared against pre-migration complexity baseline"
+      },
+      {
+        "source": "god_class_audit",
+        "file": "dadbot/core/graph.py",
+        "detail": "  LOC grew 1089\u21921353 (+264) but CC did not decrease (171\u2192275)",
+        "reason": "Pre-migration god-class baseline no longer representative"
+      },
+      {
+        "source": "god_class_audit",
+        "file": "dadbot/core/graph.py",
+        "detail": "  decision_points grew 72\u219278 (+6)",
+        "reason": "Pre-migration god-class baseline no longer representative"
+      },
+      {
+        "source": "god_class_audit",
+        "file": "dadbot/core/orchestrator.py",
+        "detail": "  LOC grew 331\u21921268 (+937) but CC did not decrease (94\u2192392)",
+        "reason": "Pre-migration god-class baseline no longer representative"
+      },
+      {
+        "source": "god_class_audit",
+        "file": "dadbot/core/orchestrator.py",
+        "detail": "  decision_points grew 25\u2192127 (+102)",
+        "reason": "Pre-migration god-class baseline no longer representative"
+      },
+      {
+        "source": "god_class_audit",
+        "file": "dadbot/core/graph_context.py",
+        "detail": "  LOC grew 182\u2192225 (+43) but CC did not decrease (41\u219252)",
+        "reason": "Pre-migration god-class baseline no longer representative"
+      },
+      {
+        "source": "god_class_audit",
+        "file": "dadbot/core/graph_context.py",
+        "detail": "  decision_points grew 7\u219218 (+11)",
+        "reason": "Pre-migration god-class baseline no longer representative"
+      }
+    ],
+    "real_regressions": [],
+    "policy": {
+      "rebaseline_only_after_classification": true,
+      "strict_bucket_for_failures": "A"
+    }
+  }
+}

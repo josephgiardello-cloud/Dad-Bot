@@ -1,68 +1,122 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
-from dadbot.contracts import AttachmentList, ChunkCallback, DadBotContext, SupportsTurnProcessingRuntime
+import logging
+from dadbot.contracts import (
+    AttachmentList,
+    ChunkCallback,
+    DadBotContext,
+    SupportsTurnProcessingRuntime,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class ReplyGenerationManager:
-	"""Owns Ollama reply generation, supervision, validation, and finalization before turn persistence."""
+    """Legacy compatibility shim for reply-generation APIs.
 
-	def __init__(self, bot: DadBotContext | SupportsTurnProcessingRuntime):
-		self.context = DadBotContext.from_runtime(bot)
-		self.bot = self.context.bot
+    Phase 1 authority collapse: direct reply-generation entrypoints are
+    intentionally disabled so imports cannot bypass control-plane authority.
+    """
 
-	def generate_validated_reply(
-		self,
-		stripped_input: str,
-		turn_text: str,
-		current_mood: str,
-		normalized_attachments: AttachmentList,
-		stream: bool = False,
-		chunk_callback: ChunkCallback | None = None,
-	) -> str:
-		validation_input = stripped_input or turn_text
-		if stream:
-			raw_reply = self.bot.call_ollama_chat_stream(
-				messages=self.bot.build_chat_request_messages(turn_text, current_mood, normalized_attachments),
-				purpose="chat response",
-				chunk_callback=chunk_callback,
-			)
-			reviewed_reply = raw_reply if self.bot.LIGHT_MODE else self.bot.critique_reply(stripped_input, raw_reply, current_mood)
-		else:
-			response = self.bot.call_ollama_chat(
-				messages=self.bot.build_chat_request_messages(turn_text, current_mood, normalized_attachments),
-				purpose="chat response",
-			)
-			reply_text = response["message"]["content"]
-			reviewed_reply = reply_text if self.bot.LIGHT_MODE else self.bot.critique_reply(stripped_input, reply_text, current_mood)
+    def __init__(self, bot: DadBotContext | SupportsTurnProcessingRuntime):
+        self.context = DadBotContext.from_runtime(bot)
+        self.bot = self.context.bot
 
-		validated_reply = self.bot.validate_reply(validation_input, reviewed_reply)
-		return self.bot.reply_finalization.finalize(validated_reply, current_mood, validation_input)
+    @staticmethod
+    def _authority_disabled_error(path: str) -> RuntimeError:
+        return RuntimeError(
+            f"ReplyGenerationManager.{path} authority is disabled; use control_plane.execute_from_graph_context",
+        )
 
-	async def generate_validated_reply_async(
-		self,
-		stripped_input: str,
-		turn_text: str,
-		current_mood: str,
-		normalized_attachments: AttachmentList,
-		stream: bool = False,
-		chunk_callback: ChunkCallback | None = None,
-	) -> str:
-		validation_input = stripped_input or turn_text
-		if stream:
-			raw_reply = await self.bot.call_ollama_chat_stream_async(
-				messages=self.bot.build_chat_request_messages(turn_text, current_mood, normalized_attachments),
-				purpose="chat response",
-				chunk_callback=chunk_callback,
-			)
-		else:
-			response = await self.bot.call_ollama_chat_async(
-				messages=self.bot.build_chat_request_messages(turn_text, current_mood, normalized_attachments),
-				purpose="chat response",
-			)
-			raw_reply = response["message"]["content"]
-		reviewed_reply = raw_reply if self.bot.LIGHT_MODE else await self.bot.critique_reply_async(stripped_input, raw_reply, current_mood)
-		validated_reply = self.bot.validate_reply(validation_input, reviewed_reply)
-		return await self.bot.reply_finalization.finalize_async(validated_reply, current_mood, validation_input)
+    def _record_direct_call_attempt(
+        self,
+        *,
+        path: str,
+        stripped_input: str,
+        turn_text: str,
+        current_mood: str,
+        normalized_attachments: AttachmentList,
+        stream: bool,
+    ) -> None:
+        reason = (
+            "Direct reply_generation invocation attempted; "
+            "authority is restricted to control_plane.execute_from_graph_context"
+        )
+        logger.warning(reason)
+        metadata = {
+            "path": path,
+            "stream": bool(stream),
+            "attachments": len(list(normalized_attachments or [])),
+            "authority_disabled": True,
+        }
+        recorder = getattr(self.bot, "record_shadow_decision", None)
+        event = (
+            recorder(
+                source="reply_generation",
+                type="override_attempt",
+                content_preview="",
+                reason=reason,
+                would_replace=False,
+                priority=0.0,
+                metadata=metadata,
+            )
+            if callable(recorder)
+            else None
+        )
+        setattr(
+            self.bot,
+            "_last_reply_generation_shadow",
+            {
+                "path": path,
+                "validation_input": str(stripped_input or turn_text or ""),
+                "current_mood": str(current_mood or "neutral"),
+                "applied": False,
+                "authority_disabled": True,
+                "bus_event": event,
+            },
+        )
+
+    def generate_validated_reply(
+        self,
+        stripped_input: str,
+        turn_text: str,
+        current_mood: str,
+        normalized_attachments: AttachmentList,
+        stream: bool = False,
+        chunk_callback: ChunkCallback | None = None,
+    ) -> str:
+        """Disabled authority surface preserved only for compatibility telemetry."""
+        _ = chunk_callback
+        self._record_direct_call_attempt(
+            path="generate_validated_reply",
+            stripped_input=stripped_input,
+            turn_text=turn_text,
+            current_mood=current_mood,
+            normalized_attachments=normalized_attachments,
+            stream=stream,
+        )
+        raise self._authority_disabled_error("generate_validated_reply")
+
+    async def generate_validated_reply_async(
+        self,
+        stripped_input: str,
+        turn_text: str,
+        current_mood: str,
+        normalized_attachments: AttachmentList,
+        stream: bool = False,
+        chunk_callback: ChunkCallback | None = None,
+    ) -> str:
+        """Disabled async authority surface preserved only for compatibility telemetry."""
+        _ = chunk_callback
+        self._record_direct_call_attempt(
+            path="generate_validated_reply_async",
+            stripped_input=stripped_input,
+            turn_text=turn_text,
+            current_mood=current_mood,
+            normalized_attachments=normalized_attachments,
+            stream=stream,
+        )
+        raise self._authority_disabled_error("generate_validated_reply_async")
 
 
 __all__ = ["ReplyGenerationManager"]

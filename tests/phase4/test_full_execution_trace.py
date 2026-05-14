@@ -14,22 +14,17 @@ Checks:
   - Short-circuit path still seals execution_identity
   - Failure path still seals execution_identity (identity emitted before re-raise)
 """
+
 from __future__ import annotations
 
-import asyncio
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from dadbot.core.graph import (
     ContextBuilderNode,
-    FatalTurnError,
     HealthNode,
     InferenceNode,
-    KernelRejectionSemantics,
-    MutationGuard,
-    MutationIntent,
     ReflectionNode,
     SafetyNode,
     SaveNode,
@@ -130,9 +125,7 @@ async def test_execution_trace_contract_present_and_complete():
 
     meta_contract = ctx.metadata.get("execution_trace_contract")
     assert isinstance(meta_contract, dict), "execution_trace_contract must be in ctx.metadata too"
-    assert meta_contract["trace_hash"] == trace_hash, (
-        "state and metadata trace_hash must be identical"
-    )
+    assert meta_contract["trace_hash"] == trace_hash, "state and metadata trace_hash must be identical"
 
 
 # ---------------------------------------------------------------------------
@@ -170,16 +163,12 @@ async def test_execution_identity_emitted_as_persistence_event():
 
     await graph.execute(ctx)
 
-    identity_events = [
-        e for e in service.events if e.get("event_type") == "execution_identity"
-    ]
+    identity_events = [e for e in service.events if e.get("event_type") == "execution_identity"]
     assert len(identity_events) >= 1, (
         "At least one 'execution_identity' event must be emitted to the persistence service"
     )
     identity_payload = identity_events[-1].get("identity", {})
-    assert identity_payload.get("fingerprint"), (
-        "execution_identity event must carry the fingerprint"
-    )
+    assert identity_payload.get("fingerprint"), "execution_identity event must carry the fingerprint"
 
 
 @pytest.mark.asyncio
@@ -313,8 +302,7 @@ async def test_phase_transitions_follow_canonical_order():
             continue
         idx = _PHASE_ORDER.index(phase)
         assert idx >= seen_idx, (
-            f"Phase regression in history: {phase!r} after index {seen_idx}; "
-            f"full history: {ctx.phase_history}"
+            f"Phase regression in history: {phase!r} after index {seen_idx}; full history: {ctx.phase_history}"
         )
         seen_idx = idx
 

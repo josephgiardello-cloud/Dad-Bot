@@ -8,6 +8,7 @@ MockPersistenceService is stateful across calls — the same instance is
 returned every time registry.get("persistence_service") is called,
 so checkpoint lists and event logs accumulate correctly across a full turn.
 """
+
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -27,9 +28,11 @@ class MockPersistenceService:
     # Called by SaveNode when finalize_turn is available
     def finalize_turn(self, ctx: Any, result: Any) -> Any:
         self.finalize_calls += 1
+
         # Drain the mutation queue — this is the canonical SaveNode commit path.
         def _drain_executor(intent: Any) -> None:
             self.drained.append(intent)
+
         ctx.mutation_queue.drain(_drain_executor, hard_fail_on_error=False)
         self.events.append({"event_type": "finalize_turn", "trace_id": ctx.trace_id})
         return result if result is not None else ("finalized", False)
@@ -74,7 +77,7 @@ class MockRegistry:
         self._fail: set[str] = fail_services or set()
         self.persistence = MockPersistenceService()
 
-    def get(self, key: str, default: Any = None) -> Any:  # noqa: ANN001
+    def get(self, key: str, default: Any = None) -> Any:
         if key in self._fail:
             raise RuntimeError(f"[MockRegistry] injected failure: service={key!r}")
 
@@ -94,6 +97,16 @@ class MockRegistry:
             resp = self._response
 
             class _Agent:
+                class _ControlPlane:
+                    def __init__(self, owner: "_Agent") -> None:
+                        self._owner = owner
+
+                    async def execute_from_graph_context(self, ctx: Any, rich_context: Any) -> tuple[str, bool]:
+                        return await self._owner.run_agent(ctx, rich_context)
+
+                def __init__(self) -> None:
+                    self.control_plane = self._ControlPlane(self)
+
                 async def run_agent(self, ctx: Any, rich_context: Any) -> tuple[str, bool]:
                     return (resp, False)
 
@@ -101,15 +114,11 @@ class MockRegistry:
 
         if key == "safety_service":
             return SimpleNamespace(
-                enforce_policies=lambda ctx, candidate: (
-                    candidate if candidate is not None else ("safe_fallback", False)
-                )
+                enforce_policies=lambda ctx, candidate: candidate if candidate is not None else ("safe_fallback", False)
             )
 
         if key == "reflection":
-            return SimpleNamespace(
-                reflect_after_turn=lambda *args, **kw: {"status": "ok", "reflected": True}
-            )
+            return SimpleNamespace(reflect_after_turn=lambda *args, **kw: {"status": "ok", "reflected": True})
 
         if key == "persistence_service":
             return self.persistence

@@ -1,37 +1,17 @@
 #!/usr/bin/env python3
-"""
-Quick launcher — double-click friendly.
-Run: python launch.py
-"""
+"""Thin launcher entrypoint routed through canonical app runtime startup."""
 
-import subprocess
+from __future__ import annotations
+
 import sys
-import time
-import webbrowser
+
+from dadbot.app_runtime import main as app_main
+from Dad import DadBot
 
 
-def main():
-    print("🧔 Starting DadBot...")
-    try:
-        proc = subprocess.Popen([
-            sys.executable, "-m", "streamlit", "run", "dad_streamlit.py",
-            "--server.headless=false",
-            "--server.port=8501",
-        ])
-
-        # Give Streamlit a moment to start before opening browser
-        time.sleep(4)
-        webbrowser.open("http://localhost:8501")
-
-        print("✅ DadBot is running at http://localhost:8501")
-        print("   Browser should open automatically.")
-        print("   Press Ctrl+C to stop.\n")
-        proc.wait()
-    except KeyboardInterrupt:
-        print("\n👋 DadBot stopped.")
-    except Exception as e:
-        print(f"❌ Error: {e}")
+def main() -> int:
+    return app_main(["--web", *sys.argv[1:]], dadbot_cls=DadBot, script_path=__file__)
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

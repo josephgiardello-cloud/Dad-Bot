@@ -1,12 +1,16 @@
 """Tests for Bayesian governing authority over tool selection."""
-import asyncio
+
 from types import SimpleNamespace
 
 import pytest
+
+from dadbot.core.action_mixin import DadBotActionMixin
 from dadbot.services.turn_service import TurnService
 
+pytestmark = pytest.mark.unit
 
-class _BotStub:
+
+class _BotStub(DadBotActionMixin):
     """Minimal bot stub for TurnService Bayesian gate tests."""
 
     def __init__(self, *, tool_bias: str = "planner_default"):
@@ -53,27 +57,21 @@ def test_planner_default_bias_permits_both_tools():
     allowed_reminder, _ = ts._bayesian_tool_gate(
         tool_name="set_reminder", tool_bias="planner_default", plan_reason="test"
     )
-    allowed_web, _ = ts._bayesian_tool_gate(
-        tool_name="web_search", tool_bias="planner_default", plan_reason="test"
-    )
+    allowed_web, _ = ts._bayesian_tool_gate(tool_name="web_search", tool_bias="planner_default", plan_reason="test")
     assert allowed_reminder is True
     assert allowed_web is True
 
 
 def test_minimal_tools_bias_blocks_web_search():
     ts = _make_turn_service("minimal_tools")
-    allowed, reason = ts._bayesian_tool_gate(
-        tool_name="web_search", tool_bias="minimal_tools", plan_reason="test"
-    )
+    allowed, reason = ts._bayesian_tool_gate(tool_name="web_search", tool_bias="minimal_tools", plan_reason="test")
     assert allowed is False
     assert "minimal_tools" in reason
 
 
 def test_minimal_tools_bias_permits_set_reminder():
     ts = _make_turn_service("minimal_tools")
-    allowed, _ = ts._bayesian_tool_gate(
-        tool_name="set_reminder", tool_bias="minimal_tools", plan_reason="test"
-    )
+    allowed, _ = ts._bayesian_tool_gate(tool_name="set_reminder", tool_bias="minimal_tools", plan_reason="test")
     assert allowed is True
 
 
@@ -89,14 +87,17 @@ def test_defer_tools_bias_blocks_all_tools():
 
 def test_unknown_bias_falls_back_to_default_permissions():
     ts = _make_turn_service("unknown_bias_xyz")
-    allowed, _ = ts._bayesian_tool_gate(
-        tool_name="set_reminder", tool_bias="unknown_bias_xyz", plan_reason=""
-    )
+    allowed, _ = ts._bayesian_tool_gate(tool_name="set_reminder", tool_bias="unknown_bias_xyz", plan_reason="")
     assert allowed is True
 
 
-def test_permitted_tools_for_bias_returns_expected_sets():
-    assert "web_search" not in TurnService._permitted_tools_for_bias("minimal_tools")
-    assert "set_reminder" in TurnService._permitted_tools_for_bias("minimal_tools")
-    assert len(TurnService._permitted_tools_for_bias("defer_tools_unless_explicit")) == 0
-    assert "web_search" in TurnService._permitted_tools_for_bias("planner_default")
+def test_runtime_bias_authority_blocks_web_search_for_minimal_tools():
+    bot = _BotStub(tool_bias="minimal_tools")
+    assert bot.authorize_tool_execution_for_bias("web_search", "minimal_tools") is False
+    assert bot.authorize_tool_execution_for_bias("set_reminder", "minimal_tools") is True
+
+
+def test_runtime_bias_authority_blocks_all_tools_for_defer_bias():
+    bot = _BotStub(tool_bias="defer_tools_unless_explicit")
+    assert bot.authorize_tool_execution_for_bias("web_search", "defer_tools_unless_explicit") is False
+    assert bot.authorize_tool_execution_for_bias("set_reminder", "defer_tools_unless_explicit") is False

@@ -1,11 +1,10 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import logging
 from typing import Any
 
 from dadbot.runtime_core.event_api import RuntimeEventAPI
 from dadbot.runtime_core.store import ConversationStore
-
 
 logger = logging.getLogger(__name__)
 

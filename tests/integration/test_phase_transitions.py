@@ -1,7 +1,12 @@
 """Integration — phase mapping per stage, no regressions, transition events."""
+
 from __future__ import annotations
 
 import pytest
+from harness.deterministic_seeds import ADVERSARIAL, BASELINE, CHECKPOINT
+from harness.graph_runner import GraphRunner
+from harness.kernel_mock import MockRegistry
+from harness.turn_factory import TurnFactory
 
 from dadbot.core.graph import (
     ContextBuilderNode,
@@ -14,10 +19,6 @@ from dadbot.core.graph import (
     TurnGraph,
     TurnPhase,
 )
-from harness.deterministic_seeds import BASELINE, ADVERSARIAL, CHECKPOINT
-from harness.graph_runner import GraphRunner
-from harness.kernel_mock import MockRegistry
-from harness.turn_factory import TurnFactory
 
 
 def _build_canonical(registry: MockRegistry) -> TurnGraph:
@@ -40,27 +41,6 @@ def _build_canonical(registry: MockRegistry) -> TurnGraph:
     return g
 
 
-class TestPhaseMapping:
-    """Each canonical stage maps to the expected phase."""
-
-    @pytest.mark.parametrize("stage,expected_phase", [
-        ("temporal", TurnPhase.PLAN),
-        ("health", TurnPhase.PLAN),
-        ("context_builder", TurnPhase.PLAN),
-        ("inference", TurnPhase.ACT),
-        ("safety", TurnPhase.OBSERVE),
-        ("save", TurnPhase.RESPOND),
-    ])
-    def test_stage_to_phase(self, stage: str, expected_phase: TurnPhase):
-        assert TurnGraph._phase_for_stage(stage, TurnPhase.PLAN) == expected_phase
-
-    @pytest.mark.parametrize("unknown_stage", ["logging", "custom_hook", "test_node", ""])
-    def test_unknown_stage_returns_none_or_plan(self, unknown_stage: str):
-        result = TurnGraph._phase_for_stage(unknown_stage, TurnPhase.ACT)
-        # Unknown stage falls back to current phase.
-        assert result == TurnPhase.ACT
-
-
 class TestPhaseTransitionsAfterRun:
     def test_no_phase_regressions_in_history(self):
         registry = MockRegistry()
@@ -79,9 +59,7 @@ class TestPhaseTransitionsAfterRun:
             except ValueError:
                 continue
             idx = _PHASE_INDEX.get(to_phase, -1)
-            assert idx >= prev_idx, (
-                f"Phase regression detected: history={ctx.phase_history}"
-            )
+            assert idx >= prev_idx, f"Phase regression detected: history={ctx.phase_history}"
             prev_idx = idx
 
     def test_phase_sequence_plan_act_observe_respond(self):

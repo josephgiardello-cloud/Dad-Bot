@@ -1,4 +1,4 @@
-﻿"""Heritage Graph â€” Semantic Cross-Linking for Narrative Memories.
+"""Heritage Graph â€” Semantic Cross-Linking for Narrative Memories.
 
 Scans the distilled ``narrative_memories`` and ``consolidated_memories``
 archives to find resonant connections across different life topics and
@@ -13,21 +13,66 @@ The output is injected by ContextBuilder so Dad can say things like:
 from __future__ import annotations
 
 import re
-from collections import defaultdict
 from typing import Any
-
 
 # â”€â”€ Topic synonym groups for broader matching â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 _TOPIC_SYNONYMS: dict[str, list[str]] = {
-    "math": ["math", "division", "arithmetic", "calculus", "algebra", "geometry", "numbers"],
-    "woodworking": ["woodworking", "workshop", "carpentry", "build", "craft", "wood", "shop"],
-    "fitness": ["fitness", "exercise", "gym", "running", "workout", "health", "training"],
+    "math": [
+        "math",
+        "division",
+        "arithmetic",
+        "calculus",
+        "algebra",
+        "geometry",
+        "numbers",
+    ],
+    "woodworking": [
+        "woodworking",
+        "workshop",
+        "carpentry",
+        "build",
+        "craft",
+        "wood",
+        "shop",
+    ],
+    "fitness": [
+        "fitness",
+        "exercise",
+        "gym",
+        "running",
+        "workout",
+        "health",
+        "training",
+    ],
     "work": ["work", "job", "career", "office", "boss", "promotion", "project"],
-    "relationships": ["relationship", "friend", "girlfriend", "boyfriend", "partner", "social"],
+    "relationships": [
+        "relationship",
+        "friend",
+        "girlfriend",
+        "boyfriend",
+        "partner",
+        "social",
+    ],
     "stress": ["stress", "anxiety", "pressure", "overwhelm", "worried", "nervous"],
     "confidence": ["confidence", "courage", "brave", "try", "attempt", "risk"],
-    "persistence": ["persist", "keep going", "keep trying", "never give up", "don't quit", "resilience"],
-    "creativity": ["creative", "art", "design", "music", "writing", "poetry", "draw", "paint"],
+    "persistence": [
+        "persist",
+        "keep going",
+        "keep trying",
+        "never give up",
+        "don't quit",
+        "resilience",
+    ],
+    "creativity": [
+        "creative",
+        "art",
+        "design",
+        "music",
+        "writing",
+        "poetry",
+        "draw",
+        "paint",
+    ],
     "learning": ["learn", "study", "school", "practice", "improve", "progress", "grow"],
 }
 
@@ -70,11 +115,54 @@ _DEFAULT_BRIDGE = (
 def _tokenize(text: str) -> set[str]:
     """Lower-case word-level tokens, no stopwords."""
     _STOP = {
-        "a", "an", "and", "are", "as", "at", "be", "been", "but", "by", "do", "for",
-        "had", "has", "have", "he", "her", "his", "i", "in", "is", "it", "its",
-        "me", "my", "no", "not", "of", "on", "or", "our", "so", "that", "the",
-        "their", "them", "they", "this", "to", "up", "us", "was", "we", "were",
-        "will", "with", "you", "your",
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "been",
+        "but",
+        "by",
+        "do",
+        "for",
+        "had",
+        "has",
+        "have",
+        "he",
+        "her",
+        "his",
+        "i",
+        "in",
+        "is",
+        "it",
+        "its",
+        "me",
+        "my",
+        "no",
+        "not",
+        "of",
+        "on",
+        "or",
+        "our",
+        "so",
+        "that",
+        "the",
+        "their",
+        "them",
+        "they",
+        "this",
+        "to",
+        "up",
+        "us",
+        "was",
+        "we",
+        "were",
+        "will",
+        "with",
+        "you",
+        "your",
     }
     words = re.findall(r"[a-z]+", text.lower())
     return {w for w in words if w not in _STOP and len(w) > 2}
@@ -134,7 +222,9 @@ class HeritageGraphManager:
         - ``score``: float relevance score
         """
         narratives: list[dict[str, Any]] = list(self.bot.narrative_memories() or [])
-        consolidated: list[dict[str, Any]] = list(self.bot.consolidated_memories() or [])
+        consolidated: list[dict[str, Any]] = list(
+            self.bot.consolidated_memories() or [],
+        )
 
         current_tokens = _expand_synonyms(_tokenize(current_text))
         if not current_tokens:
@@ -150,10 +240,22 @@ class HeritageGraphManager:
             period = str(entry.get("period") or entry.get("period_start") or "")[:7]
             if not summary:
                 continue
-            entry_tokens = _expand_synonyms(_tokenize(summary + " " + evidence + " " + topic))
+            entry_tokens = _expand_synonyms(
+                _tokenize(summary + " " + evidence + " " + topic),
+            )
             score = _overlap_score(current_tokens, entry_tokens)
             if score > 0.04:  # minimum relevance threshold
-                candidates.append((score, {"source": "narrative", "topic": topic, "period": period, "summary": summary}))
+                candidates.append(
+                    (
+                        score,
+                        {
+                            "source": "narrative",
+                            "topic": topic,
+                            "period": period,
+                            "summary": summary,
+                        },
+                    ),
+                )
 
         # Score consolidated memories
         for entry in consolidated[-20:]:  # only recent consolidated slice
@@ -165,7 +267,17 @@ class HeritageGraphManager:
             entry_tokens = _expand_synonyms(_tokenize(summary + " " + category))
             score = _overlap_score(current_tokens, entry_tokens)
             if score > 0.06:
-                candidates.append((score, {"source": "consolidated", "topic": category, "period": created_at, "summary": summary}))
+                candidates.append(
+                    (
+                        score,
+                        {
+                            "source": "consolidated",
+                            "topic": category,
+                            "period": created_at,
+                            "summary": summary,
+                        },
+                    ),
+                )
 
         if not candidates:
             return []
@@ -201,7 +313,7 @@ class HeritageGraphManager:
                     "past_summary": past_summary,
                     "bridge_phrase": bridge,
                     "score": round(score, 4),
-                }
+                },
             )
             if len(links) >= int(max_links or 3):
                 break
@@ -215,7 +327,7 @@ class HeritageGraphManager:
             return None
         lines = ["Dad's Heritage Memory â€” cross-linked life lessons Dad can draw on:"]
         for link in links:
-            lines.append(f'- {link["bridge_phrase"]}')
+            lines.append(f"- {link['bridge_phrase']}")
         return "\n".join(lines)
 
     # â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -240,8 +352,19 @@ def _friendly_period(period: str) -> str:
         year = int(period[:4])
         month = int(period[5:7])
         months = [
-            "", "January", "February", "March", "April", "May", "June",
-            "July", "August", "September", "October", "November", "December",
+            "",
+            "January",
+            "February",
+            "March",
+            "April",
+            "May",
+            "June",
+            "July",
+            "August",
+            "September",
+            "October",
+            "November",
+            "December",
         ]
         return f"{months[month]} {year}" if 1 <= month <= 12 else period
     except (ValueError, IndexError):

@@ -1,1 +1,1 @@
-﻿"""API client consumer boundary package."""
+"""API client consumer boundary package."""

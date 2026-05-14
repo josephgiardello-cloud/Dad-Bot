@@ -20,15 +20,19 @@ Resolves contradictions introduced by:
        - ENSEMBLE_MERGE           — weighted merge of all non-empty results
        - DEFER_TO_REEXECUTION     — signal that re-execution is required
 """
+
 from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Optional
+from typing import Any
 
-from dadbot.core.uncertainty_model import ConfidenceVector, FusionStrategy, ConfidenceFusion
+from dadbot.core.uncertainty_model import (
+    ConfidenceFusion,
+    ConfidenceVector,
+)
 
 # ---------------------------------------------------------------------------
 # Domain types
@@ -42,16 +46,17 @@ class ResolutionPolicyKind(str, Enum):
 
 
 class ConflictKind(str, Enum):
-    TYPE_MISMATCH = "type_mismatch"          # outputs have different Python types
+    TYPE_MISMATCH = "type_mismatch"  # outputs have different Python types
     EMPTY_VS_NONEMPTY = "empty_vs_nonempty"  # one output is empty, another is not
-    VALUE_DIVERGENCE = "value_divergence"    # same type but content diverges
-    STATUS_MISMATCH = "status_mismatch"      # different terminal statuses
-    NONE = "none"                            # no conflict detected
+    VALUE_DIVERGENCE = "value_divergence"  # same type but content diverges
+    STATUS_MISMATCH = "status_mismatch"  # different terminal statuses
+    NONE = "none"  # no conflict detected
 
 
 @dataclass
 class ToolOutput:
     """One candidate output from a single tool execution."""
+
     tool_name: str
     output: Any
     confidence_vector: ConfidenceVector
@@ -82,7 +87,7 @@ class ConflictReport:
     conflict_kind: ConflictKind
     conflicting_tools: list[str]
     description: str
-    severity: float                  # 0.0 (benign) – 1.0 (critical)
+    severity: float  # 0.0 (benign) – 1.0 (critical)
 
     def has_conflict(self) -> bool:
         return self.conflict_kind != ConflictKind.NONE
@@ -164,7 +169,7 @@ class ConflictDetector:
     def _fingerprint(value: Any) -> str:
         try:
             serialized = json.dumps(value, sort_keys=True, default=str)
-        except Exception:
+        except Exception:  # noqa: BLE001
             serialized = str(value)
         return hashlib.sha1(serialized.encode("utf-8")).hexdigest()[:12]
 
@@ -177,8 +182,9 @@ class ConflictDetector:
 @dataclass(frozen=True)
 class ResolutionResult:
     """The output of a conflict resolution pass."""
+
     resolved_output: Any
-    winning_tool: str                    # tool whose output was selected or primary
+    winning_tool: str  # tool whose output was selected or primary
     confidence_vector: ConfidenceVector  # confidence of the resolved output
     policy_used: ResolutionPolicyKind
     conflict_report: ConflictReport
@@ -201,7 +207,13 @@ class TrustWeightedMerger:
         nonempty = [o for o in outputs if not o.is_empty()]
         if not nonempty:
             # All empty — return empty list with zero confidence
-            zero_cv = ConfidenceVector(0.0, 0.0, 0.0, source_tool="merged", result_status="error")
+            zero_cv = ConfidenceVector(
+                0.0,
+                0.0,
+                0.0,
+                source_tool="merged",
+                result_status="error",
+            )
             return [], zero_cv
 
         # Collect list items weighted by confidence
@@ -226,7 +238,13 @@ class TrustWeightedMerger:
                 ordered.append(item)
 
         fused = ConfidenceFusion.bayesian([o.confidence_vector for o in nonempty])
-        fallback_cv = ConfidenceVector(0.5, 0.5, 0.5, source_tool="merged", result_status="ok")
+        fallback_cv = ConfidenceVector(
+            0.5,
+            0.5,
+            0.5,
+            source_tool="merged",
+            result_status="ok",
+        )
         fused_cv = ConfidenceVector(
             reliability_score=fused.reliability_score if fused else fallback_cv.reliability_score,
             freshness_score=fused.freshness_score if fused else fallback_cv.freshness_score,
@@ -261,13 +279,24 @@ class ConflictResolver:
         policy_override: ResolutionPolicyKind | None = None,
     ) -> ResolutionResult:
         if not outputs:
-            zero_cv = ConfidenceVector(0.0, 0.0, 0.0, source_tool="none", result_status="error")
+            zero_cv = ConfidenceVector(
+                0.0,
+                0.0,
+                0.0,
+                source_tool="none",
+                result_status="error",
+            )
             return ResolutionResult(
                 resolved_output=None,
                 winning_tool="none",
                 confidence_vector=zero_cv,
                 policy_used=ResolutionPolicyKind.HIGHEST_CONFIDENCE_WINS,
-                conflict_report=ConflictReport(ConflictKind.NONE, [], "No outputs.", 0.0),
+                conflict_report=ConflictReport(
+                    ConflictKind.NONE,
+                    [],
+                    "No outputs.",
+                    0.0,
+                ),
                 resolution_notes=["No candidate outputs to resolve."],
                 requires_reexecution=True,
             )
@@ -277,28 +306,32 @@ class ConflictResolver:
 
         if policy == ResolutionPolicyKind.HIGHEST_CONFIDENCE_WINS:
             return self._highest_confidence_wins(outputs, report, policy)
-        elif policy == ResolutionPolicyKind.ENSEMBLE_MERGE:
+        if policy == ResolutionPolicyKind.ENSEMBLE_MERGE:
             return self._ensemble_merge(outputs, report, policy)
-        else:  # DEFER_TO_REEXECUTION
-            return self._defer(outputs, report)
+        # DEFER_TO_REEXECUTION
+        return self._defer(outputs, report)
 
     # ------------------------------------------------------------------
     # Policy implementations
     # ------------------------------------------------------------------
 
     def _highest_confidence_wins(
-        self, outputs: list[ToolOutput], report: ConflictReport, policy: ResolutionPolicyKind
+        self,
+        outputs: list[ToolOutput],
+        report: ConflictReport,
+        policy: ResolutionPolicyKind,
     ) -> ResolutionResult:
         # Prefer non-empty outputs
         nonempty = [o for o in outputs if not o.is_empty()]
-        candidates = nonempty if nonempty else outputs
+        candidates = nonempty or outputs
         winner = max(candidates, key=lambda o: o.confidence_vector.aggregate)
         notes = [
-            f"Selected output from '{winner.tool_name}' "
-            f"(confidence={winner.confidence_vector.aggregate:.3f}).",
+            f"Selected output from '{winner.tool_name}' (confidence={winner.confidence_vector.aggregate:.3f}).",
         ]
         if report.has_conflict():
-            notes.append(f"Conflict detected: {report.conflict_kind.value} — {report.description}")
+            notes.append(
+                f"Conflict detected: {report.conflict_kind.value} — {report.description}",
+            )
         return ResolutionResult(
             resolved_output=winner.output,
             winning_tool=winner.tool_name,
@@ -309,7 +342,10 @@ class ConflictResolver:
         )
 
     def _ensemble_merge(
-        self, outputs: list[ToolOutput], report: ConflictReport, policy: ResolutionPolicyKind
+        self,
+        outputs: list[ToolOutput],
+        report: ConflictReport,
+        policy: ResolutionPolicyKind,
     ) -> ResolutionResult:
         merged_output, fused_cv = self._merger.merge(outputs)
         tools = [o.tool_name for o in outputs if not o.is_empty()]
@@ -329,7 +365,9 @@ class ConflictResolver:
         )
 
     def _defer(
-        self, outputs: list[ToolOutput], report: ConflictReport
+        self,
+        outputs: list[ToolOutput],
+        report: ConflictReport,
     ) -> ResolutionResult:
         # Pick the best available output as a placeholder, but flag re-execution
         nonempty = [o for o in outputs if not o.is_empty()]
@@ -356,7 +394,10 @@ class ConflictResolver:
     def _select_policy(report: ConflictReport) -> ResolutionPolicyKind:
         if not report.has_conflict():
             return ResolutionPolicyKind.HIGHEST_CONFIDENCE_WINS
-        if report.conflict_kind in {ConflictKind.STATUS_MISMATCH, ConflictKind.TYPE_MISMATCH}:
+        if report.conflict_kind in {
+            ConflictKind.STATUS_MISMATCH,
+            ConflictKind.TYPE_MISMATCH,
+        }:
             return ResolutionPolicyKind.HIGHEST_CONFIDENCE_WINS
         if report.conflict_kind == ConflictKind.EMPTY_VS_NONEMPTY:
             return ResolutionPolicyKind.HIGHEST_CONFIDENCE_WINS

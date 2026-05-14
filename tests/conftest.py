@@ -5,6 +5,8 @@ from tempfile import TemporaryDirectory
 
 import pytest
 
+pytest_plugins = ("tests.phase4_helpers",)
+
 try:
     from Dad import DadBot as _DadBot
 except ModuleNotFoundError:

@@ -1,20 +1,16 @@
 """Tests for Phase 3 — Causal Execution Graph Engine (causal_graph.py)."""
+
 from __future__ import annotations
 
-import pytest
-
 from dadbot.core.causal_graph import (
-    CausalGraph,
-    CausalNode,
-    CausalEdge,
-    CausalNodeKind,
     CausalEdgeKind,
+    CausalGraph,
+    CausalNodeKind,
     CausalReconstructionAPI,
+    InfluenceTrace,
     InfluenceTracer,
     SelectionRationale,
-    InfluenceTrace,
 )
-
 
 # ---------------------------------------------------------------------------
 # 3.1 CausalGraph — structure
@@ -93,8 +89,7 @@ class TestCausalGraph:
     def test_record_tool_selection_creates_rejected_nodes(self):
         self.graph.record_planner_decision("pd1", "goal_lookup", "search")
         self.graph.record_tool_selection(
-            "sel1", "memory_lookup", "goal_lookup",
-            score=0.92, rejected_tools=["cache_tool"], decision_id="pd1"
+            "sel1", "memory_lookup", "goal_lookup", score=0.92, rejected_tools=["cache_tool"], decision_id="pd1"
         )
         # One selection node + one rejected node
         selections = self.graph.get_nodes_by_kind(CausalNodeKind.TOOL_SELECTION)
@@ -133,10 +128,16 @@ class TestCausalReconstructionAPI:
         # Build a small representative graph
         self.graph.record_planner_decision("pd1", "goal_lookup", "direct_search", alternatives=["fuzzy_search"])
         self.graph.record_tool_selection(
-            "sel1", "memory_lookup", "goal_lookup",
-            score=0.85, rejected_tools=["cache_tool", "semantic_search"], decision_id="pd1"
+            "sel1",
+            "memory_lookup",
+            "goal_lookup",
+            score=0.85,
+            rejected_tools=["cache_tool", "semantic_search"],
+            decision_id="pd1",
         )
-        self.graph.record_tool_outcome("out1", "memory_lookup", "ok", latency_ms=80, confidence=0.9, selection_id="sel1")
+        self.graph.record_tool_outcome(
+            "out1", "memory_lookup", "ok", latency_ms=80, confidence=0.9, selection_id="sel1"
+        )
 
     def test_why_tool_selected_returns_rationale(self):
         rationale = self.api.why_tool_selected("sel1")
@@ -158,7 +159,9 @@ class TestCausalReconstructionAPI:
 
     def test_why_fallback_activated_explains_failure(self):
         self.graph.record_tool_outcome("out_fail", "memory_lookup", "timeout", latency_ms=3000)
-        self.graph.record_fallback_activation("fb1", "memory_lookup", "cache_tool", reason="timeout exceeded", outcome_id="out_fail")
+        self.graph.record_fallback_activation(
+            "fb1", "memory_lookup", "cache_tool", reason="timeout exceeded", outcome_id="out_fail"
+        )
         steps = self.api.why_fallback_activated("fb1")
         assert any("fallback" in s.lower() for s in steps)
         assert any("cache_tool" in s for s in steps)

@@ -1,9 +1,16 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import streamlit as st
 
 try:
-    from streamlit_webrtc import WebRtcMode, RTCConfiguration as WebRtcRTCConfiguration, webrtc_streamer
+    from streamlit_webrtc import (
+        RTCConfiguration as WebRtcRTCConfiguration,
+    )
+    from streamlit_webrtc import (
+        WebRtcMode,
+        webrtc_streamer,
+    )
+
     WEBRTC_AVAILABLE = True
 except Exception:  # pragma: no cover - optional dependency
     WEBRTC_AVAILABLE = False
@@ -16,7 +23,11 @@ def voice_known_devices(voice: dict, runtime_state: dict) -> list[str]:
     known = list(voice.get("known_device_ids") or [])
     runtime_known = list(runtime_state.get("known_devices") or [])
     merged = ["default"]
-    for item in [*known, *runtime_known, str(voice.get("last_used_device") or "default")]:
+    for item in [
+        *known,
+        *runtime_known,
+        str(voice.get("last_used_device") or "default"),
+    ]:
         normalized = str(item or "").strip()
         if not normalized:
             continue
@@ -37,7 +48,11 @@ def persist_known_devices(voice: dict, known_devices: list[str]) -> None:
 
 
 def collect_webrtc_audio_bytes(webrtc_ctx, *, key: str, min_bytes: int) -> bytes:
-    if not webrtc_ctx or not getattr(getattr(webrtc_ctx, "state", None), "playing", False):
+    if not webrtc_ctx or not getattr(
+        getattr(webrtc_ctx, "state", None),
+        "playing",
+        False,
+    ):
         return b""
     receiver = getattr(webrtc_ctx, "audio_receiver", None)
     if receiver is None:
@@ -82,7 +97,9 @@ def render_voice_capture_layer(controller, voice: dict, *, key_prefix: str) -> b
     selected_device = st.selectbox(
         "Input device ID",
         options=known_devices,
-        index=known_devices.index(str(voice.get("last_used_device") or "default")) if str(voice.get("last_used_device") or "default") in known_devices else 0,
+        index=known_devices.index(str(voice.get("last_used_device") or "default"))
+        if str(voice.get("last_used_device") or "default") in known_devices
+        else 0,
         key=f"{key_prefix}-device-select",
         help="Persistent WebRTC device ID. Use default unless you need a specific microphone.",
     )
@@ -93,7 +110,11 @@ def render_voice_capture_layer(controller, voice: dict, *, key_prefix: str) -> b
         key=f"{key_prefix}-device-custom",
         placeholder="Paste a browser deviceId token (optional)",
     )
-    if st.button("Save device ID", key=f"{key_prefix}-device-save", use_container_width=True):
+    if st.button(
+        "Save device ID",
+        key=f"{key_prefix}-device-save",
+        use_container_width=True,
+    ):
         custom = str(custom_device or "").strip()
         if custom:
             known_devices.append(custom)
@@ -106,7 +127,11 @@ def render_voice_capture_layer(controller, voice: dict, *, key_prefix: str) -> b
     controller.set_device(selected_device)
 
     if not WEBRTC_AVAILABLE:
-        audio_label = "Hold mic, speak, release" if str(voice.get("mode") or "push_to_talk") == "push_to_talk" else "Always-listening capture"
+        audio_label = (
+            "Hold mic, speak, release"
+            if str(voice.get("mode") or "push_to_talk") == "push_to_talk"
+            else "Always-listening capture"
+        )
         st.caption("WebRTC unavailable; using Streamlit audio input fallback.")
         clip = st.audio_input(audio_label, key=f"{key_prefix}-audio-fallback")
         if clip is None:
@@ -117,7 +142,9 @@ def render_voice_capture_layer(controller, voice: dict, *, key_prefix: str) -> b
     if str(selected_device or "default") != "default":
         media_audio = {"deviceId": {"exact": str(selected_device)}}
 
-    rtc_config = WebRtcRTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
+    rtc_config = WebRtcRTCConfiguration(
+        {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
+    )
     webrtc_ctx = webrtc_streamer(
         key=f"{key_prefix}-webrtc-capture",
         mode=WebRtcMode.SENDONLY,
@@ -130,4 +157,8 @@ def render_voice_capture_layer(controller, voice: dict, *, key_prefix: str) -> b
         st.caption("Click START to begin WebRTC microphone capture.")
         return b""
 
-    return collect_webrtc_audio_bytes(webrtc_ctx, key=f"{key_prefix}-webrtc-capture", min_bytes=min_audio_bytes)
+    return collect_webrtc_audio_bytes(
+        webrtc_ctx,
+        key=f"{key_prefix}-webrtc-capture",
+        min_bytes=min_audio_bytes,
+    )

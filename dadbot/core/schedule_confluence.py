@@ -12,16 +12,16 @@ Provides:
 - ExecutionEquivalenceChecker: verifies confluence across schedule seeds
 - ConfluenceProof: evidence that all tested permutations converge
 """
+
 from __future__ import annotations
 
-import hashlib
-import json
 from dataclasses import dataclass
 from typing import Any
 
+from dadbot.core.semantic_primitives import hash as semantic_hash
+from dadbot.core.semantic_primitives import schedule as semantic_schedule
 from dadbot.core.tool_dag import ToolDAG
 from dadbot.core.tool_scheduler import ScheduledItem, ToolScheduler
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -29,9 +29,7 @@ from dadbot.core.tool_scheduler import ScheduledItem, ToolScheduler
 
 
 def _sha256(payload: Any) -> str:
-    return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
-    ).hexdigest()
+    return semantic_hash(payload)
 
 
 # ---------------------------------------------------------------------------
@@ -94,8 +92,11 @@ class ScheduleNormalizer:
 
     def normalized_dag_hash(self, dag: ToolDAG, seed: int = 0) -> str:
         """Normalize a fresh schedule from the given DAG and seed, return hash."""
-        scheduler = ToolScheduler(seed=seed)
-        items = scheduler.schedule(dag)
+        if int(seed or 0) == 0:
+            items = semantic_schedule(dag)
+        else:
+            scheduler = ToolScheduler(seed=seed)
+            items = scheduler.schedule(dag)
         return self.normalized_hash(items)
 
 
@@ -107,11 +108,12 @@ class ScheduleNormalizer:
 @dataclass
 class ConfluenceProof:
     """Evidence that all schedule permutations converge to the same hash."""
+
     dag_hash: str
     seeds_tested: list[int]
-    normalized_hashes: dict[int, str]   # seed → normalized_hash
-    confluent: bool                     # all normalized_hashes are equal
-    canonical_hash: str                 # the convergence hash (or "" if not confluent)
+    normalized_hashes: dict[int, str]  # seed → normalized_hash
+    confluent: bool  # all normalized_hashes are equal
+    canonical_hash: str  # the convergence hash (or "" if not confluent)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -167,7 +169,7 @@ class ExecutionEquivalenceChecker:
         dag_hash = dag.deterministic_hash()
         normalized_hashes: dict[int, str] = {}
 
-        for seed in (seeds or [0]):
+        for seed in seeds or [0]:
             scheduler = ToolScheduler(seed=seed)
             items = scheduler.schedule(dag)
             normalized_hashes[seed] = self._normalizer.normalized_hash(items)

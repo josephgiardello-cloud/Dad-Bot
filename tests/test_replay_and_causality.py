@@ -5,6 +5,8 @@ from dadbot.core.replay_verifier import ReplayVerifier
 from dadbot.core.session_store import SessionMutationError, SessionStore
 from dadbot.core.system_health_checker import SystemHealthChecker
 
+pytestmark = pytest.mark.unit
+
 
 def test_execution_ledger_enforces_strict_session_causal_chain():
     ledger = ExecutionLedger()
@@ -86,6 +88,7 @@ def test_session_store_projection_only_blocks_direct_mutation():
         store.delete("s1")
 
 
+@pytest.mark.slow
 def test_system_health_checker_reports_causal_partitioning_ok():
     ledger = ExecutionLedger()
     store = SessionStore()

@@ -27,6 +27,7 @@ Architecture role
 This module imports ONLY from dadbot.core.authorization.  TurnGraph imports
 this module; the graph executor has no authorization logic of its own.
 """
+
 from __future__ import annotations
 
 import logging
@@ -40,7 +41,6 @@ from dadbot.core.authorization import (
     SessionAuthorizationPolicy,
 )
 
-
 logger = logging.getLogger(__name__)
 
 # State key where the capability snapshot is stored during a turn.
@@ -51,6 +51,7 @@ _CAP_SNAPSHOT_KEY = "_capability_snapshot"
 # Errors
 # ---------------------------------------------------------------------------
 
+
 class CapabilityViolationError(RuntimeError):
     """Raised when a pipeline stage cannot be entered due to missing capability."""
 
@@ -59,17 +60,19 @@ class CapabilityViolationError(RuntimeError):
 # Enforcement mode
 # ---------------------------------------------------------------------------
 
+
 class EnforcementMode(StrEnum):
     """What the registry does when a required capability is missing."""
 
-    ENFORCE = "enforce"   # Raise CapabilityViolationError — turn is aborted
-    WARN    = "warn"      # Log warning and continue (dev/test mode)
-    SKIP    = "skip"      # Skip the stage silently (soft degradation)
+    ENFORCE = "enforce"  # Raise CapabilityViolationError — turn is aborted
+    WARN = "warn"  # Log warning and continue (dev/test mode)
+    SKIP = "skip"  # Skip the stage silently (soft degradation)
 
 
 # ---------------------------------------------------------------------------
 # Per-node requirement
 # ---------------------------------------------------------------------------
+
 
 @dataclass(frozen=True)
 class NodeCapabilityRequirement:
@@ -87,6 +90,7 @@ class NodeCapabilityRequirement:
         Enforcement action when requirements are not met.
     reason:
         Human-readable description of why this capability is required.
+
     """
 
     stage: str
@@ -103,6 +107,7 @@ class NodeCapabilityRequirement:
 # Capability snapshot (frozen at turn start)
 # ---------------------------------------------------------------------------
 
+
 @dataclass(frozen=True)
 class CapabilitySnapshot:
     """Immutable capability record frozen at turn-start.
@@ -113,27 +118,23 @@ class CapabilitySnapshot:
     """
 
     session_id: str
-    granted: tuple[str, ...]   # sorted capability value strings
+    granted: tuple[str, ...]  # sorted capability value strings
 
     @classmethod
     def from_policy(
         cls,
         session_id: str,
         policy: SessionAuthorizationPolicy,
-    ) -> "CapabilitySnapshot":
+    ) -> CapabilitySnapshot:
         caps = policy.caps_for(session_id)
-        granted = tuple(sorted(
-            cap.value
-            for cap in Capability
-            if caps.has(cap)
-        ))
+        granted = tuple(sorted(cap.value for cap in Capability if caps.has(cap)))
         return cls(session_id=session_id, granted=granted)
 
     def to_dict(self) -> dict[str, Any]:
         return {"session_id": self.session_id, "granted": list(self.granted)}
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "CapabilitySnapshot":
+    def from_dict(cls, d: dict[str, Any]) -> CapabilitySnapshot:
         return cls(
             session_id=str(d.get("session_id") or ""),
             granted=tuple(d.get("granted") or []),
@@ -142,7 +143,7 @@ class CapabilitySnapshot:
     def has(self, capability: Capability) -> bool:
         return capability.value in self.granted
 
-    def is_equivalent_to(self, other: "CapabilitySnapshot") -> bool:
+    def is_equivalent_to(self, other: CapabilitySnapshot) -> bool:
         """Return True if both snapshots represent the same capability set.
 
         Session ID is NOT compared — a resumed session may have a different ID
@@ -150,7 +151,7 @@ class CapabilitySnapshot:
         """
         return set(self.granted) == set(other.granted)
 
-    def is_escalation_of(self, original: "CapabilitySnapshot") -> bool:
+    def is_escalation_of(self, original: CapabilitySnapshot) -> bool:
         """Return True if this snapshot has MORE capabilities than *original*.
 
         Used on resume: if the new session has capabilities not present at
@@ -162,6 +163,7 @@ class CapabilitySnapshot:
 # ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
+
 
 class CapabilityRegistry:
     """Maps pipeline stage names to NodeCapabilityRequirement.
@@ -203,7 +205,10 @@ class CapabilityRegistry:
     def requirement_for(self, stage: str) -> NodeCapabilityRequirement:
         """Return the requirement for *stage*, falling back to the global ``"*"``."""
         key = str(stage or "").strip().lower()
-        return self._requirements.get(key, self._requirements.get("*", NodeCapabilityRequirement(stage="*")))
+        return self._requirements.get(
+            key,
+            self._requirements.get("*", NodeCapabilityRequirement(stage="*")),
+        )
 
     def all_requirements(self) -> dict[str, NodeCapabilityRequirement]:
         return dict(self._requirements)
@@ -212,6 +217,7 @@ class CapabilityRegistry:
 # ---------------------------------------------------------------------------
 # Enforcement function (called by TurnGraph._execute_stage)
 # ---------------------------------------------------------------------------
+
 
 def enforce_node_entry(
     stage: str,
@@ -243,6 +249,7 @@ def enforce_node_entry(
     ------
     CapabilityViolationError
         When mode is ENFORCE and the requirement is not satisfied.
+
     """
     if caps is None:
         return EnforcementMode.WARN  # no-op; compatible with legacy turns
@@ -273,6 +280,7 @@ def enforce_node_entry(
 # ---------------------------------------------------------------------------
 # Snapshot helpers (called by TurnGraph.execute() at turn boundaries)
 # ---------------------------------------------------------------------------
+
 
 def freeze_capabilities(
     turn_context: Any,
@@ -320,7 +328,7 @@ def verify_capability_freeze(
         raise CapabilityViolationError(
             f"Capability escalation detected on resume: session {session_id!r} "
             f"has new capabilities {escalated!r} not present at turn start.  "
-            "The resumed turn is rejected."
+            "The resumed turn is rejected.",
         )
 
 

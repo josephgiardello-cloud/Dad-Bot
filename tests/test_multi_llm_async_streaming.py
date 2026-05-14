@@ -1,7 +1,10 @@
 import asyncio
 
-import dadbot.core.dadbot as dadbot_module
+import pytest
+
 import dadbot.managers.runtime_client as runtime_client_module
+
+pytestmark = pytest.mark.integration
 
 
 class FakeAsyncStream:

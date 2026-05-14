@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import base64
 import mimetypes
@@ -20,7 +20,9 @@ def summarize_document_attachment(uploaded_file, max_chars: int = 420):
     name = str(getattr(uploaded_file, "name", "document")).strip() or "document"
     mime_type = str(getattr(uploaded_file, "type", "")).strip() or (mimetypes.guess_type(name)[0] or "")
     text_excerpt = ""
-    if mime_type.startswith("text/") or name.lower().endswith((".txt", ".md", ".csv", ".json", ".py", ".log")):
+    if mime_type.startswith("text/") or name.lower().endswith(
+        (".txt", ".md", ".csv", ".json", ".py", ".log"),
+    ):
         text_excerpt = raw_bytes.decode("utf-8", errors="replace").strip()
     elif name.lower().endswith(".pdf"):
         text_excerpt = f"PDF uploaded ({len(raw_bytes)} bytes)."
@@ -42,7 +44,11 @@ def summarize_document_attachment(uploaded_file, max_chars: int = 420):
     }
 
 
-def build_chat_attachments_from_uploads(uploaded_files, *, max_upload_bytes: int = MAX_UPLOAD_BYTES):
+def build_chat_attachments_from_uploads(
+    uploaded_files,
+    *,
+    max_upload_bytes: int = MAX_UPLOAD_BYTES,
+):
     attachments = []
     issues = []
     for uploaded_file in list(uploaded_files or []):
@@ -55,17 +61,23 @@ def build_chat_attachments_from_uploads(uploaded_files, *, max_upload_bytes: int
             raw_bytes = uploaded_file.getvalue() or b""
         except Exception as exc:
             raw_bytes = b""
-            issues.append(f"{getattr(uploaded_file, 'name', 'upload')}: could not read file ({exc}).")
+            issues.append(
+                f"{getattr(uploaded_file, 'name', 'upload')}: could not read file ({exc}).",
+            )
         if not raw_bytes:
-            issues.append(f"{getattr(uploaded_file, 'name', 'upload')}: file was empty.")
+            issues.append(
+                f"{getattr(uploaded_file, 'name', 'upload')}: file was empty.",
+            )
             continue
         if len(raw_bytes) > max_upload_bytes:
             issues.append(
-                f"{getattr(uploaded_file, 'name', 'upload')}: file is larger than {max_upload_bytes // (1024 * 1024)}MB limit."
+                f"{getattr(uploaded_file, 'name', 'upload')}: file is larger than {max_upload_bytes // (1024 * 1024)}MB limit.",
             )
             continue
 
-        is_image = mime_type.startswith("image/") or file_name.endswith((".png", ".jpg", ".jpeg", ".webp"))
+        is_image = mime_type.startswith("image/") or file_name.endswith(
+            (".png", ".jpg", ".jpeg", ".webp"),
+        )
         if is_image:
             attachments.append(
                 {
@@ -73,8 +85,8 @@ def build_chat_attachments_from_uploads(uploaded_files, *, max_upload_bytes: int
                     "name": str(getattr(uploaded_file, "name", "image")),
                     "mime_type": mime_type,
                     "image_b64": base64.b64encode(raw_bytes).decode("utf-8"),
-                    "note": f"Tony uploaded {str(getattr(uploaded_file, 'name', 'an image'))}",
-                }
+                    "note": f"Tony uploaded {getattr(uploaded_file, 'name', 'an image')!s}",
+                },
             )
             continue
 
@@ -82,6 +94,8 @@ def build_chat_attachments_from_uploads(uploaded_files, *, max_upload_bytes: int
         if summarized is not None:
             attachments.append(summarized)
         else:
-            issues.append(f"{getattr(uploaded_file, 'name', 'upload')}: unsupported or unreadable document.")
+            issues.append(
+                f"{getattr(uploaded_file, 'name', 'upload')}: unsupported or unreadable document.",
+            )
 
     return attachments[:6], issues

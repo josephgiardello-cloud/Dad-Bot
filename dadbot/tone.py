@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dadbot.config import MOOD_TONE_GUIDANCE
 from dadbot.contracts import DadBotContext, SupportsToneRuntime
@@ -36,13 +36,19 @@ Keep replies natural - do not mention the mood explicitly unless it helps.
     def support_escalation_settings(self) -> tuple[set[str], int, list[str]]:
         tracked_moods = {
             self.bot.normalize_mood(mood)
-            for mood in self.bot.SUPPORT_ESCALATION.get("tracked_moods", ["sad", "stressed"])
+            for mood in self.bot.SUPPORT_ESCALATION.get(
+                "tracked_moods",
+                ["sad", "stressed"],
+            )
         }
         tracked_moods.discard("neutral")
         threshold = self.bot.SUPPORT_ESCALATION.get("streak_threshold", 2)
         supportive_lines = self.bot.SUPPORT_ESCALATION.get(
             "supportive_lines",
-            ["I'm right here with you, buddy.", "We can take this one step at a time together."],
+            [
+                "I'm right here with you, buddy.",
+                "We can take this one step at a time together.",
+            ],
         )
         if not supportive_lines:
             supportive_lines = ["I'm right here with you, buddy."]
@@ -54,7 +60,11 @@ Keep replies natural - do not mention the mood explicitly unless it helps.
 
         return tracked_moods or {"sad", "stressed"}, threshold, supportive_lines
 
-    def emotional_support_streak_for_tracked_moods(self, session_moods: list[str], tracked_moods: set[str]) -> int:
+    def emotional_support_streak_for_tracked_moods(
+        self,
+        session_moods: list[str],
+        tracked_moods: set[str],
+    ) -> int:
         streak = 0
 
         for mood in reversed(session_moods):
@@ -65,10 +75,17 @@ Keep replies natural - do not mention the mood explicitly unless it helps.
 
         return streak
 
-    def build_escalation_context(self, current_mood: str, session_moods: list[str]) -> str | None:
+    def build_escalation_context(
+        self,
+        current_mood: str,
+        session_moods: list[str],
+    ) -> str | None:
         current_mood = self.bot.normalize_mood(current_mood)
         tracked_moods, threshold, supportive_lines = self.support_escalation_settings()
-        streak = self.emotional_support_streak_for_tracked_moods(session_moods, tracked_moods)
+        streak = self.emotional_support_streak_for_tracked_moods(
+            session_moods,
+            tracked_moods,
+        )
 
         if current_mood not in tracked_moods or streak < threshold:
             return None

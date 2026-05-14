@@ -1,281 +1,182 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
-import os
+import threading
 import time
-import uuid
 from pathlib import Path
-from threading import RLock
 from typing import Any
+from uuid import uuid4
 
 
 class LeaseConflictError(RuntimeError):
-    pass
+    """Raised when a different worker already owns the active lease."""
+
+
+class WorkerIdentity:
+    """Persist a stable worker id to disk for multi-process lease tests."""
+
+    def __init__(self, path: str | Path) -> None:
+        self._path = Path(path)
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        if self._path.exists():
+            data = json.loads(self._path.read_text(encoding="utf-8") or "{}")
+        else:
+            data = {
+                "worker_id": f"worker-{uuid4().hex}",
+                "pid": __import__("os").getpid(),
+            }
+            self._path.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
+        self.worker_id = str(data.get("worker_id") or f"worker-{uuid4().hex}")
 
 
 class ExecutionLease:
-    """Per-session single-writer ownership lease.
+    """Session-scoped in-memory lease with fencing tokens."""
 
-    Contract:
-    - Only one holder (worker) may hold the lease for a given session at a time.
-    - Leases have a TTL; stale leases are automatically expired before acquisition.
-    - The owner must pass its lease_id when releasing or renewing to prevent
-      unintentional release by a different worker.
-    - Kernel/scheduler checks require_session_lease() before executing a job;
-      this raises LeaseConflictError if the session is already owned by another holder.
-    """
+    DEFAULT_TTL_SECONDS = 30.0
 
-    DEFAULT_TTL_SECONDS: float = 30.0
-
-    def __init__(self, *, default_ttl_seconds: float = DEFAULT_TTL_SECONDS) -> None:
-        self._lock = RLock()
+    def __init__(self, default_ttl_seconds: float | None = None) -> None:
+        self.default_ttl_seconds = float(
+            default_ttl_seconds or self.DEFAULT_TTL_SECONDS,
+        )
         self._leases: dict[str, dict[str, Any]] = {}
-        self._default_ttl = max(1.0, float(default_ttl_seconds or self.DEFAULT_TTL_SECONDS))
-        self._fencing_counters: dict[str, int] = {}  # session_id â†’ monotonic token
+        self._fencing_counters: dict[str, int] = {}
+        self._lock = threading.RLock()
 
-    def _next_fencing_token(self, session_id: str) -> int:
-        """Return a monotonically increasing fencing token for session_id.
+    def _normalize_session(self, session_id: str) -> str:
+        sid = str(session_id or "").strip()
+        if not sid:
+            raise ValueError("session_id must be non-empty")
+        return sid
 
-        The token increments on every new acquisition (not on renewal).
-        Callers can embed the token in write operations to detect and reject
-        writes from stale lease holders.
-        """
-        current = self._fencing_counters.get(session_id, 0) + 1
-        self._fencing_counters[session_id] = current
-        return current
-
-    def fencing_token_for(self, session_id: str) -> int | None:
-        """Return the current fencing token for session_id, or None if not held."""
-        with self._lock:
-            lease = self._leases.get(str(session_id or "").strip())
-            if lease is None:
-                return None
-            return lease.get("fencing_token")
-
-    # ------------------------------------------------------------------
-    # Acquire / Release / Renew
-    # ------------------------------------------------------------------
+    def _expired(self, lease: dict[str, Any], now: float) -> bool:
+        return float(lease.get("expires_at", 0.0) or 0.0) <= now
 
     def acquire(
         self,
-        *,
         session_id: str,
-        owner_id: str | None = None,
+        owner_id: str,
         ttl_seconds: float | None = None,
     ) -> dict[str, Any]:
-        """Acquire the execution lease for session_id.
-
-        If a non-expired lease already exists for a *different* owner, raises LeaseConflictError.
-        If the caller is renewing its own lease, the TTL is extended.
-        """
-        normalized = str(session_id or "").strip()
-        if not normalized:
-            raise ValueError("session_id must not be empty")
-
-        holder = str(owner_id or uuid.uuid4().hex)
-        ttl = float(ttl_seconds or self._default_ttl)
+        sid = self._normalize_session(session_id)
+        owner = str(owner_id or "").strip() or "worker"
+        ttl = float(ttl_seconds or self.default_ttl_seconds)
         now = time.monotonic()
-        expires_at = now + ttl
 
         with self._lock:
-            existing = self._leases.get(normalized)
-            if existing is not None:
-                if existing["expires_at"] > now:
-                    if existing["owner_id"] != holder:
-                        raise LeaseConflictError(
-                            f"Session {normalized!r} already owned by {existing['owner_id']!r}; "
-                            f"lease expires in {existing['expires_at'] - now:.1f}s"
-                        )
-                    # Renew in-place.
-                    existing["expires_at"] = expires_at
-                    existing["renewed_at"] = now
-                    existing["ttl_seconds"] = ttl
-                    return dict(existing)
+            current = self._leases.get(sid)
+            if current and not self._expired(current, now):
+                current_owner = str(current.get("owner_id") or "")
+                if current_owner and current_owner != owner:
+                    raise LeaseConflictError(
+                        f"lease conflict: session_id={sid!r} owned_by={current_owner!r} requested_by={owner!r}",
+                    )
+
+            if current and str(current.get("owner_id") or "") == owner and not self._expired(current, now):
+                token = int(current.get("fencing_token") or 1)
+                lease_id = str(current.get("lease_id") or f"lease-{uuid4().hex}")
+            else:
+                token = int(self._fencing_counters.get(sid, 0)) + 1
+                self._fencing_counters[sid] = token
+                lease_id = f"lease-{uuid4().hex}"
 
             lease = {
-                "session_id": normalized,
-                "owner_id": holder,
-                "lease_id": uuid.uuid4().hex,
-                "acquired_at": now,
-                "renewed_at": now,
-                "expires_at": expires_at,
+                "session_id": sid,
+                "owner_id": owner,
+                "lease_id": lease_id,
                 "ttl_seconds": ttl,
-                "fencing_token": self._next_fencing_token(normalized),
+                "acquired_at": now,
+                "expires_at": now + max(0.001, ttl),
+                "fencing_token": token,
             }
-            self._leases[normalized] = lease
+            self._leases[sid] = lease
             return dict(lease)
 
-    def release(self, *, session_id: str, owner_id: str) -> bool:
-        """Release the lease. Returns True if released, False if already gone/expired."""
-        normalized = str(session_id or "").strip()
+    def renew(
+        self,
+        session_id: str,
+        owner_id: str,
+        ttl_seconds: float | None = None,
+    ) -> dict[str, Any]:
+        sid = self._normalize_session(session_id)
+        owner = str(owner_id or "").strip() or "worker"
+        now = time.monotonic()
         with self._lock:
-            existing = self._leases.get(normalized)
-            if existing is None:
+            current = self._leases.get(sid)
+            if not current or self._expired(current, now):
+                raise LeaseConflictError(
+                    f"cannot renew expired or missing lease for {sid!r}",
+                )
+            if str(current.get("owner_id") or "") != owner:
+                raise LeaseConflictError(
+                    f"lease conflict: session_id={sid!r} requested_by={owner!r}",
+                )
+            ttl = float(
+                ttl_seconds or current.get("ttl_seconds") or self.default_ttl_seconds,
+            )
+            current["expires_at"] = now + max(0.001, ttl)
+            current["ttl_seconds"] = ttl
+            return dict(current)
+
+    def release(self, session_id: str, owner_id: str) -> bool:
+        sid = self._normalize_session(session_id)
+        owner = str(owner_id or "").strip() or "worker"
+        with self._lock:
+            current = self._leases.get(sid)
+            if not current:
                 return False
-            if existing["owner_id"] != str(owner_id or ""):
+            if str(current.get("owner_id") or "") != owner:
                 return False
-            del self._leases[normalized]
+            self._leases.pop(sid, None)
             return True
 
-    def renew(self, *, session_id: str, owner_id: str, ttl_seconds: float | None = None) -> dict[str, Any]:
-        """Extend the lease TTL without releasing and reacquiring."""
-        return self.acquire(session_id=session_id, owner_id=owner_id, ttl_seconds=ttl_seconds)
-
-    # ------------------------------------------------------------------
-    # Enforcement
-    # ------------------------------------------------------------------
-
-    def require_session_lease(self, *, session_id: str, owner_id: str) -> None:
-        """Raise LeaseConflictError if session_id is owned by a different worker."""
-        normalized = str(session_id or "").strip()
-        now = time.monotonic()
+    def owner_of(self, session_id: str) -> str | None:
+        sid = self._normalize_session(session_id)
         with self._lock:
-            existing = self._leases.get(normalized)
-            if existing is None:
-                return  # no lease held â€” caller may proceed
-            if existing["expires_at"] <= now:
-                # Expired lease â€” evict and allow
-                del self._leases[normalized]
-                return
-            if existing["owner_id"] != str(owner_id or ""):
-                raise LeaseConflictError(
-                    f"Execution ownership conflict for session {normalized!r}: "
-                    f"held by {existing['owner_id']!r}, attempted by {str(owner_id)!r}"
-                )
+            lease = self._leases.get(sid)
+            if not lease or self._expired(lease, time.monotonic()):
+                return None
+            return str(lease.get("owner_id") or "") or None
+
+    def lease_for(self, session_id: str) -> dict[str, Any] | None:
+        sid = self._normalize_session(session_id)
+        with self._lock:
+            lease = self._leases.get(sid)
+            if not lease or self._expired(lease, time.monotonic()):
+                return None
+            return dict(lease)
+
+    def is_held(self, session_id: str) -> bool:
+        return self.owner_of(session_id) is not None
+
+    def require_session_lease(self, session_id: str, owner_id: str) -> None:
+        owner = self.owner_of(session_id)
+        requested = str(owner_id or "").strip() or "worker"
+        if owner is None or owner == requested:
+            return
+        raise LeaseConflictError(
+            f"lease conflict: session_id={session_id!r} owned_by={owner!r} requested_by={requested!r}",
+        )
 
     def evict_expired(self) -> list[str]:
-        """Remove all expired leases and return their session IDs."""
         now = time.monotonic()
+        evicted: list[str] = []
         with self._lock:
-            expired = [
-                session_id
-                for session_id, lease in list(self._leases.items())
-                if lease["expires_at"] <= now
-            ]
-            for session_id in expired:
-                del self._leases[session_id]
-        return expired
-
-    # ------------------------------------------------------------------
-    # Inspection
-    # ------------------------------------------------------------------
-
-    def is_held(self, *, session_id: str) -> bool:
-        normalized = str(session_id or "").strip()
-        now = time.monotonic()
-        with self._lock:
-            existing = self._leases.get(normalized)
-            return existing is not None and existing["expires_at"] > now
-
-    def owner_of(self, *, session_id: str) -> str | None:
-        normalized = str(session_id or "").strip()
-        now = time.monotonic()
-        with self._lock:
-            existing = self._leases.get(normalized)
-            if existing is None or existing["expires_at"] <= now:
-                return None
-            return str(existing["owner_id"])
+            for sid, lease in list(self._leases.items()):
+                if self._expired(lease, now):
+                    evicted.append(sid)
+                    self._leases.pop(sid, None)
+        return evicted
 
     def snapshot(self) -> dict[str, Any]:
-        now = time.monotonic()
+        self.evict_expired()
         with self._lock:
-            active = [
-                {
-                    "session_id": lease["session_id"],
-                    "owner_id": lease["owner_id"],
-                    "ttl_remaining": max(0.0, lease["expires_at"] - now),
-                    "fencing_token": lease.get("fencing_token"),
-                }
-                for lease in self._leases.values()
-                if lease["expires_at"] > now
-            ]
-        return {"active_lease_count": len(active), "leases": active}
+            leases = [dict(lease) for _, lease in sorted(self._leases.items())]
+        return {"active_lease_count": len(leases), "leases": leases}
 
-
-# ---------------------------------------------------------------------------
-# Worker identity â€” persistent process ID across restarts
-# ---------------------------------------------------------------------------
-
-class WorkerIdentity:
-    """Persists a stable worker identity (UUID) across process restarts.
-
-    On first startup, generates a UUID and writes it to ``identity_path``.
-    On subsequent startups, loads the existing UUID.
-
-    Also detects crashed previous workers by comparing the stored PID against
-    the live process table.  If the previous PID is no longer alive, the
-    identity file is refreshed with the current PID.
-
-    Usage::
-
-        identity = WorkerIdentity("runtime/.worker_identity.json")
-        worker_id = identity.worker_id  # stable UUID string
-        if identity.previous_crashed:
-            logger.warning("Previous worker %s crashed", identity.previous_worker_id)
-    """
-
-    def __init__(self, identity_path: str | Path) -> None:
-        self._path = Path(identity_path)
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._worker_id: str = ""
-        self._previous_worker_id: str = ""
-        self._previous_crashed: bool = False
-        self._load_or_create()
-
-    def _load_or_create(self) -> None:
-        existing = self._read()
-        if existing:
-            prev_pid = int(existing.get("pid") or 0)
-            if prev_pid and prev_pid != os.getpid() and not _pid_is_alive(prev_pid):
-                # Previous worker crashed â€” preserve its ID for diagnostics.
-                self._previous_worker_id = str(existing.get("worker_id") or "")
-                self._previous_crashed = True
-            elif prev_pid and prev_pid == os.getpid():
-                # Same process (e.g. test re-use) â€” reuse identity.
-                self._worker_id = str(existing.get("worker_id") or "")
-                return
-            elif prev_pid and _pid_is_alive(prev_pid):
-                # Another live process owns this identity â€” generate a new one.
-                self._worker_id = uuid.uuid4().hex
-                self._write()
-                return
-
-        if not self._worker_id:
-            self._worker_id = str(existing.get("worker_id") or "") if existing else ""
-        if not self._worker_id:
-            self._worker_id = uuid.uuid4().hex
-        self._write()
-
-    def _read(self) -> dict[str, Any] | None:
-        try:
-            return json.loads(self._path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return None
-
-    def _write(self) -> None:
-        record = {
-            "worker_id": self._worker_id,
-            "pid": os.getpid(),
-            "started_at": time.time(),
-        }
-        self._path.write_text(json.dumps(record), encoding="utf-8")
-
-    @property
-    def worker_id(self) -> str:
-        return self._worker_id
-
-    @property
-    def previous_worker_id(self) -> str:
-        return self._previous_worker_id
-
-    @property
-    def previous_crashed(self) -> bool:
-        return self._previous_crashed
-
-
-def _pid_is_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-        return True
-    except (ProcessLookupError, PermissionError, OSError):
-        return False
+    def fencing_token_for(self, session_id: str) -> int | None:
+        sid = self._normalize_session(session_id)
+        with self._lock:
+            lease = self._leases.get(sid)
+            if not lease or self._expired(lease, time.monotonic()):
+                return None
+            return int(lease.get("fencing_token") or 0)

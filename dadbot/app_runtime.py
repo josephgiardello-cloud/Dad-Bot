@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 import importlib
@@ -11,172 +11,516 @@ import textwrap
 import time
 import webbrowser
 from pathlib import Path
-from socket import AF_INET, SOCK_STREAM, SOL_SOCKET, SO_REUSEADDR, socket
+from socket import AF_INET, SO_REUSEADDR, SOCK_STREAM, SOL_SOCKET, socket
 from urllib.request import urlopen
 
+from dadbot.runtime.supervisor import get_runtime_supervisor
+from dadbot.runtime.env_loader import bootstrap_environment, validate_startup_environment
 from dadbot.runtime_adapter import runtime_contract_errors
 from dadbot_system import (
-	CompositeStateStore,
-	DadBotOrchestrator,
-	DadServiceClient,
-	InMemoryEventBus,
-	InMemoryStateStore,
-	LocalMultiprocessBroker,
-	PostgresStateStore,
-	RedisStateStore,
-	ServiceConfig,
-	WorkerProcessManager,
-	configure_logging,
-	configure_tracing,
-	create_api_app,
-	normalize_tenant_id,
+    CompositeStateStore,
+    DadBotOrchestrator,
+    DadServiceClient,
+    InMemoryEventBus,
+    InMemoryStateStore,
+    LocalMultiprocessBroker,
+    PostgresStateStore,
+    RedisStateStore,
+    ServiceConfig,
+    WorkerProcessManager,
+    configure_logging,
+    configure_tracing,
+    create_api_app,
+    normalize_tenant_id,
 )
 
 logger = logging.getLogger(__name__)
 
 
 def env_truthy(name, default=False):
-	raw_value = os.environ.get(name)
-	if raw_value is None:
-		return default
-	return str(raw_value).strip().lower() in {"1", "true", "yes", "on"}
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return default
+    return str(raw_value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def initialize_startup_logging(*, force=False):
-	"""Initialize logging as early as possible for startup diagnostics."""
-	try:
-		config = ServiceConfig.from_environment()
-		configure_logging(config.telemetry, force=force)
-		logger.debug("Startup logging initialized.")
-	except Exception as exc:
-		print(f"Warning: startup logging initialization failed: {exc}", file=sys.stderr)
+    """Initialize logging as early as possible for startup diagnostics."""
+    try:
+        config = ServiceConfig.from_environment()
+        configure_logging(config.telemetry, force=force)
+        logger.debug("Startup logging initialized.")
+    except Exception as exc:
+        print(f"Warning: startup logging initialization failed: {exc}", file=sys.stderr)
 
 
 def _resolve_graph_config_path(base_script_path: Path):
-	configured = str(os.environ.get("DADBOT_TURN_GRAPH_CONFIG_PATH") or "config.yaml").strip() or "config.yaml"
-	configured_path = Path(configured)
-	if configured_path.is_absolute():
-		return configured_path
-	return (base_script_path.parent / configured_path).resolve()
+    configured = str(os.environ.get("DADBOT_TURN_GRAPH_CONFIG_PATH") or "config.yaml").strip() or "config.yaml"
+    configured_path = Path(configured)
+    if configured_path.is_absolute():
+        return configured_path
+    return (base_script_path.parent / configured_path).resolve()
 
 
 def check_dependencies(args, *, base_script_path: Path, runtime_cls):
-	"""Fail fast on critical startup prerequisites before opening UI/CLI."""
-	if "PYTEST_CURRENT_TEST" in os.environ:
-		return
+    """Fail fast on critical startup prerequisites before opening UI/CLI."""
+    if "PYTEST_CURRENT_TEST" in os.environ:
+        return
 
-	if args.stop_streamlit or args.init_profile:
-		return
+    if args.stop_streamlit or args.init_profile:
+        return
 
-	contract_issues = runtime_contract_errors(runtime_cls)
-	if contract_issues:
-		details = "; ".join(contract_issues)
-		raise RuntimeError(f"Runtime class failed app contract validation: {details}")
+    contract_issues = runtime_contract_errors(runtime_cls)
+    if contract_issues:
+        details = "; ".join(contract_issues)
+        raise RuntimeError(f"Runtime class failed app contract validation: {details}")
 
-	needs_local_runtime = (not args.serve_api) and ((not args.cli) or bool(args.disable_service_client))
-	if needs_local_runtime:
-		try:
-			ollama_module = importlib.import_module("ollama")
-			_ = ollama_module.ps()
-		except Exception as exc:
-			raise RuntimeError(
-				"Ollama is not reachable. Start Ollama before launching Dad Bot local runtime."
-			) from exc
+    needs_local_runtime = (not args.serve_api) and ((not args.cli) or bool(args.disable_service_client))
+    if needs_local_runtime:
+        try:
+            ollama_module = importlib.import_module("ollama")
+            _ = ollama_module.ps()
+        except Exception as exc:
+            raise RuntimeError(
+                "Ollama is not reachable. Start Ollama before launching Dad Bot local runtime.",
+            ) from exc
 
-	if needs_local_runtime and env_truthy("DADBOT_ENABLE_TURN_GRAPH", default=False):
-		graph_config_path = _resolve_graph_config_path(base_script_path)
-		if not graph_config_path.exists():
-			raise RuntimeError(
-				f"Turn graph is enabled, but config file was not found: {graph_config_path}"
-			)
+    if needs_local_runtime and env_truthy("DADBOT_ENABLE_TURN_GRAPH", default=False):
+        graph_config_path = _resolve_graph_config_path(base_script_path)
+        if not graph_config_path.exists():
+            raise RuntimeError(
+                f"Turn graph is enabled, but config file was not found: {graph_config_path}",
+            )
 
-	check_system_resources(args)
+    check_system_resources(args)
 
 
 # â”€â”€â”€ Model memory requirements (minimum RAM in GB) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 _MODEL_MIN_RAM_GB: dict[str, float] = {
-	"llama3.2:1b": 1.5,
-	"llama3.2": 2.5,
-	"phi4:mini": 3.0,
-	"gemma3:4b": 4.5,
-	"gemma3:1b": 2.0,
-	"qwen2.5:3b": 3.5,
+    "llama3.2:1b": 1.5,
+    "llama3.2": 2.5,
+    "phi4:mini": 3.0,
+    "gemma3:4b": 4.5,
+    "gemma3:1b": 2.0,
+    "qwen2.5:3b": 3.5,
 }
 _DEFAULT_MIN_RAM_GB = 2.5
 
 
 def check_system_resources(args) -> None:
-	"""Warn or fail if system RAM is critically insufficient for the selected model.
+    """Warn or fail if system RAM is critically insufficient for the selected model.
 
-	Uses *psutil* if available; silently skips the check when it is not installed
-	so development machines without psutil still work fine.
-	"""
-	try:
-		import psutil  # type: ignore[import]
-	except ImportError:
-		return
+    Uses *psutil* if available; silently skips the check when it is not installed
+    so development machines without psutil still work fine.
+    """
+    try:
+        import psutil  # type: ignore[import]
+    except ImportError:
+        return
 
-	model_name = str(getattr(args, "model", None) or "").strip().lower()
-	required_gb = _MODEL_MIN_RAM_GB.get(model_name, _DEFAULT_MIN_RAM_GB)
+    model_name = str(getattr(args, "model", None) or "").strip().lower()
+    required_gb = _MODEL_MIN_RAM_GB.get(model_name, _DEFAULT_MIN_RAM_GB)
 
-	mem = psutil.virtual_memory()
-	available_gb = mem.available / (1024 ** 3)
-	total_gb = mem.total / (1024 ** 3)
+    mem = psutil.virtual_memory()
+    available_gb = mem.available / (1024**3)
+    total_gb = mem.total / (1024**3)
 
-	logger = logging.getLogger(__name__)
+    logger = logging.getLogger(__name__)
 
-	if available_gb < required_gb * 0.5:
-		raise RuntimeError(
-			f"Critically low RAM: {available_gb:.1f} GB available, "
-			f"but the model needs at least {required_gb:.1f} GB. "
-			"Close other applications or choose a smaller model (--model llama3.2:1b)."
-		)
+    if available_gb < required_gb * 0.5:
+        raise RuntimeError(
+            f"Critically low RAM: {available_gb:.1f} GB available, "
+            f"but the model needs at least {required_gb:.1f} GB. "
+            "Close other applications or choose a smaller model (--model llama3.2:1b).",
+        )
 
-	if available_gb < required_gb:
-		logger.warning(
-			"Low RAM warning: %.1f GB available, model may need up to %.1f GB. "
-			"Performance may be degraded. Consider --model llama3.2:1b for lighter footprint.",
-			available_gb,
-			required_gb,
-		)
-	elif total_gb >= 8 and available_gb < 2.0:
-		logger.warning(
-			"System has %.1f GB total RAM but only %.1f GB free. "
-			"Close other apps for best performance.",
-			total_gb,
-			available_gb,
-		)
+    if available_gb < required_gb:
+        logger.warning(
+            "Low RAM warning: %.1f GB available, model may need up to %.1f GB. "
+            "Performance may be degraded. Consider --model llama3.2:1b for lighter footprint.",
+            available_gb,
+            required_gb,
+        )
+    elif total_gb >= 8 and available_gb < 2.0:
+        logger.warning(
+            "System has %.1f GB total RAM but only %.1f GB free. Close other apps for best performance.",
+            total_gb,
+            available_gb,
+        )
 
 
 def parse_args(argv=None):
-	parser = argparse.ArgumentParser(add_help=True)
-	parser.add_argument("--cli", action="store_true", help="Run the terminal chat interface.")
-	parser.add_argument("--serve-api", action="store_true", help="Run the multiprocess API service instead of Streamlit.")
-	parser.add_argument("--stop-streamlit", action="store_true", help="Stop Dad Bot Streamlit processes for this workspace and free localhost:8501.")
-	parser.add_argument("--service-url", metavar="URL", default="", help="Dad Bot API base URL for CLI/client execution.")
-	parser.add_argument("--disable-service-client", action="store_true", help="Force CLI to use the in-process DadBot runtime instead of the API service.")
-	parser.add_argument("--clear-memory", action="store_true", help="Clear Dad's saved memory store and exit.")
-	parser.add_argument("--export-memory", metavar="PATH", help="Export Dad's saved memory store to a JSON file and exit.")
-	parser.add_argument("--init-profile", action="store_true", help="Create a starter dad_profile.json and exit if one does not already exist.")
-	parser.add_argument("--model", metavar="NAME", help="Override the default Ollama model for this run.")
-	parser.add_argument("--worker-count", metavar="N", type=int, default=None, help="Number of queue workers when running --serve-api.")
-	parser.add_argument("--api-host", metavar="HOST", default=None, help="Bind host for --serve-api.")
-	parser.add_argument("--api-port", metavar="PORT", type=int, default=None, help="Bind port for --serve-api.")
-	parser.add_argument("--redis-url", metavar="URL", default=None, help="Redis URL for fast session/task state.")
-	parser.add_argument("--postgres-dsn", metavar="DSN", default=None, help="Postgres DSN for durable state.")
-	parser.add_argument("--tenant-id", metavar="ID", default="", help="Tenant/customer identifier used to isolate persisted state.")
-	parser.add_argument("--otel", action="store_true", help="Enable OpenTelemetry if the SDK is installed.")
-	parser.add_argument("--no-signoff", action="store_true", help="Disable Dad's default reply signoff for this run.")
-	parser.add_argument("--light", action="store_true", help="Use a lighter runtime that skips mood detection and extra review passes.")
-	return parser.parse_args(argv)
+    parser = argparse.ArgumentParser(add_help=True)
+    subparsers = parser.add_subparsers(dest="command")
+
+    status_parser = subparsers.add_parser("status", help="Show runtime ownership and lifecycle status.")
+    status_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON output.")
+
+    trace_parser = subparsers.add_parser("trace", help="Inspect persisted execution trace events by trace ID.")
+    trace_parser.add_argument("turn_id", help="Trace/turn identifier to inspect.")
+    trace_parser.add_argument("--limit", type=int, default=25, help="Maximum event count to display.")
+    trace_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON output.")
+
+    doctor_parser = subparsers.add_parser("doctor", help="Run runtime preflight diagnostics.")
+    doctor_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON output.")
+
+    restart_parser = subparsers.add_parser("restart", help="Restart Dad Bot Streamlit runtime.")
+    restart_parser.add_argument("--light", action="store_true", help="Restart in light mode.")
+    restart_parser.add_argument("--no-signoff", action="store_true", help="Disable signoff after restart.")
+
+    heartbeat_parser = subparsers.add_parser(
+        "heartbeat-daemon",
+        help="Run a resident heartbeat/consolidation loop for sovereign maintenance.",
+    )
+    heartbeat_parser.add_argument(
+        "--interval-seconds",
+        type=int,
+        default=60,
+        help="Seconds between heartbeat cycles.",
+    )
+    heartbeat_parser.add_argument(
+        "--consolidation-interval-seconds",
+        type=int,
+        default=300,
+        help="Seconds between memory consolidation cycles.",
+    )
+    heartbeat_parser.add_argument(
+        "--session-id",
+        default="sovereign-daemon",
+        help="Session identifier for consolidation jobs.",
+    )
+    heartbeat_parser.add_argument(
+        "--window-size",
+        type=int,
+        default=10,
+        help="Window size passed to memory consolidation jobs.",
+    )
+    heartbeat_parser.add_argument(
+        "--max-cycles",
+        type=int,
+        default=0,
+        help="Optional max cycles before exit (0 runs forever).",
+    )
+
+    hud_parser = subparsers.add_parser(
+        "hud",
+        help="Render a terminal observability HUD from runtime health snapshots.",
+    )
+    hud_parser.add_argument(
+        "--interval-seconds",
+        type=int,
+        default=2,
+        help="Seconds between HUD refreshes.",
+    )
+    hud_parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Render a single HUD sample and exit.",
+    )
+    hud_parser.add_argument(
+        "--max-samples",
+        type=int,
+        default=0,
+        help="Optional max HUD samples before exit (0 runs until interrupted).",
+    )
+
+    parser.add_argument(
+        "--cli",
+        action="store_true",
+        help="Run the terminal chat interface.",
+    )
+    parser.add_argument(
+        "--serve-api",
+        action="store_true",
+        help="Run the multiprocess API service instead of Streamlit.",
+    )
+    parser.add_argument(
+        "--stop-streamlit",
+        action="store_true",
+        help="Stop Dad Bot Streamlit processes for this workspace and free localhost:8501.",
+    )
+    parser.add_argument(
+        "--service-url",
+        metavar="URL",
+        default="",
+        help="Dad Bot API base URL for CLI/client execution.",
+    )
+    parser.add_argument(
+        "--disable-service-client",
+        action="store_true",
+        help="Force CLI to use the in-process DadBot runtime instead of the API service.",
+    )
+    parser.add_argument(
+        "--clear-memory",
+        action="store_true",
+        help="Clear Dad's saved memory store and exit.",
+    )
+    parser.add_argument(
+        "--export-memory",
+        metavar="PATH",
+        help="Export Dad's saved memory store to a JSON file and exit.",
+    )
+    parser.add_argument(
+        "--init-profile",
+        action="store_true",
+        help="Create a starter dad_profile.json and exit if one does not already exist.",
+    )
+    parser.add_argument(
+        "--model",
+        metavar="NAME",
+        help="Override the default Ollama model for this run.",
+    )
+    parser.add_argument(
+        "--worker-count",
+        metavar="N",
+        type=int,
+        default=None,
+        help="Number of queue workers when running --serve-api.",
+    )
+    parser.add_argument(
+        "--api-host",
+        metavar="HOST",
+        default=None,
+        help="Bind host for --serve-api.",
+    )
+    parser.add_argument(
+        "--api-port",
+        metavar="PORT",
+        type=int,
+        default=None,
+        help="Bind port for --serve-api.",
+    )
+    parser.add_argument(
+        "--redis-url",
+        metavar="URL",
+        default=None,
+        help="Redis URL for fast session/task state.",
+    )
+    parser.add_argument(
+        "--postgres-dsn",
+        metavar="DSN",
+        default=None,
+        help="Postgres DSN for durable state.",
+    )
+    parser.add_argument(
+        "--tenant-id",
+        metavar="ID",
+        default="",
+        help="Tenant/customer identifier used to isolate persisted state.",
+    )
+    parser.add_argument(
+        "--otel",
+        action="store_true",
+        help="Enable OpenTelemetry if the SDK is installed.",
+    )
+    parser.add_argument(
+        "--no-signoff",
+        action="store_true",
+        help="Disable Dad's default reply signoff for this run.",
+    )
+    parser.add_argument(
+        "--light",
+        action="store_true",
+        help="Use a lighter runtime that skips mood detection and extra review passes.",
+    )
+    return parser.parse_args(argv)
+
+
+def _emit_operator_output(payload: dict, *, as_json: bool) -> int:
+    if as_json:
+        print(json.dumps(payload, indent=2, default=str))
+    else:
+        for key, value in payload.items():
+            print(f"{key}: {value}")
+    return 0
+
+
+def _cli_status(*, as_json: bool) -> int:
+    supervisor = get_runtime_supervisor()
+    payload = {
+        "command": "status",
+        "runtime": supervisor.get_status(),
+    }
+    return _emit_operator_output(payload, as_json=as_json)
+
+
+def _cli_trace(dadbot_cls, *, turn_id: str, limit: int, as_json: bool) -> int:
+    bot = dadbot_cls()
+    trace_id = str(turn_id or "").strip()
+    if not trace_id:
+        print("trace command requires a non-empty turn_id", file=sys.stderr)
+        return 2
+
+    events = list(bot.list_turn_events(trace_id, limit=max(0, int(limit or 0))) or [])
+    replay = dict(bot.replay_turn_events(trace_id) or {})
+    payload = {
+        "command": "trace",
+        "trace_id": trace_id,
+        "event_count": len(events),
+        "events": events,
+        "replay": replay,
+    }
+    return _emit_operator_output(payload, as_json=as_json)
+
+
+def _cli_doctor(dadbot_cls, *, as_json: bool) -> int:
+    supervisor = get_runtime_supervisor()
+    preflight_ok, preflight_issues = supervisor.preflight_check()
+
+    bot = dadbot_cls(light_mode=True)
+    health = dict(bot.current_runtime_health_snapshot(force=True, log_warnings=False, persist=False) or {})
+
+    payload = {
+        "command": "doctor",
+        "preflight_ok": bool(preflight_ok),
+        "preflight_issues": list(preflight_issues or []),
+        "runtime": supervisor.get_status(),
+        "health": health,
+    }
+    code = _emit_operator_output(payload, as_json=as_json)
+    return code if preflight_ok else 1
+
+
+def _cli_heartbeat_daemon(
+    dadbot_cls,
+    *,
+    interval_seconds: int,
+    consolidation_interval_seconds: int,
+    session_id: str,
+    window_size: int,
+    max_cycles: int,
+) -> int:
+    bot = dadbot_cls(light_mode=True)
+    assistant = bot.assistant
+    heartbeat_interval = max(1, int(interval_seconds or 1))
+    consolidation_interval = max(heartbeat_interval, int(consolidation_interval_seconds or heartbeat_interval))
+    last_consolidation = 0.0
+    cycles = 0
+    max_run_cycles = max(0, int(max_cycles or 0))
+
+    print("Starting sovereign heartbeat daemon. Press Ctrl+C to stop.")
+    try:
+        while True:
+            now = time.time()
+            heartbeat_result = dict(assistant.run_heartbeat(force=True) or {})
+            consolidation_result: dict[str, Any] = {}
+            if (now - last_consolidation) >= consolidation_interval:
+                consolidation_result = dict(
+                    assistant.run_memory_consolidation(
+                        session_id=session_id,
+                        window_size=window_size,
+                        background=False,
+                        force=True,
+                    )
+                    or {}
+                )
+                last_consolidation = now
+
+            payload = {
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "cycle": cycles + 1,
+                "heartbeat": heartbeat_result,
+                "consolidation": consolidation_result,
+            }
+            print(json.dumps(payload, default=str))
+
+            cycles += 1
+            if max_run_cycles and cycles >= max_run_cycles:
+                return 0
+            time.sleep(heartbeat_interval)
+    except KeyboardInterrupt:
+        print("Sovereign heartbeat daemon stopped.")
+        return 0
+
+
+def _cli_hud_watch(
+    dadbot_cls,
+    *,
+    interval_seconds: int,
+    once: bool,
+    max_samples: int,
+) -> int:
+    bot = dadbot_cls(light_mode=True)
+    cadence = max(1, int(interval_seconds or 1))
+    sample = 0
+    max_count = max(0, int(max_samples or 0))
+
+    try:
+        while True:
+            health = dict(bot.current_runtime_health_snapshot(force=True, log_warnings=False, persist=False) or {})
+            fidelity = dict(bot.turn_fidelity_state() or {})
+            status = str(health.get("status") or "unknown")
+            score = str(health.get("health_score") or health.get("score") or "n/a")
+            contract_ok = health.get("contract_ok")
+            replay_ok = health.get("replay_determinism_ok")
+            full_pipeline = bool(fidelity.get("full_pipeline", False))
+            stamp = datetime.utcnow().strftime("%H:%M:%S")
+            print(
+                f"[{stamp}] status={status} score={score} contract_ok={contract_ok} "
+                f"replay_ok={replay_ok} full_pipeline={full_pipeline}",
+            )
+
+            sample += 1
+            if once or (max_count and sample >= max_count):
+                return 0
+            time.sleep(cadence)
+    except KeyboardInterrupt:
+        print("HUD watch stopped.")
+        return 0
+
+
+def _run_operator_command(args, *, dadbot_cls, script_path: Path) -> int | None:
+    command = str(getattr(args, "command", "") or "").strip().lower()
+    if not command:
+        return None
+    if command == "status":
+        return _cli_status(as_json=bool(getattr(args, "json", False)))
+    if command == "trace":
+        return _cli_trace(
+            dadbot_cls,
+            turn_id=str(getattr(args, "turn_id", "") or ""),
+            limit=int(getattr(args, "limit", 25) or 25),
+            as_json=bool(getattr(args, "json", False)),
+        )
+    if command == "doctor":
+        return _cli_doctor(dadbot_cls, as_json=bool(getattr(args, "json", False)))
+    if command == "restart":
+        stop_code = stop_streamlit_app(script_path=script_path)
+        if stop_code != 0:
+            return stop_code
+        return launch_streamlit_app(
+            append_signoff=not bool(getattr(args, "no_signoff", False)),
+            light_mode=bool(getattr(args, "light", False)),
+            script_path=script_path,
+        )
+    if command == "heartbeat-daemon":
+        return _cli_heartbeat_daemon(
+            dadbot_cls,
+            interval_seconds=int(getattr(args, "interval_seconds", 60) or 60),
+            consolidation_interval_seconds=int(getattr(args, "consolidation_interval_seconds", 300) or 300),
+            session_id=str(getattr(args, "session_id", "sovereign-daemon") or "sovereign-daemon"),
+            window_size=int(getattr(args, "window_size", 10) or 10),
+            max_cycles=int(getattr(args, "max_cycles", 0) or 0),
+        )
+    if command == "hud":
+        return _cli_hud_watch(
+            dadbot_cls,
+            interval_seconds=int(getattr(args, "interval_seconds", 2) or 2),
+            once=bool(getattr(args, "once", False)),
+            max_samples=int(getattr(args, "max_samples", 0) or 0),
+        )
+    print(f"Unknown command: {command}", file=sys.stderr)
+    return 2
 
 
 def minimal_streamlit_stub_source():
-	return textwrap.dedent(
-		"""
+    return (
+        textwrap.dedent(
+            """
 		import streamlit as st
 
 		from Dad import DadBot
+        from dadbot.core.execution_contract import TurnDelivery, live_turn_request
 
 		st.set_page_config(page_title="Dad Bot", page_icon="ðŸ§”", layout="centered")
 
@@ -199,415 +543,538 @@ def minimal_streamlit_stub_source():
 			with st.chat_message("user"):
 				st.markdown(prompt)
 			with st.chat_message("assistant"):
-				reply, _should_end = bot.process_user_message(prompt)
+                response = bot.execute_turn(live_turn_request(prompt, delivery=TurnDelivery.SYNC))
+                reply, _should_end = response.as_result()
 				reply = reply or bot.reply_finalization.append_signoff("I'm here, buddy.")
 				st.markdown(reply)
 			st.session_state.messages.append({"role": "assistant", "content": reply})
 			bot.persist_conversation_async()
 			st.rerun()
-		"""
-	).strip() + "\n"
+		""",
+        ).strip()
+        + "\n"
+    )
 
 
 def ensure_streamlit_app_file(streamlit_app_path):
-	if streamlit_app_path.exists():
-		return False
+    if streamlit_app_path.exists():
+        return False
 
-	streamlit_app_path.write_text(minimal_streamlit_stub_source(), encoding="utf-8")
-	return True
+    streamlit_app_path.write_text(minimal_streamlit_stub_source(), encoding="utf-8")
+    return True
 
 
-def launch_streamlit_app(*, append_signoff=True, light_mode=False, script_path: str | Path | None = None):
-	def required_streamlit_port():
-		configured_port = os.environ.get("DADBOT_STREAMLIT_PORT", "8501")
-		try:
-			required_port = int(configured_port)
-		except (TypeError, ValueError) as exc:
-			raise RuntimeError(
-				f"DADBOT_STREAMLIT_PORT must be a valid integer port. Got: {configured_port!r}"
-			) from exc
+def launch_streamlit_app(
+    *,
+    append_signoff=True,
+    light_mode=False,
+    script_path: str | Path | None = None,
+):
+    supervisor = get_runtime_supervisor()
 
-		if required_port != 8501:
-			raise RuntimeError(
-				f"Dad Bot is pinned to port 8501. Update or unset DADBOT_STREAMLIT_PORT (current value: {configured_port!r})."
-			)
+    def required_streamlit_port():
+        configured_port = os.environ.get("DADBOT_STREAMLIT_PORT", "8501")
+        try:
+            required_port = int(configured_port)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"DADBOT_STREAMLIT_PORT must be a valid integer port. Got: {configured_port!r}",
+            ) from exc
 
-		with socket(AF_INET, SOCK_STREAM) as candidate_socket:
-			candidate_socket.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
-			try:
-				candidate_socket.bind(("127.0.0.1", required_port))
-			except OSError as exc:
-				raise RuntimeError(
-					"Dad Bot requires localhost:8501, but that port is already in use. "
-					"Stop the existing process using 8501 and try again."
-				) from exc
+        if required_port != 8501:
+            raise RuntimeError(
+                f"Dad Bot is pinned to port 8501. Update or unset DADBOT_STREAMLIT_PORT (current value: {configured_port!r}).",
+            )
 
-		return required_port
+        with socket(AF_INET, SOCK_STREAM) as candidate_socket:
+            candidate_socket.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
+            try:
+                candidate_socket.bind(("127.0.0.1", required_port))
+            except OSError as exc:
+                raise RuntimeError(
+                    "Dad Bot requires localhost:8501, but that port is already in use. "
+                    "Stop the existing process using 8501 and try again.",
+                ) from exc
 
-	def wait_for_streamlit(url, process, timeout_seconds=15):
-		deadline = time.monotonic() + timeout_seconds
-		while time.monotonic() < deadline:
-			try:
-				with urlopen(url, timeout=1):
-					return True
-			except Exception:
-				if process.poll() is not None:
-					return False
-				time.sleep(0.25)
-		return False
+        return required_port
 
-	base_path = Path(script_path) if script_path is not None else Path.cwd() / "Dad.py"
-	streamlit_app_path = base_path.with_name("dad_streamlit.py")
-	stub_created = ensure_streamlit_app_file(streamlit_app_path)
-	if stub_created:
-		print(f"dad_streamlit.py was missing, so a minimal stub was created at {streamlit_app_path}.")
-	chosen_port = required_streamlit_port()
-	local_url = f"http://localhost:{chosen_port}"
-	command_env = os.environ.copy()
-	if append_signoff:
-		command_env.pop("DADBOT_NO_SIGNOFF", None)
-	else:
-		command_env["DADBOT_NO_SIGNOFF"] = "1"
-	if light_mode:
-		command_env["DADBOT_LIGHT_MODE"] = "1"
-	else:
-		command_env.pop("DADBOT_LIGHT_MODE", None)
-	command = [
-		sys.executable,
-		"-m",
-		"streamlit",
-		"run",
-		str(streamlit_app_path),
-		"--browser.gatherUsageStats",
-		"false",
-		"--server.headless",
-		"true",
-		"--server.port",
-		str(chosen_port),
-	]
-	process = subprocess.Popen(command, cwd=str(streamlit_app_path.parent), env=command_env)
-	try:
-		if wait_for_streamlit(local_url, process):
-			try:
-				webbrowser.open(local_url)
-			except Exception:
-				logger.warning("Could not open browser automatically for %s", local_url, exc_info=True)
-		return process.wait()
-	except KeyboardInterrupt:
-		if process.poll() is None:
-			process.terminate()
-			try:
-				return process.wait(timeout=5)
-			except subprocess.TimeoutExpired:
-				process.kill()
-				return process.wait()
-		return process.returncode or 0
+    def wait_for_streamlit(url, process, timeout_seconds=15):
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            try:
+                with urlopen(url, timeout=1):
+                    return True
+            except Exception:
+                if process.poll() is not None:
+                    return False
+                time.sleep(0.25)
+        return False
 
+    base_path = Path(script_path) if script_path is not None else Path.cwd() / "Dad.py"
+    streamlit_app_path = base_path.with_name("dad_streamlit.py")
+    stub_created = ensure_streamlit_app_file(streamlit_app_path)
+    if stub_created:
+        print(
+            f"dad_streamlit.py was missing, so a minimal stub was created at {streamlit_app_path}.",
+        )
+
+    preflight_ok, preflight_issues = supervisor.preflight_check()
+    if not preflight_ok:
+        healed, actions = supervisor.attempt_self_heal()
+        if healed:
+            for action in actions:
+                logger.warning("Runtime self-heal: %s", action)
+            preflight_ok, preflight_issues = supervisor.preflight_check()
+        if not preflight_ok:
+            raise RuntimeError(f"Startup preflight failed: {'; '.join(preflight_issues)}")
+
+    chosen_port = required_streamlit_port()
+    local_url = f"http://localhost:{chosen_port}"
+    command_env = os.environ.copy()
+    if append_signoff:
+        command_env.pop("DADBOT_NO_SIGNOFF", None)
+    else:
+        command_env["DADBOT_NO_SIGNOFF"] = "1"
+    if light_mode:
+        command_env["DADBOT_LIGHT_MODE"] = "1"
+    else:
+        command_env.pop("DADBOT_LIGHT_MODE", None)
+    command = [
+        sys.executable,
+        "-m",
+        "streamlit",
+        "run",
+        str(streamlit_app_path),
+        "--browser.gatherUsageStats",
+        "false",
+        "--server.headless",
+        "true",
+        "--server.port",
+        str(chosen_port),
+    ]
+
+    lock_acquired, lock_message = supervisor.acquire_lock(
+        pid=os.getpid(),
+        port=chosen_port,
+        owner_id=f"streamlit-launcher-{os.getpid()}",
+    )
+    if not lock_acquired:
+        raise RuntimeError(f"Failed to acquire runtime lock: {lock_message}")
+
+    max_start_attempts = 2 if env_truthy("DADBOT_STREAMLIT_AUTO_RECOVER", default=True) else 1
+    process = None
+    try:
+        for attempt in range(1, max_start_attempts + 1):
+            process = subprocess.Popen(
+                command,
+                cwd=str(streamlit_app_path.parent),
+                env=command_env,
+            )
+            if wait_for_streamlit(local_url, process):
+                supervisor.set_state("RUNNING")
+                try:
+                    webbrowser.open(local_url)
+                except Exception:
+                    logger.warning(
+                        "Could not open browser automatically for %s",
+                        local_url,
+                        exc_info=True,
+                    )
+                return process.wait()
+
+            exit_code = process.wait()
+            supervisor.set_state("DEGRADED")
+            logger.error(
+                "Streamlit runtime exited before readiness on attempt %d/%d with code %s.",
+                attempt,
+                max_start_attempts,
+                exit_code,
+            )
+            if attempt >= max_start_attempts:
+                return exit_code
+            logger.warning("Attempting automatic Streamlit recovery restart.")
+    except KeyboardInterrupt:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:
+                return process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                return process.wait()
+        return (process.returncode if process is not None else 0) or 0
+    finally:
+        supervisor.release_lock()
 
 def stop_streamlit_app(script_path: str | Path | None = None):
-	workspace = str((Path(script_path) if script_path is not None else Path.cwd() / "Dad.py").resolve().parent)
+    workspace = str(
+        (Path(script_path) if script_path is not None else Path.cwd() / "Dad.py").resolve().parent,
+    )
 
-	def port_8501_in_use():
-		with socket(AF_INET, SOCK_STREAM) as candidate_socket:
-			candidate_socket.settimeout(0.5)
-			return candidate_socket.connect_ex(("127.0.0.1", 8501)) == 0
+    def port_8501_in_use():
+        with socket(AF_INET, SOCK_STREAM) as candidate_socket:
+            candidate_socket.settimeout(0.5)
+            return candidate_socket.connect_ex(("127.0.0.1", 8501)) == 0
 
-	if os.name == "nt":
-		query = (
-			f"$workspace = {workspace!r}; "
-			"Get-CimInstance Win32_Process | Where-Object { "
-			"$cmd = $_.CommandLine; "
-			"$_.Name -ieq \"python.exe\" -and $cmd -and $cmd -like \"*$workspace*\" -and ($cmd -like \"*streamlit run*\" -or $cmd -like \"*dad_streamlit.py*\") "
-			"} | Select-Object ProcessId, Name, CommandLine | ConvertTo-Json -Compress"
-		)
-		result = subprocess.run(
-			["powershell", "-NoProfile", "-NonInteractive", "-Command", query],
-			capture_output=True,
-			text=True,
-			check=False,
-		)
+    if os.name == "nt":
+        query = (
+            f"$workspace = {workspace!r}; "
+            "Get-CimInstance Win32_Process | Where-Object { "
+            "$cmd = $_.CommandLine; "
+            '$_.Name -ieq "python.exe" -and $cmd -and $cmd -like "*$workspace*" -and ($cmd -like "*streamlit run*" -or $cmd -like "*dad_streamlit.py*") '
+            "} | Select-Object ProcessId, Name, CommandLine | ConvertTo-Json -Compress"
+        )
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", query],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
 
-		if result.returncode != 0:
-			stderr = (result.stderr or "").strip()
-			if stderr:
-				print(stderr, file=sys.stderr)
-			return result.returncode or 1
+        if result.returncode != 0:
+            stderr = (result.stderr or "").strip()
+            if stderr:
+                print(stderr, file=sys.stderr)
+            return result.returncode or 1
 
-		stdout = (result.stdout or "").strip()
-		if not stdout:
-			targets = []
-		else:
-			try:
-				parsed = json.loads(stdout)
-			except json.JSONDecodeError as exc:
-				print(f"Could not parse stop-streamlit process list: {exc}", file=sys.stderr)
-				return 1
-			targets = parsed if isinstance(parsed, list) else [parsed]
+        stdout = (result.stdout or "").strip()
+        if not stdout:
+            targets = []
+        else:
+            try:
+                parsed = json.loads(stdout)
+            except json.JSONDecodeError as exc:
+                print(
+                    f"Could not parse stop-streamlit process list: {exc}",
+                    file=sys.stderr,
+                )
+                return 1
+            targets = parsed if isinstance(parsed, list) else [parsed]
 
-		if not targets:
-			print("STOP_RESULT: no matching Dad Bot Streamlit processes were running.")
-			if port_8501_in_use():
-				print("PORT_8501_OCCUPIED_BY_NON_DADBOT_PROCESS", file=sys.stderr)
-				return 1
-			print("PORT_8501_FREE")
-			return 0
+        if not targets:
+            print("STOP_RESULT: no matching Dad Bot Streamlit processes were running.")
+            if port_8501_in_use():
+                print("PORT_8501_OCCUPIED_BY_NON_DADBOT_PROCESS", file=sys.stderr)
+                return 1
+            print("PORT_8501_FREE")
+            return 0
 
-		stop_failed = False
-		for target in sorted(targets, key=lambda item: int(item.get("ProcessId", 0)), reverse=True):
-			process_id = int(target.get("ProcessId", 0))
-			name = target.get("Name") or "python.exe"
-			kill_result = subprocess.run(
-				["taskkill", "/PID", str(process_id), "/F", "/T"],
-				capture_output=True,
-				text=True,
-				check=False,
-			)
-			if kill_result.returncode == 0:
-				print(f"STOPPED PID={process_id} NAME={name}")
-			else:
-				stop_failed = True
-				error_text = (kill_result.stderr or kill_result.stdout or "").strip()
-				print(f"STOP_FAILED PID={process_id} NAME={name} ERROR={error_text}", file=sys.stderr)
+        stop_failed = False
+        for target in sorted(
+            targets,
+            key=lambda item: int(item.get("ProcessId", 0)),
+            reverse=True,
+        ):
+            process_id = int(target.get("ProcessId", 0))
+            name = target.get("Name") or "python.exe"
+            kill_result = subprocess.run(
+                ["taskkill", "/PID", str(process_id), "/F", "/T"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if kill_result.returncode == 0:
+                print(f"STOPPED PID={process_id} NAME={name}")
+            else:
+                stop_failed = True
+                error_text = (kill_result.stderr or kill_result.stdout or "").strip()
+                print(
+                    f"STOP_FAILED PID={process_id} NAME={name} ERROR={error_text}",
+                    file=sys.stderr,
+                )
 
-		if stop_failed:
-			return 1
+        if stop_failed:
+            return 1
 
-		if port_8501_in_use():
-			print("PORT_8501_STILL_OCCUPIED", file=sys.stderr)
-			return 1
+        if port_8501_in_use():
+            print("PORT_8501_STILL_OCCUPIED", file=sys.stderr)
+            return 1
 
-		print("PORT_8501_FREE")
-		return 0
+        print("PORT_8501_FREE")
+        return 0
 
-	try:
-		result = subprocess.run(
-			["lsof", "-ti", "tcp:8501"],
-			capture_output=True,
-			text=True,
-			check=False,
-		)
-	except FileNotFoundError:
-		print("--stop-streamlit is currently supported on Windows or systems with lsof installed.", file=sys.stderr)
-		return 1
+    try:
+        result = subprocess.run(
+            ["lsof", "-ti", "tcp:8501"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        print(
+            "--stop-streamlit is currently supported on Windows or systems with lsof installed.",
+            file=sys.stderr,
+        )
+        return 1
 
-	process_ids = []
-	for line in (result.stdout or "").splitlines():
-		line = line.strip()
-		if not line:
-			continue
-		try:
-			process_ids.append(int(line))
-		except ValueError:
-			continue
+    process_ids = []
+    for line in (result.stdout or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            process_ids.append(int(line))
+        except ValueError:
+            continue
 
-	if not process_ids:
-		print("STOP_RESULT: no matching Dad Bot Streamlit processes were running.")
-		if port_8501_in_use():
-			print("PORT_8501_OCCUPIED_BY_NON_DADBOT_PROCESS", file=sys.stderr)
-			return 1
-		print("PORT_8501_FREE")
-		return 0
+    if not process_ids:
+        print("STOP_RESULT: no matching Dad Bot Streamlit processes were running.")
+        if port_8501_in_use():
+            print("PORT_8501_OCCUPIED_BY_NON_DADBOT_PROCESS", file=sys.stderr)
+            return 1
+        print("PORT_8501_FREE")
+        return 0
 
-	stop_failed = False
-	for process_id in sorted(set(process_ids), reverse=True):
-		try:
-			os.kill(process_id, 15)
-			print(f"STOPPED PID={process_id}")
-		except OSError as exc:
-			stop_failed = True
-			print(f"STOP_FAILED PID={process_id} ERROR={exc}", file=sys.stderr)
+    stop_failed = False
+    for process_id in sorted(set(process_ids), reverse=True):
+        try:
+            os.kill(process_id, 15)
+            print(f"STOPPED PID={process_id}")
+        except OSError as exc:
+            stop_failed = True
+            print(f"STOP_FAILED PID={process_id} ERROR={exc}", file=sys.stderr)
 
-	if stop_failed:
-		return 1
+    if stop_failed:
+        return 1
 
-	if port_8501_in_use():
-		print("PORT_8501_STILL_OCCUPIED", file=sys.stderr)
-		return 1
+    if port_8501_in_use():
+        print("PORT_8501_STILL_OCCUPIED", file=sys.stderr)
+        return 1
 
-	print("PORT_8501_FREE")
-	return 0
+    print("PORT_8501_FREE")
+    return 0
 
 
 def build_service_state_store(config):
-	fast_store = None
-	durable_store = None
+    fast_store = None
+    durable_store = None
 
-	if config.persistence.redis_url:
-		fast_store = RedisStateStore(config.persistence.redis_url)
+    if config.persistence.redis_url:
+        fast_store = RedisStateStore(config.persistence.redis_url)
 
-	if config.persistence.postgres_dsn:
-		durable_store = PostgresStateStore(
-			config.persistence.postgres_dsn,
-			session_table=config.persistence.session_table,
-			task_table=config.persistence.task_table,
-			event_table=config.persistence.event_table,
-		)
+    if config.persistence.postgres_dsn:
+        durable_store = PostgresStateStore(
+            config.persistence.postgres_dsn,
+            session_table=config.persistence.session_table,
+            task_table=config.persistence.task_table,
+            event_table=config.persistence.event_table,
+        )
 
-	if fast_store is None and durable_store is None:
-		return InMemoryStateStore()
+    if fast_store is None and durable_store is None:
+        return InMemoryStateStore()
 
-	return CompositeStateStore(fast_store=fast_store, durable_store=durable_store)
+    return CompositeStateStore(fast_store=fast_store, durable_store=durable_store)
 
 
 def build_customer_document_store(config):
-	fast_store = None
-	durable_store = None
+    fast_store = None
+    durable_store = None
 
-	if config.persistence.redis_url:
-		fast_store = RedisStateStore(config.persistence.redis_url)
+    if config.persistence.redis_url:
+        fast_store = RedisStateStore(config.persistence.redis_url)
 
-	if config.persistence.postgres_dsn:
-		durable_store = PostgresStateStore(
-			config.persistence.postgres_dsn,
-			session_table=config.persistence.session_table,
-			task_table=config.persistence.task_table,
-			event_table=config.persistence.event_table,
-		)
+    if config.persistence.postgres_dsn:
+        durable_store = PostgresStateStore(
+            config.persistence.postgres_dsn,
+            session_table=config.persistence.session_table,
+            task_table=config.persistence.task_table,
+            event_table=config.persistence.event_table,
+        )
 
-	if durable_store is None:
-		return None
-	if fast_store is None:
-		return durable_store
-	return CompositeStateStore(fast_store=fast_store, durable_store=durable_store)
+    if durable_store is None:
+        return None
+    if fast_store is None:
+        return durable_store
+    return CompositeStateStore(fast_store=fast_store, durable_store=durable_store)
 
 
 def launch_api_service(args, *, dadbot_cls=None):
-	try:
-		uvicorn = importlib.import_module("uvicorn")
-	except ImportError as exc:
-		print("FastAPI service mode requires uvicorn and fastapi to be installed.")
-		raise SystemExit(1) from exc
+    try:
+        uvicorn = importlib.import_module("uvicorn")
+    except ImportError as exc:
+        print("FastAPI service mode requires uvicorn and fastapi to be installed.")
+        raise SystemExit(1) from exc
 
-	resolved_dadbot_cls = dadbot_cls
-	if resolved_dadbot_cls is None:
-		main_module = sys.modules.get("__main__")
-		resolved_dadbot_cls = getattr(main_module, "DadBot", None)
-		if resolved_dadbot_cls is None:
-			from Dad import DadBot as ImportedDadBot
+    resolved_dadbot_cls = dadbot_cls
+    if resolved_dadbot_cls is None:
+        main_module = sys.modules.get("__main__")
+        resolved_dadbot_cls = getattr(main_module, "DadBot", None)
+        if resolved_dadbot_cls is None:
+            from Dad import DadBot as ImportedDadBot
 
-			resolved_dadbot_cls = ImportedDadBot
+            resolved_dadbot_cls = ImportedDadBot
 
-	config = ServiceConfig.from_environment()
-	config.default_model = args.model or config.default_model
-	if args.api_host:
-		config.api.host = args.api_host
-	if args.api_port is not None:
-		config.api.port = args.api_port
-	if args.worker_count is not None:
-		config.workers.worker_count = max(1, int(args.worker_count))
-	if args.redis_url is not None:
-		config.persistence.redis_url = str(args.redis_url or "").strip()
-	if args.postgres_dsn is not None:
-		config.persistence.postgres_dsn = str(args.postgres_dsn or "").strip()
-	if args.otel:
-		config.telemetry.otel_enabled = True
-		try:
-			from dadbot.core.otel_bridge import install_otel_bridge
+    config = ServiceConfig.from_environment()
+    config.default_model = args.model or config.default_model
+    if args.api_host:
+        config.api.host = args.api_host
+    if args.api_port is not None:
+        config.api.port = args.api_port
+    if args.worker_count is not None:
+        config.workers.worker_count = max(1, int(args.worker_count))
+    if args.redis_url is not None:
+        config.persistence.redis_url = str(args.redis_url or "").strip()
+    if args.postgres_dsn is not None:
+        config.persistence.postgres_dsn = str(args.postgres_dsn or "").strip()
+    if args.otel:
+        config.telemetry.otel_enabled = True
+        try:
+            from dadbot.core.otel_bridge import install_otel_bridge
 
-			install_otel_bridge()
-		except Exception:
-			logger.warning("OpenTelemetry bridge could not be installed", exc_info=True)
+            install_otel_bridge()
+        except Exception:
+            logger.warning("OpenTelemetry bridge could not be installed", exc_info=True)
 
-	configure_logging(config.telemetry, force=True)
-	configure_tracing(config.telemetry)
+    configure_logging(config.telemetry, force=True)
+    configure_tracing(config.telemetry)
 
-	broker = LocalMultiprocessBroker(max_queue_size=config.queue.max_queue_size)
-	event_bus = InMemoryEventBus()
-	state_store = build_service_state_store(config)
-	orchestrator = DadBotOrchestrator(
-		broker,
-		state_store=state_store,
-		event_bus=event_bus,
-		planner_debug_factory=resolved_dadbot_cls.default_planner_debug_state,
-	)
-	worker_manager = WorkerProcessManager(broker, config)
-	worker_manager.start()
-	app = create_api_app(orchestrator, worker_manager=worker_manager, config=config)
-	try:
-		uvicorn.run(app, host=config.api.host, port=config.api.port, log_level=config.telemetry.log_level.lower())
-	finally:
-		worker_manager.shutdown()
-	return 0
+    broker = LocalMultiprocessBroker(max_queue_size=config.queue.max_queue_size)
+    event_bus = InMemoryEventBus()
+    state_store = build_service_state_store(config)
+    runtime_bot = resolved_dadbot_cls(
+        model_name=args.model or config.default_model,
+        append_signoff=not args.no_signoff,
+        light_mode=args.light,
+        tenant_id=args.tenant_id,
+    )
+    orchestrator = DadBotOrchestrator(
+        broker,
+        state_store=state_store,
+        event_bus=event_bus,
+        planner_debug_factory=resolved_dadbot_cls.default_planner_debug_state,
+    )
+    worker_manager = WorkerProcessManager(broker, config)
+    worker_manager.start()
+    app = create_api_app(orchestrator, worker_manager=worker_manager, config=config, runtime_bot=runtime_bot)
+    try:
+        uvicorn.run(
+            app,
+            host=config.api.host,
+            port=config.api.port,
+            log_level=config.telemetry.log_level.lower(),
+        )
+    finally:
+        worker_manager.shutdown()
+    return 0
 
 
-def main(argv=None, *, dadbot_cls=None, service_client_cls=DadServiceClient, script_path: str | Path | None = None):
-	args = parse_args(sys.argv[1:] if argv is None else argv)
-	initialize_startup_logging(force=False)
-	resolved_dadbot_cls = dadbot_cls
-	if resolved_dadbot_cls is None:
-		main_module = sys.modules.get("__main__")
-		resolved_dadbot_cls = getattr(main_module, "DadBot", None)
-		if resolved_dadbot_cls is None:
-			from Dad import DadBot as ImportedDadBot
+def main(
+    argv=None,
+    *,
+    dadbot_cls=None,
+    service_client_cls=DadServiceClient,
+    script_path: str | Path | None = None,
+):
+    bootstrap_environment()
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    initialize_startup_logging(force=False)
+    resolved_dadbot_cls = dadbot_cls
+    if resolved_dadbot_cls is None:
+        main_module = sys.modules.get("__main__")
+        resolved_dadbot_cls = getattr(main_module, "DadBot", None)
+        if resolved_dadbot_cls is None:
+            from Dad import DadBot as ImportedDadBot
 
-			resolved_dadbot_cls = ImportedDadBot
+            resolved_dadbot_cls = ImportedDadBot
 
-	base_script_path = Path(script_path) if script_path is not None else Path.cwd() / "Dad.py"
-	check_dependencies(args, base_script_path=base_script_path, runtime_cls=resolved_dadbot_cls)
+    base_script_path = Path(script_path) if script_path is not None else Path.cwd() / "Dad.py"
 
-	if args.no_signoff:
-		os.environ["DADBOT_NO_SIGNOFF"] = "1"
-	if args.light:
-		os.environ["DADBOT_LIGHT_MODE"] = "1"
-	if args.tenant_id:
-		os.environ["DADBOT_TENANT_ID"] = normalize_tenant_id(args.tenant_id)
+    operator_result = _run_operator_command(
+        args,
+        dadbot_cls=resolved_dadbot_cls,
+        script_path=base_script_path,
+    )
+    if operator_result is not None:
+        return operator_result
 
-	if args.init_profile:
-		created = resolved_dadbot_cls.initialize_profile_file()
-		if created:
-			print("Starter dad_profile.json created.")
-		else:
-			print("dad_profile.json already exists.")
-		return 0
+    startup_errors = validate_startup_environment(serve_api=bool(args.serve_api))
+    if startup_errors:
+        raise RuntimeError("Startup configuration validation failed: " + "; ".join(startup_errors))
 
-	if args.stop_streamlit:
-		return stop_streamlit_app(script_path=base_script_path)
+    check_dependencies(
+        args,
+        base_script_path=base_script_path,
+        runtime_cls=resolved_dadbot_cls,
+    )
 
-	if args.serve_api:
-		return launch_api_service(args, dadbot_cls=resolved_dadbot_cls)
+    if args.no_signoff:
+        os.environ["DADBOT_NO_SIGNOFF"] = "1"
+    if args.light:
+        os.environ["DADBOT_LIGHT_MODE"] = "1"
+    if args.tenant_id:
+        os.environ["DADBOT_TENANT_ID"] = normalize_tenant_id(args.tenant_id)
 
-	bot = resolved_dadbot_cls(
-		model_name=args.model or "llama3.2",
-		append_signoff=not args.no_signoff,
-		light_mode=args.light,
-		tenant_id=args.tenant_id,
-	)
+    # Capture git SHA once at startup so shadow mode never needs a subprocess.
+    if "DADBOT_CODE_VERSION" not in os.environ:
+        try:
+            import subprocess as _sp
+            _r = _sp.run(
+                ["git", "rev-parse", "--short", "HEAD"],
+                capture_output=True, text=True, timeout=3,
+                cwd=str(Path(__file__).resolve().parents[1]),
+            )
+            if _r.returncode == 0 and _r.stdout.strip():
+                os.environ["DADBOT_CODE_VERSION"] = _r.stdout.strip()
+        except Exception:
+            pass
 
-	if args.clear_memory:
-		bot.memory.clear_memory_store()
-		bot.print_system_message("Dad's saved memory has been cleared.")
-		return 0
-	if args.export_memory:
-		bot.memory.export_memory_store(args.export_memory)
-		bot.print_system_message(f"Dad's saved memory was exported to {args.export_memory}.")
-		return 0
-	if args.cli:
-		if args.disable_service_client:
-			bot.chat_loop()
-		else:
-			client = service_client_cls()
-			if args.service_url:
-				client.config.base_url = args.service_url
-			if args.tenant_id:
-				client.config.tenant_id = normalize_tenant_id(args.tenant_id)
-			bot.chat_loop_via_service(client)
-		return 0
+    if args.init_profile:
+        created = resolved_dadbot_cls.initialize_profile_file()
+        if created:
+            print("Starter dad_profile.json created.")
+        else:
+            print("dad_profile.json already exists.")
+        return 0
 
-	return launch_streamlit_app(
-		append_signoff=not args.no_signoff,
-		light_mode=args.light,
-		script_path=base_script_path,
-	)
+    if args.stop_streamlit:
+        return stop_streamlit_app(script_path=base_script_path)
+
+    if args.serve_api:
+        return launch_api_service(args, dadbot_cls=resolved_dadbot_cls)
+
+    bot = resolved_dadbot_cls(
+        model_name=args.model or "llama3.2",
+        append_signoff=not args.no_signoff,
+        light_mode=args.light,
+        tenant_id=args.tenant_id,
+    )
+
+    if args.clear_memory:
+        bot.memory.clear_memory_store()
+        bot.print_system_message("Dad's saved memory has been cleared.")
+        return 0
+    if args.export_memory:
+        bot.memory.export_memory_store(args.export_memory)
+        bot.print_system_message(
+            f"Dad's saved memory was exported to {args.export_memory}.",
+        )
+        return 0
+    if args.cli:
+        if args.disable_service_client:
+            bot.chat_loop()
+        else:
+            client = service_client_cls()
+            if args.service_url:
+                client.config.base_url = args.service_url
+            if args.tenant_id:
+                client.config.tenant_id = normalize_tenant_id(args.tenant_id)
+            bot.chat_loop_via_service(client)
+        return 0
+
+    return launch_streamlit_app(
+        append_signoff=not args.no_signoff,
+        light_mode=args.light,
+        script_path=base_script_path,
+    )
 
 
 __all__ = [
-	"build_customer_document_store",
-	"build_service_state_store",
-	"ensure_streamlit_app_file",
-	"launch_api_service",
-	"launch_streamlit_app",
-	"main",
-	"minimal_streamlit_stub_source",
-	"parse_args",
-	"stop_streamlit_app",
+    "build_customer_document_store",
+    "build_service_state_store",
+    "ensure_streamlit_app_file",
+    "launch_api_service",
+    "launch_streamlit_app",
+    "main",
+    "minimal_streamlit_stub_source",
+    "parse_args",
+    "stop_streamlit_app",
 ]

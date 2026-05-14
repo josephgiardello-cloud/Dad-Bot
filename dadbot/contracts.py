@@ -1,14 +1,202 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
+import hashlib
+import json
+from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
-from typing import Any, Callable, Protocol, TypeAlias
+from typing import Annotated, Any, Literal, Protocol, TypeAlias
+from uuid import UUID, uuid4
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator  # pyright: ignore[reportMissingImports]
 
 Attachment: TypeAlias = dict[str, Any]
 AttachmentList: TypeAlias = list[Attachment]
 ChunkCallback: TypeAlias = Callable[[str], Any]
 PreparedTurnResult: TypeAlias = tuple[str | None, str | None, bool, str, AttachmentList]
 FinalizedTurnResult: TypeAlias = tuple[str | None, bool]
+
+
+class SovereignEventType(StrEnum):
+    PLANNER_DECISION = "PLANNER_DECISION"
+    TOOL_EXECUTION = "TOOL_EXECUTION"
+    POLICY_VETO = "POLICY_VETO"
+    LOGIC_BRANCH = "LOGIC_BRANCH"
+    GENERIC = "GENERIC"
+
+
+class PlannerDecisionPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["PLANNER_DECISION"] = "PLANNER_DECISION"
+    planner_node: str = ""
+    selected_branch: str = ""
+    rationale: str = ""
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ToolResultPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: str = ""
+    output_hash: str = ""
+    error: str = ""
+    latency_ms: float = 0.0
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class VetoReason(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code: str = ""
+    message: str = ""
+    severity: str = "high"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ToolExecutionPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["TOOL_EXECUTION"] = "TOOL_EXECUTION"
+    tool_name: str = ""
+    status: str = "pending"
+    input_hash: str = ""
+    output_hash: str = ""
+    tool_result: ToolResultPayload | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class PolicyVetoPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["POLICY_VETO"] = "POLICY_VETO"
+    policy_rule: str = ""
+    reason: str = ""
+    severity: str = "high"
+    veto_reason: VetoReason | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class LogicBranchPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["LOGIC_BRANCH"] = "LOGIC_BRANCH"
+    branch_name: str = ""
+    condition: str = ""
+    outcome: str = ""
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class GenericSovereignPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["GENERIC"] = "GENERIC"
+    data: dict[str, Any] = Field(default_factory=dict)
+
+
+SovereignEventPayload: TypeAlias = Annotated[
+    PlannerDecisionPayload
+    | ToolExecutionPayload
+    | PolicyVetoPayload
+    | LogicBranchPayload
+    | GenericSovereignPayload,
+    Field(discriminator="kind"),
+]
+
+
+def _sovereign_event_checksum(
+    *,
+    event_id: UUID,
+    timestamp: datetime,
+    turn_id: str,
+    event_type: str,
+    payload: dict[str, Any],
+    previous_checksum: str,
+) -> str:
+    canonical = {
+        "event_id": str(event_id),
+        "timestamp": timestamp.astimezone(UTC).isoformat(),
+        "turn_id": str(turn_id or ""),
+        "event_type": str(event_type or ""),
+        "payload": payload,
+        "previous_checksum": str(previous_checksum or ""),
+    }
+    digest = hashlib.sha256(
+        json.dumps(canonical, sort_keys=True, default=str).encode("utf-8"),
+    ).hexdigest()
+    return f"evtchk-{digest}"
+
+
+class SovereignEvent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    event_id: UUID = Field(default_factory=uuid4)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    turn_id: str
+    event_type: str
+    payload: SovereignEventPayload
+    previous_checksum: str = ""
+    checksum: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_type(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        normalized = dict(data)
+        payload = normalized.get("payload")
+        payload_kind = ""
+        if isinstance(payload, dict):
+            payload_kind = str(payload.get("kind") or "")
+        else:
+            payload_kind = str(getattr(payload, "kind", "") or "")
+        event_type = str(normalized.get("event_type") or "").strip()
+        normalized["event_type"] = event_type or payload_kind or SovereignEventType.GENERIC.value
+        return normalized
+
+    @model_validator(mode="after")
+    def _normalize_and_validate_checksum(self) -> SovereignEvent:
+        normalized_type = str(self.event_type or "").strip() or str(self.payload.kind)
+        if self.payload.kind != SovereignEventType.GENERIC.value and normalized_type != self.payload.kind:
+            raise ValueError(
+                f"event_type {normalized_type!r} must match payload kind {self.payload.kind!r}",
+            )
+        expected_checksum = _sovereign_event_checksum(
+            event_id=self.event_id,
+            timestamp=self.timestamp,
+            turn_id=self.turn_id,
+            event_type=normalized_type,
+            payload=self.payload.model_dump(mode="json"),
+            previous_checksum=self.previous_checksum,
+        )
+        if str(self.checksum or "").strip() and self.checksum != expected_checksum:
+            raise ValueError("checksum mismatch for sovereign event")
+        self.checksum = expected_checksum
+        return self
+
+    def verify_checksum(self, previous_checksum: str = "") -> bool:
+        expected = _sovereign_event_checksum(
+            event_id=self.event_id,
+            timestamp=self.timestamp,
+            turn_id=self.turn_id,
+            event_type=self.event_type,
+            payload=self.payload.model_dump(mode="json"),
+            previous_checksum=previous_checksum,
+        )
+        return self.previous_checksum == str(previous_checksum or "") and self.checksum == expected
+
+    def to_ledger_event(self) -> dict[str, Any]:
+        return {
+            "event_id": str(self.event_id),
+            "timestamp": self.timestamp.astimezone(UTC).isoformat(),
+            "turn_id": str(self.turn_id or ""),
+            "event_type": str(self.event_type or ""),
+            "payload": self.payload.model_dump(mode="json"),
+            "previous_checksum": str(self.previous_checksum or ""),
+            "checksum": str(self.checksum or ""),
+        }
 
 
 class SupportsDadBotAccess(Protocol):
@@ -26,7 +214,11 @@ class SupportsProfileContext(Protocol):
 class SupportsLongTermSignals(Protocol):
     def build_wisdom_context(self, user_input: str) -> str | None: ...
 
-    def build_deep_pattern_context(self, user_input: str, limit: int | None = None) -> str | None: ...
+    def build_deep_pattern_context(
+        self,
+        user_input: str,
+        limit: int | None = None,
+    ) -> str | None: ...
 
     def trait_impact(self, entry: dict[str, Any]) -> float: ...
 
@@ -57,9 +249,17 @@ class SupportsContextRuntime(Protocol):
 
     def memory_context_limit_for_input(self, user_input: str) -> int: ...
 
-    def graph_retrieval_for_input(self, user_input: str, limit: int = 3) -> dict[str, Any] | None: ...
+    def graph_retrieval_for_input(
+        self,
+        user_input: str,
+        limit: int = 3,
+    ) -> dict[str, Any] | None: ...
 
-    def relevant_archive_entries_for_input(self, user_input: str, limit: int = 2) -> list[dict[str, Any]]: ...
+    def relevant_archive_entries_for_input(
+        self,
+        user_input: str,
+        limit: int = 2,
+    ) -> list[dict[str, Any]]: ...
 
     def relevant_memories_for_input(
         self,
@@ -117,11 +317,20 @@ class SupportsRelationshipRuntime(Protocol):
 
     def prompt_history(self) -> list[dict[str, Any]]: ...
 
-    def call_ollama_chat(self, messages: list[dict[str, Any]], **kwargs: Any) -> dict[str, Any]: ...
+    def call_ollama_chat(
+        self,
+        messages: list[dict[str, Any]],
+        **kwargs: Any,
+    ) -> dict[str, Any]: ...
 
     def extract_ollama_message_content(self, response: dict[str, Any]) -> str: ...
 
-    def record_runtime_issue(self, stage: str, fallback: str, exc: Exception | None = None) -> None: ...
+    def record_runtime_issue(
+        self,
+        stage: str,
+        fallback: str,
+        exc: Exception | None = None,
+    ) -> None: ...
 
     def parse_model_json_content(self, content: str) -> dict[str, Any]: ...
 
@@ -129,7 +338,11 @@ class SupportsRelationshipRuntime(Protocol):
 
     def mutate_memory_store(self, **changes: Any) -> dict[str, Any]: ...
 
-    def update_trait_impact_from_relationship_feedback(self, trust_delta: int, openness_delta: int) -> None: ...
+    def update_trait_impact_from_relationship_feedback(
+        self,
+        trust_delta: int,
+        openness_delta: int,
+    ) -> None: ...
 
     def infer_memory_category(self, user_input: str) -> str: ...
 
@@ -149,9 +362,17 @@ class SupportsTurnProcessingRuntime(Protocol):
 
     def get_available_tools(self) -> list[dict[str, Any]]: ...
 
-    def call_ollama_chat(self, messages: list[dict[str, Any]], **kwargs: Any) -> dict[str, Any]: ...
+    def call_ollama_chat(
+        self,
+        messages: list[dict[str, Any]],
+        **kwargs: Any,
+    ) -> dict[str, Any]: ...
 
-    async def call_ollama_chat_async(self, messages: list[dict[str, Any]], **kwargs: Any) -> dict[str, Any]: ...
+    async def call_ollama_chat_async(
+        self,
+        messages: list[dict[str, Any]],
+        **kwargs: Any,
+    ) -> dict[str, Any]: ...
 
     def parse_model_json_content(self, content: str) -> dict[str, Any]: ...
 
@@ -173,11 +394,22 @@ class SupportsTurnProcessingRuntime(Protocol):
 
     def normalize_lookup_query(self, user_input: str) -> str: ...
 
-    def normalize_chat_attachments(self, attachments: AttachmentList | None = None) -> AttachmentList: ...
+    def normalize_chat_attachments(
+        self,
+        attachments: AttachmentList | None = None,
+    ) -> AttachmentList: ...
 
-    def enrich_multimodal_attachments(self, attachments: AttachmentList | None = None, user_input: str = "") -> AttachmentList: ...
+    def enrich_multimodal_attachments(
+        self,
+        attachments: AttachmentList | None = None,
+        user_input: str = "",
+    ) -> AttachmentList: ...
 
-    def compose_user_turn_text(self, user_input: str, attachments: AttachmentList | None = None) -> str: ...
+    def compose_user_turn_text(
+        self,
+        user_input: str,
+        attachments: AttachmentList | None = None,
+    ) -> str: ...
 
     def is_session_exit_command(self, stripped_input: str) -> bool: ...
 
@@ -206,15 +438,30 @@ class SupportsTurnProcessingRuntime(Protocol):
 
     def set_active_tool_observation(self, observation: str | None) -> None: ...
 
-    def history_attachment_metadata(self, attachment: dict[str, Any]) -> dict[str, Any]: ...
+    def history_attachment_metadata(
+        self,
+        attachment: dict[str, Any],
+    ) -> dict[str, Any]: ...
 
     def sync_active_thread_snapshot(self) -> None: ...
 
-    def schedule_post_turn_maintenance(self, user_input: str, current_mood: str) -> dict[str, Any]: ...
+    def schedule_post_turn_maintenance(
+        self,
+        user_input: str,
+        current_mood: str,
+    ) -> dict[str, Any]: ...
 
-    def call_ollama_chat_stream(self, messages: list[dict[str, Any]], **kwargs: Any) -> str: ...
+    def call_ollama_chat_stream(
+        self,
+        messages: list[dict[str, Any]],
+        **kwargs: Any,
+    ) -> str: ...
 
-    async def call_ollama_chat_stream_async(self, messages: list[dict[str, Any]], **kwargs: Any) -> str: ...
+    async def call_ollama_chat_stream_async(
+        self,
+        messages: list[dict[str, Any]],
+        **kwargs: Any,
+    ) -> str: ...
 
     def build_chat_request_messages(
         self,
@@ -223,57 +470,27 @@ class SupportsTurnProcessingRuntime(Protocol):
         attachments: AttachmentList | None = None,
     ) -> list[dict[str, object]]: ...
 
-    def critique_reply(self, user_input: str, draft_reply: str, current_mood: str) -> str: ...
+    def critique_reply(
+        self,
+        user_input: str,
+        draft_reply: str,
+        current_mood: str,
+    ) -> str: ...
 
-    async def critique_reply_async(self, user_input: str, draft_reply: str, current_mood: str) -> str: ...
+    async def critique_reply_async(
+        self,
+        user_input: str,
+        draft_reply: str,
+        current_mood: str,
+    ) -> str: ...
 
     def validate_reply(self, user_input: str, candidate_reply: str) -> str: ...
 
-    def begin_planner_debug(self, user_input: str, current_mood: str) -> dict[str, Any]: ...
-
-
-# ---------------------------------------------------------------------------
-# L3/L4/L5 substrate protocols
-# ---------------------------------------------------------------------------
-
-
-class SupportsEventAuthority(Protocol):
-    """Protocol for EventAuthority: canonical source-of-truth event layer."""
-    def append(self, event: dict[str, Any]) -> int: ...
-    def derive_state(self) -> dict[str, Any]: ...
-    def is_defined(self) -> bool: ...
-    def assert_defined(self) -> None: ...
-    def rebuild_state_from_events(self, events: list[dict[str, Any]]) -> dict[str, Any]: ...
-    def authority_hash(self) -> str: ...
-
-
-class SupportsStatelessExecution(Protocol):
-    """Protocol for StatelessExecutor: pure-function execution mode."""
-    def execute(
+    def begin_planner_debug(
         self,
         user_input: str,
-        event_log: list[dict[str, Any]],
-        config: dict[str, Any] | None = None,
-    ) -> Any: ...
-    def is_bootstrapped(self, event_log: list[dict[str, Any]]) -> bool: ...
-
-
-class SupportsMemoryStateSpace(Protocol):
-    """Protocol for MemoryStateVector: ordered state vector space."""
-    entries: tuple[dict[str, Any], ...]
-    space_hash: str
-
-    @classmethod
-    def from_memories(cls, memories: list[dict[str, Any]]) -> Any: ...
-    def project(self, indices: list[int]) -> Any: ...
-    def to_list(self) -> list[dict[str, Any]]: ...
-
-
-class SupportsEvolutionHooks(Protocol):
-    """Protocol for GraphIntrospectionAPI: read-only introspection + hooks."""
-    def introspect(self, dag: Any) -> dict[str, Any]: ...
-    def hook_pre_mutation(self, callback: Any) -> None: ...
-    def hook_post_mutation(self, callback: Any) -> None: ...
+        current_mood: str,
+    ) -> dict[str, Any]: ...
 
 
 @dataclass(frozen=True)
@@ -283,11 +500,14 @@ class DadBotContext:
     bot: Any
 
     @classmethod
-    def from_runtime(cls, runtime: Any | SupportsDadBotAccess | "DadBotContext") -> "DadBotContext":
+    def from_runtime(
+        cls,
+        runtime: Any | SupportsDadBotAccess | DadBotContext,
+    ) -> DadBotContext:
         if isinstance(runtime, cls):
             return runtime
         if hasattr(runtime, "bot"):
-            return cls(getattr(runtime, "bot"))
+            return cls(runtime.bot)
         return cls(runtime)
 
     def __getattr__(self, name: str) -> Any:
@@ -335,7 +555,14 @@ __all__ = [
     "ChunkCallback",
     "DadBotContext",
     "FinalizedTurnResult",
+    "GenericSovereignPayload",
+    "LogicBranchPayload",
+    "PlannerDecisionPayload",
     "PreparedTurnResult",
+    "PolicyVetoPayload",
+    "SovereignEvent",
+    "SovereignEventPayload",
+    "SovereignEventType",
     "SupportsContextRuntime",
     "SupportsDadBotAccess",
     "SupportsLongTermSignals",
@@ -345,5 +572,6 @@ __all__ = [
     "SupportsRelationshipRuntime",
     "SupportsRelationshipSnapshot",
     "SupportsToneRuntime",
+    "ToolExecutionPayload",
     "SupportsTurnProcessingRuntime",
 ]

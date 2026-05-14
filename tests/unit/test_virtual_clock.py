@@ -1,12 +1,15 @@
 """Unit tests for VirtualClock — determinism, monotonicity, datetime output."""
+
 from __future__ import annotations
 
 import datetime as dt
 
 import pytest
 
-from dadbot.core.graph import VirtualClock
+pytestmark = pytest.mark.unit
 from harness.deterministic_seeds import BASELINE, TEMPORAL_FREEZE
+
+from dadbot.core.graph import VirtualClock
 
 
 class TestVirtualClockMonotonicity:

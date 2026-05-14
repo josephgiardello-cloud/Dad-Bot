@@ -1,0 +1,29 @@
+[
+  {
+    "event_type": "JOB_QUEUED",
+    "sequence_id": 1,
+    "stage": "legacy.enqueue",
+    "payload": {
+      "submitted_at": 1714630000.1,
+      "request": "hello"
+    }
+  },
+  {
+    "event_type": "JOB_STARTED",
+    "sequence_id": 2,
+    "stage": "legacy.start",
+    "payload": {
+      "acquired_at": 1714630000.2,
+      "worker": "legacy"
+    }
+  },
+  {
+    "event_type": "JOB_COMPLETED",
+    "sequence_id": 3,
+    "stage": "legacy.done",
+    "payload": {
+      "expires_at": 1714630000.3,
+      "status": "ok"
+    }
+  }
+]

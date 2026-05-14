@@ -19,10 +19,10 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
-
 # ---------------------------------------------------------------------------
 # Types
 # ---------------------------------------------------------------------------
+
 
 class GoalStatus(StrEnum):
     ACTIVE = "active"
@@ -67,7 +67,7 @@ class GoalRecord:
         }
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "GoalRecord":
+    def from_dict(cls, d: dict[str, Any]) -> GoalRecord:
         return cls(
             id=str(d.get("id") or uuid.uuid4().hex[:16]),
             description=str(d.get("description") or ""),
@@ -85,6 +85,7 @@ class GoalRecord:
 # ---------------------------------------------------------------------------
 # GoalStore
 # ---------------------------------------------------------------------------
+
 
 class GoalStore:
     """In-memory goal registry.  Persist with ``to_state()`` / restore with ``load_from_state()``."""
@@ -146,11 +147,11 @@ class GoalStore:
     def load_from_state(self, state: list[dict[str, Any]]) -> None:
         """Restore from a serialised goal list (e.g. session_state['goals'])."""
         self._goals.clear()
-        for item in (state or []):
+        for item in state or []:
             try:
                 rec = GoalRecord.from_dict(item)
                 self._goals[rec.id] = rec
-            except Exception:
+            except Exception:  # noqa: BLE001
                 pass
 
     def to_state(self) -> list[dict[str, Any]]:
@@ -178,12 +179,12 @@ class GoalStore:
 
 # Patterns that indicate the user is expressing a persistent intent/goal.
 _GOAL_PATTERNS: list[re.Pattern] = [
-    re.compile(r"(?:i want|i'd like|i wish)\s+to\s+(.+)", re.I),
-    re.compile(r"(?:my goal is|my objective is|i aim to)\s+(.+)", re.I),
-    re.compile(r"(?:i'm trying to|i need to|i have to)\s+(.+)", re.I),
-    re.compile(r"(?:i plan to|i intend to|i hope to)\s+(.+)", re.I),
-    re.compile(r"(?:help me|assist me|i need help)\s+(?:to\s+)?(.+)", re.I),
-    re.compile(r"(?:i'm working on|i've been working on)\s+(.+)", re.I),
+    re.compile(r"(?:i want|i'd like|i wish)\s+to\s+(.+)", re.IGNORECASE),
+    re.compile(r"(?:my goal is|my objective is|i aim to)\s+(.+)", re.IGNORECASE),
+    re.compile(r"(?:i'm trying to|i need to|i have to)\s+(.+)", re.IGNORECASE),
+    re.compile(r"(?:i plan to|i intend to|i hope to)\s+(.+)", re.IGNORECASE),
+    re.compile(r"(?:help me|assist me|i need help)\s+(?:to\s+)?(.+)", re.IGNORECASE),
+    re.compile(r"(?:i'm working on|i've been working on)\s+(.+)", re.IGNORECASE),
 ]
 
 _MIN_GOAL_WORDS = 3

@@ -1,151 +1,202 @@
 # 🧔 DadBot — Your Local AI Dad
 
-A warm, private, long-term memory AI companion that feels like a real dad.
-Runs locally on your computer with Ollama.
+A warm, private AI companion with long-term memory that remembers you, grows with you, and feels like having a supportive dad in your corner.
 
-**"That's my boy. I love hearing that, Tony."**
+**Runs 100% locally. No data leaves your machine.**
 
-## ✨ Features
+---
 
-- Deep long-term memory + continuous learning (RLHF-style)
-- Real relationship modeling (trust, openness, emotional momentum)
-- Live voice calls (WebRTC + Piper TTS + Whisper STT)
-- Calendar awareness (iCal feed sync)
-- Proactive nudges & reminders
-- Custom avatar generation
-- First-run wizard + PIN protection
-- Mobile-friendly PWA
-- Fully local & private — no data leaves your machine
+## Why Dad-Bot?
+
+- **Actually remembers you**: Learns from your conversations over weeks/months. Tracks your goals, relationships, mood patterns.
+- **Feels real**: Adaptive personality, emotional awareness, proactive check-ins. More than a chatbot.
+- **Privacy-first**: Ollama-powered, runs on your computer. Your data is yours.
+- **Voice support**: Talk to Dad like you would a real person (WebRTC + TTS).
+- **No subscriptions**: Install once, use forever.
+
+---
+
+## ✨ Key Features
+
+- 🧠 **Deep Long-Term Memory** — Remembers conversations, goals, relationships, and emotional context
+- 💭 **Relationship Modeling** — Understands trust, emotional momentum, and personal history
+- 🎤 **Voice Calls** — Talk naturally with WebRTC + Piper TTS + Whisper STT
+- 📅 **Calendar Aware** — Knows your schedule and life events (iCal sync)
+- 📬 **Proactive Nudges** — Reminders and check-ins tailored to you
+- 🎨 **Custom Avatar** — Visual personality (generated)
+- 📱 **Mobile-Friendly** — PWA works on phone browsers
+- 🔒 **100% Private** — No cloud, no tracking, fully local
+
+---
 
 ## 🚀 Quick Start
 
-### 1. Install and Run (Recommended)
+### Install and Run
 
 ```bash
-git clone https://github.com/yourusername/dadbot.git
+git clone https://github.com/josephreisinger/dadbot.git
 cd dadbot
 python install.py
 ```
 
-This installs dependencies, prepares profile and memory files, checks Ollama, pulls baseline models, and launches Streamlit.
+This will:
+- Install dependencies and set up Python environment
+- Prepare profile and memory files
+- Check for Ollama installation
+- Pull recommended AI models
+- Launch Streamlit UI
 
-### 2. Quick Launch (after first install)
+### Quick Launch (Next Time)
 
 ```bash
 python launch.py
 ```
 
-Or run Streamlit directly:
+Then open [http://localhost:8501](http://localhost:8501) in your browser.
 
-```bash
-streamlit run dad_streamlit.py
-```
+---
 
-Open [http://localhost:8501](http://localhost:8501) in your browser.
+## 📸 Screenshots & Demo
 
-### Windows Workspace Virtual Environment Note
+*(Coming soon: main chat interface, voice call screen, status dashboard, memory graph visualization)*
 
-If you have similarly named folders (for example `Desktop/Dad-Bot` and `Desktop/Codes/Dad-Bot`), always use the workspace-local environment:
+For now, try it yourself! It takes ~2 minutes to install.
 
-```powershell
-& c:/Users/josep/OneDrive/Desktop/Dad-Bot/.venv/Scripts/Activate.ps1
-python -m pytest
-```
+---
 
-Using a different folder's virtual environment can miss required pytest plugins (such as asyncio support) and cause false test failures.
-
-### 3. Production-Oriented Install and Run
-
-Install the package into your current environment:
-
-```bash
-pip install -e .
-```
-
-Optional feature groups:
-
-```bash
-pip install -e .[service,voice,notifications,heritage]
-```
-
-Primary runtime entrypoints:
-
-- Streamlit UI: python -m streamlit run dad_streamlit.py
-- Console chat runtime: python Dad.py
-- API runtime: python Dad.py --serve-api
+## 🎯 First-Run Setup
 
 ### Prerequisites
 
-- Python 3.10+
+- Python 3.13+
 - [Ollama](https://ollama.com) installed and running
-- Recommended model: `ollama pull llama3.2` (and `nomic-embed-text` for semantic memory)
+- Recommended: `ollama pull llama3.2` and `ollama pull nomic-embed-text`
 
-## 📸 Screenshots
+The install script will guide you through the rest.
 
-*(Add 3–4 screenshots here: main chat, voice call, status tab, preferences)*
+### Story Mode (Password Protected)
 
-## 🐳 Docker Support
+Story Mode enables deeper personalization learning. Set a password before launch:
+
+```bash
+export DADBOT_STORY_MODE_PASSWORD="your-password"  # or set in .env
+python launch.py
+```
+
+---
+
+## 🧑‍💻 Development & Contribution
+
+### Running Tests
+
+```bash
+pytest tests/
+```
+
+### Docker (Dev & Production)
 
 ```bash
 docker compose up
 ```
 
-See `docker-compose.yml` for dev and production profiles.
+See `docker-compose.yml` for profile options.
 
-## Packaging And Entrypoints
+---
 
-- Core DadBot implementation now lives in dadbot/core/dadbot.py.
-- Dad.py is a minimal compatibility shim that re-exports DadBot and preserves legacy run behavior.
-- Existing imports like from Dad import DadBot continue to work.
-- New internal code should import from dadbot.core.dadbot where practical.
+## 📚 Technical Documentation
 
-## Current Refactor Status
+### Architecture & Internals
 
-Phase 4 graph hardening is complete and the turn pipeline is now frozen around these invariants:
+- **Execution Model** — `docs/explicit-execution-model.md`
+- **Explainability** — `docs/system-level-explainability.md`
+- **Failure Handling** — `docs/failure-model.md`
+- **Confluence & Semantics** — `docs/confluence-law.md`
 
-- DadBot graph execution is the default turn path.
-- Sync, async, and stream entrypoints all preserve correlation and trace context.
-- Graph failures are fail-closed: they emit `GRAPH_EXECUTION_FAILED`, return a controlled response, and do not invoke legacy fallback execution.
-- Legacy `turn_service.process_user_message*` entrypoints are confined to the DadBot facade compatibility surface and are guarded by freeze tests.
+### Deep Validation
 
-This means current work is in system hardening and validation mode rather than graph redesign. Node ordering, Save ownership, reflection timing, and core graph wiring should be treated as frozen unless a concrete bug is found.
+Proof-of-correctness runs under chaos/fuzz/replay pressure:
 
-## Status/Dashboard Observability
+```bash
+python tools/system_validation_at_scale.py --turns 1000
+```
 
-The Status/Dashboard surfaces guardrails and runtime safety signals, including:
+This validates long-horizon behavior, adversarial fuzzing, and replay equivalence.
 
-- Memory context token usage and pruning state.
-- Prompt guard trim counters and last trim token sizes.
-- Recent runtime degradation issues and fallback actions.
-- Runtime health level (`green`, `yellow`, `red`) with adaptive controls.
+### Runtime Health & Observability
 
-## Runtime Health Levels
+- **Health Levels**: `green` (normal) → `yellow` (pressure) → `red` (critical)
+- **Adaptive Guardrails**: Auto-throttling when memory/prompt pressure rises
+- **Status Dashboard**: Real-time memory usage, trim counters, runtime health signals
 
-- `green`: normal operation, no immediate pressure signals.
-- `yellow`: growing pressure (memory ratio, trim frequency, or fallback issues). Dad-Bot starts adaptive throttling.
-- `red`: sustained high pressure. Non-critical maintenance is delayed and runtime guardrails tighten.
+---
 
-## Adaptive Guardrails
+## 📦 Packaging & Entrypoints
 
-When health turns `yellow` or `red`, Dad-Bot now actively adjusts behavior:
+- **Core**: `dadbot/core/dadbot.py` (main DadBot class)
+- **Compatibility**: `Dad.py` (legacy re-export, preserves old imports)
+- **CLI**: `Dad.py` (console chat, API server)
+- **UI**: `dad_streamlit.py` (web interface)
 
-- In light mode, effective background worker concurrency is reduced.
-- Prompt-size guard budgets are tightened automatically when trim pressure rises.
-- Memory-context budget is tightened to prune lower-priority sections earlier.
-- Non-critical maintenance jobs can be deferred during heavy pressure.
-- Optional quiet mode suppresses proactive nudges while pressure remains elevated.
+### Feature Groups
 
-Runtime health snapshots are refreshed automatically at key points:
+```bash
+pip install -e .[service,voice,notifications,heritage]
+```
 
-- At the end of each completed user turn.
-- At the end of post-turn maintenance.
-- During status/orchestration checks with cached refresh windows (about every 5 minutes by default).
+---
 
-CLI quiet-mode commands:
+## 🔒 Privacy & Security
 
-- `/quiet on`
-- `/quiet off`
-- `/quiet status`
+- **No cloud calls** — All processing is local via Ollama
+- **No telemetry** — We don't collect usage data
+- **Story Mode Lock** — Optional password protection for sensitive contexts
+- **Data export** — Full access to your memory files (JSON, SQLite)
+
+---
+
+## 🛠️ Troubleshooting
+
+### Ollama Not Found
+
+```bash
+# On macOS
+brew install ollama
+
+# On Windows/Linux
+# Download from https://ollama.com
+```
+
+### Virtual Environment Issues (Windows)
+
+If working with multiple `Dad-Bot` folders, always activate the local venv:
+
+```powershell
+& ./.venv/Scripts/Activate.ps1
+python -m pytest
+```
+
+### First Run Slow?
+
+Initial setup pulls model weights (~4GB). Subsequent runs are instant.
+
+---
+
+## 🤝 Contributing
+
+Found a bug? Have an idea? Open an issue or PR.
+
+---
+
+## 📋 Current Refactor Status
+
+Phase 4 graph hardening is complete. Turn pipeline is frozen around these invariants:
+
+- Graph execution is the default path
+- Sync, async, stream entrypoints preserve correlation
+- Graph failures are fail-closed
+- Legacy fallback execution is guarded
+
+Current work focuses on **system validation & hardening** rather than graph redesign.
 
 ## Streamlit Quick Actions
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import asyncio
 import ast
+import asyncio
 import json
 import sys
 from pathlib import Path
@@ -10,6 +10,13 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+_EXCLUDED_DIR_NAMES = {".git", "__pycache__", ".pytest_cache", ".ruff_cache"}
+
+
+def _is_excluded(path: Path) -> bool:
+    rel = path.relative_to(ROOT)
+    return any(part in _EXCLUDED_DIR_NAMES or part.startswith(".venv") for part in rel.parts)
 
 
 def _required_files() -> list[Path]:
@@ -31,7 +38,8 @@ def _structural_checks() -> dict[str, Any]:
     duplicate_stems = sorted({p.stem for p in core_files if sum(1 for q in core_files if q.stem == p.stem) > 1})
 
     # Orphan heuristic: python module that is not imported anywhere else.
-    all_py = [p for p in ROOT.rglob("*.py") if ".venv" not in p.parts and "__pycache__" not in p.parts]
+    # Keep this scan repo-scoped; never walk interpreter/env trees like .venv-*.
+    all_py = [p for p in ROOT.rglob("*.py") if not _is_excluded(p)]
     corpus = "\n".join(p.read_text(encoding="utf-8-sig", errors="replace") for p in all_py)
     orphans: list[str] = []
     for module in core_files:
@@ -160,7 +168,9 @@ def _security_checks() -> dict[str, Any]:
     }
 
 
-def _coverage(structural: dict[str, Any], observability: dict[str, Any], runtime: dict[str, Any], security: dict[str, Any]) -> dict[str, float]:
+def _coverage(
+    structural: dict[str, Any], observability: dict[str, Any], runtime: dict[str, Any], security: dict[str, Any]
+) -> dict[str, float]:
     core = 1.0 if structural.get("ok") and runtime.get("ok") and security.get("ok") else 0.0
     observ = 1.0 if observability.get("ok") else 0.0
     export = 1.0 if observability.get("otel_bridge") and observability.get("prometheus_bridge") else 0.0

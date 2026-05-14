@@ -1,0 +1,281 @@
+from __future__ import annotations
+
+import hashlib
+import json
+from dataclasses import dataclass
+from typing import Any
+
+from dadbot.core.canonical_execution_reducer import reduce_official_execution_state
+from dadbot.core.execution_context import build_tool_invocation_projection
+from dadbot.core.execution_memory_view import ExecutionMemoryView
+from dadbot.core.graph_context import TurnContext
+
+_SCHEMA_VERSION = "1.0"
+
+
+def _stable_sha256(payload: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, default=str).encode("utf-8"),
+    ).hexdigest()
+
+
+def _final_output_value(finalized_result: Any) -> str:
+    if isinstance(finalized_result, tuple) and finalized_result:
+        return str(finalized_result[0] or "")
+    return str(finalized_result or "")
+
+
+def _model_output_hashes(execution_trace_context: dict[str, Any]) -> list[str]:
+    steps = list(execution_trace_context.get("steps") or [])
+    hashes: list[str] = []
+    for step in steps:
+        if str(step.get("operation") or "") != "model_output":
+            continue
+        payload = dict(step.get("payload") or {})
+        output_hash = str(payload.get("output_hash") or "").strip()
+        if output_hash:
+            hashes.append(output_hash)
+    return hashes
+
+
+def _execution_order_hash(execution_trace_context: dict[str, Any]) -> str:
+    operations = list(execution_trace_context.get("operations") or [])
+    if not operations:
+        operations = [
+            str(step.get("operation") or "")
+            for step in list(execution_trace_context.get("steps") or [])
+        ]
+    return _stable_sha256(list(operations))
+
+
+def _node_decision_sequence_hash(execution_trace_context: dict[str, Any]) -> str:
+    sequence: list[dict[str, Any]] = []
+    for step in list(execution_trace_context.get("steps") or []):
+        payload = dict(step.get("payload") or {})
+        execution_result = dict(payload.get("metadata", {}).get("execution_result") or {})
+        sequence.append(
+            {
+                "operation": str(step.get("operation") or ""),
+                "status": str(execution_result.get("status") or payload.get("status") or ""),
+                "purpose": str(payload.get("purpose") or ""),
+                "system": str(payload.get("system") or ""),
+                "passed": bool(payload.get("passed", False)),
+                "issue_count": int(payload.get("issue_count") or 0),
+            },
+        )
+    return _stable_sha256(sequence)
+
+
+def _failure_replay_projection(failure_replay: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "stage": str(item.get("stage") or ""),
+            "error_type": str(item.get("error_type") or ""),
+            "error_msg": str(item.get("error_msg") or ""),
+        }
+        for item in list(failure_replay or [])
+    ]
+
+
+def _status_signals_failure(status: str) -> bool:
+    return status.lower() in {"error", "failed", "retry", "recover", "recovered"}
+
+
+def _has_step_failure_signal(failure_view: dict[str, Any]) -> bool:
+    return bool(
+        str(failure_view.get("class") or "")
+        or str(failure_view.get("type") or "")
+        or str(failure_view.get("message") or ""),
+    )
+
+
+def _build_step_error_string(failure_view: dict[str, Any], payload: dict[str, Any]) -> str:
+    return str(
+        failure_view.get("message")
+        or payload.get("error")
+        or failure_view.get("type")
+        or payload.get("error_type")
+        or ""
+    )
+
+
+def _failure_transition_from_step(step: dict[str, Any]) -> dict[str, Any] | None:
+    payload = dict(step.get("payload") or {})
+    execution_result = dict(payload.get("metadata", {}).get("execution_result") or {})
+    failure_view = dict(execution_result.get("failure") or {})
+    resolved_status = str(execution_result.get("status") or payload.get("status") or "")
+    if not _has_step_failure_signal(failure_view) and not _status_signals_failure(resolved_status):
+        return None
+    return {
+        "operation": str(step.get("operation") or ""),
+        "status": resolved_status,
+        "error": _build_step_error_string(failure_view, payload),
+    }
+
+
+def _failure_recovery_transition_hash(
+    execution_trace_context: dict[str, Any],
+    determinism_manifest: dict[str, Any],
+) -> str:
+    failure_replay = list(determinism_manifest.get("failure_replay") or [])
+    if failure_replay:
+        return _stable_sha256(_failure_replay_projection(failure_replay))
+
+    transitions: list[dict[str, Any]] = []
+    for step in list(execution_trace_context.get("steps") or []):
+        transition = _failure_transition_from_step(dict(step or {}))
+        if transition is not None:
+            transitions.append(transition)
+    return _stable_sha256(transitions)
+
+
+def _tool_invocation_sequence_hash(execution_trace_context: dict[str, Any]) -> str:
+    return _stable_sha256(build_tool_invocation_projection(execution_trace_context))
+
+
+def _post_commit_mutation_effects_hash(
+    context: TurnContext,
+    execution_trace_context: dict[str, Any],
+) -> str:
+    snapshot = dict(execution_trace_context.get("execution_snapshot") or {})
+    payload = {
+        "outputs_per_step": list(snapshot.get("outputs_per_step") or []),
+        "final_output": str(
+            snapshot.get("final_output")
+            or execution_trace_context.get("normalized_response")
+            or ""
+        ),
+        "memory_write_intents": list(snapshot.get("memory_write_intents") or []),
+        "memory_delta_summary": dict(snapshot.get("memory_delta_summary") or {}),
+        "memory_influence_feedback": dict(context.state.get("memory_influence_feedback") or {}),
+        "output_coherence": dict(context.state.get("output_coherence") or {}),
+    }
+    return _stable_sha256(payload)
+
+
+def _policy_snapshot(context: TurnContext) -> dict[str, Any]:
+    metadata = dict(context.metadata or {})
+    state = dict(context.state or {})
+    return {
+        "kernel_policy": dict(metadata.get("kernel_policy") or {}),
+        "kernel_rejections": list(metadata.get("kernel_rejections") or []),
+        "capability_audit_report": dict(state.get("capability_audit_report") or {}),
+        "safety_check_result": dict(state.get("safety_check_result") or {}),
+        "tony_level": str(state.get("tony_level") or ""),
+        "tony_score": int(state.get("tony_score") or 0),
+    }
+
+
+def _prepare_terminal_state_inputs(
+    context: TurnContext,
+    finalized_result: Any,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], str]:
+    trace_context = dict(context.metadata.get("execution_trace_context") or {})
+    determinism = dict(context.metadata.get("determinism") or {})
+    tool_trace_hash = str(determinism.get("tool_trace_hash") or "")
+    policy_snapshot = _policy_snapshot(context)
+    return trace_context, determinism, policy_snapshot, tool_trace_hash
+
+
+def _assemble_terminal_state(
+    official_state: dict[str, Any],
+    final_memory_view: dict[str, Any],
+    memory_state_id: str,
+    policy_snapshot: dict[str, Any],
+    tool_trace_hash: str,
+) -> ExecutionTerminalState:
+    return ExecutionTerminalState(
+        schema_version=_SCHEMA_VERSION,
+        final_output=str(official_state.get("final_output") or ""),
+        final_memory_view=final_memory_view,
+        memory_view_state_id=memory_state_id,
+        final_trace_hash=str(official_state.get("final_trace_hash") or ""),
+        execution_dag_hash=str(official_state.get("execution_dag_hash") or ""),
+        policy_snapshot=policy_snapshot,
+        model_output_hashes=list(official_state.get("model_output_hashes") or []),
+        memory_retrieval_hash=str(official_state.get("memory_retrieval_hash") or ""),
+        policy_hash=str(official_state.get("policy_hash") or ""),
+        tool_trace_hash=tool_trace_hash,
+        execution_order_hash=str(official_state.get("execution_order_hash") or ""),
+        node_decision_sequence_hash=str(official_state.get("node_decision_sequence_hash") or ""),
+        failure_recovery_transition_hash=str(official_state.get("failure_recovery_transition_hash") or ""),
+        tool_invocation_sequence_hash=str(official_state.get("tool_invocation_sequence_hash") or ""),
+        post_commit_mutation_effects_hash=str(official_state.get("post_commit_mutation_effects_hash") or ""),
+        determinism_closure_hash=str(official_state.get("determinism_closure_hash") or ""),
+    )
+
+
+@dataclass(frozen=True)
+class ExecutionTerminalState:
+    schema_version: str
+    final_output: str
+    final_memory_view: dict[str, Any]
+    memory_view_state_id: str
+    final_trace_hash: str
+    execution_dag_hash: str
+    policy_snapshot: dict[str, Any]
+    model_output_hashes: list[str]
+    memory_retrieval_hash: str
+    policy_hash: str
+    tool_trace_hash: str
+    execution_order_hash: str
+    node_decision_sequence_hash: str
+    failure_recovery_transition_hash: str
+    tool_invocation_sequence_hash: str
+    post_commit_mutation_effects_hash: str
+    determinism_closure_hash: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "final_output": self.final_output,
+            "final_memory_view": self.final_memory_view,
+            "memory_view_state_id": self.memory_view_state_id,
+            "final_trace_hash": self.final_trace_hash,
+            "execution_dag_hash": self.execution_dag_hash,
+            "policy_snapshot": self.policy_snapshot,
+            "model_output_hashes": self.model_output_hashes,
+            "memory_retrieval_hash": self.memory_retrieval_hash,
+            "policy_hash": self.policy_hash,
+            "tool_trace_hash": self.tool_trace_hash,
+            "execution_order_hash": self.execution_order_hash,
+            "node_decision_sequence_hash": self.node_decision_sequence_hash,
+            "failure_recovery_transition_hash": self.failure_recovery_transition_hash,
+            "tool_invocation_sequence_hash": self.tool_invocation_sequence_hash,
+            "post_commit_mutation_effects_hash": self.post_commit_mutation_effects_hash,
+            "determinism_closure_hash": self.determinism_closure_hash,
+        }
+
+
+def build_execution_terminal_state(
+    context: TurnContext,
+    *,
+    finalized_result: Any,
+) -> ExecutionTerminalState:
+    trace_context, determinism, policy_snapshot, tool_trace_hash = _prepare_terminal_state_inputs(
+        context,
+        finalized_result,
+    )
+    memory_view = ExecutionMemoryView.from_context(context)
+    final_memory_view = memory_view.to_dict()
+
+    official_state = reduce_official_execution_state(
+        graph_output=_final_output_value(finalized_result),
+        execution_trace_context=trace_context,
+        memory_view=final_memory_view,
+        memory_view_state_id=memory_view.state_id,
+        policy_snapshot=policy_snapshot,
+        tool_trace_hash=tool_trace_hash,
+        final_trace_hash_fallback=str(context.trace_id or ""),
+        invariant_decisions=list(context.state.get("invariant_decisions") or []),
+        ledger_events=list(context.state.get("execution_trace") or []),
+        live_tool_mode=False,
+    )
+
+    return _assemble_terminal_state(
+        official_state,
+        final_memory_view,
+        memory_view.state_id,
+        policy_snapshot,
+        tool_trace_hash,
+    )

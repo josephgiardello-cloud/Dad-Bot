@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import hashlib
 import json
@@ -24,8 +24,7 @@ class ReplayVerifier:
             [
                 dict(event)
                 for event in list(events or [])
-                if isinstance(event, dict)
-                and str(event.get("type") or "") not in NON_REPLAY_EVENT_TYPES
+                if isinstance(event, dict) and str(event.get("type") or "") not in NON_REPLAY_EVENT_TYPES
             ],
             key=lambda event: int(event.get("sequence") or 0),
         )
@@ -44,19 +43,29 @@ class ReplayVerifier:
             }
             for event in ordered
         ]
-        return hashlib.sha256(json.dumps(canonical_trace, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+        return hashlib.sha256(
+            json.dumps(canonical_trace, sort_keys=True, default=str).encode("utf-8"),
+        ).hexdigest()
 
     def state_hash(self, events: list[dict[str, Any]]) -> str:
         state = self.reducer.reduce(events)
-        return hashlib.sha256(json.dumps(state, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+        return hashlib.sha256(
+            json.dumps(state, sort_keys=True, default=str).encode("utf-8"),
+        ).hexdigest()
 
-    def verify_equivalence(self, original_events: list[dict[str, Any]], replayed_events: list[dict[str, Any]]) -> dict[str, Any]:
+    def verify_equivalence(
+        self,
+        original_events: list[dict[str, Any]],
+        replayed_events: list[dict[str, Any]],
+    ) -> dict[str, Any]:
         original_trace_hash = self.trace_hash(original_events)
         replayed_trace_hash = self.trace_hash(replayed_events)
         original_state_hash = self.state_hash(original_events)
         replayed_state_hash = self.state_hash(replayed_events)
         return {
-            "ok": bool(original_trace_hash == replayed_trace_hash and original_state_hash == replayed_state_hash),
+            "ok": bool(
+                original_trace_hash == replayed_trace_hash and original_state_hash == replayed_state_hash,
+            ),
             "original_trace_hash": original_trace_hash,
             "replayed_trace_hash": replayed_trace_hash,
             "original_state_hash": original_state_hash,

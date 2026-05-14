@@ -1,7 +1,7 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import streamlit as st
 
@@ -54,10 +54,15 @@ def runtime_rejection_payload(exc: Exception, *, action: str) -> dict:
             diagnostics = {}
     return {
         "action": str(action or "runtime_call"),
-        "reason": str(diagnostics.get("reason") or "Dad Runtime blocked this action to protect system safety and contract integrity."),
+        "reason": str(
+            diagnostics.get("reason")
+            or "Dad Runtime blocked this action to protect system safety and contract integrity.",
+        ),
         "rule": str(diagnostics.get("rule") or "unspecified_rule"),
         "layer": str(diagnostics.get("layer") or "runtime_boundary"),
-        "message": str(diagnostics.get("message") or str(exc) or exc.__class__.__name__),
+        "message": str(
+            diagnostics.get("message") or str(exc) or exc.__class__.__name__,
+        ),
     }
 
 
@@ -70,7 +75,10 @@ def record_runtime_rejection(exc: Exception, *, action: str) -> None:
     )
     if not is_capability_rejection:
         return
-    st.session_state[RUNTIME_REJECTION_SESSION_KEY] = runtime_rejection_payload(exc, action=action)
+    st.session_state[RUNTIME_REJECTION_SESSION_KEY] = runtime_rejection_payload(
+        exc,
+        action=action,
+    )
 
 
 def clear_runtime_rejection() -> None:
@@ -89,7 +97,10 @@ def runtime_rule_fix_hint(rule: str) -> str:
         "all_mutating_events_must_declare_side_effect_labels": "Attach _side_effects labels to emitted mutating events so validation can trace what happened.",
     }
     normalized = str(rule or "").strip().lower()
-    return mapping.get(normalized, "Follow the capability contract for this action and keep UI calls on declared boundary methods.")
+    return mapping.get(
+        normalized,
+        "Follow the capability contract for this action and keep UI calls on declared boundary methods.",
+    )
 
 
 def runtime_guardrail_severity(rule: str) -> str:
@@ -142,18 +153,28 @@ def runtime_turn_timeline() -> list[dict]:
     return timeline
 
 
-def record_turn_timeline_event(*, thread_id: str, event_type: str, summary: str, payload: dict | None = None, severity: str = "info") -> None:
+def record_turn_timeline_event(
+    *,
+    thread_id: str,
+    event_type: str,
+    summary: str,
+    payload: dict | None = None,
+    severity: str = "info",
+) -> None:
     timeline = runtime_turn_timeline()
     timeline.append(
         {
-            "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+            "timestamp": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
             "thread_id": str(thread_id or "default"),
             "event_type": str(event_type or "unknown"),
-            "signal": EVENT_TO_UI_SIGNAL.get(str(event_type or "").strip().lower(), "runtime_state"),
+            "signal": EVENT_TO_UI_SIGNAL.get(
+                str(event_type or "").strip().lower(),
+                "runtime_state",
+            ),
             "summary": str(summary or ""),
             "severity": str(severity or "info"),
             "payload": dict(payload or {}),
-        }
+        },
     )
     if len(timeline) > 160:
         del timeline[:-160]
@@ -161,7 +182,14 @@ def record_turn_timeline_event(*, thread_id: str, event_type: str, summary: str,
 
 def active_primary_view(default: str = "chat") -> str:
     normalized_default = str(default or "chat").strip().lower() or "chat"
-    value = str(st.session_state.get(PRIMARY_VIEW_SESSION_KEY, normalized_default) or normalized_default).strip().lower() or normalized_default
+    value = (
+        str(
+            st.session_state.get(PRIMARY_VIEW_SESSION_KEY, normalized_default) or normalized_default,
+        )
+        .strip()
+        .lower()
+        or normalized_default
+    )
     st.session_state[PRIMARY_VIEW_SESSION_KEY] = value
     return value
 
@@ -174,7 +202,14 @@ def set_primary_view(view: str) -> str:
 
 def current_ui_mood(default: str = "neutral") -> str:
     normalized_default = str(default or "neutral").strip().lower() or "neutral"
-    value = str(st.session_state.get(UI_MOOD_SESSION_KEY, normalized_default) or normalized_default).strip().lower() or normalized_default
+    value = (
+        str(
+            st.session_state.get(UI_MOOD_SESSION_KEY, normalized_default) or normalized_default,
+        )
+        .strip()
+        .lower()
+        or normalized_default
+    )
     st.session_state[UI_MOOD_SESSION_KEY] = value
     return value
 

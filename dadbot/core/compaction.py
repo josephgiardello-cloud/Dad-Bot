@@ -1,4 +1,4 @@
-﻿"""Event log compaction and archive tier.
+"""Event log compaction and archive tier.
 
 CompactionPolicy â€” decides when compaction should trigger.
 EventCompactor   â€” trims pre-snapshot events from the in-memory ledger.
@@ -17,6 +17,7 @@ Usage::
     if report["compacted"]:
         print(f"Removed {report['events_removed']} events; archive: {report['archive_path']}")
 """
+
 from __future__ import annotations
 
 import gzip
@@ -26,10 +27,10 @@ import time
 from pathlib import Path
 from typing import Any
 
-
 # ---------------------------------------------------------------------------
 # Compaction policy
 # ---------------------------------------------------------------------------
+
 
 class CompactionPolicy:
     """Threshold-based policy that decides whether compaction should run."""
@@ -41,16 +42,16 @@ class CompactionPolicy:
         max_age_seconds: float = 86_400.0,
         min_snapshot_distance: int = 100,
     ) -> None:
+        """Args:
+        max_events: Compact when the in-memory event count exceeds this.
+        max_age_seconds: Compact when the oldest event is older than this.
+        min_snapshot_distance: Keep at least this many events *before* the
+            snapshot head even after compaction (safety margin).
+
         """
-        Args:
-            max_events: Compact when the in-memory event count exceeds this.
-            max_age_seconds: Compact when the oldest event is older than this.
-            min_snapshot_distance: Keep at least this many events *before* the
-                snapshot head even after compaction (safety margin).
-        """
-        self.max_events             = max(1, int(max_events))
-        self.max_age_seconds        = max(1.0, float(max_age_seconds))
-        self.min_snapshot_distance  = max(0, int(min_snapshot_distance))
+        self.max_events = max(1, int(max_events))
+        self.max_age_seconds = max(1.0, float(max_age_seconds))
+        self.min_snapshot_distance = max(0, int(min_snapshot_distance))
 
     def should_compact(
         self,
@@ -61,10 +62,7 @@ class CompactionPolicy:
     ) -> bool:
         if event_count >= self.max_events:
             return True
-        if (
-            oldest_event_timestamp is not None
-            and (time.time() - oldest_event_timestamp) >= self.max_age_seconds
-        ):
+        if oldest_event_timestamp is not None and (time.time() - oldest_event_timestamp) >= self.max_age_seconds:
             return True
         return False
 
@@ -72,6 +70,7 @@ class CompactionPolicy:
 # ---------------------------------------------------------------------------
 # Archive tier
 # ---------------------------------------------------------------------------
+
 
 class ArchiveTier:
     """Writes discarded events to gzip-compressed JSONL archive files.
@@ -96,10 +95,9 @@ class ArchiveTier:
         suffix = f"-{label}" if label else ""
         filename = f"ledger{suffix}-{ts}.archive.gz"
         path = self._dir / filename
-        with self._lock:
-            with gzip.open(str(path), "wt", encoding="utf-8") as gz:
-                for event in events:
-                    gz.write(json.dumps(event, default=str) + "\n")
+        with self._lock, gzip.open(str(path), "wt", encoding="utf-8") as gz:
+            for event in events:
+                gz.write(json.dumps(event, default=str) + "\n")
         return path
 
     def list_archives(self) -> list[Path]:
@@ -129,6 +127,7 @@ class ArchiveTier:
 # Event compactor
 # ---------------------------------------------------------------------------
 
+
 class EventCompactor:
     """Trims in-memory ledger events before the snapshot head.
 
@@ -146,8 +145,8 @@ class EventCompactor:
         policy: CompactionPolicy | None = None,
         archive: ArchiveTier | None = None,
     ) -> None:
-        self._policy           = policy or CompactionPolicy()
-        self._archive          = archive
+        self._policy = policy or CompactionPolicy()
+        self._archive = archive
         self._compaction_count = 0
 
     def compact(
@@ -166,12 +165,18 @@ class EventCompactor:
 
         Returns:
             Report dict: compacted (bool), events_removed (int), archive_path (str|None).
+
         """
         events = ledger.read()
         n = len(events)
 
         if not events:
-            return {"compacted": False, "events_removed": 0, "archive_path": None, "reason": "empty"}
+            return {
+                "compacted": False,
+                "events_removed": 0,
+                "archive_path": None,
+                "reason": "empty",
+            }
 
         if snapshot is None:
             return {
@@ -200,7 +205,7 @@ class EventCompactor:
         # Keep min_snapshot_distance events before the snapshot head.
         cutoff = max(0, head_seq - self._policy.min_snapshot_distance)
         events_to_archive = events[:cutoff]
-        events_to_keep    = events[cutoff:]
+        events_to_keep = events[cutoff:]
 
         if not events_to_archive:
             return {

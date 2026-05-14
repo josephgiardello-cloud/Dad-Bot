@@ -17,14 +17,17 @@ Merge semantics:
 
 This makes execution plans first-class composable values — not runtime objects.
 """
+
 from __future__ import annotations
 
 import hashlib
 import json
 from typing import Any
 
-from dadbot.core.tool_dag import ToolDAG, ToolEdge, ToolNode, build_dag_from_execution_plan
-
+from dadbot.core.tool_dag import (
+    ToolDAG,
+    build_dag_from_execution_plan,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -33,7 +36,7 @@ from dadbot.core.tool_dag import ToolDAG, ToolEdge, ToolNode, build_dag_from_exe
 
 def _sha256(payload: Any) -> str:
     return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        json.dumps(payload, sort_keys=True, default=str).encode("utf-8"),
     ).hexdigest()
 
 
@@ -79,14 +82,16 @@ class ToolGraphAlgebra:
         for node in [*a.nodes, *b.nodes]:
             if node.deterministic_id not in seen_det_ids:
                 seen_det_ids.add(node.deterministic_id)
-                merged_node_specs.append({
-                    "tool_name": node.tool_name,
-                    "intent": node.intent,
-                    "args": dict(node.args),
-                    "priority": node.priority,
-                    "sequence": len(merged_node_specs),
-                    "deterministic_id": node.deterministic_id,
-                })
+                merged_node_specs.append(
+                    {
+                        "tool_name": node.tool_name,
+                        "intent": node.intent,
+                        "args": dict(node.args),
+                        "priority": node.priority,
+                        "sequence": len(merged_node_specs),
+                        "deterministic_id": node.deterministic_id,
+                    },
+                )
 
         # 2 — Build the merged DAG from deduplicated specs.
         merged_dag = build_dag_from_execution_plan(merged_node_specs)
@@ -101,7 +106,7 @@ class ToolGraphAlgebra:
         compose_all([A, B, C]) == (A ⊕ B) ⊕ C
         """
         result = cls.identity()
-        for g in (graphs or []):
+        for g in graphs or []:
             result = cls.compose(result, g)
         return result
 

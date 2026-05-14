@@ -20,6 +20,7 @@ The executor does NOT call LLMs or tools — it operates on event evidence
 already in the log.  This makes it suitable for replay, verification,
 and deterministic audit.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -27,8 +28,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from dadbot.core.event_authority import EventAuthority, rebuild_state_from_events
-
+from dadbot.core.event_authority import rebuild_state_from_events
 
 # ---------------------------------------------------------------------------
 # Result type
@@ -47,7 +47,9 @@ class StatelessExecutionResult:
         bootstrapped:   True iff the log contained a SESSION_STATE_UPDATED event.
         session_id:     Session derived from the event log (or "").
         notes:          Any runtime notes from the execution step (informational).
+
     """
+
     state: dict[str, Any]
     event_log: tuple[dict[str, Any], ...]
     execution_hash: str
@@ -72,14 +74,16 @@ class StatelessExecutionResult:
 # Bootstrap check
 # ---------------------------------------------------------------------------
 
-_BOOTSTRAP_EVENT_TYPES = frozenset({
-    "SESSION_STATE_UPDATED",
-    "session_state_updated",
-    "session_start",
-    "SESSION_START",
-    "TURN_COMPLETED",
-    "turn_completed",
-})
+_BOOTSTRAP_EVENT_TYPES = frozenset(
+    {
+        "SESSION_STATE_UPDATED",
+        "session_state_updated",
+        "session_start",
+        "SESSION_START",
+        "TURN_COMPLETED",
+        "turn_completed",
+    },
+)
 
 
 def is_bootstrapped(event_log: list[dict[str, Any]]) -> bool:
@@ -90,10 +94,7 @@ def is_bootstrapped(event_log: list[dict[str, Any]]) -> bool:
 
     An empty log or a log with only TOOL_EXECUTED events is not bootstrapped.
     """
-    return any(
-        str(e.get("type") or "").strip() in _BOOTSTRAP_EVENT_TYPES
-        for e in (event_log or [])
-    )
+    return any(str(e.get("type") or "").strip() in _BOOTSTRAP_EVENT_TYPES for e in (event_log or []))
 
 
 # ---------------------------------------------------------------------------
@@ -113,7 +114,7 @@ def _execution_hash(
         "config_keys": sorted((config or {}).keys()),
     }
     return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        json.dumps(payload, sort_keys=True, default=str).encode("utf-8"),
     ).hexdigest()
 
 
@@ -132,10 +133,10 @@ class StatelessExecutor:
         self,
         reducer: Any | None = None,
     ) -> None:
-        """
-        Args:
-            reducer: Optional CanonicalEventReducer.  If None, uses
-                     rebuild_state_from_events (which creates its own).
+        """Args:
+        reducer: Optional CanonicalEventReducer.  If None, uses
+                 rebuild_state_from_events (which creates its own).
+
         """
         self._reducer = reducer
 
@@ -167,7 +168,9 @@ class StatelessExecutor:
 
         # Derive session context from state.
         sessions = dict(state.get("sessions") or {})
-        session_id = str(state.get("last_session_id") or (next(iter(sessions)) if sessions else ""))
+        session_id = str(
+            state.get("last_session_id") or (next(iter(sessions)) if sessions else ""),
+        )
         bootstrapped = is_bootstrapped(log)
 
         e_hash = _execution_hash(inp, log, cfg)

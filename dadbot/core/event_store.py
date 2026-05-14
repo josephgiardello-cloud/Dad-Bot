@@ -1,11 +1,10 @@
-﻿from collections import deque
+from collections import deque
 from threading import RLock
 from typing import Any
 
 
 class EventStore:
-    """
-    Lightweight in-memory event buffer aligned with ledger-style execution.
+    """Lightweight in-memory event buffer aligned with ledger-style execution.
 
     This is NOT the source of truth (ledger is).
     This is a fast-access cache for recent event inspection.

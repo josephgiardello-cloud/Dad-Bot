@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import copy
 import hashlib
@@ -36,7 +36,13 @@ class AgentRuntime:
         "metadata",
     )
 
-    def __init__(self, services: RuntimeServices, store: ConversationStore, *, policy_engine: PolicyEngine | None = None) -> None:
+    def __init__(
+        self,
+        services: RuntimeServices,
+        store: ConversationStore,
+        *,
+        policy_engine: PolicyEngine | None = None,
+    ) -> None:
         self.services = services
         self.store = store
         self.policy_engine = policy_engine or PolicyEngine()
@@ -57,10 +63,20 @@ class AgentRuntime:
             return []
 
         if event.type == "memory_write":
-            self.services.write_memory(thread_id=event.thread_id, payload=dict(event.payload or {}))
+            self.services.write_memory(
+                thread_id=event.thread_id,
+                payload=dict(event.payload or {}),
+            )
             return []
 
-        if event.type in {"tool_result", "tool_call", "thread_switch", "photo_request", "tts_request", "mood_update"}:
+        if event.type in {
+            "tool_result",
+            "tool_call",
+            "thread_switch",
+            "photo_request",
+            "tts_request",
+            "mood_update",
+        }:
             return []
 
         return []
@@ -74,7 +90,9 @@ class AgentRuntime:
                 if field == "step":
                     normalized[field] = str(step.get("step") or step.get("name") or "")
                 elif field == "tool_name":
-                    normalized[field] = str(step.get("tool_name") or step.get("tool") or "")
+                    normalized[field] = str(
+                        step.get("tool_name") or step.get("tool") or "",
+                    )
                 elif field == "kind":
                     normalized[field] = str(step.get("kind") or "reasoning")
                 elif field == "depends_on":
@@ -95,27 +113,19 @@ class AgentRuntime:
     @classmethod
     def _execution_structure_signature(cls, pipeline: dict) -> str:
         normalized_steps = [
-            cls._normalize_execution_step(step)
-            for step in list(dict(pipeline or {}).get("steps") or [])
+            cls._normalize_execution_step(step) for step in list(dict(pipeline or {}).get("steps") or [])
         ]
         payload = json.dumps(normalized_steps, sort_keys=True).encode("utf-8")
         return hashlib.sha256(payload).hexdigest()
 
     @classmethod
     def _execution_structure_snapshot(cls, pipeline: dict) -> list[dict]:
-        return [
-            cls._normalize_execution_step(step)
-            for step in list(dict(pipeline or {}).get("steps") or [])
-        ]
+        return [cls._normalize_execution_step(step) for step in list(dict(pipeline or {}).get("steps") or [])]
 
     @classmethod
     def _execution_semantic_snapshot(cls, pipeline: dict) -> dict:
         pipeline_dict = dict(pipeline or {})
-        semantic_pipeline = {
-            key: copy.deepcopy(value)
-            for key, value in pipeline_dict.items()
-            if str(key) != "steps"
-        }
+        semantic_pipeline = {key: copy.deepcopy(value) for key, value in pipeline_dict.items() if str(key) != "steps"}
         semantic_steps = []
         for raw_step in list(pipeline_dict.get("steps") or []):
             if not isinstance(raw_step, dict):
@@ -126,14 +136,19 @@ class AgentRuntime:
                     field: copy.deepcopy(raw_step[field])
                     for field in cls._EXECUTION_SEMANTIC_STEP_FIELDS
                     if field in raw_step
-                }
+                },
             )
         return {
             "pipeline": semantic_pipeline,
             "steps": semantic_steps,
         }
 
-    def _execution_boundary_started_event(self, *, event: Event, pipeline: dict) -> Event:
+    def _execution_boundary_started_event(
+        self,
+        *,
+        event: Event,
+        pipeline: dict,
+    ) -> Event:
         return new_event(
             "execution_region_started",
             thread_id=event.thread_id,
@@ -146,16 +161,28 @@ class AgentRuntime:
             },
         )
 
-    def _execution_boundary_completed_event(self, *, event: Event, before_pipeline: dict, after_pipeline: dict) -> Event:
+    def _execution_boundary_completed_event(
+        self,
+        *,
+        event: Event,
+        before_pipeline: dict,
+        after_pipeline: dict,
+    ) -> Event:
         return new_event(
             "execution_region_completed",
             thread_id=event.thread_id,
             payload={
                 "structural_fields": list(self._EXECUTION_STRUCTURAL_STEP_FIELDS),
                 "semantic_fields": list(self._EXECUTION_SEMANTIC_STEP_FIELDS),
-                "structural_signature_before": self._execution_structure_signature(before_pipeline),
-                "structural_signature_after": self._execution_structure_signature(after_pipeline),
-                "structural_snapshot": self._execution_structure_snapshot(after_pipeline),
+                "structural_signature_before": self._execution_structure_signature(
+                    before_pipeline,
+                ),
+                "structural_signature_after": self._execution_structure_signature(
+                    after_pipeline,
+                ),
+                "structural_snapshot": self._execution_structure_snapshot(
+                    after_pipeline,
+                ),
                 "semantic_snapshot": self._execution_semantic_snapshot(after_pipeline),
             },
         )
@@ -171,12 +198,17 @@ class AgentRuntime:
             attachments=list(event.payload.get("attachments") or []),
         )
         before_pipeline = copy.deepcopy(dict(result.pipeline or {}))
-        started_event = self._execution_boundary_started_event(event=event, pipeline=before_pipeline)
+        started_event = self._execution_boundary_started_event(
+            event=event,
+            pipeline=before_pipeline,
+        )
         post_result = self._after_execution_region(event=event, result=result)
         after_pipeline = copy.deepcopy(dict(post_result.pipeline or {}))
-        if self._execution_structure_signature(before_pipeline) != self._execution_structure_signature(after_pipeline):
+        if self._execution_structure_signature(
+            before_pipeline,
+        ) != self._execution_structure_signature(after_pipeline):
             raise RuntimeError(
-                "Execution boundary violation: execution region mutated structural pipeline"
+                "Execution boundary violation: execution region mutated structural pipeline",
             )
         completed_event = self._execution_boundary_completed_event(
             event=event,
@@ -189,14 +221,14 @@ class AgentRuntime:
 
     def _handle_user_message(self, event: Event) -> list[Event]:
         result, execution_boundary_events = self._run_execution_region(event=event)
-        
+
         # Evaluate policies for this turn
         policies = self.policy_engine.evaluate(
             mood=str(result.mood or "neutral"),
             thread_id=event.thread_id,
             reply_text=str(result.reply or ""),
         )
-        
+
         pipeline = copy.deepcopy(dict(result.pipeline or {}))
         turn_health = copy.deepcopy(dict(result.turn_health or {}))
         ux_feedback = copy.deepcopy(dict(result.ux_feedback or {}))
@@ -214,15 +246,18 @@ class AgentRuntime:
                     "ux_feedback": ux_feedback,
                     "attachments": [],
                 },
-            )
-        ,
+            ),
             new_event(
                 "thinking_update",
                 thread_id=event.thread_id,
                 payload={
-                    "mood_detected": str(pipeline.get("current_mood") or result.mood or "neutral"),
+                    "mood_detected": str(
+                        pipeline.get("current_mood") or result.mood or "neutral",
+                    ),
                     "final_path": str(pipeline.get("final_path") or "model_reply"),
-                    "reply_source": str(pipeline.get("reply_source") or "model_generation"),
+                    "reply_source": str(
+                        pipeline.get("reply_source") or "model_generation",
+                    ),
                     "pipeline_steps": list(pipeline.get("steps") or []),
                     "active_rules": list(result.active_rules or []),
                     "dad_is_thinking": bool(ux_feedback.get("dad_is_thinking", False)),
@@ -231,9 +266,9 @@ class AgentRuntime:
                     "memory_message": str(ux_feedback.get("memory_message") or ""),
                     "turn_health": turn_health,
                 },
-            )
+            ),
         ]
-        
+
         # Photo request based on policy
         if policies.should_generate_photo:
             events.append(
@@ -241,9 +276,9 @@ class AgentRuntime:
                     "photo_request",
                     thread_id=event.thread_id,
                     payload={"reason": "mood_support", "mood": result.mood},
-                )
+                ),
             )
-        
+
         # TTS request based on policy
         if policies.should_request_tts:
             events.append(
@@ -251,9 +286,9 @@ class AgentRuntime:
                     "tts_request",
                     thread_id=event.thread_id,
                     payload={"text": str(result.reply or "")},
-                )
+                ),
             )
-        
+
         return events
 
     def run_until_idle(self, bus: EventBus, *, max_events: int = 256) -> list[Event]:

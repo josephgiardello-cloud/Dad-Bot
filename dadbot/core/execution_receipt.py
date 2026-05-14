@@ -36,20 +36,21 @@ The receipts are NOT stored in TurnResumeStore by default — that keeps the
 store minimal.  Callers who want fully durable receipts should call
 ``ReceiptChain.to_dict()`` and write it alongside the resume record.
 """
+
 from __future__ import annotations
 
-import hashlib
 import hmac
 import json
 import os
 import time
-from dataclasses import dataclass, field
-from typing import Any, Sequence
-
+from collections.abc import Sequence
+from dataclasses import dataclass
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # Receipt
 # ---------------------------------------------------------------------------
+
 
 @dataclass(frozen=True)
 class ExecutionReceipt:
@@ -75,6 +76,7 @@ class ExecutionReceipt:
         Wall-clock epoch when the stage completed (advisory; not used in sig).
     signature:
         HMAC-SHA256 of the canonical payload (see ``_signing_payload``).
+
     """
 
     turn_id: str
@@ -121,7 +123,7 @@ class ExecutionReceipt:
         }
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "ExecutionReceipt":
+    def from_dict(cls, d: dict[str, Any]) -> ExecutionReceipt:
         return cls(
             turn_id=str(d.get("turn_id") or ""),
             stage=str(d.get("stage") or ""),
@@ -137,6 +139,7 @@ class ExecutionReceipt:
 # ---------------------------------------------------------------------------
 # Receipt signer
 # ---------------------------------------------------------------------------
+
 
 class ReceiptSigner:
     """Issues and verifies ExecutionReceipt signatures.
@@ -200,9 +203,11 @@ class ReceiptSigner:
 # Receipt chain
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class ContinuityViolation:
     """Describes a specific continuity problem detected by ReceiptChain.verify_continuity."""
+
     receipt_index: int
     stage: str
     reason: str
@@ -268,11 +273,11 @@ class ReceiptChain:
         return [r.to_dict() for r in self._receipts]
 
     @classmethod
-    def from_list(cls, lst: list[dict[str, Any]]) -> "ReceiptChain":
+    def from_list(cls, lst: list[dict[str, Any]]) -> ReceiptChain:
         return cls([ExecutionReceipt.from_dict(d) for d in lst])
 
     @classmethod
-    def from_state(cls, state: dict[str, Any]) -> "ReceiptChain":
+    def from_state(cls, state: dict[str, Any]) -> ReceiptChain:
         """Load chain from TurnContext.state (returns empty chain if absent)."""
         raw = state.get(cls._STATE_KEY)
         if isinstance(raw, list):
@@ -305,6 +310,7 @@ class ReceiptChain:
         -------
         list[ContinuityViolation]
             Empty list if the chain is intact.  Non-empty if violations exist.
+
         """
         violations: list[ContinuityViolation] = []
         prev_sig = ""
@@ -313,34 +319,36 @@ class ReceiptChain:
         for i, receipt in enumerate(self._receipts):
             # Check signature.
             if not signer.verify(receipt):
-                violations.append(ContinuityViolation(
-                    receipt_index=i,
-                    stage=receipt.stage,
-                    reason=f"Invalid signature for stage {receipt.stage!r} (sequence {receipt.sequence})",
-                ))
+                violations.append(
+                    ContinuityViolation(
+                        receipt_index=i,
+                        stage=receipt.stage,
+                        reason=f"Invalid signature for stage {receipt.stage!r} (sequence {receipt.sequence})",
+                    ),
+                )
 
             # Check sequence continuity.
             if receipt.sequence != expected_seq:
-                violations.append(ContinuityViolation(
-                    receipt_index=i,
-                    stage=receipt.stage,
-                    reason=(
-                        f"Sequence gap: expected {expected_seq}, got {receipt.sequence} "
-                        f"for stage {receipt.stage!r}"
+                violations.append(
+                    ContinuityViolation(
+                        receipt_index=i,
+                        stage=receipt.stage,
+                        reason=(
+                            f"Sequence gap: expected {expected_seq}, got {receipt.sequence} for stage {receipt.stage!r}"
+                        ),
                     ),
-                ))
+                )
             expected_seq = receipt.sequence + 1
 
             # Check prev_receipt_sig linkage.
             if receipt.prev_receipt_sig != prev_sig:
-                violations.append(ContinuityViolation(
-                    receipt_index=i,
-                    stage=receipt.stage,
-                    reason=(
-                        f"Chain broken at stage {receipt.stage!r}: "
-                        f"prev_receipt_sig mismatch"
+                violations.append(
+                    ContinuityViolation(
+                        receipt_index=i,
+                        stage=receipt.stage,
+                        reason=(f"Chain broken at stage {receipt.stage!r}: prev_receipt_sig mismatch"),
                     ),
-                ))
+                )
             prev_sig = receipt.signature
 
         # Check expected stages present.
@@ -348,11 +356,13 @@ class ReceiptChain:
             completed = {r.stage for r in self._receipts}
             for stage in expected_stages:
                 if stage not in completed:
-                    violations.append(ContinuityViolation(
-                        receipt_index=-1,
-                        stage=stage,
-                        reason=f"Expected stage {stage!r} missing from receipt chain",
-                    ))
+                    violations.append(
+                        ContinuityViolation(
+                            receipt_index=-1,
+                            stage=stage,
+                            reason=f"Expected stage {stage!r} missing from receipt chain",
+                        ),
+                    )
 
         return violations
 

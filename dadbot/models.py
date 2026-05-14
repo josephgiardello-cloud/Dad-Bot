@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from datetime import date, datetime
 from typing import Any, Literal
@@ -8,6 +8,34 @@ from pydantic import BaseModel, ConfigDict, Field
 
 class DadBotModel(BaseModel):
     model_config = ConfigDict(extra="ignore")
+
+
+class InvarianceGate(DadBotModel):
+    role: Literal["CORE", "SECONDARY"]
+    question: str
+    signals: list[str] = Field(default_factory=list)
+    allowed_influences: list[str] = Field(default_factory=list)
+    must_not_depend_on: list[str] = Field(default_factory=list)
+    coverage: list[str] = Field(default_factory=list)
+    examples: list[str] = Field(default_factory=list)
+    correctness_critical: bool = True
+
+
+class EvaluationContract(DadBotModel):
+    version: str = "1.0"
+    owner: str = "dadbot"
+    behavioral_invariance: InvarianceGate
+    envelope_invariance: InvarianceGate
+
+
+class BoundaryComplianceDeclaration(DadBotModel):
+    boundary: Literal["boot", "registry", "orchestrator"]
+    contract_version: str
+    contract_hash: str
+    compliant: bool = True
+    declared_behavioral_signals: list[str] = Field(default_factory=list)
+    declared_envelope_signals: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
 
 
 class MemoryEntry(DadBotModel):
@@ -102,7 +130,9 @@ class ModerationSnapshot(DadBotModel):
     enabled: bool = True
     use_llm_classifier: bool = False
     blocked_pattern_count: int = Field(0, ge=0)
-    last_decision: OutputModerationDecision = Field(default_factory=OutputModerationDecision)
+    last_decision: OutputModerationDecision = Field(
+        default_factory=OutputModerationDecision,
+    )
 
 
 class SupervisorDecisionState(DadBotModel):
@@ -254,7 +284,9 @@ class ReplySupervisorSnapshot(DadBotModel):
     active_hypothesis: str = "supportive_baseline"
     active_hypothesis_label: str = "Supportive Baseline"
     active_hypothesis_probability: float = 0.0
-    last_decision: SupervisorDecisionState = Field(default_factory=SupervisorDecisionState)
+    last_decision: SupervisorDecisionState = Field(
+        default_factory=SupervisorDecisionState,
+    )
 
 
 class StatusTraitMetric(DadBotModel):
@@ -364,6 +396,22 @@ class GraphFallbackStatusSnapshot(DadBotModel):
     message: str = ""
 
 
+class ConfluenceStatusSnapshot(DadBotModel):
+    mode: str = "off"
+    strict_legacy_disabled: bool = False
+    enforced: bool = False
+    action: str = ""
+    key: str = ""
+    observed_hash: str = ""
+    expected_hash: str = ""
+    attempted: int = Field(0, ge=0)
+    matched: int = Field(0, ge=0)
+    mismatch: int = Field(0, ge=0)
+    bound_first_observation: int = Field(0, ge=0)
+    enforced_blocked: int = Field(0, ge=0)
+    enforcement_rate: float = Field(0.0, ge=0.0, le=1.0)
+
+
 class PromptGuardStatusSnapshot(DadBotModel):
     trim_count: int = Field(0, ge=0)
     trimmed_tokens_total: int = Field(0, ge=0)
@@ -446,16 +494,27 @@ class DashboardStatusSnapshot(DadBotModel):
     session: SessionStatusSnapshot = Field(default_factory=SessionStatusSnapshot)
     threads: ThreadsStatusSnapshot = Field(default_factory=ThreadsStatusSnapshot)
     active_thread: ActiveThreadSnapshot = Field(default_factory=ActiveThreadSnapshot)
-    relationship: RelationshipStatusSnapshot = Field(default_factory=RelationshipStatusSnapshot)
+    relationship: RelationshipStatusSnapshot = Field(
+        default_factory=RelationshipStatusSnapshot,
+    )
     relationship_history: list[RelationshipTrendPoint] = Field(default_factory=list)
     memory_contradictions: list[dict[str, Any]] = Field(default_factory=list)
-    memory_context: MemoryContextStatusSnapshot = Field(default_factory=MemoryContextStatusSnapshot)
-    prompt_guard: PromptGuardStatusSnapshot = Field(default_factory=PromptGuardStatusSnapshot)
+    memory_context: MemoryContextStatusSnapshot = Field(
+        default_factory=MemoryContextStatusSnapshot,
+    )
+    prompt_guard: PromptGuardStatusSnapshot = Field(
+        default_factory=PromptGuardStatusSnapshot,
+    )
     health: RuntimeHealthSnapshot = Field(default_factory=RuntimeHealthSnapshot)
-    circuit_breaker: CircuitBreakerStatusSnapshot = Field(default_factory=CircuitBreakerStatusSnapshot)
+    circuit_breaker: CircuitBreakerStatusSnapshot = Field(
+        default_factory=CircuitBreakerStatusSnapshot,
+    )
     health_history: list[RuntimeHealthTrendPoint] = Field(default_factory=list)
     recent_runtime_issues: list[RuntimeIssueSnapshot] = Field(default_factory=list)
-    graph_fallback: GraphFallbackStatusSnapshot = Field(default_factory=GraphFallbackStatusSnapshot)
+    graph_fallback: GraphFallbackStatusSnapshot = Field(
+        default_factory=GraphFallbackStatusSnapshot,
+    )
+    confluence: ConfluenceStatusSnapshot = Field(default_factory=ConfluenceStatusSnapshot)
     maintenance: dict[str, Any] = Field(default_factory=dict)
     supervisor: ReplySupervisorSnapshot = Field(default_factory=ReplySupervisorSnapshot)
     living: dict[str, Any] = Field(default_factory=dict)
@@ -482,6 +541,7 @@ class MemoryGraph(DadBotModel):
 
 
 class MemoryStore(DadBotModel):
+    schema_version: int = Field(1, ge=1)
     memories: list[MemoryEntry] = Field(default_factory=list)
     consolidated_memories: list[ConsolidatedMemory] = Field(default_factory=list)
     persona_evolution: list[PersonaTrait] = Field(default_factory=list)
@@ -520,13 +580,16 @@ class MemoryStore(DadBotModel):
 __all__ = [
     "ActiveThreadSnapshot",
     "AgenticToolPlan",
-    "BackgroundTaskRecord",
     "BackgroundTaskOverview",
+    "BackgroundTaskRecord",
+    "BoundaryComplianceDeclaration",
     "ChatThreadState",
     "CircuitBreakerStatusSnapshot",
     "ConsolidatedMemory",
     "DadBotModel",
     "DashboardStatusSnapshot",
+    "EvaluationContract",
+    "InvarianceGate",
     "LifePattern",
     "MemoryContextStatusSnapshot",
     "MemoryEntry",
@@ -537,19 +600,19 @@ __all__ = [
     "ModerationSnapshot",
     "MoodHistoryEntry",
     "OutputModerationDecision",
-    "PersonaTrait",
     "PersistenceStatusSnapshot",
+    "PersonaTrait",
     "PlannerDebugState",
     "ProactiveMessage",
     "PromptGuardStatusSnapshot",
+    "RelationshipState",
     "RelationshipStatusSnapshot",
     "ReminderEntry",
     "ReplySupervisorSnapshot",
-    "RelationshipState",
     "RuntimeHealthSnapshot",
     "RuntimeHealthTrendPoint",
-    "RuntimeStatusSnapshot",
     "RuntimeIssueSnapshot",
+    "RuntimeStatusSnapshot",
     "SecurityStatusSnapshot",
     "ServiceStatusSnapshot",
     "SessionArchiveEntry",

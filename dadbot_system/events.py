@@ -9,8 +9,7 @@ from .contracts import EventEnvelope
 
 
 class EventBus(Protocol):
-    def publish(self, event: EventEnvelope) -> None:
-        ...
+    def publish(self, event: EventEnvelope) -> None: ...
 
 
 class InMemoryEventBus:

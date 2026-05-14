@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import logging
 
@@ -30,7 +30,9 @@ class MultimodalManager:
         }
 
         if attachment_type == "image":
-            image_b64 = str(attachment.get("image_b64") or attachment.get("data_b64") or "").strip()
+            image_b64 = str(
+                attachment.get("image_b64") or attachment.get("data_b64") or "",
+            ).strip()
             if not image_b64:
                 return None
             normalized["image_b64"] = image_b64
@@ -54,7 +56,9 @@ class MultimodalManager:
             return normalized
 
         note = str(attachment.get("note") or "").strip()
-        text_content = str(attachment.get("text") or attachment.get("content") or "").strip()
+        text_content = str(
+            attachment.get("text") or attachment.get("content") or "",
+        ).strip()
         if not note and not text_content:
             return None
         if note:
@@ -90,7 +94,11 @@ class MultimodalManager:
         )
         return any(hint in lowered for hint in multimodal_hints)
 
-    def compose_user_turn_text(self, user_input, attachments: AttachmentList | None = None):
+    def compose_user_turn_text(
+        self,
+        user_input,
+        attachments: AttachmentList | None = None,
+    ):
         sections = []
         primary_text = str(user_input or "").strip()
         if primary_text:
@@ -100,7 +108,9 @@ class MultimodalManager:
             if attachment.get("type") == "image":
                 note = str(attachment.get("note") or "").strip()
                 analysis = str(attachment.get("analysis") or "").strip()
-                sections.append(f"Photo note: {note}" if note else "Tony shared a photo in this turn.")
+                sections.append(
+                    f"Photo note: {note}" if note else "Tony shared a photo in this turn.",
+                )
                 if analysis:
                     sections.append(f"Photo analysis: {analysis}")
                 continue
@@ -123,7 +133,11 @@ class MultimodalManager:
 
         return "\n\n".join(section for section in sections if section).strip()
 
-    def build_user_request_message(self, user_input, attachments: AttachmentList | None = None):
+    def build_user_request_message(
+        self,
+        user_input,
+        attachments: AttachmentList | None = None,
+    ):
         request_message = {"role": "user", "content": user_input}
         if self.bot.model_supports_image_input(self.bot.ACTIVE_MODEL):
             image_payload = [
@@ -158,8 +172,17 @@ class MultimodalManager:
                 metadata["text"] = attachment["text"]
         return metadata
 
-    def build_image_analysis_prompt(self, note: str = "", user_input: str = "", attachment: dict | None = None) -> str:
-        return self.bot.prompt_assembly.build_image_analysis_prompt(note=note, user_input=user_input, attachment=attachment)
+    def build_image_analysis_prompt(
+        self,
+        note: str = "",
+        user_input: str = "",
+        attachment: dict | None = None,
+    ) -> str:
+        return self.bot.prompt_assembly.build_image_analysis_prompt(
+            note=note,
+            user_input=user_input,
+            attachment=attachment,
+        )
 
     def describe_image_attachment(self, attachment, user_input=""):
         if not isinstance(attachment, dict) or attachment.get("type") != "image":
@@ -176,15 +199,17 @@ class MultimodalManager:
         try:
             response = self.bot.call_ollama_chat_with_model(
                 vision_model,
-                messages=[{
-                    "role": "user",
-                    "content": self.bot.build_image_analysis_prompt(
-                        str(attachment.get("note") or ""),
-                        user_input=user_input,
-                        attachment=attachment,
-                    ),
-                    "images": [image_b64],
-                }],
+                messages=[
+                    {
+                        "role": "user",
+                        "content": self.bot.build_image_analysis_prompt(
+                            str(attachment.get("note") or ""),
+                            user_input=user_input,
+                            attachment=attachment,
+                        ),
+                        "images": [image_b64],
+                    },
+                ],
                 options={"temperature": 0.1},
                 purpose="image analysis",
             )
@@ -194,20 +219,24 @@ class MultimodalManager:
 
         return self.bot.extract_ollama_message_content(response).strip().strip('"')
 
-    def enrich_multimodal_attachments(self, attachments: AttachmentList | None = None, user_input=""):
+    def enrich_multimodal_attachments(
+        self,
+        attachments: AttachmentList | None = None,
+        user_input="",
+    ):
         enriched = []
         vision_ready, vision_message = self.bot.vision_fallback_status()
         for attachment in self.bot.normalize_chat_attachments(attachments):
             updated = dict(attachment)
             if updated.get("type") == "image" and not updated.get("analysis"):
-                analysis = self.bot.describe_image_attachment(updated, user_input=user_input)
+                analysis = self.bot.describe_image_attachment(
+                    updated,
+                    user_input=user_input,
+                )
                 if analysis:
                     updated["analysis"] = analysis
                 elif not vision_ready:
-                    updated["analysis"] = (
-                        "Dad could not inspect the image directly. "
-                        f"{vision_message}"
-                    )
+                    updated["analysis"] = f"Dad could not inspect the image directly. {vision_message}"
             enriched.append(updated)
         return enriched
 

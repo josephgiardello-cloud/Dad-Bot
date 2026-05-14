@@ -15,13 +15,14 @@ Layers:
 - ExecutionTelemetryVector — structured feature vector for observability
 - OptimizationBoundary    — declares which components are evolvable vs frozen
 """
+
 from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, field
-from typing import Any, Callable
-
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -30,7 +31,7 @@ from typing import Any, Callable
 
 def _sha256(payload: Any) -> str:
     return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        json.dumps(payload, sort_keys=True, default=str).encode("utf-8"),
     ).hexdigest()
 
 
@@ -48,6 +49,7 @@ class ExecutionTelemetryVector:
 
     Fields are stable: adding new fields must not break existing consumers.
     """
+
     event_count: int = 0
     tool_count: int = 0
     latency_ms: float = 0.0
@@ -67,8 +69,8 @@ class ExecutionTelemetryVector:
             float(self.latency_ms),
             float(self.schedule_waves),
             float(self.state_transitions),
-            float(len(self.dag_hash)),     # hash length as a proxy for presence
-            float(len(self.session_id)),   # session id length as proxy
+            float(len(self.dag_hash)),  # hash length as a proxy for presence
+            float(len(self.session_id)),  # session id length as proxy
         ]
 
     def to_dict(self) -> dict[str, Any]:
@@ -88,22 +90,26 @@ class ExecutionTelemetryVector:
 # ---------------------------------------------------------------------------
 
 
-_DEFAULT_EVOLVABLE = frozenset({
-    "tool_selection_policy",
-    "planning_policy",
-    "memory_ranker",
-    "critic_constraints",
-    "schedule_confluence",
-})
+_DEFAULT_EVOLVABLE = frozenset(
+    {
+        "tool_selection_policy",
+        "planning_policy",
+        "memory_ranker",
+        "critic_constraints",
+        "schedule_confluence",
+    },
+)
 
-_DEFAULT_FROZEN = frozenset({
-    "event_authority",
-    "event_reducer",
-    "dag_integrity",
-    "tool_ir_boundary",
-    "execution_ledger",
-    "canonical_event",
-})
+_DEFAULT_FROZEN = frozenset(
+    {
+        "event_authority",
+        "event_reducer",
+        "dag_integrity",
+        "tool_ir_boundary",
+        "execution_ledger",
+        "canonical_event",
+    },
+)
 
 
 @dataclass(frozen=True)
@@ -116,19 +122,22 @@ class OptimizationBoundary:
     boundary_hash is computed from the frozensets so it changes whenever
     the boundary declaration changes.
     """
+
     evolvable_components: frozenset[str]
     frozen_components: frozenset[str]
     boundary_hash: str
 
     @classmethod
-    def default(cls) -> "OptimizationBoundary":
+    def default(cls) -> OptimizationBoundary:
         """Return the default boundary separating evolvable from frozen."""
         evolvable = _DEFAULT_EVOLVABLE
         frozen = _DEFAULT_FROZEN
-        boundary_hash = _sha256({
-            "evolvable": sorted(evolvable),
-            "frozen": sorted(frozen),
-        })
+        boundary_hash = _sha256(
+            {
+                "evolvable": sorted(evolvable),
+                "frozen": sorted(frozen),
+            },
+        )
         return cls(
             evolvable_components=evolvable,
             frozen_components=frozen,
@@ -159,6 +168,7 @@ class ExecutionPolicyLayer:
 
     Scaffolding: no active implementation.  Override in subclasses.
     """
+
     def select_execution_order(self, dag: Any, context: dict[str, Any]) -> Any:
         return dag  # identity — not yet active
 
@@ -168,6 +178,7 @@ class PlanningPolicyLayer:
 
     Scaffolding: no active implementation.  Override in subclasses.
     """
+
     def select_plan(self, candidates: list[Any], context: dict[str, Any]) -> Any:
         return candidates[0] if candidates else None
 
@@ -177,6 +188,7 @@ class ToolSelectionPolicyLayer:
 
     Scaffolding: no active implementation.  Override in subclasses.
     """
+
     def select_tools(self, available: list[str], context: dict[str, Any]) -> list[str]:
         return list(available)  # identity
 
@@ -238,7 +250,7 @@ class GraphIntrospectionAPI:
             nodes = list(dag.nodes)
             edges = list(dag.edges)
             dag_hash = dag.deterministic_hash()
-        except Exception:
+        except Exception:  # noqa: BLE001
             nodes = []
             edges = []
             dag_hash = ""

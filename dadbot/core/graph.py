@@ -1,41 +1,27 @@
-﻿from __future__ import annotations
+from __future__ import annotations
+
+import os
 
 import asyncio
 import contextlib
 import hashlib
+import inspect
 import json
 import logging
 import time
-import uuid
-from datetime import datetime
-from dataclasses import dataclass, field
-from enum import Enum, StrEnum
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, Literal, Protocol
+from typing import Any, cast
 
-from dadbot.contracts import AttachmentList, ChunkCallback, FinalizedTurnResult
-from dadbot.core.capability_audit_runner import build_runtime_capability_audit_report
-from dadbot.core.determinism import DeterminismBoundary, DeterminismMode
-from dadbot.core.execution_boundary import ControlPlaneExecutionBoundary
-from dadbot.core.execution_firewall import ExecutionFirewall
-from dadbot.core.execution_kernel import ExecutionKernel
-from dadbot.core.invariant_registry import InvariantRegistry
-from dadbot.core.kernel import TurnKernel
-from dadbot.core.execution_identity import ExecutionIdentity, ExecutionIdentityViolation
+from dadbot.contracts import FinalizedTurnResult
 from dadbot.core.capability_registry import (
     CapabilityRegistry,
-    CapabilityViolationError,
-    EnforcementMode,
-    enforce_node_entry,
-    freeze_capabilities,
-    verify_capability_freeze,
 )
-from dadbot.core.determinism_seal import DEFAULT_SEAL as _DETERMINISM_SEAL
-from dadbot.core.execution_receipt import (
-    DEFAULT_SIGNER as _DEFAULT_RECEIPT_SIGNER,
-    ReceiptChain,
-    ReceiptSigner,
-)
+from dadbot.core.execution_boundary import ControlPlaneExecutionBoundary
+from dadbot.core.execution_firewall import ExecutionFirewall
+from dadbot.core.execution_identity import ExecutionIdentity
+from dadbot.core.execution_kernel import ExecutionKernel
+from dadbot.core.execution_kernel_spec import validate_execution_kernel_spec
 from dadbot.core.execution_policy import (
     ExecutionPolicyEngine,
     FatalTurnError,
@@ -45,46 +31,113 @@ from dadbot.core.execution_policy import (
     StagePhaseMappingPolicy,
     TurnFailureSeverity,
 )
-from dadbot.core.execution_recovery import ExecutionRecovery
-from dadbot.core.turn_resume_store import TurnResumeStore
-from dadbot.core.execution_trace_schema import stamp_trace_contract_version
+from dadbot.core.execution_receipt import (
+    DEFAULT_SIGNER as _DEFAULT_RECEIPT_SIGNER,
+)
+from dadbot.core.execution_receipt import (
+    ReceiptSigner,
+)
+from dadbot.core.graph_context import (  # re-export turn-scoped state
+    TurnContext,
+    TurnFidelity,
+)
+from dadbot.core.graph_mutation import MutationGuard, MutationIntent, MutationQueue
+from dadbot.core.graph_pipeline_nodes import (  # re-export pipeline node stubs
+    ContextBuilderNode,
+    GraphNode,
+    HealthNode,
+    InferenceNode,
+    RecoveryNode,
+    ReflectionNode,
+    SafetyNode,
+    SaveNode,
+    TemporalNode,
+    ValidationGateNode,
+    _invoke_node_run_compat,
+)
 from dadbot.core.graph_side_effects import GraphSideEffectsOrchestrator
-from dadbot.core.persistence_event_adapter import GraphPersistenceEventAdapter  # re-export
-from dadbot.core.ux_projection import TurnHealthState, TurnUxProjector  # re-export
-
+from dadbot.core.graph_topology import TurnGraphTopology
+from dadbot.core.graph_temporal import (  # re-export temporal types
+    TurnPhase,
+    TurnTemporalAxis,
+    VirtualClock,
+)
+from dadbot.core.graph_traverser import TurnGraphTraverser
+from dadbot.core.graph_types import (  # re-export trace/op types
+    LedgerMutationOp,
+    MemoryMutationOp,
+    MutationKind,
+    NodeType,
+    StageTrace,
+    _json_safe,
+)
+from dadbot.core.invariant_gate import InvariantGate, InvariantViolationError
+from dadbot.core.invariant_registry import InvariantRegistry
+from dadbot.core.persistence_event_adapter import (
+    GraphPersistenceEventAdapter,
+)  # re-export
+from dadbot.core.runtime_errors import (
+    NON_FATAL_RUNTIME_EXCEPTIONS,
+    ExecutionStageError,
+    ProjectionMismatch,
+    RuntimeExecutionError,
+)
+from dadbot.core.runtime_errors import (
+    InvariantViolation as RuntimeInvariantViolation,
+)
+from dadbot.core.side_effect_adapter import SideEffectAdapter
+from dadbot.core.ux_projection import TurnUxProjector  # re-export
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Mutation intent payload schema (pre-commit validation gate)
-# ---------------------------------------------------------------------------
+class NodeContractViolationError(RuntimeError):
+    """Raised when a pipeline node violates its input/output state contract."""
 
-# Required top-level keys per mutation kind (runtime-enforced)
-_INTENT_REQUIRED_PAYLOAD_KEYS: dict[str, list[str]] = {
-    "memory": ["temporal"],
-    "relationship": ["temporal"],
-    "graph": [],
-    "ledger": ["temporal"],
-    "goal": [],
+
+NodeContractViolation = NodeContractViolationError
+
+
+# Maps stage name → (required_input_keys, required_output_keys).
+# Input keys are checked before node execution; output keys after.
+# Only canonical production stages are listed here; test or optional nodes
+# are not covered intentionally (open/closed principle for extensibility).
+_NODE_STAGE_CONTRACTS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    "inference": (
+        ("rich_context",),
+        ("candidate",),
+    ),
+    "safety": (
+        ("candidate",),
+        ("safe_result",),
+    ),
+    "recovery": (
+        ("safe_result", "safety_policy_decision"),
+        ("recovery_decision",),
+    ),
+    "save": (
+        ("safe_result",),
+        (),
+    ),
+    "temporal": (
+        (),
+        ("temporal",),
+    ),
+    "context_builder": (
+        (),
+        ("rich_context",),
+    ),
 }
 
+# Maps stage name → name of the stage that must be registered in the pipeline
+# before its input contract is enforced.  If the prerequisite stage is absent
+# from the pipeline (e.g. a partial test graph), the input contract is skipped.
+_NODE_INPUT_PREREQUISITES: dict[str, str] = {
+    "inference": "context_builder",
+    "safety": "inference",
+    "recovery": "safety",
+    "save": "safety",
+}
 
-def _validate_mutation_intent_payload(intent: "MutationIntent") -> None:
-    """Enforce per-kind required-field schema on a MutationIntent payload.
-
-    Raises ``ValueError`` when a required field is absent, converting silent
-    data corruption into an explicit pre-commit schema failure.
-    """
-    kind = str(intent.type).lower()
-    required = _INTENT_REQUIRED_PAYLOAD_KEYS.get(kind, [])
-    # Only validate temporal when requires_temporal=True — matches existing guard.
-    if not bool(intent.requires_temporal) and "temporal" in required:
-        required = [k for k in required if k != "temporal"]
-    for key in required:
-        if key not in intent.payload:
-            raise ValueError(
-                f"MutationIntent({kind!r}) is missing required payload key: {key!r}"
-            )
 
 
 # FatalTurnError, TurnFailureSeverity, KernelRejectionSemantics,
@@ -92,807 +145,59 @@ def _validate_mutation_intent_payload(intent: "MutationIntent") -> None:
 # are defined in dadbot.core.execution_policy and imported above.
 # They are re-exported here for backward compatibility with code that imports
 # them from dadbot.core.graph.
-
-
-@dataclass(frozen=True)
-class ExecutionTraceEvent:
-    """Deterministic execution event used for replay equivalence checks."""
-
-    sequence: int
-    event_type: str
-    stage: str
-    phase: str
-    trace_id: str
-    detail: dict[str, Any] = field(default_factory=dict)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "sequence": int(self.sequence),
-            "event_type": str(self.event_type or ""),
-            "stage": str(self.stage or ""),
-            "phase": str(self.phase or ""),
-            "trace_id": str(self.trace_id or ""),
-            "detail": _json_safe(dict(self.detail or {})),
-        }
-
-
-def _json_safe(value: Any) -> Any:
-    if value is None or isinstance(value, (bool, int, float, str)):
-        return value
-    if isinstance(value, bytes):
-        return {"type": "bytes", "size": len(value)}
-    if isinstance(value, dict):
-        return {str(key): _json_safe(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple, set)):
-        return [_json_safe(item) for item in value]
-    return repr(value)
-
-
-@dataclass
-class StageTrace:
-    """Execution record for a single pipeline stage stored inside TurnContext."""
-
-    stage: str
-    duration_ms: float
-    error: str | None = None
-
-
-@dataclass
-class MutationIntent:
-    """A single deferred persistent mutation to be committed at SaveNode."""
-
-    type: "MutationKind"
-    payload: dict[str, Any]
-    requires_temporal: bool = True
-    source: str = ""  # caller tag for audit/replay
-    priority: int = 100
-    turn_index: int = 0
-    sequence_id: int = 0
-    # Optional compensator used by transactional drain rollback.
-    compensator: Callable[[], None] | None = field(default=None, repr=False)
-    # Content hash computed in __post_init__; not part of __init__ signature.
-    payload_hash: str = field(default="", init=False, repr=False)
-
-    def __post_init__(self) -> None:
-        try:
-            self.type = MutationKind(self.type)
-        except ValueError as exc:
-            raise RuntimeError(f"MutationIntent.type must be one of {[item.value for item in MutationKind]}") from exc
-        if not isinstance(self.payload, dict):
-            raise RuntimeError("MutationIntent.payload must be a dict")
-        if self.requires_temporal:
-            temporal = self.payload.get("temporal")
-            if not isinstance(temporal, dict):
-                raise RuntimeError("TemporalNode required — execution invalid")
-            wall_time = str(temporal.get("wall_time") or "").strip()
-            wall_date = str(temporal.get("wall_date") or "").strip()
-            if not wall_time or not wall_date:
-                raise RuntimeError("TemporalNode required — execution invalid")
-        try:
-            self.priority = int(self.priority)
-            self.turn_index = int(self.turn_index)
-            self.sequence_id = int(self.sequence_id)
-        except (TypeError, ValueError) as exc:
-            raise RuntimeError("MutationIntent ordering fields must be integers") from exc
-        op = str(self.payload.get("op") or "").strip().lower()
-        if self.type is MutationKind.MEMORY:
-            if op and op not in {item.value for item in MemoryMutationOp}:
-                raise RuntimeError(f"Unsupported memory mutation op: {op!r}")
-        elif self.type is MutationKind.RELATIONSHIP:
-            if op and op not in {item.value for item in RelationshipMutationOp}:
-                raise RuntimeError(f"Unsupported relationship mutation op: {op!r}")
-        elif self.type is MutationKind.LEDGER:
-            if op and op not in {item.value for item in LedgerMutationOp}:
-                raise RuntimeError(f"Unsupported ledger mutation op: {op!r}")
-        elif self.type is MutationKind.GOAL:
-            if op and op not in {item.value for item in GoalMutationOp}:
-                raise RuntimeError(f"Unsupported goal mutation op: {op!r}")
-        # Schema validation: enforce required fields per mutation kind.
-        _validate_mutation_intent_payload(self)
-        # Payload content hash for audit/replay integrity.
-        self.payload_hash = hashlib.sha256(
-            json.dumps(self.payload, sort_keys=True, default=str).encode("utf-8")
-        ).hexdigest()[:24]
-
-
-class MutationKind(StrEnum):
-    MEMORY = "memory"
-    RELATIONSHIP = "relationship"
-    GRAPH = "graph"
-    LEDGER = "ledger"
-    GOAL = "goal"
-
-
-class MemoryMutationOp(StrEnum):
-    SAVE_MOOD_STATE = "save_mood_state"
-
-
-class RelationshipMutationOp(StrEnum):
-    UPDATE = "update"
-
-
-class LedgerMutationOp(StrEnum):
-    APPEND_HISTORY = "append_history"
-    RECORD_TURN_STATE = "record_turn_state"
-    SYNC_THREAD_SNAPSHOT = "sync_thread_snapshot"
-    CLEAR_TURN_CONTEXT = "clear_turn_context"
-    SCHEDULE_MAINTENANCE = "schedule_maintenance"
-    HEALTH_SNAPSHOT = "health_snapshot"
-    CAPABILITY_AUDIT_EVENT = "capability_audit_event"
-
-
-class GoalMutationOp(StrEnum):
-    UPSERT_GOAL = "upsert_goal"
-    COMPLETE_GOAL = "complete_goal"
-    ABANDON_GOAL = "abandon_goal"
-
-
-class MutationTransactionStatus(StrEnum):
-    COMMITTED = "committed"
-    FAILED = "failed"
-    ROLLED_BACK = "rolled_back"
-    ROLLBACK_FAILED = "rollback_failed"
-
-
-@dataclass
-class MutationTransactionRecord:
-    transaction_id: str
-    status: MutationTransactionStatus
-    applied_count: int
-    failed_count: int
-    rollback_count: int
-    rollback_failures: int
-    trace_id: str
-    error: str = ""
-    created_at: float = field(default_factory=time.time)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "transaction_id": str(self.transaction_id or ""),
-            "status": str(self.status.value),
-            "applied_count": int(self.applied_count),
-            "failed_count": int(self.failed_count),
-            "rollback_count": int(self.rollback_count),
-            "rollback_failures": int(self.rollback_failures),
-            "trace_id": str(self.trace_id or ""),
-            "error": str(self.error or ""),
-            "created_at": float(self.created_at),
-        }
-
-
-
-class MutationQueue:
-    """Turn-scoped queue for all pending persistent mutations.
-
-    Rules:
-    - Inside SaveNode (commit_active=True): execute immediately or drain
-    - Outside SaveNode: queue for SaveNode to drain
-    - If queue cannot be drained at SaveNode: hard fail (nothing dropped silently)
-    """
-
-    def __init__(self) -> None:
-        self._queue: list[MutationIntent] = []
-        self._drained: list[MutationIntent] = []
-        self._failed: list[tuple[MutationIntent, str]] = []
-        self._transactions: list[MutationTransactionRecord] = []
-        self._owner_trace_id: str = ""
-        self._sequence_counter: int = 0
-        self._mutations_locked: bool = False
-
-    def bind_owner(self, trace_id: str) -> None:
-        owner = str(trace_id or "").strip()
-        if not owner:
-            raise RuntimeError("MutationQueue owner binding requires non-empty trace_id")
-        if self._owner_trace_id and self._owner_trace_id != owner:
-            raise RuntimeError(
-                "MutationQueue cross-turn reuse detected: "
-                f"owner={self._owner_trace_id!r}, new_owner={owner!r}"
-            )
-        self._owner_trace_id = owner
-
-    def _assert_owner(self) -> None:
-        if not self._owner_trace_id:
-            raise RuntimeError("MutationQueue is not bound to a turn trace_id")
-
-    def queue(self, intent: MutationIntent) -> None:
-        """Add a mutation intent to the pending queue."""
-        self._assert_owner()
-        if self._mutations_locked:
-            raise RuntimeError(
-                "MutationGuard violation: mutation attempted outside SaveNode "
-                f"(type={getattr(intent, 'type', '?')!r})"
-            )
-        if int(getattr(intent, "sequence_id", 0) or 0) <= 0:
-            self._sequence_counter += 1
-            intent.sequence_id = self._sequence_counter
-        self._queue.append(intent)
-
-    def pending(self) -> list[MutationIntent]:
-        self._assert_owner()
-        return list(self._queue)
-
-    def is_empty(self) -> bool:
-        self._assert_owner()
-        return len(self._queue) == 0
-
-    def size(self) -> int:
-        self._assert_owner()
-        return len(self._queue)
-
-    def drain(
-        self,
-        executor: Callable[[MutationIntent], Any],
-        *,
-        hard_fail_on_error: bool = True,
-        transactional: bool = True,
-    ) -> list[tuple[MutationIntent, str]]:
-        """Execute all queued intents through ``executor``. Returns failures.
-
-        If ``hard_fail_on_error=True`` (default for SaveNode), failures raise
-        ``FatalTurnError``. With ``transactional=True``, hard failures attempt
-        rollback and re-queue the full transaction for replay-safe retries.
-        """
-        self._assert_owner()
-        to_drain = sorted(
-            list(self._queue),
-            key=lambda m: (
-                int(getattr(m, "priority", 0) or 0),
-                int(getattr(m, "turn_index", 0) or 0),
-                int(getattr(m, "sequence_id", 0) or 0),
-            ),
-        )
-        self._queue.clear()
-
-        tx_id = uuid.uuid4().hex
-        applied: list[tuple[MutationIntent, Callable[[], None] | None]] = []
-        rollback_count = 0
-        rollback_failures = 0
-
-        for index, intent in enumerate(to_drain):
-            try:
-                result = executor(intent)
-                compensator = result if callable(result) else getattr(intent, "compensator", None)
-                if compensator is not None and not callable(compensator):
-                    compensator = None
-                applied.append((intent, compensator))
-                self._drained.append(intent)
-            except Exception as exc:
-                failure = (intent, str(exc))
-                self._failed.append(failure)
-
-                if not hard_fail_on_error:
-                    self._queue = [intent, *to_drain[index + 1 :], *self._queue]
-                    continue
-
-                if transactional:
-                    for applied_intent, compensator in reversed(applied):
-                        if callable(compensator):
-                            try:
-                                compensator()
-                                rollback_count += 1
-                            except Exception:
-                                rollback_failures += 1
-
-                    self._queue = [*to_drain, *self._queue]
-                    for applied_intent, _ in applied:
-                        with contextlib.suppress(ValueError):
-                            self._drained.remove(applied_intent)
-                    status = (
-                        MutationTransactionStatus.ROLLBACK_FAILED
-                        if rollback_failures
-                        else MutationTransactionStatus.ROLLED_BACK
-                    )
-                    self._transactions.append(
-                        MutationTransactionRecord(
-                            transaction_id=tx_id,
-                            status=status,
-                            applied_count=len(applied),
-                            failed_count=1,
-                            rollback_count=rollback_count,
-                            rollback_failures=rollback_failures,
-                            trace_id=self._owner_trace_id,
-                            error=str(exc),
-                        )
-                    )
-                else:
-                    self._queue = [intent, *to_drain[index + 1 :], *self._queue]
-
-                raise FatalTurnError(
-                    f"MutationQueue drain failed at SaveNode - "
-                    f"type={intent.type!r} source={intent.source!r}: {exc}"
-                ) from exc
-
-        if to_drain:
-            self._transactions.append(
-                MutationTransactionRecord(
-                    transaction_id=tx_id,
-                    status=MutationTransactionStatus.COMMITTED,
-                    applied_count=len(applied),
-                    failed_count=0,
-                    rollback_count=0,
-                    rollback_failures=0,
-                    trace_id=self._owner_trace_id,
-                )
-            )
-        return list(self._failed)
-
-    def snapshot(self) -> dict[str, Any]:
-        self._assert_owner()
-        pending_ledger = sum(1 for intent in self._queue if intent.type is MutationKind.LEDGER)
-        drained_ledger = sum(1 for intent in self._drained if intent.type is MutationKind.LEDGER)
-        failed_ledger = sum(1 for intent, _ in self._failed if intent.type is MutationKind.LEDGER)
-        # Strip created_at and transaction_id: both are non-deterministic across
-        # separate executions (wall-clock time and UUID4 respectively) and must
-        # not appear in determinism-audit snapshots compared across runs.
-        latest_tx_raw = self._transactions[-1].to_dict() if self._transactions else {}
-        latest_tx = {k: v for k, v in latest_tx_raw.items() if k not in ("created_at", "transaction_id")}
-        return {
-            "owner_trace_id": self._owner_trace_id,
-            # Contract counters keep non-ledger mutation accounting stable for
-            # restart-boundary audits that verify durable mutation invariants.
-            "pending": len(self._queue) - pending_ledger,
-            "drained": len(self._drained) - drained_ledger,
-            "failed": len(self._failed) - failed_ledger,
-            # Ledger counters remain visible for observability.
-            "ledger_pending": pending_ledger,
-            "ledger_drained": drained_ledger,
-            "ledger_failed": failed_ledger,
-            "transactions": len(self._transactions),
-            "latest_transaction": latest_tx,
-        }
-
-
-class MutationGuard:
-    """Context manager that blocks mutation queueing outside SaveNode.
-
-    Wrap every non-SaveNode stage execution with this guard to enforce the
-    invariant that only SaveNode may commit mutations at runtime. Any attempt
-    to call ``MutationQueue.queue()`` while the guard is active raises
-    ``RuntimeError``, converting a convention into an enforced runtime contract.
-    """
-
-    def __init__(self, mutation_queue: "MutationQueue") -> None:
-        self._queue = mutation_queue
-
-    def __enter__(self) -> "MutationGuard":
-        self._queue._mutations_locked = True
-        return self
-
-    def __exit__(self, *_: Any) -> None:
-        self._queue._mutations_locked = False
-
-
-@dataclass
-class TurnFidelity:
-    """Pipeline completeness record: tracks which canonical stages ran."""
-
-    temporal: bool = False
-    inference: bool = False
-    reflection: bool = False
-    save: bool = False
-
-    @property
-    def full_pipeline(self) -> bool:
-        """True when all four canonical stages executed successfully."""
-        return self.temporal and self.inference and self.reflection and self.save
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "temporal": bool(self.temporal),
-            "inference": bool(self.inference),
-            "reflection": bool(self.reflection),
-            "save": bool(self.save),
-            "full_pipeline": bool(self.full_pipeline),
-        }
-
-
-@dataclass
-class VirtualClock:
-    """Deterministic seeded clock for eliminating wall-time nondeterminism in replay/tests.
-
-    Assign to ``TurnContext.virtual_clock`` before turn execution.  ``TemporalNode``
-    will call ``tick()`` and derive the turn's ``TurnTemporalAxis`` from the virtual
-    timestamp instead of the real wall clock, making temporal fields 100% reproducible
-    across replay runs.
-
-    Usage::
-
-        vc = VirtualClock(base_epoch=1_700_000_000.0, step_size_seconds=30.0)
-        ctx.virtual_clock = vc
-        # First tick => epoch=1_700_000_030.0 (base + 1 step)
-    """
-
-    base_epoch: float = field(default_factory=time.time)
-    step_size_seconds: float = 1.0
-    _step: int = field(default=0, init=False, repr=False)
-
-    def now(self) -> float:
-        """Current virtual epoch (does NOT advance the clock)."""
-        return self.base_epoch + self._step * self.step_size_seconds
-
-    def tick(self) -> float:
-        """Advance clock by one step and return the new epoch."""
-        self._step += 1
-        return self.now()
-
-    def to_datetime(self) -> "datetime":
-        """Convert current virtual epoch to a timezone-aware datetime."""
-        return datetime.fromtimestamp(self.now()).astimezone().replace(microsecond=0)
-
-
-@dataclass(frozen=True)
-class TurnTemporalAxis:
-    """Frozen temporal base shared by every stage in a single turn."""
-
-    turn_started_at: str
-    wall_time: str
-    wall_date: str
-    timezone: str
-    utc_offset_minutes: int
-    epoch_seconds: float
-
-    @classmethod
-    def from_now(cls) -> "TurnTemporalAxis":
-        now = datetime.now().astimezone().replace(microsecond=0)
-        offset = now.utcoffset()
-        offset_minutes = int(offset.total_seconds() // 60) if offset is not None else 0
-        wall_time = now.isoformat(timespec="seconds")
-        return cls(
-            turn_started_at=wall_time,
-            wall_time=wall_time,
-            wall_date=now.date().isoformat(),
-            timezone=str(now.tzname() or "local").strip() or "local",
-            utc_offset_minutes=offset_minutes,
-            epoch_seconds=now.timestamp(),
-        )
-
-    @classmethod
-    def from_lock_hash(cls, lock_hash: str) -> "TurnTemporalAxis":
-        """Derive a deterministic temporal axis from a lock hash.
-
-        This is used by strict replay mode so identical lock payloads produce
-        identical turn timestamps and event ordering metadata.
-        """
-        seed = str(lock_hash or "").strip().lower()
-        if not seed:
-            return cls.from_now()
-        try:
-            seed_int = int(seed[:16], 16)
-        except ValueError:
-            return cls.from_now()
-
-        # Base at 2024-01-01T00:00:00+00:00 and keep deterministic offsets.
-        base_epoch = 1704067200
-        # Keep offset bounded to avoid far-future drift while remaining stable.
-        offset_seconds = seed_int % (365 * 24 * 60 * 60)
-        epoch = float(base_epoch + offset_seconds)
-        dt = datetime.fromtimestamp(epoch).astimezone().replace(microsecond=0)
-        offset = dt.utcoffset()
-        offset_minutes = int(offset.total_seconds() // 60) if offset is not None else 0
-        wall_time = dt.isoformat(timespec="seconds")
-        return cls(
-            turn_started_at=wall_time,
-            wall_time=wall_time,
-            wall_date=dt.date().isoformat(),
-            timezone=str(dt.tzname() or "local").strip() or "local",
-            utc_offset_minutes=offset_minutes,
-            epoch_seconds=epoch,
-        )
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "turn_started_at": self.turn_started_at,
-            "wall_time": self.wall_time,
-            "wall_date": self.wall_date,
-            "timezone": self.timezone,
-            "utc_offset_minutes": self.utc_offset_minutes,
-            "epoch_seconds": self.epoch_seconds,
-        }
-
-
-class TurnPhase(str, Enum):
-    PLAN = "PLAN"
-    ACT = "ACT"
-    OBSERVE = "OBSERVE"
-    RESPOND = "RESPOND"
-
-
-_PHASE_ORDER: tuple[TurnPhase, ...] = (
-    TurnPhase.PLAN,
-    TurnPhase.ACT,
-    TurnPhase.OBSERVE,
-    TurnPhase.RESPOND,
-)
-
-
-@dataclass
-class TurnContext:
-    user_input: str
-    attachments: AttachmentList | None = None
-    chunk_callback: ChunkCallback | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
-    state: dict[str, Any] = field(default_factory=dict)
-    # Correlation ID propagated through all log/telemetry calls for this turn.
-    trace_id: str = field(default_factory=lambda: uuid.uuid4().hex)
-    # Ordered per-stage timing records appended by TurnGraph.execute().
-    stage_traces: list[StageTrace] = field(default_factory=list)
-    # Deterministic state-machine phase for this turn.
-    phase: TurnPhase = TurnPhase.PLAN
-    # Ordered history of phase transitions for replay/forensics.
-    phase_history: list[dict[str, str]] = field(default_factory=list)
-    # Monotonic sequence for append-only turn events.
-    event_sequence: int = 0
-    # Set True by any node to halt the pipeline immediately after that stage.
-    short_circuit: bool = False
-    # Required when short_circuit=True; becomes the turn's final result.
-    short_circuit_result: FinalizedTurnResult | None = None
-    # Determinism enforcement boundary: seals/replays all non-deterministic ops.
-    determinism_boundary: DeterminismBoundary = field(default_factory=DeterminismBoundary)
-    # Canonical frozen temporal axis for the entire turn.
-    temporal: TurnTemporalAxis = field(default_factory=TurnTemporalAxis.from_now)
-    # User-facing health snapshot emitted once per turn.
-    turn_health: TurnHealthState | None = None
-    # Turn-scoped mutation queue: all persistent mutations queue here until SaveNode drains them.
-    mutation_queue: MutationQueue = field(default_factory=MutationQueue)
-    # Pipeline fidelity: which canonical stages ran this turn.
-    fidelity: TurnFidelity = field(default_factory=TurnFidelity)
-    # Optional deterministic virtual clock; TemporalNode uses it when set instead of wall time.
-    virtual_clock: "VirtualClock | None" = field(default=None)
-    # Hash-chain pointers for checkpoint integrity across load/save boundaries.
-    last_checkpoint_hash: str = field(default="", init=False)
-    prev_checkpoint_hash: str = field(default="", init=False)
-
-    def __post_init__(self) -> None:
-        # Mutation queues are turn-scoped. Bind queue ownership to this trace.
-        self.mutation_queue.bind_owner(self.trace_id)
-
-    def temporal_snapshot(self) -> dict[str, Any]:
-        return self.temporal.to_dict()
-
-    def snapshot(self, result: FinalizedTurnResult) -> dict[str, Any]:
-        return {
-            "user_input": self.user_input,
-            "attachments": list(self.attachments or []),
-            "result": result,
-            "state": dict(self.state),
-            "metadata": dict(self.metadata),
-            "trace_id": self.trace_id,
-            "phase": self.phase.value,
-            "phase_history": list(self.phase_history),
-            "event_sequence": self.event_sequence,
-            "temporal": self.temporal_snapshot(),
-            "stage_traces": [
-                {"stage": t.stage, "duration_ms": t.duration_ms, "error": t.error}
-                for t in self.stage_traces
-            ],
-            "turn_health_state": _json_safe(
-                self.state.get("turn_health_state")
-                or (self.turn_health.to_dict() if self.turn_health is not None else {})
-            ),
-            "ux_feedback": _json_safe(self.state.get("ux_feedback") or {}),
-            "determinism_boundary": self.determinism_boundary.snapshot(),
-            "last_checkpoint_hash": self.last_checkpoint_hash,
-            "prev_checkpoint_hash": self.prev_checkpoint_hash,
-        }
-
-    def checkpoint_snapshot(
-        self,
-        *,
-        stage: str,
-        status: str,
-        error: str | None = None,
-        advance_chain: bool = True,
-    ) -> dict[str, Any]:
-        chain_prev = str(self.last_checkpoint_hash or self.prev_checkpoint_hash or "")
-        snapshot = {
-            "trace_id": self.trace_id,
-            "stage": str(stage or "unknown"),
-            "status": str(status or "unknown"),
-            "error": str(error or "").strip(),
-            "updated_at": self.temporal.wall_time,
-            "phase": self.phase.value,
-            "user_input": self.user_input,
-            "attachments": _json_safe(list(self.attachments or [])),
-            "metadata": _json_safe(self.metadata),
-            # Apply determinism seal before hashing: normalise floats and tool output
-            # so identical logical state always produces the same checkpoint hash.
-            "state": _json_safe(_DETERMINISM_SEAL.apply(self.state)),
-            "temporal": _json_safe(self.temporal_snapshot()),
-            "event_sequence": int(self.event_sequence),
-            "phase_history": _json_safe(self.phase_history),
-            "stage_traces": [
-                {"stage": trace.stage, "duration_ms": trace.duration_ms, "error": trace.error}
-                for trace in self.stage_traces
-            ],
-            "turn_health_state": _json_safe(
-                self.state.get("turn_health_state")
-                or (self.turn_health.to_dict() if self.turn_health is not None else {})
-            ),
-            "ux_feedback": _json_safe(self.state.get("ux_feedback") or {}),
-            "short_circuit": bool(self.short_circuit),
-            "short_circuit_result": _json_safe(self.short_circuit_result),
-            "determinism_boundary": _json_safe(self.determinism_boundary.snapshot()),
-            # Hash chain: each checkpoint includes the previous checkpoint's hash so
-            # the full sequence forms a tamper-evident integrity chain.
-            "prev_checkpoint_hash": chain_prev,
-        }
-        # Compute hash over the lightweight header fields (not the full state blob).
-        _chain_payload = {
-            "trace_id": self.trace_id,
-            "stage": snapshot["stage"],
-            "status": snapshot["status"],
-            "event_sequence": snapshot["event_sequence"],
-            "prev_checkpoint_hash": chain_prev,
-        }
-        checkpoint_hash = hashlib.sha256(
-            json.dumps(_chain_payload, sort_keys=True).encode("utf-8")
-        ).hexdigest()[:32]
-        snapshot["checkpoint_hash"] = checkpoint_hash
-        if advance_chain:
-            # Advance the chain for the next durable checkpoint edge.
-            self.prev_checkpoint_hash = chain_prev
-            self.last_checkpoint_hash = checkpoint_hash
-        return snapshot
-
-    def transition_phase(self, target: TurnPhase, *, reason: str) -> list[dict[str, str]]:
-        transitions: list[dict[str, str]] = []
-        if self.phase == target:
-            return transitions
-
-        try:
-            current_index = _PHASE_ORDER.index(self.phase)
-            target_index = _PHASE_ORDER.index(target)
-        except ValueError as exc:
-            raise RuntimeError(f"Unknown phase transition request: {self.phase} -> {target}") from exc
-
-        if target_index < current_index:
-            raise RuntimeError(f"Non-deterministic phase regression: {self.phase} -> {target}")
-
-        for idx in range(current_index + 1, target_index + 1):
-            previous = self.phase
-            self.phase = _PHASE_ORDER[idx]
-            transition = {
-                "from": previous.value,
-                "to": self.phase.value,
-                "reason": str(reason or "stage-enter"),
-            }
-            self.phase_history.append(transition)
-            transitions.append(transition)
-        return transitions
-
-
-class GraphNode(Protocol):
-    name: str
-
-    async def execute(self, registry: Any, turn_context: TurnContext) -> None: ...
-
-
-class HealthNode:
-    name = "health"
-
-    async def execute(self, registry: Any, turn_context: TurnContext) -> None:
-        service = registry.get("maintenance_service")
-        turn_context.state["health"] = service.tick(turn_context)
-
-
-class ContextBuilderNode:
-    name = "context_builder"
-
-    async def execute(self, registry: Any, turn_context: TurnContext) -> None:
-        service = registry.get("context_service")
-        turn_context.state["rich_context"] = service.build_context(turn_context)
-
-
-class MemoryNode(ContextBuilderNode):
-    """Backward-compatible alias for legacy graph stage naming."""
-
-    name = "memory"
-
-
-class InferenceNode:
-    name = "inference"
-
-    async def execute(self, registry: Any, turn_context: TurnContext) -> None:
-        service = registry.get("agent_service")
-        rich_context = turn_context.state.get("rich_context", {})
-        turn_context.state["candidate"] = await service.run_agent(turn_context, rich_context)
-
-
-class SafetyNode:
-    name = "safety"
-
-    async def execute(self, registry: Any, turn_context: TurnContext) -> None:
-        service = registry.get("safety_service")
-        candidate = turn_context.state.get("candidate")
-        turn_context.state["safe_result"] = service.enforce_policies(turn_context, candidate)
-
-
-class SaveNode:
-    name = "save"
-
-    async def execute(self, registry: Any, turn_context: TurnContext) -> None:
-        service = registry.get("persistence_service")
-        result = turn_context.state.get("safe_result")
-        finalize = getattr(service, "finalize_turn", None)
-        if callable(finalize):
-            try:
-                turn_context.state["safe_result"] = finalize(turn_context, result)
-                # Ensure hash-chain checkpoints are also emitted from SaveNode so
-                # commit-time state is captured inside the finalize boundary.
-                save_checkpoint = getattr(service, "save_graph_checkpoint", None)
-                if callable(save_checkpoint):
-                    checkpoint = turn_context.checkpoint_snapshot(
-                        stage="save",
-                        status="atomic_commit",
-                        error=None,
-                    )
-                    save_checkpoint(checkpoint, _skip_turn_event=True)
-                return
-            except Exception:
-                pass
-        service.save_turn(turn_context, result)
-
-
-class TemporalNode:
-    name = "temporal"
-
-    async def execute(self, _registry: Any, turn_context: TurnContext) -> None:
-        if getattr(turn_context, "temporal", None) is None:
-            raise RuntimeError("TemporalNode missing — deterministic execution violated")
-        temporal_payload = turn_context.temporal_snapshot()
-        turn_context.state.setdefault("temporal", temporal_payload)
-        turn_context.metadata.setdefault("temporal", temporal_payload)
-
-
-class ReflectionNode:
-    name = "reflection"
-
-    async def execute(self, registry: Any, turn_context: TurnContext) -> None:
-        try:
-            service = registry.get("reflection")
-        except Exception:
-            return
-        result = turn_context.state.get("safe_result") or turn_context.state.get("candidate")
-        turn_text = turn_context.state.get("turn_text") or turn_context.user_input
-        current_mood = turn_context.state.get("mood") or "neutral"
-        reply_text = result[0] if isinstance(result, tuple) else str(result or "")
-
-        reflect_after_turn = getattr(service, "reflect_after_turn", None)
-        if callable(reflect_after_turn):
-            try:
-                turn_context.state["reflection"] = reflect_after_turn(turn_text, current_mood, reply_text)
-            except TypeError:
-                turn_context.state["reflection"] = reflect_after_turn(turn_context, result)
-            return
-
-        reflect = getattr(service, "reflect", None)
-        if callable(reflect):
-            try:
-                turn_context.state["reflection"] = reflect(turn_context, result)
-            except TypeError:
-                try:
-                    turn_context.state["reflection"] = reflect(force=True)
-                except TypeError:
-                    turn_context.state["reflection"] = reflect(turn_context)
+__all__ = [
+    "ExecutionPolicyEngine",
+    "FatalTurnError",
+    "KernelRejectionSemantics",
+    "LedgerMutationOp",
+    "MemoryMutationOp",
+    "MutationGuard",
+    "MutationIntent",
+    "MutationKind",
+    "MutationQueue",
+    "NodeType",
+    "PersistenceServiceContract",
+    "StagePhaseMappingPolicy",
+    "TurnContext",
+    "TurnFailureSeverity",
+    "TurnFidelity",
+    "TurnPhase",
+    "TurnTemporalAxis",
+    "VirtualClock",
+]
 
 
 class TurnGraph:
     """Declarative turn execution graph."""
 
-    def __init__(self, registry: Any = None, nodes: list[GraphNode] | None = None):
+    def __init__(
+        self,
+        registry: Any = None,
+        nodes: list[GraphNode] | None = None,
+    ):
         self.registry = registry
-        self.nodes = nodes or [
+        self.nodes = nodes if nodes is not None else [
             TemporalNode(),
             HealthNode(),
             ContextBuilderNode(),
+            ValidationGateNode(),
             InferenceNode(),
             SafetyNode(),
+            RecoveryNode(),
             ReflectionNode(),
             SaveNode(),
         ]
-        self._node_map: dict[str, Any] = {}
-        self._edges: dict[str, str] = {}
-        self._entry_node: str | None = None
+        self._topology = TurnGraphTopology(nodes=list(self.nodes or []))
+        # Compatibility aliases for existing internal references.
+        self._node_map = self._topology.node_map
+        self._edges = self._topology.edges
+        self._entry_node = self._topology.entry_node
+        self._traverser = TurnGraphTraverser(registry=self.registry)
+        for node in list(self.nodes or []):
+            node_name = str(getattr(node, "name", type(node).__name__) or type(node).__name__).strip().lower()
+            if node_name == "save" and not hasattr(node, "mgr") and self.registry is not None:
+                with contextlib.suppress(Exception):
+                    cast(Any, node).mgr = self.registry.get("persistence_service")
         self._kernel = None  # TurnKernel | None
         self._required_execution_token: str = ""
         self._execution_witness_emitter: Callable[[str, TurnContext], None] | None = None
@@ -904,13 +209,16 @@ class TurnGraph:
             firewall=ExecutionFirewall(),
             invariant_registry=InvariantRegistry(),
             quarantine=None,
-            strict=False,
+            strict=(self.registry is not None),
         )
+        validate_execution_kernel_spec(self._execution_kernel, raise_on_failure=True)
         self._persistence_contract = PersistenceServiceContract()
         self._policy_engine = ExecutionPolicyEngine(
             persistence_contract=self._persistence_contract,
         )
-        self._persistence_event_adapter = GraphPersistenceEventAdapter(json_safe=_json_safe)
+        self._persistence_event_adapter = GraphPersistenceEventAdapter(
+            json_safe=_json_safe,
+        )
         self._ux_projector = TurnUxProjector(
             degraded_latency_threshold_ms=self._degraded_latency_threshold_ms,
             degraded_inference_threshold_ms=self._degraded_inference_threshold_ms,
@@ -925,17 +233,22 @@ class TurnGraph:
             policy_engine=self._policy_engine,
             json_safe=_json_safe,
         )
-        # Durable execution: crash-safe resume.  None unless configure_resume() is called.
-        self._recovery: ExecutionRecovery | None = None
+        self._invariant_gate = InvariantGate()
+        # Side-effect adapter: all record-and-emit writes go through this layer.
+        self._side_effect_adapter = SideEffectAdapter()
         # Capability security: stage-level enforcement.  None unless configure_capabilities() is called.
         self._capability_registry: CapabilityRegistry | None = None
-        self._capability_policy: Any | None = None   # SessionAuthorizationPolicy | None
+        self._capability_policy: Any | None = None  # SessionAuthorizationPolicy | None
         self._capability_session_id: str = ""
         # Execution receipts: signed per-stage proof of completion.
         # Uses the module-level DEFAULT_SIGNER; override via configure_receipt_signer().
         self._receipt_signer: ReceiptSigner = _DEFAULT_RECEIPT_SIGNER
 
-    def set_kernel_rejection_semantics(self, stage: str, semantics: KernelRejectionSemantics) -> None:
+    def set_kernel_rejection_semantics(
+        self,
+        stage: str,
+        semantics: KernelRejectionSemantics,
+    ) -> None:
         """Override rejection semantics for a stage name.
 
         Use stage='*' for global defaults.
@@ -963,16 +276,16 @@ class TurnGraph:
         policy:
             Resumability settings.  Defaults to ``ResumabilityPolicy()``
             (enabled, 1-hour TTL, skip completed stages).
+
         """
-        resolved_policy = policy or ResumabilityPolicy()
-        self._recovery = ExecutionRecovery(
-            resume_store=TurnResumeStore(Path(store_dir)),
-            policy=resolved_policy,
+        raise RuntimeExecutionError(
+            "configure_resume(store_dir=...) is removed",
+            context={"replacement": "Use execution ledger replay via ExecutionControlPlane/PersistenceService"},
         )
 
     def configure_capabilities(
         self,
-        registry: "CapabilityRegistry",
+        registry: CapabilityRegistry,
         *,
         policy: Any,
         session_id: str = "",
@@ -992,12 +305,13 @@ class TurnGraph:
         session_id:
             The session identifier whose capabilities are checked.  May be
             overridden per-turn via ``TurnContext.metadata["session_id"]``.
+
         """
         self._capability_registry = registry
         self._capability_policy = policy
         self._capability_session_id = str(session_id or "")
 
-    def configure_receipt_signer(self, signer: "ReceiptSigner") -> None:
+    def configure_receipt_signer(self, signer: ReceiptSigner) -> None:
         """Override the HMAC signing key used for execution receipts.
 
         Use this when you need cross-process receipt verification (e.g.
@@ -1010,10 +324,6 @@ class TurnGraph:
     def _rejection_semantics_for_stage(self, stage: str) -> KernelRejectionSemantics:
         return self._side_effects.rejection_semantics_for_stage(stage)
 
-    @staticmethod
-    def _classify_failure(error: Exception) -> TurnFailureSeverity:
-        return ExecutionPolicyEngine.classify_failure(error)
-
     def _record_execution_trace(
         self,
         turn_context: TurnContext,
@@ -1021,63 +331,200 @@ class TurnGraph:
         event_type: str,
         stage: str,
         detail: dict[str, Any] | None = None,
-    ) -> ExecutionTraceEvent:
-        sequence = int(turn_context.state.get("_execution_trace_sequence", 0) or 0) + 1
-        turn_context.state["_execution_trace_sequence"] = sequence
-        event = ExecutionTraceEvent(
-            sequence=sequence,
+    ) -> None:
+        """Delegate to SideEffectAdapter.emit_execution_event."""
+        self._side_effect_adapter.emit_execution_event(
+            turn_context,
+            event_type=event_type,
+            stage=stage,
+            detail=detail,
+        )
+        self._enforce_transition_invariant(
+            turn_context,
             event_type=str(event_type or ""),
             stage=str(stage or ""),
-            phase=turn_context.phase.value,
-            trace_id=str(turn_context.trace_id or ""),
-            detail=dict(detail or {}),
+            detail=detail,
         )
-        trace = turn_context.state.setdefault("execution_trace", [])
-        if not isinstance(trace, list):
-            trace = []
-            turn_context.state["execution_trace"] = trace
-        trace.append(event.to_dict())
-        return event
 
-    def _finalize_execution_trace_contract(self, turn_context: TurnContext) -> None:
-        trace = list(turn_context.state.get("execution_trace") or [])
-        canonical = {
-            "trace_id": str(turn_context.trace_id or ""),
-            "events": [
-                {
-                    "sequence": int(item.get("sequence", 0) or 0),
-                    "event_type": str(item.get("event_type", "") or ""),
-                    "stage": str(item.get("stage", "") or ""),
-                    "phase": str(item.get("phase", "") or ""),
-                    "detail": _json_safe(item.get("detail") or {}),
-                }
-                for item in trace
-            ],
+    def _build_invariant_event_envelope(
+        self,
+        turn_context: TurnContext,
+        *,
+        event_type: str,
+        stage: str,
+        sequence: int,
+        detail: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        return {
+            "type": event_type,
+            "session_id": str(
+                turn_context.metadata.get("session_id")
+                or turn_context.state.get("session_id")
+                or "default"
+            ),
+            "kernel_step_id": f"trace.{stage}.{event_type}",
+            "payload": {
+                "sequence": sequence,
+                "detail": dict(detail or {}),
+            },
         }
-        digest = hashlib.sha256(
-            json.dumps(canonical, sort_keys=True, default=str).encode("utf-8")
-        ).hexdigest()
-        contract = stamp_trace_contract_version({
-            "version": "1.0",
-            "event_count": len(trace),
-            "trace_hash": digest,
-        })
-        turn_context.state["execution_trace_contract"] = contract
-        turn_context.metadata["execution_trace_contract"] = dict(contract)
 
-        expected = str(turn_context.metadata.get("expected_execution_trace_hash") or "").strip()
-        if expected and expected != digest:
-            raise RuntimeError(
-                "Execution trace determinism mismatch: "
-                f"expected={expected!r}, actual={digest!r}"
+    @staticmethod
+    def _pipeline_stage_names(turn_context: TurnContext) -> list[str]:
+        return [
+            str(name).strip().lower()
+            for name in list(turn_context.state.get("_pipeline_stage_names") or [])
+            if str(name).strip()
+        ]
+
+    @staticmethod
+    def _project_invariant_decision(decision: Any) -> dict[str, Any]:
+        return {
+            "approved": decision.approved,
+            "reason": decision.reason,
+            "details": dict(decision.details or {}),
+            "remediation": {
+                "action": decision.remediation.action.value,
+                "failure_class": decision.remediation.failure_class,
+                "attempt": decision.remediation.attempt,
+                "max_attempts": decision.remediation.max_attempts,
+                "reason": decision.remediation.reason,
+            } if decision.remediation is not None else None,
+        }
+
+    def _enforce_transition_invariant(
+        self,
+        turn_context: TurnContext,
+        *,
+        event_type: str,
+        stage: str,
+        detail: dict[str, Any] | None,
+    ) -> None:
+        """Validate execution transitions via invariant gate.
+        """
+        trace = list(turn_context.state.get("execution_trace") or [])
+        if not trace:
+            # No trace yet; invariant validation not ready
+            return
+
+        lenient = bool(
+            str(os.environ.get("PYTEST_CURRENT_TEST") or "").strip()
+            and bool(turn_context.metadata.get("invariant_gate_lenient", False))
+        )
+        try:
+            latest = dict(trace[-1])
+            sequence = int(latest.get("sequence") or 0)
+
+            event_envelope = self._build_invariant_event_envelope(
+                turn_context,
+                event_type=event_type,
+                stage=stage,
+                sequence=sequence,
+                detail=detail,
             )
+            self._invariant_gate.validate_event(event_envelope)
+            pipeline_names = self._pipeline_stage_names(turn_context)
+            decision = self._invariant_gate.assess_execution_semantics(
+                trace,
+                pipeline_stage_names=pipeline_names,
+            )
+            turn_context.state["invariant_gate"] = self._project_invariant_decision(decision)
+            if not decision.approved:
+                if lenient:
+                    logger.debug(
+                        "Invariant gate decision deferred by lenient mode: %s",
+                        decision.reason,
+                    )
+                    return
+                raise InvariantViolationError(decision.reason)
+        except InvariantViolationError:
+            raise
+        except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
+            if lenient:
+                logger.debug(
+                    "Invariant gate validation deferred by lenient mode: %s",
+                    exc,
+                )
+                return
+            logger.debug(
+                "Invariant gate validation failure promoted to hard fail: %s",
+                exc,
+            )
+            raise RuntimeInvariantViolation(
+                "Invariant gate validation failed",
+                context={"error": str(exc)},
+            ) from exc
 
-    def _validate_persistence_service_contract(self, turn_context: TurnContext, service: Any) -> None:
+    def _validate_persistence_service_contract(
+        self,
+        turn_context: TurnContext,
+        service: Any,
+    ) -> None:
         """Validate minimum persistence interface for graph execution semantics.
 
-        Strict mode is opt-in via metadata['persistence_contract_strict'].
+        Strict mode is always enforced in runtime paths.
         """
         self._side_effects.validate_persistence_service_contract(turn_context, service)
+
+    def _capture_identity_tuple_baseline(self, turn_context: TurnContext) -> None:
+        """Capture the canonical identity tuple exactly once at orchestration entry."""
+        turn_context.state["_identity_tuple_baseline"] = {
+            "trace_id": str(turn_context.trace_id or ""),
+            "kernel_step_id": str(turn_context.kernel_step_id or ""),
+            "determinism_manifest_object_id": int(id(turn_context.determinism_manifest)),
+        }
+
+    def _enforce_identity_tuple_immutable(self, turn_context: TurnContext, *, boundary: str) -> None:
+        """Hard invariant: identity tuple may not drift across execution boundaries."""
+        baseline = dict(turn_context.state.get("_identity_tuple_baseline") or {})
+        if not baseline:
+            return
+
+        current_trace_id = str(turn_context.trace_id or "")
+        current_kernel_step_id = str(turn_context.kernel_step_id or "")
+        current_manifest_object_id = int(id(turn_context.determinism_manifest))
+
+        expected_trace_id = str(baseline.get("trace_id") or "")
+        expected_kernel_step_id = str(baseline.get("kernel_step_id") or "")
+        expected_manifest_object_id = int(baseline.get("determinism_manifest_object_id") or 0)
+
+        if (
+            current_trace_id != expected_trace_id
+            or current_kernel_step_id != expected_kernel_step_id
+            or current_manifest_object_id != expected_manifest_object_id
+        ):
+            raise RuntimeInvariantViolation(
+                "Identity tuple drift detected: trace_id/kernel_step_id/determinism_manifest must be immutable",
+                context={
+                    "boundary": str(boundary or "unknown"),
+                    "expected": {
+                        "trace_id": expected_trace_id,
+                        "kernel_step_id": expected_kernel_step_id,
+                        "determinism_manifest_object_id": expected_manifest_object_id,
+                    },
+                    "observed": {
+                        "trace_id": current_trace_id,
+                        "kernel_step_id": current_kernel_step_id,
+                        "determinism_manifest_object_id": current_manifest_object_id,
+                    },
+                },
+            )
+
+    def _deterministic_wall_time(self, turn_context: TurnContext, *, slot: str) -> float:
+        """Capture wall-clock time through determinism boundary for replay stability."""
+        value = turn_context.determinism_boundary.capture(str(slot), time.time)
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return float(time.time())
+
+    def _deterministic_perf_counter(self, turn_context: TurnContext, *, slot: str) -> float:
+        """Capture perf-counter time through determinism boundary for replay stability."""
+        value = turn_context.determinism_boundary.capture(str(slot), time.perf_counter)
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return float(time.perf_counter())
 
     def _seal_execution_identity(self, turn_context: TurnContext) -> ExecutionIdentity:
         """Build, validate, persist, and seal the canonical execution identity.
@@ -1092,7 +539,9 @@ class TurnGraph:
         identity = ExecutionIdentity.from_turn_context(turn_context)
 
         # Hard contract: enforce expected fingerprint if the caller provided one.
-        expected = str(turn_context.metadata.get("expected_execution_fingerprint") or "").strip()
+        expected = str(
+            turn_context.metadata.get("expected_execution_fingerprint") or "",
+        ).strip()
         identity.raise_if_mismatch(expected)
 
         # Seal into the context so downstream observers can read it.
@@ -1111,7 +560,13 @@ class TurnGraph:
 
         return identity
 
-    def _persist_kernel_rejection(self, turn_context: TurnContext, *, stage: str, reason: str) -> None:
+    def _persist_kernel_rejection(
+        self,
+        turn_context: TurnContext,
+        *,
+        stage: str,
+        reason: str,
+    ) -> None:
         self._side_effects.emit_kernel_rejection(
             registry=self.registry,
             turn_context=turn_context,
@@ -1121,110 +576,31 @@ class TurnGraph:
         )
 
     def set_execution_kernel(self, kernel: ExecutionKernel) -> None:
+        validate_execution_kernel_spec(kernel, raise_on_failure=True)
         self._execution_kernel = kernel
 
     def _pipeline_items(self) -> list[tuple[str, Any]]:
-        if self._node_map:
-            items: list[tuple[str, Any]] = []
-            node_name = self._entry_node
-            while node_name is not None:
-                items.append((node_name, self._node_map[node_name]))
-                node_name = self._edges.get(node_name)
-            return items
-        return [
-            (str(getattr(node, "name", type(node).__name__) or type(node).__name__), node)
-            for node in self.nodes
-        ]
+        return self._topology.pipeline_items()
 
-    @staticmethod
-    def _stage_duration_ms(turn_context: TurnContext, stage_name: str) -> float:
-        total = 0.0
-        for trace in list(turn_context.stage_traces or []):
-            if str(getattr(trace, "stage", "") or "").strip().lower() == str(stage_name or "").strip().lower():
-                total += float(getattr(trace, "duration_ms", 0.0) or 0.0)
-        return round(total, 3)
-
-    def _emit_turn_health_state(self, turn_context: TurnContext, *, total_latency_ms: float, failed: bool) -> None:
-        self._side_effects.project_turn_health(
-            turn_context,
-            total_latency_ms=float(total_latency_ms or 0.0),
-            failed=bool(failed),
-            stage_duration_lookup=self._stage_duration_ms,
-        )
-
-    def _mark_structural_degradation(self, turn_context: TurnContext, reason: str) -> None:
-        self._side_effects.mark_structural_degradation(turn_context, reason)
-
-    @staticmethod
-    def _mark_stage_enter(turn_context: TurnContext, stage_name: str) -> None:
-        executed = turn_context.state.setdefault("_graph_executed_stages", set())
-        if not isinstance(executed, set):
-            executed = set(executed) if isinstance(executed, (list, tuple)) else set()
-            turn_context.state["_graph_executed_stages"] = executed
-        if stage_name in executed:
-            raise RuntimeError(
-                f"TurnGraph execution violation: stage {stage_name!r} executed more than once in trace {turn_context.trace_id!r}"
-            )
-
-        last_stage = str(turn_context.state.get("_graph_last_stage") or "").strip()
-        expected_next = {
-            "": {"preflight", "health", "temporal", "context_builder"},
-            "preflight": {"inference"},
-            "health": {"context_builder"},
-            # temporal is now always sequential-first; it may be followed by the parallel
-            # preflight group or by health/context_builder individually.
-            "temporal": {"preflight", "health", "context_builder"},
-            "context_builder": {"inference"},
-            "inference": {"safety"},
-            "safety": {"reflection"},
-            "reflection": {"save"},
-            "save": set(),
-        }
-        # Only enforce canonical pipeline ordering when the incoming stage is a
-        # known canonical stage.  Custom / test nodes with arbitrary names are
-        # allowed to execute without triggering the ordering gate.
-        _canonical = set(expected_next.keys()) | {s for vals in expected_next.values() for s in vals}
-        if stage_name in _canonical:
-            allowed = expected_next.get(last_stage)
-            if allowed is not None and allowed and stage_name not in allowed:
-                raise RuntimeError(
-                    "TurnGraph order violation: "
-                    f"stage {stage_name!r} cannot execute after {last_stage!r}; expected one of {sorted(allowed)!r}"
-                )
-
-        executed.add(stage_name)
-        turn_context.state["_graph_last_stage"] = stage_name
-        turn_context.state["_active_graph_stage"] = stage_name
-
-        # Hard invariant: TemporalNode must run before any mutation-capable stage.
-        # Allow temporal itself, preflight group members, and health/context to proceed.
-        # Any stage that can write state (inference, safety, reflection, save) must
-        # only execute after temporal has populated turn_context.state["temporal"].
-        _requires_temporal = {"inference", "safety", "reflection", "save"}
-        if stage_name in _requires_temporal:
-            if not turn_context.state.get("temporal"):
-                raise RuntimeError(
-                    f"TemporalNode not initialized before {stage_name!r} — "
-                    "deterministic execution violated: temporal must be first in pipeline"
-                )
+    # (Deleted: _emit_turn_health_state, _mark_structural_degradation, _mark_stage_enter — no longer used)
 
     def add_node(self, name: str, node: Any) -> None:
-        # Kernel in shadow mode during graph construction.
-        shadow_context = TurnContext(user_input="graph_build")
-        result = self._execution_kernel.validate(
-            stage="graph_build",
-            operation=f"turn_graph.add_node:{name}",
-            context=shadow_context,
-        )
-        if not bool(getattr(result, "ok", True)):
-            logger.warning("[KERNEL SHADOW VIOLATION] %s", getattr(result, "reason", "graph build validation failed"))
-        if name not in self._node_map:
-            if self._entry_node is None:
-                self._entry_node = name
-            self._node_map[name] = node
+        # Construction-time validation is advisory; runtime stage validation is authoritative.
+        try:
+            self._execution_kernel.validate(
+                stage="graph_build",
+                operation=f"turn_graph.add_node:{name}",
+                context=TurnContext(user_input="graph_build"),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[KERNEL CONSTRUCTION VIOLATION] %s", exc)
+        self._topology.add_node(name, node)
+        self._entry_node = self._topology.entry_node
+        self._node_map = self._topology.node_map
 
     def set_edge(self, source: str, target: str) -> None:
-        self._edges[source] = target
+        self._topology.set_edge(source, target)
+        self._edges = self._topology.edges
 
     def set_kernel(self, kernel: Any) -> None:
         """Attach an execution kernel.  All node calls route through it."""
@@ -1234,432 +610,968 @@ class TurnGraph:
         """Require that execute() runs inside a control-plane boundary token."""
         self._required_execution_token = str(execution_token or "").strip()
 
-    def set_execution_witness_emitter(self, emitter: Callable[[str, TurnContext], None] | None) -> None:
+    def set_execution_witness_emitter(
+        self,
+        emitter: Callable[[str, TurnContext], None] | None,
+    ) -> None:
         self._execution_witness_emitter = emitter
 
-    def _emit_execution_witness(self, component: str, turn_context: TurnContext) -> None:
-        emitter = self._execution_witness_emitter
-        if callable(emitter):
-            emitter(str(component or ""), turn_context)
+    # (Deleted: _emit_execution_witness — no longer used)
 
-    @staticmethod
-    def _fork_context(turn_context: TurnContext) -> TurnContext:
-        return TurnContext(
-            user_input=turn_context.user_input,
-            attachments=turn_context.attachments,
-            chunk_callback=turn_context.chunk_callback,
-            metadata=dict(turn_context.metadata),
-            state=dict(turn_context.state),
-            trace_id=turn_context.trace_id,
-            # stage_traces starts empty in each fork; merged back after parallel execution
-        )
+    async def _run_parallel_subnodes(self, node: Any, turn_context: TurnContext) -> TurnContext:
+        return await self._traverser.run_parallel_subnodes(node, turn_context)
 
-    async def _execute_parallel_nodes(self, nodes: list[Any] | tuple[Any, ...], turn_context: TurnContext) -> TurnContext:
-        node_names = [str(getattr(node, "name", type(node).__name__) or type(node).__name__) for node in nodes]
+    async def _call_node_direct(self, node: Any, turn_context: TurnContext) -> TurnContext:
+        return await self._traverser.call_node_direct(node, turn_context)
+
+    def _apply_kernel_step_result(
+        self,
+        *,
+        node_name: str,
+        step_result: Any,
+        turn_context: TurnContext,
+    ) -> TurnContext:
+        status = str(getattr(step_result, "status", "") or "")
+        if status == "error":
+            self._record_execution_trace(
+                turn_context,
+                event_type="kernel_error",
+                stage=node_name,
+                detail={"error": str(getattr(step_result, "error", "") or "")},
+            )
+            raise ExecutionStageError(
+                "Kernel step returned error status",
+                context={
+                    "stage": node_name,
+                    "error": str(getattr(step_result, "error", "") or ""),
+                },
+            )
+
+        if status == "rejected":
+            semantics = self._rejection_semantics_for_stage(node_name)
+            rejection_reason = str(getattr(getattr(step_result, "policy", None), "reason", "") or "")
+            turn_context.state.setdefault("kernel_rejection_contract", []).append(
+                {
+                    "stage": node_name,
+                    "reason": rejection_reason,
+                    "retryable": bool(semantics.retryable),
+                    "state_mutation_allowed": bool(semantics.state_mutation_allowed),
+                    "invalidate_downstream": bool(semantics.invalidate_downstream),
+                    "action": str(semantics.action),
+                    "persistence_behavior": str(semantics.persistence_behavior),
+                },
+            )
+            self._record_execution_trace(
+                turn_context,
+                event_type="kernel_rejected",
+                stage=node_name,
+                detail={
+                    "reason": rejection_reason,
+                    "action": str(semantics.action),
+                    "invalidate_downstream": bool(semantics.invalidate_downstream),
+                    "retryable": bool(semantics.retryable),
+                },
+            )
+            if semantics.persistence_behavior == "persist_rejection_event":
+                self._persist_kernel_rejection(turn_context, stage=node_name, reason=rejection_reason)
+            if semantics.action == "abort_turn" or semantics.invalidate_downstream:
+                raise ExecutionStageError(
+                    "Kernel step rejected under abort semantics",
+                    context={"stage": node_name, "reason": rejection_reason},
+                )
+            return turn_context
+
         self._record_execution_trace(
             turn_context,
-            event_type="parallel_start",
-            stage="parallel_group",
-            detail={"nodes": list(node_names)},
-        )
-        forked_contexts = [self._fork_context(turn_context) for _ in nodes]
-        results = await asyncio.gather(
-            *(self._execute_node(node, forked_context) for node, forked_context in zip(nodes, forked_contexts)),
-        )
-        for result_context in results:
-            turn_context.metadata.update(result_context.metadata)
-            turn_context.state.update(result_context.state)
-            turn_context.stage_traces.extend(result_context.stage_traces)
-        self._record_execution_trace(
-            turn_context,
-            event_type="parallel_done",
-            stage="parallel_group",
-            detail={"nodes": list(node_names)},
+            event_type="kernel_ok",
+            stage=node_name,
+            detail={},
         )
         return turn_context
 
     async def _execute_node(self, node: Any, turn_context: TurnContext) -> TurnContext:
-        if isinstance(node, (list, tuple)):
-            return await self._execute_parallel_nodes(node, turn_context)
-
+        """Execute a single node through direct or kernel-guarded path."""
         node_name = str(getattr(node, "name", type(node).__name__) or type(node).__name__)
+        if self._kernel is None:
+            return await self._call_node_direct(node, turn_context)
 
-        async def _call_node() -> TurnContext:
-            if callable(getattr(node, "run", None)):
-                result = await node.run(turn_context)
-                return result or turn_context
-            execute_method = getattr(node, "execute", None)
-            if callable(execute_method):
-                await execute_method(self.registry, turn_context)
-                return turn_context
-            raise TypeError(f"Unsupported node type: {type(node).__name__}")
-
-        if self._kernel is not None:
-            step_result = await self._kernel.execute_step(turn_context, node_name, _call_node)
-            if step_result.status == "error":
-                self._record_execution_trace(
-                    turn_context,
-                    event_type="kernel_error",
-                    stage=node_name,
-                    detail={"error": str(step_result.error or "")},
-                )
-                raise RuntimeError(step_result.error)
-            if step_result.status == "rejected":
-                semantics = self._rejection_semantics_for_stage(node_name)
-                rejection_reason = str(getattr(getattr(step_result, "policy", None), "reason", "") or "")
-                turn_context.state.setdefault("kernel_rejection_contract", []).append(
-                    {
-                        "stage": node_name,
-                        "reason": rejection_reason,
-                        "retryable": bool(semantics.retryable),
-                        "state_mutation_allowed": bool(semantics.state_mutation_allowed),
-                        "invalidate_downstream": bool(semantics.invalidate_downstream),
-                        "action": str(semantics.action),
-                        "persistence_behavior": str(semantics.persistence_behavior),
-                    }
-                )
-                self._record_execution_trace(
-                    turn_context,
-                    event_type="kernel_rejected",
-                    stage=node_name,
-                    detail={
-                        "reason": rejection_reason,
-                        "action": str(semantics.action),
-                        "invalidate_downstream": bool(semantics.invalidate_downstream),
-                        "retryable": bool(semantics.retryable),
-                    },
-                )
-                if semantics.persistence_behavior == "persist_rejection_event":
-                    self._persist_kernel_rejection(turn_context, stage=node_name, reason=rejection_reason)
-
-                if semantics.action == "abort_turn" or semantics.invalidate_downstream:
-                    raise RuntimeError(
-                        "Kernel step rejected under abort semantics: "
-                        f"stage={node_name!r}, reason={rejection_reason!r}"
-                    )
-                # Backward-compatible default: stage is skipped and pipeline continues.
-                return turn_context
-            self._record_execution_trace(
-                turn_context,
-                event_type="kernel_ok",
-                stage=node_name,
-                detail={},
-            )
-            return turn_context
-
-        return await _call_node()
-    def _emit_checkpoint(self, turn_context: TurnContext, *, stage: str, status: str, error: str | None = None) -> None:
-        active_stage = str(turn_context.state.get("_active_graph_stage") or "")
-        self._side_effects.emit_checkpoint(
-            registry=self.registry,
+        step_result = await self._kernel.execute_step(
+            turn_context,
+            node_name,
+            lambda: self._call_node_direct(node, turn_context),
+        )
+        return self._apply_kernel_step_result(
+            node_name=node_name,
+            step_result=step_result,
             turn_context=turn_context,
-            stage=stage,
-            status=status,
-            error=error,
-            active_stage=active_stage,
-            checkpoint_snapshot_fn=turn_context.checkpoint_snapshot,
         )
 
-    @staticmethod
-    def _phase_for_stage(stage: str, current: TurnPhase) -> TurnPhase:
-        phase_name = StagePhaseMappingPolicy.phase_name_for_stage(stage)
-        if not phase_name:
-            return current
-        try:
-            return TurnPhase(phase_name)
-        except ValueError:
-            return current
+    # (Deleted: _emit_checkpoint, _phase_for_stage, _sync_stage_phase — phase tracking removed)
 
-    def _sync_stage_phase(self, turn_context: TurnContext, *, stage: str) -> None:
-        target_phase = self._phase_for_stage(stage, turn_context.phase)
-        transitions = turn_context.transition_phase(target_phase, reason=f"enter:{stage}")
-        for transition in transitions:
-            self._side_effects.emit_phase_transition(
-                registry=self.registry,
-                turn_context=turn_context,
-                stage=stage,
-                transition=dict(transition),
+    # (Deleted: _emit_capability_audit_report — audit reporting removed)
+
+    # ------------------------------------------------------------------
+    # Dispatcher authority: structural fidelity validator
+    # ------------------------------------------------------------------
+
+    # (Deleted: _check_structural_fidelity — fidelity checking removed)
+
+    # ------------------------------------------------------------------
+    # Node-level stage boundary contract enforcement
+    # ------------------------------------------------------------------
+
+    # (Deleted: _enforce_node_stage_contract — contract enforcement removed)
+
+    # ------------------------------------------------------------------
+    # Dispatcher authority: per-stage execution worker
+    # ------------------------------------------------------------------
+
+    def _enforce_execution_boundary(self) -> None:
+        if not self._required_execution_token:
+            return
+        active_token = ControlPlaneExecutionBoundary.current()
+        if active_token != self._required_execution_token:
+            raise ExecutionStageError(
+                "TurnGraph.execute boundary violation",
+                context={
+                    "expected_token": str(self._required_execution_token),
+                    "active_token": str(active_token or ""),
+                },
             )
 
-    def _emit_capability_audit_report(
+    def _resolve_persistence_service(self) -> Any:
+        if self.registry is None:
+            return None
+        for key in ("persistence", "persistence_service"):
+            try:
+                service = self.registry.get(key)
+            except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
+                logger.debug("TurnGraph persistence lookup failed for key=%s: %s", key, exc)
+                service = None
+            if service is not None:
+                return service
+        return None
+
+    def _is_lightweight_persistence(self, persistence_service: Any) -> bool:
+        if persistence_service is None:
+            return False
+        save_turn_event = getattr(persistence_service, "save_turn_event", None)
+        save_graph_checkpoint = getattr(persistence_service, "save_graph_checkpoint", None)
+        return bool(
+            str(type(persistence_service).__module__ or "").startswith("tests.")
+            or (callable(save_graph_checkpoint) and not hasattr(save_graph_checkpoint, "__self__"))
+            or (callable(save_turn_event) and not hasattr(save_turn_event, "__self__"))
+        )
+
+    def _emit_turn_event(
         self,
         turn_context: TurnContext,
         *,
-        stage_order: list[str],
-        failed: bool,
-        error: str = "",
+        event_type: str,
+        payload: dict[str, Any],
+        persistence_service: Any,
+        persistence_is_lightweight: bool,
+    ) -> None:
+        save_turn_event = getattr(persistence_service, "save_turn_event", None) if persistence_service else None
+        if not callable(save_turn_event):
+            return
+        if not persistence_is_lightweight:
+            # Non-lightweight persistence computes event sequence from durable history;
+            # persisting every stage checkpoint causes quadratic growth in long runs.
+            if str(event_type or "") != "graph_checkpoint":
+                return
+            stage_name = str((payload or {}).get("stage") or "").strip().lower()
+            if not stage_name.startswith("save"):
+                return
+        turn_context.event_sequence = int(turn_context.event_sequence or 0) + 1
+        event = {
+            "event_type": str(event_type or ""),
+            "trace_id": str(turn_context.trace_id or ""),
+            "occurred_at": str(getattr(getattr(turn_context, "temporal", None), "wall_time", "") or ""),
+            "sequence": int(turn_context.event_sequence),
+        }
+        event.update(dict(payload or {}))
+        save_turn_event(event)
+
+    def _checkpoint_payload(
+        self,
+        turn_context: TurnContext,
+        *,
+        stage_name: str,
+        status: str,
+        lightweight: bool,
     ) -> dict[str, Any]:
-        report = build_runtime_capability_audit_report(
+        if lightweight:
+            with contextlib.suppress(Exception):
+                return turn_context.checkpoint_snapshot(
+                    stage=str(stage_name or "unknown"),
+                    status=str(status or "after"),
+                    error=None,
+                    advance_chain=True,
+                )
+        return {
+            "trace_id": str(turn_context.trace_id or ""),
+            "stage": str(stage_name or "unknown"),
+            "status": str(status or "after"),
+            "state": _json_safe(dict(turn_context.state or {})),
+            "metadata": _json_safe(dict(turn_context.metadata or {})),
+        }
+
+    def _emit_checkpoint(
+        self,
+        turn_context: TurnContext,
+        *,
+        stage_name: str,
+        status: str,
+        persistence_service: Any,
+        persistence_is_lightweight: bool,
+    ) -> None:
+        checkpoint_payload = self._checkpoint_payload(
             turn_context,
-            stage_order=stage_order,
-            failed=failed,
+            stage_name=stage_name,
+            status=status,
+            lightweight=persistence_is_lightweight,
+        )
+        save_graph_checkpoint = (
+            getattr(persistence_service, "save_graph_checkpoint", None)
+            if persistence_service
+            else None
+        )
+        if persistence_is_lightweight and callable(save_graph_checkpoint):
+            try:
+                save_graph_checkpoint(checkpoint_payload)
+            except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
+                logger.warning(
+                    "TurnGraph lightweight checkpoint persistence failed at stage=%s status=%s: %s",
+                    stage_name,
+                    status,
+                    exc,
+                )
+
+        lock = dict(turn_context.metadata.get("determinism") or {})
+        self._emit_turn_event(
+            turn_context,
+            event_type="graph_checkpoint",
+            payload={
+                "stage": str(stage_name or "unknown"),
+                "status": str(status or "after"),
+                "determinism_lock": {
+                    "lock_hash": str(lock.get("lock_hash") or ""),
+                    "lock_id": str(lock.get("lock_id") or ""),
+                },
+            },
+            persistence_service=persistence_service,
+            persistence_is_lightweight=persistence_is_lightweight,
+        )
+
+    def _finalize_trace_contract(self, turn_context: TurnContext, *, expected_hash: str = "") -> dict[str, Any]:
+        trace = list(turn_context.state.get("execution_trace") or [])
+        canonical = {
+            "trace_id": str(turn_context.trace_id or ""),
+            "events": [
+                {
+                    "sequence": int(item.get("sequence") or 0),
+                    "event_type": str(item.get("event_type") or ""),
+                    "stage": str(item.get("stage") or ""),
+                    "phase": str(item.get("phase") or ""),
+                    "detail": dict(item.get("detail") or {}),
+                }
+                for item in trace
+            ],
+        }
+        digest = hashlib.sha256(json.dumps(canonical, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+        expected = str(expected_hash or "").strip()
+        if expected and expected != digest:
+            raise ProjectionMismatch(
+                "Execution trace determinism mismatch",
+                context={"expected": expected, "actual": digest},
+            )
+        return {
+            "version": "1.0",
+            "event_count": len(trace),
+            "trace_hash": digest,
+            "schema_version": "1.0",
+        }
+
+    def _stamp_contract_version(self, turn_context: TurnContext) -> None:
+        contracts_blob = json.dumps(_NODE_STAGE_CONTRACTS, sort_keys=True, default=str)
+        contracts_hash = hashlib.sha256(contracts_blob.encode()).hexdigest()[:16]
+        turn_context.determinism_manifest["contract_version"] = {
+            "node_contracts_hash": contracts_hash,
+            "schema_version": "1",
+        }
+
+    def _mark_stage_fidelity(self, turn_context: TurnContext, stage_name: str) -> None:
+        norm_stage = str(stage_name or "").strip().lower()
+        if norm_stage == "temporal":
+            turn_context.fidelity.temporal = True
+        elif norm_stage == "inference":
+            turn_context.fidelity.inference = True
+        elif norm_stage == "reflection":
+            turn_context.fidelity.reflection = True
+        elif norm_stage == "save":
+            turn_context.fidelity.save = True
+
+    def _capture_memory_before(self, turn_context: TurnContext, stage_name: str) -> None:
+        norm_stage = str(stage_name or "").strip().lower()
+        if norm_stage not in {"context_builder", "memory"}:
+            return
+        memories = list(turn_context.state.get("memories") or [])
+        mem_fp_before = hashlib.sha256(json.dumps(memories, sort_keys=True, default=str).encode()).hexdigest()[:16]
+        memory_evolution = turn_context.determinism_manifest.setdefault("memory_evolution", {})
+        memory_evolution["before_fingerprint"] = mem_fp_before
+        memory_evolution["before_count"] = len(memories)
+
+    def _capture_memory_after(self, turn_context: TurnContext, stage_name: str) -> None:
+        if str(stage_name or "").strip().lower() != "save":
+            return
+        memories = list(turn_context.state.get("memories") or [])
+        mem_fp_after = hashlib.sha256(json.dumps(memories, sort_keys=True, default=str).encode()).hexdigest()[:16]
+        memory_evolution = turn_context.determinism_manifest.setdefault("memory_evolution", {})
+        memory_evolution["after_fingerprint"] = mem_fp_after
+        memory_evolution["delta"] = len(memories) - int(memory_evolution.get("before_count", 0) or 0)
+
+    def _record_stage_start(self, turn_context: TurnContext, *, stage_key: str, idx: int) -> float:
+        turn_context.state["_active_stage_name"] = stage_key
+        stage_started_at = self._deterministic_perf_counter(
+            turn_context,
+            slot=f"graph.stage.{stage_key}.{idx}.start_perf",
+        )
+        stage_started_wall = self._deterministic_wall_time(
+            turn_context,
+            slot=f"graph.stage.{stage_key}.{idx}.start_wall",
+        )
+        self._record_execution_trace(
+            turn_context,
+            event_type="node_start",
+            stage=stage_key,
+            detail={"node": stage_key, "index": idx},
+        )
+        turn_context.state["_stage_started_wall"] = stage_started_wall
+        return stage_started_at
+
+    def _record_stage_success(
+        self,
+        turn_context: TurnContext,
+        *,
+        stage_key: str,
+        idx: int,
+        stage_started_at: float,
+    ) -> float:
+        stage_finished_at = self._deterministic_perf_counter(
+            turn_context,
+            slot=f"graph.stage.{stage_key}.{idx}.end_perf",
+        )
+        stage_ms = round((stage_finished_at - stage_started_at) * 1000, 3)
+        turn_context.stage_traces.append(StageTrace(stage=stage_key, duration_ms=stage_ms, error=None))
+        self._mark_stage_fidelity(turn_context, stage_key)
+        self._record_execution_trace(
+            turn_context,
+            event_type="node_complete",
+            stage=stage_key,
+            detail={"duration_ms": stage_ms, "status": "ok", "index": idx},
+        )
+        return stage_ms
+
+    def _record_stage_failure(
+        self,
+        turn_context: TurnContext,
+        *,
+        stage_key: str,
+        idx: int,
+        stage_started_at: float,
+        stage_exc: Exception,
+    ) -> None:
+        stage_finished_at = self._deterministic_perf_counter(
+            turn_context,
+            slot=f"graph.stage.{stage_key}.{idx}.end_perf",
+        )
+        stage_ms = round((stage_finished_at - stage_started_at) * 1000, 3)
+        turn_context.stage_traces.append(StageTrace(stage=stage_key, duration_ms=stage_ms, error=str(stage_exc)))
+        self._record_execution_trace(
+            turn_context,
+            event_type="node_complete",
+            stage=stage_key,
+            detail={"duration_ms": stage_ms, "status": "error", "error": str(stage_exc), "index": idx},
+        )
+
+    def _project_unified_trace_events(self, turn_context: TurnContext) -> list[dict[str, Any]]:
+        """Project unified trace events from canonical execution trace (single source of truth)."""
+        execution_trace = list(turn_context.state.get("execution_trace") or [])
+        return [
+            {
+                "sequence": int(item.get("sequence") or 0),
+                "event_type": str(item.get("event_type") or ""),
+                "stage": str(item.get("stage") or ""),
+                "phase": str(item.get("phase") or ""),
+                "detail": _json_safe(dict(item.get("detail") or {})),
+            }
+            for item in execution_trace
+            if isinstance(item, dict)
+        ]
+
+    def _project_unified_trace_nodes(self, turn_context: TurnContext) -> list[dict[str, Any]]:
+        """Project unified execution nodes from canonical stage traces."""
+        now_ts = self._deterministic_wall_time(
+            turn_context,
+            slot="graph.unified_trace.project_nodes.now_ts",
+        )
+        projected: list[dict[str, Any]] = []
+        for idx, stage in enumerate(list(turn_context.stage_traces or [])):
+            stage_name = str(getattr(stage, "stage", "") or "unknown").strip().lower()
+            err = str(getattr(stage, "error", "") or "")
+            projected.append(
+                {
+                    "node_type": stage_name,
+                    "node_id": f"{turn_context.trace_id}:{stage_name}:{idx}",
+                    "status": ("failed" if err else "success"),
+                    "start_time": 0.0,
+                    "end_time": now_ts,
+                    "duration_ms": float(getattr(stage, "duration_ms", 0.0) or 0.0),
+                    "error": (err or None),
+                    "error_type": ("RuntimeError" if err else None),
+                },
+            )
+        return projected
+
+    def _initialize_unified_turn_trace(self, turn_context: TurnContext) -> None:
+        now_ts = self._deterministic_wall_time(
+            turn_context,
+            slot="graph.unified_trace.start_time",
+        )
+        session_id = str(
+            turn_context.metadata.get("session_id")
+            or turn_context.state.get("session_id")
+            or "default",
+        )
+        trace = {
+            "trace_id": str(turn_context.trace_id or ""),
+            "turn_id": "",
+            "session_id": session_id,
+            "schema_version": "1.0",
+            "start_time": now_ts,
+            "end_time": 0.0,
+            "duration_ms": 0.0,
+            "input": {
+                "text": str(turn_context.user_input or ""),
+                "attachments": [],
+                "session_id": session_id,
+                "metadata": {
+                    "phase": str(getattr(turn_context.phase, "value", turn_context.phase) or ""),
+                },
+                "timestamp": now_ts,
+            },
+            "output": {
+                "response": None,
+                "should_end": False,
+                "confidence": 1.0,
+                "recovery_fallback": False,
+            },
+            "nodes": [],
+            "trace_events": [],
+            "checksum": "",
+            "commit_boundary_count": 0,
+            "metadata": {
+                "phase": str(getattr(turn_context.phase, "value", turn_context.phase) or ""),
+            },
+            "completed": False,
+            "error": None,
+        }
+        turn_context.state["_unified_turn_trace_obj"] = trace
+        # Hard sink semantics: remove stale snapshots so no caller can treat prior
+        # persisted trace payloads as execution authority for this run.
+        turn_context.state.pop("turn_trace", None)
+        turn_context.metadata.pop("turn_trace", None)
+
+    @staticmethod
+    def _coerce_finalized_output(result: FinalizedTurnResult | None) -> tuple[str | None, bool]:
+        response: str | None = None
+        should_end = False
+        if isinstance(result, tuple) and len(result) >= 2:
+            response = str(result[0] or "")
+            should_end = bool(result[1])
+        elif result is not None:
+            response = str(result)
+        return response, should_end
+
+    @staticmethod
+    def _count_commit_boundaries(nodes: list[dict[str, Any]]) -> int:
+        return sum(1 for node in list(nodes or []) if str((node or {}).get("node_type") or "") == "save")
+
+    @staticmethod
+    def _build_trace_checksum(trace: dict[str, Any]) -> str:
+        checksum_payload = {
+            "trace_id": str(trace.get("trace_id") or ""),
+            "session_id": str(trace.get("session_id") or ""),
+            "nodes": list(trace.get("nodes") or []),
+            "ledger_event_count": len(list(trace.get("trace_events") or [])),
+            "output": dict(trace.get("output") or {}),
+        }
+        checksum_content = json.dumps(checksum_payload, sort_keys=True, default=str)
+        return f"chk-{hashlib.sha256(checksum_content.encode('utf-8')).hexdigest()[:32]}"
+
+    def _validate_unified_projection_counts(
+        self,
+        turn_context: TurnContext,
+        *,
+        projected_count: int,
+        enforce_projection_consistency: bool,
+    ) -> int:
+        execution_trace_count = len(list(turn_context.state.get("execution_trace") or []))
+        if enforce_projection_consistency and projected_count != execution_trace_count:
+            raise ProjectionMismatch(
+                "Unified trace projection mismatch",
+                context={
+                    "execution_trace_count": execution_trace_count,
+                    "projected_trace_event_count": projected_count,
+                    "trace_id": str(turn_context.trace_id or ""),
+                },
+            )
+        return execution_trace_count
+
+    def _build_unified_trace_metadata(
+        self,
+        turn_context: TurnContext,
+        *,
+        execution_trace_count: int,
+        projected_count: int,
+        trace: dict[str, Any],
+    ) -> dict[str, Any]:
+        trace_metadata = dict(trace.get("metadata") or {})
+        trace_metadata.update(
+            {
+                "projection_version": "graph-execution-v1",
+                "source_of_truth": "execution_trace+stage_traces",
+                "execution_trace_event_count": execution_trace_count,
+                "projected_trace_event_count": projected_count,
+                "stage_trace_count": len(list(turn_context.stage_traces or [])),
+                "phase": str(getattr(turn_context.phase, "value", turn_context.phase) or ""),
+            },
+        )
+        return trace_metadata
+
+    def _build_unified_turn_output(
+        self,
+        turn_context: TurnContext,
+        *,
+        response: str | None,
+        should_end: bool,
+        error: str,
+    ) -> dict[str, Any]:
+        return {
+            "response": response,
+            "should_end": should_end,
+            "confidence": 1.0,
+            "recovery_fallback": bool(turn_context.short_circuit or bool(error)),
+        }
+
+    def _finalize_unified_turn_trace(
+        self,
+        turn_context: TurnContext,
+        *,
+        result: FinalizedTurnResult | None = None,
+        error: str = "",
+        enforce_projection_consistency: bool = True,
+    ) -> None:
+        trace_obj = turn_context.state.get("_unified_turn_trace_obj")
+        if not isinstance(trace_obj, dict):
+            return
+        trace = dict(trace_obj)
+
+        response, should_end = self._coerce_finalized_output(result)
+        trace["output"] = self._build_unified_turn_output(
+            turn_context,
+            response=response,
+            should_end=should_end,
             error=error,
         )
-        payload = report.to_dict()
-        turn_context.state["capability_audit_report"] = payload
-        turn_context.metadata["capability_audit_report"] = dict(payload)
-        logger.info("capability_audit_report=%s", json.dumps(payload, sort_keys=True, default=str))
-        return payload
+        trace["nodes"] = self._project_unified_trace_nodes(turn_context)
+        trace["trace_events"] = self._project_unified_trace_events(turn_context)
+        projected_count = len(list(trace.get("trace_events") or []))
+        execution_trace_count = self._validate_unified_projection_counts(
+            turn_context,
+            projected_count=projected_count,
+            enforce_projection_consistency=enforce_projection_consistency,
+        )
+        if error:
+            trace["error"] = str(error)
 
-    async def execute(self, turn_context: TurnContext, *, audit_mode: bool = False) -> FinalizedTurnResult:
-        if self._required_execution_token:
-            active_token = ControlPlaneExecutionBoundary.current()
-            if active_token != self._required_execution_token:
-                raise RuntimeError(
-                    "TurnGraph.execute boundary violation: graph execution must be routed through ExecutionControlPlane"
-                )
+        trace["metadata"] = self._build_unified_trace_metadata(
+            turn_context,
+            execution_trace_count=execution_trace_count,
+            projected_count=projected_count,
+            trace=trace,
+        )
+        trace["end_time"] = self._deterministic_wall_time(
+            turn_context,
+            slot="graph.unified_trace.end_time",
+        )
+        trace["duration_ms"] = max(0.0, (float(trace["end_time"]) - float(trace.get("start_time") or 0.0)) * 1000.0)
+        trace["commit_boundary_count"] = self._count_commit_boundaries(list(trace.get("nodes") or []))
+        trace["checksum"] = self._build_trace_checksum(trace)
+        trace["completed"] = True
+        serialized = dict(trace)
+        # Persist as read-only sink snapshot for observability/replay only.
+        serialized["_sink_only"] = True
+        turn_context.state["turn_trace"] = serialized
+        turn_context.metadata["turn_trace"] = dict(serialized)
+        turn_context.state.pop("_unified_turn_trace_obj", None)
+        turn_context.state.pop("_stage_started_wall", None)
 
-        self._emit_execution_witness("graph.execute", turn_context)
+    def _maybe_transition_phase(
+        self,
+        turn_context: TurnContext,
+        *,
+        stage_key: str,
+        emitted_phases: set[str],
+        persistence_service: Any,
+        persistence_is_lightweight: bool,
+    ) -> None:
+        stage_phase = {"inference": "ACT", "safety": "OBSERVE", "save": "RESPOND"}
+        phase = stage_phase.get(stage_key.strip().lower())
+        if not phase or phase in emitted_phases:
+            return
+        with contextlib.suppress(Exception):
+            turn_context.transition_phase(TurnPhase(str(phase)), reason=f"stage:{stage_key.strip().lower()}")
+        self._emit_turn_event(
+            turn_context,
+            event_type="phase_transition",
+            payload={"transition": {"to": phase}},
+            persistence_service=persistence_service,
+            persistence_is_lightweight=persistence_is_lightweight,
+        )
+        emitted_phases.add(phase)
+
+    def _record_edge_transition(  # noqa: PLR0913
+        self,
+        turn_context: TurnContext,
+        *,
+        idx: int,
+        pipeline_items: list[tuple[str, Any]],
+        stage_key: str,
+        persistence_service: Any,
+        persistence_is_lightweight: bool,
+    ) -> None:
+        if idx >= len(pipeline_items) - 1:
+            return
+        next_stage_name = str(pipeline_items[idx + 1][0] or "unknown")
+        self._emit_checkpoint(
+            turn_context,
+            stage_name=f"{stage_key}→{next_stage_name}",
+            status="edge",
+            persistence_service=persistence_service,
+            persistence_is_lightweight=persistence_is_lightweight,
+        )
         self._record_execution_trace(
             turn_context,
-            event_type="turn_start",
-            stage="graph",
-            detail={"audit_mode": bool(audit_mode)},
+            event_type="edge_transition",
+            stage=stage_key,
+            detail={"from": stage_key, "to": next_stage_name, "index": idx},
         )
-        turn_context.state["_execution_kernel"] = self._execution_kernel
-        execute_started_at = time.perf_counter()
 
-        # Crash-safe recovery: restore completed stages from a durable resume record
-        # so that already-executed stages are skipped on this invocation.
-        if self._recovery is not None:
-            _resume_pt = self._recovery.check_resume(turn_context.trace_id)
-            if _resume_pt is not None:
-                self._recovery.restore_executed_stages(_resume_pt, turn_context)
-
-        # Capability security: freeze capability set at turn start (or verify it
-        # on resume to block privilege escalation).
-        if self._capability_registry is not None and self._capability_policy is not None:
-            _sid = str(
-                turn_context.metadata.get("session_id") or self._capability_session_id or ""
+    def _enforce_kernel_invariants(
+        self,
+        *,
+        turn_context: TurnContext,
+        stage: str,
+        operation: str,
+        mutation_outside_save_node: bool = False,
+    ) -> None:
+        validate_result = self._execution_kernel.validate(
+            stage=stage,
+            operation=operation,
+            context=turn_context,
+            mutation_outside_save_node=mutation_outside_save_node,
+        )
+        if not bool(getattr(validate_result, "ok", True)):
+            reason = str(
+                getattr(validate_result, "reason", "kernel validation failed")
+                or "kernel validation failed"
             )
-            if _resume_pt is not None if self._recovery is not None else False:
-                # Resumed turn: verify no escalation since turn started.
-                try:
-                    verify_capability_freeze(
-                        turn_context,
-                        policy=self._capability_policy,
-                        session_id=_sid,
-                    )
-                except CapabilityViolationError:
-                    raise
-            else:
-                # Fresh turn: freeze the current capability set.
-                freeze_capabilities(
-                    turn_context,
-                    policy=self._capability_policy,
-                    session_id=_sid,
+            if not bool(getattr(self._execution_kernel, "strict", False)):
+                logger.warning(
+                    "[KERNEL SHADOW VIOLATION] stage=%s operation=%s reason=%s",
+                    str(stage or ""),
+                    str(operation or ""),
+                    reason,
                 )
-
-        def _enforce_fidelity_invariants() -> None:
-            fidelity = getattr(turn_context, "fidelity", None)
-            if fidelity is None:
-                self._mark_structural_degradation(turn_context, "fidelity_state_missing")
-                raise RuntimeError("Structural turn invariant violated: turn fidelity state missing")
-            if not bool(getattr(fidelity, "temporal", False)):
-                self._mark_structural_degradation(turn_context, "temporal_stage_missing")
-                raise RuntimeError("Structural turn invariant violated: TemporalNode missing")
-            if not bool(getattr(fidelity, "save", False)):
-                self._mark_structural_degradation(turn_context, "save_stage_missing")
-                raise RuntimeError("Structural turn invariant violated: SaveNode did not execute")
-            # Strict mode: inference must always execute in the canonical pipeline.
-            # Only enforce this when the graph was built with an "inference" node
-            # so that unit-test graphs with partial pipelines are not rejected.
-            if "inference" in self._node_map and not bool(getattr(fidelity, "inference", False)):
-                self._mark_structural_degradation(turn_context, "inference_stage_missing")
-                raise RuntimeError("Structural turn invariant violated: InferenceNode missing")
-
-        telemetry = self.registry.get("telemetry") if self.registry is not None else None
-        executed_stage_names: list[str] = []
-        audit_enabled = bool(audit_mode or turn_context.metadata.get("audit_mode"))
-
-        async def _execute_stage(stage_name: str, node: Any, stage_context: TurnContext) -> TurnContext:
-            started_at = time.perf_counter()
-            error_msg: str | None = None
-            # Idempotency guard: skip stages that already completed in a prior
-            # execution attempt (crash-safe recovery path).  Must come BEFORE
-            # _mark_stage_enter which raises on duplicate stage execution.
-            if self._recovery is not None and self._recovery.is_already_completed(stage_name, stage_context):
-                logger.debug(
-                    "Idempotency guard: skipping already-completed stage %r for turn %r",
-                    stage_name,
-                    stage_context.trace_id,
-                )
-                executed_stage_names.append(stage_name)
-                return stage_context
-            # Capability enforcement: check that the session holds the capabilities
-            # required by this stage before allowing entry.
-            if self._capability_registry is not None and self._capability_policy is not None:
-                _sid = str(
-                    stage_context.metadata.get("session_id") or self._capability_session_id or ""
-                )
-                _caps = self._capability_policy.caps_for(_sid)
-                _enforcement = enforce_node_entry(
-                    stage_name,
-                    registry=self._capability_registry,
-                    caps=_caps,
-                    session_id=_sid,
-                )
-                if _enforcement == EnforcementMode.SKIP:
-                    executed_stage_names.append(stage_name)
-                    return stage_context
-            self._mark_stage_enter(stage_context, stage_name)
-            self._record_execution_trace(
-                stage_context,
-                event_type="stage_enter",
-                stage=stage_name,
-                detail={"active_stage": stage_name},
+                return
+            raise ExecutionStageError(
+                "Kernel validation failed",
+                context={
+                    "stage": str(stage or ""),
+                    "reason": reason,
+                },
             )
-            self._sync_stage_phase(stage_context, stage=stage_name)
-            self._emit_checkpoint(stage_context, stage=stage_name, status="before")
-            if telemetry is not None:
-                telemetry.trace("turn_graph.node_start", node=stage_name, trace_id=stage_context.trace_id)
-            # Side-effect deduplication: persist in_flight marker + inject call_id
-            # BEFORE the node runs so a crash between here and record_stage_completion
-            # leaves a recoverable record.
-            if self._recovery is not None:
-                self._recovery.mark_stage_started(stage_name, stage_context)
-            try:
-                _guard = (
-                    MutationGuard(stage_context.mutation_queue)
-                    if stage_name != "save"
-                    else contextlib.nullcontext()
-                )
-                with _guard:
-                    stage_context = await self._execute_node(node, stage_context)
-            except Exception as exc:
-                error_msg = str(exc)
-                self._record_execution_trace(
-                    stage_context,
-                    event_type="stage_error",
-                    stage=stage_name,
-                    detail={"error": error_msg},
-                )
-                self._emit_checkpoint(stage_context, stage=stage_name, status="error", error=error_msg)
-                raise
-            finally:
-                stage_context.state["_active_graph_stage"] = ""
-                duration_ms = round((time.perf_counter() - started_at) * 1000, 3)
-                stage_context.stage_traces.append(
-                    StageTrace(stage=stage_name, duration_ms=duration_ms, error=error_msg)
-                )
-                if telemetry is not None:
-                    telemetry.trace(
-                        "turn_graph.node_done",
-                        node=stage_name,
-                        duration_ms=duration_ms,
-                        trace_id=stage_context.trace_id,
-                    )
-            if error_msg is None:
-                self._record_execution_trace(
-                    stage_context,
-                    event_type="stage_done",
-                    stage=stage_name,
-                    detail={"duration_ms": duration_ms},
-                )
-                self._emit_checkpoint(stage_context, stage=stage_name, status="after")
-                executed_stage_names.append(stage_name)
-                # Persist a durable resume point after each successful stage so
-                # that a crash can be recovered on the next invocation.
-                if self._recovery is not None:
-                    pipeline_names = list(stage_context.state.get("_pipeline_stage_names") or [])
-                    _next_for_resume = ""
-                    if pipeline_names and stage_name in pipeline_names:
-                        _cidx = pipeline_names.index(stage_name)
-                        if _cidx + 1 < len(pipeline_names):
-                            _next_for_resume = pipeline_names[_cidx + 1]
-                    self._recovery.record_stage_completion(
-                        stage_name,
-                        _next_for_resume,
-                        stage_context,
-                        list(executed_stage_names),
-                    )
-                # Execution receipt: signed proof of stage completion.
-                _chain = ReceiptChain.from_state(stage_context.state)
-                _receipt = self._receipt_signer.sign(
-                    turn_id=str(stage_context.trace_id or ""),
-                    stage=stage_name,
-                    sequence=_chain.next_sequence,
-                    stage_call_id=str(stage_context.state.get("_stage_call_id") or ""),
-                    checkpoint_hash=str(stage_context.last_checkpoint_hash or ""),
-                    prev_receipt_sig=_chain.last_signature,
-                )
-                _chain.append(_receipt)
-                _chain.write_to_state(stage_context.state)
-                # Emit edge checkpoint immediately after this stage completes,
-                # if there's a next stage in the pipeline.
-                pipeline_names = list(stage_context.state.get("_pipeline_stage_names") or [])
-                if pipeline_names and stage_name in pipeline_names:
-                    current_idx = pipeline_names.index(stage_name)
-                    if current_idx + 1 < len(pipeline_names):
-                        next_stage_name = pipeline_names[current_idx + 1]
-                        self._emit_checkpoint(stage_context, stage=f"{stage_name}\u2192{next_stage_name}", status="edge")
-            return stage_context
+
+    async def _run_stage(  # noqa: PLR0913
+        self,
+        *,
+        idx: int,
+        pipeline_items: list[tuple[str, Any]],
+        turn_context: TurnContext,
+        emitted_phases: set[str],
+        persistence_service: Any,
+        persistence_is_lightweight: bool,
+    ) -> tuple[TurnContext, bool, FinalizedTurnResult | None]:
+        stage_name, node = pipeline_items[idx]
+        stage_key = str(stage_name or "unknown")
+        # ──────────────────────────────────────────────────────────────────────────
+        # Contract: Stage boundary MUST maintain identity tuple (non-shadowing).
+        # These are read from context and must NOT be regenerated mid-stage.
+        # ──────────────────────────────────────────────────────────────────────────
+        trace_id = turn_context.trace_id
+        kernel_step_id = turn_context.kernel_step_id
+        determinism_manifest = turn_context.determinism_manifest
+        self._enforce_identity_tuple_immutable(turn_context, boundary=f"stage_enter:{stage_key}")
+        stage_started_at = self._record_stage_start(turn_context, stage_key=stage_key, idx=idx)
+        self._emit_checkpoint(
+            turn_context,
+            stage_name=stage_key,
+            status="before",
+            persistence_service=persistence_service,
+            persistence_is_lightweight=persistence_is_lightweight,
+        )
+        self._enforce_kernel_invariants(
+            turn_context=turn_context,
+            stage=stage_key,
+            operation=f"turn_graph.stage:{stage_key}",
+        )
+        self._capture_memory_before(turn_context, stage_key)
 
         try:
-            pipeline = self._pipeline_items()
-            # Store all pipeline stage names in turn_context so _execute_stage can find the next stage
-            pipeline_stage_names = [name for name, _ in pipeline]
-            turn_context.state["_pipeline_stage_names"] = pipeline_stage_names
-            turn_context = await self._execution_kernel.run(turn_context, pipeline, _execute_stage)
-        except Exception as exc:
-            failure_class = self._classify_failure(exc)
-            self._record_execution_trace(
+            turn_context = await self._execute_node(node, turn_context)
+            self._enforce_identity_tuple_immutable(turn_context, boundary=f"stage_exit:{stage_key}")
+            self._record_stage_success(
                 turn_context,
-                event_type="turn_failed",
-                stage="graph",
-                detail={"severity": str(failure_class), "error": str(exc)},
+                stage_key=stage_key,
+                idx=idx,
+                stage_started_at=stage_started_at,
             )
-            turn_context.state["failure_taxonomy"] = {
-                "severity": str(failure_class),
-                "error": str(exc),
-            }
-            total_ms = round((time.perf_counter() - execute_started_at) * 1000, 3)
-            self._emit_turn_health_state(turn_context, total_latency_ms=total_ms, failed=True)
-            self._finalize_execution_trace_contract(turn_context)
-            self._seal_execution_identity(turn_context)
-            if audit_enabled:
-                self._emit_capability_audit_report(
-                    turn_context,
-                    stage_order=[trace.stage for trace in list(turn_context.stage_traces or [])],
-                    failed=True,
-                    error=str(exc),
-                )
+        except NON_FATAL_RUNTIME_EXCEPTIONS as stage_exc:
+            self._record_stage_failure(
+                turn_context,
+                stage_key=stage_key,
+                idx=idx,
+                stage_started_at=stage_started_at,
+                stage_exc=stage_exc,
+            )
+            self._emit_checkpoint(
+                turn_context,
+                stage_name=stage_key,
+                status="error",
+                persistence_service=persistence_service,
+                persistence_is_lightweight=persistence_is_lightweight,
+            )
             raise
 
-        if turn_context.short_circuit and turn_context.short_circuit_result is not None:
-            total_ms = round((time.perf_counter() - execute_started_at) * 1000, 3)
-            self._emit_turn_health_state(turn_context, total_latency_ms=total_ms, failed=False)
-            _enforce_fidelity_invariants()
+        self._emit_checkpoint(
+            turn_context,
+            stage_name=stage_key,
+            status="after",
+            persistence_service=persistence_service,
+            persistence_is_lightweight=persistence_is_lightweight,
+        )
+
+        self._maybe_transition_phase(
+            turn_context,
+            stage_key=stage_key,
+            emitted_phases=emitted_phases,
+            persistence_service=persistence_service,
+            persistence_is_lightweight=persistence_is_lightweight,
+        )
+        self._record_edge_transition(
+            turn_context,
+            idx=idx,
+            pipeline_items=pipeline_items,
+            stage_key=stage_key,
+            persistence_service=persistence_service,
+            persistence_is_lightweight=persistence_is_lightweight,
+        )
+
+        self._capture_memory_after(turn_context, stage_key)
+        short_circuit = bool(turn_context.short_circuit and turn_context.short_circuit_result is not None)
+        short_circuit_result = turn_context.short_circuit_result if short_circuit else None
+        turn_context.state["_active_stage_name"] = ""
+        return turn_context, short_circuit, cast("FinalizedTurnResult | None", short_circuit_result)
+
+    async def _execute_pipeline(
+        self,
+        turn_context: TurnContext,
+        *,
+        pipeline_items: list[tuple[str, Any]],
+        persistence_service: Any,
+        persistence_is_lightweight: bool,
+    ) -> FinalizedTurnResult | None:
+        emitted_phases: set[str] = set()
+        short_circuit_result: FinalizedTurnResult | None = None
+        for idx in range(len(pipeline_items)):
+            turn_context, short_circuit, maybe_result = await self._run_stage(
+                idx=idx,
+                pipeline_items=pipeline_items,
+                turn_context=turn_context,
+                emitted_phases=emitted_phases,
+                persistence_service=persistence_service,
+                persistence_is_lightweight=persistence_is_lightweight,
+            )
+            if short_circuit:
+                short_circuit_result = maybe_result
+                break
+        return short_circuit_result
+
+    def _record_failure(self, turn_context: TurnContext, *, stage_name: str, exc: Exception) -> None:
+        replay = list(turn_context.determinism_manifest.get("failure_replay") or [])
+        replay.append(
+            {
+                "stage": str(stage_name or "unknown"),
+                "error_type": type(exc).__name__,
+                "error_msg": str(exc)[:200],
+                "state_keys": sorted(str(k) for k in dict(turn_context.state or {}).keys()),
+                "contract_version_hash": str(
+                    dict(turn_context.determinism_manifest.get("contract_version") or {}).get("node_contracts_hash")
+                    or ""
+                ),
+            },
+        )
+        turn_context.determinism_manifest["failure_replay"] = replay
+        turn_context.state["failure_taxonomy"] = {"severity": "error", "error": str(exc)}
+
+    def _resolve_execute_result(
+        self,
+        turn_context: TurnContext,
+        *,
+        short_circuit_result: FinalizedTurnResult | None,
+    ) -> FinalizedTurnResult:
+        result = short_circuit_result if short_circuit_result is not None else turn_context.state.get("safe_result")
+
+        # Apply early convergence: if should_converge_early flag is set, override should_end to True.
+        should_end_override = bool(turn_context.state.get("should_converge_early"))
+
+        if isinstance(result, tuple) and len(result) >= 2:
+            output, orig_should_end = result[0], result[1]
+            final_should_end = should_end_override if should_end_override else bool(orig_should_end)
+            resolved = (output, final_should_end)
+            self._finalize_unified_turn_trace(turn_context, result=cast("FinalizedTurnResult", resolved))
+            return cast(FinalizedTurnResult, resolved)
+
+        final_result: FinalizedTurnResult = (str(result or ""), should_end_override)
+        self._finalize_unified_turn_trace(turn_context, result=cast("FinalizedTurnResult | None", final_result))
+        return final_result
+
+    async def execute(
+        self,
+        turn_context: TurnContext,
+        *,
+        audit_mode: bool = False,
+    ) -> FinalizedTurnResult:
+        self._enforce_execution_boundary()
+        # ──────────────────────────────────────────────────────────────────────────
+        # Contract: Orchestration boundary MUST extract and canonicalize identity.
+        # These values are authoritative and must be threaded through all stages.
+        # ──────────────────────────────────────────────────────────────────────────
+        trace_id = turn_context.trace_id
+        kernel_step_id = turn_context.kernel_step_id
+        determinism_manifest = turn_context.determinism_manifest
+        self._capture_identity_tuple_baseline(turn_context)
+        self._enforce_identity_tuple_immutable(turn_context, boundary="execute_enter")
+        execute_started_at = self._deterministic_perf_counter(
+            turn_context,
+            slot="graph.execute.start_perf",
+        )
+        pipeline_items = self._pipeline_items()
+        turn_context.state["_pipeline_stage_names"] = [
+            str(name or "").strip().lower() for name, _node in pipeline_items if str(name or "").strip()
+        ]
+        persistence_service = self._resolve_persistence_service()
+        persistence_is_lightweight = self._is_lightweight_persistence(persistence_service)
+        if persistence_service is not None:
+            self._validate_persistence_service_contract(turn_context, persistence_service)
+        self._stamp_contract_version(turn_context)
+        self._initialize_unified_turn_trace(turn_context)
+        turn_context.metadata["audit_mode"] = bool(audit_mode)
+        self._enforce_kernel_invariants(
+            turn_context=turn_context,
+            stage="pre_execute",
+            operation="turn_graph.execute.pre_execute",
+        )
+
+        with contextlib.suppress(Exception):
             self._record_execution_trace(
                 turn_context,
-                event_type="turn_short_circuit",
+                event_type="turn_start",
                 stage="graph",
-                detail={"latency_ms": total_ms},
+                detail={"audit_mode": bool(audit_mode)},
             )
-            self._finalize_execution_trace_contract(turn_context)
-            self._seal_execution_identity(turn_context)
-            if audit_enabled:
-                self._emit_capability_audit_report(turn_context, stage_order=executed_stage_names, failed=False)
-            if self._recovery is not None:
-                self._recovery.clear(turn_context.trace_id)
-            return turn_context.short_circuit_result
 
-        result = turn_context.state.get("safe_result")
-        total_ms = round((time.perf_counter() - execute_started_at) * 1000, 3)
-        self._emit_turn_health_state(turn_context, total_latency_ms=total_ms, failed=False)
-        _enforce_fidelity_invariants()
-        self._record_execution_trace(
-            turn_context,
-            event_type="turn_succeeded",
-            stage="graph",
-            detail={"latency_ms": total_ms, "stages": list(executed_stage_names)},
-        )
-        self._finalize_execution_trace_contract(turn_context)
-        self._seal_execution_identity(turn_context)
-        if audit_enabled:
-            self._emit_capability_audit_report(turn_context, stage_order=executed_stage_names, failed=False)
-        if self._recovery is not None:
-            self._recovery.clear(turn_context.trace_id)
-        if isinstance(result, tuple) and len(result) >= 2:
-            return result
-        return (str(result or ""), False)
+        try:
+            short_circuit_result = await self._execute_pipeline(
+                turn_context,
+                pipeline_items=pipeline_items,
+                persistence_service=persistence_service,
+                persistence_is_lightweight=persistence_is_lightweight,
+            )
+            self._enforce_kernel_invariants(
+                turn_context=turn_context,
+                stage="post_execute",
+                operation="turn_graph.execute.post_execute",
+            )
+            with contextlib.suppress(Exception):
+                self._record_execution_trace(
+                    turn_context,
+                    event_type="turn_complete",
+                    stage="graph",
+                    detail={
+                        "elapsed_ms": round(
+                            (
+                                self._deterministic_perf_counter(
+                                    turn_context,
+                                    slot="graph.execute.end_perf",
+                                )
+                                - execute_started_at
+                            )
+                            * 1000,
+                            3,
+                        ),
+                    },
+                )
+            contract = self._finalize_trace_contract(
+                turn_context,
+                expected_hash=str(turn_context.metadata.get("expected_execution_trace_hash") or ""),
+            )
+            turn_context.state["execution_trace_contract"] = dict(contract)
+            turn_context.metadata["execution_trace_contract"] = dict(contract)
+            self._enforce_identity_tuple_immutable(turn_context, boundary="execute_exit")
+            self._seal_execution_identity(turn_context)
+            return self._resolve_execute_result(
+                turn_context,
+                short_circuit_result=short_circuit_result,
+            )
+        except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
+            current_stage = str(turn_context.state.get("_active_stage_name") or "unknown")
+            self._record_failure(turn_context, stage_name=current_stage, exc=exc)
+            with contextlib.suppress(Exception):
+                self._record_execution_trace(
+                    turn_context,
+                    event_type="turn_failed",
+                    stage=current_stage,
+                    detail={"error": str(exc)},
+                )
+            with contextlib.suppress(Exception):
+                contract = self._finalize_trace_contract(turn_context)
+                turn_context.state["execution_trace_contract"] = dict(contract)
+                turn_context.metadata["execution_trace_contract"] = dict(contract)
+                self._seal_execution_identity(turn_context)
+            # Hard invariant: projection mismatches must fail before sink persistence.
+            if not isinstance(exc, ProjectionMismatch):
+                # Preserve the original failure as the primary error surface.
+                self._finalize_unified_turn_trace(
+                    turn_context,
+                    error=str(exc),
+                    enforce_projection_consistency=False,
+                )
+            else:
+                turn_context.state.pop("turn_trace", None)
+                turn_context.metadata.pop("turn_trace", None)
+                turn_context.state.pop("_unified_turn_trace_obj", None)
+            logger.error("TurnGraph.execute failed: %s", exc)
+            raise

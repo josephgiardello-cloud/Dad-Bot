@@ -1,4 +1,4 @@
-﻿"""Session-level authorization and tenant isolation.
+"""Session-level authorization and tenant isolation.
 
 Design
 ------
@@ -20,28 +20,27 @@ mTLS, JWT service).  It protects well-behaved in-process callers.  For
 multi-process / multi-tenant deployments, layer a proper AuthN/AuthZ service
 on top and use CapabilityToken as an internal delegation mechanism.
 """
+
 from __future__ import annotations
 
 import base64
-import hashlib
 import hmac
 import json
 import os
 import time
 from enum import Enum
 from threading import RLock
-from typing import Any
-
 
 # ---------------------------------------------------------------------------
 # Capabilities
 # ---------------------------------------------------------------------------
 
+
 class Capability(str, Enum):
-    READ    = "read"
-    WRITE   = "write"
+    READ = "read"
+    WRITE = "write"
     EXECUTE = "execute"
-    ADMIN   = "admin"
+    ADMIN = "admin"
 
 
 class CapabilitySet:
@@ -66,25 +65,31 @@ class CapabilitySet:
         return f"CapabilitySet({', '.join(names)})"
 
     @classmethod
-    def empty(cls) -> "CapabilitySet":
+    def empty(cls) -> CapabilitySet:
         return cls()
 
     @classmethod
-    def read_only(cls) -> "CapabilitySet":
+    def read_only(cls) -> CapabilitySet:
         return cls(Capability.READ)
 
     @classmethod
-    def read_write(cls) -> "CapabilitySet":
+    def read_write(cls) -> CapabilitySet:
         return cls(Capability.READ, Capability.WRITE)
 
     @classmethod
-    def full(cls) -> "CapabilitySet":
-        return cls(Capability.READ, Capability.WRITE, Capability.EXECUTE, Capability.ADMIN)
+    def full(cls) -> CapabilitySet:
+        return cls(
+            Capability.READ,
+            Capability.WRITE,
+            Capability.EXECUTE,
+            Capability.ADMIN,
+        )
 
 
 # ---------------------------------------------------------------------------
 # Errors
 # ---------------------------------------------------------------------------
+
 
 class AuthorizationError(RuntimeError):
     """Raised when a caller attempts an operation without the required capability."""
@@ -93,6 +98,7 @@ class AuthorizationError(RuntimeError):
 # ---------------------------------------------------------------------------
 # Tenant boundary
 # ---------------------------------------------------------------------------
+
 
 class TenantBoundary:
     """Enforces that session IDs carry a recognized tenant prefix.
@@ -122,8 +128,7 @@ class TenantBoundary:
         sid = str(session_id or "")
         if not any(sid.startswith(p) for p in self._prefixes):
             raise AuthorizationError(
-                f"Session {session_id!r} does not belong to any allowed tenant "
-                f"prefix: {sorted(self._prefixes)}"
+                f"Session {session_id!r} does not belong to any allowed tenant prefix: {sorted(self._prefixes)}",
             )
 
     def add_prefix(self, prefix: str) -> None:
@@ -145,6 +150,7 @@ class TenantBoundary:
 # Session authorization policy
 # ---------------------------------------------------------------------------
 
+
 class SessionAuthorizationPolicy:
     """Maps session IDs to granted capability sets.
 
@@ -164,19 +170,15 @@ class SessionAuthorizationPolicy:
         default_caps: CapabilitySet | None = None,
         strict: bool = False,
     ) -> None:
+        """Args:
+        default_caps: Capabilities for sessions not explicitly registered.
+                      Defaults to read+write.  Ignored when strict=True.
+        strict: When True, unregistered sessions get no capabilities at all.
+
         """
-        Args:
-            default_caps: Capabilities for sessions not explicitly registered.
-                          Defaults to read+write.  Ignored when strict=True.
-            strict: When True, unregistered sessions get no capabilities at all.
-        """
-        self._lock         = RLock()
-        self._grants:      dict[str, CapabilitySet] = {}
-        self._default_caps = (
-            CapabilitySet.empty()
-            if strict
-            else (default_caps or CapabilitySet.read_write())
-        )
+        self._lock = RLock()
+        self._grants: dict[str, CapabilitySet] = {}
+        self._default_caps = CapabilitySet.empty() if strict else (default_caps or CapabilitySet.read_write())
         self._strict = bool(strict)
 
     def grant(self, session_id: str, caps: CapabilitySet) -> None:
@@ -195,7 +197,7 @@ class SessionAuthorizationPolicy:
         """Raise AuthorizationError if the session lacks capability."""
         if not self.caps_for(session_id).has(capability):
             raise AuthorizationError(
-                f"Session {session_id!r} lacks capability {capability.value!r}"
+                f"Session {session_id!r} lacks capability {capability.value!r}",
             )
 
     def check(self, session_id: str, capability: Capability) -> bool:
@@ -209,6 +211,7 @@ class SessionAuthorizationPolicy:
 # ---------------------------------------------------------------------------
 # HMAC-signed capability token
 # ---------------------------------------------------------------------------
+
 
 class CapabilityToken:
     """HMAC-SHA256 signed bearer token granting a capability for a session.
@@ -239,9 +242,9 @@ class CapabilityToken:
         payload = {
             "session_id": str(session_id),
             "capability": capability.value,
-            "issued_at":  time.time(),
+            "issued_at": time.time(),
             "expires_at": time.time() + float(ttl_seconds),
-            "issuer":     str(issuer),
+            "issuer": str(issuer),
         }
         payload_bytes = json.dumps(payload, sort_keys=True).encode("utf-8")
         sig = hmac.new(self._key, payload_bytes, self.ALGORITHM).hexdigest()
@@ -259,7 +262,11 @@ class CapabilityToken:
         try:
             b64, sig = token.rsplit(".", 1)
             payload_bytes = base64.urlsafe_b64decode(b64 + "==")
-            expected_sig = hmac.new(self._key, payload_bytes, self.ALGORITHM).hexdigest()
+            expected_sig = hmac.new(
+                self._key,
+                payload_bytes,
+                self.ALGORITHM,
+            ).hexdigest()
             if not hmac.compare_digest(sig, expected_sig):
                 return False
             payload = json.loads(payload_bytes)
@@ -270,13 +277,14 @@ class CapabilityToken:
             if float(payload.get("expires_at", 0)) < time.time():
                 return False
             return True
-        except Exception:
+        except Exception:  # noqa: BLE001
             return False
 
 
 # ---------------------------------------------------------------------------
 # Convenience guard for LedgerWriter integration
 # ---------------------------------------------------------------------------
+
 
 def authorize_write(
     policy: SessionAuthorizationPolicy | None,

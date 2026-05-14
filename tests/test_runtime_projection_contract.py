@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import ast
+from functools import lru_cache
 from pathlib import Path
 
+import pytest
+
+pytestmark = pytest.mark.unit
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DADBOT_ROOT = REPO_ROOT / "dadbot"
@@ -47,16 +51,13 @@ FORBIDDEN_CONSUMER_HELPERS = {
 }
 
 
+@lru_cache(maxsize=None)
 def _parse_module(path: Path) -> ast.AST:
     return ast.parse(path.read_text(encoding="utf-8-sig"), filename=str(path))
 
 
 def _defined_function_names(tree: ast.AST) -> set[str]:
-    return {
-        node.name
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
+    return {node.name for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
 
 
 def _iter_imports(tree: ast.AST):
@@ -71,14 +72,17 @@ def _iter_imports(tree: ast.AST):
             yield module_name, {alias.name for alias in node.names}
 
 
-def _repo_python_files() -> list[Path]:
+@lru_cache(maxsize=1)
+def _repo_python_files() -> tuple[Path, ...]:
     files: list[Path] = []
     for path in REPO_ROOT.rglob("*.py"):
         relative = path.relative_to(REPO_ROOT)
-        if relative.parts and relative.parts[0] in {".venv", "tests", "session_logs", "runtime"}:
+        if relative.parts and (
+            relative.parts[0].startswith(".venv") or relative.parts[0] in {"tests", "session_logs", "runtime", "external"}
+        ):
             continue
         files.append(path)
-    return files
+    return tuple(files)
 
 
 def _is_consumer_module(path: Path) -> bool:
@@ -117,6 +121,7 @@ def test_streamlit_consumer_does_not_import_runtime_internals_or_raw_journal() -
     assert imported_names.isdisjoint(FORBIDDEN_CONSUMER_IMPORT_NAMES)
 
 
+@pytest.mark.slow
 def test_only_consumer_modules_import_projection_boundary_clients() -> None:
     offending_paths: list[str] = []
 

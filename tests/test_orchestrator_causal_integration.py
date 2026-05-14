@@ -16,7 +16,14 @@ class _StubOrchestrator:
         self._state = state
         self._last_turn_context = None
 
-    async def handle_turn(self, user_input: str, session_id: str, timeout_seconds: float):
+    async def handle_turn(
+        self,
+        user_input: str,
+        session_id: str = "default",
+        timeout_seconds: float = 15.0,
+        confluence_key: str | None = None,
+        **kwargs,
+    ):
         self._last_turn_context = _StubContext(state=dict(self._state))
         return "stub response", True
 

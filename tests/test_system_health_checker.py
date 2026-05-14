@@ -1,6 +1,10 @@
+import pytest
+
 from dadbot.core.execution_ledger import ExecutionLedger
 from dadbot.core.session_store import SessionStore
 from dadbot.core.system_health_checker import SystemHealthChecker
+
+pytestmark = pytest.mark.unit
 
 
 def test_health_checker_passes_basic_ledger_invariants():
@@ -37,7 +41,7 @@ def test_health_checker_passes_basic_ledger_invariants():
             "payload": {"job_id": "j1", "result": ("ok", False)},
         }
     )
-    session_store.apply_event(completed)
+    session_store.rebuild_from_ledger([completed])
 
     checker = SystemHealthChecker(base_path=".")
     completeness = checker.check_ledger_completeness(ledger)
@@ -97,6 +101,7 @@ def test_health_checker_identity_check_passes_with_trace_ids():
     assert identity["ok"] is True
 
 
+@pytest.mark.slow
 def test_health_checker_run_all_includes_global_invariant_contract():
     ledger = ExecutionLedger()
     session_store = SessionStore()

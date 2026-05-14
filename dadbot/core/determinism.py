@@ -1,4 +1,4 @@
-﻿"""Determinism enforcement boundary for the DadBot turn pipeline.
+"""Determinism enforcement boundary for the DadBot turn pipeline.
 
 Problem
 -------
@@ -44,16 +44,17 @@ import copy
 import hashlib
 import json
 import logging
+from collections.abc import Callable
 from enum import Enum
-from typing import Any, Callable
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
 
 class DeterminismMode(str, Enum):
-    RECORD = "RECORD"   # Execute + capture output; re-use if already captured
-    REPLAY = "REPLAY"   # Never execute; return sealed output or raise
-    OPEN = "OPEN"       # Passthrough: no recording, no enforcement
+    RECORD = "RECORD"  # Execute + capture output; re-use if already captured
+    REPLAY = "REPLAY"  # Never execute; return sealed output or raise
+    OPEN = "OPEN"  # Passthrough: no recording, no enforcement
 
 
 class DeterminismViolation(RuntimeError):
@@ -70,7 +71,7 @@ def _content_hash(value: Any) -> str:
     """Stable fingerprint of a JSON-serialisable value."""
     try:
         serialised = json.dumps(value, sort_keys=True, default=str).encode("utf-8")
-    except Exception:
+    except Exception:  # noqa: BLE001
         serialised = repr(value).encode("utf-8")
     return hashlib.sha256(serialised).hexdigest()[:16]
 
@@ -84,16 +85,26 @@ class DeterminismBoundary:
     sealed_values:  Slot â†’ captured output mapping.
     hashes:         Slot â†’ content hash of captured output.
     violations:     Accumulated violation records; non-empty means enforcement failed.
+    strict_structural_drift: If True, RECORD-mode re-invocation of an already
+        sealed slot re-evaluates the callable and raises DeterminismViolation
+        when content drifts from the sealed value.
+
     """
 
-    __slots__ = ("mode", "sealed_values", "hashes", "violations", "_call_count")
+    __slots__ = ("_call_count", "hashes", "mode", "sealed_values", "strict_structural_drift", "violations")
 
-    def __init__(self, mode: DeterminismMode = DeterminismMode.RECORD) -> None:
+    def __init__(
+        self,
+        mode: DeterminismMode = DeterminismMode.RECORD,
+        *,
+        strict_structural_drift: bool = False,
+    ) -> None:
         self.mode: DeterminismMode = mode
         self.sealed_values: dict[str, Any] = {}
         self.hashes: dict[str, str] = {}
         self.violations: list[dict[str, str]] = []
         self._call_count: dict[str, int] = {}
+        self.strict_structural_drift = bool(strict_structural_drift)
 
     # ------------------------------------------------------------------
     # Public API
@@ -111,7 +122,13 @@ class DeterminismBoundary:
         """Switch back to RECORD mode."""
         self.mode = DeterminismMode.RECORD
 
-    def capture(self, slot: str, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    def capture(
+        self,
+        slot: str,
+        fn: Callable[..., Any],
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
         """Execute *fn* or return the sealed value, depending on current mode.
 
         Parameters
@@ -127,6 +144,7 @@ class DeterminismBoundary:
         Raises
         ------
         DeterminismViolation  if REPLAY mode and no sealed value is present.
+
         """
         self._call_count[slot] = self._call_count.get(slot, 0) + 1
 
@@ -140,11 +158,13 @@ class DeterminismBoundary:
                     self.mode,
                     "no sealed value available; cannot guarantee deterministic replay",
                 )
-                self.violations.append({
-                    "slot": slot,
-                    "mode": self.mode.value,
-                    "reason": violation.reason,
-                })
+                self.violations.append(
+                    {
+                        "slot": slot,
+                        "mode": self.mode.value,
+                        "reason": violation.reason,
+                    },
+                )
                 raise violation
             logger.debug("DeterminismBoundary: REPLAY slot=%r", slot)
             return copy.deepcopy(self.sealed_values[slot])
@@ -152,15 +172,43 @@ class DeterminismBoundary:
         # RECORD mode ---------------------------------------------------------
         if slot in self.sealed_values:
             # Already captured during this turn; return the same value (idempotency).
+            if self.strict_structural_drift:
+                candidate = fn(*args, **kwargs)
+                existing_hash = str(self.hashes.get(slot) or "")
+                candidate_hash = _content_hash(candidate)
+                if existing_hash and candidate_hash != existing_hash:
+                    violation = DeterminismViolation(
+                        slot,
+                        self.mode,
+                        "structural drift detected for sealed slot during RECORD mode",
+                    )
+                    self.violations.append(
+                        {
+                            "slot": slot,
+                            "mode": self.mode.value,
+                            "reason": violation.reason,
+                        },
+                    )
+                    raise violation
             logger.debug("DeterminismBoundary: RECORD HIT slot=%r", slot)
             return copy.deepcopy(self.sealed_values[slot])
 
         result = fn(*args, **kwargs)
         self._seal_slot(slot, result)
-        logger.debug("DeterminismBoundary: RECORD SEALED slot=%r hash=%s", slot, self.hashes[slot])
+        logger.debug(
+            "DeterminismBoundary: RECORD SEALED slot=%r hash=%s",
+            slot,
+            self.hashes[slot],
+        )
         return result
 
-    async def capture_async(self, slot: str, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    async def capture_async(
+        self,
+        slot: str,
+        fn: Callable[..., Any],
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
         """Async variant of :meth:`capture`."""
         self._call_count[slot] = self._call_count.get(slot, 0) + 1
 
@@ -174,22 +222,46 @@ class DeterminismBoundary:
                     self.mode,
                     "no sealed value available; cannot guarantee deterministic replay",
                 )
-                self.violations.append({
-                    "slot": slot,
-                    "mode": self.mode.value,
-                    "reason": violation.reason,
-                })
+                self.violations.append(
+                    {
+                        "slot": slot,
+                        "mode": self.mode.value,
+                        "reason": violation.reason,
+                    },
+                )
                 raise violation
             logger.debug("DeterminismBoundary: REPLAY (async) slot=%r", slot)
             return copy.deepcopy(self.sealed_values[slot])
 
         # RECORD mode
         if slot in self.sealed_values:
+            if self.strict_structural_drift:
+                candidate = await fn(*args, **kwargs)
+                existing_hash = str(self.hashes.get(slot) or "")
+                candidate_hash = _content_hash(candidate)
+                if existing_hash and candidate_hash != existing_hash:
+                    violation = DeterminismViolation(
+                        slot,
+                        self.mode,
+                        "structural drift detected for sealed slot during RECORD mode",
+                    )
+                    self.violations.append(
+                        {
+                            "slot": slot,
+                            "mode": self.mode.value,
+                            "reason": violation.reason,
+                        },
+                    )
+                    raise violation
             return copy.deepcopy(self.sealed_values[slot])
 
         result = await fn(*args, **kwargs)
         self._seal_slot(slot, result)
-        logger.debug("DeterminismBoundary: RECORD SEALED (async) slot=%r hash=%s", slot, self.hashes[slot])
+        logger.debug(
+            "DeterminismBoundary: RECORD SEALED (async) slot=%r hash=%s",
+            slot,
+            self.hashes[slot],
+        )
         return result
 
     def inject(self, slot: str, value: Any) -> None:
@@ -200,12 +272,40 @@ class DeterminismBoundary:
         """Return a serialisable snapshot of all sealed slots."""
         return {
             "mode": self.mode.value,
+            "strict_structural_drift": bool(self.strict_structural_drift),
+            "sealed_values": copy.deepcopy(self.sealed_values),
             "slots": list(self.sealed_values.keys()),
             "hashes": dict(self.hashes),
             "call_counts": dict(self._call_count),
             "violations": list(self.violations),
             "consistent": not self.violations,
         }
+
+    def hydrate_from_snapshot(self, snapshot: dict[str, Any] | None) -> None:
+        """Restore sealed slots/mode from a persisted snapshot.
+
+        This enables restart-safe deterministic replay using previously captured
+        slot outputs.
+        """
+        payload = dict(snapshot or {})
+        mode_raw = str(payload.get("mode") or DeterminismMode.RECORD.value).strip().upper()
+        try:
+            self.mode = DeterminismMode(mode_raw)
+        except ValueError:
+            self.mode = DeterminismMode.RECORD
+        self.strict_structural_drift = bool(payload.get("strict_structural_drift", False))
+        self._call_count = dict(payload.get("call_counts") or {})
+        self.violations = list(payload.get("violations") or [])
+        self.sealed_values = {}
+        self.hashes = {}
+        for slot, value in dict(payload.get("sealed_values") or {}).items():
+            self._seal_slot(str(slot), value)
+
+    @classmethod
+    def from_snapshot(cls, snapshot: dict[str, Any] | None) -> "DeterminismBoundary":
+        boundary = cls()
+        boundary.hydrate_from_snapshot(snapshot)
+        return boundary
 
     def is_consistent(self) -> bool:
         return not self.violations

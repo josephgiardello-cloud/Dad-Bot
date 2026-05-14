@@ -1,16 +1,18 @@
 """Unit tests for MutationQueue — ordering, locking, drain modes, snapshot math."""
+
 from __future__ import annotations
 
 import pytest
+
+pytestmark = pytest.mark.unit
+from harness.mutation_fuzzer import MutationFuzzer
 
 from dadbot.core.graph import (
     FatalTurnError,
     MutationGuard,
     MutationIntent,
-    MutationKind,
     MutationQueue,
 )
-from harness.mutation_fuzzer import MutationFuzzer
 
 _T = {"wall_time": "2026-01-01T00:00:00", "wall_date": "2026-01-01"}
 
@@ -27,6 +29,7 @@ def _ledger_intent(priority: int = 100) -> MutationIntent:
 # ---------------------------------------------------------------------------
 # Ownership binding
 # ---------------------------------------------------------------------------
+
 
 class TestMutationQueueOwnership:
     def test_unbound_queue_raises_on_any_op(self):
@@ -66,6 +69,7 @@ class TestMutationQueueOwnership:
 # ---------------------------------------------------------------------------
 # Queue operations
 # ---------------------------------------------------------------------------
+
 
 class TestMutationQueueOperations:
     def _q(self) -> MutationQueue:
@@ -109,6 +113,7 @@ class TestMutationQueueOperations:
 # ---------------------------------------------------------------------------
 # Drain ordering
 # ---------------------------------------------------------------------------
+
 
 class TestMutationQueueDrainOrdering:
     def _q(self) -> MutationQueue:
@@ -191,11 +196,13 @@ class TestMutationQueueDrainOrdering:
         snap = q.snapshot()
         latest = dict(snap.get("latest_transaction") or {})
         assert latest.get("status") in {"rolled_back", "rollback_failed"}
+        assert latest.get("rollback_mode") == "audit_critical"
 
 
 # ---------------------------------------------------------------------------
 # Snapshot ledger split
 # ---------------------------------------------------------------------------
+
 
 class TestMutationQueueSnapshot:
     def _q(self) -> MutationQueue:
@@ -205,9 +212,9 @@ class TestMutationQueueSnapshot:
 
     def test_snapshot_separates_ledger_from_non_ledger_pending(self):
         q = self._q()
-        q.queue(_intent("goal"))        # non-ledger
-        q.queue(_ledger_intent())       # ledger
-        q.queue(_ledger_intent())       # ledger
+        q.queue(_intent("goal"))  # non-ledger
+        q.queue(_ledger_intent())  # ledger
+        q.queue(_ledger_intent())  # ledger
         snap = q.snapshot()
         assert snap["pending"] == 1
         assert snap["ledger_pending"] == 2
@@ -237,11 +244,13 @@ class TestMutationQueueSnapshot:
         assert int(snap.get("transactions", 0)) >= 1
         latest = dict(snap.get("latest_transaction") or {})
         assert latest.get("status") == "committed"
+        assert latest.get("rollback_mode") == "best_effort"
 
 
 # ---------------------------------------------------------------------------
 # MutationGuard lifecycle
 # ---------------------------------------------------------------------------
+
 
 class TestMutationGuard:
     def _q(self) -> MutationQueue:
@@ -287,6 +296,7 @@ class TestMutationGuard:
 # ---------------------------------------------------------------------------
 # Fuzzer-driven ordering consistency
 # ---------------------------------------------------------------------------
+
 
 class TestMutationQueueFuzzerOrdering:
     def test_fuzzer_mutations_drain_in_priority_order(self):

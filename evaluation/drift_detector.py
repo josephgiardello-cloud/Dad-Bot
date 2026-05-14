@@ -32,12 +32,10 @@ Usage:
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from evaluation.benchmark_registry import BenchmarkSnapshot
-
 
 # ---------------------------------------------------------------------------
 # Thresholds
@@ -60,19 +58,21 @@ CATEGORY_REGRESSION_THRESHOLD: float = 0.04
 # Data structures
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class ScenarioDelta:
     """Score change for one scenario between two snapshots."""
+
     scenario_name: str
     category: str
     baseline_score: float
     current_score: float
-    delta: float                # current - baseline (positive = improvement)
+    delta: float  # current - baseline (positive = improvement)
     is_regression: bool
     is_improvement: bool
     is_noise: bool
 
-    subsystem_deltas: Dict[str, float] = field(default_factory=dict)
+    subsystem_deltas: dict[str, float] = field(default_factory=dict)
 
     @property
     def severity(self) -> str:
@@ -90,6 +90,7 @@ class ScenarioDelta:
 @dataclass
 class CategoryDelta:
     """Aggregate score change for one category."""
+
     category: str
     baseline_avg: float
     current_avg: float
@@ -110,8 +111,9 @@ class CategoryDelta:
 @dataclass
 class VersionDrift:
     """Detected change in evaluation stack source files."""
-    changed_files: List[str]
-    affects_scores: bool      # True if scoring/schema/scenarios changed
+
+    changed_files: list[str]
+    affects_scores: bool  # True if scoring/schema/scenarios changed
 
     @property
     def stack_changed(self) -> bool:
@@ -121,22 +123,23 @@ class VersionDrift:
 @dataclass
 class DriftReport:
     """Complete drift analysis between two benchmark snapshots."""
+
     baseline_snapshot_id: str
     current_snapshot_id: str
     baseline_label: str
     current_label: str
 
-    scenario_deltas: List[ScenarioDelta]
-    category_deltas: List[CategoryDelta]
+    scenario_deltas: list[ScenarioDelta]
+    category_deltas: list[CategoryDelta]
     version_drift: VersionDrift
 
-    drift_severity: str         # "none" | "minor" | "significant" | "critical"
+    drift_severity: str  # "none" | "minor" | "significant" | "critical"
     drift_detected: bool
 
-    regressions: List[str]      # scenario names that regressed
-    improvements: List[str]     # scenario names that improved
+    regressions: list[str]  # scenario names that regressed
+    improvements: list[str]  # scenario names that improved
 
-    overall_delta: float        # average overall score delta
+    overall_delta: float  # average overall score delta
     scenarios_compared: int
 
     def passes_gate(self, allow_minor: bool = True) -> bool:
@@ -174,8 +177,7 @@ class DriftReport:
                 )
                 if delta:
                     lines.append(
-                        f"     {name}: {delta.baseline_score:.3f} → "
-                        f"{delta.current_score:.3f}  ({delta.delta:+.3f})"
+                        f"     {name}: {delta.baseline_score:.3f} → {delta.current_score:.3f}  ({delta.delta:+.3f})"
                     )
 
         if self.improvements:
@@ -187,17 +189,14 @@ class DriftReport:
                 )
                 if delta:
                     lines.append(
-                        f"     {name}: {delta.baseline_score:.3f} → "
-                        f"{delta.current_score:.3f}  ({delta.delta:+.3f})"
+                        f"     {name}: {delta.baseline_score:.3f} → {delta.current_score:.3f}  ({delta.delta:+.3f})"
                     )
 
         lines.append("\n  CATEGORY SUMMARY:")
         for cd in self.category_deltas:
             indicator = "❌" if cd.is_regression else ("✅" if cd.is_improvement else "·")
             lines.append(
-                f"    {indicator} {cd.category:12s} "
-                f"{cd.baseline_avg:.3f} → {cd.current_avg:.3f}  "
-                f"({cd.delta:+.3f})"
+                f"    {indicator} {cd.category:12s} {cd.baseline_avg:.3f} → {cd.current_avg:.3f}  ({cd.delta:+.3f})"
             )
 
         lines.append("=" * 72)
@@ -207,6 +206,7 @@ class DriftReport:
 # ---------------------------------------------------------------------------
 # Drift Detector
 # ---------------------------------------------------------------------------
+
 
 class DriftDetector:
     """Compares two BenchmarkSnapshots and produces a DriftReport.
@@ -238,10 +238,10 @@ class DriftDetector:
 
         # Build lookup maps
         baseline_map = {s.get("scenario"): s for s in baseline.scores}
-        current_map  = {s.get("scenario"): s for s in current.scores}
+        current_map = {s.get("scenario"): s for s in current.scores}
 
         # Compute per-scenario deltas
-        scenario_deltas: List[ScenarioDelta] = []
+        scenario_deltas: list[ScenarioDelta] = []
         compared_names = set(baseline_map) & set(current_map)
 
         for name in sorted(compared_names):
@@ -303,18 +303,16 @@ class DriftDetector:
     def _compare_scenario(
         self,
         name: str,
-        baseline_score: Dict[str, Any],
-        current_score: Dict[str, Any],
+        baseline_score: dict[str, Any],
+        current_score: dict[str, Any],
     ) -> ScenarioDelta:
-        category = str(
-            current_score.get("category") or baseline_score.get("category") or ""
-        )
+        category = str(current_score.get("category") or baseline_score.get("category") or "")
         b_overall = self._extract_overall(baseline_score)
         c_overall = self._extract_overall(current_score)
         delta = c_overall - b_overall
 
         # Subsystem deltas
-        sub_deltas: Dict[str, float] = {}
+        sub_deltas: dict[str, float] = {}
         for sub in ["planning", "tools", "memory", "ux", "robustness"]:
             b_sub = self._extract_subsystem(baseline_score, sub)
             c_sub = self._extract_subsystem(current_score, sub)
@@ -333,10 +331,8 @@ class DriftDetector:
             subsystem_deltas=sub_deltas,
         )
 
-    def _compute_category_deltas(
-        self, scenario_deltas: List[ScenarioDelta]
-    ) -> List[CategoryDelta]:
-        by_cat: Dict[str, List[ScenarioDelta]] = {}
+    def _compute_category_deltas(self, scenario_deltas: list[ScenarioDelta]) -> list[CategoryDelta]:
+        by_cat: dict[str, list[ScenarioDelta]] = {}
         for d in scenario_deltas:
             by_cat.setdefault(d.category, []).append(d)
 
@@ -344,21 +340,23 @@ class DriftDetector:
         for cat, deltas in sorted(by_cat.items()):
             b_avg = sum(d.baseline_score for d in deltas) / len(deltas)
             c_avg = sum(d.current_score for d in deltas) / len(deltas)
-            result.append(CategoryDelta(
-                category=cat,
-                baseline_avg=round(b_avg, 4),
-                current_avg=round(c_avg, 4),
-                delta=round(c_avg - b_avg, 4),
-                scenario_count=len(deltas),
-                regressions_in_category=sum(1 for d in deltas if d.is_regression),
-                improvements_in_category=sum(1 for d in deltas if d.is_improvement),
-            ))
+            result.append(
+                CategoryDelta(
+                    category=cat,
+                    baseline_avg=round(b_avg, 4),
+                    current_avg=round(c_avg, 4),
+                    delta=round(c_avg - b_avg, 4),
+                    scenario_count=len(deltas),
+                    regressions_in_category=sum(1 for d in deltas if d.is_regression),
+                    improvements_in_category=sum(1 for d in deltas if d.is_improvement),
+                )
+            )
         return result
 
     def _classify_severity(
         self,
-        scenario_deltas: List[ScenarioDelta],
-        category_deltas: List[CategoryDelta],
+        scenario_deltas: list[ScenarioDelta],
+        category_deltas: list[CategoryDelta],
         version_drift: VersionDrift,
     ) -> str:
         regression_count = sum(1 for d in scenario_deltas if d.is_regression)
@@ -377,27 +375,25 @@ class DriftDetector:
         self,
         baseline: BenchmarkSnapshot,
         current: BenchmarkSnapshot,
-    ) -> List[str]:
+    ) -> list[str]:
         b = baseline.version_manifest
         c = current.version_manifest
         changed = []
         checks = {
             "tests/scoring_engine.py": (b.scoring_engine_hash, c.scoring_engine_hash),
-            "tests/trace_schema.py":   (b.trace_schema_hash,   c.trace_schema_hash),
+            "tests/trace_schema.py": (b.trace_schema_hash, c.trace_schema_hash),
             "tests/scenario_suite.py": (b.scenario_suite_hash, c.scenario_suite_hash),
-            "evaluation/gold_set.py":  (b.gold_set_hash,       c.gold_set_hash),
+            "evaluation/gold_set.py": (b.gold_set_hash, c.gold_set_hash),
         }
         if baseline.execution_mode == "orchestrator":
-            checks["dadbot/core/orchestrator.py"] = (
-                b.orchestrator_hash, c.orchestrator_hash
-            )
+            checks["dadbot/core/orchestrator.py"] = (b.orchestrator_hash, c.orchestrator_hash)
         for file, (old, new) in checks.items():
             if old and new and old != new:
                 changed.append(file)
         return changed
 
     @staticmethod
-    def _extract_overall(score_dict: Dict[str, Any]) -> float:
+    def _extract_overall(score_dict: dict[str, Any]) -> float:
         """Extract overall score from a serialized benchmark result."""
         # Try capability_score first (Phase 4B+)
         cap = score_dict.get("capability_score") or {}
@@ -410,7 +406,7 @@ class DriftDetector:
         return 0.0
 
     @staticmethod
-    def _extract_subsystem(score_dict: Dict[str, Any], subsystem: str) -> Optional[float]:
+    def _extract_subsystem(score_dict: dict[str, Any], subsystem: str) -> float | None:
         """Extract a subsystem score from a serialized benchmark result."""
         cap = score_dict.get("capability_score") or {}
         sub = cap.get(subsystem) or {}
@@ -423,9 +419,10 @@ class DriftDetector:
 # Regression gate helper (for use in pytest or CI)
 # ---------------------------------------------------------------------------
 
+
 def assert_no_regression(
     registry: Any,  # BenchmarkRegistry
-    current_scores: List[Dict[str, Any]],
+    current_scores: list[dict[str, Any]],
     execution_mode: str = "mock",
     run_label: str = "current",
     allow_minor: bool = True,

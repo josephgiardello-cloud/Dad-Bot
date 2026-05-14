@@ -1,20 +1,17 @@
 """Tests for Phase 5 — Conflict Resolution Engine (conflict_resolution.py)."""
+
 from __future__ import annotations
 
-import pytest
-
-from dadbot.core.uncertainty_model import ConfidenceVector
 from dadbot.core.conflict_resolution import (
-    ToolOutput,
     ConflictDetector,
     ConflictKind,
     ConflictReport,
     ConflictResolver,
-    TrustWeightedMerger,
     ResolutionPolicyKind,
-    ResolutionResult,
+    ToolOutput,
+    TrustWeightedMerger,
 )
-
+from dadbot.core.uncertainty_model import ConfidenceVector
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -26,7 +23,9 @@ def _cv(r: float = 0.9, f: float = 0.9, c: float = 0.9, tool: str = "t", status:
 
 
 def _output(tool: str, output, status: str = "ok", r: float = 0.9, f: float = 0.9, c: float = 0.9) -> ToolOutput:
-    return ToolOutput(tool_name=tool, output=output, confidence_vector=_cv(r, f, c, tool=tool, status=status), status=status)
+    return ToolOutput(
+        tool_name=tool, output=output, confidence_vector=_cv(r, f, c, tool=tool, status=status), status=status
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -237,7 +236,7 @@ class TestConflictResolver:
         assert isinstance(result.conflict_report, ConflictReport)
 
     def test_highest_confidence_prefers_non_empty(self):
-        empty = _output("t1", [], r=0.95)   # high confidence but empty
+        empty = _output("t1", [], r=0.95)  # high confidence but empty
         nonempty = _output("t2", ["data"], r=0.5)  # lower confidence but has data
         result = self.resolver.resolve([empty, nonempty])
         # Should prefer non-empty result

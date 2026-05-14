@@ -15,13 +15,13 @@ Design principle:
 
 These are pure mathematical objects — no I/O, no DB access, no LLM calls.
 """
+
 from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -30,7 +30,7 @@ from typing import Any
 
 def _sha256(payload: Any) -> str:
     return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        json.dumps(payload, sort_keys=True, default=str).encode("utf-8"),
     ).hexdigest()
 
 
@@ -49,11 +49,12 @@ class MemoryStateVector:
     - Projection reduces dimensionality: project([0,2]) → sub-vector.
     - Dimension == len(entries).
     """
+
     entries: tuple[dict[str, Any], ...]
     space_hash: str
 
     @classmethod
-    def from_memories(cls, memories: list[dict[str, Any]]) -> "MemoryStateVector":
+    def from_memories(cls, memories: list[dict[str, Any]]) -> MemoryStateVector:
         """Construct a MemoryStateVector from a list of memory dicts."""
         frozen = tuple(dict(m) for m in (memories or []))
         return cls(
@@ -65,7 +66,7 @@ class MemoryStateVector:
     def dimension(self) -> int:
         return len(self.entries)
 
-    def project(self, indices: list[int]) -> "MemoryStateVector":
+    def project(self, indices: list[int]) -> MemoryStateVector:
         """Return a sub-vector containing only the entries at given indices."""
         projected = tuple(self.entries[i] for i in sorted(set(indices)) if 0 <= i < len(self.entries))
         return MemoryStateVector(
@@ -100,10 +101,7 @@ class GoalWeightingFunction:
 
     def __init__(self, active_goals: list[dict[str, Any]]) -> None:
         self._goals = list(active_goals or [])
-        self._goal_token_sets = [
-            self._tokenize(str(g.get("description") or ""))
-            for g in self._goals
-        ]
+        self._goal_token_sets = [self._tokenize(str(g.get("description") or "")) for g in self._goals]
 
     @staticmethod
     def _tokenize(text: str) -> set[str]:
@@ -114,12 +112,14 @@ class GoalWeightingFunction:
         if not self._goals:
             return 1.0  # identity weight when no goals
 
-        content = " ".join([
-            str(entry.get("content") or ""),
-            str(entry.get("text") or ""),
-            str(entry.get("summary") or ""),
-            str(entry.get("description") or ""),
-        ])
+        content = " ".join(
+            [
+                str(entry.get("content") or ""),
+                str(entry.get("text") or ""),
+                str(entry.get("summary") or ""),
+                str(entry.get("description") or ""),
+            ],
+        )
         entry_tokens = self._tokenize(content)
         if not entry_tokens:
             return 0.0
@@ -130,8 +130,7 @@ class GoalWeightingFunction:
                 continue
             overlap = len(entry_tokens & goal_tokens)
             ratio = overlap / len(goal_tokens)
-            if ratio > best:
-                best = ratio
+            best = max(best, ratio)
 
         return min(1.0, max(0.0, best))
 

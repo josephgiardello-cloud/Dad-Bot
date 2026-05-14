@@ -1,4 +1,4 @@
-﻿"""Event schema versioning and backward-compatible migration.
+"""Event schema versioning and backward-compatible migration.
 
 Every event written to the ledger receives a ``_schema_version`` stamp.
 When loading events from a WAL, ``EventSchemaMigrator`` upgrades older events
@@ -18,10 +18,12 @@ Usage::
     from dadbot.core.event_schema import get_migrator
     get_migrator().register("0.9", "1.0", lambda e: {**e, "kernel_step_id": e.get("step_id", "")})
 """
+
 from __future__ import annotations
 
+from collections.abc import Callable
 from copy import deepcopy
-from typing import Any, Callable
+from typing import Any
 
 # Bump this string when the event envelope structure changes.
 CURRENT_SCHEMA_VERSION: str = "1.0"
@@ -37,6 +39,7 @@ def stamp_schema_version(event: dict[str, Any]) -> dict[str, Any]:
 # Migration registry
 # ---------------------------------------------------------------------------
 
+
 class EventSchemaMigration:
     """A single schema-version upgrade step."""
 
@@ -47,8 +50,8 @@ class EventSchemaMigration:
         migrate_fn: Callable[[dict[str, Any]], dict[str, Any]],
     ) -> None:
         self.from_version = str(from_version)
-        self.to_version   = str(to_version)
-        self._fn          = migrate_fn
+        self.to_version = str(to_version)
+        self._fn = migrate_fn
 
     def apply(self, event: dict[str, Any]) -> dict[str, Any]:
         result = self._fn(deepcopy(event))
@@ -72,10 +75,10 @@ class EventSchemaMigrator:
         from_version: str,
         to_version: str,
         migrate_fn: Callable[[dict[str, Any]], dict[str, Any]],
-    ) -> "EventSchemaMigrator":
+    ) -> EventSchemaMigrator:
         """Register a migration step.  Returns self for chaining."""
         self._migrations.append(
-            EventSchemaMigration(from_version, to_version, migrate_fn)
+            EventSchemaMigration(from_version, to_version, migrate_fn),
         )
         return self
 

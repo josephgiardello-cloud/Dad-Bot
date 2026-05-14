@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import pytest
+
 from dadbot.ui.voice_control_plane import VoiceSessionController
+
+pytestmark = pytest.mark.unit
 
 
 def test_voice_controller_defaults_and_mode_transition() -> None:

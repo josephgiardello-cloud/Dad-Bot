@@ -41,21 +41,22 @@ Usage
     health_dict = turn_context.state.get("turn_health_state", {})
     ux_feedback  = turn_context.state.get("ux_feedback", {})
 """
+
 from __future__ import annotations
 
 from typing import Any
 
-from dadbot.core.ux_projection import TurnUxProjector, TurnHealthState  # noqa: F401 (re-export)
+from dadbot.core.ux_projection import (  # noqa: F401 (re-export)
+    TurnHealthState,
+    TurnUxProjector,
+)
 
 
 def _stage_duration_ms_from_context(turn_context: Any, stage_name: str) -> float:
     """Extract total elapsed ms for *stage_name* from ``turn_context.stage_traces``."""
     total = 0.0
     for trace in list(getattr(turn_context, "stage_traces", None) or []):
-        if (
-            str(getattr(trace, "stage", "") or "").strip().lower()
-            == str(stage_name or "").strip().lower()
-        ):
+        if str(getattr(trace, "stage", "") or "").strip().lower() == str(stage_name or "").strip().lower():
             total += float(getattr(trace, "duration_ms", 0.0) or 0.0)
     return round(total, 3)
 
@@ -81,6 +82,7 @@ class TurnUxProjectionGateway:
         Memory operations latency threshold.
     degraded_graph_sync_threshold_ms:
         Graph sync latency threshold.
+
     """
 
     def __init__(
@@ -121,6 +123,7 @@ class TurnUxProjectionGateway:
             Wall-clock duration of the full turn execution in milliseconds.
         failed:
             True when the turn ended in an unhandled exception.
+
         """
         self._projector.project(
             turn_context,
@@ -147,10 +150,11 @@ class TurnUxProjectionGateway:
         dict
             The ``turn_health_state`` payload stamped into the context.
             Returns an empty dict if projection fails silently.
+
         """
         try:
             self.project(turn_context, total_latency_ms=total_latency_ms, failed=failed)
-        except Exception:
+        except Exception:  # noqa: BLE001
             return {}
         state = getattr(turn_context, "state", None)
         if isinstance(state, dict):

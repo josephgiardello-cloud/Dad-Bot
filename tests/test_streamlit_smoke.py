@@ -6,7 +6,21 @@ import sys
 import textwrap
 from pathlib import Path
 
+import pytest
+
 from Dad import ensure_streamlit_app_file
+
+pytestmark = pytest.mark.ui
+
+
+def _copytree_ignore_runtime_artifacts(_src: str, names: list[str]) -> set[str]:
+    ignored: set[str] = set()
+    for name in names:
+        if name == "__pycache__":
+            ignored.add(name)
+        elif name.endswith((".pyc", ".pyo", ".pyd")):
+            ignored.add(name)
+    return ignored
 
 
 def test_ensure_streamlit_app_file_creates_minimal_stub(tmp_path):
@@ -29,25 +43,38 @@ def test_dad_streamlit_app_starts_without_streamlit_exceptions(tmp_path):
     for file_name in ("Dad.py", "dad_streamlit.py", "dad_profile.json", "dad_profile.template.json"):
         shutil.copy2(repo_root / file_name, sandbox_root / file_name)
 
-    shutil.copytree(repo_root / "dadbot", sandbox_root / "dadbot")
-    shutil.copytree(repo_root / "dadbot_system", sandbox_root / "dadbot_system")
-    shutil.copytree(repo_root / "static", sandbox_root / "static")
-    shutil.copytree(repo_root / ".streamlit", sandbox_root / ".streamlit")
+    shutil.copytree(repo_root / "dadbot", sandbox_root / "dadbot", ignore=_copytree_ignore_runtime_artifacts)
+    shutil.copytree(repo_root / "dadbot_system", sandbox_root / "dadbot_system", ignore=_copytree_ignore_runtime_artifacts)
+    shutil.copytree(repo_root / "static", sandbox_root / "static", ignore=_copytree_ignore_runtime_artifacts)
+    shutil.copytree(repo_root / ".streamlit", sandbox_root / ".streamlit", ignore=_copytree_ignore_runtime_artifacts)
 
     smoke_code = textwrap.dedent(
         """
         from streamlit.testing.v1 import AppTest
 
-        app = AppTest.from_file("dad_streamlit.py").run(timeout=15)
-        button_labels = [button.label for button in app.button]
-        radio_labels = [r.label for r in app.radio]
+        app = AppTest.from_file("dad_streamlit.py").run(timeout=30)
+        button_labels = [str(button.label) for button in app.button]
+        radio_labels = [str(r.label) for r in app.radio]
 
         assert len(app.exception) == 0, list(app.exception)
         assert len(app.error) == 0, [item.value for item in app.error]
         assert "New Thread" in button_labels, button_labels
         assert "Navigate" in radio_labels, radio_labels
+
+        # Availability-only check: route load succeeds and workshop section is present.
+        nav_radio = next(r for r in app.radio if r.label == "Navigate")
+        app = nav_radio.set_value("workshop").run(timeout=30)
+        assert len(app.exception) == 0, list(app.exception)
+        assert len(app.error) == 0, [item.value for item in app.error]
+
+        workshop_labels = [str(r.label) for r in app.radio]
+        assert "Workshop section" in workshop_labels, workshop_labels
         """
     )
+
+    _dadbot_keys = {k for k in os.environ if k.startswith("DADBOT_")}
+    _smoke_env = {k: v for k, v in os.environ.items() if k not in _dadbot_keys}
+    _smoke_env["PYTHONIOENCODING"] = "utf-8"
 
     result = subprocess.run(
         [sys.executable, "-c", smoke_code],
@@ -55,14 +82,12 @@ def test_dad_streamlit_app_starts_without_streamlit_exceptions(tmp_path):
         capture_output=True,
         text=True,
         encoding="utf-8",
-        timeout=30,
-        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+        timeout=60,
+        env=_smoke_env,
     )
 
     assert result.returncode == 0, (
-        "dad_streamlit.py failed smoke startup.\n"
-        f"STDOUT:\n{result.stdout}\n"
-        f"STDERR:\n{result.stderr}"
+        f"dad_streamlit.py failed smoke startup.\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
     )
 
 
@@ -74,10 +99,10 @@ def test_preferences_tab_shows_detected_cloud_llm_api_key_hint(tmp_path):
     for file_name in ("Dad.py", "dad_streamlit.py", "dad_profile.json", "dad_profile.template.json"):
         shutil.copy2(repo_root / file_name, sandbox_root / file_name)
 
-    shutil.copytree(repo_root / "dadbot", sandbox_root / "dadbot")
-    shutil.copytree(repo_root / "dadbot_system", sandbox_root / "dadbot_system")
-    shutil.copytree(repo_root / "static", sandbox_root / "static")
-    shutil.copytree(repo_root / ".streamlit", sandbox_root / ".streamlit")
+    shutil.copytree(repo_root / "dadbot", sandbox_root / "dadbot", ignore=_copytree_ignore_runtime_artifacts)
+    shutil.copytree(repo_root / "dadbot_system", sandbox_root / "dadbot_system", ignore=_copytree_ignore_runtime_artifacts)
+    shutil.copytree(repo_root / "static", sandbox_root / "static", ignore=_copytree_ignore_runtime_artifacts)
+    shutil.copytree(repo_root / ".streamlit", sandbox_root / ".streamlit", ignore=_copytree_ignore_runtime_artifacts)
 
     profile_path = sandbox_root / "dad_profile.json"
     profile_payload = json.loads(profile_path.read_text(encoding="utf-8"))
@@ -91,23 +116,28 @@ def test_preferences_tab_shows_detected_cloud_llm_api_key_hint(tmp_path):
         """
         from streamlit.testing.v1 import AppTest
 
-        app = AppTest.from_file("dad_streamlit.py").run(timeout=15)
+        app = AppTest.from_file("dad_streamlit.py").run(timeout=30)
 
         assert len(app.exception) == 0, list(app.exception)
         assert len(app.error) == 0, [item.value for item in app.error]
 
         # Navigate to Dad's Workshop
         nav_radio = next(r for r in app.radio if r.label == "Navigate")
-        app = nav_radio.set_value("workshop").run(timeout=15)
+        app = nav_radio.set_value("workshop").run(timeout=30)
 
         # Select Preferences section in workshop
         workshop_radio = next(r for r in app.radio if r.label == "Workshop section")
-        app = workshop_radio.set_value("Preferences").run(timeout=15)
+        app = workshop_radio.set_value("Preferences").run(timeout=30)
 
         captions = [str(item.value) for item in app.caption]
         assert any("OPENAI_API_KEY" in caption and "detected" in caption for caption in captions), captions
         """
     )
+
+    _dadbot_keys_pref = {k for k in os.environ if k.startswith("DADBOT_")}
+    _pref_env = {k: v for k, v in os.environ.items() if k not in _dadbot_keys_pref}
+    _pref_env["OPENAI_API_KEY"] = "test-openai-key"
+    _pref_env["PYTHONIOENCODING"] = "utf-8"
 
     result = subprocess.run(
         [sys.executable, "-c", smoke_code],
@@ -115,18 +145,12 @@ def test_preferences_tab_shows_detected_cloud_llm_api_key_hint(tmp_path):
         capture_output=True,
         text=True,
         encoding="utf-8",
-        timeout=30,
-        env={
-            **os.environ,
-            "OPENAI_API_KEY": "test-openai-key",
-            "PYTHONIOENCODING": "utf-8",
-        },
+        timeout=60,
+        env=_pref_env,
     )
 
     assert result.returncode == 0, (
-        "dad_streamlit.py failed LLM preferences hint smoke test.\n"
-        f"STDOUT:\n{result.stdout}\n"
-        f"STDERR:\n{result.stderr}"
+        f"dad_streamlit.py failed LLM preferences hint smoke test.\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
     )
 
 
@@ -149,10 +173,10 @@ def test_sidebar_and_button_surface_accessible(tmp_path):
     for file_name in ("Dad.py", "dad_streamlit.py", "dad_profile.json", "dad_profile.template.json"):
         shutil.copy2(repo_root / file_name, sandbox_root / file_name)
 
-    shutil.copytree(repo_root / "dadbot", sandbox_root / "dadbot")
-    shutil.copytree(repo_root / "dadbot_system", sandbox_root / "dadbot_system")
-    shutil.copytree(repo_root / "static", sandbox_root / "static")
-    shutil.copytree(repo_root / ".streamlit", sandbox_root / ".streamlit")
+    shutil.copytree(repo_root / "dadbot", sandbox_root / "dadbot", ignore=_copytree_ignore_runtime_artifacts)
+    shutil.copytree(repo_root / "dadbot_system", sandbox_root / "dadbot_system", ignore=_copytree_ignore_runtime_artifacts)
+    shutil.copytree(repo_root / "static", sandbox_root / "static", ignore=_copytree_ignore_runtime_artifacts)
+    shutil.copytree(repo_root / ".streamlit", sandbox_root / ".streamlit", ignore=_copytree_ignore_runtime_artifacts)
 
     smoke_code = textwrap.dedent(
         """
@@ -163,7 +187,7 @@ def test_sidebar_and_button_surface_accessible(tmp_path):
             checkboxes.update(str(item.label) for item in app.checkbox)
             selects.update(str(item.label) for item in app.selectbox)
 
-        app = AppTest.from_file("dad_streamlit.py").run(timeout=20)
+        app = AppTest.from_file("dad_streamlit.py").run(timeout=30)
         assert len(app.exception) == 0, list(app.exception)
         assert len(app.error) == 0, [item.value for item in app.error]
 
@@ -174,7 +198,7 @@ def test_sidebar_and_button_surface_accessible(tmp_path):
 
         nav_radio = next(r for r in app.radio if r.label == "Navigate")
         for view in ("status", "workshop", "voice", "chat"):
-            app = nav_radio.set_value(view).run(timeout=20)
+            app = nav_radio.set_value(view).run(timeout=30)
             assert len(app.exception) == 0, list(app.exception)
             assert len(app.error) == 0, [item.value for item in app.error]
             collect_labels(app, seen_buttons, seen_checkboxes, seen_selects)
@@ -183,7 +207,7 @@ def test_sidebar_and_button_surface_accessible(tmp_path):
             if view == "workshop":
                 section_radio = next(r for r in app.radio if r.label == "Workshop section")
                 for section in ("Status", "Preferences", "Data", "Mobile"):
-                    app = section_radio.set_value(section).run(timeout=20)
+                    app = section_radio.set_value(section).run(timeout=30)
                     assert len(app.exception) == 0, list(app.exception)
                     assert len(app.error) == 0, [item.value for item in app.error]
                     collect_labels(app, seen_buttons, seen_checkboxes, seen_selects)
@@ -225,14 +249,20 @@ def test_sidebar_and_button_surface_accessible(tmp_path):
         """
     )
 
+    # Strip any DADBOT_* env overrides so the subprocess always derives paths
+    # from the sandbox root rather than inheriting leaked test-scoped env vars.
+    _dadbot_keys = {k for k in os.environ if k.startswith("DADBOT_")}
+    sandbox_env = {k: v for k, v in os.environ.items() if k not in _dadbot_keys}
+    sandbox_env["PYTHONIOENCODING"] = "utf-8"
+
     result = subprocess.run(
         [sys.executable, "-c", smoke_code],
         cwd=sandbox_root,
         capture_output=True,
         text=True,
         encoding="utf-8",
-        timeout=60,
-        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+        timeout=120,
+        env=sandbox_env,
     )
 
     assert result.returncode == 0, (

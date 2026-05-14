@@ -10,6 +10,7 @@ Upgrades ToolDAG from a runtime object to a verifiable compiled artifact:
 Once locked, a DAG can be compared across runs, stored, and re-verified
 without relying on object identity or wall-clock ordering.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -17,8 +18,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from dadbot.core.tool_dag import ToolDAG, ToolNode
-
+from dadbot.core.tool_dag import ToolDAG
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -27,7 +27,7 @@ from dadbot.core.tool_dag import ToolDAG, ToolNode
 
 def _sha256(payload: Any) -> str:
     return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        json.dumps(payload, sort_keys=True, default=str).encode("utf-8"),
     ).hexdigest()
 
 
@@ -51,13 +51,13 @@ class DagIdentityLock:
         assert lock == DagIdentityLock.from_dag(rebuilt_dag)  # reproducibility proof
     """
 
-    structural_hash: str   # topology only (node IDs + edge IDs)
-    semantic_hash: str     # full content (tool_name, intent, args, edges)
+    structural_hash: str  # topology only (node IDs + edge IDs)
+    semantic_hash: str  # full content (tool_name, intent, args, edges)
     node_count: int
     edge_count: int
 
     @classmethod
-    def from_dag(cls, dag: ToolDAG) -> "DagIdentityLock":
+    def from_dag(cls, dag: ToolDAG) -> DagIdentityLock:
         # Sort nodes by deterministic_id for stable ordering.
         nodes = sorted(dag.nodes, key=lambda n: n.deterministic_id)
         edges = sorted(dag.edges, key=lambda e: (e.source_id, e.target_id))
@@ -79,7 +79,11 @@ class DagIdentityLock:
                 for n in nodes
             ],
             "edges": [
-                {"source_id": e.source_id, "target_id": e.target_id, "edge_type": e.edge_type}
+                {
+                    "source_id": e.source_id,
+                    "target_id": e.target_id,
+                    "edge_type": e.edge_type,
+                }
                 for e in edges
             ],
         }
@@ -150,6 +154,7 @@ def graph_equivalence_proof(a: ToolDAG, b: ToolDAG) -> dict[str, Any]:
 
 class DagReplayInvariantError(ValueError):
     """Raised when a replayed DAG is not semantically equivalent to the original."""
+
     def __init__(self, message: str, original_hash: str, replayed_hash: str) -> None:
         self.original_hash = original_hash
         self.replayed_hash = replayed_hash

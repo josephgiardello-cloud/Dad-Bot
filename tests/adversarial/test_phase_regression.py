@@ -3,6 +3,7 @@
 Confirms that directly attempting backward phase transitions raises,
 while valid forward-only sequences succeed.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -44,14 +45,17 @@ class TestPhaseRegressionRejection:
             ctx.transition_phase(phase, reason="test")
         assert ctx.phase == TurnPhase.RESPOND
 
-    @pytest.mark.parametrize("from_phase,to_phase", [
-        (TurnPhase.RESPOND, TurnPhase.PLAN),
-        (TurnPhase.RESPOND, TurnPhase.ACT),
-        (TurnPhase.RESPOND, TurnPhase.OBSERVE),
-        (TurnPhase.ACT, TurnPhase.PLAN),
-        (TurnPhase.OBSERVE, TurnPhase.PLAN),
-        (TurnPhase.OBSERVE, TurnPhase.ACT),
-    ])
+    @pytest.mark.parametrize(
+        "from_phase,to_phase",
+        [
+            (TurnPhase.RESPOND, TurnPhase.PLAN),
+            (TurnPhase.RESPOND, TurnPhase.ACT),
+            (TurnPhase.RESPOND, TurnPhase.OBSERVE),
+            (TurnPhase.ACT, TurnPhase.PLAN),
+            (TurnPhase.OBSERVE, TurnPhase.PLAN),
+            (TurnPhase.OBSERVE, TurnPhase.ACT),
+        ],
+    )
     def test_backward_transition_raises(self, from_phase: TurnPhase, to_phase: TurnPhase):
         ctx = _ctx()
         # Advance to the starting phase

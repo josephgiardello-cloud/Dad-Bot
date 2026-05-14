@@ -37,55 +37,83 @@ Wire the budget into the runtime adapter or app layer:
 The graph itself is unaware of the budget — resource accounting is a
 cross-cutting concern managed at the **kernel/adapter** boundary.
 """
+
 from __future__ import annotations
 
 import asyncio
 import contextlib
 import logging
 import time
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator
+from typing import Any
+
+from dadbot.core.runtime_errors import BackpressureError
 
 logger = logging.getLogger(__name__)
+_NON_BLOCKING_ACQUIRE_TIMEOUT_SEC: float = 1e-6
 
 
 # ---------------------------------------------------------------------------
 # Exceptions
 # ---------------------------------------------------------------------------
 
+
 class ConcurrencyBudgetExceeded(RuntimeError):
     """Raised when a new execution cannot be admitted due to concurrency limits."""
 
-    def __init__(self, *, max_concurrent: int, current_inflight: int, trace_id: str = "") -> None:
+    def __init__(
+        self,
+        *,
+        max_concurrent: int,
+        current_inflight: int,
+        trace_token: str = "",
+        **legacy_kwargs: Any,
+    ) -> None:
+        legacy_trace = legacy_kwargs.pop("trace_id", "")
+        if legacy_kwargs:
+            unknown = ", ".join(sorted(str(name) for name in legacy_kwargs))
+            raise TypeError(f"Unexpected keyword argument(s): {unknown}")
         self.max_concurrent = int(max_concurrent)
         self.current_inflight = int(current_inflight)
-        self.trace_id = str(trace_id or "")
+        self.trace_id = str(trace_token or legacy_trace or "")
         super().__init__(
             f"Concurrency budget exceeded: max_concurrent={max_concurrent}, "
-            f"current_inflight={current_inflight}, trace_id={trace_id!r}"
+            f"current_inflight={current_inflight}, trace_id={self.trace_id!r}",
         )
 
 
-class BackpressureSignal(RuntimeError):
+class BackpressureSignal(BackpressureError):
     """Raised when the backpressure policy rejects a turn due to resource pressure.
 
     Callers can catch this to return a graceful degraded response instead of
     propagating the error.
     """
 
-    def __init__(self, *, reason: str, retry_after_ms: float = 0.0, trace_id: str = "") -> None:
+    def __init__(
+        self,
+        *,
+        reason: str,
+        retry_after_ms: float = 0.0,
+        trace_token: str = "",
+        **legacy_kwargs: Any,
+    ) -> None:
+        legacy_trace = legacy_kwargs.pop("trace_id", "")
+        if legacy_kwargs:
+            unknown = ", ".join(sorted(str(name) for name in legacy_kwargs))
+            raise TypeError(f"Unexpected keyword argument(s): {unknown}")
         self.reason = str(reason or "")
         self.retry_after_ms = float(retry_after_ms or 0.0)
-        self.trace_id = str(trace_id or "")
+        self.trace_id = str(trace_token or legacy_trace or "")
         super().__init__(
-            f"Backpressure: {self.reason} (retry_after_ms={self.retry_after_ms:.0f}, "
-            f"trace_id={self.trace_id!r})"
+            f"Backpressure: {self.reason} (retry_after_ms={self.retry_after_ms:.0f}, trace_id={self.trace_id!r})",
         )
 
 
 # ---------------------------------------------------------------------------
 # Configuration dataclasses
 # ---------------------------------------------------------------------------
+
 
 @dataclass(frozen=True)
 class ConcurrencyBudget:
@@ -102,6 +130,7 @@ class ConcurrencyBudget:
     soft_limit_turns:
         When inflight count reaches this value the backpressure policy emits a
         warning but does not reject.  Must be ≤ ``max_concurrent_turns``.
+
     """
 
     max_concurrent_turns: int = 10
@@ -133,6 +162,7 @@ class BackpressurePolicy:
     retry_after_hint_ms:
         Hint included in ``BackpressureSignal.retry_after_ms`` to tell callers
         how long to back off before retrying.
+
     """
 
     action: str = "reject"
@@ -141,12 +171,15 @@ class BackpressurePolicy:
 
     def __post_init__(self) -> None:
         if self.action not in ("reject", "raise", "wait"):
-            raise ValueError(f"BackpressurePolicy.action must be one of 'reject', 'raise', 'wait'; got {self.action!r}")
+            raise ValueError(
+                f"BackpressurePolicy.action must be one of 'reject', 'raise', 'wait'; got {self.action!r}",
+            )
 
 
 # ---------------------------------------------------------------------------
 # Resource accounting ledger
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class _InflightRecord:
@@ -175,29 +208,41 @@ class ResourceAccounter:
     # Async API
     # ------------------------------------------------------------------
 
-    async def try_acquire_async(self, *, trace_id: str, session_id: str = "") -> bool:
+    async def try_acquire_async(self, *, trace_token: str = "", session_id: str = "", **legacy_kwargs: Any) -> bool:
+        legacy_trace = legacy_kwargs.pop("trace_id", "")
+        if legacy_kwargs:
+            unknown = ", ".join(sorted(str(name) for name in legacy_kwargs))
+            raise TypeError(f"Unexpected keyword argument(s): {unknown}")
+        resolved_trace = str(trace_token or legacy_trace or "")
         """Attempt to acquire a concurrency slot (non-blocking).
 
         Returns ``True`` if a slot was acquired, ``False`` if the budget is at
         capacity.
         """
-        acquired = self._semaphore.locked() is False and await asyncio.wait_for(
-            asyncio.shield(self._semaphore.acquire()), timeout=0
-        ) if False else self._semaphore._value > 0  # type: ignore[attr-defined]
-        if not acquired:
+        try:
+            await asyncio.wait_for(
+                self._semaphore.acquire(),
+                timeout=_NON_BLOCKING_ACQUIRE_TIMEOUT_SEC,
+            )
+        except TimeoutError:
             self._total_rejected += 1
             return False
-        await self._semaphore.acquire()
-        await self._record_inflight(trace_id=trace_id, session_id=session_id)
+        await self._record_inflight(trace_token=resolved_trace, session_id=session_id)
         return True
 
     async def acquire_async(
         self,
         *,
-        trace_id: str,
+        trace_token: str = "",
         session_id: str = "",
         timeout_ms: float = 0.0,
+        **legacy_kwargs: Any,
     ) -> None:
+        legacy_trace = legacy_kwargs.pop("trace_id", "")
+        if legacy_kwargs:
+            unknown = ", ".join(sorted(str(name) for name in legacy_kwargs))
+            raise TypeError(f"Unexpected keyword argument(s): {unknown}")
+        resolved_trace = str(trace_token or legacy_trace or "")
         """Acquire a concurrency slot, blocking up to *timeout_ms* ms.
 
         Raises ``ConcurrencyBudgetExceeded`` if *timeout_ms* == 0 and the
@@ -209,34 +254,44 @@ class ResourceAccounter:
                     self._semaphore.acquire(),
                     timeout=timeout_ms / 1000.0,
                 )
-            except asyncio.TimeoutError as exc:
+            except TimeoutError as exc:
                 self._total_rejected += 1
                 raise ConcurrencyBudgetExceeded(
                     max_concurrent=self._budget.max_concurrent_turns,
                     current_inflight=self.inflight_count,
-                    trace_id=trace_id,
+                    trace_token=resolved_trace,
                 ) from exc
+            await self._record_inflight(trace_token=resolved_trace, session_id=session_id)
         else:
-            if self._semaphore._value <= 0:  # type: ignore[attr-defined]
-                self._total_rejected += 1
+            acquired = await self.try_acquire_async(trace_token=resolved_trace, session_id=session_id)
+            if not acquired:
                 raise ConcurrencyBudgetExceeded(
                     max_concurrent=self._budget.max_concurrent_turns,
                     current_inflight=self.inflight_count,
-                    trace_id=trace_id,
+                    trace_token=resolved_trace,
                 )
-            await self._semaphore.acquire()
-        await self._record_inflight(trace_id=trace_id, session_id=session_id)
+            return
 
-    async def release_async(self, trace_id: str) -> None:
+    async def release_async(self, trace_token: str = "", **legacy_kwargs: Any) -> None:
         """Release a concurrency slot for *trace_id*."""
+        legacy_trace = legacy_kwargs.pop("trace_id", "")
+        if legacy_kwargs:
+            unknown = ", ".join(sorted(str(name) for name in legacy_kwargs))
+            raise TypeError(f"Unexpected keyword argument(s): {unknown}")
+        resolved_trace = str(trace_token or legacy_trace or "")
         async with self._lock:
-            self._inflight.pop(trace_id, None)
+            self._inflight.pop(resolved_trace, None)
         self._semaphore.release()
 
-    async def _record_inflight(self, *, trace_id: str, session_id: str) -> None:
+    async def _record_inflight(self, *, trace_token: str = "", session_id: str, **legacy_kwargs: Any) -> None:
+        legacy_trace = legacy_kwargs.pop("trace_id", "")
+        if legacy_kwargs:
+            unknown = ", ".join(sorted(str(name) for name in legacy_kwargs))
+            raise TypeError(f"Unexpected keyword argument(s): {unknown}")
+        resolved_trace = str(trace_token or legacy_trace or "")
         async with self._lock:
-            self._inflight[trace_id] = _InflightRecord(
-                trace_id=str(trace_id),
+            self._inflight[resolved_trace] = _InflightRecord(
+                trace_id=resolved_trace,
                 session_id=str(session_id or ""),
             )
             self._total_admitted += 1
@@ -283,6 +338,7 @@ class ResourceAccounter:
 # Main entry point
 # ---------------------------------------------------------------------------
 
+
 class ExecutionResourceBudget:
     """Unified resource accounting and concurrency boundary enforcement.
 
@@ -323,8 +379,9 @@ class ExecutionResourceBudget:
     async def acquire(
         self,
         *,
-        trace_id: str,
+        trace_token: str = "",
         session_id: str = "",
+        **legacy_kwargs: Any,
     ) -> AsyncIterator[None]:
         """Async context manager that acquires and releases a concurrency slot.
 
@@ -336,41 +393,42 @@ class ExecutionResourceBudget:
             async with budget.acquire(trace_id=turn_context.trace_id):
                 result = await graph.execute(turn_context)
         """
+        legacy_trace = legacy_kwargs.pop("trace_id", "")
+        if legacy_kwargs:
+            unknown = ", ".join(sorted(str(name) for name in legacy_kwargs))
+            raise TypeError(f"Unexpected keyword argument(s): {unknown}")
+        resolved_trace = str(trace_token or legacy_trace or "")
+
         try:
             if self._policy.action == "wait":
                 await self._accounter.acquire_async(
-                    trace_id=trace_id,
+                    trace_token=resolved_trace,
                     session_id=session_id,
                     timeout_ms=self._policy.wait_timeout_ms,
                 )
             elif self._policy.action == "raise":
                 await self._accounter.acquire_async(
-                    trace_id=trace_id,
+                    trace_token=resolved_trace,
                     session_id=session_id,
                     timeout_ms=0,
                 )
             else:  # "reject"
                 try:
                     await self._accounter.acquire_async(
-                        trace_id=trace_id,
+                        trace_token=resolved_trace,
                         session_id=session_id,
                         timeout_ms=0,
                     )
                 except ConcurrencyBudgetExceeded as exc:
                     raise BackpressureSignal(
-                        reason=str(exc),
+                        reason="max_concurrent_turns_exceeded",
                         retry_after_ms=self._policy.retry_after_hint_ms,
-                        trace_id=trace_id,
+                        trace_token=resolved_trace,
                     ) from exc
-        except (BackpressureSignal, ConcurrencyBudgetExceeded):
-            raise
 
-        try:
             yield
         finally:
-            await self._accounter.release_async(trace_id)
-
-    @property
+            await self._accounter.release_async(trace_token=resolved_trace)
     def budget(self) -> ConcurrencyBudget:
         return self._budget
 

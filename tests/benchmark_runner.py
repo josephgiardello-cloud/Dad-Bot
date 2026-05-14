@@ -33,16 +33,17 @@ OUTPUT STRUCTURE:
 
 import asyncio
 import logging
-import time
 import tempfile
 import uuid
-from typing import Dict, List, Any, Optional, Literal
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any, Literal
 
-from tests.scenario_suite import Scenario, SCENARIOS
+from evaluation.coherence_engine import CoherenceEngine
+from tests.harness.graph_runner import confluence_key_for_turn
+from tests.scenario_suite import SCENARIOS, Scenario
+from tests.scoring_engine import CapabilityScore, ScoringEngine
 from tests.trace_schema import NormalizedTrace
-from tests.scoring_engine import ScoringEngine, CapabilityScore
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +52,7 @@ class _InMemorySessionStore:
     """Minimal save/load store used to bypass filesystem persistence in tests."""
 
     def __init__(self) -> None:
-        self._data: Dict[str, Any] = {}
+        self._data: dict[str, Any] = {}
 
     def save_session_state(self, key: str, value: Any) -> None:
         self._data[str(key)] = value
@@ -63,16 +64,17 @@ class _InMemorySessionStore:
 @dataclass
 class ExecutionTrace:
     """Captured execution trace from a scenario run."""
+
     scenario_name: str
     category: str
     input_text: str
-    planner_output: Optional[Dict[str, Any]] = None
-    tools_executed: List[str] = None
-    memory_accessed: List[str] = None
+    planner_output: dict[str, Any] | None = None
+    tools_executed: list[str] = None
+    memory_accessed: list[str] = None
     final_response: str = ""
     steps: int = 0
     completed: bool = False
-    error: Optional[str] = None
+    error: str | None = None
 
     def __post_init__(self):
         if self.tools_executed is None:
@@ -84,10 +86,11 @@ class ExecutionTrace:
 @dataclass
 class ScoreResult:
     """Minimal scoring result."""
+
     success: bool
     steps: int
     tool_used_correctly: bool
-    error: Optional[str] = None
+    error: str | None = None
 
 
 @dataclass
@@ -95,28 +98,32 @@ class ExecutionResult:
     """Execution validity separate from capability/intelligence scoring."""
 
     valid_run: bool
-    execution_error: Optional[str]
+    execution_error: str | None
     trace_available: bool
     execution_error_class: str = "none"
 
 
 class BenchmarkRunner:
     """Executes scenarios and captures execution traces.
-    
+
     Supports two modes:
     1. mock: Fast validation with synthetic execution (Phase 1)
     2. orchestrator: Real orchestrator execution (Phase 4A)
     """
+
     _scoring_engine = ScoringEngine()
+    _coherence_engine = CoherenceEngine()
 
     def __init__(
         self,
         strict: bool = False,
         mode: Literal["mock", "orchestrator"] = "mock",
-        orchestrator: Optional[Any] = None,
+        orchestrator: Any | None = None,
         sandbox_outputs: bool = True,
-        sandbox_root: Optional[str] = None,
+        sandbox_root: str | None = None,
         disable_persistence_disk: bool = True,
+        use_offline_llm_stub: bool = False,
+        cert_mode: bool = False,
     ):
         """Initialize benchmark runner.
 
@@ -124,27 +131,141 @@ class BenchmarkRunner:
             strict: Whether to enforce strict validation.
             mode: Execution mode ("mock" or "orchestrator").
             orchestrator: Pre-initialized DadBotOrchestrator instance (required for orchestrator mode).
+            cert_mode: Certification mode; reject offline stubs and enforce strict execution.
         """
+        # Cert mode: reject offline stub.
+        if bool(cert_mode) and bool(use_offline_llm_stub):
+            raise ValueError("cert_mode and use_offline_llm_stub are mutually exclusive.")
+        
         self.strict = strict
         self.mode = mode
         self.orchestrator = orchestrator
+        self.cert_mode = bool(cert_mode)
         self._session_id = f"benchmark_session_{uuid.uuid4().hex[:8]}"
         self._turn_counter = 0
         self.sandbox_outputs = bool(sandbox_outputs)
         self.disable_persistence_disk = bool(disable_persistence_disk)
+        self.use_offline_llm_stub = bool(use_offline_llm_stub)
         self._sandbox_root = Path(sandbox_root) if sandbox_root else None
-        self._sandbox_tmp: Optional[tempfile.TemporaryDirectory[str]] = None
+        self._sandbox_tmp: tempfile.TemporaryDirectory[str] | None = None
         self._sandbox_applied = False
-        
+
         if mode == "orchestrator" and orchestrator is None:
-            logger.warning(
-                "⚠️  Orchestrator mode selected but no orchestrator provided. "
-                "Falling back to mock mode."
-            )
+            logger.warning("⚠️  Orchestrator mode selected but no orchestrator provided. Falling back to mock mode.")
             self.mode = "mock"
 
+    def _scenario_session_id(self, scenario: Scenario) -> str:
+        suffix = uuid.uuid5(uuid.NAMESPACE_DNS, str(scenario.name or "scenario")).hex[:12]
+        return f"{self._session_id}_{suffix}"
+
     @staticmethod
-    def _classify_execution_error(error: Optional[str]) -> str:
+    def _extract_tools_from_state(state: dict[str, Any]) -> list[str]:
+        tool_ir = dict(state.get("tool_ir") or {})
+        executions = list(tool_ir.get("executions") or [])
+        tool_results = list(state.get("tool_results") or [])
+        execution_plan = list(tool_ir.get("execution_plan") or [])
+        requests = list(tool_ir.get("requests") or [])
+
+        names: list[str] = []
+        for item in executions:
+            if isinstance(item, dict):
+                name = str(item.get("tool_name") or "").strip()
+                if name and name.lower() != "safety":
+                    names.append(name)
+        if not names:
+            for item in tool_results:
+                if isinstance(item, dict):
+                    name = str(item.get("tool_name") or "").strip()
+                    if name and name.lower() != "safety":
+                        names.append(name)
+        if not names:
+            for item in execution_plan:
+                if isinstance(item, dict):
+                    name = str(item.get("tool_name") or "").strip()
+                    if name and name.lower() != "safety":
+                        names.append(name)
+        if not names:
+            for item in requests:
+                if isinstance(item, dict):
+                    name = str(item.get("tool_name") or "").strip()
+                    if name and name.lower() != "safety":
+                        names.append(name)
+        # Preserve order while deduplicating.
+        return list(dict.fromkeys(names))
+
+    @staticmethod
+    def _extract_planner_payload_from_state(state: dict[str, Any]) -> dict[str, Any] | None:
+        plan = state.get("plan")
+        tool_ir = dict(state.get("tool_ir") or {})
+        detected_goals = list(state.get("detected_goals") or state.get("new_goals") or [])
+        task_decomposition = dict(state.get("task_decomposition") or {})
+
+        if isinstance(plan, list):
+            plan_steps = [dict(step) if isinstance(step, dict) else {"step": str(step)} for step in plan]
+        elif isinstance(plan, dict):
+            plan_steps = [dict(plan)]
+        else:
+            plan_steps = []
+
+        dependencies = list(task_decomposition.get("dependencies") or [])
+        requests = list(tool_ir.get("requests") or [])
+        execution_plan = list(tool_ir.get("execution_plan") or [])
+
+        if not plan_steps and not detected_goals and not requests and not execution_plan:
+            return None
+
+        return {
+            "intent_type": str(state.get("intent_type") or "task_execution"),
+            "strategy": str(state.get("strategy") or "direct_resolution"),
+            "plan_steps": plan_steps,
+            "goal_count": len(detected_goals),
+            "replan_count": int(state.get("replan_count") or 0),
+            "dependency_count": len(dependencies),
+            "tool_request_count": len(requests),
+            "tool_plan_count": len(execution_plan),
+        }
+
+    @staticmethod
+    def _infer_completion_from_context(
+        state: dict[str, Any],
+        response_text: str,
+        fallback: bool,
+    ) -> bool:
+        execution_trace = list(state.get("execution_trace") or [])
+        turn_trace = dict(state.get("turn_trace") or {})
+
+        if execution_trace:
+            if any(str(item.get("event_type") or "") == "turn_failed" for item in execution_trace if isinstance(item, dict)):
+                return False
+            if any(str(item.get("event_type") or "") == "turn_complete" for item in execution_trace if isinstance(item, dict)):
+                return bool(str(response_text or "").strip())
+
+        if isinstance(turn_trace.get("completed"), bool):
+            return bool(turn_trace.get("completed"))
+
+        if state.get("error"):
+            return False
+
+        return bool(fallback)
+
+    def close(self) -> None:
+        sandbox_tmp = self._sandbox_tmp
+        self._sandbox_tmp = None
+        if sandbox_tmp is None:
+            return
+        try:
+            sandbox_tmp.cleanup()
+        except Exception:
+            logger.debug("Failed to cleanup benchmark sandbox temporary directory", exc_info=True)
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    @staticmethod
+    def _classify_execution_error(error: str | None) -> str:
         if not error:
             return "none"
         lowered = str(error).lower()
@@ -158,7 +279,7 @@ class BenchmarkRunner:
             return "timeout"
         return "runtime"
 
-    def _build_execution_result(self, completed: bool, error: Optional[str], trace_available: bool) -> ExecutionResult:
+    def _build_execution_result(self, completed: bool, error: str | None, trace_available: bool) -> ExecutionResult:
         error_class = self._classify_execution_error(error)
         valid_run = bool(completed)
         if not valid_run and error_class.startswith("io_") and trace_available:
@@ -172,9 +293,161 @@ class BenchmarkRunner:
         )
 
     @staticmethod
-    def _condense_capability_score(capability_score: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    def _extract_planner_diagnostics(
+        normalized: NormalizedTrace | None,
+        scenario: Scenario | None = None,
+    ) -> dict[str, float]:
+        planner = getattr(normalized, "planner", None) if normalized is not None else None
+        if planner is None:
+            return {
+                "plan_length": 0.0,
+                "branching_factor": 0.0,
+                "revision_count": 0.0,
+                "dependency_correctness": 0.0,
+            }
+
+        plan_length = float(max(int(getattr(planner, "step_count", 0) or 0), 0))
+        branching_factor = float(max(getattr(planner, "branching_factor", lambda: 0.0)() or 0.0, 0.0))
+        revision_count = float(max(int(getattr(planner, "replan_count", 0) or 0), 0))
+
+        deps = list(getattr(planner, "dependencies", []) or [])
+        dep_count = len(deps)
+        if plan_length <= 0:
+            dependency_correctness = 0.0
+        else:
+            max_edges = max((int(plan_length) * max(int(plan_length) - 1, 0)) / 2.0, 1.0)
+            structure_score = 1.0 if dep_count <= max_edges else max(0.0, 1.0 - ((dep_count - max_edges) / max_edges))
+
+            expects_dependencies = False
+            if scenario is not None:
+                caps = [str(item or "").lower() for item in list(getattr(scenario, "expected_capabilities", []) or [])]
+                expects_dependencies = any("dependenc" in item for item in caps)
+            if expects_dependencies and dep_count == 0:
+                dependency_correctness = 0.0
+            elif not expects_dependencies and dep_count == 0:
+                dependency_correctness = 1.0
+            else:
+                dependency_correctness = float(max(0.0, min(1.0, structure_score)))
+
+        return {
+            "plan_length": plan_length,
+            "branching_factor": round(branching_factor, 4),
+            "revision_count": revision_count,
+            "dependency_correctness": round(dependency_correctness, 4),
+        }
+
+    def _extract_phase45_diagnostics(
+        self,
+        normalized: NormalizedTrace | None,
+        scenario: Scenario | None = None,
+    ) -> dict[str, Any]:
+        raw_state = dict(getattr(normalized, "raw_state", {}) or {}) if normalized is not None else {}
+        coherence = self._coherence_engine.score(raw_state)
+
+        ux = dict(raw_state.get("ux_trace") or raw_state.get("ux_feedback") or {})
+        memory_causal = dict(raw_state.get("memory_causal_trace") or {})
+        tool_failure_semantics = [
+            item
+            for item in list(raw_state.get("tool_failure_semantics") or [])
+            if isinstance(item, dict)
+        ]
+
+        wrong_tool_count = 0
+        for item in tool_failure_semantics:
+            failure_class = str(item.get("failure_class") or "").strip().lower()
+            if failure_class == "wrong_tool":
+                wrong_tool_count += 1
+
+        expected_tool_use = True
+        min_tool_calls = 0
+        if scenario is not None:
+            spec = dict(getattr(scenario, "behavioral_spec", {}) or {})
+            expected_tool_use = bool(spec.get("expected_tool_use", True))
+            min_tool_calls = max(int(spec.get("min_tool_calls") or 0), 0)
+
+        tool_count = len(list(getattr(normalized, "tools", []) or [])) if normalized is not None else 0
+        semantic_total = len(tool_failure_semantics)
+
+        optimality = 1.0
+        if expected_tool_use and tool_count == 0:
+            optimality = 0.0
+        elif (not expected_tool_use) and tool_count > 0:
+            optimality = 0.6
+
+        if min_tool_calls > 0 and tool_count < min_tool_calls:
+            optimality *= tool_count / float(min_tool_calls)
+
+        if semantic_total > 0:
+            optimality *= max(0.0, 1.0 - (wrong_tool_count / float(semantic_total)))
+
+        contradiction_count = 0
+        contradictions_seen: set[str] = set()
+
+        for item in list(raw_state.get("memory_contradictions") or []):
+            if isinstance(item, dict):
+                key = str(item.get("reason") or item.get("message") or item)
+            else:
+                key = str(item)
+            key = key.strip()
+            if key:
+                contradictions_seen.add(key)
+
+        for item in list(raw_state.get("contradictions") or []):
+            key = str(item or "").strip()
+            if key:
+                contradictions_seen.add(key)
+
+        memory_snapshot = dict(raw_state.get("memory_snapshot") or {})
+        memory_structured = dict(memory_snapshot.get("memory_structured") or raw_state.get("memory_structured") or {})
+        for value in memory_structured.values():
+            if not isinstance(value, dict):
+                continue
+            for item in list(value.get("contradictions") or []):
+                key = str(item or "").strip()
+                if key:
+                    contradictions_seen.add(key)
+
+        for penalty in list(coherence.penalties or []):
+            key = str(penalty or "").strip().lower()
+            if "contradiction" in key:
+                contradictions_seen.add(key)
+
+        contradiction_count = len(contradictions_seen)
+        contradiction_detected = contradiction_count > 0
+        user_confusion_detected = bool(ux.get("user_confusion_detected", False))
+
+        if not contradiction_detected:
+            contradiction_resolution = 1.0
+        elif user_confusion_detected:
+            contradiction_resolution = 0.3
+        elif bool(memory_causal.get("influenced_final_response", False)):
+            contradiction_resolution = 1.0
+        else:
+            contradiction_resolution = 0.7
+
+        return {
+            "coherence_score": round(float(coherence.score), 4),
+            "coherence_penalty_count": len(list(coherence.penalties or [])),
+            "contradiction_detected": bool(contradiction_detected),
+            "contradiction_count": int(contradiction_count),
+            "contradiction_resolution": round(float(contradiction_resolution), 4),
+            "tool_selection_optimality": round(max(0.0, min(1.0, float(optimality))), 4),
+        }
+
+    @staticmethod
+    def _condense_capability_score(
+        capability_score: dict[str, Any] | None,
+        *,
+        scenario: Scenario | None = None,
+        execution_steps: int = 0,
+        execution_error_class: str = "none",
+        planner_diagnostics: dict[str, float] | None = None,
+        phase45_diagnostics: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
         if not isinstance(capability_score, dict):
             return None
+
+        subsystem_names = ("planning", "tools", "memory", "ux", "robustness")
 
         def _subsystem_value(name: str) -> float:
             section = capability_score.get(name)
@@ -182,13 +455,83 @@ class BenchmarkRunner:
                 return float(section.get("score") or 0.0)
             return 0.0
 
+        def _subsystem_partial_success(name: str) -> float:
+            section = capability_score.get(name)
+            if isinstance(section, dict):
+                return 1.0 if bool(section.get("partial_success")) else 0.0
+            return 0.0
+
+        def _signal_value(name: str, signal_name: str) -> float | None:
+            section = capability_score.get(name)
+            if not isinstance(section, dict):
+                return None
+            for item in list(section.get("signals") or []):
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("name") or "").strip() != signal_name:
+                    continue
+                value = item.get("value")
+                if value is None:
+                    continue
+                return float(value)
+            return None
+
+        max_steps = 0
+        quality_threshold = 0.0
+        if scenario is not None:
+            spec = dict(getattr(scenario, "behavioral_spec", {}) or {})
+            max_steps = max(int(spec.get("max_steps") or 0), 0)
+            quality_threshold = max(float(spec.get("quality_threshold") or 0.0), 0.0)
+
+        actual_steps = max(int(execution_steps), 0)
+        if max_steps <= 0:
+            step_efficiency = 1.0
+        elif actual_steps <= 0:
+            step_efficiency = 0.0
+        elif actual_steps <= max_steps:
+            step_efficiency = 1.0
+        else:
+            step_efficiency = max(0.0, min(1.0, max_steps / float(actual_steps)))
+
+        partial_success_values = [_subsystem_partial_success(name) for name in subsystem_names]
+        partial_success = sum(partial_success_values) / max(len(partial_success_values), 1)
+
+        tool_correctness = _signal_value("tools", "tool_success_rate")
+        if tool_correctness is None:
+            tool_correctness = _subsystem_value("tools")
+
+        subsystem_coverage = (
+            sum(1.0 for name in subsystem_names if isinstance(capability_score.get(name), dict))
+            / float(len(subsystem_names))
+        )
+
+        overall = float(capability_score.get("overall") or 0.0)
+        quality_threshold_met = True if quality_threshold <= 0.0 else overall >= quality_threshold
+
         return {
-            "overall": float(capability_score.get("overall") or 0.0),
+            "overall": overall,
             "planning": _subsystem_value("planning"),
             "tools": _subsystem_value("tools"),
             "memory": _subsystem_value("memory"),
             "ux": _subsystem_value("ux"),
             "robustness": _subsystem_value("robustness"),
+            "partial_success": round(partial_success, 4),
+            "tool_correctness": round(float(tool_correctness), 4),
+            "step_efficiency": round(step_efficiency, 4),
+            "failure_type": str(execution_error_class or "none"),
+            "quality_threshold": round(quality_threshold, 4),
+            "quality_threshold_met": bool(quality_threshold_met),
+            "subsystem_coverage": round(subsystem_coverage, 4),
+            "plan_length": float((planner_diagnostics or {}).get("plan_length") or 0.0),
+            "branching_factor": float((planner_diagnostics or {}).get("branching_factor") or 0.0),
+            "revision_count": float((planner_diagnostics or {}).get("revision_count") or 0.0),
+            "dependency_correctness": float((planner_diagnostics or {}).get("dependency_correctness") or 0.0),
+            "coherence_score": float((phase45_diagnostics or {}).get("coherence_score") or 0.0),
+            "coherence_penalty_count": int((phase45_diagnostics or {}).get("coherence_penalty_count") or 0),
+            "contradiction_detected": bool((phase45_diagnostics or {}).get("contradiction_detected") or False),
+            "contradiction_count": int((phase45_diagnostics or {}).get("contradiction_count") or 0),
+            "contradiction_resolution": float((phase45_diagnostics or {}).get("contradiction_resolution") or 0.0),
+            "tool_selection_optimality": float((phase45_diagnostics or {}).get("tool_selection_optimality") or 0.0),
         }
 
     def _ensure_orchestrator_sandbox(self) -> None:
@@ -216,6 +559,12 @@ class BenchmarkRunner:
         if bot is None:
             self._sandbox_applied = True
             return
+
+        # Keep maintenance deterministic and offline-safe by avoiding network-backed
+        # summary refresh work from background threads.
+        if self._should_use_offline_llm_stub():
+            self._stabilize_llm_calls(bot)
+        self._stabilize_background_maintenance(bot)
 
         if self.sandbox_outputs:
             try:
@@ -262,10 +611,78 @@ class BenchmarkRunner:
 
         self._sandbox_applied = True
 
+    @staticmethod
+    def _stabilize_llm_calls(bot: Any) -> None:
+        """Replace live model calls with deterministic offline responses for benchmarks."""
+
+        def _offline_llm_response(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            return {"message": {"content": "[benchmark-offline]"}}
+
+        try:
+            bot.call_ollama_chat = _offline_llm_response
+        except Exception:
+            logger.debug("Failed to patch bot.call_ollama_chat for benchmark sandbox", exc_info=True)
+
+        try:
+            runtime_client = getattr(bot, "runtime_client", None)
+            if runtime_client is not None:
+                runtime_client.call_llm = _offline_llm_response
+                runtime_client.call_ollama_chat = _offline_llm_response
+                runtime_client.call_ollama_chat_with_model = _offline_llm_response
+        except Exception:
+            logger.debug("Failed to patch runtime client LLM methods for benchmark sandbox", exc_info=True)
+
+    def _should_use_offline_llm_stub(self) -> bool:
+        if self.use_offline_llm_stub:
+            return True
+        try:
+            import os
+
+            raw = str(os.environ.get("DADBOT_BENCHMARK_OFFLINE_LLM", "") or "").strip().lower()
+            return raw in {"1", "true", "yes", "on"}
+        except Exception:
+            return False
+
+    @staticmethod
+    def _stabilize_background_maintenance(bot: Any) -> None:
+        """Prevent background maintenance from issuing blocking external LLM calls."""
+        try:
+
+            def _offline_refresh_session_summary(force: bool = False) -> str:
+                return str(getattr(bot, "session_summary", "") or "")
+
+            bot.refresh_session_summary = _offline_refresh_session_summary
+        except Exception:
+            logger.debug("Failed to patch refresh_session_summary for benchmark sandbox", exc_info=True)
+
+        try:
+            maintenance_scheduler = getattr(bot, "maintenance_scheduler", None)
+            if maintenance_scheduler is not None:
+
+                def _offline_post_turn_maintenance(user_input: str, current_mood: str) -> dict[str, Any]:
+                    return {
+                        "summary_refreshed": False,
+                        "scheduled_proactive": False,
+                        "scheduled_proactive_count": 0,
+                        "relationship_reflected": False,
+                        "wisdom_generated": False,
+                        "periodic_synthesis": False,
+                        "periodic_archive_delta": 0,
+                        "persona_evolved": False,
+                        "memory_compaction": False,
+                        "memory_compaction_updated_at": None,
+                        "memory_graph_refreshed": True,
+                        "offline_stub": True,
+                    }
+
+                maintenance_scheduler.run_post_turn_maintenance = _offline_post_turn_maintenance
+        except Exception:
+            logger.debug("Failed to patch maintenance manager for benchmark sandbox", exc_info=True)
+
     def _score_trace(self, trace: ExecutionTrace, scenario: Scenario) -> ScoreResult:
         """Apply minimal scoring to execution trace (backward-compatible)."""
         success = trace.completed and trace.error is None
-        
+
         tool_used_correctly = True
         if scenario.category == "tool":
             tool_used_correctly = len(trace.tools_executed) > 0 or not self.strict
@@ -291,7 +708,7 @@ class BenchmarkRunner:
             memory_accessed=trace.memory_accessed,
         )
 
-    def _score_normalized(self, normalized: NormalizedTrace, scenario: Scenario) -> Dict[str, Any]:
+    def _score_normalized(self, normalized: NormalizedTrace, scenario: Scenario) -> dict[str, Any]:
         """Run the scoring engine and return serializable dict."""
         try:
             cap_score: CapabilityScore = self._scoring_engine.score(normalized, scenario)
@@ -300,9 +717,7 @@ class BenchmarkRunner:
             logger.warning(f"Scoring engine error for {scenario.name}: {e}")
             return {"error": str(e), "overall": 0.0}
 
-    async def _run_scenario_orchestrator_async(
-        self, scenario: Scenario
-    ) -> Dict[str, Any]:
+    async def _run_scenario_orchestrator_async(self, scenario: Scenario) -> dict[str, Any]:
         """Execute scenario through real orchestrator (Phase 4A)."""
         trace = ExecutionTrace(
             scenario_name=scenario.name,
@@ -313,39 +728,45 @@ class BenchmarkRunner:
         try:
             self._turn_counter += 1
             self._ensure_orchestrator_sandbox()
-            
+            scenario_session_id = self._scenario_session_id(scenario)
+
             # Execute through orchestrator
             response_text, success = await self.orchestrator.handle_turn(
                 user_input=scenario.input_text,
-                session_id=self._session_id,
+                session_id=scenario_session_id,
                 timeout_seconds=15.0,
+                confluence_key=confluence_key_for_turn(scenario_session_id, scenario.input_text),
+                metadata={
+                    "tool_system_v2_enabled": True,
+                    "benchmark_mode": True,
+                },
             )
 
-            trace.completed = success
+            trace.completed = bool(str(response_text or "").strip())
             trace.steps = 1  # Will be updated with real step count from context
             trace.final_response = str(response_text or "")
 
             # Capture trace from orchestrator context
             context = getattr(self.orchestrator, "_last_turn_context", None)
             if context:
+                state = dict(getattr(context, "state", {}) or {})
                 # Planner output
-                plan = context.state.get("plan")
-                if plan:
-                    trace.planner_output = plan if isinstance(plan, dict) else {"plan": plan}
-                    trace.steps = len(plan) if isinstance(plan, (list, dict)) else 1
+                trace.planner_output = self._extract_planner_payload_from_state(state)
+                if isinstance(state.get("plan"), list):
+                    trace.steps = max(1, len(list(state.get("plan") or [])))
 
                 # Tools executed
-                tool_ir = context.state.get("tool_ir", {})
-                executions = tool_ir.get("executions", [])
-                trace.tools_executed = [
-                    e.get("tool_name") for e in executions if e.get("tool_name")
-                ]
+                trace.tools_executed = self._extract_tools_from_state(state)
 
                 # Memory accessed
-                memory_structured = context.state.get("memory_structured", {})
+                memory_snapshot = dict(state.get("memory_snapshot") or {})
+                memory_structured = memory_snapshot.get("memory_structured") or state.get("memory_structured", {})
                 trace.memory_accessed = list(memory_structured.keys())
 
-        except asyncio.TimeoutError:
+                # Completion should reflect successful turn completion, not conversation termination.
+                trace.completed = self._infer_completion_from_context(state, trace.final_response, trace.completed or bool(success))
+
+        except TimeoutError:
             trace.error = "Execution timeout (15s)"
             trace.completed = False
             logger.warning(f"Scenario {scenario.name} timed out")
@@ -359,7 +780,7 @@ class BenchmarkRunner:
 
         # Build normalized trace from orchestrator context
         context = getattr(self.orchestrator, "_last_turn_context", None)
-        normalized: Optional[NormalizedTrace] = None
+        normalized: NormalizedTrace | None = None
         if context:
             try:
                 normalized = NormalizedTrace.from_orchestrator_context(
@@ -381,7 +802,16 @@ class BenchmarkRunner:
             error=trace.error,
             trace_available=normalized is not None,
         )
-        condensed_capability_score = self._condense_capability_score(capability_score)
+        planner_diagnostics = self._extract_planner_diagnostics(normalized, scenario)
+        phase45_diagnostics = self._extract_phase45_diagnostics(normalized, scenario)
+        condensed_capability_score = self._condense_capability_score(
+            capability_score,
+            scenario=scenario,
+            execution_steps=trace.steps,
+            execution_error_class=execution_result.execution_error_class,
+            planner_diagnostics=planner_diagnostics,
+            phase45_diagnostics=phase45_diagnostics,
+        )
 
         return {
             "scenario": scenario.name,
@@ -397,6 +827,12 @@ class BenchmarkRunner:
                 "planner_output": trace.planner_output,
                 "tools_executed": trace.tools_executed,
                 "memory_accessed": trace.memory_accessed,
+                "raw_state": {
+                    "tool_call_counts": dict(state.get("tool_call_counts") or {}),
+                    "tool_redundant_calls": list(state.get("tool_redundant_calls") or []),
+                    "should_converge_early": bool(state.get("should_converge_early") or False),
+                    "convergence_reason": str(state.get("convergence_reason") or ""),
+                },
                 "final_response": trace.final_response,
             },
             "scoring": asdict(score),
@@ -404,7 +840,7 @@ class BenchmarkRunner:
             "capability_score_detail": capability_score,
         }
 
-    def _run_scenario_orchestrator(self, scenario: Scenario) -> Dict[str, Any]:
+    def _run_scenario_orchestrator(self, scenario: Scenario) -> dict[str, Any]:
         """Execute scenario through orchestrator (sync wrapper)."""
         try:
             loop = asyncio.get_running_loop()
@@ -415,14 +851,15 @@ class BenchmarkRunner:
         if loop and loop.is_running():
             # Already in async context
             import concurrent.futures
+
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                 return pool.submit(asyncio.run, coro).result()
         else:
             return asyncio.run(coro)
 
-    def run_scenario(self, scenario: Scenario) -> Dict[str, Any]:
+    def run_scenario(self, scenario: Scenario) -> dict[str, Any]:
         """Execute a single scenario with appropriate backend.
-        
+
         Dispatches to orchestrator or mock based on configured mode.
         """
         if self.mode == "orchestrator":
@@ -430,7 +867,7 @@ class BenchmarkRunner:
         else:
             return self._run_scenario_mock(scenario)
 
-    def _run_scenario_mock(self, scenario: Scenario) -> Dict[str, Any]:
+    def _run_scenario_mock(self, scenario: Scenario) -> dict[str, Any]:
         """Execute scenario with mock execution (Phase 1)."""
         trace = ExecutionTrace(
             scenario_name=scenario.name,
@@ -442,19 +879,19 @@ class BenchmarkRunner:
             # PHASE 1: Validate scenario definition
             if not scenario.name or not scenario.input_text:
                 raise ValueError("Scenario must have name and input_text")
-            
+
             # PHASE 1: Mock execution
             trace.completed = True
             trace.steps = 1
             trace.final_response = f"[PHASE 1 MOCK] Response for: {scenario.input_text[:50]}..."
-            
+
             # PHASE 1: Mock trace capture
             if scenario.category == "tool":
                 trace.tools_executed = ["mock_tool"]
-            
+
             if scenario.category == "memory":
                 trace.memory_accessed = ["memory_store"]
-            
+
             if scenario.category == "planning":
                 trace.planner_output = {
                     "plan": f"Plan: {scenario.input_text[:40]}...",
@@ -462,7 +899,7 @@ class BenchmarkRunner:
                 }
 
         except Exception as e:
-            trace.error = f"{type(e).__name__}: {str(e)}"
+            trace.error = f"{type(e).__name__}: {e!s}"
             trace.completed = False
             logger.exception(f"Error executing scenario {scenario.name}")
 
@@ -477,7 +914,16 @@ class BenchmarkRunner:
             error=trace.error,
             trace_available=True,
         )
-        condensed_capability_score = self._condense_capability_score(capability_score)
+        planner_diagnostics = self._extract_planner_diagnostics(normalized, scenario)
+        phase45_diagnostics = self._extract_phase45_diagnostics(normalized, scenario)
+        condensed_capability_score = self._condense_capability_score(
+            capability_score,
+            scenario=scenario,
+            execution_steps=trace.steps,
+            execution_error_class=execution_result.execution_error_class,
+            planner_diagnostics=planner_diagnostics,
+            phase45_diagnostics=phase45_diagnostics,
+        )
 
         return {
             "scenario": scenario.name,
@@ -502,10 +948,10 @@ class BenchmarkRunner:
 
     def run_all_scenarios(
         self,
-        scenarios: Optional[List[Scenario]] = None,
-    ) -> List[Dict[str, Any]]:
+        scenarios: list[Scenario] | None = None,
+    ) -> list[dict[str, Any]]:
         """Execute all scenarios (or specified subset).
-        
+
         Uses configured backend (mock or orchestrator).
         """
         if scenarios is None:
@@ -518,8 +964,8 @@ class BenchmarkRunner:
 
     def _run_all_scenarios_mock(
         self,
-        scenarios: List[Scenario],
-    ) -> List[Dict[str, Any]]:
+        scenarios: list[Scenario],
+    ) -> list[dict[str, Any]]:
         """Execute all scenarios with mock backend."""
         results = []
         for scenario in scenarios:
@@ -529,8 +975,8 @@ class BenchmarkRunner:
 
     def _run_all_scenarios_orchestrator(
         self,
-        scenarios: List[Scenario],
-    ) -> List[Dict[str, Any]]:
+        scenarios: list[Scenario],
+    ) -> list[dict[str, Any]]:
         """Execute all scenarios with orchestrator backend (sequentially)."""
         try:
             loop = asyncio.get_running_loop()
@@ -540,6 +986,7 @@ class BenchmarkRunner:
         coro = self._run_all_scenarios_orchestrator_async(scenarios)
         if loop and loop.is_running():
             import concurrent.futures
+
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                 return pool.submit(asyncio.run, coro).result()
         else:
@@ -547,8 +994,8 @@ class BenchmarkRunner:
 
     async def _run_all_scenarios_orchestrator_async(
         self,
-        scenarios: List[Scenario],
-    ) -> List[Dict[str, Any]]:
+        scenarios: list[Scenario],
+    ) -> list[dict[str, Any]]:
         """Execute all scenarios sequentially through orchestrator."""
         results = []
         for scenario in scenarios:
@@ -557,10 +1004,10 @@ class BenchmarkRunner:
         return results
 
 
-def print_benchmark_results(results: List[Dict[str, Any]], mode: str = "mock") -> None:
+def print_benchmark_results(results: list[dict[str, Any]], mode: str = "mock") -> None:
     """Pretty-print benchmark results."""
     mode_label = "PHASE 4A - ORCHESTRATOR EXECUTION" if mode == "orchestrator" else "PHASE 1 - MOCK EXECUTION"
-    
+
     print("\n" + "=" * 80)
     print(f"BENCHMARK RESULTS ({mode_label})")
     print("=" * 80)
@@ -571,7 +1018,7 @@ def print_benchmark_results(results: List[Dict[str, Any]], mode: str = "mock") -
         cat = result.get("category", "unknown")
         if cat not in by_category:
             by_category[cat] = {"pass": 0, "fail": 0}
-        
+
         if result["scoring"]["success"]:
             by_category[cat]["pass"] += 1
         else:
@@ -646,7 +1093,7 @@ if __name__ == "__main__":
     print("   results = runner.run_all_scenarios()")
     print("\n" + "=" * 80)
     print("\nRunning PHASE 1 (mock) validation by default...")
-    
+
     runner = BenchmarkRunner(strict=False, mode="mock")
     results = runner.run_all_scenarios()
     print_benchmark_results(results, mode="mock")

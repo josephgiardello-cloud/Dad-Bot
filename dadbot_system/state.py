@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass, field
 from threading import RLock
 from typing import Any, Protocol
 
-from .contracts import ChatResponse, DEFAULT_TENANT_ID, EventEnvelope, EventType, normalize_tenant_id
+from .contracts import DEFAULT_TENANT_ID, ChatResponse, EventEnvelope, EventType, normalize_tenant_id
 
 try:
     import redis
@@ -37,11 +37,11 @@ class SessionRuntimeState:
     memory_store: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def initial(cls, planner_debug_factory) -> "SessionRuntimeState":
+    def initial(cls, planner_debug_factory) -> SessionRuntimeState:
         return cls(planner_debug=dict(planner_debug_factory()))
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any], planner_debug_factory) -> "SessionRuntimeState":
+    def from_dict(cls, payload: dict[str, Any], planner_debug_factory) -> SessionRuntimeState:
         state = cls.initial(planner_debug_factory)
         state.history = [dict(message) for message in payload.get("history", []) if isinstance(message, dict)]
         state.session_moods = [str(mood) for mood in payload.get("session_moods", [])]
@@ -77,29 +77,21 @@ class SessionRuntimeState:
 
 
 class StateStore(Protocol):
-    def save_session_state(self, session_id: str, state: dict[str, Any]) -> None:
-        ...
+    def save_session_state(self, session_id: str, state: dict[str, Any]) -> None: ...
 
-    def load_session_state(self, session_id: str) -> dict[str, Any] | None:
-        ...
+    def load_session_state(self, session_id: str) -> dict[str, Any] | None: ...
 
-    def save_task(self, task_id: str, payload: dict[str, Any]) -> None:
-        ...
+    def save_task(self, task_id: str, payload: dict[str, Any]) -> None: ...
 
-    def load_task(self, task_id: str) -> dict[str, Any] | None:
-        ...
+    def load_task(self, task_id: str) -> dict[str, Any] | None: ...
 
-    def save_response(self, task_id: str, response: dict[str, Any]) -> None:
-        ...
+    def save_response(self, task_id: str, response: dict[str, Any]) -> None: ...
 
-    def load_response(self, task_id: str) -> dict[str, Any] | None:
-        ...
+    def load_response(self, task_id: str) -> dict[str, Any] | None: ...
 
-    def append_event(self, session_id: str, event: dict[str, Any]) -> None:
-        ...
+    def append_event(self, session_id: str, event: dict[str, Any]) -> None: ...
 
-    def list_events(self, session_id: str) -> list[dict[str, Any]]:
-        ...
+    def list_events(self, session_id: str) -> list[dict[str, Any]]: ...
 
 
 class InMemoryStateStore:
@@ -361,12 +353,22 @@ class PostgresStateStore:
 
     def list_events(self, session_id: str) -> list[dict[str, Any]]:
         with self._connect() as connection, connection.cursor() as cursor:
-            cursor.execute(f"SELECT payload FROM {self._event_table} WHERE session_id = %s ORDER BY event_id", (session_id,))
+            cursor.execute(
+                f"SELECT payload FROM {self._event_table} WHERE session_id = %s ORDER BY event_id", (session_id,)
+            )
             return [row[0] for row in cursor.fetchall()]
 
 
 class AppStateContainer:
-    def __init__(self, session_id: str, planner_debug_factory, *, tenant_id: str = DEFAULT_TENANT_ID, store: StateStore | None = None, event_bus=None):
+    def __init__(
+        self,
+        session_id: str,
+        planner_debug_factory,
+        *,
+        tenant_id: str = DEFAULT_TENANT_ID,
+        store: StateStore | None = None,
+        event_bus=None,
+    ):
         self.session_id = session_id
         self.tenant_id = normalize_tenant_id(tenant_id)
         self._planner_debug_factory = planner_debug_factory

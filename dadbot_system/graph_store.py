@@ -42,7 +42,12 @@ class SQLiteGraphStore(GraphStoreBackend):
                             connection.execute("PRAGMA busy_timeout = 5000")
                             if write:
                                 connection.execute("PRAGMA journal_mode=WAL")
-                            return operation(connection)
+                            result = operation(connection)
+                        if write:
+                            # Revert to DELETE mode before close to avoid WAL
+                            # checkpoint stalls on Windows when io_lock is held.
+                            connection.execute("PRAGMA journal_mode=DELETE")
+                        return result
 
                 with io_lock:
                     with closing(sqlite3.connect(self.db_path, timeout=5)) as connection:
@@ -50,7 +55,12 @@ class SQLiteGraphStore(GraphStoreBackend):
                             connection.execute("PRAGMA busy_timeout = 5000")
                             if write:
                                 connection.execute("PRAGMA journal_mode=WAL")
-                            return operation(connection)
+                            result = operation(connection)
+                        if write:
+                            # Revert to DELETE mode before close to avoid WAL
+                            # checkpoint stalls on Windows when io_lock is held.
+                            connection.execute("PRAGMA journal_mode=DELETE")
+                        return result
             except sqlite3.OperationalError as exc:
                 last_error = exc
                 if "locked" not in str(exc).lower() or attempt == 3:
@@ -238,7 +248,10 @@ class SQLiteGraphStore(GraphStoreBackend):
         if not self.db_path.exists():
             return
         try:
-            self.with_connection(lambda connection: connection.executescript("DELETE FROM graph_edges; DELETE FROM graph_nodes;"), write=True)
+            self.with_connection(
+                lambda connection: connection.executescript("DELETE FROM graph_edges; DELETE FROM graph_nodes;"),
+                write=True,
+            )
         except Exception:
             try:
                 self.db_path.unlink()
@@ -310,12 +323,24 @@ class PostgresGraphStore(GraphStoreBackend):
                     )
                     """
                 )
-                cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{self.nodes_table}_type ON {self.nodes_table}(node_type)")
-                cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{self.nodes_table}_source_type ON {self.nodes_table}(source_type)")
-                cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{self.nodes_table}_updated_at ON {self.nodes_table}(updated_at)")
-                cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{self.edges_table}_source ON {self.edges_table}(source_key)")
-                cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{self.edges_table}_target ON {self.edges_table}(target_key)")
-                cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{self.edges_table}_relation_type ON {self.edges_table}(relation_type)")
+                cursor.execute(
+                    f"CREATE INDEX IF NOT EXISTS idx_{self.nodes_table}_type ON {self.nodes_table}(node_type)"
+                )
+                cursor.execute(
+                    f"CREATE INDEX IF NOT EXISTS idx_{self.nodes_table}_source_type ON {self.nodes_table}(source_type)"
+                )
+                cursor.execute(
+                    f"CREATE INDEX IF NOT EXISTS idx_{self.nodes_table}_updated_at ON {self.nodes_table}(updated_at)"
+                )
+                cursor.execute(
+                    f"CREATE INDEX IF NOT EXISTS idx_{self.edges_table}_source ON {self.edges_table}(source_key)"
+                )
+                cursor.execute(
+                    f"CREATE INDEX IF NOT EXISTS idx_{self.edges_table}_target ON {self.edges_table}(target_key)"
+                )
+                cursor.execute(
+                    f"CREATE INDEX IF NOT EXISTS idx_{self.edges_table}_relation_type ON {self.edges_table}(relation_type)"
+                )
 
         self.with_connection(operation)
 

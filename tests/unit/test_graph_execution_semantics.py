@@ -5,6 +5,7 @@ These tests enforce explicit runtime behavior for:
 - failure taxonomy emission
 - persistence contract validation modes
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -12,10 +13,14 @@ from types import SimpleNamespace
 
 import pytest
 
+pytestmark = pytest.mark.unit
+from harness.kernel_mock import MockRegistry
+
 from dadbot.core.graph import (
     ContextBuilderNode,
     HealthNode,
     InferenceNode,
+    InvariantViolationError,
     KernelRejectionSemantics,
     ReflectionNode,
     SafetyNode,
@@ -24,7 +29,6 @@ from dadbot.core.graph import (
     TurnContext,
     TurnGraph,
 )
-from harness.kernel_mock import MockRegistry
 
 
 class _RejectInferenceKernel:
@@ -147,3 +151,50 @@ def test_execution_trace_expected_hash_mismatch_raises():
     ctx.metadata["expected_execution_trace_hash"] = "not-the-real-hash"
     with pytest.raises(RuntimeError, match="Execution trace determinism mismatch"):
         asyncio.run(graph.execute(ctx))
+
+
+def test_transition_invariant_hard_fails_by_default():
+    registry = MockRegistry()
+    graph = _build_canonical(registry)
+
+    ctx = TurnContext(user_input="hello")
+    ctx.state["_pipeline_stage_names"] = ["temporal", "health"]
+    ctx.state["execution_trace"] = [
+        {"sequence": 2, "event_type": "stage_done", "stage": "temporal"},
+    ]
+
+    with pytest.raises(InvariantViolationError, match="non-contiguous sequence"):
+        graph._enforce_transition_invariant(
+            ctx,
+            event_type="stage_done",
+            stage="temporal",
+            detail={},
+        )
+
+    payload = dict(ctx.state.get("invariant_gate") or {})
+    remediation = dict(payload.get("remediation") or {})
+    assert remediation.get("action") == "hard_fail"
+
+
+def test_transition_invariant_lenient_mode_records_but_does_not_raise():
+    registry = MockRegistry()
+    graph = _build_canonical(registry)
+
+    ctx = TurnContext(user_input="hello")
+    ctx.metadata["invariant_gate_lenient"] = True
+    ctx.state["_pipeline_stage_names"] = ["temporal", "health"]
+    ctx.state["execution_trace"] = [
+        {"sequence": 2, "event_type": "stage_done", "stage": "temporal"},
+    ]
+
+    graph._enforce_transition_invariant(
+        ctx,
+        event_type="stage_done",
+        stage="temporal",
+        detail={},
+    )
+
+    payload = dict(ctx.state.get("invariant_gate") or {})
+    assert payload.get("approved") is False
+    remediation = dict(payload.get("remediation") or {})
+    assert remediation.get("action") == "hard_fail"

@@ -41,6 +41,7 @@ Usage
 
     assert report.passed, report.violations
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -48,10 +49,10 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
-
 # ---------------------------------------------------------------------------
 # Internal helpers — no imports from runtime modules
 # ---------------------------------------------------------------------------
+
 
 def _json_safe_offline(value: Any) -> Any:
     """Serialisation-safe reducer — mirrors graph._json_safe without import."""
@@ -86,7 +87,7 @@ def _recompute_trace_hash(events: list[dict[str, Any]], trace_id: str) -> str:
         ],
     }
     return hashlib.sha256(
-        json.dumps(canonical, sort_keys=True, default=str).encode("utf-8")
+        json.dumps(canonical, sort_keys=True, default=str).encode("utf-8"),
     ).hexdigest()
 
 
@@ -94,6 +95,8 @@ def _recompute_identity_fingerprint(identity: dict[str, Any]) -> str:
     """Re-compute the execution identity fingerprint from a stored identity dict.
 
     Mirrors ``ExecutionIdentity.fingerprint`` without importing that class.
+    GAP 2: includes memory_snapshot_hash and execution_result_hash so that
+    replay validation covers the full unified identity envelope.
     """
     canonical = {
         "trace_id": str(identity.get("trace_id") or ""),
@@ -102,15 +105,18 @@ def _recompute_identity_fingerprint(identity: dict[str, Any]) -> str:
         "checkpoint_chain_hash": str(identity.get("checkpoint_chain_hash") or ""),
         "mutation_tx_count": int(identity.get("mutation_tx_count") or 0),
         "event_count": int(identity.get("event_count") or 0),
+        "memory_snapshot_hash": str(identity.get("memory_snapshot_hash") or ""),
+        "execution_result_hash": str(identity.get("execution_result_hash") or ""),
     }
     return hashlib.sha256(
-        json.dumps(canonical, sort_keys=True, default=str).encode("utf-8")
+        json.dumps(canonical, sort_keys=True, default=str).encode("utf-8"),
     ).hexdigest()
 
 
 # ---------------------------------------------------------------------------
 # Result types
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class ReplayValidationReport:
@@ -144,6 +150,7 @@ class ReplayValidationReport:
 # ---------------------------------------------------------------------------
 # Validator
 # ---------------------------------------------------------------------------
+
 
 class OfflineReplayValidator:
     """Deterministic, runtime-independent verifier for execution trace artifacts.
@@ -181,7 +188,7 @@ class OfflineReplayValidator:
         contract: dict[str, Any],
         events: list[dict[str, Any]],
         *,
-        trace_id: str = "",
+        trace_token: str = "",
     ) -> ReplayValidationReport:
         """Verify an execution trace contract against its event list.
 
@@ -203,6 +210,7 @@ class OfflineReplayValidator:
         Returns
         -------
         ReplayValidationReport
+
         """
         violations: list[str] = []
         checks: list[str] = []
@@ -212,8 +220,8 @@ class OfflineReplayValidator:
         events = list(events or [])
 
         # Derive trace_id from events if not supplied.
-        if not trace_id and events:
-            trace_id = str(events[0].get("trace_id") or "")
+        if not trace_token and events:
+            trace_token = str(events[0].get("trace_id") or "")
 
         # --- Check 1: schema version presence ---------------------------
         checks.append("schema_version_present")
@@ -230,20 +238,18 @@ class OfflineReplayValidator:
         meta["actual_event_count"] = actual_count
         if stored_count != actual_count:
             violations.append(
-                f"event_count mismatch: contract says {stored_count}, "
-                f"actual event list has {actual_count}"
+                f"event_count mismatch: contract says {stored_count}, actual event list has {actual_count}",
             )
 
         # --- Check 3: trace hash integrity ------------------------------
         checks.append("trace_hash_integrity")
         stored_hash = str(contract.get("trace_hash") or "").strip()
-        recomputed_hash = _recompute_trace_hash(events, trace_id)
+        recomputed_hash = _recompute_trace_hash(events, trace_token)
         meta["stored_trace_hash"] = stored_hash
         meta["recomputed_trace_hash"] = recomputed_hash
         if stored_hash != recomputed_hash:
             violations.append(
-                f"trace_hash mismatch: stored={stored_hash!r}, "
-                f"recomputed={recomputed_hash!r}"
+                f"trace_hash mismatch: stored={stored_hash!r}, recomputed={recomputed_hash!r}",
             )
 
         # --- Check 4: phase ordering ------------------------------------
@@ -282,6 +288,7 @@ class OfflineReplayValidator:
         Returns
         -------
         ReplayValidationReport
+
         """
         violations: list[str] = []
         checks: list[str] = []
@@ -297,15 +304,16 @@ class OfflineReplayValidator:
         meta["recomputed_fingerprint"] = recomputed_fp
         if stored_fp != recomputed_fp:
             violations.append(
-                f"identity fingerprint mismatch: stored={stored_fp!r}, "
-                f"recomputed={recomputed_fp!r}"
+                f"identity fingerprint mismatch: stored={stored_fp!r}, recomputed={recomputed_fp!r}",
             )
 
         # --- Check 2: required fields -----------------------------------
         checks.append("identity_required_fields")
         for field_name in ("trace_id", "trace_hash", "lock_hash"):
             if not str(identity.get(field_name) or "").strip():
-                violations.append(f"execution_identity missing required field: {field_name!r}")
+                violations.append(
+                    f"execution_identity missing required field: {field_name!r}",
+                )
 
         # --- Check 3: event_count vs supplied events --------------------
         if events is not None:
@@ -316,8 +324,7 @@ class OfflineReplayValidator:
             meta["actual_event_count"] = actual
             if id_event_count != actual:
                 violations.append(
-                    f"identity event_count={id_event_count} does not match "
-                    f"supplied event list length={actual}"
+                    f"identity event_count={id_event_count} does not match supplied event list length={actual}",
                 )
 
         passed = len(violations) == 0
@@ -335,7 +342,7 @@ class OfflineReplayValidator:
         contract: dict[str, Any],
         events: list[dict[str, Any]],
         identity: dict[str, Any],
-        trace_id: str = "",
+        trace_token: str = "",
     ) -> ReplayValidationReport:
         """Run all checks: trace contract + identity fingerprint together.
 
@@ -343,9 +350,7 @@ class OfflineReplayValidator:
         into a single report.  This is the recommended entry point for full
         offline verification of a persisted turn.
         """
-        trace_report = self.validate_trace_contract(
-            contract, events, trace_id=trace_id
-        )
+        trace_report = self.validate_trace_contract(contract, events, trace_token=trace_token)
         identity_report = self.validate_execution_identity(identity, events=events)
 
         all_violations = trace_report.violations + identity_report.violations
@@ -379,7 +384,7 @@ class OfflineReplayValidator:
                 violations.append(
                     f"phase back-transition detected: {phase!r} (rank {rank}) "
                     f"after {max_phase_name!r} (rank {max_phase_rank}) "
-                    f"at event sequence={event.get('sequence', '?')}"
+                    f"at event sequence={event.get('sequence', '?')}",
                 )
             else:
                 max_phase_rank = rank

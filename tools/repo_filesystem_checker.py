@@ -31,7 +31,8 @@ EXPECTED_TEST_FILES = [
 
 def _line_count(path: Path) -> int:
     try:
-        return sum(1 for _ in path.open("r", encoding="utf-8", errors="replace"))
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            return sum(1 for _ in handle)
     except Exception:
         return 0
 
@@ -39,12 +40,8 @@ def _line_count(path: Path) -> int:
 def build_repo_filesystem_report(root: Path | None = None) -> dict[str, Any]:
     repo_root = root or ROOT
 
-    missing_expected_files = [
-        rel for rel in EXPECTED_CRITICAL_FILES if not (repo_root / rel).exists()
-    ]
-    missing_expected_tests = [
-        rel for rel in EXPECTED_TEST_FILES if not (repo_root / rel).exists()
-    ]
+    missing_expected_files = [rel for rel in EXPECTED_CRITICAL_FILES if not (repo_root / rel).exists()]
+    missing_expected_tests = [rel for rel in EXPECTED_TEST_FILES if not (repo_root / rel).exists()]
 
     underoptimized: list[dict[str, Any]] = []
 

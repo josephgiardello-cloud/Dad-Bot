@@ -1,7 +1,11 @@
 from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 
+import pytest
+
 from dadbot.services.context_service import ContextService
+
+pytestmark = pytest.mark.unit
 
 
 class StubContextBuilder:

@@ -1,10 +1,19 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 VOICE_MODES = {"push_to_talk", "always_listening", "ambient"}
-VOICE_STATES = {"IDLE", "LISTENING", "RECORDING", "TRANSCRIBING", "THINKING", "SPEAKING", "ERROR"}
+VOICE_STATES = {
+    "IDLE",
+    "LISTENING",
+    "RECORDING",
+    "TRANSCRIBING",
+    "THINKING",
+    "SPEAKING",
+    "ERROR",
+}
 
 VOICE_TRANSITION_EVENTS = {
     "ENABLE",
@@ -31,9 +40,23 @@ _TRANSITION_GUARDS: dict[str, set[str]] = {
     "BEGIN_TRANSCRIBING": {"RECORDING"},
     "BEGIN_THINKING": {"TRANSCRIBING"},
     "BEGIN_SPEAKING": {"THINKING", "IDLE", "LISTENING"},
-    "COMPLETE_TURN": {"RECORDING", "TRANSCRIBING", "THINKING", "SPEAKING", "LISTENING", "IDLE"},
+    "COMPLETE_TURN": {
+        "RECORDING",
+        "TRANSCRIBING",
+        "THINKING",
+        "SPEAKING",
+        "LISTENING",
+        "IDLE",
+    },
     "CLEAR_ERROR": {"ERROR"},
-    "CANCEL": {"RECORDING", "TRANSCRIBING", "THINKING", "SPEAKING", "LISTENING", "IDLE"},
+    "CANCEL": {
+        "RECORDING",
+        "TRANSCRIBING",
+        "THINKING",
+        "SPEAKING",
+        "LISTENING",
+        "IDLE",
+    },
     "ERROR": set(VOICE_STATES),
 }
 
@@ -98,17 +121,26 @@ class VoiceSessionController:
             mode = "push_to_talk"
             self.voice_config["mode"] = mode
         self.voice_config["last_mode"] = mode
-        self.voice_config["auto_listen_allowed"] = mode in {"always_listening", "ambient"}
+        self.voice_config["auto_listen_allowed"] = mode in {
+            "always_listening",
+            "ambient",
+        }
 
     def _ensure_runtime_defaults(self) -> None:
         self.runtime_state.setdefault("state", "IDLE")
-        self.runtime_state.setdefault("mode", str(self.voice_config.get("mode") or "push_to_talk"))
+        self.runtime_state.setdefault(
+            "mode",
+            str(self.voice_config.get("mode") or "push_to_talk"),
+        )
         self.runtime_state.setdefault("recording", False)
         self.runtime_state.setdefault("transcribing", False)
         self.runtime_state.setdefault("thinking", False)
         self.runtime_state.setdefault("speaking", False)
         self.runtime_state.setdefault("mic_available", False)
-        self.runtime_state.setdefault("muted", bool(self.voice_config.get("muted", False)))
+        self.runtime_state.setdefault(
+            "muted",
+            bool(self.voice_config.get("muted", False)),
+        )
         self.runtime_state.setdefault("last_error", "")
         self.runtime_state.setdefault("last_transcript", "")
         self.runtime_state.setdefault("last_event", "")
@@ -127,7 +159,9 @@ class VoiceSessionController:
             "state": str(self.runtime_state.get("state") or "IDLE"),
             "mode": str(self.voice_config.get("mode") or "push_to_talk"),
             "detail": dict(detail or {}),
-            "transition_version": int(self.runtime_state.get("transition_version") or 0),
+            "transition_version": int(
+                self.runtime_state.get("transition_version") or 0,
+            ),
         }
         events = self.runtime_state.setdefault("events", [])
         events.append(event)
@@ -152,7 +186,10 @@ class VoiceSessionController:
         enriched = dict(payload or {})
         if callable(self._session_id_provider):
             try:
-                enriched.setdefault("session_id", str(self._session_id_provider() or "default"))
+                enriched.setdefault(
+                    "session_id",
+                    str(self._session_id_provider() or "default"),
+                )
             except Exception:
                 enriched.setdefault("session_id", "default")
         if callable(self._trace_id_provider):
@@ -181,9 +218,21 @@ class VoiceSessionController:
             return "LISTENING"
         return "IDLE"
 
-    def _resolve_target_state(self, event_name: str, *, fallback_state: str | None = None) -> str:
+    def _resolve_target_state(
+        self,
+        event_name: str,
+        *,
+        fallback_state: str | None = None,
+    ) -> str:
         event_name = str(event_name or "").strip().upper()
-        if event_name in {"ENABLE", "MODE_CHANGED", "RESUME_PASSIVE", "COMPLETE_TURN", "CLEAR_ERROR", "CANCEL"}:
+        if event_name in {
+            "ENABLE",
+            "MODE_CHANGED",
+            "RESUME_PASSIVE",
+            "COMPLETE_TURN",
+            "CLEAR_ERROR",
+            "CANCEL",
+        }:
             return self._passive_target_state()
         if event_name == "BEGIN_RECORDING":
             return "RECORDING"
@@ -222,11 +271,20 @@ class VoiceSessionController:
                     "reason": str(reason or ""),
                     "error": str(error or ""),
                     "mode": str(self.voice_config.get("mode") or "push_to_talk"),
-                    "transition_version": int(self.runtime_state.get("transition_version") or 0),
+                    "transition_version": int(
+                        self.runtime_state.get("transition_version") or 0,
+                    ),
                 },
             )
 
-    def _transition(self, event_name: str, *, detail: dict[str, Any] | None = None, force: bool = False, error: str = "") -> bool:
+    def _transition(
+        self,
+        event_name: str,
+        *,
+        detail: dict[str, Any] | None = None,
+        force: bool = False,
+        error: str = "",
+    ) -> bool:
         normalized_event = str(event_name or "").strip().upper()
         if normalized_event not in VOICE_TRANSITION_EVENTS:
             self.mark_error(f"Unsupported transition event: {event_name!r}")
@@ -235,7 +293,7 @@ class VoiceSessionController:
         current_state = str(self.runtime_state.get("state") or "IDLE").strip().upper()
         if not force and not self._guard_allows(normalized_event, current_state):
             self.mark_error(
-                f"Invalid voice transition: event={normalized_event} from state={current_state}"
+                f"Invalid voice transition: event={normalized_event} from state={current_state}",
             )
             return False
 
@@ -249,7 +307,10 @@ class VoiceSessionController:
         mode = str(self.voice_config.get("mode") or "push_to_talk").strip().lower()
         self._set_state(self._passive_target_state(), reason="resume_passive")
         if record_event:
-            self._record_event("passive_state_resumed", {"enabled": enabled, "mode": mode})
+            self._record_event(
+                "passive_state_resumed",
+                {"enabled": enabled, "mode": mode},
+            )
 
     def set_mode(self, mode: str) -> bool:
         normalized = str(mode or "push_to_talk").strip().lower()
@@ -258,7 +319,10 @@ class VoiceSessionController:
             return False
         self.voice_config["mode"] = normalized
         self.voice_config["last_mode"] = normalized
-        self.voice_config["auto_listen_allowed"] = normalized in {"always_listening", "ambient"}
+        self.voice_config["auto_listen_allowed"] = normalized in {
+            "always_listening",
+            "ambient",
+        }
         self.runtime_state["mode"] = normalized
         self._transition("MODE_CHANGED", detail={"mode": normalized}, force=True)
         return True
@@ -285,7 +349,10 @@ class VoiceSessionController:
         if "default" not in known:
             known.insert(0, "default")
         self.runtime_state["known_devices"] = known[:12]
-        self._record_event("device_selected", {"device_id": resolved, "label": str(label or "")})
+        self._record_event(
+            "device_selected",
+            {"device_id": resolved, "label": str(label or "")},
+        )
 
     def mark_mic_available(self, available: bool) -> None:
         self.runtime_state["mic_available"] = bool(available)
@@ -325,15 +392,29 @@ class VoiceSessionController:
         self.runtime_state["priority_override"] = str(priority or "normal")
         self.runtime_state["cancel_requested"] = False
         self.runtime_state["cancel_reason"] = ""
-        self._record_event("turn_started", {"turn_id": self.runtime_state["active_turn_id"], "priority": str(priority or "normal")})
+        self._record_event(
+            "turn_started",
+            {
+                "turn_id": self.runtime_state["active_turn_id"],
+                "priority": str(priority or "normal"),
+            },
+        )
 
-    def request_cancel(self, *, reason: str = "user_interrupt", priority: str = "normal") -> bool:
+    def request_cancel(
+        self,
+        *,
+        reason: str = "user_interrupt",
+        priority: str = "normal",
+    ) -> bool:
         self.runtime_state["cancel_requested"] = True
         self.runtime_state["cancel_reason"] = str(reason or "user_interrupt")
         self.runtime_state["priority_override"] = str(priority or "normal")
         cancelled = self._transition(
             "CANCEL",
-            detail={"reason": self.runtime_state["cancel_reason"], "priority": self.runtime_state["priority_override"]},
+            detail={
+                "reason": self.runtime_state["cancel_reason"],
+                "priority": self.runtime_state["priority_override"],
+            },
             force=True,
         )
         return bool(cancelled)
@@ -342,7 +423,9 @@ class VoiceSessionController:
         payload = {
             "cancel_requested": bool(self.runtime_state.get("cancel_requested", False)),
             "cancel_reason": str(self.runtime_state.get("cancel_reason") or ""),
-            "priority_override": str(self.runtime_state.get("priority_override") or "normal"),
+            "priority_override": str(
+                self.runtime_state.get("priority_override") or "normal",
+            ),
         }
         self.runtime_state["cancel_requested"] = False
         self.runtime_state["cancel_reason"] = ""
@@ -356,14 +439,20 @@ class VoiceSessionController:
         min_bytes = max(1, int(self.voice_config.get("barge_in_min_audio_bytes") or 1))
         if len(audio_bytes or b"") < min_bytes:
             return False
-        return str(self.runtime_state.get("state") or "IDLE") in {"THINKING", "SPEAKING"}
+        return str(self.runtime_state.get("state") or "IDLE") in {
+            "THINKING",
+            "SPEAKING",
+        }
 
     def apply_priority_override(self, priority: str, *, reason: str = "manual") -> bool:
         if not bool(self.voice_config.get("priority_override_enabled", True)):
             return False
         normalized = str(priority or "normal").strip().lower() or "normal"
         self.runtime_state["priority_override"] = normalized
-        self._record_event("priority_override", {"priority": normalized, "reason": str(reason or "")})
+        self._record_event(
+            "priority_override",
+            {"priority": normalized, "reason": str(reason or "")},
+        )
         return True
 
     def process_audio_capture(
@@ -385,7 +474,9 @@ class VoiceSessionController:
             self.request_cancel(reason="barge_in_audio", priority="high")
 
         self.mark_mic_available(True)
-        self.voice_config["last_used_device"] = str(self.voice_config.get("mic_preference") or "default")
+        self.voice_config["last_used_device"] = str(
+            self.voice_config.get("mic_preference") or "default",
+        )
 
         self.begin_recording()
         self.begin_transcribing()
@@ -394,7 +485,9 @@ class VoiceSessionController:
             transcript_text, transcript_error = transcribe_fn(audio_bytes)
         except Exception as exc:
             self.mark_error(f"Transcription failed: {exc}")
-            return "", str(self.runtime_state.get("last_error") or "Transcription failed")
+            return "", str(
+                self.runtime_state.get("last_error") or "Transcription failed",
+            )
 
         if transcript_error:
             self.mark_error(str(transcript_error))
@@ -448,19 +541,37 @@ class VoiceSessionController:
             "last_error": str(self.runtime_state.get("last_error") or ""),
             "last_event": str(self.runtime_state.get("last_event") or ""),
             "last_transcript": str(self.runtime_state.get("last_transcript") or ""),
-            "last_used_device": str(self.voice_config.get("last_used_device") or "default"),
-            "known_devices": list(self.runtime_state.get("known_devices") or ["default"]),
-            "transition_version": int(self.runtime_state.get("transition_version") or 0),
+            "last_used_device": str(
+                self.voice_config.get("last_used_device") or "default",
+            ),
+            "known_devices": list(
+                self.runtime_state.get("known_devices") or ["default"],
+            ),
+            "transition_version": int(
+                self.runtime_state.get("transition_version") or 0,
+            ),
             "cancel_requested": bool(self.runtime_state.get("cancel_requested", False)),
             "cancel_reason": str(self.runtime_state.get("cancel_reason") or ""),
             "active_turn_id": str(self.runtime_state.get("active_turn_id") or ""),
-            "priority_override": str(self.runtime_state.get("priority_override") or "normal"),
+            "priority_override": str(
+                self.runtime_state.get("priority_override") or "normal",
+            ),
             "safety_flags": {
-                "auto_listen_allowed": bool(self.voice_config.get("auto_listen_allowed", False)),
-                "wake_word_required": bool(self.voice_config.get("wake_word_required", False)),
-                "interruptions_enabled": bool(self.voice_config.get("interruptions_enabled", True)),
-                "barge_in_enabled": bool(self.voice_config.get("barge_in_enabled", True)),
-                "allow_tts_cancel": bool(self.voice_config.get("allow_tts_cancel", True)),
+                "auto_listen_allowed": bool(
+                    self.voice_config.get("auto_listen_allowed", False),
+                ),
+                "wake_word_required": bool(
+                    self.voice_config.get("wake_word_required", False),
+                ),
+                "interruptions_enabled": bool(
+                    self.voice_config.get("interruptions_enabled", True),
+                ),
+                "barge_in_enabled": bool(
+                    self.voice_config.get("barge_in_enabled", True),
+                ),
+                "allow_tts_cancel": bool(
+                    self.voice_config.get("allow_tts_cancel", True),
+                ),
             },
             "events": list(self.runtime_state.get("events") or []),
         }

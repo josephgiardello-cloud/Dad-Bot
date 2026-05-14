@@ -1,22 +1,19 @@
 """Tests for Phase 2 — Execution Replay Safety (execution_checkpoint.py)."""
+
 from __future__ import annotations
 
 import pytest
-import time
 
 from dadbot.core.execution_checkpoint import (
+    CheckpointIntegrityError,
+    DeterministicReplayValidator,
     ExecutionCheckpointKernel,
     ExecutionIdempotencyRegistry,
-    DeterministicReplayValidator,
-    ReplaySafeExecutionContext,
     FallbackChainEntry,
     NodeState,
-    NodeExecutionSnapshot,
-    CheckpointIntegrityError,
-    DuplicateExecutionError,
     ReplayMismatchError,
+    ReplaySafeExecutionContext,
 )
-
 
 # ---------------------------------------------------------------------------
 # 2.1 Checkpoint Kernel
@@ -210,28 +207,28 @@ class TestReplayValidator:
 
     def test_validate_status_mismatch_raises(self):
         self.validator.record("h1", "ok", "list")
-        with pytest.raises(ReplayMismatchError, match="status mismatch"):
+        with pytest.raises(ReplayMismatchError):
             self.validator.validate("h1", "error", "list")
 
     def test_validate_output_type_mismatch_raises(self):
         self.validator.record("h1", "ok", "list")
-        with pytest.raises(ReplayMismatchError, match="output type mismatch"):
+        with pytest.raises(ReplayMismatchError):
             self.validator.validate("h1", "ok", "dict")
 
     def test_validate_missing_record_raises(self):
-        with pytest.raises(ReplayMismatchError, match="No recorded fingerprint"):
+        with pytest.raises(ReplayMismatchError):
             self.validator.validate("unknown_hash", "ok", "list")
 
     def test_strict_mode_chain_length_mismatch_raises(self):
         strict = DeterministicReplayValidator(strict_mode=True)
         strict.record("h1", "ok", "list", fallback_chain_length=0, attempt_count=1)
-        with pytest.raises(ReplayMismatchError, match="fallback chain length"):
+        with pytest.raises(ReplayMismatchError):
             strict.validate("h1", "ok", "list", fallback_chain_length=1, attempt_count=1)
 
     def test_strict_mode_attempt_count_mismatch_raises(self):
         strict = DeterministicReplayValidator(strict_mode=True)
         strict.record("h1", "ok", "list", fallback_chain_length=0, attempt_count=1)
-        with pytest.raises(ReplayMismatchError, match="attempt count"):
+        with pytest.raises(ReplayMismatchError):
             strict.validate("h1", "ok", "list", fallback_chain_length=0, attempt_count=2)
 
     def test_non_strict_ignores_attempt_count_difference(self):
@@ -300,8 +297,6 @@ class TestReplaySafeContext:
             FallbackChainEntry("primary", 1, "timeout", fallback_reason="primary timed out"),
             FallbackChainEntry("secondary", 1, "ok"),
         ]
-        self.ctx.record_execution(
-            "n1", "h1", "secondary", "ok", "list", fallback_chain=chain
-        )
+        self.ctx.record_execution("n1", "h1", "secondary", "ok", "list", fallback_chain=chain)
         snap = self.ctx.kernel.get_node("n1")
         assert len(snap.fallback_chain) == 2

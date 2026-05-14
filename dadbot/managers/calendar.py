@@ -1,8 +1,9 @@
-﻿"""iCal feed fetching and calendar sync background worker."""
+"""iCal feed fetching and calendar sync background worker."""
+
 from __future__ import annotations
 
 import urllib.request
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 
@@ -46,7 +47,9 @@ class CalendarManager:
                         if "T" in dt_str:
                             dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
                         else:
-                            dt = datetime.strptime(dt_str, "%Y%m%d").replace(tzinfo=None)
+                            dt = datetime.strptime(dt_str, "%Y%m%d").replace(
+                                tzinfo=None,
+                            )
                         current["DTSTART"] = dt
                     except Exception:
                         pass
@@ -54,12 +57,12 @@ class CalendarManager:
                     current["DESCRIPTION"] = line[12:].strip()
                 elif line.startswith("LOCATION:"):
                     current["LOCATION"] = line[9:].strip()
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             upcoming = []
             for e in events:
                 dt = e.get("DTSTART")
                 if isinstance(dt, datetime):
-                    dt_aware = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+                    dt_aware = dt if dt.tzinfo else dt.replace(tzinfo=UTC)
                     if dt_aware > now:
                         upcoming.append(e)
             upcoming.sort(key=lambda e: e["DTSTART"])

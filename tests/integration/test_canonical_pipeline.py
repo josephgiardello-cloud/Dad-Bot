@@ -3,27 +3,26 @@
 Validates that every stage runs in the correct order, fidelity flags are
 all set to True, and the SaveNode executes exactly once.
 """
+
 from __future__ import annotations
 
 import pytest
+from harness.deterministic_seeds import ADVERSARIAL, BASELINE, CHECKPOINT, REPLAY_A
+from harness.graph_runner import GraphRunner
+from harness.invariant_checker import InvariantChecker
+from harness.kernel_mock import MockRegistry
+from harness.turn_factory import TurnFactory
 
 from dadbot.core.graph import (
     ContextBuilderNode,
     HealthNode,
     InferenceNode,
-    MutationIntent,
     ReflectionNode,
     SafetyNode,
     SaveNode,
     TemporalNode,
     TurnGraph,
 )
-from harness.deterministic_seeds import BASELINE, ADVERSARIAL, CHECKPOINT, REPLAY_A
-from harness.graph_runner import GraphRunner
-from harness.invariant_checker import InvariantChecker
-from harness.kernel_mock import MockRegistry
-from harness.turn_factory import TurnFactory
-
 
 _T = {"wall_time": "2026-01-01T00:00:00", "wall_date": "2026-01-01"}
 

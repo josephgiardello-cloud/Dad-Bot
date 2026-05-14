@@ -1,16 +1,41 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import multiprocessing as mp
 import queue
 import time
 from dataclasses import dataclass
 
-from .contracts import ChatRequest, ChatResponse, DEFAULT_TENANT_ID, EventEnvelope, EventType, ServiceConfig, WorkerResult, WorkerTask, normalize_tenant_id
-from .telemetry import configure_logging, start_span
+from dadbot.core.execution_contract import SovereignContext, TurnDelivery, live_turn_request
+
+from .contracts import (
+    DEFAULT_TENANT_ID,
+    ChatRequest,
+    ChatResponse,
+    EventEnvelope,
+    EventType,
+    ServiceConfig,
+    WorkerResult,
+    WorkerTask,
+    normalize_tenant_id,
+)
+from .runtime_signals import configure_logging, start_span
 
 logger = logging.getLogger(__name__)
+
+
+def _coerce_turn_result(response_obj: object) -> tuple[str, bool]:
+    if hasattr(response_obj, "as_result") and callable(getattr(response_obj, "as_result", None)):
+        result = response_obj.as_result()
+        if isinstance(result, tuple) and len(result) >= 2:
+            return str(result[0] or ""), bool(result[1])
+    if isinstance(response_obj, tuple) and len(response_obj) >= 2:
+        return str(response_obj[0] or ""), bool(response_obj[1])
+    reply = str(getattr(response_obj, "reply", "") or "")
+    should_end = bool(getattr(response_obj, "should_end", False))
+    return reply, should_end
 
 
 @dataclass(slots=True)
@@ -116,16 +141,62 @@ class DadBotTaskProcessor:
             attachments.append(payload)
         return attachments
 
+    @staticmethod
+    def _request_policy_metadata(request: ChatRequest) -> dict[str, object] | None:
+        metadata = dict(request.metadata or {})
+        service_policy = dict(metadata.get("service_policy") or {})
+        if not service_policy:
+            return None
+        principal = dict(metadata.get("auth") or {})
+        if principal:
+            service_policy.setdefault("principal", principal)
+        return service_policy
+
     async def _execute_request_async(self, bot, request: ChatRequest) -> tuple[str, bool]:
         attachments = self._build_request_attachments(request)
-        if hasattr(bot, "process_user_message_async"):
-            return await bot.process_user_message_async(request.user_input, attachments=attachments)
-        return bot.process_user_message(request.user_input, attachments=attachments)
+        request_policy = self._request_policy_metadata(request)
+        previous_policy = getattr(bot, "_service_request_policy", None)
+        if request_policy is not None:
+            bot._service_request_policy = request_policy
+        try:
+            try:
+                execute_turn = bot.execute_turn
+            except AttributeError as exc:
+                raise RuntimeError("service shell requires bot.execute_turn") from exc
+            if not callable(execute_turn):
+                raise RuntimeError("service shell requires bot.execute_turn")
+
+            turn_request = live_turn_request(
+                request.user_input,
+                attachments=attachments,
+                delivery=TurnDelivery.ASYNC,
+                context=SovereignContext(
+                    session_id=str(request.session_id or "default"),
+                    tenant_id=str(request.tenant_id or DEFAULT_TENANT_ID),
+                    request_id=str(request.request_id or ""),
+                    trace_id=str(request.request_id or ""),
+                    policy_scope="dadbot_system.worker",
+                ),
+            )
+            response_obj = execute_turn(turn_request)
+            if inspect.isawaitable(response_obj):
+                response_obj = await response_obj
+            return _coerce_turn_result(response_obj)
+        finally:
+            if request_policy is not None:
+                bot._service_request_policy = previous_policy
 
     def process(self, task: WorkerTask) -> WorkerResult:
         if not self._circuit.allow_request():
             error = "Circuit breaker is open for worker requests"
-            return WorkerResult(task_id=task.task_id, session_id=task.session_id, request_id=task.request.request_id, tenant_id=task.tenant_id, status="failed", error=error)
+            return WorkerResult(
+                task_id=task.task_id,
+                session_id=task.session_id,
+                request_id=task.request.request_id,
+                tenant_id=task.tenant_id,
+                status="failed",
+                error=error,
+            )
 
         policy = RetryPolicy(
             max_attempts=max(1, self.config.workers.max_retries + 1),
@@ -135,7 +206,9 @@ class DadBotTaskProcessor:
 
         last_error = ""
         for attempt in range(1, policy.max_attempts + 1):
-            with start_span("worker.process_task", task_id=task.task_id, request_id=task.request.request_id, attempt=attempt):
+            with start_span(
+                "worker.process_task", task_id=task.task_id, request_id=task.request.request_id, attempt=attempt
+            ):
                 try:
                     bot = self._get_bot(task.session_id, task.request.requested_model, tenant_id=task.tenant_id)
                     if task.session_state:
@@ -167,7 +240,7 @@ class DadBotTaskProcessor:
                         session_state=bot.snapshot_session_state(),
                         response=response,
                     )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     last_error = f"Worker timed out after {policy.timeout_seconds:.1f}s"
                 except Exception as exc:
                     last_error = str(exc)
@@ -194,7 +267,12 @@ def worker_process_main(config_payload: dict, request_queue, result_queue, event
 
     if event_queue is not None:
         event_queue.put(
-            EventEnvelope(session_id="system", event_type=EventType.WORKER_STARTED, tenant_id=DEFAULT_TENANT_ID, payload={"worker": worker_name})
+            EventEnvelope(
+                session_id="system",
+                event_type=EventType.WORKER_STARTED,
+                tenant_id=DEFAULT_TENANT_ID,
+                payload={"worker": worker_name},
+            )
         )
 
     while True:
@@ -206,7 +284,12 @@ def worker_process_main(config_payload: dict, request_queue, result_queue, event
 
     if event_queue is not None:
         event_queue.put(
-            EventEnvelope(session_id="system", event_type=EventType.WORKER_STOPPED, tenant_id=DEFAULT_TENANT_ID, payload={"worker": worker_name})
+            EventEnvelope(
+                session_id="system",
+                event_type=EventType.WORKER_STOPPED,
+                tenant_id=DEFAULT_TENANT_ID,
+                payload={"worker": worker_name},
+            )
         )
 
 

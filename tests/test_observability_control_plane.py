@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import pytest
+
 from dadbot.core.observability import (
-    configure_exporter,
     EventStreamExporter,
+    TraceLevel,
+    TracingContext,
+    configure_exporter,
     get_exporter,
     get_tracer,
     set_trace_level,
-    TraceLevel,
-    TracingContext,
 )
+
+pytestmark = pytest.mark.unit
 
 
 def test_minimal_events_are_not_sampled_out() -> None:

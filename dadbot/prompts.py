@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 
@@ -82,18 +82,25 @@ Reason: The main emotion is still emotional hurt, with relief as a secondary not
 """.strip()
 
     @staticmethod
-    def persona_evolution(relationship_state, top_topics: str, current_traits: str, positive_traits: str, timeline: str, mood_trend: str) -> str:
+    def persona_evolution(
+        relationship_state,
+        top_topics: str,
+        current_traits: str,
+        positive_traits: str,
+        timeline: str,
+        mood_trend: str,
+    ) -> str:
         return f"""
 Relationship data:
-- Trust: {relationship_state['trust_level']}/100
-- Openness: {relationship_state['openness_level']}/100
-- Momentum: {relationship_state['emotional_momentum']}
+- Trust: {relationship_state["trust_level"]}/100
+- Openness: {relationship_state["openness_level"]}/100
+- Momentum: {relationship_state["emotional_momentum"]}
 - Top recurring topics: {top_topics}
 - Recent mood trend: {mood_trend}
 
 Current evolved traits: {current_traits}
 Most positive evolved traits so far: {positive_traits}
-Relationship timeline: {timeline or 'No long-term timeline yet.'}
+Relationship timeline: {timeline or "No long-term timeline yet."}
 
 Suggest ONE small, permanent, high-impact evolution to Dad's style that would strengthen the relationship right now.
 
@@ -107,7 +114,13 @@ Rules:
 """.strip()
 
     @staticmethod
-    def reply_critique(profile_block: str, relevant_facts: str, user_input: str, draft_reply: str, current_mood: str) -> str:
+    def reply_critique(
+        profile_block: str,
+        relevant_facts: str,
+        user_input: str,
+        draft_reply: str,
+        current_mood: str,
+    ) -> str:
         return f"""
 You are reviewing a draft reply from a warm, supportive dad.
 
@@ -132,7 +145,11 @@ Draft: {json.dumps(draft_reply)}
 """.strip()
 
     @staticmethod
-    def wisdom_prompt(graph_summary: str, consolidated_lines: str, user_input: str) -> str:
+    def wisdom_prompt(
+        graph_summary: str,
+        consolidated_lines: str,
+        user_input: str,
+    ) -> str:
         return f"""
 Using only the relationship graph and consolidated memories below, give me one original piece of dad wisdom Tony might need right now.
 

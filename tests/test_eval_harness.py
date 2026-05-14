@@ -17,18 +17,21 @@ emotional_alignment
 from __future__ import annotations
 
 import re
-import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+import pytest
+
 from Dad import DadBot
 
+pytestmark = pytest.mark.unit
 
 # ---------------------------------------------------------------------------
 # Shared fixture helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_bot(temp_path: Path) -> DadBot:
     bot = DadBot()
@@ -46,8 +49,10 @@ def _make_bot(temp_path: Path) -> DadBot:
 
 def _fake_chat_factory(reply: str):
     """Return a callable that mimics call_ollama_chat and always yields *reply*."""
+
     def _fake_chat(messages, options=None, response_format=None, purpose="chat"):
         return {"message": {"content": reply}}
+
     return _fake_chat
 
 
@@ -87,15 +92,28 @@ def score_faithfulness(reply: str, profile: dict) -> tuple[float, list[str]]:
 # Consistency scorer
 # ---------------------------------------------------------------------------
 
+
 def score_consistency(mood_a: str, mood_b: str) -> float:
     """Return 1.0 if both moods map to the same category, else 0.0."""
     _CANONICAL = {
-        "happy": "positive", "excited": "positive", "proud": "positive", "positive": "positive",
-        "neutral": "neutral", "calm": "neutral", "reflective": "neutral",
-        "stressed": "stressed", "anxious": "stressed", "overwhelmed": "stressed",
-        "sad": "sad", "down": "sad", "lonely": "sad",
-        "frustrated": "frustrated", "angry": "frustrated", "irritated": "frustrated",
-        "tired": "tired", "exhausted": "tired",
+        "happy": "positive",
+        "excited": "positive",
+        "proud": "positive",
+        "positive": "positive",
+        "neutral": "neutral",
+        "calm": "neutral",
+        "reflective": "neutral",
+        "stressed": "stressed",
+        "anxious": "stressed",
+        "overwhelmed": "stressed",
+        "sad": "sad",
+        "down": "sad",
+        "lonely": "sad",
+        "frustrated": "frustrated",
+        "angry": "frustrated",
+        "irritated": "frustrated",
+        "tired": "tired",
+        "exhausted": "tired",
     }
     return 1.0 if _CANONICAL.get(mood_a, mood_a) == _CANONICAL.get(mood_b, mood_b) else 0.0
 
@@ -138,6 +156,7 @@ def score_emotional_alignment(user_input: str, reply: str, detected_mood: str) -
 # ---------------------------------------------------------------------------
 # Test cases
 # ---------------------------------------------------------------------------
+
 
 class TestFaithfulnessEval(unittest.TestCase):
     def setUp(self):
@@ -193,9 +212,9 @@ class TestConsistencyEval(unittest.TestCase):
 
         fake_mood_response = '{"mood": "stressed"}'
         with patch.object(bot, "call_ollama_chat", side_effect=_fake_chat_factory(fake_mood_response)):
-            mood_a = bot.detect_mood("I'm so overwhelmed with everything right now!")
+            mood_a = bot.mood_manager.detect("I'm so overwhelmed with everything right now!")
         with patch.object(bot, "call_ollama_chat", side_effect=_fake_chat_factory(fake_mood_response)):
-            mood_b = bot.detect_mood("I'm so overwhelmed with everything right now!")
+            mood_b = bot.mood_manager.detect("I'm so overwhelmed with everything right now!")
 
         consistency = score_consistency(mood_a, mood_b)
         self.assertEqual(consistency, 1.0, msg=f"Mood drifted: {mood_a!r} vs {mood_b!r}")
@@ -242,7 +261,7 @@ class TestEmotionalAlignmentEval(unittest.TestCase):
             return {"message": {"content": distress_reply}}
 
         with patch.object(bot, "call_ollama_chat", side_effect=fake_chat):
-            detected_mood = bot.detect_mood("I can't keep up, everything is piling on.")
+            detected_mood = bot.mood_manager.detect("I can't keep up, everything is piling on.")
 
         score, issues = score_emotional_alignment(
             "I can't keep up, everything is piling on.", distress_reply, detected_mood

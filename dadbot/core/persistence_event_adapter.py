@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import asdict, is_dataclass
-from typing import Any, Callable
+from typing import Any
 
 
 class GraphPersistenceEventAdapter:
     """Adapter for persistence event emission from graph execution.
 
     This keeps persistence payload shaping out of TurnGraph orchestration logic.
+    The persistence service is the authority boundary; it must append runtime
+    events to ExecutionLedger, and any filesystem emission is derived-only.
     """
 
     def __init__(self, *, json_safe: Callable[[Any], Any]) -> None:
@@ -55,7 +58,7 @@ class GraphPersistenceEventAdapter:
                 "active_stage": str(active_stage or ""),
                 "determinism_lock": self._json_safe(dict(determinism_lock or {})),
                 "checkpoint": checkpoint,
-            }
+            },
         )
 
     def emit_phase_transition(
@@ -82,7 +85,7 @@ class GraphPersistenceEventAdapter:
                 "phase": turn_context.phase.value,
                 "transition": dict(transition or {}),
                 "determinism_lock": self._json_safe(dict(determinism_lock or {})),
-            }
+            },
         )
 
     def emit_kernel_rejection(
@@ -109,7 +112,7 @@ class GraphPersistenceEventAdapter:
                 "reason": str(reason or ""),
                 "phase": turn_context.phase.value,
                 "semantics": self._json_safe(self._to_dict(semantics)),
-            }
+            },
         )
 
     def emit_execution_identity(
@@ -138,5 +141,5 @@ class GraphPersistenceEventAdapter:
                 "occurred_at": turn_context.temporal.wall_time,
                 "phase": turn_context.phase.value,
                 "identity": identity_dict,
-            }
+            },
         )

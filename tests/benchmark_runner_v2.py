@@ -33,10 +33,10 @@ OUTPUT STRUCTURE:
 """
 
 import logging
-from typing import Dict, List, Any, Optional
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
+from typing import Any
 
-from tests.scenario_suite import Scenario, SCENARIOS
+from tests.scenario_suite import SCENARIOS, Scenario
 
 logger = logging.getLogger(__name__)
 
@@ -44,16 +44,17 @@ logger = logging.getLogger(__name__)
 @dataclass
 class ExecutionTrace:
     """Captured execution trace from a scenario run."""
+
     scenario_name: str
     category: str
     input_text: str
-    planner_output: Optional[Dict[str, Any]] = None
-    tools_executed: List[str] = None
-    memory_accessed: List[str] = None
+    planner_output: dict[str, Any] | None = None
+    tools_executed: list[str] = None
+    memory_accessed: list[str] = None
     final_response: str = ""
     steps: int = 0
     completed: bool = False
-    error: Optional[str] = None
+    error: str | None = None
 
     def __post_init__(self):
         if self.tools_executed is None:
@@ -65,15 +66,16 @@ class ExecutionTrace:
 @dataclass
 class ScoreResult:
     """Minimal scoring result."""
+
     success: bool
     steps: int
     tool_used_correctly: bool
-    error: Optional[str] = None
+    error: str | None = None
 
 
 class BenchmarkRunner:
     """Executes scenarios and captures execution traces.
-    
+
     PHASE 1: Mock-based scenario validation.
     PHASE 2: Real orchestrator integration (coming next).
     """
@@ -94,7 +96,7 @@ class BenchmarkRunner:
         first benchmark run reveals what signals matter.
         """
         success = trace.completed and trace.error is None
-        
+
         tool_used_correctly = True
         if scenario.category == "tool":
             # For tool scenarios: did execution use/attempt tools?
@@ -107,7 +109,7 @@ class BenchmarkRunner:
             error=trace.error,
         )
 
-    def run_scenario(self, scenario: Scenario) -> Dict[str, Any]:
+    def run_scenario(self, scenario: Scenario) -> dict[str, Any]:
         """Execute a single scenario.
 
         PHASE 1: Mock execution validates scenario structure.
@@ -123,19 +125,19 @@ class BenchmarkRunner:
             # PHASE 1: Validate scenario definition
             if not scenario.name or not scenario.input_text:
                 raise ValueError("Scenario must have name and input_text")
-            
+
             # PHASE 1: Mock execution (Phase 2 will do real orchestrator execution)
             trace.completed = True
             trace.steps = 1
             trace.final_response = f"[PHASE 1 MOCK] Response for: {scenario.input_text[:50]}..."
-            
+
             # PHASE 1: Mock tool/memory trace capture
             if scenario.category == "tool":
                 trace.tools_executed = ["mock_tool"]
-            
+
             if scenario.category == "memory":
                 trace.memory_accessed = ["memory_store"]
-            
+
             if scenario.category == "planning":
                 trace.planner_output = {
                     "plan": f"Plan: {scenario.input_text[:40]}...",
@@ -143,7 +145,7 @@ class BenchmarkRunner:
                 }
 
         except Exception as e:
-            trace.error = f"{type(e).__name__}: {str(e)}"
+            trace.error = f"{type(e).__name__}: {e!s}"
             trace.completed = False
             logger.exception(f"Error executing scenario {scenario.name}")
 
@@ -170,8 +172,8 @@ class BenchmarkRunner:
 
     def run_all_scenarios(
         self,
-        scenarios: Optional[List[Scenario]] = None,
-    ) -> List[Dict[str, Any]]:
+        scenarios: list[Scenario] | None = None,
+    ) -> list[dict[str, Any]]:
         """Execute all scenarios (or specified subset)."""
         if scenarios is None:
             scenarios = SCENARIOS
@@ -183,7 +185,7 @@ class BenchmarkRunner:
         return results
 
 
-def print_benchmark_results(results: List[Dict[str, Any]]) -> None:
+def print_benchmark_results(results: list[dict[str, Any]]) -> None:
     """Pretty-print benchmark results."""
     print("\n" + "=" * 80)
     print("BENCHMARK RESULTS (PHASE 1 - SCENARIO VALIDATION)")
@@ -195,7 +197,7 @@ def print_benchmark_results(results: List[Dict[str, Any]]) -> None:
         cat = result.get("category", "unknown")
         if cat not in by_category:
             by_category[cat] = {"pass": 0, "fail": 0}
-        
+
         if result["scoring"]["success"]:
             by_category[cat]["pass"] += 1
         else:

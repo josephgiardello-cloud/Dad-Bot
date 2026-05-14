@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
 @dataclass
@@ -22,9 +22,13 @@ class UXTrace:
     user_confusion_detected: bool
     replan_triggered: bool
     memory_correction_written: bool
+    time_to_first_token_ms: float = 0.0  # Turn start → first output token (milliseconds)
+    time_to_resolution_ms: float = 0.0   # Turn start → final answer (milliseconds)
+    backtrack_count: int = 0             # Number of plan revisions/re-executions
+    clarity_markers: list[str] = field(default_factory=list)  # Structured output indicators
 
     @classmethod
-    def from_state(cls, state: Dict[str, Any]) -> "UXTrace":
+    def from_state(cls, state: dict[str, Any]) -> UXTrace:
         payload = dict(state.get("ux_trace") or state.get("ux_feedback") or {})
         return cls(
             intent_shift_detected=bool(payload.get("intent_shift_detected", False)),
@@ -33,6 +37,10 @@ class UXTrace:
             user_confusion_detected=bool(payload.get("user_confusion_detected", False)),
             replan_triggered=bool(payload.get("replan_triggered", False)),
             memory_correction_written=bool(payload.get("memory_correction_written", False)),
+            time_to_first_token_ms=float(payload.get("time_to_first_token_ms", 0.0)),
+            time_to_resolution_ms=float(payload.get("time_to_resolution_ms", 0.0)),
+            backtrack_count=int(payload.get("backtrack_count", 0)),
+            clarity_markers=list(payload.get("clarity_markers", [])),
         )
 
 
@@ -41,11 +49,11 @@ class PlannerCausalTrace:
     """Planner causality fields required for strict evaluation."""
 
     planner_replan_reason: str = ""
-    intent_delta_vector: List[str] = field(default_factory=list)
-    dependency_graph_diff: List[str] = field(default_factory=list)
+    intent_delta_vector: list[str] = field(default_factory=list)
+    dependency_graph_diff: list[str] = field(default_factory=list)
 
     @classmethod
-    def from_state(cls, state: Dict[str, Any]) -> "PlannerCausalTrace":
+    def from_state(cls, state: dict[str, Any]) -> PlannerCausalTrace:
         payload = dict(state.get("planner_causal_trace") or {})
         return cls(
             planner_replan_reason=str(payload.get("planner_replan_reason") or "").strip(),
@@ -65,7 +73,7 @@ class MemoryCausalTrace:
     overridden: bool = False
 
     @classmethod
-    def from_state(cls, state: Dict[str, Any]) -> "MemoryCausalTrace":
+    def from_state(cls, state: dict[str, Any]) -> MemoryCausalTrace:
         payload = dict(state.get("memory_causal_trace") or {})
         return cls(
             trigger=str(payload.get("trigger") or "").strip(),
@@ -99,7 +107,7 @@ class CrossSubsystemCoherenceScore:
     """Global consistency indicator across subsystem traces."""
 
     score: float
-    penalties: List[str] = field(default_factory=list)
+    penalties: list[str] = field(default_factory=list)
 
     @property
     def coherent(self) -> bool:

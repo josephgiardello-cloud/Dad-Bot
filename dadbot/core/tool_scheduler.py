@@ -11,11 +11,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from dadbot.core.tool_dag import ToolDAG, ToolNode
-
 
 # ---------------------------------------------------------------------------
 # Scheduled item
@@ -30,6 +29,7 @@ class ScheduledItem:
     ``ordering_key`` is a stable string key derived from (priority, intent, det_id)
     and the scheduler seed, used to produce a fully reproducible ordering.
     """
+
     schedule_sequence: int
     node: ToolNode
     ordering_key: str
@@ -103,12 +103,14 @@ class ToolScheduler:
         while current_wave_nodes:
             next_wave_candidates: set[str] = set()
             for node in current_wave_nodes:
-                result.append(ScheduledItem(
-                    schedule_sequence=schedule_sequence,
-                    node=node,
-                    ordering_key=self._ordering_key(node),
-                    wave=wave,
-                ))
+                result.append(
+                    ScheduledItem(
+                        schedule_sequence=schedule_sequence,
+                        node=node,
+                        ordering_key=self._ordering_key(node),
+                        wave=wave,
+                    ),
+                )
                 processed.add(node.node_id)
                 schedule_sequence += 1
                 for successor_id in adjacency.get(node.node_id, []):
@@ -126,7 +128,7 @@ class ToolScheduler:
         if len(result) != len(dag.nodes):
             raise RuntimeError(
                 f"ToolScheduler: schedule incomplete — cycle detected or unreachable nodes. "
-                f"Scheduled {len(result)} of {len(dag.nodes)}."
+                f"Scheduled {len(result)} of {len(dag.nodes)}.",
             )
 
         return result
@@ -147,7 +149,7 @@ class ToolScheduler:
             for item in items
         ]
         return hashlib.sha256(
-            json.dumps(payload, sort_keys=True).encode("utf-8")
+            json.dumps(payload, sort_keys=True).encode("utf-8"),
         ).hexdigest()
 
     def to_schedule_dict(self, dag: ToolDAG) -> dict[str, Any]:

@@ -16,33 +16,30 @@ Coverage:
     R26–R30: Long-horizon session simulation (5-10 turns, event log stable)
     R31–R35: Tool stress (100+ events, all invariants hold)
 """
+
 from __future__ import annotations
 
-import hashlib
-import json
 from typing import Any
 
 import pytest
 
-from dadbot.core.tool_ir_boundary import (
-    ToolSchemaError,
-    validate_tool_request,
-    validate_tool_result,
-    validate_tool_requests_batch,
-)
 from dadbot.core.event_authority import EventAuthority
+from dadbot.core.invariant_engine import (
+    ExecutionState,
+    GlobalInvariantEngine,
+)
 from dadbot.core.memory_space import (
     GoalWeightingFunction,
     MemoryRankerOperator,
     MemoryStateVector,
 )
-from dadbot.core.system_snapshot import GoldenBehaviorRecord, GoldenBehaviorSet
-from dadbot.core.invariant_engine import (
-    ExecutionState,
-    GlobalInvariantEngine,
-    InvariantSeverity,
+from dadbot.core.system_snapshot import GoldenBehaviorSet
+from dadbot.core.tool_ir_boundary import (
+    ToolSchemaError,
+    validate_tool_request,
+    validate_tool_requests_batch,
+    validate_tool_result,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -369,35 +366,43 @@ class TestLongHorizonSessions:
         events.append({"type": "session_start", "session_id": "long-sess", "sequence": seq})
         seq += 1
         for turn in range(num_turns):
-            events.append({
-                "type": "turn_started",
-                "session_id": "long-sess",
-                "turn": turn,
-                "sequence": seq,
-            })
+            events.append(
+                {
+                    "type": "turn_started",
+                    "session_id": "long-sess",
+                    "turn": turn,
+                    "sequence": seq,
+                }
+            )
             seq += 1
-            events.append({
-                "type": "tool_requested",
-                "session_id": "long-sess",
-                "tool": "memory_lookup",
-                "turn": turn,
-                "sequence": seq,
-            })
+            events.append(
+                {
+                    "type": "tool_requested",
+                    "session_id": "long-sess",
+                    "tool": "memory_lookup",
+                    "turn": turn,
+                    "sequence": seq,
+                }
+            )
             seq += 1
-            events.append({
-                "type": "tool_executed",
-                "session_id": "long-sess",
-                "tool": "memory_lookup",
-                "turn": turn,
-                "sequence": seq,
-            })
+            events.append(
+                {
+                    "type": "tool_executed",
+                    "session_id": "long-sess",
+                    "tool": "memory_lookup",
+                    "turn": turn,
+                    "sequence": seq,
+                }
+            )
             seq += 1
-            events.append({
-                "type": "TURN_COMPLETED",
-                "session_id": "long-sess",
-                "turn": turn,
-                "sequence": seq,
-            })
+            events.append(
+                {
+                    "type": "TURN_COMPLETED",
+                    "session_id": "long-sess",
+                    "turn": turn,
+                    "sequence": seq,
+                }
+            )
             seq += 1
         return events
 
@@ -452,18 +457,22 @@ class TestToolStress:
     def _make_tool_events(self, n: int) -> list[dict]:
         events = []
         for i in range(n):
-            events.append({
-                "type": "tool_requested",
-                "session_id": "stress-sess",
-                "tool_id": f"tool-{i:05d}",
-                "sequence": i * 2,
-            })
-            events.append({
-                "type": "tool_executed",
-                "session_id": "stress-sess",
-                "tool_id": f"tool-{i:05d}",
-                "sequence": i * 2 + 1,
-            })
+            events.append(
+                {
+                    "type": "tool_requested",
+                    "session_id": "stress-sess",
+                    "tool_id": f"tool-{i:05d}",
+                    "sequence": i * 2,
+                }
+            )
+            events.append(
+                {
+                    "type": "tool_executed",
+                    "session_id": "stress-sess",
+                    "tool_id": f"tool-{i:05d}",
+                    "sequence": i * 2 + 1,
+                }
+            )
         return events
 
     def test_100_tool_events_appended_stably(self):
@@ -502,7 +511,12 @@ class TestToolStress:
     def test_stress_batch_schema_validation(self):
         """Batch validation of 100 valid requests should produce 100 valid."""
         requests = [
-            {"tool_name": "memory_lookup", "args": {"query": f"q{i}"}, "intent": "goal_lookup", "expected_output": "list"}
+            {
+                "tool_name": "memory_lookup",
+                "args": {"query": f"q{i}"},
+                "intent": "goal_lookup",
+                "expected_output": "list",
+            }
             for i in range(100)
         ]
         valid, rejected = validate_tool_requests_batch(requests)

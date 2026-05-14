@@ -1,4 +1,4 @@
-﻿"""Mood normalisation and detection-key utilities.
+"""Mood normalisation and detection-key utilities.
 
 Canonical home for pure mood-string logic that previously lived as @staticmethod
 methods on DadBot.  Import directly rather than going through the facade::
@@ -25,7 +25,10 @@ def normalize_mood(mood: str) -> str:
     if lowered in MOOD_ALIASES:
         return MOOD_ALIASES[lowered]
 
-    for alias, mapped_mood in sorted(MOOD_ALIASES.items(), key=lambda item: -len(item[0])):
+    for alias, mapped_mood in sorted(
+        MOOD_ALIASES.items(),
+        key=lambda item: -len(item[0]),
+    ):
         if alias in lowered:
             return mapped_mood
 
@@ -38,6 +41,7 @@ def normalize_mood_detection_key(user_input: str, recent_history=None) -> str:
     Includes the current date as a salt so that identical phrases on different
     days do not serve a stale cached mood from a prior session.
     """
+
     def _norm(value: str) -> str:
         normalized = re.sub(r"[^a-z0-9\s!?]+", " ", str(value or "").lower())
         return re.sub(r"\s+", " ", normalized).strip()
@@ -78,8 +82,8 @@ def command_help_text() -> str:
 
 
 __all__ = [
-    "normalize_mood",
-    "normalize_mood_detection_key",
     "build_style_examples",
     "command_help_text",
+    "normalize_mood",
+    "normalize_mood_detection_key",
 ]

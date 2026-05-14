@@ -1,29 +1,60 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import logging
 import math
 from typing import Any
 
-from dadbot.core.determinism import DeterminismBoundary, DeterminismMode, DeterminismViolation
-
 logger = logging.getLogger(__name__)
+
+AGENT_SERVICE_DEPRECATED = True
 
 
 class AgentService:
     """Service wrapper for primary LLM/tool turn execution.
 
-    Drives the InferenceNode of the TurnGraph: runs mood detection, direct reply
-    checks, agentic tool planning, and LLM generation.  The turn is NOT finalized
-    here â€” history append, maintenance scheduling, and persistence are the
-    SaveNode / PersistenceService responsibility.
+    Legacy compatibility surface for inference-era call sites.
+    AgentService no longer has output authority: control-plane + ResponseEngine
+    decide final output. This service records telemetry only.
 
     Calling ``bot.process_user_message*`` here would re-enter the graph and cause
-    infinite recursion.  Instead, we call ``bot.turn_service.prepare_user_turn_async``
-    directly (which bypasses the graph check) and then ``reply_generation.generate_validated_reply``.
+    infinite recursion. Legacy callers are preserved, but they receive a
+    non-authoritative empty candidate and metadata for observability.
     """
 
     def __init__(self, bot: Any):
         self.bot = bot
+
+    def _record_deprecated_usage(self, turn_context: Any, *, reason: str) -> None:
+        if not AGENT_SERVICE_DEPRECATED:
+            return
+        logger.warning("AgentService is a deprecated execution surface")
+        recorder = getattr(self.bot, "record_shadow_decision", None)
+        if callable(recorder):
+            try:
+                recorder(
+                    source="agent_service",
+                    type="suggestion",
+                    content_preview="",
+                    reason=reason,
+                    would_replace=False,
+                    priority=0.05,
+                    metadata={"path": "agent_service.run_agent", "deprecated": True},
+                    turn_context=turn_context,
+                )
+            except Exception:
+                logger.debug("AgentService deprecation telemetry failed", exc_info=True)
+
+    def _emit_telemetry_only(self, turn_context: Any, *, stage: str, reason: str) -> tuple[str, bool]:
+        self._record_deprecated_usage(turn_context, reason=reason)
+        try:
+            turn_context.state["agent_service_deprecated"] = {
+                "stage": stage,
+                "reason": reason,
+                "deprecated": True,
+            }
+        except Exception:
+            pass
+        return "", False
 
     @staticmethod
     def _policy_for_hypothesis(hypothesis_name: str) -> dict[str, str]:
@@ -45,12 +76,22 @@ class AgentService:
                 "tool_bias": "optional_tools",
             },
         }
-        return dict(mapping.get(str(hypothesis_name or ""), {
-            "policy": "supportive_problem_solving",
-            "tool_bias": "planner_default",
-        }))
+        return dict(
+            mapping.get(
+                str(hypothesis_name or ""),
+                {
+                    "policy": "supportive_problem_solving",
+                    "tool_bias": "planner_default",
+                },
+            ),
+        )
 
-    def _bayesian_execution_state(self, *, turn_text: str, current_mood: str) -> dict[str, Any]:
+    def _bayesian_execution_state(
+        self,
+        *,
+        turn_text: str,
+        current_mood: str,
+    ) -> dict[str, Any]:
         relationship = getattr(self.bot, "relationship_manager", None)
         if relationship is None:
             return {
@@ -61,7 +102,11 @@ class AgentService:
             }
 
         state = relationship.current_state()
-        posterior = relationship.build_hypothesis_posteriors(state, turn_text, current_mood)
+        posterior = relationship.build_hypothesis_posteriors(
+            state,
+            turn_text,
+            current_mood,
+        )
         if not posterior:
             return {
                 "required": True,
@@ -96,7 +141,12 @@ class AgentService:
         }
 
     @staticmethod
-    def _tool_execution_envelope(bot: Any, turn_context: Any, *, reply_source: str) -> dict[str, Any]:
+    def _tool_execution_envelope(
+        bot: Any,
+        turn_context: Any,
+        *,
+        reply_source: str,
+    ) -> dict[str, Any]:
         planner_snapshot = {}
         planner_debug_snapshot = getattr(bot, "planner_debug_snapshot", None)
         if callable(planner_debug_snapshot):
@@ -106,16 +156,14 @@ class AgentService:
                 planner_snapshot = {}
 
         selected_tool = str(
-            planner_snapshot.get("planner_tool")
-            or planner_snapshot.get("fallback_tool")
-            or ""
+            planner_snapshot.get("planner_tool") or planner_snapshot.get("fallback_tool") or "",
         ).strip()
         parameters = dict(planner_snapshot.get("planner_parameters") or {})
         observation = str(
             planner_snapshot.get("planner_observation")
             or planner_snapshot.get("fallback_observation")
             or turn_context.state.get("active_tool_observation")
-            or ""
+            or "",
         ).strip()
 
         return {
@@ -144,21 +192,42 @@ class AgentService:
     ) -> tuple[Any, Any, Any, str, Any] | None:
         service = bot.turn_service
         if service is None:
-            logger.error("AgentService: bot.turn_service is not wired; cannot run inference")
+            logger.error(
+                "AgentService: bot.turn_service is not wired; cannot run inference",
+            )
             return None
         try:
-            return await service.prepare_user_turn_async(stripped, attachments, turn_context=turn_context)
+            return await service.prepare_user_turn_async(
+                stripped,
+                attachments,
+                turn_context=turn_context,
+            )
         except Exception as exc:
             logger.error("AgentService: prepare_user_turn_async failed: %s", exc)
             return None
 
     @staticmethod
-    def _record_turn_preinference_state(turn_context: Any, *, mood: Any, turn_text: str, stripped: str, norm_attachments: Any) -> None:
+    def _record_turn_preinference_state(
+        turn_context: Any,
+        *,
+        mood: Any,
+        turn_text: str,
+        stripped: str,
+        norm_attachments: Any,
+    ) -> None:
         turn_context.state["mood"] = mood or "neutral"
         turn_context.state["turn_text"] = turn_text or stripped
         turn_context.state["norm_attachments"] = norm_attachments
 
-    def _record_bayesian_state(self, bot: Any, turn_context: Any, *, turn_text: str, stripped: str, mood: Any) -> dict[str, Any]:
+    def _record_bayesian_state(
+        self,
+        bot: Any,
+        turn_context: Any,
+        *,
+        turn_text: str,
+        stripped: str,
+        mood: Any,
+    ) -> dict[str, Any]:
         bayesian_state = self._bayesian_execution_state(
             turn_text=turn_text or stripped,
             current_mood=mood or "neutral",
@@ -196,47 +265,33 @@ class AgentService:
         mood: Any,
         norm_attachments: Any,
     ) -> str:
-        reply_gen = getattr(bot, "reply_generation", None)
-        if reply_gen is None:
-            logger.error("AgentService: bot.reply_generation is not wired")
-            return "I can't generate a reply right now. Try again."
+        raise RuntimeError("Deprecated: use ResponseEngine via control_plane")
 
-        boundary: DeterminismBoundary = getattr(turn_context, "determinism_boundary", None) or DeterminismBoundary()
-
-        def _llm_call():
-            return reply_gen.generate_validated_reply(
-                stripped,
-                turn_text or stripped,
-                mood or "neutral",
-                norm_attachments,
-                stream=False,
-            )
-
-        try:
-            reply = boundary.capture("inference.llm_reply", _llm_call)
-        except DeterminismViolation as exc:
-            logger.error("AgentService: determinism boundary violated: %s", exc)
-            reply = "I'm having trouble saving my thoughts right now - let me try again in a moment."
-        except Exception as exc:
-            logger.error("AgentService: LLM inference failed: %s", exc)
-            reply = "I'm having trouble saving my thoughts right now - let me try again in a moment."
-
-        boundary_snapshot = boundary.snapshot()
-        turn_context.state["determinism_boundary"] = boundary_snapshot
-        turn_context.metadata["determinism_boundary"] = boundary_snapshot
-        return reply
-
-    async def run_agent(self, turn_context: Any, rich_context: dict[str, Any] | None = None):
+    async def run_agent(
+        self,
+        turn_context: Any,
+        rich_context: dict[str, Any] | None = None,
+    ):
         bot = self.bot
         _user_input, attachments, stripped = self._normalize_turn_input(turn_context)
+
+        self._record_deprecated_usage(
+            turn_context,
+            reason="AgentService.run_agent is deprecated; control_plane must own final response authority.",
+        )
 
         if not stripped and not attachments:
             turn_context.state["already_finalized"] = True
             return ("", False)
 
-        prepared = await self._prepare_user_turn(bot, stripped, attachments, turn_context)
+        prepared = await self._prepare_user_turn(
+            bot,
+            stripped,
+            attachments,
+            turn_context,
+        )
         if prepared is None:
-            return ("I'm having trouble saving my thoughts right now - let me try again in a moment.", False)
+            return ("", False)
         mood, early_reply, should_end, turn_text, norm_attachments = prepared
 
         self._record_turn_preinference_state(
@@ -246,7 +301,13 @@ class AgentService:
             stripped=stripped,
             norm_attachments=norm_attachments,
         )
-        self._record_bayesian_state(bot, turn_context, turn_text=turn_text, stripped=stripped, mood=mood)
+        self._record_bayesian_state(
+            bot,
+            turn_context,
+            turn_text=turn_text,
+            stripped=stripped,
+            mood=mood,
+        )
         self._record_relationship_snapshot(bot, turn_context)
 
         # Session exit: prepare_user_turn_async already persisted; skip SaveNode work.
@@ -255,32 +316,20 @@ class AgentService:
             turn_context.state["tool_execution_envelope"] = self._tool_execution_envelope(
                 bot,
                 turn_context,
-                reply_source="session_exit",
+                reply_source="agent_service_deprecated",
             )
-            return (early_reply or "", True)
-
-        # Direct reply (safety intercept, memory command, tool command, fact reply)
-        if early_reply is not None:
-            turn_context.state["tool_execution_envelope"] = self._tool_execution_envelope(
-                bot,
-                turn_context,
-                reply_source="direct_or_tool_reply",
-            )
-            return (early_reply, False)
-
-        reply = self._llm_reply_with_boundary(
-            bot=bot,
-            turn_context=turn_context,
-            stripped=stripped,
-            turn_text=turn_text,
-            mood=mood,
-            norm_attachments=norm_attachments,
-        )
+            return ("", True)
 
         turn_context.state["tool_execution_envelope"] = self._tool_execution_envelope(
             bot,
             turn_context,
-            reply_source="model_generation",
+            reply_source="agent_service_deprecated",
         )
-
-        return (reply, False)
+        if early_reply is not None:
+            turn_context.state["agent_service_legacy_reply_candidate"] = str(early_reply or "")
+        self._emit_telemetry_only(
+            turn_context,
+            stage="run_agent",
+            reason="AgentService returns telemetry only; control_plane owns final output.",
+        )
+        return ("", False)

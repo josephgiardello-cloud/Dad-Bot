@@ -55,7 +55,7 @@ class ExecutionFirewall:
                     symbol = self._normalize_symbol(str(item or ""))
                     if symbol:
                         self._quarantined_symbols.add(symbol)
-        except Exception:
+        except Exception:  # noqa: BLE001
             # Firewall must stay fail-safe and never crash loading quarantine state.
             self._quarantined_symbols = set()
 
@@ -70,23 +70,27 @@ class ExecutionFirewall:
             return True
         return any(symbol.endswith(f".{blocked}") for blocked in self._quarantined_symbols)
 
-    def enforce_execution_firewall(self, call_site: str, context: FirewallContext) -> None:
+    def enforce_execution_firewall(
+        self,
+        call_site: str,
+        context: FirewallContext,
+    ) -> None:
         symbol = self._normalize_symbol(call_site)
         if self.is_blocked(symbol):
             raise ExecutionBlockedInvariantError(
-                f"Legacy/quarantined execution blocked by Phase 4 firewall: {call_site!r}"
+                f"Legacy/quarantined execution blocked by Phase 4 firewall: {call_site!r}",
             )
 
         if bool(context.mutation_outside_save_node):
             raise ExecutionBlockedInvariantError(
                 f"Mutation outside SaveNode blocked by Phase 4 firewall "
-                f"(trace_id={context.trace_id!r}, stage={context.stage!r})"
+                f"(trace_id={context.trace_id!r}, stage={context.stage!r})",
             )
 
         if bool(context.temporal_missing):
             raise ExecutionBlockedInvariantError(
                 f"TemporalNode violation blocked by Phase 4 firewall "
-                f"(trace_id={context.trace_id!r}, stage={context.stage!r})"
+                f"(trace_id={context.trace_id!r}, stage={context.stage!r})",
             )
 
 

@@ -4,7 +4,11 @@ import asyncio
 import random
 import time
 
+import pytest
+
 from dadbot.core.replay_verifier import ReplayVerifier
+
+pytestmark = pytest.mark.unit
 
 
 def _base_events() -> list[dict]:

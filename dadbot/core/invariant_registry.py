@@ -5,7 +5,6 @@ from typing import Any
 
 from dadbot.core.execution_firewall import ExecutionBlockedInvariantError
 
-
 INVARIANTS: dict[str, bool] = {
     "temporal_required": True,
     "save_node_required": True,
@@ -55,28 +54,36 @@ class InvariantRegistry:
 
         Raises:
             ExecutionBlockedInvariantError when any enforced invariant is violated.
-        """
 
+        """
         stage_name = _stage_name(stage)
-        temporal_missing = self.rules.get("temporal_required", True) and not _has_temporal(turn_context)
+        temporal_missing = self.rules.get(
+            "temporal_required",
+            True,
+        ) and not _has_temporal(turn_context)
 
         if temporal_missing:
             raise ExecutionBlockedInvariantError(
-                f"TemporalNode invariant failed at stage={stage_name!r} operation={operation!r}"
+                f"TemporalNode invariant failed at stage={stage_name!r} operation={operation!r}",
             )
 
         if self.rules.get("save_node_required", True) and stage_name == "post_execute":
             traces = list(getattr(turn_context, "stage_traces", []) or [])
             stage_order = [str(getattr(item, "stage", "") or "").strip().lower() for item in traces]
             if "save" not in stage_order:
-                raise ExecutionBlockedInvariantError("SaveNode stage missing at post_execute invariant gate")
+                raise ExecutionBlockedInvariantError(
+                    "SaveNode stage missing at post_execute invariant gate",
+                )
 
-        if self.rules.get("mutation_only_via_save", True) and bool(mutation_outside_save_node):
+        if self.rules.get("mutation_only_via_save", True) and bool(
+            mutation_outside_save_node,
+        ):
             raise ExecutionBlockedInvariantError(
-                f"Mutation outside SaveNode invariant failed at stage={stage_name!r} operation={operation!r}"
+                f"Mutation outside SaveNode invariant failed at stage={stage_name!r} operation={operation!r}",
             )
 
         return InvariantCheckResult(ok=True)
+
 
 _DEFAULT_REGISTRY = InvariantRegistry()
 
@@ -97,4 +104,9 @@ def check_invariants(
     )
 
 
-__all__ = ["INVARIANTS", "InvariantCheckResult", "InvariantRegistry", "check_invariants"]
+__all__ = [
+    "INVARIANTS",
+    "InvariantCheckResult",
+    "InvariantRegistry",
+    "check_invariants",
+]

@@ -1,9 +1,11 @@
 """Replay — determinism tests: same seed → same everything."""
+
 from __future__ import annotations
 
 import pytest
-
-from harness.deterministic_seeds import BASELINE, REPLAY_A, REPLAY_B, ADVERSARIAL, CHECKPOINT
+from harness.deterministic_seeds import ADVERSARIAL, BASELINE, CHECKPOINT, REPLAY_A, REPLAY_B
+from harness.graph_runner import GraphRunner
+from harness.kernel_mock import MockRegistry
 from harness.turn_factory import TurnFactory
 
 from dadbot.core.graph import (
@@ -16,8 +18,6 @@ from dadbot.core.graph import (
     TemporalNode,
     TurnGraph,
 )
-from harness.graph_runner import GraphRunner
-from harness.kernel_mock import MockRegistry
 
 
 def _build_canonical(registry: MockRegistry) -> TurnGraph:

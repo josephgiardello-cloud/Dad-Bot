@@ -4,6 +4,7 @@ Call validate() after every graph.execute() call to assert all
 system-level invariants hold. Each check is independent so failures
 identify exactly which invariant broke.
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -57,17 +58,11 @@ class InvariantChecker:
             return
         temporal = ctx.state.get("temporal")
         if not temporal:
-            raise InvariantViolation(
-                f"TEMPORAL [trace={ctx.trace_id[:8]}]: state['temporal'] absent after execution"
-            )
+            raise InvariantViolation(f"TEMPORAL [trace={ctx.trace_id[:8]}]: state['temporal'] absent after execution")
         if not str(temporal.get("wall_time") or "").strip():
-            raise InvariantViolation(
-                f"TEMPORAL [trace={ctx.trace_id[:8]}]: wall_time is empty or missing"
-            )
+            raise InvariantViolation(f"TEMPORAL [trace={ctx.trace_id[:8]}]: wall_time is empty or missing")
         if not str(temporal.get("wall_date") or "").strip():
-            raise InvariantViolation(
-                f"TEMPORAL [trace={ctx.trace_id[:8]}]: wall_date is empty or missing"
-            )
+            raise InvariantViolation(f"TEMPORAL [trace={ctx.trace_id[:8]}]: wall_date is empty or missing")
 
     # ------------------------------------------------------------------
     # Phase monotonicity invariant
@@ -80,14 +75,11 @@ class InvariantChecker:
             try:
                 to_phase = TurnPhase(to_val)
             except ValueError:
-                raise InvariantViolation(
-                    f"PHASE [trace={ctx.trace_id[:8]}]: unknown phase in history: {to_val!r}"
-                )
+                raise InvariantViolation(f"PHASE [trace={ctx.trace_id[:8]}]: unknown phase in history: {to_val!r}")
             idx = _PHASE_INDEX.get(to_phase, -1)
             if idx < prev_idx:
                 raise InvariantViolation(
-                    f"PHASE [trace={ctx.trace_id[:8]}]: regression — "
-                    f"{transition.get('from')!r} → {to_val!r}"
+                    f"PHASE [trace={ctx.trace_id[:8]}]: regression — {transition.get('from')!r} → {to_val!r}"
                 )
             prev_idx = idx
 
@@ -98,9 +90,7 @@ class InvariantChecker:
     def _check_fidelity(self, ctx: TurnContext, *, expect_save: bool) -> None:
         fidelity = ctx.fidelity
         if expect_save and not fidelity.save:
-            raise InvariantViolation(
-                f"FIDELITY [trace={ctx.trace_id[:8]}]: save stage did not execute"
-            )
+            raise InvariantViolation(f"FIDELITY [trace={ctx.trace_id[:8]}]: save stage did not execute")
         if fidelity.save:
             save_traces = [t for t in ctx.stage_traces if t.stage == "save"]
             if len(save_traces) != 1:
@@ -117,9 +107,7 @@ class InvariantChecker:
         snap = ctx.mutation_queue.snapshot()
         failed = snap.get("failed", 0)
         if failed > 0:
-            raise InvariantViolation(
-                f"MUTATION_QUEUE [trace={ctx.trace_id[:8]}]: {failed} mutation(s) failed drain"
-            )
+            raise InvariantViolation(f"MUTATION_QUEUE [trace={ctx.trace_id[:8]}]: {failed} mutation(s) failed drain")
 
     # ------------------------------------------------------------------
     # Checkpoint hash-chain integrity

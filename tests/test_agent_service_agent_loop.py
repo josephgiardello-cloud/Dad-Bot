@@ -1,7 +1,11 @@
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from dadbot.services.agent_service import AgentService
+
+pytestmark = pytest.mark.integration
 
 
 class _TurnServiceStub:
@@ -45,12 +49,13 @@ def test_agent_service_requires_bayesian_step_before_returning_direct_reply():
 
     result = asyncio.run(service.run_agent(turn_context, rich_context={}))
 
-    assert result == ("tool handled", False)
+    assert result == ("", False)
     assert turn_context.state["bayesian_state"]["required"] is True
     assert turn_context.state["bayesian_state"]["applied"] is True
     assert turn_context.state["bayesian_state"]["policy"] == "supportive_problem_solving"
     assert turn_context.state["tool_execution_envelope"]["selected_tool"] == "web_search"
     assert turn_context.state["tool_execution_envelope"]["deterministic"] is True
+    assert turn_context.state["agent_service_deprecated"]["deprecated"] is True
 
 
 def test_agent_service_attaches_tool_envelope_on_model_generation_path():
@@ -76,6 +81,7 @@ def test_agent_service_attaches_tool_envelope_on_model_generation_path():
 
     result = asyncio.run(service.run_agent(turn_context, rich_context={}))
 
-    assert result == ("model reply", False)
+    assert result == ("", False)
     assert turn_context.state["tool_execution_envelope"]["final_path"] == "model_reply"
     assert turn_context.state["tool_execution_envelope"]["selected_tool"] is None
+    assert turn_context.state["agent_service_deprecated"]["deprecated"] is True

@@ -10,10 +10,9 @@ Coverage:
     Q16–Q20: SystemSnapshotV1 (build, hash stability, serialization, load)
     Q21–Q25: SnapshotRestoreValidator (validate, per-record replay)
 """
+
 from __future__ import annotations
 
-import json
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -29,7 +28,6 @@ from dadbot.core.system_snapshot import (
     SchemaRegistry,
     SnapshotRestoreValidator,
     SystemSnapshotV1,
-    get_git_hash,
 )
 
 # ---------------------------------------------------------------------------

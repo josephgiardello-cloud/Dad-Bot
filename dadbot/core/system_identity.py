@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from typing import Any
 
 from dadbot.core.critic import MAX_LOOP_ITERATIONS, PASS_THRESHOLD
-from dadbot.core.graph import (
+from dadbot.core.graph_types import (
     GoalMutationOp,
     LedgerMutationOp,
     MemoryMutationOp,
@@ -17,11 +18,11 @@ from dadbot.core.planner import ComplexityLevel, IntentType, ReplyStrategy
 
 def _stable_sha256(payload: Any) -> str:
     return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        json.dumps(payload, sort_keys=True, default=str).encode("utf-8"),
     ).hexdigest()
 
 
-def turn_graph_structure(*, tool_system_v2_enabled: bool) -> dict[str, Any]:
+def turn_graph_structure(*, tool_system_v2_enabled: bool) -> Mapping[str, Any]:
     if tool_system_v2_enabled:
         nodes = [
             "temporal",
@@ -70,7 +71,7 @@ def turn_graph_structure(*, tool_system_v2_enabled: bool) -> dict[str, Any]:
     }
 
 
-def planner_schema_snapshot() -> dict[str, Any]:
+def planner_schema_snapshot() -> Mapping[str, Any]:
     return {
         "intent_type": [v.value for v in IntentType],
         "complexity": [v.value for v in ComplexityLevel],
@@ -78,7 +79,7 @@ def planner_schema_snapshot() -> dict[str, Any]:
     }
 
 
-def critic_schema_snapshot() -> dict[str, Any]:
+def critic_schema_snapshot() -> Mapping[str, Any]:
     return {
         "pass_threshold": float(PASS_THRESHOLD),
         "max_loop_iterations": int(MAX_LOOP_ITERATIONS),
@@ -90,12 +91,16 @@ def critic_schema_snapshot() -> dict[str, Any]:
         },
         "tool_awareness_checks": {
             "necessity": ["tool_omission_detected", "tool_unnecessary_usage"],
-            "correctness": ["tool_execution_mismatch", "tool_result_mismatch", "tool_correctness_low"],
+            "correctness": [
+                "tool_execution_mismatch",
+                "tool_result_mismatch",
+                "tool_correctness_low",
+            ],
         },
     }
 
 
-def memory_schema_snapshot() -> dict[str, Any]:
+def memory_schema_snapshot() -> Mapping[str, Any]:
     return {
         "mutation_kinds": [v.value for v in MutationKind],
         "memory_ops": [v.value for v in MemoryMutationOp],
@@ -113,7 +118,7 @@ def memory_schema_snapshot() -> dict[str, Any]:
     }
 
 
-def determinism_manifest_logic_snapshot() -> dict[str, Any]:
+def determinism_manifest_logic_snapshot() -> Mapping[str, Any]:
     return {
         "manifest_keys": [
             "python_version",
@@ -144,9 +149,11 @@ def determinism_manifest_logic_snapshot() -> dict[str, Any]:
     }
 
 
-def build_execution_schema_snapshot(*, tool_system_v2_enabled: bool) -> dict[str, Any]:
+def build_execution_schema_snapshot(*, tool_system_v2_enabled: bool) -> Mapping[str, Any]:
     return {
-        "turn_graph": turn_graph_structure(tool_system_v2_enabled=tool_system_v2_enabled),
+        "turn_graph": turn_graph_structure(
+            tool_system_v2_enabled=tool_system_v2_enabled,
+        ),
         "planner": planner_schema_snapshot(),
         "critic": critic_schema_snapshot(),
         "memory": memory_schema_snapshot(),
@@ -154,7 +161,7 @@ def build_execution_schema_snapshot(*, tool_system_v2_enabled: bool) -> dict[str
     }
 
 
-def compute_component_hashes(*, tool_system_v2_enabled: bool) -> dict[str, str]:
+def compute_component_hashes(*, tool_system_v2_enabled: bool) -> Mapping[str, str]:
     graph = turn_graph_structure(tool_system_v2_enabled=tool_system_v2_enabled)
     planner = planner_schema_snapshot()
     critic = critic_schema_snapshot()
@@ -173,5 +180,5 @@ def compute_system_snapshot_v0_hash(*, tool_system_v2_enabled: bool) -> str:
 
 
 SYSTEM_SNAPSHOT_V0_HASH: str = compute_system_snapshot_v0_hash(
-    tool_system_v2_enabled=False
+    tool_system_v2_enabled=False,
 )

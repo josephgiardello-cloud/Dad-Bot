@@ -1,4 +1,4 @@
-﻿"""Streamlit session-state helpers for UI preferences and voice settings.
+"""Streamlit session-state helpers for UI preferences and voice settings.
 
 These functions are pure in the sense that they never import from dad_streamlit,
 only from streamlit and the DadBot type annotation.
@@ -14,13 +14,13 @@ if TYPE_CHECKING:
     from dadbot.core.dadbot import DadBot
 
 __all__ = [
-    "default_ui_preferences",
     "_voice_defaults",
-    "ui_preferences",
-    "voice_preferences",
+    "default_ui_preferences",
+    "notification_settings",
     "profile_voice_preferences",
     "sync_ui_voice_from_profile",
-    "notification_settings",
+    "ui_preferences",
+    "voice_preferences",
     "voice_profile_catalog",
 ]
 
@@ -101,7 +101,7 @@ def voice_preferences() -> dict:
     return voice
 
 
-def profile_voice_preferences(bot: "DadBot") -> dict:
+def profile_voice_preferences(bot: DadBot) -> dict:
     """Return persisted voice preferences merged over defaults."""
     defaults = _voice_defaults()
     profile_voice = bot.PROFILE.get("voice", {}) if isinstance(bot.PROFILE, dict) else {}
@@ -110,13 +110,13 @@ def profile_voice_preferences(bot: "DadBot") -> dict:
     return defaults
 
 
-def sync_ui_voice_from_profile(bot: "DadBot") -> None:
+def sync_ui_voice_from_profile(bot: DadBot) -> None:
     """Keep session UI cache aligned with profile-backed persisted voice settings."""
     preferences = ui_preferences()
     preferences["voice"] = dict(profile_voice_preferences(bot))
 
 
-def notification_settings(bot: "DadBot") -> dict:
+def notification_settings(bot: DadBot) -> dict:
     configured = bot.PROFILE.get("notifications", {}) if isinstance(bot.PROFILE, dict) else {}
     if not isinstance(configured, dict):
         configured = {}

@@ -56,7 +56,9 @@ def main() -> int:
 
     firewall = ExecutionFirewall(quarantine_path=quarantine_output)
     registry = InvariantRegistry()
-    kernel = ExecutionKernel(firewall=firewall, invariant_registry=registry, quarantine=quarantine_payload, strict=bool(args.strict))
+    kernel = ExecutionKernel(
+        firewall=firewall, invariant_registry=registry, quarantine=quarantine_payload, strict=bool(args.strict)
+    )
 
     context = TurnContext(user_input="phase4 kernel gate self-check")
 

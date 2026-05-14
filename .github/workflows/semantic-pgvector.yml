@@ -13,7 +13,7 @@ jobs:
         env:
           POSTGRES_DB: dadbot
           POSTGRES_USER: dadbot
-          POSTGRES_PASSWORD: dadbot
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD != '' && secrets.POSTGRES_PASSWORD || 'dadbot_ci_ephemeral' }}
         ports:
           - 5432:5432
         options: >-
@@ -38,5 +38,5 @@ jobs:
 
       - name: Run live PGVector integration test
         env:
-          DADBOT_TEST_POSTGRES_DSN: postgresql://dadbot:dadbot@127.0.0.1:5432/dadbot
+          DADBOT_TEST_POSTGRES_DSN: postgresql://dadbot:${{ secrets.POSTGRES_PASSWORD != '' && secrets.POSTGRES_PASSWORD || 'dadbot_ci_ephemeral' }}@127.0.0.1:5432/dadbot
         run: python -m pytest -q tests/test_semantic_pgvector_integration.py

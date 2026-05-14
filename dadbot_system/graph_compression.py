@@ -52,11 +52,7 @@ Compressed summary:
         return self._truncate_to_budget(raw_text, budget)
 
     def _extract_relevant_subgraph(self, nodes, edges, query):
-        node_map = {
-            node.get("node_key"): node
-            for node in nodes
-            if isinstance(node, dict) and node.get("node_key")
-        }
+        node_map = {node.get("node_key"): node for node in nodes if isinstance(node, dict) and node.get("node_key")}
         if not node_map:
             return {"nodes": [], "edges": []}
 
@@ -89,7 +85,11 @@ Compressed summary:
             )[: min(3, len(node_map))]
             scored_nodes = [(1.0, node.get("node_key")) for node in fallback_nodes if node.get("node_key")]
 
-        seeds = [node_key for _score, node_key in sorted(scored_nodes, key=lambda item: item[0], reverse=True)[:3] if node_key]
+        seeds = [
+            node_key
+            for _score, node_key in sorted(scored_nodes, key=lambda item: item[0], reverse=True)[:3]
+            if node_key
+        ]
         visited_nodes = set(seeds)
         visited_edges = []
         seen_edge_keys = set()
@@ -122,7 +122,10 @@ Compressed summary:
 
         subgraph_nodes = [node_map[node_key] for node_key in visited_nodes if node_key in node_map]
         return {
-            "nodes": sorted(subgraph_nodes, key=lambda item: (item.get("node_type", ""), item.get("label", ""), item.get("node_key", ""))),
+            "nodes": sorted(
+                subgraph_nodes,
+                key=lambda item: (item.get("node_type", ""), item.get("label", ""), item.get("node_key", "")),
+            ),
             "edges": visited_edges,
         }
 
@@ -144,7 +147,12 @@ Compressed summary:
         target = node_map.get(edge.get("target_key"))
         source_score = self._node_match_score(source or {}, query_tokens, query_category, query_mood)
         target_score = self._node_match_score(target or {}, query_tokens, query_category, query_mood)
-        return float(edge.get("weight", 0.0) or 0.0) + source_score + target_score + float(edge.get("confidence", 0.0) or 0.0)
+        return (
+            float(edge.get("weight", 0.0) or 0.0)
+            + source_score
+            + target_score
+            + float(edge.get("confidence", 0.0) or 0.0)
+        )
 
     def _subgraph_to_text(self, subgraph):
         nodes = subgraph.get("nodes", [])
@@ -154,10 +162,10 @@ Compressed summary:
 
         node_map = {node.get("node_key"): node for node in nodes if node.get("node_key")}
         source_nodes = [
-            node for node in nodes
-            if str(node.get("source_type") or "").strip() or node.get("node_type") in {
-                "consolidated_memory", "archive_session", "persona_trait", "life_pattern"
-            }
+            node
+            for node in nodes
+            if str(node.get("source_type") or "").strip()
+            or node.get("node_type") in {"consolidated_memory", "archive_session", "persona_trait", "life_pattern"}
         ]
         if not source_nodes:
             source_nodes = nodes[:]
@@ -196,11 +204,7 @@ Compressed summary:
     def _source_summary(node):
         attributes = dict(node.get("attributes") or {})
         return str(
-            attributes.get("summary")
-            or attributes.get("reason")
-            or node.get("content")
-            or node.get("label")
-            or ""
+            attributes.get("summary") or attributes.get("reason") or node.get("content") or node.get("label") or ""
         ).strip()
 
     def _truncate_to_budget(self, text, token_budget):

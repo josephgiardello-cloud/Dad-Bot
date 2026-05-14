@@ -18,17 +18,16 @@ TurnContext and all runtime state are *projections* of the event log,
 never authoritative sources.  Any runtime state that cannot be derived
 from the event log is by definition undefined.
 """
+
 from __future__ import annotations
 
 import hashlib
 import json
 from copy import deepcopy
-from dataclasses import dataclass, field
 from threading import RLock
 from typing import Any
 
 from dadbot.core.event_reducer import CanonicalEventReducer
-
 
 # ---------------------------------------------------------------------------
 # Errors
@@ -95,7 +94,7 @@ class EventAuthority:
         """Append multiple events atomically. Returns assigned sequence numbers."""
         with self._lock:
             seqs: list[int] = []
-            for event in (events or []):
+            for event in events or []:
                 stamped = dict(event)
                 stamped.setdefault("sequence", self._sequence)
                 stamped.setdefault("session_id", self._session_id)
@@ -123,7 +122,7 @@ class EventAuthority:
             raise UndefinedSystemStateError(
                 "EventAuthority: system state is undefined — event log is empty. "
                 "Bootstrap with at least one SESSION_STATE_UPDATED event before "
-                "deriving state."
+                "deriving state.",
             )
 
     def event_count(self) -> int:
@@ -143,7 +142,9 @@ class EventAuthority:
     def read_from(self, sequence: int) -> list[dict[str, Any]]:
         """Return events with sequence >= the given value."""
         with self._lock:
-            return deepcopy([e for e in self._events if int(e.get("sequence") or 0) >= sequence])
+            return deepcopy(
+                [e for e in self._events if int(e.get("sequence") or 0) >= sequence],
+            )
 
     # ------------------------------------------------------------------
     # L4-P1: State derivation (authority → projection)
@@ -166,7 +167,9 @@ class EventAuthority:
         """Derive state as of a specific sequence number (point-in-time query)."""
         self.assert_defined()
         with self._lock:
-            events = deepcopy([e for e in self._events if int(e.get("sequence") or 0) <= sequence])
+            events = deepcopy(
+                [e for e in self._events if int(e.get("sequence") or 0) <= sequence],
+            )
         return self._reducer.reduce(events)
 
     def derive_session_state(self, session_id: str | None = None) -> dict[str, Any]:
@@ -207,12 +210,9 @@ class EventAuthority:
         Changes whenever a new event is appended.
         """
         with self._lock:
-            payload = [
-                {k: v for k, v in e.items() if k != "sequence"}
-                for e in self._events
-            ]
+            payload = [{k: v for k, v in e.items() if k != "sequence"} for e in self._events]
         return hashlib.sha256(
-            json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+            json.dumps(payload, sort_keys=True, default=str).encode("utf-8"),
         ).hexdigest()
 
     def to_dict(self) -> dict[str, Any]:
