@@ -1,9 +1,8 @@
-# 🧔 DadBot — Your Local AI Dad
+# 🧔 DadBot Sovereign — Your Local AI Dad
 
 A warm, private, long-term memory AI companion that feels like a real dad.
 Runs locally on your computer with Ollama.
 
-**"That's my boy. I love hearing that, Tony."**
 
 ## ✨ Features
 
