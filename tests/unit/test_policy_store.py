@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
-from dadbot.core.policy_store import DadPolicy, DadPolicyStore, InMemoryAsyncPolicyPersistence
+from dadbot.core.policy_store import (
+    DadPolicy,
+    DadPolicyStore,
+    InMemoryAsyncPolicyPersistence,
+    SQLiteAsyncPolicyPersistence,
+)
 
 
 @pytest.mark.asyncio
@@ -77,3 +84,26 @@ async def test_policy_store_normalizes_harmful_keywords_to_lowercase() -> None:
 
     current = await store.get_current_policy()
     assert current.safety_boundaries["harmful_keywords"] == ["hack", "bomb"]
+
+
+@pytest.mark.asyncio
+async def test_policy_store_sqlite_persists_across_instances(tmp_path: Path) -> None:
+    db_path = tmp_path / "policy.sqlite3"
+
+    store_one = DadPolicyStore(SQLiteAsyncPolicyPersistence(str(db_path)))
+    base = await store_one.get_current_policy()
+    updated = DadPolicy(
+        version="dad_v2.sqlite",
+        persona_style=dict(base.persona_style),
+        relationship_rules=dict(base.relationship_rules),
+        safety_boundaries=dict(base.safety_boundaries),
+        memory_preferences=dict(base.memory_preferences),
+        created_at=base.created_at,
+        comment="sqlite persistence",
+    )
+    await store_one.save_policy(updated)
+
+    store_two = DadPolicyStore(SQLiteAsyncPolicyPersistence(str(db_path)))
+    current = await store_two.get_current_policy()
+
+    assert current.version == "dad_v2.sqlite"

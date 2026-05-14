@@ -145,6 +145,7 @@ class DadRuntimeConfig:
     dual_control_approvals_required: int = 2
     rtbf_proof_enabled: bool = True
     goal_alignment_guard_enabled: bool = True
+    hybrid_memory_retrieval_enabled: bool = True
     primary_identity_log_filenames: tuple[str, ...] = ("relational_ledger.jsonl",)
 
     cadence_defaults: dict[str, int] = field(

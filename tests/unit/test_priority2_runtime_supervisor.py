@@ -121,11 +121,12 @@ class TestRuntimeSupervisor:
 
     def test_acquire_lock_fails_on_existing_lock(self, supervisor):
         """Verify lock acquisition fails when lock exists."""
-        # Acquire first lock
-        supervisor.acquire_lock(pid=1111, port=8501, owner_id="first")
+        with patch.object(RuntimeSupervisor, "_is_pid_alive", return_value=True):
+            # Acquire first lock
+            supervisor.acquire_lock(pid=1111, port=8501, owner_id="first")
 
-        # Try to acquire second lock
-        success, msg = supervisor.acquire_lock(pid=2222, port=8502, owner_id="second")
+            # Try to acquire second lock
+            success, msg = supervisor.acquire_lock(pid=2222, port=8502, owner_id="second")
 
         assert success is False
         assert "already locked" in msg.lower()
@@ -206,9 +207,10 @@ class TestRuntimeSupervisor:
 
     def test_preflight_check_detects_active_lock(self, supervisor):
         """Verify preflight detects active locks."""
-        supervisor.acquire_lock(pid=1111, port=8501, owner_id="test")
+        with patch.object(RuntimeSupervisor, "_is_pid_alive", return_value=True):
+            supervisor.acquire_lock(pid=1111, port=8501, owner_id="test")
 
-        ok, issues = supervisor.preflight_check()
+            ok, issues = supervisor.preflight_check()
 
         assert ok is False
         assert len(issues) > 0
@@ -231,6 +233,43 @@ class TestRuntimeSupervisor:
         # Should report stale lock but allow recovery
         assert len(issues) > 0
         assert any("stale" in issue.lower() for issue in issues)
+
+    def test_preflight_check_detects_orphaned_lock(self, supervisor):
+        """Verify preflight reports orphaned locks for self-healing."""
+        orphan_lock = RuntimeLock(
+            pid=1111,
+            port=8501,
+            timestamp=time.time(),
+            state="RUNNING",
+            command_hash="cmd-orphan",
+            owner_id="orphan",
+        )
+        supervisor._write_lock(orphan_lock)
+
+        with patch.object(RuntimeSupervisor, "_is_pid_alive", return_value=False):
+            ok, issues = supervisor.preflight_check()
+
+        assert ok is False
+        assert any("orphaned lock" in issue.lower() for issue in issues)
+
+    def test_attempt_self_heal_removes_orphaned_lock(self, supervisor):
+        """Verify self-heal removes orphaned locks immediately."""
+        orphan_lock = RuntimeLock(
+            pid=1111,
+            port=8501,
+            timestamp=time.time(),
+            state="RUNNING",
+            command_hash="cmd-orphan",
+            owner_id="orphan",
+        )
+        supervisor._write_lock(orphan_lock)
+
+        with patch.object(RuntimeSupervisor, "_is_pid_alive", return_value=False):
+            healed, actions = supervisor.attempt_self_heal()
+
+        assert healed is True
+        assert any("orphaned lock" in action.lower() for action in actions)
+        assert supervisor._read_lock() is None
 
     def test_lock_file_creation(self, supervisor):
         """Verify lock file is created in correct location."""
@@ -265,7 +304,8 @@ class TestRuntimeSupervisor:
     @patch("dadbot.runtime.supervisor.RuntimeSupervisor._is_port_in_use")
     def test_preflight_check_port_binding(self, mock_is_port_in_use, supervisor):
         """Verify preflight detects port binding conflicts."""
-        supervisor.acquire_lock(pid=1111, port=8501, owner_id="test")
+        with patch.object(RuntimeSupervisor, "_is_pid_alive", return_value=True):
+            supervisor.acquire_lock(pid=1111, port=8501, owner_id="test")
         mock_is_port_in_use.return_value = True
 
         ok, issues = supervisor.preflight_check()
@@ -362,12 +402,13 @@ class TestRuntimeSupervisorIntegration:
             lock_file = Path(tmpdir) / "runtime.lock"
             supervisor = RuntimeSupervisor(lock_file=lock_file)
 
-            # First acquisition
-            success1, _ = supervisor.acquire_lock(pid=1111, port=8501, owner_id="owner1")
-            assert success1
+            with patch.object(RuntimeSupervisor, "_is_pid_alive", return_value=True):
+                # First acquisition
+                success1, _ = supervisor.acquire_lock(pid=1111, port=8501, owner_id="owner1")
+                assert success1
 
-            # Second acquisition by different owner
-            success2, msg = supervisor.acquire_lock(pid=2222, port=8502, owner_id="owner2")
+                # Second acquisition by different owner
+                success2, msg = supervisor.acquire_lock(pid=2222, port=8502, owner_id="owner2")
             assert not success2
             assert "already locked" in msg.lower()
 

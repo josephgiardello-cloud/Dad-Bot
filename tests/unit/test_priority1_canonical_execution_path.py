@@ -17,9 +17,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from dadbot.core.control_plane import ExecutionControlPlane, ExecutionJob
+from dadbot.core.dadbot import DadBot
 from dadbot.core.execution_resource_budget import BackpressureSignal
 from dadbot.core.orchestrator import DadBotOrchestrator
 from dadbot.core.runtime_errors import TransientExecutionError
+from dadbot.core.turn_mixin import DadBotTurnMixin
 
 pytestmark = pytest.mark.unit
 
@@ -75,6 +77,56 @@ class TestCanonicalExecutionPathStructure:
         assert hasattr(DadBotOrchestrator, "_submit_turn_via_control_plane")
         # Should be async
         assert iscoroutinefunction(DadBotOrchestrator._submit_turn_via_control_plane)
+
+    def test_turn_mixin_has_no_runtime_thin_toggle_branch(self):
+        """Thin-spine migration guard: no runtime env toggle checks in turn mixin."""
+        import inspect
+
+        source = inspect.getsource(DadBotTurnMixin._run_graph_turn_async)
+        assert "thin_turn_handler_enabled" not in source
+        assert "_submit_turn_via_control_plane" in source
+        assert "TurnHandler(" in source
+
+    def test_turn_mixin_has_no_chunk_callback_compat_wrappers(self):
+        """Thin-spine migration guard: remove legacy compatibility wrappers."""
+        assert not hasattr(DadBotTurnMixin, "_invoke_chunk_callback_compat")
+        assert not hasattr(DadBotTurnMixin, "_run_graph_turn_sync_compat")
+        assert not hasattr(DadBotTurnMixin, "_run_graph_turn_async_compat")
+
+    def test_turn_mixin_execute_turn_requires_explicit_delivery_branch(self):
+        """Thin-spine migration guard: execute_turn must not use implicit fallback delivery routing."""
+        import inspect
+
+        source = inspect.getsource(DadBotTurnMixin.execute_turn)
+        assert "ASYNC_DELIVERIES" in source
+        assert "SYNC_DELIVERIES" in source
+        assert "Unsupported turn delivery" in source
+
+    def test_turn_mixin_delivery_event_mode_has_explicit_validation(self):
+        """Thin-spine migration guard: delivery mode mapping must validate unknown deliveries."""
+        import inspect
+
+        source = inspect.getsource(DadBotTurnMixin._delivery_event_mode)
+        assert "ASYNC_DELIVERIES" in source
+        assert "SYNC_DELIVERIES" in source
+        assert "Unsupported turn delivery" in source
+
+    def test_turn_mixin_uses_canonical_signoff_helper_only(self):
+        """Thin-spine migration guard: signoff path must not use compatibility shim names."""
+        import inspect
+
+        assert not hasattr(DadBotTurnMixin, "_append_signoff_compat")
+        source = inspect.getsource(DadBotTurnMixin._append_signoff)
+        assert "reply_finalization" in source
+        assert "finalize_reply" not in source
+
+    def test_dadbot_getattr_has_no_facade_compat_warning_hook(self):
+        """Thin-spine migration guard: facade routing should not call legacy compat warning hooks."""
+        import inspect
+
+        source = inspect.getsource(DadBot.__getattr__)
+        assert "_facade_compat" not in source
+        assert "warn_if_deprecated" not in source
 
 
 @pytest.mark.unit

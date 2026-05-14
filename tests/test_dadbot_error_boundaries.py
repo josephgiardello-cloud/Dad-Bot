@@ -17,12 +17,12 @@ def test_process_user_message_returns_finalized_turn_result_on_graph_failure():
     bot._strict_graph_mode = True
     bot.finalize_reply = lambda text: text
 
-    def boom(user_input, attachments=None):
+    def boom(user_input, attachments=None, chunk_callback=None):
         raise ConnectionError("Ollama unreachable")
 
     bot._run_graph_turn_sync = boom
     bot._emit_graph_failure_event = lambda **_kw: None
-    bot._append_signoff_compat = lambda text: text
+    bot._append_signoff = lambda text: text
 
     with CorrelationContext.bind("test-corr-001"):
         try:

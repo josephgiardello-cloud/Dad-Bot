@@ -43,10 +43,16 @@ except Exception:  # pragma: no cover - optional dependency
     ImageFont = cast(Any, None)
 
 from dadbot.consumers.streamlit import load_thread_projection
-from dadbot.core.policy_store import DadPolicyStore
+from dadbot.core.policy_store import DadPolicy, DadPolicyStore
 from dadbot.runtime.supervisor import get_runtime_supervisor
 from dadbot.runtime_core import ThreadView, UIRuntimeAPI
 from dadbot.runtime_core.streamlit_runtime import StreamlitRuntime
+from dadbot.streamlit_helpers import (
+    format_relationship_card,
+    get_relationship_health_stats,
+    load_important_memories,
+    save_important_memory,
+)
 from dadbot.ui import interaction_controller, state_manager
 from dadbot.ui.data import render_data_tab
 from dadbot.ui.helpers import (
@@ -164,6 +170,8 @@ STORY_MODE_LOCKOUT_BASE_SECONDS = 30
 STORY_MODE_LOCKOUT_MAX_SECONDS = 900
 THIN_SPINE_TOGGLE_SESSION_KEY = "chat_use_thin_turn_handler"
 TURN_PATH_METRICS_SESSION_KEY = "chat_turn_path_metrics"
+WORLD_MODEL_SESSION_KEY = "world_model"
+WORLD_MODEL_HISTORY_SESSION_KEY = "world_model_history"
 
 
 def configured_story_mode_password() -> str:
@@ -565,6 +573,155 @@ def render_turn_inspector(*, thread_id: str, view: ThreadView) -> None:
                 st.caption(
                     f"- {stage_name}: {purpose} | guards={guard_text} | emits={emit_text} | next={next_text} | observed={observed_text}"
                 )
+
+
+def _extract_world_model_from_runtime(api: UIRuntimeAPI, *, thread_id: str) -> dict[str, Any] | None:
+    orchestrator = getattr(api, "turn_orchestrator", None)
+    turn_context = getattr(orchestrator, "_last_turn_context", None)
+    if turn_context is None:
+        return None
+
+    metadata = dict(getattr(turn_context, "metadata", {}) or {})
+    snapshot = dict(metadata.get("user_world_model") or {})
+    if not snapshot:
+        return None
+
+    normalized_thread_id = str(thread_id or api.active_thread_id or "default")
+    snapshot["thread_id"] = normalized_thread_id
+    snapshot["captured_at"] = datetime.utcnow().isoformat() + "Z"
+    return snapshot
+
+
+def _record_world_model_snapshot(api: UIRuntimeAPI, *, thread_id: str) -> dict[str, Any] | None:
+    snapshot = _extract_world_model_from_runtime(api, thread_id=thread_id)
+    if not snapshot:
+        return None
+
+    st.session_state[WORLD_MODEL_SESSION_KEY] = dict(snapshot)
+    history = list(st.session_state.get(WORLD_MODEL_HISTORY_SESSION_KEY) or [])
+    history.append(dict(snapshot))
+    st.session_state[WORLD_MODEL_HISTORY_SESSION_KEY] = history[-10:]
+    return snapshot
+
+
+def render_world_model_status_panel(api: UIRuntimeAPI) -> None:
+    active_thread_id = str(api.active_thread_id or "default")
+    _record_world_model_snapshot(api, thread_id=active_thread_id)
+
+    with st.expander("User World Model (Current Turn)", expanded=False):
+        snapshot = dict(st.session_state.get(WORLD_MODEL_SESSION_KEY) or {})
+        if not snapshot:
+            st.info("No world model snapshot yet - send a message first.")
+            return
+
+        col1, col2 = st.columns(2)
+        trust_level = int(snapshot.get("trust_level", 0) or 0)
+        openness_level = int(snapshot.get("openness_level", 0) or 0)
+
+        def _band(level: int) -> tuple[str, str]:
+            if level < 40:
+                return "low", "red"
+            if level <= 75:
+                return "medium", "yellow"
+            return "high", "green"
+
+        with col1:
+            st.metric("Trust Level", trust_level)
+            st.metric("Openness", openness_level)
+            st.metric("Momentum", str(snapshot.get("emotional_momentum", "")) or "unknown")
+        with col2:
+            st.metric("Policy Version", str(snapshot.get("policy_version", "unknown")) or "unknown")
+            session_id = str(snapshot.get("session_id", ""))
+            clipped_session = session_id[:8] + "..." if len(session_id) > 8 else (session_id or "-")
+            st.metric("Session ID", clipped_session)
+
+        trust_band, trust_color = _band(trust_level)
+        openness_band, openness_color = _band(openness_level)
+        st.caption(
+            f"Trust band: {trust_band} ({trust_color}) | Openness band: {openness_band} ({openness_color})"
+        )
+
+        goals = [str(goal).strip() for goal in list(snapshot.get("active_goals") or []) if str(goal).strip()]
+        contradictions = [
+            str(item).strip() for item in list(snapshot.get("contradictions") or []) if str(item).strip()
+        ]
+        family_map = {
+            str(key).strip(): str(value).strip()
+            for key, value in dict(snapshot.get("family_map") or {}).items()
+            if str(key).strip() and str(value).strip()
+        }
+
+        st.markdown("**Active Goals**")
+        if goals:
+            st.dataframe(
+                [{"goal": goal} for goal in goals],
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.caption("No extracted active goals yet.")
+
+        st.markdown("**Contradictions**")
+        if contradictions:
+            for contradiction in contradictions[:8]:
+                st.warning(contradiction)
+        else:
+            st.caption("No contradictions detected.")
+
+        st.markdown("**Family Map**")
+        if family_map:
+            st.dataframe(
+                [{"relation": relation, "descriptor": descriptor} for relation, descriptor in family_map.items()],
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.caption("No family map entries yet.")
+
+        st.json(snapshot, expanded=False)
+
+    with st.expander("User World Model History (Last 10)", expanded=False):
+        history = list(st.session_state.get(WORLD_MODEL_HISTORY_SESSION_KEY) or [])
+        if not history:
+            st.caption("No snapshots captured yet.")
+            return
+
+        trust_series = [int(dict(item).get("trust_level", 0) or 0) for item in history if isinstance(item, dict)]
+        openness_series = [int(dict(item).get("openness_level", 0) or 0) for item in history if isinstance(item, dict)]
+        if trust_series and openness_series:
+            latest_trust = trust_series[-1]
+            prior_trust = trust_series[-2] if len(trust_series) > 1 else latest_trust
+            latest_openness = openness_series[-1]
+            prior_openness = openness_series[-2] if len(openness_series) > 1 else latest_openness
+
+            trend_col1, trend_col2 = st.columns(2)
+            trend_col1.metric("Trust Trend", latest_trust, delta=latest_trust - prior_trust)
+            trend_col2.metric("Openness Trend", latest_openness, delta=latest_openness - prior_openness)
+            st.line_chart(
+                {
+                    "trust_level": trust_series[-10:],
+                    "openness_level": openness_series[-10:],
+                },
+                use_container_width=True,
+                height=160,
+            )
+
+        rows = [
+            {
+                "captured_at": str(item.get("captured_at") or ""),
+                "thread_id": str(item.get("thread_id") or ""),
+                "policy_version": str(item.get("policy_version") or ""),
+                "trust_level": int(item.get("trust_level", 0) or 0),
+                "openness_level": int(item.get("openness_level", 0) or 0),
+                "emotional_momentum": str(item.get("emotional_momentum") or ""),
+            }
+            for item in history[-10:]
+            if isinstance(item, dict)
+        ]
+        if not rows:
+            st.caption("No valid snapshots in history.")
+            return
+        st.dataframe(rows[::-1], use_container_width=True, hide_index=True)
 
 
 def ui_shell_snapshot(bot):
@@ -3457,6 +3614,26 @@ def render_chat_tab(bot: DadBot, active_thread: dict):
                             api.process_until_idle(max_events=8)
                             assistant_attachments.append(attachment)
                     st.markdown(reply)
+                    
+                    # ── Save This Moment feature ─────────────────────────────────────────
+                    save_col, tags_col = st.columns([2, 3])
+                    if save_col.button("💾 Save This Moment", key=f"save-moment-{thread_id}", use_container_width=True, help="Save this response as an important memory"):
+                        tags_input = tags_col.multiselect(
+                            "Tags",
+                            options=["family", "goal", "emotional", "advice", "wisdom"],
+                            default=[],
+                            key=f"save-tags-{thread_id}",
+                        )
+                        if save_important_memory(
+                            content=reply,
+                            context=prompt,
+                            tags=list(tags_input or []),
+                            importance="high",
+                        ):
+                            st.success("✨ Memory saved successfully!")
+                        else:
+                            st.warning("Could not save memory — try again")
+                    
                     show_trace = bool(st.session_state.get("show_tool_reasoning", True))
                     if show_trace:
                         render_agentic_trace(runtime_result)
@@ -3465,6 +3642,7 @@ def render_chat_tab(bot: DadBot, active_thread: dict):
                         render_reply_tts(bot, reply)
                     if degraded_mode == "normal":
                         latest_view = load_thread_projection(api=api, thread_id=thread_id)
+                        _record_world_model_snapshot(api, thread_id=thread_id)
                         if gateway_context:
                             mirror_payload = try_gateway_ingest_mirror(
                                 channel=str(gateway_context.get("channel") or "chat"),
@@ -3573,6 +3751,40 @@ def render_status_tab(bot: DadBot):
     col1.metric("Health Score", f"{int(health.get('health_score', 100))}/100")
     col2.metric("Runtime Pressure", health.get("level", "green").upper())
     col3.metric("Open Threads", dashboard.get("threads", {}).get("open", 0))
+
+    # ── Relationship Health Visualization ────────────────────────────────────
+    world_model = dict(dashboard.get("world_model") or {})
+    health_stats = get_relationship_health_stats(world_model)
+    with st.container(border=True):
+        st.subheader("💙 Relationship Health")
+        st.markdown(format_relationship_card(health_stats))
+        
+        rel_col1, rel_col2, rel_col3 = st.columns(3)
+        if rel_col1.button("💬 How are we doing?", key="quick-checkin-relationship", use_container_width=True, help="Trigger a relationship reflection"):
+            st.session_state.nudge_prompt = "How's our relationship lately? Be honest with me."
+            st.rerun()
+        if rel_col2.button("📋 Saved Moments", key="view-saved-moments", use_container_width=True, help="View your saved important memories"):
+            st.session_state["show_saved_moments"] = not st.session_state.get("show_saved_moments", False)
+            st.rerun()
+        if rel_col3.button("🎯 Set a Goal", key="set-relationship-goal", use_container_width=True, help="Set a goal for our relationship"):
+            st.session_state.nudge_prompt = "I'd like to set a goal for our relationship. What should we focus on?"
+            st.rerun()
+        
+        # Show saved moments if expanded
+        if st.session_state.get("show_saved_moments", False):
+            st.divider()
+            st.caption("**Your Saved Important Moments**")
+            saved_moments = load_important_memories(limit=10)
+            if saved_moments:
+                for idx, memory in enumerate(saved_moments, 1):
+                    with st.expander(f"💾 Moment {idx} - {memory.get('timestamp', '')[:10]}", expanded=False):
+                        st.markdown(f"**What Dad said:**\n{memory.get('content', '').strip()[:300]}...")
+                        if memory.get("tags"):
+                            st.caption(f"Tags: {', '.join(memory.get('tags', []))}")
+                        if memory.get("importance"):
+                            st.caption(f"Importance: {memory.get('importance').upper()}")
+            else:
+                st.info("No saved moments yet. Click '💾 Save This Moment' after a response you want to remember.")
 
     with st.container(border=True):
         st.subheader("Conversation Engine")
@@ -3798,6 +4010,10 @@ def render_status_tab(bot: DadBot):
         st.caption(f"Current hypothesis: **{relationship.get('active_hypothesis_label', 'Supportive Baseline')}**")
 
     with st.container(border=True):
+        st.subheader("World Model")
+        render_world_model_status_panel(api)
+
+    with st.container(border=True):
         st.subheader("Quick Actions")
         cols = st.columns(5)
         with cols[0]:
@@ -3861,42 +4077,166 @@ def render_status_tab(bot: DadBot):
 
 
 def _sidebar_policy_store_health(bot: DadBot) -> dict[str, str]:
-    store = getattr(bot, "_turn_policy_store", None)
-    if not isinstance(store, DadPolicyStore):
-        getter = getattr(bot, "_get_policy_store", None)
-        if callable(getter):
-            try:
-                store = getter()
-            except (TypeError, ValueError, RuntimeError):
-                store = None
-
-    if not isinstance(store, DadPolicyStore):
+    store = _resolve_policy_store(bot)
+    if store is None:
         return {"status": "unavailable", "version": "unknown", "detail": "policy store not initialized"}
 
     get_current = getattr(store, "get_current_policy", None)
     if not callable(get_current):
         return {"status": "unhealthy", "version": "unknown", "detail": "policy accessor missing"}
 
+    policy, err = _run_sync_policy_call(get_current)
+    if err:
+        return err
+
+    version = str(getattr(policy, "version", "") or "").strip() or "unknown"
+    return {"status": "healthy", "version": version, "detail": "active policy loaded"}
+
+
+def _resolve_policy_store(bot: DadBot) -> DadPolicyStore | None:
+    store = getattr(bot, "_turn_policy_store", None)
+    if isinstance(store, DadPolicyStore):
+        return store
+
+    getter = getattr(bot, "_get_policy_store", None)
+    if not callable(getter):
+        return None
+    try:
+        maybe_store = getter()
+    except (TypeError, ValueError, RuntimeError):
+        return None
+    return maybe_store if isinstance(maybe_store, DadPolicyStore) else None
+
+
+def _run_sync_policy_call(callable_obj: Any, *args: Any, **kwargs: Any) -> tuple[Any | None, dict[str, str] | None]:
     try:
         running_loop = asyncio.get_running_loop()
     except RuntimeError:
         running_loop = None
 
     if running_loop is not None and running_loop.is_running():
-        return {
+        return None, {
             "status": "deferred",
             "version": "unknown",
-            "detail": "policy check deferred while event loop is running",
+            "detail": "policy call deferred while event loop is running",
         }
 
     try:
-        maybe_policy = get_current()
-        policy = asyncio.run(maybe_policy) if asyncio.iscoroutine(maybe_policy) else maybe_policy
+        maybe_result = callable_obj(*args, **kwargs)
+        result = asyncio.run(maybe_result) if asyncio.iscoroutine(maybe_result) else maybe_result
+        return result, None
     except (TypeError, ValueError, RuntimeError) as exc:
-        return {"status": "unhealthy", "version": "unknown", "detail": f"{type(exc).__name__}: {exc}"}
+        return None, {
+            "status": "unhealthy",
+            "version": "unknown",
+            "detail": f"{type(exc).__name__}: {exc}",
+        }
 
-    version = str(getattr(policy, "version", "") or "").strip() or "unknown"
-    return {"status": "healthy", "version": version, "detail": "active policy loaded"}
+
+def _render_policy_store_editor(bot: DadBot) -> None:
+    store = _resolve_policy_store(bot)
+    if store is None:
+        st.caption("Policy editor unavailable until policy store is initialized.")
+        return
+
+    current_policy, err = _run_sync_policy_call(store.get_current_policy)
+    if err:
+        st.warning(str(err.get("detail") or "Unable to load policy"))
+        return
+    if not isinstance(current_policy, DadPolicy):
+        st.warning("Policy editor could not load current policy.")
+        return
+
+    with st.expander("Policy Editor", expanded=False):
+        version = st.text_input("Version", value=str(current_policy.version), key="sidebar-policy-version")
+        comment = st.text_input(
+            "Comment",
+            value=str(current_policy.comment or ""),
+            key="sidebar-policy-comment",
+        )
+        persona_style_raw = st.text_area(
+            "Persona Style (JSON)",
+            value=json.dumps(dict(current_policy.persona_style), indent=2),
+            key="sidebar-policy-persona-style",
+            height=120,
+        )
+        relationship_rules_raw = st.text_area(
+            "Relationship Rules (JSON)",
+            value=json.dumps(dict(current_policy.relationship_rules), indent=2),
+            key="sidebar-policy-relationship-rules",
+            height=120,
+        )
+        safety_boundaries_raw = st.text_area(
+            "Safety Boundaries (JSON)",
+            value=json.dumps(dict(current_policy.safety_boundaries), indent=2),
+            key="sidebar-policy-safety-boundaries",
+            height=120,
+        )
+        memory_preferences_raw = st.text_area(
+            "Memory Preferences (JSON)",
+            value=json.dumps(dict(current_policy.memory_preferences), indent=2),
+            key="sidebar-policy-memory-preferences",
+            height=120,
+        )
+
+        save_clicked = st.button("Save Policy", use_container_width=True, key="sidebar-policy-save")
+        if save_clicked:
+            try:
+                persona_style = dict(json.loads(persona_style_raw))
+                relationship_rules = dict(json.loads(relationship_rules_raw))
+                safety_boundaries = dict(json.loads(safety_boundaries_raw))
+                memory_preferences = dict(json.loads(memory_preferences_raw))
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                st.error(f"Invalid JSON in editor fields: {exc}")
+            else:
+                candidate = DadPolicy(
+                    version=str(version or "").strip() or str(current_policy.version),
+                    persona_style=persona_style,
+                    relationship_rules=relationship_rules,
+                    safety_boundaries=safety_boundaries,
+                    memory_preferences=memory_preferences,
+                    created_at=datetime.utcnow().isoformat() + "Z",
+                    created_by="streamlit",
+                    comment=str(comment or "").strip() or None,
+                )
+                _, save_err = _run_sync_policy_call(store.save_policy, candidate, comment=candidate.comment)
+                if save_err:
+                    st.error(str(save_err.get("detail") or "Failed to save policy"))
+                else:
+                    st.success("Policy saved.")
+                    st.rerun()
+
+        history, history_err = _run_sync_policy_call(store.list_history)
+        if history_err:
+            st.caption(str(history_err.get("detail") or "Policy history unavailable"))
+            return
+        history_items = [item for item in list(history or []) if isinstance(item, DadPolicy)]
+        versions = [str(item.version) for item in reversed(history_items)]
+        if not versions:
+            st.caption("No historical policy versions found.")
+            return
+
+        rollback_version = st.selectbox(
+            "Rollback to version",
+            options=versions,
+            key="sidebar-policy-rollback-version",
+        )
+        rollback_comment = st.text_input(
+            "Rollback Comment",
+            value="",
+            key="sidebar-policy-rollback-comment",
+        )
+        if st.button("Rollback", use_container_width=True, key="sidebar-policy-rollback"):
+            _, rollback_err = _run_sync_policy_call(
+                store.rollback_to_version,
+                rollback_version,
+                comment=str(rollback_comment or "").strip() or None,
+            )
+            if rollback_err:
+                st.error(str(rollback_err.get("detail") or "Rollback failed"))
+            else:
+                st.success(f"Rolled back to {rollback_version}.")
+                st.rerun()
 
 
 @maybe_fragment
@@ -4022,6 +4362,7 @@ def render_sidebar(bot: DadBot):
             st.info(detail or "policy check deferred")
         else:
             st.warning(detail or "policy store health check unavailable")
+        _render_policy_store_editor(bot)
 
     with st.container(border=True):
         st.markdown("**Execution Path**")

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import sqlite3
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Protocol
 
 
@@ -43,6 +46,113 @@ class InMemoryAsyncMemoryLedgerPersistence:
         if normalized_start > normalized_end:
             return []
         return values[normalized_start : normalized_end + 1]
+
+
+class SQLiteAsyncMemoryLedgerPersistence:
+    """Async sqlite-backed persistence adapter for memory ledger state."""
+
+    def __init__(self, db_path: str) -> None:
+        self._db_path = str(db_path)
+        Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
+        self._initialize_schema()
+
+    def _initialize_schema(self) -> None:
+        conn = sqlite3.connect(self._db_path)
+        try:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS dadbot_memory_kv (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )
+                """,
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS dadbot_memory_list (
+                    key TEXT NOT NULL,
+                    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                    value TEXT NOT NULL
+                )
+                """,
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_dadbot_memory_list_key_seq
+                ON dadbot_memory_list(key, seq)
+                """,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _get_sync(self, key: str) -> str | None:
+        conn = sqlite3.connect(self._db_path)
+        try:
+            row = conn.execute(
+                "SELECT value FROM dadbot_memory_kv WHERE key = ?",
+                (str(key),),
+            ).fetchone()
+            return None if row is None else str(row[0])
+        finally:
+            conn.close()
+
+    def _set_sync(self, key: str, value: str) -> None:
+        conn = sqlite3.connect(self._db_path)
+        try:
+            conn.execute(
+                """
+                INSERT INTO dadbot_memory_kv(key, value)
+                VALUES(?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (str(key), str(value)),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _rpush_sync(self, key: str, value: str) -> None:
+        conn = sqlite3.connect(self._db_path)
+        try:
+            conn.execute(
+                "INSERT INTO dadbot_memory_list(key, value) VALUES(?, ?)",
+                (str(key), str(value)),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _lrange_sync(self, key: str, start: int, end: int) -> list[str]:
+        conn = sqlite3.connect(self._db_path)
+        try:
+            rows = conn.execute(
+                "SELECT value FROM dadbot_memory_list WHERE key = ? ORDER BY seq ASC",
+                (str(key),),
+            ).fetchall()
+            values = [str(row[0]) for row in rows]
+            if not values:
+                return []
+
+            normalized_start = max(int(start), 0)
+            normalized_end = len(values) - 1 if int(end) < 0 else int(end)
+            if normalized_start > normalized_end:
+                return []
+            return values[normalized_start : normalized_end + 1]
+        finally:
+            conn.close()
+
+    async def get(self, key: str) -> str | None:
+        return await asyncio.to_thread(self._get_sync, str(key))
+
+    async def set(self, key: str, value: str) -> None:
+        await asyncio.to_thread(self._set_sync, str(key), str(value))
+
+    async def rpush(self, key: str, value: str) -> None:
+        await asyncio.to_thread(self._rpush_sync, str(key), str(value))
+
+    async def lrange(self, key: str, start: int, end: int) -> list[str]:
+        return await asyncio.to_thread(self._lrange_sync, str(key), int(start), int(end))
 
 
 class MemoryLedger:

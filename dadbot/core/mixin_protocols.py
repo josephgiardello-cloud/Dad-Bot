@@ -26,8 +26,8 @@ class GraphFailureHandlerProvider(Protocol):
         """Get the turn orchestrator."""
         ...
     
-    def _append_signoff_compat(self, message: str) -> str:
-        """Append signature to message for compatibility."""
+    def _append_signoff(self, message: str) -> str:
+        """Append signature to a user-facing message."""
         ...
 
 

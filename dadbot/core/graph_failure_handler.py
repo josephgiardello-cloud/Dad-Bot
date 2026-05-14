@@ -143,7 +143,7 @@ class DadBotGraphFailureHandlerMixin:
 
     def _graph_failure_reply(self: GraphFailureHandlerProvider, correlation_id: str) -> str:
         """Format a user-facing failure message with reference ID."""
-        return self._append_signoff_compat(
+        return self._append_signoff(
             "I hit an internal graph error and stopped before touching memory or state. "
             f"Please try again. Reference ID: {correlation_id}",
         )

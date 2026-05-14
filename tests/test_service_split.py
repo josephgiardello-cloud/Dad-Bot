@@ -368,7 +368,9 @@ def test_process_user_message_uses_graph_path_when_enabled(bot, monkeypatch):
     bot._turn_graph_enabled = True
 
     monkeypatch.setattr(
-        bot, "_run_graph_turn_sync", lambda user_input, attachments=None: (f"graph::{user_input}", False)
+        bot,
+        "_run_graph_turn_sync",
+        lambda user_input, attachments=None, chunk_callback=None: (f"graph::{user_input}", False),
     )
     monkeypatch.setattr(
         bot.turn_service, "process_user_message", lambda user_input, attachments=None: ("legacy", False)
@@ -397,7 +399,7 @@ def test_process_user_message_graph_failure_returns_controlled_response(bot, mon
     class DummyOrchestrator:
         control_plane = DummyControlPlane()
 
-    def boom(user_input, attachments=None):
+    def boom(user_input, attachments=None, chunk_callback=None):
         raise RuntimeError("graph unavailable")
 
     monkeypatch.setattr(bot, "_run_graph_turn_sync", boom)
@@ -408,7 +410,7 @@ def test_process_user_message_graph_failure_returns_controlled_response(bot, mon
         raise AssertionError("legacy path should not run")
 
     monkeypatch.setattr(bot.turn_service, "process_user_message", fail_legacy)
-    monkeypatch.setattr(bot, "_append_signoff_compat", lambda text: text)
+    monkeypatch.setattr(bot, "_append_signoff", lambda text: text)
 
     try:
         bot.process_user_message("Need a hand.")
@@ -464,7 +466,7 @@ def test_process_user_message_stream_graph_failure_preserves_trace_and_correlati
     class DummyOrchestrator:
         control_plane = DummyControlPlane()
 
-    def boom(user_input, attachments=None):
+    def boom(user_input, attachments=None, chunk_callback=None):
         raise RuntimeError("graph unavailable")
 
     def fail_legacy(*args, **kwargs):
@@ -475,7 +477,7 @@ def test_process_user_message_stream_graph_failure_preserves_trace_and_correlati
     monkeypatch.setattr(bot, "_turn_orchestrator", DummyOrchestrator())
     monkeypatch.setattr(bot.turn_service, "process_user_message", fail_legacy)
     monkeypatch.setattr(bot.turn_service, "process_user_message_stream", fail_legacy)
-    monkeypatch.setattr(bot, "_append_signoff_compat", lambda text: text)
+    monkeypatch.setattr(bot, "_append_signoff", lambda text: text)
 
     def capture_chunk(chunk):
         order.append("chunk")
@@ -513,7 +515,7 @@ def test_process_user_message_stream_graph_failure_preserves_trace_and_correlati
 def test_process_user_message_async_uses_graph_path_when_enabled(bot, monkeypatch):
     bot._turn_graph_enabled = True
 
-    async def run_graph(user_input, attachments=None):
+    async def run_graph(user_input, attachments=None, chunk_callback=None):
         return (f"graph::{user_input}", False)
 
     async def fail_legacy(*args, **kwargs):
@@ -545,7 +547,7 @@ def test_process_user_message_async_graph_failure_preserves_trace_and_correlatio
     class DummyOrchestrator:
         control_plane = DummyControlPlane()
 
-    async def boom(user_input, attachments=None):
+    async def boom(user_input, attachments=None, chunk_callback=None):
         raise RuntimeError("graph unavailable")
 
     async def fail_legacy(*args, **kwargs):
@@ -555,7 +557,7 @@ def test_process_user_message_async_graph_failure_preserves_trace_and_correlatio
     monkeypatch.setattr(bot, "_get_turn_orchestrator", lambda: DummyOrchestrator())
     monkeypatch.setattr(bot, "_turn_orchestrator", DummyOrchestrator())
     monkeypatch.setattr(bot.turn_service, "process_user_message_async", fail_legacy)
-    monkeypatch.setattr(bot, "_append_signoff_compat", lambda text: text)
+    monkeypatch.setattr(bot, "_append_signoff", lambda text: text)
 
     with CorrelationContext.bind("corr-async-001"):
         with TracingContext().span("test.async.failure", trace_id="trace-async-001"):
