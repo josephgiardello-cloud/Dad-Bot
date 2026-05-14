@@ -33,6 +33,7 @@ from dadbot.core.execution_contract import (
 from dadbot.core.graph_failure_handler import DadBotGraphFailureHandlerMixin
 from dadbot.core.kernel_locks import KernelReplaySequenceLock
 from dadbot.core.kernel_signals import CorrelationContext, TracingContext
+from dadbot.core.policy_store import DadPolicyStore, InMemoryAsyncPolicyPersistence
 from dadbot.core.runtime_errors import (
     CanonicalInvariantViolation,
     ConfigurationError,
@@ -51,6 +52,14 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
     _turn_execution_lock: Any
     services: Any
     turn_orchestrator: Any
+
+    def _get_policy_store(self) -> DadPolicyStore:
+        policy_store = getattr(self, "_turn_policy_store", None)
+        if isinstance(policy_store, DadPolicyStore):
+            return policy_store
+        policy_store = DadPolicyStore(InMemoryAsyncPolicyPersistence())
+        self._turn_policy_store = policy_store
+        return policy_store
 
     # ------------------------------------------------------------------
     # Orchestrator resolution
@@ -121,7 +130,10 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
                 "Canonical execution gate violation: control-plane submit entrypoint missing.",
             )
 
-        handler = TurnHandler(submit_turn=cast(Any, submit_turn))
+        handler = TurnHandler(
+            submit_turn=cast(Any, submit_turn),
+            policy_store=self._get_policy_store(),
+        )
         return await handler.process_turn(
             TurnContext(
                 user_input=str(user_input or ""),

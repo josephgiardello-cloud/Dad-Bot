@@ -748,6 +748,48 @@ class ResponseEngine:
             return {"safety": 0.0, "tools": 0.0, "memory": 0.0, "coherence": 0.0}
         return {name: float(value / total) for name, value in magnitudes.items()}
 
+    def _apply_safety_critic(self, context: Any, candidate: ResponseCandidate) -> ResponseCandidate:
+        critic = getattr(context, "safety_critic", None)
+        evaluate = getattr(critic, "evaluate", None)
+        if not callable(evaluate):
+            return candidate
+
+        relationship_trust = 0.5
+        try:
+            relationship_trust = float(getattr(context, "relationship_trust", 0.5) or 0.5)
+        except (TypeError, ValueError):
+            relationship_trust = 0.5
+
+        safety_boundaries = dict(getattr(context, "safety_boundaries", {}) or {})
+        decision = evaluate(
+            str(getattr(context, "user_input", "") or ""),
+            str(candidate.text or ""),
+            {
+                "relationship_trust": relationship_trust,
+                "safety_boundaries": safety_boundaries,
+            },
+        )
+        decision_payload = dict(decision or {})
+        self._last_turn_telemetry["safety_critic"] = {
+            "decision": str(decision_payload.get("decision") or "PASS"),
+            "risk_score": float(decision_payload.get("risk_score") or 0.0),
+            "reasons": list(decision_payload.get("reasons") or []),
+        }
+        if str(decision_payload.get("decision") or "").upper() != "BLOCK":
+            return candidate
+
+        return ResponseCandidate(
+            text="I can't help with that, but I can help with a safer option.",
+            source="safety_critic_block",
+            confidence=1.0,
+            tone="neutral",
+            intensity=0.0,
+            stance="balanced",
+            response_goal="safety_redirect",
+            risk_level=0.0,
+            depth="minimal",
+        )
+
     def run(self, context: Any) -> str:
         """Orchestrator: generate → score → select → track.
 
@@ -800,6 +842,25 @@ class ResponseEngine:
         self._last_turn_telemetry["second_best_score"] = float(second_best_score)
         self._last_turn_telemetry["decision_confidence"] = float(decision_confidence)
 
+        best = self._apply_safety_critic(context, best)
+        if best.source == "safety_critic_block":
+            self._last_turn_telemetry["selected"] = {
+                "source": best.source,
+                "tone": best.tone,
+                "depth": best.depth,
+                "response_goal": best.response_goal,
+                "risk_level": float(best.risk_level),
+                "selected_score": float(selected_score),
+                "second_best_score": float(second_best_score),
+                "decision_confidence": float(decision_confidence),
+                "influence_share": {
+                    "safety": 1.0,
+                    "tools": 0.0,
+                    "memory": 0.0,
+                    "coherence": 0.0,
+                },
+            }
+            self._last_turn_telemetry["selected_text_preview"] = best.text[:180]
         self._record_selection(best)
 
         try:

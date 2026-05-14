@@ -35,8 +35,38 @@ class TurnHandler:
         self,
         *,
         submit_turn: Callable[..., Awaitable[FinalizedTurnResult]],
+        policy_store: Any | None = None,
     ) -> None:
         self._submit_turn = submit_turn
+        self._policy_store = policy_store
+
+    async def _inject_policy_metadata(self, metadata: dict[str, Any]) -> None:
+        store = self._policy_store
+        if store is None:
+            return
+        getter = getattr(store, "get_current_policy", None)
+        if not callable(getter):
+            return
+        try:
+            policy = await getter()
+        except (RuntimeError, ValueError, TypeError):
+            return
+
+        if metadata.get("dad_policy_version"):
+            return
+
+        version = str(getattr(policy, "version", "") or "").strip()
+        if version:
+            metadata["dad_policy_version"] = version
+            metadata.setdefault("policy_version", version)
+
+        template = {
+            "persona_style": dict(getattr(policy, "persona_style", {}) or {}),
+            "relationship_rules": dict(getattr(policy, "relationship_rules", {}) or {}),
+            "safety_boundaries": dict(getattr(policy, "safety_boundaries", {}) or {}),
+            "memory_preferences": dict(getattr(policy, "memory_preferences", {}) or {}),
+        }
+        metadata.setdefault("dad_policy_template", template)
 
     async def process_turn(self, ctx: TurnContext) -> FinalizedTurnResult:
         outbound_metadata: dict[str, Any] = {
@@ -45,6 +75,7 @@ class TurnHandler:
         }
         if ctx.metadata:
             outbound_metadata.update(dict(ctx.metadata))
+        await self._inject_policy_metadata(outbound_metadata)
 
         return await self._submit_turn(
             str(ctx.user_input or ""),

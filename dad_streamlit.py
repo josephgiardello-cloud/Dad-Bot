@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import importlib
@@ -42,6 +43,7 @@ except Exception:  # pragma: no cover - optional dependency
     ImageFont = cast(Any, None)
 
 from dadbot.consumers.streamlit import load_thread_projection
+from dadbot.core.policy_store import DadPolicyStore
 from dadbot.runtime.supervisor import get_runtime_supervisor
 from dadbot.runtime_core import ThreadView, UIRuntimeAPI
 from dadbot.runtime_core.streamlit_runtime import StreamlitRuntime
@@ -3858,6 +3860,45 @@ def render_status_tab(bot: DadBot):
             st.code(log_tail.get("stderr") or "[no stderr yet]", language="text")
 
 
+def _sidebar_policy_store_health(bot: DadBot) -> dict[str, str]:
+    store = getattr(bot, "_turn_policy_store", None)
+    if not isinstance(store, DadPolicyStore):
+        getter = getattr(bot, "_get_policy_store", None)
+        if callable(getter):
+            try:
+                store = getter()
+            except (TypeError, ValueError, RuntimeError):
+                store = None
+
+    if not isinstance(store, DadPolicyStore):
+        return {"status": "unavailable", "version": "unknown", "detail": "policy store not initialized"}
+
+    get_current = getattr(store, "get_current_policy", None)
+    if not callable(get_current):
+        return {"status": "unhealthy", "version": "unknown", "detail": "policy accessor missing"}
+
+    try:
+        running_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        running_loop = None
+
+    if running_loop is not None and running_loop.is_running():
+        return {
+            "status": "deferred",
+            "version": "unknown",
+            "detail": "policy check deferred while event loop is running",
+        }
+
+    try:
+        maybe_policy = get_current()
+        policy = asyncio.run(maybe_policy) if asyncio.iscoroutine(maybe_policy) else maybe_policy
+    except (TypeError, ValueError, RuntimeError) as exc:
+        return {"status": "unhealthy", "version": "unknown", "detail": f"{type(exc).__name__}: {exc}"}
+
+    version = str(getattr(policy, "version", "") or "").strip() or "unknown"
+    return {"status": "healthy", "version": version, "detail": "active policy loaded"}
+
+
 @maybe_fragment
 def render_sidebar(bot: DadBot):
     api = get_chat_event_api()
@@ -3968,6 +4009,19 @@ def render_sidebar(bot: DadBot):
             st.session_state.primary_view = "workshop"
             st.session_state["workshop-section"] = "Status"
             st.rerun()
+
+    with st.container(border=True):
+        st.markdown("**Policy Store**")
+        policy_health = _sidebar_policy_store_health(bot)
+        st.caption(f"Current policy version: {policy_health.get('version', 'unknown')}")
+        status = str(policy_health.get("status") or "unknown").lower()
+        detail = str(policy_health.get("detail") or "")
+        if status == "healthy":
+            st.success(detail or "policy store healthy")
+        elif status == "deferred":
+            st.info(detail or "policy check deferred")
+        else:
+            st.warning(detail or "policy store health check unavailable")
 
     with st.container(border=True):
         st.markdown("**Execution Path**")
