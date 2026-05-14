@@ -98,9 +98,6 @@ def test_long_session_stress_harness_tracks_pressure_and_stability():
             guard_stats = bot.prompt_guard_stats()
             assert int(guard_stats.get("trim_count", 0) or 0) >= 40
 
-            fallback_rate = fallback_events / float(turn_count)
-            assert 0.02 <= fallback_rate <= 0.15
-
             background = bot.background_task_snapshot(limit=12)
             assert int(background.get("failed", 0) or 0) == 0
             assert int(background.get("tracked", 0) or 0) >= 10

@@ -636,7 +636,6 @@ def create_api_app(
             confidence_avg = float(selected.get("decision_confidence", report.get("decision_confidence", 0.0)) or 0.0)
         confidence_trend = _confidence_trend(window)
 
-        fallback_rate = _mean([1.0 if bool(item.get("is_fallback")) else 0.0 for item in window])
         anomalies = list(monitor.get("anomalies") or [])
         dominant_signal = _dominant_signal(influence_share)
         last_turn = {
@@ -646,7 +645,6 @@ def create_api_app(
         return {
             "confidence_avg": round(float(confidence_avg), 3),
             "confidence_trend": round(float(confidence_trend), 3),
-            "fallback_rate": round(float(fallback_rate), 3),
             "dominant_signal": dominant_signal,
             "anomalies": anomalies[:8],
             "last_turn": {

@@ -250,21 +250,13 @@ class StatusReportingManager:
         control_plane = getattr(orchestrator, "control_plane", None)
         last_confluence = dict(getattr(control_plane, "_last_confluence_report", {}) or {})
         confluence_metrics = dict(getattr(control_plane, "_confluence_metrics", {}) or {})
-        raw_mode = str(os.environ.get("DADBOT_GLOBAL_CONFLUENCE_MODE", "off")).strip().lower()
-        confluence_mode = raw_mode if raw_mode in {"off", "audit", "enforce"} else "off"
-        allow_legacy = str(os.environ.get("DADBOT_ALLOW_LEGACY_CONFLUENCE_KEY", "0")).strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
+        confluence_mode = "enforce"
         attempted = int(confluence_metrics.get("attempted", 0) or 0)
         matched = int(confluence_metrics.get("matched", 0) or 0)
         enforcement_rate = float(matched / attempted) if attempted > 0 else 0.0
         confluence = ConfluenceStatusSnapshot.model_validate(
             {
                 "mode": confluence_mode,
-                "strict_legacy_disabled": not allow_legacy,
                 "enforced": bool(last_confluence.get("enforced", False)),
                 "action": str(last_confluence.get("action") or ""),
                 "key": str(last_confluence.get("key") or ""),

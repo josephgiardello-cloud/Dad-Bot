@@ -43,6 +43,22 @@ class InvariantViolation(InvariantError):
     """Raised when a runtime invariant is violated."""
 
 
+class SystemInvariantViolation(InvariantViolation):
+    """Raised when a system-level invariant boundary is violated."""
+
+
+class CanonicalInvariantViolation(SystemInvariantViolation):
+    """Raised when canonical single-path execution invariants are violated."""
+
+
+class ConfigurationError(RuntimeErrorBase):
+    """Raised when required runtime configuration is missing or invalid."""
+
+
+class TransientExecutionError(RuntimeExecutionError):
+    """Raised for retryable runtime execution failures (timeouts/backpressure/transient faults)."""
+
+
 class ReplayMismatch(ReplayError):
     """Raised when replay output diverges from recorded execution shape."""
 
@@ -82,6 +98,8 @@ __all__ = [
     "AuthorityError",
     "AuthorityViolation",
     "BackpressureError",
+    "CanonicalInvariantViolation",
+    "ConfigurationError",
     "DadbotRuntimeError",
     "NON_FATAL_RUNTIME_EXCEPTIONS",
     "ExecutionStageError",
@@ -91,8 +109,10 @@ __all__ = [
     "PersistenceFailure",
     "PoisonExecutionError",
     "ProjectionMismatch",
+    "SystemInvariantViolation",
     "ReplayError",
     "ReplayMismatch",
     "RuntimeErrorBase",
     "RuntimeExecutionError",
+    "TransientExecutionError",
 ]

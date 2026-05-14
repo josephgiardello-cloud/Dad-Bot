@@ -19,6 +19,7 @@ import pytest
 from dadbot.core.control_plane import ExecutionControlPlane, ExecutionJob
 from dadbot.core.execution_resource_budget import BackpressureSignal
 from dadbot.core.orchestrator import DadBotOrchestrator
+from dadbot.core.runtime_errors import TransientExecutionError
 
 pytestmark = pytest.mark.unit
 
@@ -242,7 +243,7 @@ class TestExecutionJobTraceId:
 
 @pytest.mark.unit
 class TestBackpressureHandling:
-    def test_handle_turn_returns_degraded_response_on_backpressure(self):
+    def test_handle_turn_raises_transient_error_on_backpressure(self):
         async def _exercise() -> None:
             orchestrator = DadBotOrchestrator.__new__(DadBotOrchestrator)
             orchestrator._submit_turn_via_control_plane = AsyncMock(
@@ -253,9 +254,8 @@ class TestBackpressureHandling:
                 )
             )
 
-            response = await orchestrator.handle_turn("hello")
-
-            assert response == ("I’m at capacity right now. Please try again shortly.", False)
+            with pytest.raises(TransientExecutionError, match="backpressure"):
+                await orchestrator.handle_turn("hello")
 
         asyncio.run(_exercise())
 

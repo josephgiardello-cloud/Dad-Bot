@@ -55,7 +55,7 @@ class BeliefStateEngine:
         belief["calibration"] = {
             "success_rate": round(float(success_rate), 6),
             "sample_size": int(len(recent)),
-              "updated_at": float(_now()),
+                        "updated_at": float(_now()),
         }
         get_write_plane().write("BeliefStateEngine", "memory.belief_state", belief)
         state["belief_state"] = belief

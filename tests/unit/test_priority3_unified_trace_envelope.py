@@ -130,16 +130,6 @@ class TestTurnOutput:
         assert out.should_end is False
         assert out.confidence == 0.95
 
-    def test_turn_output_fallback_flag(self):
-        """Verify output can track fallback recovery."""
-        out = TurnOutput(
-            response="fallback response",
-            should_end=False,
-            recovery_fallback=True,
-        )
-
-        assert out.recovery_fallback is True
-
 
 @pytest.mark.unit
 class TestTurnTrace:

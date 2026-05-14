@@ -49,8 +49,10 @@ from dadbot.core.persistence.base import CheckpointNotFoundError
 from dadbot.core.reflection_ir import DriftReflectionEngine
 from dadbot.core.runtime_errors import (
     NON_FATAL_RUNTIME_EXCEPTIONS,
+    CanonicalInvariantViolation,
     ExecutionStageError,
     InvariantViolation,
+    TransientExecutionError,
 )
 from dadbot.registry import ServiceRegistry, boot_registry
 
@@ -1351,37 +1353,13 @@ class DadBotOrchestrator:
         timeout_seconds: float | None = None,
     ) -> FinalizedTurnResult:
         normalized_timeout = _normalize_timeout_seconds(timeout_seconds)
-        test_override = bool(
-            str(os.environ.get("PYTEST_CURRENT_TEST") or "").strip()
-            and str(os.environ.get("DADBOT_TEST_GLOBAL_CONFLUENCE_MODE") or "").strip().lower()
-            in {"off", "audit", "enforce"}
-        )
-        if test_override:
-            confluence_mode = str(os.environ.get("DADBOT_TEST_GLOBAL_CONFLUENCE_MODE") or "enforce").strip().lower()
-        else:
-            confluence_mode = "enforce"
         explicit_key = str(confluence_key or "").strip()
-        allow_legacy = bool(
-            test_override
-            and str(os.environ.get("DADBOT_ALLOW_LEGACY_CONFLUENCE_KEY", "0")).strip().lower()
-            in {"1", "true", "yes", "on"}
-        )
-        if confluence_mode == "enforce" and not explicit_key:
-            if not allow_legacy:
-                raise InvariantViolation(
-                    "Missing explicit confluence key in enforce mode.",
-                    context={"session_id": str(session_id or "default")},
-                )
-            legacy_payload = {
-                "session_id": str(session_id or "default"),
-                "user_input": str(user_input or ""),
-                "attachments": list(attachments or []),
-            }
-            explicit_key = f"legacy:{_stable_sha256(legacy_payload)}"
-            logger.warning("Using legacy confluence fallback key because DADBOT_ALLOW_LEGACY_CONFLUENCE_KEY is enabled")
-        outbound_metadata: dict[str, Any] = {"confluence_mode": confluence_mode}
-        if explicit_key:
-            outbound_metadata["confluence_key"] = explicit_key
+        if not explicit_key:
+            raise CanonicalInvariantViolation(
+                "Missing explicit confluence key in enforce mode.",
+                context={"session_id": str(session_id or "default")},
+            )
+        outbound_metadata: dict[str, Any] = {"confluence_mode": "enforce", "confluence_key": explicit_key}
         if isinstance(metadata, dict) and metadata:
             outbound_metadata.update(dict(metadata))
         return await self.control_plane.submit_turn(
@@ -1420,15 +1398,15 @@ class DadBotOrchestrator:
                 metadata=metadata,
                 timeout_seconds=normalized_timeout,
             )
-        except TimeoutError:
+        except TimeoutError as exc:
             logger.warning("Inference timed out after %ss", _normalize_timeout_seconds(timeout_seconds))
-            return ("Sorry, I timed out while thinking. Please try again.", False)
+            raise TransientExecutionError("Inference timed out.") from exc
         except BackpressureSignal as exc:
             logger.warning("Inference deferred due to backpressure: %s", exc)
-            return ("I’m at capacity right now. Please try again shortly.", False)
+            raise TransientExecutionError("Inference deferred due to backpressure.") from exc
         except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
             logger.error("Inference failed: %s", exc)
-            return ("Something went wrong. Please try again.", False)
+            raise TransientExecutionError("Transient inference failure.") from exc
 
     def run(
         self,

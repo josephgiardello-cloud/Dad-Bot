@@ -33,6 +33,12 @@ from dadbot.core.execution_contract import (
 from dadbot.core.graph_failure_handler import DadBotGraphFailureHandlerMixin
 from dadbot.core.kernel_locks import KernelReplaySequenceLock
 from dadbot.core.kernel_signals import CorrelationContext, TracingContext
+from dadbot.core.runtime_errors import (
+    CanonicalInvariantViolation,
+    ConfigurationError,
+    TransientExecutionError,
+)
+from dadbot.core.turn_handler import TurnContext, TurnHandler, thin_turn_handler_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -106,21 +112,23 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
             attachments=attachments,
         )
         submit_turn = getattr(orchestrator, "_submit_turn_via_control_plane", None)
-        if callable(submit_turn):
-            return await cast(
-                Awaitable[FinalizedTurnResult],
-                submit_turn(
-                    user_input,
-                    attachments=attachments,
-                    session_id=session_id,
-                    confluence_key=confluence_key,
-                ),
+        if not thin_turn_handler_enabled():
+            raise CanonicalInvariantViolation(
+                "Canonical execution gate violation: thin turn handler must be enabled.",
             )
-        return await orchestrator.control_plane.submit_turn(
-            session_id=session_id,
-            user_input=user_input,
-            attachments=attachments,
-            metadata={"confluence_mode": "enforce", "confluence_key": confluence_key},
+        if not callable(submit_turn):
+            raise ConfigurationError(
+                "Canonical execution gate violation: control-plane submit entrypoint missing.",
+            )
+
+        handler = TurnHandler(submit_turn=cast(Any, submit_turn))
+        return await handler.process_turn(
+            TurnContext(
+                user_input=str(user_input or ""),
+                attachments=attachments,
+                session_id=session_id,
+                confluence_key=confluence_key,
+            ),
         )
 
     @staticmethod
@@ -393,7 +401,9 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
                 attachments=attachments,
                 context=request.context,
             )
-            raise AssertionError("unreachable") from exc
+            raise TransientExecutionError(
+                "Graph execution failed after failure handler dispatch.",
+            ) from exc
         finally:
             self._execute_turn_session_id = previous_session_id
             self._active_turn_run_id = ""

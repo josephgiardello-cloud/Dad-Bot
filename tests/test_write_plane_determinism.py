@@ -197,6 +197,7 @@ class TestBeliefStateEngineInstrumentation:
     def test_update_from_turn_deterministic(self):
         """Same inputs → identical mutation log signatures."""
         from dadbot.core.belief_state_engine import BeliefStateEngine
+        from dadbot.core.event_clock import reset_event_clock, set_event_clock
 
         kwargs = dict(
             trace_id="trace-001",
@@ -205,20 +206,21 @@ class TestBeliefStateEngineInstrumentation:
             success=True,
         )
 
-        # Run 1
-        self.plane = reset_write_plane()
-        BeliefStateEngine().update_from_turn(state=self._base_state(), **kwargs)
-        sig1 = _log_signatures(self.plane.drain_log())
+        set_event_clock(lambda: 1_700_000_000.0)
+        try:
+            # Run 1
+            self.plane = reset_write_plane()
+            BeliefStateEngine().update_from_turn(state=self._base_state(), **kwargs)
+            sig1 = _log_signatures(self.plane.drain_log())
 
-        # Run 2
-        self.plane = reset_write_plane()
-        BeliefStateEngine().update_from_turn(state=self._base_state(), **kwargs)
-        sig2 = _log_signatures(self.plane.drain_log())
+            # Run 2
+            self.plane = reset_write_plane()
+            BeliefStateEngine().update_from_turn(state=self._base_state(), **kwargs)
+            sig2 = _log_signatures(self.plane.drain_log())
+        finally:
+            reset_event_clock()
 
-        # Paths and sources must match; value_repr may differ only by timestamp
-        assert [s[:2] for s in sig1] == [s[:2] for s in sig2], (
-            f"Non-deterministic write paths:\nRun1: {sig1}\nRun2: {sig2}"
-        )
+        assert sig1 == sig2, f"Non-deterministic writes:\nRun1: {sig1}\nRun2: {sig2}"
 
 
 # ---------------------------------------------------------------------------

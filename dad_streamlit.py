@@ -160,6 +160,8 @@ CONTEXTUAL_LEARNING_KEYWORDS: tuple[str, ...] = (
 STORY_MODE_MAX_FAILED_ATTEMPTS = 3
 STORY_MODE_LOCKOUT_BASE_SECONDS = 30
 STORY_MODE_LOCKOUT_MAX_SECONDS = 900
+THIN_SPINE_TOGGLE_SESSION_KEY = "chat_use_thin_turn_handler"
+TURN_PATH_METRICS_SESSION_KEY = "chat_turn_path_metrics"
 
 
 def configured_story_mode_password() -> str:
@@ -642,6 +644,59 @@ def get_runtime() -> StreamlitRuntime:
     return interaction_controller.get_runtime()
 
 
+def _thin_spine_env_default_enabled() -> bool:
+    value = str(os.environ.get("DADBOT_USE_THIN_TURN_HANDLER", "0") or "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+def streamlit_thin_spine_enabled() -> bool:
+    if THIN_SPINE_TOGGLE_SESSION_KEY not in st.session_state:
+        st.session_state[THIN_SPINE_TOGGLE_SESSION_KEY] = _thin_spine_env_default_enabled()
+    return bool(st.session_state.get(THIN_SPINE_TOGGLE_SESSION_KEY, False))
+
+
+def set_streamlit_thin_spine_enabled(enabled: bool) -> None:
+    flag = bool(enabled)
+    st.session_state[THIN_SPINE_TOGGLE_SESSION_KEY] = flag
+    os.environ["DADBOT_USE_THIN_TURN_HANDLER"] = "1" if flag else "0"
+
+
+def _turn_path_metrics_state() -> dict[str, Any]:
+    state = st.session_state.setdefault(
+        TURN_PATH_METRICS_SESSION_KEY,
+        {
+            "total_turns": 0,
+            "thin_spine_turns": 0,
+            "legacy_turns": 0,
+            "latency_ms": [],
+            "events": [],
+        },
+    )
+    return state if isinstance(state, dict) else {}
+
+
+def _record_turn_path_metric(*, path: str, latency_ms: int) -> None:
+    metrics = _turn_path_metrics_state()
+    metrics["total_turns"] = int(metrics.get("total_turns", 0) or 0) + 1
+    if path == "thin_spine":
+        metrics["thin_spine_turns"] = int(metrics.get("thin_spine_turns", 0) or 0) + 1
+    else:
+        metrics["legacy_turns"] = int(metrics.get("legacy_turns", 0) or 0) + 1
+    latencies = list(metrics.get("latency_ms") or [])
+    latencies.append(int(max(0, latency_ms)))
+    metrics["latency_ms"] = latencies[-200:]
+    events = list(metrics.get("events") or [])
+    events.append(
+        {
+            "ts": datetime.now().isoformat(timespec="seconds"),
+            "path": path,
+            "latency_ms": int(max(0, latency_ms)),
+        }
+    )
+    metrics["events"] = events[-50:]
+    st.session_state[TURN_PATH_METRICS_SESSION_KEY] = metrics
+
+
 def process_prompt_via_runtime(
     *,
     thread_id: str,
@@ -651,7 +706,11 @@ def process_prompt_via_runtime(
     temperature_style: str = "balanced",
     message_metadata: dict | None = None,
 ) -> dict:
-    return interaction_controller.process_prompt_via_runtime(
+    # Ensure the Streamlit entrypoint explicitly controls thin-spine routing.
+    thin_spine = bool(streamlit_thin_spine_enabled())
+    set_streamlit_thin_spine_enabled(thin_spine)
+    started = time.perf_counter()
+    result = interaction_controller.process_prompt_via_runtime(
         thread_id=thread_id,
         prompt=prompt,
         attachments=attachments,
@@ -659,6 +718,9 @@ def process_prompt_via_runtime(
         temperature_style=temperature_style,
         message_metadata=message_metadata,
     )
+    latency_ms = int(max(0.0, (time.perf_counter() - started) * 1000.0))
+    _record_turn_path_metric(path="thin_spine" if thin_spine else "legacy", latency_ms=latency_ms)
+    return result
 
 
 def emit_voice_runtime_ledger_event(event_type: str, payload: dict) -> None:
@@ -3906,6 +3968,30 @@ def render_sidebar(bot: DadBot):
             st.session_state.primary_view = "workshop"
             st.session_state["workshop-section"] = "Status"
             st.rerun()
+
+    with st.container(border=True):
+        st.markdown("**Execution Path**")
+        thin_spine = st.checkbox(
+            "Use thin turn handler path",
+            value=streamlit_thin_spine_enabled(),
+            key="sidebar-thin-spine-toggle",
+            help="Routes turns through the thin spine adapter (legacy path remains available when off).",
+        )
+        set_streamlit_thin_spine_enabled(bool(thin_spine))
+        st.caption(
+            "Current path: "
+            + ("thin spine (feature flag ON)" if thin_spine else "legacy runtime path (feature flag OFF)")
+        )
+        metrics = _turn_path_metrics_state()
+        total_turns = int(metrics.get("total_turns", 0) or 0)
+        thin_turns = int(metrics.get("thin_spine_turns", 0) or 0)
+        legacy_turns = int(metrics.get("legacy_turns", 0) or 0)
+        latencies = [int(item) for item in list(metrics.get("latency_ms") or []) if isinstance(item, int | float)]
+        avg_latency = int(sum(latencies) / len(latencies)) if latencies else 0
+        st.caption(
+            f"Session turns: {total_turns} total | thin: {thin_turns} | legacy: {legacy_turns}"
+        )
+        st.caption(f"Average turn latency (UI runtime call): {avg_latency} ms")
 
     st.subheader("Threads")
     all_threads = list(api.list_chat_threads() or [])
