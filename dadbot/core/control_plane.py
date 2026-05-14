@@ -55,10 +55,6 @@ from dadbot.core.execution_result_unified import (
     mark_unified_execution_success,
 )
 from dadbot.core.failure_taxonomy import classify_failure
-from dadbot.core.system_state_algebra import (
-    evaluate_system_state_algebra,
-    persist_system_state_algebra,
-)
 from dadbot.core.global_transition_invariants import (
     TransitionBoundaryView,
     enforce_global_transition_invariants,
@@ -83,13 +79,14 @@ from dadbot.core.runtime_contracts import (
 )
 from dadbot.core.kernel_gateway import KernelGateway
 from dadbot.core.kernel_signals import get_exporter, get_metrics, get_tracer
-from dadbot.core.effect_journal import EffectJournal
-from dadbot.core.ledger_index import LedgerIndex
 from dadbot.core.ledger_reader import LedgerReader
 from dadbot.core.ledger_writer import LedgerWriter
 from dadbot.core.ledger_writer_adapter import LedgerWriterAdapter
+from dadbot.core.ledger_coordinator import LedgerCoordinator
+from dadbot.core.invariant_enforcer import InvariantEnforcer
 from dadbot.core.recovery_manager import RecoveryManager
 from dadbot.core.runtime_types import ToolSpec
+from dadbot.core.execution_coordinator import ExecutionCoordinator
 from dadbot.core.hypothesis_engine import MultiHypothesisEngine
 from dadbot.core.memory_hierarchy_manager import MemoryHierarchyManager
 from dadbot.core.multi_agent_swarm import MultiAgentSwarm
@@ -108,229 +105,152 @@ from dadbot.core.response_engine import ResponseEngine
 from dadbot.core.topology_runtime import TopologyRuntime, TopologyValidationResult
 from dadbot.core._control_plane_reconciliation import ReconciliationMixin
 from dadbot.core._control_plane_compaction import CompactionMixin
+from dadbot.core.planning_utils import (
+    build_runtime_plan as _build_runtime_plan,
+    build_semantic_memory_candidates as _build_semantic_memory_candidates,
+    mutate_runtime_plan as _mutate_runtime_plan,
+    normalize_tool_runtime_contract as _normalize_tool_runtime_contract,
+    runtime_plan_intent as _runtime_plan_intent,
+    validate_tool_runtime_contract as _validate_tool_runtime_contract,
+)
+from dadbot.core.memory_ranking import rank_semantic_memory_items as _rank_semantic_memory_items
+from dadbot.core.persistence_coordinator import PersistenceCoordinator
 
 logger = logging.getLogger(__name__)
 
-
-def _runtime_plan_intent(user_input: str) -> str:
-    text = str(user_input or "").strip().lower()
-    if not text:
-        return "statement"
-    if "?" in text:
-        return "question"
-    if text.startswith(("please", "can you", "could you", "help me", "show me")):
-        return "request"
-    if any(token in text for token in ("i feel", "i am anxious", "i am stressed", "i am worried", "i'm worried")):
-        return "emotional"
-    return "statement"
+# Single source of truth for submit_turn ordering.
+SUBMIT_TURN_PHASE_ORDER: tuple[str, ...] = (
+    "preflight",
+    "register",
+    "execution",
+    "drain",
+    "finalize",
+)
 
 
-def _runtime_plan_strategy(intent_type: str) -> str:
-    intent = str(intent_type or "").strip().lower()
-    if intent == "emotional":
-        return "empathy_first"
-    if intent == "request":
-        return "task_plan"
-    if intent == "question":
-        return "direct_answer"
-    return "direct_answer"
+def submit_turn_phase_order() -> tuple[str, ...]:
+    return SUBMIT_TURN_PHASE_ORDER
 
 
-def _build_runtime_plan(
-    *,
-    session_id: str,
-    trace_id: str,
-    user_input: str,
-    attachments: AttachmentList | None,
-    metadata: dict[str, Any],
-) -> dict[str, Any]:
-    existing = dict(metadata.get("runtime_plan") or {})
-    intent_type = str(
-        existing.get("intent_type")
-        or dict(metadata.get("turn_plan") or {}).get("intent_type")
-        or _runtime_plan_intent(user_input),
-    )
-    strategy = str(
-        existing.get("strategy")
-        or dict(metadata.get("turn_plan") or {}).get("strategy")
-        or _runtime_plan_strategy(intent_type),
-    )
-    revision = int(existing.get("revision") or 0)
-    plan = {
-        "plan_id": str(existing.get("plan_id") or f"plan:{session_id}:{trace_id}"),
-        "revision": max(1, revision if revision > 0 else 1),
-        "intent_type": intent_type,
-        "strategy": strategy,
-        "status": str(existing.get("status") or "active"),
-        "created_at": float(existing.get("created_at") or time.time()),
-        "updated_at": float(time.time()),
-        "subgoals": list(existing.get("subgoals") or []),
-        "tool_routing": {
-            "latency_budget_ms": int(dict(existing.get("tool_routing") or {}).get("latency_budget_ms") or 2500),
-            "cost_tier": str(dict(existing.get("tool_routing") or {}).get("cost_tier") or "balanced"),
-            "mode": str(dict(existing.get("tool_routing") or {}).get("mode") or "adaptive"),
-            "attachment_count": int(len(attachments or [])),
-        },
-        "branch_history": list(existing.get("branch_history") or []),
-    }
-    return plan
+def _phase_name(entry: Any) -> str:
+    if isinstance(entry, tuple) and len(entry) >= 1:
+        return str(entry[0] or "").strip()
+    return str(entry or "").strip()
 
 
-def _mutate_runtime_plan(
-    *,
-    metadata: dict[str, Any],
-    reason: str,
-    status: str = "active",
-    strategy: str | None = None,
-    note: str = "",
-) -> dict[str, Any]:
-    plan = dict(metadata.get("runtime_plan") or {})
-    if not plan:
-        return plan
-    plan["revision"] = int(plan.get("revision") or 1) + 1
-    if strategy:
-        plan["strategy"] = str(strategy)
-    plan["status"] = str(status or "active")
-    plan["updated_at"] = float(time.time())
-    history = list(plan.get("branch_history") or [])
-    history.append(
-        {
-            "revision": int(plan.get("revision") or 1),
-            "reason": str(reason or "replan"),
-            "status": str(status or "active"),
-            "note": str(note or ""),
-            "timestamp": float(time.time()),
-        },
-    )
-    plan["branch_history"] = history[-32:]
-    metadata["runtime_plan"] = plan
-    return plan
+def _phase_ts(entry: Any) -> float | None:
+    if isinstance(entry, tuple) and len(entry) >= 2:
+        return _coerce_float(entry[1])
+    return None
 
 
-def _build_semantic_memory_candidates(
-    *,
-    user_input: str,
-    response: str,
-    trace_id: str,
-    session_id: str,
-) -> list[dict[str, Any]]:
-    candidates: list[dict[str, Any]] = []
-    text = str(user_input or "").strip()
-    if text and "?" not in text and len(text) >= 12:
-        if "i " in text.lower() or "my " in text.lower():
-            candidates.append(
-                {
-                    "kind": "episodic_fact",
-                    "text": text[:240],
-                    "score": 0.72,
-                    "trace_id": str(trace_id or ""),
-                    "session_id": str(session_id or "default"),
-                    "source": "user_input",
-                    "created_at": float(time.time()),
-                },
-            )
-    answer = str(response or "").strip()
-    if answer:
-        candidates.append(
-            {
-                "kind": "assistant_summary",
-                "text": answer[:240],
-                "score": 0.51,
-                "trace_id": str(trace_id or ""),
-                "session_id": str(session_id or "default"),
-                "source": "assistant_response",
-                "created_at": float(time.time()),
+def _validate_submit_turn_phase_progress(phase_trace: list[Any]) -> None:
+    expected = submit_turn_phase_order()
+    observed = tuple(_phase_name(item) for item in list(phase_trace))
+    if len(observed) > len(expected):
+        raise InvariantViolation(
+            "submit_turn phase ordering violated",
+            context={
+                "expected_order": list(expected),
+                "observed": list(observed),
+                "reason": "observed phases exceed expected order length",
             },
         )
-    return candidates
+    prefix = expected[: len(observed)]
+    if observed != prefix:
+        raise InvariantViolation(
+            "submit_turn phase ordering violated",
+            context={
+                "expected_prefix": list(prefix),
+                "observed": list(observed),
+            },
+        )
+
+    observed_ts = [_phase_ts(item) for item in list(phase_trace)]
+    for index in range(1, len(observed_ts)):
+        prev_ts = observed_ts[index - 1]
+        curr_ts = observed_ts[index]
+        if prev_ts is None or curr_ts is None:
+            continue
+        if curr_ts < prev_ts:
+            raise InvariantViolation(
+                "submit_turn phase ordering violated",
+                context={
+                    "expected_prefix": list(prefix),
+                    "observed": list(observed),
+                    "reason": "phase timestamps are non-monotonic",
+                    "phase_index": index,
+                },
+            )
 
 
-def _normalize_tool_runtime_contract(metadata: dict[str, Any]) -> dict[str, Any]:
-    raw = dict(metadata.get("tool_runtime_contract") or metadata.get("tool_request") or {})
-    tool_name = str(raw.get("tool_name") or raw.get("name") or "").strip()
-    tool_version = str(raw.get("version") or "").strip() or "latest"
-    required_permissions = [
-        str(item).strip().lower()
-        for item in list(raw.get("required_permissions") or [])
-        if str(item).strip()
-    ]
-    return {
-        "tool_name": tool_name,
-        "version": tool_version,
-        "required_permissions": sorted(set(required_permissions)),
-        "timeout_seconds": float(raw.get("timeout_seconds") or 10.0),
-        "side_effect_class": str(raw.get("side_effect_class") or "unknown"),
-        "determinism": str(raw.get("determinism") or "unknown"),
-        "contract_valid": bool(tool_name),
-    }
+def _append_submit_turn_phase(phase_trace: list[tuple[str, float]], phase: str) -> None:
+    next_index = len(phase_trace)
+    expected = submit_turn_phase_order()
+    if next_index >= len(expected):
+        raise InvariantViolation(
+            "submit_turn phase ordering violated",
+            context={
+                "expected_order": list(expected),
+                "observed": [name for name, _ in list(phase_trace)],
+                "attempted_phase": str(phase or "").strip(),
+                "reason": "attempted to append phase past terminal finalize phase",
+            },
+        )
+
+    expected_phase = expected[next_index]
+    normalized_phase = str(phase or "").strip()
+    if normalized_phase != expected_phase:
+        raise InvariantViolation(
+            "submit_turn phase ordering violated",
+            context={
+                "expected_phase": expected_phase,
+                "observed_phase": normalized_phase,
+                "phase_index": next_index,
+            },
+        )
+
+    phase_trace.append((normalized_phase, float(time.time())))
+    _validate_submit_turn_phase_progress(phase_trace)
 
 
-def _validate_tool_runtime_contract(metadata: dict[str, Any]) -> tuple[bool, str]:
-    contract = dict(metadata.get("tool_runtime_contract") or {})
-    if not contract:
-        return True, "ok"
-    tool_name = str(contract.get("tool_name") or "").strip()
-    if not tool_name:
-        # No concrete tool invocation requested; this is a normal path.
-        return True, "ok"
-    timeout_seconds = float(contract.get("timeout_seconds") or 10.0)
-    if timeout_seconds < 0.05 or timeout_seconds > 120.0:
-        return False, "tool timeout_seconds out of accepted range [0.05, 120.0]"
-    required_permissions = {
-        str(item).strip().lower()
-        for item in list(contract.get("required_permissions") or [])
-        if str(item).strip()
-    }
-    granted_permissions = {
-        str(item).strip().lower()
-        for item in list(metadata.get("session_permissions") or [])
-        if str(item).strip()
-    }
-    missing = sorted(required_permissions - granted_permissions)
-    if missing:
-        return False, f"tool permission denied: missing {', '.join(missing)}"
-    side_effect_class = str(contract.get("side_effect_class") or "").strip().lower()
-    if side_effect_class in {"stateful", "logged"} and not bool(metadata.get("approval_granted", False)):
-        return False, "tool requires approval_granted for side effects"
-    return True, "ok"
+def _assert_submit_turn_phase_trace_complete(phase_trace: list[tuple[str, float]]) -> None:
+    observed = tuple(name for name, _ts in list(phase_trace))
+    expected = submit_turn_phase_order()
+    if observed != expected:
+        raise InvariantViolation(
+            "submit_turn phase ordering violated",
+            context={
+                "expected_order": list(expected),
+                "observed": list(observed),
+                "phase_trace": [
+                    {"phase": str(name), "timestamp": float(ts)}
+                    for name, ts in list(phase_trace)
+                ],
+            },
+        )
 
 
-def _tokenize_memory_text(value: str) -> set[str]:
-    raw = str(value or "").strip().lower()
-    if not raw:
-        return set()
-    return {token for token in raw.replace("\n", " ").split(" ") if len(token.strip()) >= 3}
-
-
-def _rank_semantic_memory_items(
+def _assert_submit_turn_phase_boundary(
     *,
-    items: list[dict[str, Any]],
-    user_input: str,
-    limit: int,
-) -> list[dict[str, Any]]:
-    query_tokens = _tokenize_memory_text(user_input)
-    now = float(time.time())
-    ranked: list[tuple[float, dict[str, Any]]] = []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        text = str(item.get("text") or "")
-        if not text:
-            continue
-        item_tokens = _tokenize_memory_text(text)
-        lexical_overlap = 0.0
-        if query_tokens and item_tokens:
-            lexical_overlap = float(len(query_tokens.intersection(item_tokens))) / float(max(1, len(query_tokens)))
-        base_score = float(item.get("score") or 0.0)
-        created_at = float(item.get("created_at") or now)
-        # Soft recency boost over ~24h horizon without swamping semantic score.
-        recency = max(0.0, 1.0 - min(1.0, (now - created_at) / 86_400.0))
-        final_score = (0.55 * base_score) + (0.35 * lexical_overlap) + (0.10 * recency)
-        candidate = dict(item)
-        candidate["retrieval_score"] = round(float(final_score), 6)
-        ranked.append((final_score, candidate))
-    ranked.sort(key=lambda pair: pair[0], reverse=True)
-    return [candidate for _score, candidate in ranked[:max(0, int(limit))]]
+    phase_trace: list[tuple[str, float]],
+    expected_phase: str,
+    operation: str,
+) -> None:
+    current = str(phase_trace[-1][0] if phase_trace else "")
+    if current != str(expected_phase or "").strip():
+        raise InvariantViolation(
+            "submit_turn phase boundary violation",
+            context={
+                "operation": str(operation or ""),
+                "expected_phase": str(expected_phase or ""),
+                "current_phase": current,
+                "phase_trace": [
+                    {"phase": str(name), "timestamp": float(ts)}
+                    for name, ts in list(phase_trace)
+                ],
+            },
+        )
 
 
 def _clamp(value: float, lower: float, upper: float) -> float:
@@ -642,7 +562,6 @@ def _update_response_engine_drift_monitor(
             "influence_share": influence_share,
             "decision_confidence": float(decision_confidence),
             "shadow_event_count": int(max(0, shadow_event_count)),
-            "is_fallback": "fallback" in selected_source,
             "missing_reasoning": bool(missing_reasoning),
         },
     )
@@ -663,7 +582,6 @@ def _update_response_engine_drift_monitor(
         "coherence": _mean([float(dict(item.get("influence_share") or {}).get("coherence", 0.0) or 0.0) for item in window]),
     }
     rates = {
-        "fallback_rate": _mean([1.0 if bool(item.get("is_fallback")) else 0.0 for item in window]),
         "veto_presence_rate": _mean([1.0 if int(item.get("shadow_event_count", 0) or 0) > 0 else 0.0 for item in window]),
         "missing_reasoning_rate": _mean([1.0 if bool(item.get("missing_reasoning")) else 0.0 for item in window]),
         "avg_decision_confidence": _mean([float(item.get("decision_confidence", 0.0) or 0.0) for item in window]),
@@ -691,8 +609,6 @@ def _update_response_engine_drift_monitor(
         anomalies.append("tools_over_contributing")
     if rolling["memory"] <= 0.08:
         anomalies.append("memory_underutilized")
-    if rates["fallback_rate"] >= 0.15:
-        anomalies.append("fallback_frequency_high")
     if rates["avg_decision_confidence"] <= 0.08:
         anomalies.append("decision_confidence_low")
     if rates["missing_reasoning_rate"] >= 0.10:
@@ -1063,48 +979,6 @@ def _extract_execution_degradations(metadata: dict[str, Any]) -> list[dict[str, 
     return [dict(item) for item in items if isinstance(item, dict)]
 
 
-def _resolve_terminal_turn_truth(
-    *,
-    state: dict[str, Any],
-    job: "ExecutionJob",
-) -> dict[str, Any]:
-    """Compile terminal turn truth via canonical system-state algebra."""
-    algebra = evaluate_system_state_algebra(
-        state=state,
-        execution_result_payload=dict(job.metadata.get("execution_result") or {}),
-        trace_token=str(job.trace_id or ""),
-        context="control_plane_commit",
-    )
-    return dict(algebra)
-
-
-def _enforce_global_turn_invariant_gate(
-    *,
-    session: dict[str, Any],
-    job: "ExecutionJob",
-) -> None:
-    """Hard gate: block commit if any turn truth/invariant contract is violated."""
-    state = session.get("state")
-    if not isinstance(state, dict):
-        return
-
-    algebra = _resolve_terminal_turn_truth(state=state, job=job)
-    persist_system_state_algebra(
-        state=state,
-        algebra=algebra,
-        trace_context="control_plane_commit",
-        persist_legacy_projections=True,
-        terminal_snapshot=True,
-    )
-    gate = dict(algebra.get("projections", {}).get("control_plane_gate") or {})
-
-    if not bool(gate.get("ok", False)):
-        raise MemorySetInvariantViolation(
-            "Global invariant gate violation: "
-            + "; ".join(str(item) for item in list(gate.get("violations") or [])[:3]),
-        )
-
-
 @dataclass(slots=True)
 class ExecutionJob:
     session_id: str
@@ -1470,6 +1344,7 @@ class Scheduler:
             str,
             tuple[ExecutionJob, asyncio.Future[FinalizedTurnResult]],
         ] = {}
+        self._invariant_enforcer = InvariantEnforcer()
         self._pending_job_ids: list[str] = []
         self._work_event: asyncio.Event | None = None
         self._work_event_loop: asyncio.AbstractEventLoop | None = None
@@ -2130,7 +2005,11 @@ class Scheduler:
         tracer = get_tracer()
         with tracer.span("scheduler.drain_once"):
             result = await self._execute_with_boundary(executor, session, job)
-        _enforce_global_turn_invariant_gate(session=session, job=job)
+        self._invariant_enforcer.enforce_global_turn_invariant_gate(
+            session=session,
+            execution_result=dict(job.metadata.get("execution_result") or {}),
+            trace_id=str(job.trace_id or ""),
+        )
         self._record_scheduler_success(
             job=job,
             future=future,
@@ -2254,26 +2133,34 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         )
         self.execution_token = f"exec-{hashlib.sha256(token_seed.encode('utf-8')).hexdigest()[:20]}"
         self.ledger = resolved_options.ledger or InMemoryExecutionLedger()
-        self._ledger_writer = LedgerWriterAdapter(
+        self._ledger_coordinator = LedgerCoordinator(
+            ledger=self.ledger,
+            scope_validator=KernelGateway.assert_scope,
+        )
+        ledger_writer_gateway = LedgerWriterAdapter(
             self.ledger,
             scope_validator=KernelGateway.assert_scope,
         )
-        self._ledger_index = LedgerIndex(self.ledger)
-        self._effect_journal = EffectJournal(writer=self._ledger_writer, index=self._ledger_index)
-        write_event = getattr(self._ledger_writer, "write_event", None)
-        self._reconcile_queue = DurableReconcileQueue(
-            ledger=self.ledger,
-            write_event=write_event,
-            request_is_ambiguous=lambda session_id, request_id: self._request_has_ambiguous_inflight_effect_state(
-                session_id=session_id,
-                request_id=request_id,
-            ),
-            effect_is_ambiguous=lambda session_id, effect_id: self._effect_journal.is_ambiguous(
-                session_id=session_id,
-                effect_id=effect_id,
+        ledger_runtime = self._ledger_coordinator.build_runtime(
+            writer=ledger_writer_gateway,
+            reconcile_queue_factory=lambda writer, effect_journal: DurableReconcileQueue(
+                ledger=self.ledger,
+                write_event=getattr(writer, "write_event", None),
+                request_is_ambiguous=lambda session_id, request_id: self._request_has_ambiguous_inflight_effect_state(
+                    session_id=session_id,
+                    request_id=request_id,
+                ),
+                effect_is_ambiguous=lambda session_id, effect_id: effect_journal.is_ambiguous(
+                    session_id=session_id,
+                    effect_id=effect_id,
+                ),
             ),
         )
-        self.ledger_reader = LedgerReader(self.ledger)
+        self._ledger_writer = ledger_runtime.writer
+        self._ledger_index = ledger_runtime.index
+        self._effect_journal = ledger_runtime.effect_journal
+        self.ledger_reader = ledger_runtime.reader
+        self._reconcile_queue = ledger_runtime.reconcile_queue
         self._execution_lease = ExecutionLease(default_ttl_seconds=resolved_options.lease_ttl_seconds)
         scheduler_options = SchedulerOptions(
             max_inflight_jobs=resolved_options.max_inflight_jobs,
@@ -2312,9 +2199,21 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
             "mismatch": 0,
             "enforced_blocked": 0,
         }
+        self._execution_coordinator = ExecutionCoordinator()
+        self._persistence_coordinator = PersistenceCoordinator()
         self._stream_event_sequence: int = 0
         self._distributed_correctness = DistributedCorrectnessModel()
         self._distributed_epoch = 1
+        # Bootstrap: register local node as initial authority to allow first turn submission.
+        # Scheduler lease sync will update this periodically during execution.
+        initial_now_ms = self._distributed_now_ms()
+        self._distributed_correctness.register_node(
+            node_id=self._scheduler.worker_id,
+            epoch=int(self._distributed_epoch),
+            lease_until_ms=initial_now_ms + int(self._scheduler.lease_ttl_seconds * 1000),
+            role=NodeRole.LEADER,
+            state_hash=self.execution_token,
+        )
         self._cognitive_policy_engine = CognitivePolicyEngine()
         self._semantic_memory_graph = SemanticMemoryGraph()
         self._tool_routing_engine = ToolRoutingEngine()
@@ -3139,11 +3038,12 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         future_done: bool,
         projection_terminal: bool,
     ) -> dict[str, bool]:
-        return {
-            "future_done": bool(future_done),
-            "projection_terminal": bool(projection_terminal),
-            "job_removed_from_scheduler": bool(job_id not in getattr(self._scheduler, "_jobs", {})),
-        }
+        return self._execution_coordinator.completion_expectations(
+            job_id=job_id,
+            future_done=future_done,
+            projection_terminal=projection_terminal,
+            scheduler=self._scheduler,
+        )
 
     async def _drain_scheduler_until_resolved(
         self,
@@ -3154,110 +3054,19 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         trace_token: str,
         deadline: float,
     ) -> int:
-        loop_iterations = 0
-        consecutive_idle_drains = 0
-        last_progress_emit = time.monotonic()
-        while not future.done():
-            loop_iterations += 1
-            if time.time() > deadline:
-                projected_at_deadline = self.lifecycle_projection.get(job.job_id)
-                projection_terminal_at_deadline = bool(
-                    projected_at_deadline is not None
-                    and projected_at_deadline.status in {ExecutionStatus.COMPLETED, ExecutionStatus.FAILED}
-                )
-                self._emit_progress_snapshot(
-                    phase="during_scheduler_drain",
-                    session_id=session_key,
-                    trace_token=trace_token,
-                    job_id=job.job_id,
-                    future_done=future.done(),
-                    completion_expectations=self._completion_expectations(
-                        job_id=job.job_id,
-                        future_done=future.done(),
-                        projection_terminal=projection_terminal_at_deadline,
-                    ),
-                    note="deadline exceeded",
-                    extra={"loop_iterations": loop_iterations, "consecutive_idle_drains": consecutive_idle_drains},
-                )
-                raise TimeoutError("submit_turn exceeded timeout")
-
-            drained = await self.scheduler.drain_once(self.kernel_executor)
-            if drained:
-                consecutive_idle_drains = 0
-                continue
-
-            consecutive_idle_drains += 1
-            remaining = max(0.0, deadline - time.time())
-            if remaining <= 0.0:
-                raise TimeoutError("submit_turn exceeded timeout")
-
-            wait_task = asyncio.create_task(
-                self.scheduler.wait_for_work(timeout_seconds=remaining),
-            )
-            done, _ = await asyncio.wait(
-                {future, wait_task},
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            wait_ready = False
-            if wait_task in done:
-                with contextlib.suppress(Exception):
-                    wait_ready = bool(wait_task.result())
-
-            if (time.monotonic() - last_progress_emit) >= 1.0 or consecutive_idle_drains >= 5:
-                projected = self.lifecycle_projection.get(job.job_id)
-                projection_terminal = bool(
-                    projected is not None and projected.status in {ExecutionStatus.COMPLETED, ExecutionStatus.FAILED}
-                )
-                if consecutive_idle_drains >= 5:
-                    _mutate_runtime_plan(
-                        metadata=job.metadata,
-                        reason="scheduler_stall_replan",
-                        status="active",
-                        strategy="clarify",
-                        note="idle_drain_threshold_reached",
-                    )
-                    self._emit_runtime_stream_event(
-                        event_type="plan.updated",
-                        session_id=session_key,
-                        trace_id=trace_token,
-                        payload={
-                            "job_id": str(job.job_id or ""),
-                            "runtime_plan": dict(job.metadata.get("runtime_plan") or {}),
-                            "trigger": "scheduler_stall_replan",
-                        },
-                    )
-                self._emit_progress_snapshot(
-                    phase="during_scheduler_drain",
-                    session_id=session_key,
-                    trace_token=trace_token,
-                    job_id=job.job_id,
-                    future_done=future.done(),
-                    completion_expectations=self._completion_expectations(
-                        job_id=job.job_id,
-                        future_done=future.done(),
-                        projection_terminal=projection_terminal,
-                    ),
-                    note="idle drain iteration",
-                    extra={
-                        "loop_iterations": loop_iterations,
-                        "consecutive_idle_drains": consecutive_idle_drains,
-                        "wait_ready": bool(wait_ready),
-                        "remaining_seconds": float(remaining),
-                        "stall_phase_candidate": "during_scheduler_drain",
-                        "potential_scheduler_ledger_cycle": bool(
-                            consecutive_idle_drains >= 5
-                            and int(len(getattr(self._scheduler, "_pending_job_ids", []) or [])) > 0
-                            and not wait_ready
-                        ),
-                    },
-                )
-                last_progress_emit = time.monotonic()
-
-            if wait_task not in done:
-                wait_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await wait_task
-        return loop_iterations
+        return await self._execution_coordinator.drain_scheduler_until_resolved(
+            future=future,
+            job=job,
+            session_key=session_key,
+            trace_token=trace_token,
+            deadline=deadline,
+            scheduler=self.scheduler,
+            kernel_executor=self.kernel_executor,
+            lifecycle_projection=self.lifecycle_projection,
+            mutate_runtime_plan=_mutate_runtime_plan,
+            emit_runtime_stream_event=self._emit_runtime_stream_event,
+            emit_progress_snapshot=self._emit_progress_snapshot,
+        )
 
     def _build_response_engine_context(
         self,
@@ -3633,6 +3442,49 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         }
         return shaped, continuity
 
+    def _record_canonical_gate_breach(
+        self,
+        *,
+        session_key: str,
+        metadata: dict[str, Any] | None,
+        gate: str,
+        reason: str,
+    ) -> None:
+        payload = {
+            "gate": str(gate or "unknown"),
+            "reason": str(reason or "canonical_gate_violation"),
+            "timestamp": float(time.time()),
+        }
+        if isinstance(metadata, dict):
+            stream = list(metadata.get("canonical_gate_breaches") or [])
+            stream.append(dict(payload))
+            metadata["canonical_gate_breaches"] = stream[-32:]
+            metadata["canonical_gate_breach_count"] = int(metadata.get("canonical_gate_breach_count") or 0) + 1
+
+        validation_enabled = False
+        if isinstance(metadata, dict) and "canonical_gate_validation" in metadata:
+            validation_enabled = bool(metadata.get("canonical_gate_validation"))
+        else:
+            validation_enabled = str(
+                os.environ.get("DADBOT_CANONICAL_GATE_VALIDATION", "0"),
+            ).strip().lower() in {"1", "true", "yes", "on"}
+
+        if not validation_enabled:
+            return
+
+        with contextlib.suppress(Exception):
+            session = self.registry.get_or_create(str(session_key or "default"))
+            state = session.setdefault("state", {})
+            if isinstance(state, dict):
+                metrics = dict(state.get("canonical_gate_metrics") or {})
+                total = int(metrics.get("total_breaches", 0) or 0) + 1
+                per_gate = dict(metrics.get("per_gate") or {})
+                per_gate[payload["gate"]] = int(per_gate.get(payload["gate"], 0) or 0) + 1
+                metrics["total_breaches"] = total
+                metrics["per_gate"] = per_gate
+                metrics["last_breach"] = dict(payload)
+                state["canonical_gate_metrics"] = metrics
+
     def execute_from_graph_context(
         self,
         turn_context: Any,
@@ -3674,10 +3526,15 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         ranked_response = self._response_engine.run(engine_context)
         final_response = str(ranked_response or "")
         if not final_response:
-            fallback_response = getattr(self._response_engine, "_fallback_response", None)
-            if callable(fallback_response):
-                final_response = str(fallback_response(engine_context) or "")
-        final_response = final_response or initial_response
+            self._record_canonical_gate_breach(
+                session_key=session_key,
+                metadata=metadata,
+                gate="response_engine_empty_graph_context",
+                reason="response_engine produced empty response",
+            )
+            raise RuntimeError(
+                "Canonical response gate violation: response_engine produced empty response."
+            )
 
         telemetry = getattr(engine_context, "response_engine_telemetry", None)
         if isinstance(telemetry, dict) and telemetry:
@@ -3740,21 +3597,29 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
             ranked_response = self._response_engine.run(engine_context)
             final_response = str(ranked_response or "")
             if not final_response:
-                fallback_response = getattr(self._response_engine, "_fallback_response", None)
-                if callable(fallback_response):
-                    final_response = str(fallback_response(engine_context) or "")
-            final_response = final_response or initial_response
+                self._record_canonical_gate_breach(
+                    session_key=session_key,
+                    metadata=job.metadata,
+                    gate="response_engine_empty_finalize",
+                    reason="response_engine produced empty response",
+                )
+                raise RuntimeError(
+                    "Canonical response gate violation: response_engine produced empty response."
+                )
             telemetry = getattr(engine_context, "response_engine_telemetry", None)
             if isinstance(telemetry, dict) and telemetry:
                 job.metadata["response_engine_telemetry"] = telemetry
         except Exception as exc:
-            logger.warning(f"ResponseEngine ranking failed: {exc}; using ResponseEngine fallback")
-            fallback_response = getattr(self._response_engine, "_fallback_response", None)
-            if callable(fallback_response):
-                final_response = str(fallback_response(engine_context) or "")
-            else:
-                final_response = initial_response
-            telemetry = None
+            logger.exception("Canonical response gate violation during response_engine ranking")
+            self._record_canonical_gate_breach(
+                session_key=session_key,
+                metadata=job.metadata,
+                gate="response_engine_ranking_exception",
+                reason=str(type(exc).__name__),
+            )
+            raise RuntimeError(
+                "Canonical response gate violation: response_engine ranking failed."
+            ) from exc
 
         shaped_response, continuity_telemetry = self._apply_continuity_shaping(
             response_text=final_response,
@@ -3774,14 +3639,15 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
             telemetry_container = dict(job.metadata.get("response_engine_telemetry") or {})
             selected = dict(telemetry_container.get("selected") or {})
             if not selected:
-                selected = {
-                    "source": "response_engine_fallback",
-                    "score": 0.0,
-                    "reason": "No ranked candidate metadata available; fallback selected by response engine.",
-                }
-                telemetry_container["selected"] = selected
-                telemetry_container.setdefault("selected_text_preview", str(final_response or "")[:240])
-                job.metadata["response_engine_telemetry"] = telemetry_container
+                self._record_canonical_gate_breach(
+                    session_key=session_key,
+                    metadata=job.metadata,
+                    gate="response_engine_missing_selected_metadata",
+                    reason="response_engine selected metadata missing",
+                )
+                raise RuntimeError(
+                    "Canonical response gate violation: missing response_engine selected metadata."
+                )
 
             if str(job.metadata.get("response_authority") or "") != "response_engine":
                 raise RuntimeError("Final response authority invariant violated: expected response_engine")
@@ -3794,7 +3660,17 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
                 or dict(getattr(engine_context, "job_metadata", {}) or {}).get("shadow_decision_bus")
                 or []
             )
-            selected_source = str(selected.get("source") or "response_engine_fallback")
+            selected_source = str(selected.get("source") or "").strip()
+            if not selected_source:
+                self._record_canonical_gate_breach(
+                    session_key=session_key,
+                    metadata=job.metadata,
+                    gate="response_engine_selected_source_missing",
+                    reason="selected source missing",
+                )
+                raise RuntimeError(
+                    "Canonical response gate violation: selected source missing."
+                )
             selected_influence_share = _response_influence_share(selected)
             decision_confidence = max(
                 0.0,
@@ -4294,16 +4170,6 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
 
     @staticmethod
     def _confluence_mode(metadata: dict[str, Any]) -> str:
-        override = str(dict(metadata or {}).get("confluence_mode") or "").strip().lower()
-        test_override = bool(
-            str(os.environ.get("PYTEST_CURRENT_TEST") or "").strip()
-            and str(os.environ.get("DADBOT_TEST_GLOBAL_CONFLUENCE_MODE") or "").strip().lower()
-            in {"off", "audit", "enforce"}
-        )
-        if test_override and override in {"off", "audit", "enforce"}:
-            return override
-        if test_override:
-            return str(os.environ.get("DADBOT_TEST_GLOBAL_CONFLUENCE_MODE") or "enforce").strip().lower()
         return "enforce"
 
     def _derive_confluence_key(
@@ -4332,28 +4198,19 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         attachments: AttachmentList | None,
         metadata: dict[str, Any],
     ) -> None:
-        mode = self._confluence_mode(metadata)
-        if mode == "off":
-            return
         explicit_key = str(dict(metadata or {}).get("confluence_key") or "").strip()
-        if mode == "enforce" and not explicit_key:
-            allow_legacy = bool(
-                str(os.environ.get("PYTEST_CURRENT_TEST") or "").strip()
-                and str(os.environ.get("DADBOT_ALLOW_LEGACY_CONFLUENCE_KEY", "0")).strip().lower()
-                in {"1", "true", "yes", "on"}
+        if not explicit_key:
+            raise RuntimeError(
+                "Missing explicit confluence_key in enforce mode. "
+                "Set metadata['confluence_key'] at orchestrator boundary.",
             )
-            if not allow_legacy:
-                raise RuntimeError(
-                    "Missing explicit confluence_key in enforce mode. "
-                    "Set metadata['confluence_key'] at orchestrator boundary.",
-                )
         key = self._derive_confluence_key(
             user_input=user_input,
             attachments=attachments,
             metadata=metadata,
         )
         known = str(self._global_confluence_contracts.get(key) or "")
-        metadata["_global_confluence_mode"] = mode
+        metadata["_global_confluence_mode"] = "enforce"
         metadata["_global_confluence_key"] = key
         if known:
             metadata.setdefault("expected_execution_confluence_hash", known)
@@ -4688,6 +4545,9 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         session_key = str(session_id or "default")
         if self.registry.is_terminated(session_key):
             raise RuntimeError(f"session {session_key!r} has been terminated")
+        # Refresh distributed authority lease before checking to ensure thin-spine path
+        # doesn't fail with expired lease during initial turns.
+        self._sync_distributed_authority(role=NodeRole.LEADER, state_hash=self.execution_token)
         self._enforce_distributed_runtime_authority(operation="submit_turn_entry_gate")
 
         md, resolved_timeout_seconds, request_id, effect_id = self._prepare_submit_metadata(
@@ -4826,6 +4686,13 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
             metadata=md,
         )
         self._merge_session_state(session_id=session_key, state_patch=session_state)
+        phase_trace: list[tuple[str, float]] = []
+        _append_submit_turn_phase(phase_trace, "preflight")
+        _assert_submit_turn_phase_boundary(
+            phase_trace=phase_trace,
+            expected_phase="preflight",
+            operation="_preflight_submit_turn",
+        )
         effect_id, dedupe_key, dedupe_future, owns_dedupe_slot, immediate_result = await self._preflight_submit_turn(
             session_key=session_key,
             request_id=request_id,
@@ -4835,6 +4702,12 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         if immediate_result is not None:
             return immediate_result
 
+        _append_submit_turn_phase(phase_trace, "register")
+        _assert_submit_turn_phase_boundary(
+            phase_trace=phase_trace,
+            expected_phase="register",
+            operation="_resolve_submit_trace_and_effect",
+        )
         trace_id, effect_id = self._resolve_submit_trace_and_effect(
             session_key=session_key,
             user_input=user_input,
@@ -4876,6 +4749,11 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
             payload={"swarm_plan": dict(md.get("swarm_plan") or {})},
         )
         assert trace_id, "Missing trace_id at control plane entry"
+        _assert_submit_turn_phase_boundary(
+            phase_trace=phase_trace,
+            expected_phase="register",
+            operation="_register_submit_job",
+        )
         job, future, _submitted_ts = await self._register_submit_job(
             session_key=session_key,
             user_input=user_input,
@@ -4892,6 +4770,12 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
             note="job registered",
             extra={"request_id": request_id, "effect_id": effect_id},
         )
+        _append_submit_turn_phase(phase_trace, "execution")
+        _assert_submit_turn_phase_boundary(
+            phase_trace=phase_trace,
+            expected_phase="execution",
+            operation="_initialize_submit_scope",
+        )
         before_state_hash, deadline, _cs_token = self._initialize_submit_scope(
             session_key=session_key,
             trace_token=trace_id,
@@ -4899,6 +4783,12 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
             resolved_timeout_seconds=resolved_timeout_seconds,
         )
         try:
+            _append_submit_turn_phase(phase_trace, "drain")
+            _assert_submit_turn_phase_boundary(
+                phase_trace=phase_trace,
+                expected_phase="drain",
+                operation="_drain_scheduler_until_resolved",
+            )
             loop_iterations = await self._drain_scheduler_until_resolved(
                 future=future,
                 job=job,
@@ -4907,7 +4797,13 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
                 deadline=deadline,
             )
             result = await future
-            return self._finalize_submit_success(
+            _append_submit_turn_phase(phase_trace, "finalize")
+            _assert_submit_turn_phase_boundary(
+                phase_trace=phase_trace,
+                expected_phase="finalize",
+                operation="_finalize_submit_success",
+            )
+            finalized = self._finalize_submit_success(
                 job=job,
                 result=result,
                 session_key=session_key,
@@ -4916,7 +4812,16 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
                 dedupe_future=dedupe_future,
                 loop_iterations=loop_iterations,
             )
+            _assert_submit_turn_phase_trace_complete(phase_trace)
+            return finalized
         except Exception as exc:
+            if len(phase_trace) < len(submit_turn_phase_order()):
+                _append_submit_turn_phase(phase_trace, "finalize")
+            _assert_submit_turn_phase_boundary(
+                phase_trace=phase_trace,
+                expected_phase="finalize",
+                operation="_record_submit_exception",
+            )
             self._record_submit_exception(
                 job=job,
                 future=future,
@@ -4925,6 +4830,7 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
                 trace_token=trace_id,
                 exc=exc,
             )
+            _assert_submit_turn_phase_trace_complete(phase_trace)
             raise
         finally:
             if (request_id or effect_id) and owns_dedupe_slot:
@@ -5159,55 +5065,7 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         job: ExecutionJob,
         result: FinalizedTurnResult,
     ) -> None:
-        """Transition CoreState to turn_committed and write views into session state."""
-        session_state = session.setdefault("state", {}) if isinstance(session, dict) else {}
-        if not isinstance(session_state, dict):
-            return
-        # CoreState is the authority — memory_retrieval_set is derived FROM CoreState.
-        active_core_state = get_active_core_state()
-        base_core_state = (
-            active_core_state
-            if active_core_state is not None
-            else CoreState.from_dict(session_state.get("core_state"))
-        )
-        next_core_state = transition(
-            base_core_state,
-            InputEvent(
-                event_type="turn_committed",
-                payload={
-                    "trace_id": str(job.trace_id or ""),
-                    "response": str(result[0] if isinstance(result, tuple) and len(result) >= 1 else ""),
-                    "should_end": bool(result[1] if isinstance(result, tuple) and len(result) >= 2 else False),
-                    "memory_retrieval_set": base_core_state.memory.to_dict_list(),
-                },
-                metadata={
-                    "job_id": str(job.job_id or ""),
-                },
-            ),
-        )
-        projections = project_views(next_core_state)
-        session_state["core_state"] = next_core_state.to_dict()
-        session_state["core_state_views"] = {
-            "memory": {
-                "entries": [dict(item.payload or {}) for item in projections.memory.entries],
-            },
-            "graph": {
-                "adjacency": dict(projections.graph.adjacency),
-            },
-            "execution": {
-                "trace_id": projections.execution.state.trace_id,
-                "last_response": projections.execution.state.last_response,
-                "should_end": bool(projections.execution.state.should_end),
-            },
-            "canonical": {
-                "event_count": len(projections.canonical.events),
-                "last_event_id": str(projections.canonical.events[-1].event_id if projections.canonical.events else ""),
-            },
-            "facade": projections.facade.as_payload(),
-        }
-        metadata = dict(job.metadata or {})
-        metadata["core_state"] = dict(session_state["core_state"])
-        job.metadata = metadata
+        self._persistence_coordinator.apply_turn_committed_core_state(session=session, job=job, result=result)
 
     def _promote_semantic_memory(
         self,
@@ -5216,34 +5074,11 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         job: ExecutionJob,
         response_text: str,
     ) -> None:
-        promoted = _build_semantic_memory_candidates(
-            user_input=str(job.user_input or ""),
-            response=str(response_text or ""),
-            trace_id=str(job.trace_id or ""),
-            session_id=str(job.session_id or "default"),
+        self._persistence_coordinator.promote_semantic_memory(
+            session=session,
+            job=job,
+            response_text=response_text,
         )
-        state = session.setdefault("state", {}) if isinstance(session, dict) else {}
-        if isinstance(state, dict) and promoted:
-            projection = dict(state.get("semantic_memory_projection") or {})
-            items = [
-                dict(item)
-                for item in list(projection.get("items") or [])
-                if isinstance(item, dict)
-            ]
-            items.extend(promoted)
-            projection["items"] = items[-128:]
-            projection["last_updated"] = float(time.time())
-            projection["authority"] = "derived_read_only"
-            projection["writer"] = "memory_manager"
-            state["semantic_memory_projection"] = projection
-        metadata = dict(job.metadata or {})
-        metadata["semantic_memory_projection"] = {
-            "authority": "derived_read_only",
-            "writer": "memory_manager",
-            "candidate_count": int(len(promoted)),
-            "candidates": [dict(item) for item in list(promoted)[:8]],
-        }
-        job.metadata = metadata
 
     def bootstrap(self) -> dict[str, Any]:
         events = self.ledger.read()

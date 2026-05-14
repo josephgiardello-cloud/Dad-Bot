@@ -769,13 +769,11 @@ class ResponseEngine:
 
         generated = self.generate_candidates(context, n=8)
         if not generated:
-            logger.warning("No candidates generated; returning fallback")
-            return self._fallback_response(context)
+            return self._terminal_no_candidate_result(context, reason="none_generated")
 
         filtered = self.filter_candidates(generated, context)
         if not filtered:
-            logger.warning("All candidates filtered out; returning fallback")
-            return self._fallback_response(context)
+            return self._terminal_no_candidate_result(context, reason="all_filtered")
 
         scored = self.score_candidates(filtered, context)
 
@@ -814,6 +812,55 @@ class ResponseEngine:
             self._recent_responses.pop(0)
 
         return best.text
+
+    def _terminal_no_candidate_result(self, context: Any, *, reason: str) -> str:
+        """Return a deterministic terminal fallback when no candidates survive."""
+        terminal_text = str(getattr(context, "initial_response", "") or "").strip() or "I hear you."
+        terminal = ResponseCandidate(
+            text=terminal_text,
+            source="canonical_empty",
+            confidence=1.0,
+            tone="neutral",
+            intensity=0.0,
+            stance="balanced",
+            response_goal="fallback_terminal",
+            risk_level=0.0,
+            depth="minimal",
+        )
+        self._last_turn_telemetry = {
+            "candidate_count": 0,
+            "status": "no_valid_candidates",
+            "reason": str(reason or "all_filtered"),
+            "selected": {
+                "source": terminal.source,
+                "tone": terminal.tone,
+                "depth": terminal.depth,
+                "response_goal": terminal.response_goal,
+                "risk_level": float(terminal.risk_level),
+                "selected_score": 0.0,
+                "second_best_score": 0.0,
+                "decision_confidence": 0.0,
+                "influence_share": {
+                    "safety": 0.0,
+                    "tools": 0.0,
+                    "memory": 0.0,
+                    "coherence": 0.0,
+                },
+            },
+            "selected_score": 0.0,
+            "second_best_score": 0.0,
+            "decision_confidence": 0.0,
+        }
+        self._record_selection(terminal)
+        try:
+            context.response_engine_telemetry = dict(self._last_turn_telemetry)
+        except Exception:
+            logger.debug("Unable to attach response_engine_telemetry to context", exc_info=True)
+
+        self._recent_responses.append(terminal.text)
+        if len(self._recent_responses) > 10:
+            self._recent_responses.pop(0)
+        return terminal.text
 
     def get_last_turn_telemetry(self) -> dict[str, Any]:
         return dict(self._last_turn_telemetry)
@@ -1469,10 +1516,6 @@ class ResponseEngine:
         if any(token in text for token in ("worried", "anxious", "overwhelmed", "sad", "stress")):
             return "emotional"
         return "statement"
-
-    def _fallback_response(self, context: Any) -> str:
-        """Fallback if no candidates generated."""
-        return "I appreciate you, and I'm thinking about what you said."
 
 
 if __name__ == "__main__":

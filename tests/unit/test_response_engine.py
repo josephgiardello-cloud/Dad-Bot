@@ -472,7 +472,7 @@ class TestResponseEngineOrchestration:
         assert result in engine._recent_responses
 
     def test_run_uses_filtered_candidates(self):
-        """run() falls back when all generated candidates fail hard filter."""
+        """run() returns deterministic terminal fallback when all candidates are filtered."""
         engine = ResponseEngine()
         context = MockContext(user_input="Anything")
 
@@ -482,8 +482,11 @@ class TestResponseEngineOrchestration:
         ]
 
         result = engine.run(context)
-        assert isinstance(result, str)
-        assert "appreciate" in result.lower()
+
+        assert result == "I hear you."
+        assert isinstance(context.response_engine_telemetry, dict)
+        assert context.response_engine_telemetry.get("status") == "no_valid_candidates"
+        assert context.response_engine_telemetry.get("reason") == "all_filtered"
 
 
 class TestResponseEngineWeights:
@@ -507,23 +510,6 @@ class TestResponseEngineWeights:
 
         # Scores should differ
         assert score_default != score_custom
-
-
-class TestResponseEngineFallback:
-    """Test fallback behavior."""
-
-    def test_run_fallback_on_no_candidates(self):
-        """run() returns fallback response if generation fails."""
-        engine = ResponseEngine()
-
-        # Override generate to return empty
-        engine.generate_candidates = lambda *args, **kwargs: []
-
-        context = MockContext(user_input="Test")
-        result = engine.run(context)
-
-        # Should get fallback
-        assert "appreciate" in result.lower() or len(result) > 0
 
 
 class TestResponseEngineEmotionAndRisk:

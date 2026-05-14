@@ -33,7 +33,7 @@ from dadbot.assistant_runtime import AssistantRuntime
 from dadbot.core.action_mixin import DadBotActionMixin
 from dadbot.core.boot_mixin import DadBotBootMixin
 from dadbot.core.compat_mixin import DadBotCompatMixin
-from dadbot.core.convenience_mixin import DadBotConvenienceMixin
+from dadbot.core.convenience_helpers import ConvenienceHelpers
 from dadbot.core.facade_compat import (
     DadBotFacadeCompat,  # noqa: F401  # type: ignore[reportUnusedImport]
 )
@@ -122,7 +122,6 @@ class DadBot(
     DadBotMcpMixin,
     DadBotHealthMixin,
     DadBotCompatMixin,
-    DadBotConvenienceMixin,
     DadBotActionMixin,
 ):
     """Thin public facade for the Dad Bot persona.
@@ -204,6 +203,13 @@ class DadBot(
         "_shadow_decision_bus": ("_internal_runtime", "shadow_decision_bus"),
         "_last_shadow_decision_report": ("_internal_runtime", "last_shadow_decision_report"),
         "_background_task_ids": ("_internal_runtime", "background_task_ids"),
+    }
+
+    # Legacy compatibility maps retained for drift-contract tests and tooling.
+    _CONFIG_ATTR_MAP: dict[str, str] = {
+        name: target_attr
+        for name, (target_obj, target_attr) in _UNIFIED_ROUTING.items()
+        if target_obj == "config"
     }
 
     # ------------------------------------------------------------------
@@ -340,6 +346,42 @@ class DadBot(
         if candidate is not None:
             return candidate
         return factory()
+
+    @property
+    def convenience(self) -> ConvenienceHelpers:
+        cached = getattr(self, "_convenience_helpers", None)
+        if cached is None:
+            cached = ConvenienceHelpers(self)
+            object.__setattr__(self, "_convenience_helpers", cached)
+        return cast(ConvenienceHelpers, cached)
+
+    def deliver_status_message(self, message, status_callback=None):
+        self.convenience.deliver_status_message(message, status_callback=status_callback)
+
+    @staticmethod
+    def terminal_width():
+        return ConvenienceHelpers.terminal_width()
+
+    def print_system_message(self, message):
+        self.convenience.print_system_message(message)
+
+    @staticmethod
+    def print_speaker_message(speaker, message):
+        ConvenienceHelpers.print_speaker_message(speaker, message)
+
+    def build_system_prompt(self) -> str:
+        return self.convenience.build_system_prompt()
+
+    @staticmethod
+    def flatten_memory_payload(payload):
+        return ConvenienceHelpers.flatten_memory_payload(payload)
+
+    @staticmethod
+    def coerce_memory_summary(value):
+        return ConvenienceHelpers.coerce_memory_summary(value)
+
+    def new_chat_session(self):
+        return self.convenience.new_chat_session()
 
     # ------------------------------------------------------------------
     # Core manager properties

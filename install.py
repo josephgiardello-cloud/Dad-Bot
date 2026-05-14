@@ -162,6 +162,7 @@ def main():
     else:
         print("\nAfter starting Ollama, run this script again or just run:")
         print("   python launch.py")
+        print("   python Dad.py")
 
 
 if __name__ == "__main__":

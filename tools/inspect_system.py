@@ -27,6 +27,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 # ── Repo root on sys.path so imports work when run directly ────────────────
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -34,6 +35,67 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from dadbot.core.system_health_scorer import SystemHealthScorer  # noqa: E402
+
+
+# ── Health Schema Contract (Frozen) ──────────────────────────────────────────
+# Version: v1_canonical
+# Enforced: No new fields without explicit version bump
+# This prevents silent schema drift and regressions.
+
+HEALTH_SCHEMA_VERSION = "v1_canonical"
+
+# Expected top-level keys in health output (order-independent)
+EXPECTED_HEALTH_KEYS = frozenset({
+    "anomalies",
+    "confidence_avg",
+    "confidence_trend",
+    "dominant_signal",
+    "last_turn",
+    "stability",
+})
+
+FORBIDDEN_HEALTH_KEYS = frozenset({
+    "fallback_rate",  # Deprecated field; regression detection
+})
+
+
+def _validate_health_schema(health_dict: dict[str, any]) -> None:
+    """Enforce health schema contract invariants.
+    
+    Raises ValueError if schema contract is violated.
+    """
+    if not isinstance(health_dict, dict):
+        raise ValueError(f"health output must be dict, got {type(health_dict)}")
+
+    # Hard contract lock: this field must never surface in the canonical schema.
+    if "fallback_rate" in health_dict:
+        raise AssertionError("Forbidden key surfaced post-schema-lock: fallback_rate")
+    
+    actual_keys = frozenset(health_dict.keys())
+    
+    # Check for forbidden keys (regression detection)
+    forbidden_found = actual_keys & FORBIDDEN_HEALTH_KEYS
+    if forbidden_found:
+        raise ValueError(
+            f"Forbidden keys detected in health schema (regression): {forbidden_found}. "
+            f"Schema version {HEALTH_SCHEMA_VERSION} does not include these fields."
+        )
+    
+    # Check for missing expected keys
+    missing = EXPECTED_HEALTH_KEYS - actual_keys
+    if missing:
+        raise ValueError(
+            f"Missing expected keys in health schema: {missing}. "
+            f"Expected {EXPECTED_HEALTH_KEYS}, got {actual_keys}."
+        )
+    
+    # Check for unexpected keys (new fields without version bump)
+    unexpected = actual_keys - EXPECTED_HEALTH_KEYS
+    if unexpected:
+        raise ValueError(
+            f"Unexpected keys detected in health schema (version bump required): {unexpected}. "
+            f"Current version {HEALTH_SCHEMA_VERSION} only supports {EXPECTED_HEALTH_KEYS}."
+        )
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
@@ -79,7 +141,16 @@ def _dominant_signal_from_share(share: dict[str, object]) -> str:
     return max(cleaned, key=cleaned.get)
 
 
+def _validate_and_return_health(snapshot: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Validate health snapshot schema before returning."""
+    if snapshot is None:
+        return None
+    _validate_health_schema(snapshot)
+    return snapshot
+
+
 def _compact_diagnostic_snapshot(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    snapshot: dict[str, Any] | None = None
     if not isinstance(payload, dict):
         return None
 
@@ -109,10 +180,9 @@ def _compact_diagnostic_snapshot(payload: dict[str, Any] | None) -> dict[str, An
                     influence_share = {"safety": 0.0, "tools": 0.0, "memory": 0.0, "coherence": 0.0}
             confidence = float(selected.get("decision_confidence", 0.0) or 0.0)
             dominant_signal = _dominant_signal_from_share(influence_share)
-            return {
+            snapshot = {
                 "confidence_avg": round(confidence, 3),
                 "confidence_trend": 0.0,
-                "fallback_rate": 0.0,
                 "dominant_signal": dominant_signal,
                 "anomalies": [],
                 "last_turn": {
@@ -121,7 +191,8 @@ def _compact_diagnostic_snapshot(payload: dict[str, Any] | None) -> dict[str, An
                 },
                 "stability": "stable" if confidence >= 0.12 else "unstable",
             }
-        return None
+            return _validate_and_return_health(snapshot)
+        return _validate_and_return_health(snapshot)
 
     if diagnostics:
         selected = dict((payload.get("response_engine_decision_report") or {}).get("selected") or {})
@@ -160,10 +231,9 @@ def _compact_diagnostic_snapshot(payload: dict[str, Any] | None) -> dict[str, An
                 else ("drifting" if len(anomalies) > 1 or abs(confidence_trend) >= 0.05 else "stable")
             )
 
-        return {
+        snapshot = {
             "confidence_avg": round(float(diagnostics.get("confidence_avg", 0.0) or 0.0), 3),
             "confidence_trend": round(float(diagnostics.get("confidence_trend", 0.0) or 0.0), 3),
-            "fallback_rate": round(float(diagnostics.get("fallback_rate", 0.0) or 0.0), 3),
             "dominant_signal": dominant_signal,
             "anomalies": anomalies[:8],
             "last_turn": {
@@ -172,6 +242,7 @@ def _compact_diagnostic_snapshot(payload: dict[str, Any] | None) -> dict[str, An
             },
             "stability": stability,
         }
+        return _validate_and_return_health(snapshot)
 
     history = list(diagnostics.get("history") or [])
     window = history[-50:]
@@ -206,7 +277,6 @@ def _compact_diagnostic_snapshot(payload: dict[str, Any] | None) -> dict[str, An
     else:
         confidence_trend = float(diagnostics.get("confidence_trend", 0.0) or 0.0)
 
-    fallback_rate = _mean([1.0 if bool(item.get("is_fallback")) else 0.0 for item in window])
     anomalies = list(diagnostics.get("anomalies") or [])
     dominant_signal = _dominant_signal_from_share(influence_share)
     last_turn_confidence = float(selected.get("decision_confidence", confidence_avg) or confidence_avg)
@@ -214,10 +284,9 @@ def _compact_diagnostic_snapshot(payload: dict[str, Any] | None) -> dict[str, An
         "unstable" if confidence_avg < 0.12 else ("drifting" if len(anomalies) > 1 or abs(confidence_trend) >= 0.05 else "stable")
     )
 
-    return {
+    snapshot = {
         "confidence_avg": round(float(confidence_avg), 3),
         "confidence_trend": round(float(confidence_trend), 3),
-        "fallback_rate": round(float(fallback_rate), 3),
         "dominant_signal": dominant_signal,
         "anomalies": anomalies[:8],
         "last_turn": {
@@ -226,6 +295,7 @@ def _compact_diagnostic_snapshot(payload: dict[str, Any] | None) -> dict[str, An
         },
         "stability": str(stability),
     }
+    return _validate_and_return_health(snapshot)
 
 
 def _live_health() -> dict | None:
@@ -286,7 +356,6 @@ def cmd_health(args: argparse.Namespace) -> int:
         snapshot = {
             "confidence_avg": 0.0,
             "confidence_trend": 0.0,
-            "fallback_rate": 0.0,
             "dominant_signal": "coherence",
             "anomalies": [
                 "diagnostic_data_unavailable",
@@ -298,6 +367,7 @@ def cmd_health(args: argparse.Namespace) -> int:
             "stability": "unstable" if not report.is_healthy else "stable",
         }
 
+    _validate_health_schema(snapshot)
     print(json.dumps(snapshot, indent=2, sort_keys=True))
 
     return 0
