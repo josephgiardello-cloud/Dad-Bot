@@ -30,6 +30,7 @@ from dadbot.core.control_plane import (
     SessionRegistry,
 )
 from dadbot.core.execution_binder import TraceBinder
+from dadbot.core.execution_mode import ExecutionModeResolver
 from dadbot.core.execution_boundary import ControlPlaneExecutionBoundary
 from dadbot.core.execution_resource_budget import BackpressureSignal
 from dadbot.core.execution_result_unified import ensure_unified_execution_result
@@ -134,15 +135,9 @@ class _OrchestratorStateCoordinator:
         job: ExecutionJob,
         checkpoint: dict[str, Any] | None,
     ) -> str:
-        explicit = _coerce_execution_mode(dict(job.metadata or {}).get("execution_mode"))
-        if explicit != "live":
-            return explicit
-        execution_state = dict(dict(job.metadata or {}).get("execution_state") or {})
-        lifecycle_state = str(execution_state.get("lifecycle_state") or "").strip().lower()
-        redelivery_count = int(execution_state.get("redelivery_count") or 0)
-        if isinstance(checkpoint, dict) and checkpoint and (redelivery_count > 0 or lifecycle_state == "recovery_pending"):
-            return "recovery"
-        return "live"
+        """Deprecated: Use ExecutionModeResolver.resolve() instead."""
+        context = ExecutionModeResolver.resolve(job, checkpoint)
+        return str(context.mode)
 
     @staticmethod
     def hydrate_context_from_checkpoint(
@@ -834,17 +829,23 @@ class DadBotOrchestrator:
     ) -> str:
         loaded_checkpoint = self._load_checkpoint_data(str(job.session_id or "default"), manifest)
         loaded_checkpoint_anchor = str((session_state or {}).get("last_checkpoint_hash") or "") if isinstance(session_state, dict) else ""
+        
+        # Unified execution mode resolution (canonical entry point)
+        mode_context = ExecutionModeResolver.resolve(job, loaded_checkpoint)
+        execution_mode = str(mode_context.mode)
+        
+        # Recovery restoration: called exactly once at mode resolution
+        if mode_context.mode.value == "recovery" and isinstance(loaded_checkpoint, dict) and loaded_checkpoint:
+            self._hydrate_context_from_checkpoint(context, loaded_checkpoint)
+        
+        # Checkpoint hash bookkeeping
         if isinstance(loaded_checkpoint, dict) and loaded_checkpoint:
-            execution_mode = self._resolve_execution_mode(job, loaded_checkpoint)
-            if execution_mode == "recovery":
-                self._hydrate_context_from_checkpoint(context, loaded_checkpoint)
             context.last_checkpoint_hash = str(loaded_checkpoint.get("checkpoint_hash") or "")
             context.prev_checkpoint_hash = str(loaded_checkpoint.get("prev_checkpoint_hash") or "")
             if not loaded_checkpoint_anchor:
                 loaded_checkpoint_anchor = str(loaded_checkpoint.get("checkpoint_hash") or "")
-        else:
-            execution_mode = self._resolve_execution_mode(job, None)
 
+        # Attach resolved mode to job and context for downstream access
         context.metadata["execution_mode"] = execution_mode
         job.metadata["execution_mode"] = execution_mode
         context.state["execution_mode"] = execution_mode

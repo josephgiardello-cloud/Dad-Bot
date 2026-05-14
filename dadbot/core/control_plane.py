@@ -47,6 +47,7 @@ from dadbot.core.execution_resource_budget import BackpressureSignal
 from dadbot.core.execution_context import get_active_core_state, push_core_state_event
 from dadbot.core.execution_ledger import ExecutionLedger
 from dadbot.core.execution_ledger_memory import InMemoryExecutionLedger
+from dadbot.core.execution_mode import ExecutionModeResolver
 from dadbot.core.execution_result_unified import (
     _TERMINAL_STATUS_VALUES,
     build_unified_execution_result,
@@ -876,16 +877,12 @@ def _transition_execution_state(
 
 
 def _resolved_execution_mode(job: "ExecutionJob") -> str:
-    metadata = dict(job.metadata or {})
-    explicit = str(metadata.get("execution_mode") or "").strip().lower()
-    state = dict(metadata.get("execution_state") or {})
-    if int(state.get("redelivery_count") or 0) > 0:
-        return "recovery"
-    if _coerce_lifecycle_state(state.get("lifecycle_state")) == ExecutionLifecycleState.RECOVERY_PENDING:
-        return "recovery"
-    if explicit in {"live", "replay", "recovery"}:
-        return explicit
-    return "live"
+    """Resolve execution mode for telemetry/logging (no checkpoint available).
+
+    Delegates to unified ExecutionModeResolver for consistency with orchestrator.
+    Used in control plane lifecycle events where checkpoint isn't accessible.
+    """
+    return ExecutionModeResolver.resolve_for_logging(job)
 
 
 def _lifecycle_state_from_projection(state: ReducedExecutionState | None) -> str:
