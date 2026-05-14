@@ -76,3 +76,113 @@ async def test_turn_handler_injects_policy_template_when_store_is_provided() -> 
     assert metadata["policy_version"] == "dad_v2.0"
     template = dict(metadata["dad_policy_template"] or {})
     assert template["persona_style"]["warmth"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_turn_handler_injects_prompt_context_into_metadata() -> None:
+    calls: list[dict[str, object]] = []
+
+    async def _submit_turn(user_input: str, **kwargs: object):
+        calls.append({"user_input": user_input, **kwargs})
+        return ("ok", False)
+
+    handler = TurnHandler(
+        submit_turn=_submit_turn,
+        prompt_builder=lambda: "Dad prompt context",
+    )
+    await handler.process_turn(TurnContext(user_input="hello", session_id="s1"))
+
+    metadata = dict(calls[0]["metadata"] or {})
+    assert metadata["prompt_context"] == "Dad prompt context"
+    rich_context = dict(metadata["rich_context"] or {})
+    assert rich_context["prompt_context"] == "Dad prompt context"
+
+
+@pytest.mark.asyncio
+async def test_turn_handler_appends_memory_ledger_event_on_success() -> None:
+    class _MemoryLedger:
+        def __init__(self) -> None:
+            self.events: list[dict[str, object]] = []
+
+        async def append_memory_event(self, event: dict[str, object]) -> None:
+            self.events.append(dict(event))
+
+    ledger = _MemoryLedger()
+
+    async def _submit_turn(user_input: str, **kwargs: object):
+        return ("reply text", False)
+
+    handler = TurnHandler(submit_turn=_submit_turn, memory_ledger=ledger)
+    await handler.process_turn(
+        TurnContext(
+            user_input="hello",
+            session_id="s1",
+            confluence_key="turn:key",
+            metadata={"policy_version": "dad_v2.0"},
+        ),
+    )
+
+    assert len(ledger.events) == 1
+    event = ledger.events[0]
+    assert event["event_type"] == "turn.finalized"
+    assert event["session_id"] == "s1"
+    assert event["confluence_key"] == "turn:key"
+    assert event["policy_version"] == "dad_v2.0"
+    assert event["reply_preview"] == "reply text"
+
+
+@pytest.mark.asyncio
+async def test_turn_handler_injects_relationship_projection_after_submit() -> None:
+    calls: list[dict[str, object]] = []
+
+    async def _submit_turn(user_input: str, **kwargs: object):
+        calls.append({"user_input": user_input, **kwargs})
+        return ("reply", False)
+
+    handler = TurnHandler(
+        submit_turn=_submit_turn,
+        relationship_snapshotter=lambda: {
+            "trust_level": 70,
+            "openness_level": 64,
+            "emotional_momentum": "steady",
+        },
+    )
+    await handler.process_turn(TurnContext(user_input="hello", session_id="s1"))
+
+    metadata = dict(calls[0]["metadata"] or {})
+    projection = dict(metadata["relationship_projection"] or {})
+    assert projection["trust_level"] == 70
+    assert projection["openness_level"] == 64
+    assert projection["emotional_momentum"] == "steady"
+
+
+@pytest.mark.asyncio
+async def test_turn_handler_writes_relationship_projection_to_ledger_event() -> None:
+    class _MemoryLedger:
+        def __init__(self) -> None:
+            self.events: list[dict[str, object]] = []
+
+        async def append_memory_event(self, event: dict[str, object]) -> None:
+            self.events.append(dict(event))
+
+    ledger = _MemoryLedger()
+
+    async def _submit_turn(user_input: str, **kwargs: object):
+        return ("reply text", False)
+
+    handler = TurnHandler(
+        submit_turn=_submit_turn,
+        memory_ledger=ledger,
+        relationship_snapshotter=lambda: {
+            "trust_level": 71,
+            "openness_level": 52,
+            "emotional_momentum": "warming",
+        },
+    )
+    await handler.process_turn(TurnContext(user_input="hello", session_id="s1"))
+
+    assert len(ledger.events) == 1
+    event = ledger.events[0]
+    assert event["relationship_trust_level"] == 71
+    assert event["relationship_openness_level"] == 52
+    assert event["relationship_emotional_momentum"] == "warming"

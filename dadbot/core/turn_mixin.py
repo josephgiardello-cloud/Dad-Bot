@@ -14,7 +14,7 @@ import hashlib
 import inspect
 import json
 import logging
-from collections.abc import Awaitable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from typing import Any, cast
 from uuid import uuid4
 
@@ -33,6 +33,7 @@ from dadbot.core.execution_contract import (
 from dadbot.core.graph_failure_handler import DadBotGraphFailureHandlerMixin
 from dadbot.core.kernel_locks import KernelReplaySequenceLock
 from dadbot.core.kernel_signals import CorrelationContext, TracingContext
+from dadbot.memory.ledger import InMemoryAsyncMemoryLedgerPersistence, MemoryLedger
 from dadbot.core.policy_store import DadPolicyStore, InMemoryAsyncPolicyPersistence
 from dadbot.core.runtime_errors import (
     CanonicalInvariantViolation,
@@ -60,6 +61,34 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
         policy_store = DadPolicyStore(InMemoryAsyncPolicyPersistence())
         self._turn_policy_store = policy_store
         return policy_store
+
+    def _get_prompt_builder(self) -> Callable[[], str] | None:
+        relationship_manager = getattr(self, "relationship_manager", None)
+        builder = getattr(relationship_manager, "build_prompt_context", None)
+        if callable(builder):
+            return cast("Callable[[], str]", builder)
+        return None
+
+    def _get_relationship_snapshotter(self) -> Callable[[], dict[str, Any] | None] | None:
+        relationship_manager = getattr(self, "relationship_manager", None)
+        snapshotter = getattr(relationship_manager, "current_state", None)
+        if callable(snapshotter):
+            return cast("Callable[[], dict[str, Any] | None]", snapshotter)
+        return None
+
+    def _get_memory_ledger(self) -> MemoryLedger:
+        ledger = getattr(self, "_turn_memory_ledger", None)
+        if isinstance(ledger, MemoryLedger):
+            return ledger
+
+        persistence = getattr(self, "_turn_memory_ledger_persistence", None)
+        if persistence is None:
+            persistence = InMemoryAsyncMemoryLedgerPersistence()
+            self._turn_memory_ledger_persistence = persistence
+
+        ledger = MemoryLedger(persistence)
+        self._turn_memory_ledger = ledger
+        return ledger
 
     # ------------------------------------------------------------------
     # Orchestrator resolution
@@ -133,6 +162,9 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
         handler = TurnHandler(
             submit_turn=cast(Any, submit_turn),
             policy_store=self._get_policy_store(),
+            prompt_builder=self._get_prompt_builder(),
+            memory_ledger=self._get_memory_ledger(),
+            relationship_snapshotter=self._get_relationship_snapshotter(),
         )
         return await handler.process_turn(
             TurnContext(

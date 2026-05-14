@@ -16,6 +16,35 @@ class AsyncMemoryLedgerPersistence(Protocol):
     async def lrange(self, key: str, start: int, end: int) -> list[str]: ...
 
 
+class InMemoryAsyncMemoryLedgerPersistence:
+    """Small async persistence adapter for tests/local wiring."""
+
+    def __init__(self) -> None:
+        self._kv: dict[str, str] = {}
+        self._lists: dict[str, list[str]] = {}
+
+    async def get(self, key: str) -> str | None:
+        return self._kv.get(str(key))
+
+    async def set(self, key: str, value: str) -> None:
+        self._kv[str(key)] = str(value)
+
+    async def rpush(self, key: str, value: str) -> None:
+        bucket = self._lists.setdefault(str(key), [])
+        bucket.append(str(value))
+
+    async def lrange(self, key: str, start: int, end: int) -> list[str]:
+        values = list(self._lists.get(str(key), []))
+        if not values:
+            return []
+
+        normalized_start = max(int(start), 0)
+        normalized_end = len(values) - 1 if int(end) < 0 else int(end)
+        if normalized_start > normalized_end:
+            return []
+        return values[normalized_start : normalized_end + 1]
+
+
 class MemoryLedger:
     """Append-only tamper-evident memory event ledger."""
 

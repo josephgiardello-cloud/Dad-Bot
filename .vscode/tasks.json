@@ -29,6 +29,18 @@
 			"group": "test"
 		},
 		{
+			"label": "Test Lane: THIN-SPINE VS LEGACY",
+			"type": "shell",
+			"command": "${workspaceFolder}/.venv/Scripts/python.exe",
+			"args": [
+				"-m",
+				"pytest",
+				"tests/integration/test_thin_spine_legacy_comparison.py",
+				"-q"
+			],
+			"group": "test"
+		},
+		{
 			"label": "Test Lane: DURABILITY / PHASE4",
 			"type": "shell",
 			"command": "${workspaceFolder}/.venv/Scripts/python.exe",
