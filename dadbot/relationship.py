@@ -4,6 +4,8 @@ import logging
 from typing import Any
 
 from dadbot.contracts import DadBotContext, SupportsRelationshipRuntime
+from dadbot.core.execution_context import record_execution_step
+from dadbot.core.state_lineage import canonical_state_hash
 
 logger = logging.getLogger(__name__)
 
@@ -621,9 +623,29 @@ Rules:
         persisted here; the signal is available to callers for logging or future
         SaveNode commit.
         """
-        _ = turn_context
-        state = self.current_state()
-        return {**state, "feedback_applied": str(feedback_type or "").strip().lower()}
+        before_state = self.current_state(turn_context=turn_context)
+        before_hash = canonical_state_hash(before_state)
+        result = self._apply_feedback_impl(before_state, feedback_type)
+        after_hash = canonical_state_hash(result)
+        record_execution_step(
+            "relationship.apply_feedback",
+            payload={
+                "before_state_hash": before_hash,
+                "after_state_hash": after_hash,
+                "inputs": {
+                    "feedback_type": str(feedback_type or "").strip().lower(),
+                },
+                "outputs": {
+                    "feedback_applied": str(result.get("feedback_applied") or ""),
+                },
+            },
+            required=False,
+        )
+        return result
+
+    @staticmethod
+    def _apply_feedback_impl(state: dict, feedback_type: str) -> dict:
+        return {**dict(state or {}), "feedback_applied": str(feedback_type or "").strip().lower()}
 
     def apply_relationship_feedback(
         self,

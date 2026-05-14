@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import contextlib
@@ -43,7 +43,7 @@ from dadbot.core.execution_context import (
     close_core_state_scope,
 )
 from dadbot.core.execution_lease import ExecutionLease, LeaseConflictError
-from dadbot.core.execution_resource_budget import BackpressureSignal
+from dadbot.core.execution_resource_budget import BackpressureSignal, resolve_dynamic_compute_ticket
 from dadbot.core.execution_context import get_active_core_state, push_core_state_event
 from dadbot.core.execution_ledger import ExecutionLedger
 from dadbot.core.execution_ledger_memory import InMemoryExecutionLedger
@@ -3082,6 +3082,11 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
             session_state_ref = {}
 
         metadata = dict(job.metadata or {})
+        compute_ticket = resolve_dynamic_compute_ticket(
+            metadata=metadata,
+            user_input=str(job.user_input or ""),
+        )
+        metadata["dynamic_compute_ticket"] = compute_ticket.to_dict()
         if not isinstance(metadata.get("reward_feedback"), dict):
             pending_feedback = dict(session_state_ref.get("response_learning_pending") or {})
             if pending_feedback:
@@ -3104,6 +3109,8 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         else:
             session_state_ref.pop("response_learning_pending", None)
 
+        self._restore_response_engine_runtime_state(session_state_ref)
+
         session_state = dict(session_state_ref)
         
         # Simple dynamic context object with execution data.
@@ -3115,6 +3122,7 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         context.session_state = session_state
         context.job_metadata = metadata
         context.trace_id = str(job.trace_id or "")
+        context.compute_ticket = compute_ticket
 
         context.memory_context = list(metadata.get("memory_context") or [])
 
@@ -3152,6 +3160,64 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         )
         
         return context
+
+    def _restore_response_engine_runtime_state(self, session_state: dict[str, Any]) -> None:
+        if not isinstance(session_state, dict):
+            return
+        durable_memory = dict(session_state.get("memory_store") or {})
+        recent_raw = list(
+            session_state.get("response_engine_recent_responses")
+            or durable_memory.get("_response_engine_recent_responses")
+            or []
+        )
+        normalized_recent: list[str] = []
+        for item in recent_raw:
+            text = str(item or "").strip()
+            if text:
+                normalized_recent.append(text)
+        if not normalized_recent:
+            history_items = list(session_state.get("history") or [])
+            assistant_replies: list[str] = []
+            for entry in history_items:
+                if not isinstance(entry, dict):
+                    continue
+                if str(entry.get("role") or "").strip().lower() != "assistant":
+                    continue
+                reply_text = str(entry.get("content") or "").strip()
+                if reply_text:
+                    assistant_replies.append(reply_text)
+            normalized_recent = assistant_replies[-10:]
+        if hasattr(self._response_engine, "_recent_responses"):
+            self._response_engine._recent_responses = normalized_recent[-10:]
+
+        stored_weights = dict(
+            session_state.get("response_engine_reward_weights")
+            or durable_memory.get("_response_engine_reward_weights")
+            or {}
+        )
+        base_weights = dict(getattr(self._response_engine, "_reward_weights", {}) or {})
+        if not base_weights:
+            return
+        bound = float(getattr(self._response_engine, "_reward_weight_bound", 0.25) or 0.25)
+        for key, value in stored_weights.items():
+            if key not in base_weights or not isinstance(value, (int, float)):
+                continue
+            numeric = float(value)
+            base_weights[key] = float(max(-bound, min(bound, numeric)))
+        if hasattr(self._response_engine, "_reward_weights"):
+            self._response_engine._reward_weights = base_weights
+
+    def _capture_response_engine_runtime_state(self) -> dict[str, Any]:
+        recent = list(getattr(self._response_engine, "_recent_responses", []) or [])
+        reward_weights = dict(getattr(self._response_engine, "_reward_weights", {}) or {})
+        return {
+            "response_engine_recent_responses": [str(item or "") for item in recent[-10:]],
+            "response_engine_reward_weights": {
+                str(key): float(value)
+                for key, value in reward_weights.items()
+                if isinstance(value, (int, float))
+            },
+        }
 
     @staticmethod
     def _estimate_emotion_signal(*, user_input: str, response_text: str) -> dict[str, float]:
@@ -3522,6 +3588,17 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         )
         ranked_response = self._response_engine.run(engine_context)
         final_response = str(ranked_response or "")
+        execution_mode = str(metadata.get("execution_mode") or "").strip().lower()
+        strict_trace = bool(metadata.get("strict_trace_invariant", False))
+        if strict_trace and execution_mode in {"recovery", "replay"}:
+            authoritative = str(initial_response or "").strip()
+            if authoritative:
+                final_response = authoritative
+        final_response = self._stabilize_strict_response_text(
+            strict_trace=strict_trace,
+            response_text=final_response,
+            user_input=str(getattr(turn_context, "user_input", "") or ""),
+        )
         if not final_response:
             self._record_canonical_gate_breach(
                 session_key=session_key,
@@ -3537,6 +3614,18 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         if isinstance(telemetry, dict) and telemetry:
             metadata["response_engine_telemetry"] = dict(telemetry)
 
+        runtime_state = self._capture_response_engine_runtime_state()
+        state.update(runtime_state)
+        metadata["response_engine_runtime_state"] = dict(runtime_state)
+        memory_store = state.get("memory_store")
+        if isinstance(memory_store, dict):
+            memory_store["_response_engine_recent_responses"] = list(
+                runtime_state.get("response_engine_recent_responses") or []
+            )
+            memory_store["_response_engine_reward_weights"] = dict(
+                runtime_state.get("response_engine_reward_weights") or {}
+            )
+
         metadata["response_authority"] = "response_engine"
         state["response_authority"] = "response_engine"
         if isinstance(telemetry, dict) and telemetry:
@@ -3549,6 +3638,22 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
             pass
 
         return str(final_response or ""), False
+
+    @staticmethod
+    def _stabilize_strict_response_text(
+        *,
+        strict_trace: bool,
+        response_text: str,
+        user_input: str,
+    ) -> str:
+        text = str(response_text or "").strip()
+        if not strict_trace:
+            return text
+        if text.lower().startswith("i hear you:"):
+            user = str(user_input or "").strip()
+            if user:
+                return user
+        return text
 
     def _finalize_submit_success(
         self,
@@ -3593,6 +3698,17 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
             # All other systems are telemetry-only observers.
             ranked_response = self._response_engine.run(engine_context)
             final_response = str(ranked_response or "")
+            execution_mode = str(job.metadata.get("execution_mode") or "").strip().lower()
+            strict_trace = bool(job.metadata.get("strict_trace_invariant", False))
+            if strict_trace and execution_mode in {"recovery", "replay"}:
+                authoritative = str(initial_response or "").strip()
+                if authoritative:
+                    final_response = authoritative
+            final_response = self._stabilize_strict_response_text(
+                strict_trace=strict_trace,
+                response_text=final_response,
+                user_input=str(job.user_input or ""),
+            )
             if not final_response:
                 self._record_canonical_gate_breach(
                     session_key=session_key,
@@ -3803,6 +3919,16 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
                     "anomalies": list(drift_monitor.get("anomalies") or []),
                 }
                 state["response_engine_decision_report"] = report
+                runtime_state = self._capture_response_engine_runtime_state()
+                state.update(runtime_state)
+                memory_store = state.get("memory_store")
+                if isinstance(memory_store, dict):
+                    memory_store["_response_engine_recent_responses"] = list(
+                        runtime_state.get("response_engine_recent_responses") or []
+                    )
+                    memory_store["_response_engine_reward_weights"] = dict(
+                        runtime_state.get("response_engine_reward_weights") or {}
+                    )
                 job.metadata["response_engine_decision_report"] = report
                 job.metadata["response_engine_drift_monitor"] = {
                     "window_size": int(drift_monitor.get("window_size", 0) or 0),

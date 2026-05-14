@@ -11,7 +11,7 @@ A warm, private AI companion with long-term memory that remembers you, grows wit
 - **Actually remembers you**: Learns from your conversations over weeks/months. Tracks your goals, relationships, mood patterns.
 - **Feels real**: Adaptive personality, emotional awareness, proactive check-ins. More than a chatbot.
 - **Privacy-first**: Ollama-powered, runs on your computer. Your data is yours.
-- **Voice support**: Talk to Dad like you would a real person (WebRTC + TTS).
+- **Voice support path**: Local voice stack integration points are included; setup maturity depends on your machine tooling.
 - **No subscriptions**: Install once, use forever.
 
 ---
@@ -20,10 +20,10 @@ A warm, private AI companion with long-term memory that remembers you, grows wit
 
 - 🧠 **Deep Long-Term Memory** — Remembers conversations, goals, relationships, and emotional context
 - 💭 **Relationship Modeling** — Understands trust, emotional momentum, and personal history
-- 🎤 **Voice Calls** — Talk naturally with WebRTC + Piper TTS + Whisper STT
-- 📅 **Calendar Aware** — Knows your schedule and life events (iCal sync)
+- 🎤 **Voice Pipeline (Experimental)** — Local STT/TTS integration hooks are present; full turnkey setup is still maturing
+- 📅 **Calendar & Proactive Flows (Partial)** — Core reminder/check-in plumbing exists; full calendar-sync automation remains in progress
 - 📬 **Proactive Nudges** — Reminders and check-ins tailored to you
-- 🎨 **Custom Avatar** — Visual personality (generated)
+- 🎨 **Avatar Support (Partial)** — Avatar rendering exists with fallback paths; generation workflows vary by environment
 - 📱 **Mobile-Friendly** — PWA works on phone browsers
 - 🔒 **100% Private** — No cloud, no tracking, fully local
 
@@ -38,6 +38,8 @@ git clone https://github.com/josephreisinger/dadbot.git
 cd dadbot
 python install.py
 ```
+
+If you prefer manual setup, copy `.env.template` to `.env` and adjust values before launch.
 
 This will:
 - Install dependencies and set up Python environment
@@ -58,9 +60,23 @@ Then open [http://localhost:8501](http://localhost:8501) in your browser.
 
 ## 📸 Screenshots & Demo
 
-*(Coming soon: main chat interface, voice call screen, status dashboard, memory graph visualization)*
+Capture this set for the first polished README pass:
 
-For now, try it yourself! It takes ~2 minutes to install.
+- Main chat view with an active thread
+- Workshop status view (health + confluence)
+- Voice panel with local STT/TTS status visible
+- Memory/relationship context panel showing long-term continuity
+- Mobile PWA chat view
+
+Suggested naming convention:
+
+- `docs/screenshots/01-chat-main.png`
+- `docs/screenshots/02-workshop-status.png`
+- `docs/screenshots/03-voice-panel.png`
+- `docs/screenshots/04-memory-context.png`
+- `docs/screenshots/05-mobile-pwa.png`
+
+Once images are added, embed them directly in this section for a complete first-run visual tour.
 
 ---
 
@@ -72,6 +88,15 @@ For now, try it yourself! It takes ~2 minutes to install.
 - [Ollama](https://ollama.com) installed and running
 - Recommended: `ollama pull llama3.2` and `ollama pull nomic-embed-text`
 
+### Environment Setup
+
+1. Copy `.env.template` to `.env`
+2. Set at minimum:
+	- `OLLAMA_HOST`
+	- `DADBOT_LLM_MODEL`
+	- `POSTGRES_PASSWORD` (if using postgres-backed flows)
+3. Keep `.env` local and uncommitted
+
 The install script will guide you through the rest.
 
 ### Story Mode (Password Protected)
@@ -79,7 +104,7 @@ The install script will guide you through the rest.
 Story Mode enables deeper personalization learning. Set a password before launch:
 
 ```bash
-export DADBOT_STORY_MODE_PASSWORD="your-password"  # or set in .env
+export DADBOT_STORY_MODE_PASSWORD="replace-with-local-secret"  # or set in .env
 python launch.py
 ```
 
@@ -92,6 +117,35 @@ python launch.py
 ```bash
 pytest tests/
 ```
+
+For regular stability validation, run the broader replay/durability/stress lane:
+
+```bash
+pytest --run-stress -m "durability or phase4 or stress" --durations=25 -q
+```
+
+### Test Lanes Quick Map
+
+- `Test Lane: DEV` (`-m unit`) for fast local iteration
+- `Test Lane: INTEGRATION` (`-m integration`) for service/storage boundaries
+- `Test Lane: THIN-SPINE VS LEGACY` for parity checks on the migration seam
+- `Test Lane: DURABILITY / PHASE4` (`-m "durability or phase4"`) for restart/commit integrity
+- `Test Lane: DETERMINISM STRESS` (`--run-stress -m stress`) for replay and strict-equivalence pressure
+- `Test Lane: STABILITY SWEEP` (`--run-stress -m "durability or phase4 or stress"`) for broad regular validation
+- `Test Lane: CERT / REGRESSION` and `Test Lane: FULL CERT` for certification-oriented full passes
+
+Source of truth: `.vscode/tasks.json`.
+
+### Feature Maturity Matrix
+
+| Capability | Maturity | Evidence |
+|---|---|---|
+| Core local chat + memory pipeline | Shipped | `dadbot/core/dadbot.py`, `dadbot/core/turn_mixin.py`, `dadbot/core/graph.py` |
+| Voice stack hooks and optional deps | Experimental | `pyproject.toml` (`[project.optional-dependencies].voice`), `dad_streamlit.py`, `dadbot/agentic.py` |
+| Local reminders + local calendar events | Shipped (local storage) | `dadbot/agentic.py` (`add_reminder`, `add_calendar_event`, `list_calendar_events`) |
+| Calendar feed synchronization | Partial | `dadbot/core/boot_mixin.py` (`ical_feed_url`, `schedule_calendar_sync`) |
+| Proactive heartbeat/nudges | Partial | `dadbot/core/boot_mixin.py` (`_run_proactive_heartbeat_loop`), `dadbot/assistant_runtime.py` |
+| Avatar rendering support | Partial | `dad_streamlit.py`, `pyproject.toml` (`[project.optional-dependencies].heritage`) |
 
 ### Docker (Dev & Production)
 
@@ -111,6 +165,7 @@ See `docker-compose.yml` for profile options.
 - **Explainability** — `docs/system-level-explainability.md`
 - **Failure Handling** — `docs/failure-model.md`
 - **Confluence & Semantics** — `docs/confluence-law.md`
+- **Historical migration notes** — `archive/docs/legacy-root-notes/`
 
 ### Deep Validation
 
@@ -184,6 +239,13 @@ Initial setup pulls model weights (~4GB). Subsequent runs are instant.
 ## 🤝 Contributing
 
 Found a bug? Have an idea? Open an issue or PR.
+
+## Engineering Guardrails
+
+- Prefer direct, concrete fixes over new framework layers
+- Treat replay-mode invariants as strict runtime contracts
+- Add trace hooks at manager boundaries instead of scattering instrumentation
+- Keep docs aligned with shipped behavior; mark partial features explicitly
 
 ---
 

@@ -538,7 +538,10 @@ class RuntimeInterfaceManager:
 
     def _trigger_learning_update(self) -> None:
         try:
-            self.bot.apply_relationship_feedback("supportive")
+            relationship = getattr(self.bot, "relationship", None)
+            apply_feedback = getattr(relationship, "apply_feedback", None)
+            if callable(apply_feedback):
+                apply_feedback("supportive")
         except Exception:
             pass
         learn_now = getattr(self.bot, "perform_continuous_learning_cycle", None)

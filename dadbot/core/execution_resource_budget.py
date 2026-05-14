@@ -46,12 +46,138 @@ import logging
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
 
 from dadbot.core.runtime_errors import BackpressureError
 
 logger = logging.getLogger(__name__)
 _NON_BLOCKING_ACQUIRE_TIMEOUT_SEC: float = 1e-6
+
+
+class ReasoningLevel(str, Enum):
+    FAST = "fast"
+    NORMAL = "normal"
+    DEEP = "deep"
+
+
+@dataclass(frozen=True)
+class DynamicComputeTicket:
+    """Concrete per-turn execution budget resolved from user/runtime intent.
+
+    This token is intentionally small and serializable so it can travel through
+    `job.metadata` and be logged/replayed deterministically.
+    """
+
+    level: ReasoningLevel
+    model_lane: str
+    max_response_tokens: int
+    max_reasoning_steps: int
+    max_tool_depth: int
+    allow_multi_model: bool
+    source: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "level": self.level.value,
+            "model_lane": str(self.model_lane or ""),
+            "max_response_tokens": int(self.max_response_tokens),
+            "max_reasoning_steps": int(self.max_reasoning_steps),
+            "max_tool_depth": int(self.max_tool_depth),
+            "allow_multi_model": bool(self.allow_multi_model),
+            "source": str(self.source or ""),
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any] | None) -> "DynamicComputeTicket":
+        source = dict(payload or {})
+        level_raw = str(source.get("level") or ReasoningLevel.NORMAL.value).strip().lower()
+        level = ReasoningLevel(level_raw) if level_raw in {"fast", "normal", "deep"} else ReasoningLevel.NORMAL
+        return cls(
+            level=level,
+            model_lane=str(source.get("model_lane") or "balanced").strip() or "balanced",
+            max_response_tokens=max(32, int(source.get("max_response_tokens") or 256)),
+            max_reasoning_steps=max(1, int(source.get("max_reasoning_steps") or 3)),
+            max_tool_depth=max(0, int(source.get("max_tool_depth") or 2)),
+            allow_multi_model=bool(source.get("allow_multi_model", False)),
+            source=str(source.get("source") or "unknown"),
+        )
+
+
+def _requested_reasoning_level(metadata: dict[str, Any]) -> tuple[ReasoningLevel, str]:
+    direct = str(metadata.get("reasoning_level") or "").strip().lower()
+    if direct in {"fast", "normal", "deep"}:
+        return ReasoningLevel(direct), "metadata.reasoning_level"
+
+    adaptive = dict(metadata.get("adaptive_compute") or {})
+    adaptive_level = str(adaptive.get("reasoning_level") or "").strip().lower()
+    if adaptive_level in {"fast", "normal", "deep"}:
+        return ReasoningLevel(adaptive_level), "metadata.adaptive_compute.reasoning_level"
+
+    if isinstance(metadata.get("target_model"), str) and str(metadata.get("target_model") or "").strip():
+        return ReasoningLevel.NORMAL, "metadata.target_model"
+
+    return ReasoningLevel.NORMAL, "default"
+
+
+def resolve_dynamic_compute_ticket(*, metadata: dict[str, Any] | None, user_input: str) -> DynamicComputeTicket:
+    """Resolve requested intelligence level into enforceable execution limits."""
+    meta = dict(metadata or {})
+    requested_level, source = _requested_reasoning_level(meta)
+
+    text = str(user_input or "").strip().lower()
+    token_count = len(text.split())
+    high_risk_terms = (
+        "urgent",
+        "crisis",
+        "harm",
+        "panic",
+        "suicide",
+        "self-harm",
+        "medical",
+        "legal",
+        "contract",
+    )
+    high_risk = any(term in text for term in high_risk_terms)
+
+    level = requested_level
+    if source == "default":
+        if token_count <= 18 and not high_risk:
+            level = ReasoningLevel.FAST
+            source = "heuristic.short_low_risk"
+        elif token_count >= 80 or high_risk:
+            level = ReasoningLevel.DEEP
+            source = "heuristic.long_or_high_risk"
+
+    if level == ReasoningLevel.FAST:
+        return DynamicComputeTicket(
+            level=level,
+            model_lane="tiny",
+            max_response_tokens=140,
+            max_reasoning_steps=1,
+            max_tool_depth=1,
+            allow_multi_model=False,
+            source=source,
+        )
+    if level == ReasoningLevel.DEEP:
+        return DynamicComputeTicket(
+            level=level,
+            model_lane="heavy",
+            max_response_tokens=420,
+            max_reasoning_steps=6,
+            max_tool_depth=4,
+            allow_multi_model=True,
+            source=source,
+        )
+    return DynamicComputeTicket(
+        level=ReasoningLevel.NORMAL,
+        model_lane="balanced",
+        max_response_tokens=260,
+        max_reasoning_steps=3,
+        max_tool_depth=2,
+        allow_multi_model=False,
+        source=source,
+    )
 
 
 # ---------------------------------------------------------------------------

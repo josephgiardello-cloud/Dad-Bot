@@ -447,7 +447,9 @@ class TestMemoryPersonalityBoundary:
         svc.bot = _MinimalBot()
         result = svc.build_personality_context("neutral")
         assert ("build_mood_context", "neutral") in calls
-        assert result == "mood context for neutral"
+        assert isinstance(result, str)
+        assert result.startswith("mood context for neutral")
+        assert "warm, witty" in result
 
     def test_prompt_assembly_memory_confidence_reads_only_diagnostics_accessor(self):
         """_memory_confidence_label reads memory diagnostics via get_retrieval_diagnostics only."""

@@ -5,7 +5,7 @@ This lane compares Dad-Bot and external competitors on the same scenario suite a
 ## Command
 
 ```powershell
-c:/Users/josep/OneDrive/Desktop/Dad-Bot/.venv/Scripts/python.exe tools/external_benchmark_loop.py \
+python tools/external_benchmark_loop.py \
   --entry dadbot=path/to/dadbot_outputs.json \
   --entry competitor_a=path/to/competitor_a_outputs.json \
   --entry competitor_b=path/to/competitor_b_outputs.json \
@@ -77,7 +77,7 @@ These are lane-targeted export bundles designed to keep one benchmark run reusab
 Example smoke run:
 
 ```powershell
-c:/Users/josep/OneDrive/Desktop/Dad-Bot/.venv/Scripts/python.exe tools/external_benchmark_loop.py \
+python tools/external_benchmark_loop.py \
   --entry dadbot=artifacts/external_benchmark_examples/dadbot.sample.json \
   --entry competitor=artifacts/external_benchmark_examples/competitor.sample.json \
   --write-markdown

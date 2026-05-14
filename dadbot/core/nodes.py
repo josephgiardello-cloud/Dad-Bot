@@ -15,6 +15,7 @@ from dadbot.core.invariant_gate import InvariantGate
 from dadbot.core.policy_compiler import PolicyCompiler
 from dadbot.core.runtime_errors import InvariantViolation
 from dadbot.core.tool_ir import ToolContractResult, ToolStatus, deterministic_tool_id
+from dadbot.core.tool_executor import execute_tool
 
 _MAX_DELEGATION_DEPTH: int = 2
 _MAX_DELEGATION_SUBTASKS: int = 8
@@ -303,16 +304,29 @@ class ToolExecutorNode:
         remediation_log: list[dict[str, Any]] = []
         raw: Any = None
         for attempt in range(self._MAX_RETRY_ATTEMPTS + 1):
-            try:
-                raw = dispatch_registered_tool(name, args, context)
-            except Exception as exc:
+            exec_params = (
+                args
+                if attempt == 0
+                else {**args, "_idempotency_key": f"{det_id}:retry:{attempt}"}
+            )
+            record = execute_tool(
+                tool_name=name,
+                parameters=exec_params,
+                executor=lambda: dispatch_registered_tool(name, args, context),
+                turn_context=context,
+            )
+            if str(record.status or "").strip().lower() == "failed":
                 raw = ToolContractResult(
                     tool_name=name,
                     status=ToolStatus.FATAL,
                     data=None,
-                    error_context={"exception": str(exc)},
+                    error_context={"exception": str(record.error or "")},
                     repair_hint=f"Tool {name!r} raised an unexpected exception.",
                 )
+            else:
+                raw = record.result
+                if isinstance(raw, dict) and set(raw.keys()) == {"result"}:
+                    raw = raw.get("result")
             if not isinstance(raw, ToolContractResult):
                 break
             failure_class = {

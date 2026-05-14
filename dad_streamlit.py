@@ -168,8 +168,6 @@ CONTEXTUAL_LEARNING_KEYWORDS: tuple[str, ...] = (
 STORY_MODE_MAX_FAILED_ATTEMPTS = 3
 STORY_MODE_LOCKOUT_BASE_SECONDS = 30
 STORY_MODE_LOCKOUT_MAX_SECONDS = 900
-THIN_SPINE_TOGGLE_SESSION_KEY = "chat_use_thin_turn_handler"
-TURN_PATH_METRICS_SESSION_KEY = "chat_turn_path_metrics"
 WORLD_MODEL_SESSION_KEY = "world_model"
 WORLD_MODEL_HISTORY_SESSION_KEY = "world_model_history"
 
@@ -803,59 +801,6 @@ def get_runtime() -> StreamlitRuntime:
     return interaction_controller.get_runtime()
 
 
-def _thin_spine_env_default_enabled() -> bool:
-    value = str(os.environ.get("DADBOT_USE_THIN_TURN_HANDLER", "0") or "").strip().lower()
-    return value in {"1", "true", "yes", "on"}
-
-
-def streamlit_thin_spine_enabled() -> bool:
-    if THIN_SPINE_TOGGLE_SESSION_KEY not in st.session_state:
-        st.session_state[THIN_SPINE_TOGGLE_SESSION_KEY] = _thin_spine_env_default_enabled()
-    return bool(st.session_state.get(THIN_SPINE_TOGGLE_SESSION_KEY, False))
-
-
-def set_streamlit_thin_spine_enabled(enabled: bool) -> None:
-    flag = bool(enabled)
-    st.session_state[THIN_SPINE_TOGGLE_SESSION_KEY] = flag
-    os.environ["DADBOT_USE_THIN_TURN_HANDLER"] = "1" if flag else "0"
-
-
-def _turn_path_metrics_state() -> dict[str, Any]:
-    state = st.session_state.setdefault(
-        TURN_PATH_METRICS_SESSION_KEY,
-        {
-            "total_turns": 0,
-            "thin_spine_turns": 0,
-            "legacy_turns": 0,
-            "latency_ms": [],
-            "events": [],
-        },
-    )
-    return state if isinstance(state, dict) else {}
-
-
-def _record_turn_path_metric(*, path: str, latency_ms: int) -> None:
-    metrics = _turn_path_metrics_state()
-    metrics["total_turns"] = int(metrics.get("total_turns", 0) or 0) + 1
-    if path == "thin_spine":
-        metrics["thin_spine_turns"] = int(metrics.get("thin_spine_turns", 0) or 0) + 1
-    else:
-        metrics["legacy_turns"] = int(metrics.get("legacy_turns", 0) or 0) + 1
-    latencies = list(metrics.get("latency_ms") or [])
-    latencies.append(int(max(0, latency_ms)))
-    metrics["latency_ms"] = latencies[-200:]
-    events = list(metrics.get("events") or [])
-    events.append(
-        {
-            "ts": datetime.now().isoformat(timespec="seconds"),
-            "path": path,
-            "latency_ms": int(max(0, latency_ms)),
-        }
-    )
-    metrics["events"] = events[-50:]
-    st.session_state[TURN_PATH_METRICS_SESSION_KEY] = metrics
-
-
 def process_prompt_via_runtime(
     *,
     thread_id: str,
@@ -864,10 +809,9 @@ def process_prompt_via_runtime(
     model_override: str = "",
     temperature_style: str = "balanced",
     message_metadata: dict | None = None,
+    turn_controls: dict | None = None,
+    adaptive_compute: bool = True,
 ) -> dict:
-    # Ensure the Streamlit entrypoint explicitly controls thin-spine routing.
-    thin_spine = bool(streamlit_thin_spine_enabled())
-    set_streamlit_thin_spine_enabled(thin_spine)
     started = time.perf_counter()
     result = interaction_controller.process_prompt_via_runtime(
         thread_id=thread_id,
@@ -876,10 +820,31 @@ def process_prompt_via_runtime(
         model_override=model_override,
         temperature_style=temperature_style,
         message_metadata=message_metadata,
+        turn_controls=turn_controls,
+        adaptive_compute=adaptive_compute,
     )
-    latency_ms = int(max(0.0, (time.perf_counter() - started) * 1000.0))
-    _record_turn_path_metric(path="thin_spine" if thin_spine else "legacy", latency_ms=latency_ms)
+    _ = int(max(0.0, (time.perf_counter() - started) * 1000.0))
     return result
+
+
+def render_progressive_reply(reply: str, *, enable_streaming: bool = True) -> None:
+    text = str(reply or "")
+    if not text:
+        st.markdown("")
+        return
+    if not enable_streaming or not hasattr(st, "write_stream"):
+        st.markdown(text)
+        return
+
+    # Word-level chunking keeps UI responsive while preserving deterministic final text.
+    tokens = text.split(" ")
+
+    def _gen():
+        for idx, token in enumerate(tokens):
+            suffix = " " if idx < len(tokens) - 1 else ""
+            yield token + suffix
+
+    st.write_stream(_gen())
 
 
 def emit_voice_runtime_ledger_event(event_type: str, payload: dict) -> None:
@@ -1875,11 +1840,15 @@ def render_hero(bot: DadBot, active_thread: dict):
 
 def render_status_strip(bot: DadBot):
     api = get_chat_event_api()
-    living = api.living_dad_snapshot(limit=2)
+    profile_runtime = getattr(api, "profile_runtime", None)
+    living_snapshot = getattr(profile_runtime, "living_dad_snapshot", None)
+    living_raw = living_snapshot(limit=2) if callable(living_snapshot) else {"counts": {"proactive_queue": 0}}
+    living = dict(living_raw) if isinstance(living_raw, dict) else {"counts": {"proactive_queue": 0}}
+    counts = dict(living.get("counts") or {})
     cards = [
         (str(len(api.list_chat_threads())), "Threads"),
         (str(len(api.reminder_catalog())), "Open reminders"),
-        (str(living["counts"]["proactive_queue"]), "Queued check-ins"),
+        (str(int(counts.get("proactive_queue", 0) or 0)), "Queued check-ins"),
     ]
     card_markup = "".join(
         f'<div class="status-card"><strong>{value}</strong><span>{label}</span></div>' for value, label in cards
@@ -3216,6 +3185,69 @@ def render_chat_tab(bot: DadBot, active_thread: dict):
 
     with st.expander("Thread Branch Map", expanded=False):
         render_thread_branch_map(active_thread_id=active_thread_id)
+
+    with st.expander("Checkpoint Time Travel + Relationship Report", expanded=False):
+        st.caption("Pause, inspect, and resume from recent checkpoints for the active thread.")
+        ckpt_limit = int(st.number_input("Recent checkpoints", min_value=3, max_value=50, value=12, step=1))
+        checkpoints = list(api.list_recent_checkpoints(limit=ckpt_limit) or [])
+        if checkpoints:
+            labels = [
+                f"{idx+1}. {str(row.get('checkpoint_hash') or '')[:18]}  phase={row.get('phase') or '-'}  seq={int(row.get('event_sequence_id') or 0)}"
+                for idx, row in enumerate(checkpoints)
+            ]
+            selected = st.selectbox("Checkpoint", options=labels, index=0)
+            selected_idx = labels.index(selected)
+            selected_trace = str(checkpoints[selected_idx].get("trace_id") or "")
+            if st.button("Restore From Selected Checkpoint", use_container_width=True):
+                ok = bool(api.restore_checkpoint(trace_id=selected_trace))
+                if ok:
+                    st.success("Checkpoint restored. Next turn will continue from recovered state.")
+                else:
+                    st.error("Checkpoint restore failed (trace may be unavailable).")
+        else:
+            st.info("No checkpoints found yet for this active thread.")
+
+        st.caption("Export an easy-to-share relationship memory book.")
+        rel_snapshot = {}
+        rel_history = []
+        try:
+            rel_snapshot = dict(getattr(bot, "relationship_snapshot")() or {})
+        except Exception:
+            rel_snapshot = {}
+        try:
+            rel_history = list(getattr(bot, "relationship_history")(limit=60) or [])
+        except Exception:
+            rel_history = []
+        report_payload = {
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "active_thread_id": str(api.active_thread_id or "default"),
+            "relationship_snapshot": rel_snapshot,
+            "relationship_history": rel_history,
+        }
+        report_md = "\n".join(
+            [
+                "# Relationship Report",
+                f"Generated: {report_payload['generated_at']}",
+                f"Active thread: {report_payload['active_thread_id']}",
+                "",
+                "## Snapshot",
+                "```json",
+                json.dumps(rel_snapshot, indent=2, ensure_ascii=True),
+                "```",
+                "",
+                "## Recent Relationship History",
+                "```json",
+                json.dumps(rel_history, indent=2, ensure_ascii=True),
+                "```",
+            ]
+        )
+        st.download_button(
+            "Download Relationship Report (.md)",
+            data=report_md.encode("utf-8"),
+            file_name="relationship_report.md",
+            mime="text/markdown",
+            use_container_width=True,
+        )
     story_mode = bool(st.session_state.get("chat_story_mode", False))
     story_password = configured_story_mode_password()
     lockout_remaining = story_mode_lockout_remaining_seconds()
@@ -3314,15 +3346,24 @@ def render_chat_tab(bot: DadBot, active_thread: dict):
                     react_cols = st.columns([1.1, 1.1, 1.1, 6])
                     with react_cols[0]:
                         if st.button("❤️ Helpful", key=f"react-helpful-{_msg_idx}", help="This reply felt supportive"):
-                            get_chat_event_api().apply_relationship_feedback("supportive")
+                            _api = get_chat_event_api()
+                            _apply_feedback = getattr(getattr(_api, "relationship", None), "apply_feedback", None)
+                            if callable(_apply_feedback):
+                                _apply_feedback("supportive")
                             st.toast("Glad that helped, buddy.", icon="❤️")
                     with react_cols[1]:
                         if st.button("😌 A bit much", key=f"react-harsh-{_msg_idx}", help="This felt a little harsh"):
-                            get_chat_event_api().apply_relationship_feedback("distant")
+                            _api = get_chat_event_api()
+                            _apply_feedback = getattr(getattr(_api, "relationship", None), "apply_feedback", None)
+                            if callable(_apply_feedback):
+                                _apply_feedback("distant")
                             st.toast("Got it — I'll soften my tone next time.", icon="💙")
                     with react_cols[2]:
                         if st.button("🌟 More warmth", key=f"react-warm-{_msg_idx}", help="I'd like even more warmth"):
-                            get_chat_event_api().apply_relationship_feedback("supportive")
+                            _api = get_chat_event_api()
+                            _apply_feedback = getattr(getattr(_api, "relationship", None), "apply_feedback", None)
+                            if callable(_apply_feedback):
+                                _apply_feedback("supportive")
                             st.toast("Noted. Warming it up.", icon="🌟")
 
                 action_cols = st.columns([1.0, 1.0, 1.0, 1.0, 3.5])
@@ -3494,6 +3535,46 @@ def render_chat_tab(bot: DadBot, active_thread: dict):
                         st.session_state["next_temp_style"] = str(regen_style or "balanced")
                         st.rerun()
 
+    with st.expander("Runtime Turn Controls", expanded=False):
+        rc1, rc2 = st.columns(2)
+        adaptive_compute = rc1.toggle(
+            "Adaptive compute path",
+            value=bool(st.session_state.get("chat_adaptive_compute", True)),
+            key="chat_adaptive_compute",
+            help="Tiny model for casual turns, medium for normal turns, heavy model for high-stakes turns.",
+        )
+        stream_reply = rc2.toggle(
+            "Progressive reply streaming",
+            value=bool(st.session_state.get("chat_stream_progressive", True)),
+            key="chat_stream_progressive",
+        )
+        s1, s2, s3, s4 = st.columns(4)
+        turn_temperature = s1.slider("Temperature", 0.0, 1.2, float(st.session_state.get("turn_temperature", 0.6)), 0.05)
+        turn_presence = s2.slider("Presence", 0.0, 1.0, float(st.session_state.get("turn_presence_penalty", 0.1)), 0.05)
+        turn_frequency = s3.slider("Frequency", 0.0, 1.0, float(st.session_state.get("turn_frequency_penalty", 0.1)), 0.05)
+        turn_pep = s4.slider("Pep", 0.0, 1.0, float(st.session_state.get("turn_pep_factor", 0.7)), 0.05)
+        st.session_state["turn_temperature"] = float(turn_temperature)
+        st.session_state["turn_presence_penalty"] = float(turn_presence)
+        st.session_state["turn_frequency_penalty"] = float(turn_frequency)
+        st.session_state["turn_pep_factor"] = float(turn_pep)
+        r1, r2 = st.columns([1.7, 1.3])
+        auto_reflector = r1.toggle(
+            "Auto Reflector loop",
+            value=bool(st.session_state.get("chat_auto_reflector", False)),
+            key="chat_auto_reflector",
+            help="Queues a lightweight self-improvement cycle every N successful turns.",
+        )
+        reflector_interval = int(
+            r2.number_input(
+                "Reflect every N turns",
+                min_value=3,
+                max_value=50,
+                value=int(st.session_state.get("chat_auto_reflector_interval", 8) or 8),
+                step=1,
+                key="chat_auto_reflector_interval",
+            )
+        )
+
     text_prompt = st.chat_input("Talk to Dad...")
     prompt = ""
     if bool(st.session_state.pop("chat_replay_submit", False)):
@@ -3577,7 +3658,19 @@ def render_chat_tab(bot: DadBot, active_thread: dict):
                         attachments=pending_attachments,
                         model_override=runtime_model_override,
                         temperature_style=runtime_temp_style,
-                        message_metadata={"gateway": gateway_context} if gateway_context else None,
+                        message_metadata={
+                            "gateway": gateway_context,
+                            "allowed_tools": list(allowed_tools),
+                        }
+                        if gateway_context
+                        else {"allowed_tools": list(allowed_tools)},
+                        turn_controls={
+                            "temperature": float(st.session_state.get("turn_temperature", 0.6) or 0.6),
+                            "presence_penalty": float(st.session_state.get("turn_presence_penalty", 0.1) or 0.1),
+                            "frequency_penalty": float(st.session_state.get("turn_frequency_penalty", 0.1) or 0.1),
+                            "pep_factor": float(st.session_state.get("turn_pep_factor", 0.7) or 0.7),
+                        },
+                        adaptive_compute=bool(st.session_state.get("chat_adaptive_compute", True)),
                     )
                     reply = str(runtime_result.get("reply") or "")
                     should_end = bool(runtime_result.get("should_end", False))
@@ -3613,7 +3706,19 @@ def render_chat_tab(bot: DadBot, active_thread: dict):
                             )
                             api.process_until_idle(max_events=8)
                             assistant_attachments.append(attachment)
-                    st.markdown(reply)
+
+                    st.session_state["chat_successful_turns"] = int(st.session_state.get("chat_successful_turns", 0) or 0) + 1
+                    if auto_reflector:
+                        turns = int(st.session_state.get("chat_successful_turns", 0) or 0)
+                        interval = max(3, int(reflector_interval or 8))
+                        if turns > 0 and (turns % interval) == 0:
+                            learning_payload = run_frontier_self_improvement(bot, background=True)
+                            if learning_payload.get("ok") and learning_payload.get("task_id"):
+                                st.caption(f"Reflector queued (task_id={learning_payload.get('task_id')}).")
+                    render_progressive_reply(
+                        reply,
+                        enable_streaming=bool(st.session_state.get("chat_stream_progressive", True)),
+                    )
                     
                     # ── Save This Moment feature ─────────────────────────────────────────
                     save_col, tags_col = st.columns([2, 3])
@@ -3673,7 +3778,9 @@ def render_chat_tab(bot: DadBot, active_thread: dict):
                         api.mark_chat_thread_closed(closed=True)
                     if degraded_mode == "normal" and (story_mode or should_trigger_contextual_learning(prompt)):
                         try:
-                            api.apply_relationship_feedback("supportive")
+                            apply_feedback = getattr(getattr(api, "relationship", None), "apply_feedback", None)
+                            if callable(apply_feedback):
+                                apply_feedback("supportive")
                         except Exception:
                             pass
                         try:
@@ -3781,8 +3888,9 @@ def render_status_tab(bot: DadBot):
                         st.markdown(f"**What Dad said:**\n{memory.get('content', '').strip()[:300]}...")
                         if memory.get("tags"):
                             st.caption(f"Tags: {', '.join(memory.get('tags', []))}")
-                        if memory.get("importance"):
-                            st.caption(f"Importance: {memory.get('importance').upper()}")
+                        importance = str(memory.get("importance") or "").strip()
+                        if importance:
+                            st.caption(f"Importance: {importance.upper()}")
             else:
                 st.info("No saved moments yet. Click '💾 Save This Moment' after a response you want to remember.")
 
@@ -4239,6 +4347,53 @@ def _render_policy_store_editor(bot: DadBot) -> None:
                 st.rerun()
 
 
+def _render_sidebar_onboarding_readiness(bot: DadBot) -> None:
+    api = get_chat_event_api()
+    shell = ui_shell_snapshot(bot)
+    ollama_status = dict(shell.get("ollama") or {})
+    onboarding_complete = bool(st.session_state.get("onboarding_complete") or api.onboarding_complete())
+    avatar_ready = bool(api.current_avatar_exists())
+    ollama_connected = bool(ollama_status.get("connected"))
+    policy_health = _sidebar_policy_store_health(bot)
+    policy_ready = str(policy_health.get("status") or "").strip().lower() in {"healthy", "deferred"}
+
+    checks = [
+        ("Onboarding complete", onboarding_complete, "Profile seeded" if onboarding_complete else "Setup wizard pending"),
+        ("Ollama connection", ollama_connected, str(ollama_status.get("connection_note") or "offline")),
+        ("Avatar ready", avatar_ready, "Custom avatar detected" if avatar_ready else "Using emoji fallback"),
+        ("Policy store", policy_ready, str(policy_health.get("detail") or "status unavailable")),
+    ]
+    ready_count = sum(1 for _, ok, _ in checks if ok)
+
+    with st.container(border=True):
+        st.markdown("**First-Run Readiness**")
+        st.caption(f"{ready_count}/{len(checks)} checks ready")
+        for label, ok, detail in checks:
+            badge = "✅" if ok else "⚠️"
+            st.caption(f"{badge} {label} - {detail}")
+
+        action_col1, action_col2 = st.columns(2)
+        if action_col1.button("Re-open Setup", use_container_width=True, key="sidebar-onboarding-reopen"):
+            api.set_onboarding_complete(False)
+            st.session_state["onboarding_complete"] = False
+            st.session_state["onboarding_step"] = 0
+            st.rerun()
+        if action_col2.button("Run Health Check", use_container_width=True, key="sidebar-onboarding-health"):
+            try:
+                health = dict(bot.current_runtime_health_snapshot(force=True, log_warnings=False, persist=False) or {})
+            except Exception as exc:
+                st.warning(f"Health check unavailable: {exc}")
+            else:
+                level = str(health.get("level") or "green").strip().lower()
+                msg = str(health.get("message") or "runtime stable").strip()
+                if level == "red":
+                    st.error(f"Runtime health: {level.upper()} - {msg}")
+                elif level == "yellow":
+                    st.warning(f"Runtime health: {level.upper()} - {msg}")
+                else:
+                    st.success(f"Runtime health: {level.upper()} - {msg}")
+
+
 @maybe_fragment
 def render_sidebar(bot: DadBot):
     api = get_chat_event_api()
@@ -4366,27 +4521,9 @@ def render_sidebar(bot: DadBot):
 
     with st.container(border=True):
         st.markdown("**Execution Path**")
-        thin_spine = st.checkbox(
-            "Use thin turn handler path",
-            value=streamlit_thin_spine_enabled(),
-            key="sidebar-thin-spine-toggle",
-            help="Routes turns through the thin spine adapter (legacy path remains available when off).",
-        )
-        set_streamlit_thin_spine_enabled(bool(thin_spine))
-        st.caption(
-            "Current path: "
-            + ("thin spine (feature flag ON)" if thin_spine else "legacy runtime path (feature flag OFF)")
-        )
-        metrics = _turn_path_metrics_state()
-        total_turns = int(metrics.get("total_turns", 0) or 0)
-        thin_turns = int(metrics.get("thin_spine_turns", 0) or 0)
-        legacy_turns = int(metrics.get("legacy_turns", 0) or 0)
-        latencies = [int(item) for item in list(metrics.get("latency_ms") or []) if isinstance(item, int | float)]
-        avg_latency = int(sum(latencies) / len(latencies)) if latencies else 0
-        st.caption(
-            f"Session turns: {total_turns} total | thin: {thin_turns} | legacy: {legacy_turns}"
-        )
-        st.caption(f"Average turn latency (UI runtime call): {avg_latency} ms")
+        st.caption("Canonical thin-spine runtime path is active.")
+
+    _render_sidebar_onboarding_readiness(bot)
 
     st.subheader("Threads")
     all_threads = list(api.list_chat_threads() or [])

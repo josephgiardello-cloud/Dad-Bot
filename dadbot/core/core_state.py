@@ -174,7 +174,7 @@ class CoreState:
         return {
             "version": int(self.version),
             "memory": self.memory.to_dict_list(),
-            "memory_kv": canonicalize_event_payload(dict(self.memory_kv or {})),
+            "memory_kv": dict(self.memory_kv or {}),
             "events": [
                 {
                     "event_id": item.event_id,
@@ -235,7 +235,7 @@ class CoreState:
         return CoreState(
             version=int(source.get("version") or 0),
             memory=SortedMemoryVector.from_entries(memory_entries),
-            memory_kv=canonicalize_event_payload(dict(source.get("memory_kv") or {})),
+            memory_kv=dict(source.get("memory_kv") or {}),
             events=tuple(events),
             execution=execution,
         )
@@ -326,8 +326,8 @@ def memory_projection(
     This projection is reconstructible from CoreState and must never be used as
     an authority surface.
     """
-    projected = canonicalize_event_payload(dict(defaults or {}))
-    projected.update(canonicalize_event_payload(dict(core_state.memory_kv or {})))
+    projected = dict(defaults or {})
+    projected.update(dict(core_state.memory_kv or {}))
     projected["memories"] = core_state.memory.to_dict_list()
     return projected
 
@@ -494,7 +494,7 @@ def transition(current_state: CoreState, input_event: InputEvent) -> CoreState:
     return CoreState(
         version=int(state.version) + 1,
         memory=memory,
-        memory_kv=canonicalize_event_payload(memory_kv),
+        memory_kv=dict(memory_kv),
         events=(*state.events, canonical_event),
         execution=execution,
     )

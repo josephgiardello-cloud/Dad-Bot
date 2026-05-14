@@ -21,7 +21,9 @@ The remaining body of this class is pure delegation plumbing:
 from __future__ import annotations
 
 import logging
+import os
 import time
+import warnings
 from typing import Any, cast
 
 try:
@@ -39,6 +41,7 @@ from dadbot.core.llm_mixin import DadBotLlmMixin
 from dadbot.core.mcp_mixin import DadBotMcpMixin
 from dadbot.core.turn_mixin import DadBotTurnMixin
 from dadbot.core.execution_contract import ExecutionEntry
+from dadbot.core.runtime_errors import ReplayInvariantViolation
 from dadbot.core.ux_projection_gateway import TurnUxProjectionGateway
 from dadbot.runtime.model import ModelPort
 
@@ -209,6 +212,18 @@ class DadBot(
         if target_obj == "config"
     }
 
+    _RUNTIME_STATE_ATTR_MAP: dict[str, str] = {
+        name: target_attr
+        for name, (target_obj, target_attr) in _UNIFIED_ROUTING.items()
+        if target_obj == "runtime_state_manager"
+    }
+
+    _INTERNAL_RUNTIME_ATTR_MAP: dict[str, str] = {
+        name: target_attr
+        for name, (target_obj, target_attr) in _UNIFIED_ROUTING.items()
+        if target_obj == "_internal_runtime"
+    }
+
     # ------------------------------------------------------------------
     # Fallback manager delegation chain
     # ------------------------------------------------------------------
@@ -230,7 +245,6 @@ class DadBot(
         "detect_mood": "mood_manager.detect",
         "detect_mood_async": "mood_manager.detect_async",
         "fastpath_detect_mood": "mood_manager.fastpath_detect",
-        "finalize_reply": "reply_finalization.append_signoff",
         "prepare_final_reply": "reply_finalization.finalize",
         "prepare_final_reply_async": "reply_finalization.finalize_async",
         "relationship_emotional_momentum": "relationship.emotional_momentum",
@@ -238,26 +252,75 @@ class DadBot(
         "relationship_hypotheses": "relationship.hypotheses",
         "relationship_snapshot": "relationship.snapshot",
         "update_relationship_state": "relationship.current_state",
-        "apply_relationship_feedback": "relationship.apply_feedback",
         "build_relationship_reflection_prompt": "relationship.build_reflection_prompt",
         "reflect_relationship_state": "relationship.current_state",
-        "internal_state_snapshot": "internal_state_manager.snapshot",
         "reflect_internal_state": "internal_state_manager.reflect_after_turn",
         "record_user_turn_state": "turn_service.record_user_turn_state",
         "evolved_persona_traits": "profile_runtime.evolved_persona_traits",
         "active_persona_traits": "profile_runtime.active_persona_traits",
         "effective_behavior_rules": "profile_runtime.effective_behavior_rules",
-        "living_dad_snapshot": "profile_runtime.living_dad_snapshot",
     }
+
+    _DEPRECATED_ALIAS_MODE_ENV = "DADBOT_DEPRECATED_FACADE_ALIAS_MODE"
+    _DEPRECATED_ALIAS_DENYLIST_ENV = "DADBOT_DEPRECATED_FACADE_ALIAS_DENYLIST"
 
     # ------------------------------------------------------------------
     # Unified attribute routing
     # ------------------------------------------------------------------
 
+    @classmethod
+    def _deprecated_alias_mode(cls) -> str:
+        raw = str(os.getenv(cls._DEPRECATED_ALIAS_MODE_ENV, "allow") or "allow").strip().lower()
+        if raw in {"warn", "deny"}:
+            return raw
+        return "allow"
+
+    @classmethod
+    def _deprecated_alias_denied(cls, alias_name: str) -> bool:
+        raw = str(os.getenv(cls._DEPRECATED_ALIAS_DENYLIST_ENV, "") or "").strip()
+        if not raw:
+            return False
+        if raw == "*":
+            return True
+        denied = {item.strip() for item in raw.split(",") if item.strip()}
+        return alias_name in denied
+
     def __getattr__(self, name: str) -> Any:
         """Route attribute lookups via unified routing map or manager delegation chain."""
         if name.startswith("__"):
             raise AttributeError(name)
+
+        # Deprecated facade aliases are explicit compatibility surfaces.
+        alias = self.__class__._DEPRECATED_FACADE_ALIASES.get(name)
+        if alias:
+            replay_mode = bool(getattr(self, "_replay_mode", False))
+            alias_layer_enabled = bool(getattr(self, "_alias_layer_enabled", True))
+            if replay_mode:
+                alias_layer_enabled = False
+            if not alias_layer_enabled:
+                if replay_mode:
+                    raise ReplayInvariantViolation("Alias path invoked during replay")
+                raise AttributeError(
+                    f"Deprecated facade alias '{name}' is disabled; use '{alias}' instead.",
+                )
+            mode = self.__class__._deprecated_alias_mode()
+            if mode == "deny" or self.__class__._deprecated_alias_denied(name):
+                raise AttributeError(
+                    f"Deprecated facade alias '{name}' is disabled; use '{alias}' instead.",
+                )
+            if mode == "warn":
+                warnings.warn(
+                    f"DadBot.{name} is deprecated; prefer DadBot.{alias}.",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+            target: Any = self
+            try:
+                for part in alias.split("."):
+                    target = getattr(target, part)
+                return target
+            except AttributeError:
+                pass
 
         # Unified routing: check config, runtime_state, internal_runtime
         route = self.__class__._UNIFIED_ROUTING.get(name)
@@ -382,6 +445,22 @@ class DadBot(
 
     def build_system_prompt(self) -> str:
         return self.convenience.build_system_prompt()
+
+    def build_cross_session_context(self, user_input: str = "") -> str | None:
+        builder = getattr(getattr(self, "context_builder", None), "build_cross_session_context", None)
+        if callable(builder):
+            return cast(str | None, builder(user_input))
+
+        context_service = getattr(self, "context_service", None)
+        builder = getattr(context_service, "build_cross_session_context", None)
+        if callable(builder):
+            return cast(str | None, builder(user_input))
+
+        context_builder = getattr(context_service, "context_builder", None)
+        builder = getattr(context_builder, "build_cross_session_context", None)
+        if callable(builder):
+            return cast(str | None, builder(user_input))
+        return None
 
     @staticmethod
     def flatten_memory_payload(payload):

@@ -42,3 +42,49 @@ def build_state_snapshot_entry(
     }
     entry["snapshot_hash"] = _stable_sha256(entry)
     return entry
+
+
+def build_causal_fork_entry(
+    *,
+    session_id: str,
+    source_snapshot_hash: str,
+    fork_snapshot_hash: str,
+    branch_id: str,
+    reason: str = "",
+) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "session_id": str(session_id or ""),
+        "branch_id": str(branch_id or ""),
+        "source_snapshot_hash": str(source_snapshot_hash or ""),
+        "fork_snapshot_hash": str(fork_snapshot_hash or ""),
+        "reason": str(reason or ""),
+    }
+    entry["fork_hash"] = _stable_sha256(entry)
+    return entry
+
+
+def diff_state_snapshots(
+    before: Mapping[str, Any] | dict[str, Any],
+    after: Mapping[str, Any] | dict[str, Any],
+) -> dict[str, Any]:
+    before_dict = dict(before or {})
+    after_dict = dict(after or {})
+    before_keys = set(before_dict.keys())
+    after_keys = set(after_dict.keys())
+
+    added_keys = sorted(after_keys - before_keys)
+    removed_keys = sorted(before_keys - after_keys)
+    changed_keys = sorted(
+        key
+        for key in (before_keys & after_keys)
+        if before_dict.get(key) != after_dict.get(key)
+    )
+
+    return {
+        "before_hash": canonical_state_hash(before_dict),
+        "after_hash": canonical_state_hash(after_dict),
+        "added_keys": added_keys,
+        "removed_keys": removed_keys,
+        "changed_keys": changed_keys,
+        "changed_count": len(changed_keys),
+    }

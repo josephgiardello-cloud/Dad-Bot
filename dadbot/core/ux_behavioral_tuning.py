@@ -146,7 +146,7 @@ _SENTIMENT_STRESS: dict[str, float] = {
     "positive": 0.0,
     "neutral": 0.2,
     "confused": 0.35,
-    "frustrated": 0.7,
+    "frustrated": 0.8,
     "angry": 1.0,
 }
 

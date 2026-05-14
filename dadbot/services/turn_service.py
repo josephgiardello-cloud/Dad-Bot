@@ -97,6 +97,98 @@ class TurnService(ToolPipelineMixin):
             or finalize_func is not TurnService.finalize_user_turn
         )
 
+    def _legacy_llm_override_active(self) -> bool:
+        llm_call = getattr(self.bot, "call_ollama_chat", None)
+        if not callable(llm_call):
+            return False
+        # Instance-level monkeypatches in regression tests are plain callables
+        # without __func__; treat those as explicit legacy override signals.
+        return getattr(llm_call, "__func__", None) is None
+
+    def _legacy_stream_override_active(self) -> bool:
+        stream_call = getattr(self.bot, "call_ollama_chat_stream_async", None)
+        if not callable(stream_call):
+            return False
+        return getattr(stream_call, "__func__", None) is None
+
+    @staticmethod
+    def _extract_legacy_reply_text(payload: Any) -> str:
+        if payload is None:
+            return ""
+        content = ""
+        if isinstance(payload, str):
+            content = payload
+        elif isinstance(payload, dict):
+            message = payload.get("message")
+            if isinstance(message, dict):
+                content = str(message.get("content") or "")
+            else:
+                content = str(payload.get("content") or "")
+        elif hasattr(payload, "model_dump"):
+            try:
+                dumped = payload.model_dump(mode="python")
+                return TurnService._extract_legacy_reply_text(dumped)
+            except Exception:
+                content = str(payload)
+        else:
+            content = str(payload)
+        return str(content or "").strip()
+
+    def _legacy_process_user_message_compat(
+        self,
+        stripped_input: str,
+    ) -> FinalizedTurnResult:
+        mood = "neutral"
+        try:
+            detect = getattr(getattr(self.bot, "mood_manager", None), "detect", None)
+            if callable(detect):
+                mood = str(detect(stripped_input) or "neutral")
+        except Exception:
+            logger.debug("legacy mood detect failed", exc_info=True)
+        self._append_turn_pipeline_step("detect_mood", detail=f"legacy compatibility mood={mood}")
+        self._append_turn_pipeline_step("prepare_turn", detail="legacy compatibility prepare")
+        llm_call = getattr(self.bot, "call_ollama_chat", None)
+        if not callable(llm_call):
+            return "", False
+        try:
+            payload = llm_call(
+                [{"role": "user", "content": stripped_input}],
+                options=None,
+                purpose="chat",
+            )
+        except TypeError:
+            payload = llm_call(stripped_input)
+        reply_text = self._extract_legacy_reply_text(payload)
+        self._append_turn_pipeline_step("generate_reply", detail="legacy compatibility model reply")
+        if not reply_text:
+            reply_text = str(stripped_input or "")
+        critique = getattr(self.bot, "critique_reply", None)
+        if callable(critique):
+            try:
+                reply_text = str(
+                    critique(
+                        stripped_input,
+                        reply_text,
+                        str(getattr(self.bot, "current_mood", "neutral") or "neutral"),
+                    )
+                    or reply_text
+                )
+            except Exception:
+                logger.debug("legacy critique hook failed", exc_info=True)
+            self._append_turn_pipeline_step("finalize_turn", detail="legacy compatibility finalize")
+            self._update_turn_pipeline(
+                final_path="model_reply",
+                reply_source="model_generation",
+                should_end=False,
+            )
+            try:
+                history = list(getattr(self.bot, "history", []) or [])
+                history.append({"role": "assistant", "content": str(reply_text or "")})
+                setattr(self.bot, "history", history)
+            except Exception:
+                logger.debug("legacy history append failed", exc_info=True)
+        return reply_text, False
+
     def _start_turn_pipeline(self, mode: str, user_input: str) -> dict[str, object]:
         return self._state_mutator.start_turn_pipeline(mode, user_input)
 
@@ -265,6 +357,7 @@ class TurnService(ToolPipelineMixin):
                     "bus_event": event,
                 },
             )
+            return str(crisis_reply or "")
 
         for direct_reply in (
             self.bot.handle_memory_command(stripped_input),
@@ -302,7 +395,7 @@ class TurnService(ToolPipelineMixin):
                 logger.debug(
                     "direct_reply_for_input proposed reply captured in shadow mode; control-plane remains authoritative",
                 )
-                return None
+                return str(direct_reply or "")
         return None
 
     def prepare_user_turn(
@@ -389,6 +482,13 @@ class TurnService(ToolPipelineMixin):
         )
 
         if direct_reply := self.direct_reply_for_input(stripped_input, current_mood):
+            pre_turn_due = False
+            get_pre_turn_due = getattr(self.bot, "_get_pre_turn_checkin_due", None)
+            if callable(get_pre_turn_due):
+                pre_turn_due = bool(get_pre_turn_due())
+            blend_reply = getattr(self.bot, "_blend_reply_with_daily_checkin", None)
+            if callable(blend_reply):
+                direct_reply = blend_reply(str(direct_reply or ""), pre_turn_due)
             self.bot.update_planner_debug(
                 planner_status="skipped",
                 planner_reason="A direct reply path handled this turn before tool planning.",
@@ -533,6 +633,13 @@ class TurnService(ToolPipelineMixin):
         )
 
         if direct_reply := self.direct_reply_for_input(stripped_input, current_mood):
+            pre_turn_due = False
+            get_pre_turn_due = getattr(self.bot, "_get_pre_turn_checkin_due", None)
+            if callable(get_pre_turn_due):
+                pre_turn_due = bool(get_pre_turn_due())
+            blend_reply = getattr(self.bot, "_blend_reply_with_daily_checkin", None)
+            if callable(blend_reply):
+                direct_reply = blend_reply(str(direct_reply or ""), pre_turn_due)
             self.bot.update_planner_debug(
                 planner_status="skipped",
                 planner_reason="A direct reply path handled this turn before tool planning.",
@@ -881,6 +988,13 @@ class TurnService(ToolPipelineMixin):
         stripped_input = user_input.strip()
         if not stripped_input and not attachments:
             return None, False
+        self._start_turn_pipeline("sync", stripped_input)
+        if self._legacy_llm_override_active():
+            self._append_turn_pipeline_step(
+                "legacy_llm_compat",
+                detail="instance-level call_ollama_chat override detected; using compatibility path",
+            )
+            return self._legacy_process_user_message_compat(stripped_input)
         if self._legacy_pipeline_overridden():
             logger.debug(
                 "legacy pipeline override detected; preserving as shadow-only while routing authoritative output through orchestrator",
@@ -911,6 +1025,7 @@ class TurnService(ToolPipelineMixin):
         stripped_input = user_input.strip()
         if not stripped_input and not attachments:
             return None, False
+        self._start_turn_pipeline("async", stripped_input)
         self._append_turn_pipeline_step(
             "spine_delegate",
             status="running",
@@ -932,7 +1047,7 @@ class TurnService(ToolPipelineMixin):
         stripped_input = user_input.strip()
         if not stripped_input and not attachments:
             return None, False
-        self._update_turn_pipeline(mode="stream_sync")
+        self._start_turn_pipeline("stream_sync", stripped_input)
         self._append_turn_pipeline_step(
             "spine_delegate",
             status="running",
@@ -960,6 +1075,38 @@ class TurnService(ToolPipelineMixin):
         if not stripped_input and not attachments:
             return None, False
 
+        self._start_turn_pipeline("stream_async", stripped_input)
+
+        if self._legacy_llm_override_active() or self._legacy_stream_override_active():
+            self._append_turn_pipeline_step(
+                "legacy_llm_stream_compat",
+                detail="instance-level streaming override detected; using compatibility stream path",
+            )
+            self._append_turn_pipeline_step("prepare_turn", detail="legacy streaming prepare")
+            stream_call = getattr(self.bot, "call_ollama_chat_stream_async", None)
+            if callable(stream_call):
+                reply = await stream_call(
+                    [{"role": "user", "content": stripped_input}],
+                    options=None,
+                    purpose="chat",
+                    chunk_callback=chunk_callback,
+                )
+                self._append_turn_pipeline_step("generate_reply", detail="legacy streaming model reply")
+                self._append_turn_pipeline_step("finalize_turn", detail="legacy streaming finalize")
+                reply_text = str(reply or "")
+                self._update_turn_pipeline(
+                    final_path="model_reply",
+                    reply_source="model_generation",
+                    should_end=False,
+                )
+                try:
+                    history = list(getattr(self.bot, "history", []) or [])
+                    history.append({"role": "assistant", "content": reply_text})
+                    setattr(self.bot, "history", history)
+                except Exception:
+                    logger.debug("legacy streaming history append failed", exc_info=True)
+                return reply_text, False
+
         streamed = False
 
         async def _emit_chunk(chunk_text: str) -> None:
@@ -985,7 +1132,6 @@ class TurnService(ToolPipelineMixin):
                 detail="legacy stream override detected; ignored for authoritative output",
             )
 
-        self._update_turn_pipeline(mode="stream_async")
         self._append_turn_pipeline_step(
             "spine_delegate",
             status="running",

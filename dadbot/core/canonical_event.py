@@ -43,6 +43,7 @@ NON_CANONICAL_PAYLOAD_FIELDS: frozenset[str] = frozenset(
         "updated_at",
         "duration_ms",
         "elapsed_ms",
+        "execution_timestamp_ms",
         "checkpoint",
         "identity",
         "execution_trace_contract",
@@ -80,12 +81,7 @@ def _strip_non_canonical(value: Any, *, depth: int = 0) -> Any:
     if isinstance(value, dict):
         cleaned: dict[str, Any] = {}
         for key, item in value.items():
-            if key in NON_CANONICAL_PAYLOAD_FIELDS:
-                # Preserve semantic temporal fields nested inside canonical domain payloads
-                # (e.g., memory/session entries) while still stripping top-level operational
-                # timestamp metadata from the event envelope itself.
-                if depth > 0 and key in {"created_at", "updated_at"}:
-                    cleaned[key] = _strip_non_canonical(item, depth=depth + 1)
+            if depth == 0 and key in NON_CANONICAL_PAYLOAD_FIELDS:
                 continue
             cleaned[key] = _strip_non_canonical(item, depth=depth + 1)
         return cleaned

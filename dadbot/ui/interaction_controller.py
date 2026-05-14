@@ -89,6 +89,39 @@ def _restore_model_override(bot: Any, previous_model: str, model_overridden: boo
         logger.debug("Could not restore previous model %s", previous_model, exc_info=True)
 
 
+def _adaptive_model_for_prompt(bot: Any, prompt: str) -> str:
+    """Pick a model lane (tiny/medium/heavy) from prompt risk/complexity signals."""
+    text = str(prompt or "").strip().lower()
+    if not text:
+        return ""
+    high_stakes_markers = (
+        "suicide",
+        "self harm",
+        "harm myself",
+        "panic attack",
+        "medical",
+        "legal",
+        "abuse",
+        "emergency",
+        "crisis",
+    )
+    heavy = any(token in text for token in high_stakes_markers)
+    medium = (len(text) > 180) or ("?" in text) or any(k in text for k in ("why", "how", "plan", "explain"))
+
+    config = getattr(bot, "config", None)
+    current = str(getattr(bot, "LLM_MODEL", "") or getattr(config, "llm_model", "") or "").strip()
+    fallback_models = list(getattr(bot, "FALLBACK_MODELS", []) or getattr(config, "fallback_models", []) or [])
+    tiny = str(fallback_models[0] if fallback_models else current)
+    med = str(fallback_models[1] if len(fallback_models) > 1 else current or tiny)
+    hvy = str(current or med or tiny)
+
+    if heavy:
+        return hvy
+    if medium:
+        return med
+    return tiny
+
+
 def _fallback_runtime_result(
     *,
     normalized_thread_id: str,
@@ -130,6 +163,8 @@ def process_prompt_via_runtime(
     model_override: str = "",
     temperature_style: str = "balanced",
     message_metadata: dict | None = None,
+    turn_controls: dict | None = None,
+    adaptive_compute: bool = True,
 ) -> dict:
     metrics = _runtime_delivery_metrics()
     normalized_thread_id, normalized_prompt = _normalized_prompt_inputs(thread_id, prompt)
@@ -151,6 +186,9 @@ def process_prompt_via_runtime(
     runtime = get_runtime()
     bot = getattr(runtime.api, "_bot", None)
     target_model = str(model_override or "").strip()
+    controls_payload = dict(turn_controls or {})
+    if adaptive_compute and not target_model:
+        target_model = _adaptive_model_for_prompt(bot, normalized_prompt)
     model_overridden, previous_model = _apply_model_override(bot, target_model)
 
     try:
@@ -170,7 +208,11 @@ def process_prompt_via_runtime(
                     thread_id=normalized_thread_id,
                     content=normalized_prompt,
                     attachments=attachments,
-                    metadata=message_metadata,
+                    metadata={
+                        **dict(message_metadata or {}),
+                        "turn_controls": controls_payload,
+                        "adaptive_compute": bool(adaptive_compute),
+                    },
                 )
                 elapsed_ms = max(1, int((time.perf_counter() - started) * 1000))
                 ttft = list(metrics.get("ttft_ms") or [])
@@ -191,6 +233,8 @@ def process_prompt_via_runtime(
                     or getattr(bot, "LLM_MODEL", "")
                     or "",
                 )
+                runtime_result["turn_controls"] = controls_payload
+                runtime_result["adaptive_compute"] = bool(adaptive_compute)
                 return runtime_result
             except Exception as exc:
                 st.session_state["runtime_last_error"] = str(exc)

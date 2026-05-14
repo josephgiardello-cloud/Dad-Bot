@@ -186,6 +186,7 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
                 attachments=attachments,
                 session_id=session_id,
                 confluence_key=confluence_key,
+                metadata=dict(getattr(self, "_execute_turn_request_metadata", {}) or {}),
             ),
         )
 
@@ -412,9 +413,12 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
         request_session_id = str(request.session_id or "").strip() or str(
             getattr(self, "active_thread_id", "") or "default",
         )
+        request_metadata = dict(getattr(request, "metadata", {}) or {})
         event_mode = self._delivery_event_mode(request.delivery)
         previous_session_id = str(getattr(self, "_execute_turn_session_id", "") or "")
+        previous_request_metadata = dict(getattr(self, "_execute_turn_request_metadata", {}) or {})
         self._execute_turn_session_id = request_session_id
+        self._execute_turn_request_metadata = request_metadata
         self._begin_turn_event_run()
         self._emit_turn_event(
             "TURN_START",
@@ -465,6 +469,7 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
             ) from exc
         finally:
             self._execute_turn_session_id = previous_session_id
+            self._execute_turn_request_metadata = previous_request_metadata
             self._active_turn_run_id = ""
 
     async def _execute_turn_async(
@@ -588,6 +593,26 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
         attachments: AttachmentList | None = None,
         chunk_callback: ChunkCallback | None = None,
     ) -> FinalizedTurnResult:
+        safety_support = getattr(self, "safety_support", None)
+        direct_crisis = getattr(safety_support, "direct_reply_for_input", None)
+        if callable(direct_crisis):
+            crisis_reply = direct_crisis(str(user_input or ""))
+            if crisis_reply is not None:
+                final_reply = str(crisis_reply or "")
+                append_signoff = getattr(getattr(self, "reply_finalization", None), "append_signoff", None)
+                if callable(append_signoff):
+                    final_reply = str(append_signoff(final_reply) or final_reply)
+                return final_reply, False
+        detect_crisis = getattr(safety_support, "detect_crisis_signal", None)
+        crisis_builder = getattr(safety_support, "crisis_support_reply", None)
+        if callable(detect_crisis) and callable(crisis_builder):
+            if bool(detect_crisis(str(user_input or ""))):
+                final_reply = str(crisis_builder() or "")
+                append_signoff = getattr(getattr(self, "reply_finalization", None), "append_signoff", None)
+                if callable(append_signoff):
+                    final_reply = str(append_signoff(final_reply) or final_reply)
+                return final_reply, False
+
         pre_turn_daily_checkin_due = self._get_pre_turn_checkin_due()
 
         context = self._build_sovereign_context(mode=ExecutionMode.LIVE)

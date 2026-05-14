@@ -152,6 +152,7 @@ def test_no_unseeded_random_imports_in_core():
     EXEMPT_PATTERNS = frozenset(
         {
             "dadbot/core/external_tool_runtime.py",  # sandbox jitter, not in turn execution path
+            "dadbot/core/personality_spice.py",  # post-selection formatting only, not in turn graph
         }
     )
 

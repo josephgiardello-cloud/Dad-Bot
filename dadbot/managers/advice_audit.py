@@ -56,8 +56,6 @@ class ShadowAuditManager:
             manager = getattr(self.bot, "internal_state_manager", None)
             if manager is not None and hasattr(manager, "snapshot"):
                 state = manager.snapshot() or {}
-            elif hasattr(self.bot, "internal_state_snapshot"):
-                state = self.bot.internal_state_snapshot() or {}
         except Exception:
             state = {}
         if not isinstance(state, dict):

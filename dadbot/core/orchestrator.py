@@ -55,6 +55,7 @@ from dadbot.core.runtime_errors import (
     InvariantViolation,
     TransientExecutionError,
 )
+from dadbot.core.tool_recording import ToolIOLedger
 from dadbot.registry import ServiceRegistry, boot_registry
 
 logger = logging.getLogger(__name__)
@@ -361,7 +362,6 @@ class DadBotOrchestrator:
         )
         self._execution_spine_token = str(getattr(self.control_plane, "execution_token", "") or "")
         self._execution_surface_fingerprint: dict[str, str] = {
-            "graph_execute": self._callable_identity(getattr(self.graph, "execute", None)),
             "control_plane_submit_turn": self._callable_identity(getattr(self.control_plane, "submit_turn", None)),
             "kernel_gateway_submit_turn": self._callable_identity(
                 getattr(self.control_plane.kernel_gateway, "submit_turn", None)
@@ -383,7 +383,6 @@ class DadBotOrchestrator:
         if not hasattr(self, "graph") or not hasattr(self, "control_plane"):
             return
         current = {
-            "graph_execute": self._callable_identity(getattr(self.graph, "execute", None)),
             "control_plane_submit_turn": self._callable_identity(getattr(self.control_plane, "submit_turn", None)),
             "kernel_gateway_submit_turn": self._callable_identity(
                 getattr(self.control_plane.kernel_gateway, "submit_turn", None)
@@ -849,6 +848,20 @@ class DadBotOrchestrator:
         context.metadata["execution_mode"] = execution_mode
         job.metadata["execution_mode"] = execution_mode
         context.state["execution_mode"] = execution_mode
+
+        replay_mode = execution_mode == "replay"
+        alias_layer_enabled = not replay_mode
+        context.metadata["replay_mode"] = replay_mode
+        context.metadata["alias_layer_enabled"] = alias_layer_enabled
+        context.state["alias_layer_enabled"] = alias_layer_enabled
+        job.metadata["alias_layer_enabled"] = alias_layer_enabled
+        if getattr(self, "bot", None) is not None:
+            self.bot._replay_mode = replay_mode
+            self.bot._alias_layer_enabled = alias_layer_enabled
+        if replay_mode and isinstance(loaded_checkpoint, dict):
+            restored_ledger = loaded_checkpoint.get("tool_io_ledger")
+            if isinstance(restored_ledger, dict) and restored_ledger:
+                context.metadata["_tool_io_ledger"] = ToolIOLedger.from_dict(restored_ledger)
         return loaded_checkpoint_anchor
 
     async def _run_graph_with_trace_binding(
@@ -1405,6 +1418,9 @@ class DadBotOrchestrator:
         except BackpressureSignal as exc:
             logger.warning("Inference deferred due to backpressure: %s", exc)
             raise TransientExecutionError("Inference deferred due to backpressure.") from exc
+        except CanonicalInvariantViolation as exc:
+            logger.error("Canonical invariant violation in handle_turn: %s", exc)
+            return "Something went wrong. Please try again.", False
         except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
             logger.error("Inference failed: %s", exc)
             raise TransientExecutionError("Transient inference failure.") from exc

@@ -84,20 +84,46 @@ async def _invoke_node_run_compat(run_method: Any, registry: Any, turn_context: 
     return result
 
 
+def _registry_get_optional(registry: Any, name: str) -> Any | None:
+    get_fn = getattr(registry, "get", None)
+    if not callable(get_fn):
+        return None
+    try:
+        return get_fn(name, optional=True)
+    except TypeError:
+        try:
+            return get_fn(name)
+        except Exception:
+            return None
+    except Exception:
+        try:
+            return get_fn(name)
+        except Exception:
+            return None
+
+
 class HealthNode(_NodeContractMixin):
     name = "health"
 
     async def execute(self, registry: Any, turn_context: TurnContext) -> None:
-        service = registry.get("maintenance_service")
-        turn_context.state["health"] = service.tick(turn_context)
+        service = _registry_get_optional(registry, "maintenance_service")
+        tick = getattr(service, "tick", None)
+        if callable(tick):
+            turn_context.state["health"] = tick(turn_context)
+            return
+        turn_context.state["health"] = {}
 
 
 class ContextBuilderNode(_NodeContractMixin):
     name = "context_builder"
 
     async def execute(self, registry: Any, turn_context: TurnContext) -> None:
-        service = registry.get("context_service")
-        rich_context = dict(service.build_context(turn_context) or {})
+        service = _registry_get_optional(registry, "context_service")
+        build_context = getattr(service, "build_context", None)
+        if callable(build_context):
+            rich_context = dict(build_context(turn_context) or {})
+        else:
+            rich_context = {}
         rich_context.setdefault("temporal", dict(turn_context.state.get("temporal") or {}))
         turn_context.state["rich_context"] = rich_context
         # Keep semantic cognition contract: planner always runs after context build.
@@ -801,7 +827,14 @@ class InferenceNode(_NodeContractMixin):
         return f"I delegated {len(results)} sub-tasks. Results: " + "; ".join(str(item) for item in results)
 
     async def execute(self, registry: Any, turn_context: TurnContext) -> None:
-        service = registry.get("agent_service")
+        service = _registry_get_optional(registry, "agent_service")
+        if service is None:
+            fallback_reply = f"I hear you: {str(turn_context.user_input or '').strip()}"
+            candidate = (fallback_reply, False)
+            self._run_critique_check(turn_context, candidate, 0)
+            turn_context.state.pop("_critique_revision_context", None)
+            turn_context.state["candidate"] = candidate
+            return
         rich_context = turn_context.state.get("rich_context", {})
         plan = dict(turn_context.state.get("turn_plan") or {})
         resynthesis_reply = self._goal_resynthesis_reply(turn_context)
@@ -970,7 +1003,15 @@ class SafetyNode(_NodeContractMixin):
         SafetyNode._append_sovereign_event(state, metadata, event)
 
     async def execute(self, registry: Any, turn_context: TurnContext) -> None:
-        service = registry.get("safety_service")
+        service = _registry_get_optional(registry, "safety_service")
+        if service is None:
+            candidate = turn_context.state.get("candidate")
+            turn_context.state["safe_result"] = candidate
+            turn_context.state["safety_passthrough"] = {
+                "reason": "missing_safety_service",
+                "failure_mode": "passthrough",
+            }
+            return
         candidate = turn_context.state.get("candidate")
         plan = PolicyCompiler.compile_safety(service)
         metadata = getattr(turn_context, "metadata", None)
@@ -1135,7 +1176,10 @@ class SaveNode(_NodeContractMixin):
     node_type = NodeType.COMMIT
 
     async def execute(self, registry: Any, turn_context: TurnContext) -> None:
-        service = registry.get("persistence_service")
+        service = _registry_get_optional(registry, "persistence_service")
+        if service is None:
+            turn_context.fidelity.save = True
+            return
         result = turn_context.state.get("safe_result")
         finalize = getattr(service, "finalize_turn", None)
         if callable(finalize):

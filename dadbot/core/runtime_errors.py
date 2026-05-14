@@ -63,6 +63,10 @@ class ReplayMismatch(ReplayError):
     """Raised when replay output diverges from recorded execution shape."""
 
 
+class ReplayInvariantViolation(ReplayError):
+    """Raised when replay mode cannot satisfy an invariant without live execution."""
+
+
 class ProjectionMismatch(RuntimeErrorBase):
     """Raised when projected trace/state diverges from authoritative execution state."""
 
@@ -111,6 +115,7 @@ __all__ = [
     "ProjectionMismatch",
     "SystemInvariantViolation",
     "ReplayError",
+    "ReplayInvariantViolation",
     "ReplayMismatch",
     "RuntimeErrorBase",
     "RuntimeExecutionError",

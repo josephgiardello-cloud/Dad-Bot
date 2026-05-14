@@ -231,11 +231,11 @@ Test anchors:
 Compiler workflow:
 
 - Compile and validate anchors:
-  - c:/Users/josep/OneDrive/Desktop/Dad-Bot/.venv/Scripts/python.exe tools/contract_test_compiler.py --validate-nodeids --fail-on-untested
+  - python tools/contract_test_compiler.py --validate-nodeids --fail-on-untested
 - Execute compiled contract suite:
-  - c:/Users/josep/OneDrive/Desktop/Dad-Bot/.venv/Scripts/python.exe tools/contract_test_compiler.py --run-tests --fail-on-untested
+  - python tools/contract_test_compiler.py --run-tests --fail-on-untested
 - CI drift check (manifest up-to-date):
-  - c:/Users/josep/OneDrive/Desktop/Dad-Bot/.venv/Scripts/python.exe tools/contract_test_compiler.py --check --fail-on-untested
+  - python tools/contract_test_compiler.py --check --fail-on-untested
 
 ### D-3 Documentation Staleness Rule
 

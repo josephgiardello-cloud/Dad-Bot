@@ -156,6 +156,20 @@ class TurnHandler:
             "family_map": cls._extract_family_map(user_input),
         }
 
+    @staticmethod
+    def _route_subagent_lane(user_input: str) -> str:
+        """Route to a lightweight sub-agent lane for downstream orchestration hints."""
+        text = str(user_input or "").strip().lower()
+        if not text:
+            return "AdviceDad"
+        if any(token in text for token in ("remember", "memory", "last time", "we talked", "history")):
+            return "MemoryDad"
+        if any(token in text for token in ("joke", "funny", "roast", "tease", "lol", "haha")):
+            return "FunDad"
+        if any(token in text for token in ("rules", "boundary", "must", "discipline", "serious")):
+            return "StrictDad"
+        return "AdviceDad"
+
     async def _inject_policy_metadata(self, metadata: dict[str, Any]) -> None:
         store = self._policy_store
         if store is None:
@@ -310,6 +324,8 @@ class TurnHandler:
         outbound_metadata: dict[str, Any] = {
             "confluence_mode": "enforce",
             "confluence_key": str(ctx.confluence_key or "").strip(),
+            "subagent_lane": self._route_subagent_lane(str(ctx.user_input or "")),
+            "subagent_family": ["AdviceDad", "MemoryDad", "FunDad", "StrictDad"],
         }
         if ctx.metadata:
             outbound_metadata.update(dict(ctx.metadata))

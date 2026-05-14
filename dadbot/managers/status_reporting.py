@@ -383,7 +383,7 @@ class StatusReportingManager:
                 "maintenance": dict(maintenance or {}),
                 "supervisor": dict(supervisor or {}),
                 "living": dict(living or {}),
-                "turn_pipeline": self.bot.turn_pipeline_snapshot(),
+                "turn_pipeline": dict(self.bot.turn_pipeline_snapshot() or {}),
             },
         )
         return validated.model_dump(mode="python")

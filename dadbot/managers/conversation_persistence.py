@@ -877,13 +877,13 @@ class ConversationPersistenceManager:
         trace_id = str(payload.get("trace_id") or "unknown").strip() or "unknown"
         payload["trace_id"] = trace_id
         sequence = self._compute_next_sequence(trace_id)
-        payload.setdefault("sequence", sequence)
-        event_id_seed = f"{trace_id}:{int(payload.get('sequence') or sequence)}"
-        payload.setdefault(
-            "event_id",
-            hashlib.sha256(event_id_seed.encode()).hexdigest()[:16],
-        )
-        payload.setdefault("occurred_at", self._active_turn_wall_time())
+        # Always canonicalize envelope identity fields from durable order.
+        # Caller-provided values may be blank, stale, or non-deterministic.
+        payload["sequence"] = int(sequence)
+        event_id_seed = f"{trace_id}:{int(sequence)}"
+        payload["event_id"] = hashlib.sha256(event_id_seed.encode()).hexdigest()[:16]
+        occurred_at = str(payload.get("occurred_at") or "").strip()
+        payload["occurred_at"] = occurred_at or self._active_turn_wall_time()
         payload.setdefault("persistence_schema_version", PERSISTENCE_SCHEMA_VERSION)
         payload = normalize_trace_event(payload)
         self._append_ledger_event(

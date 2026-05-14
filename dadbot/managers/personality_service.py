@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import re
 
+from dadbot.core.personality_spice import DadSpiceEngine
+
 
 class PersonalityServiceManager:
     """Single authority for response voice, tone, and emotional stance.
@@ -19,6 +21,24 @@ class PersonalityServiceManager:
 
     def __init__(self, bot):
         self.bot = bot
+        self._spice = DadSpiceEngine(pep_level=0.7)
+
+    def _get_spice_engine(self) -> DadSpiceEngine:
+        spice = getattr(self, "_spice", None)
+        if isinstance(spice, DadSpiceEngine):
+            return spice
+        spice = DadSpiceEngine(pep_level=0.7)
+        self._spice = spice
+        return spice
+
+    def _current_turn_controls(self) -> dict:
+        """Read optional per-turn controls propagated through turn metadata."""
+        ctx = getattr(getattr(self.bot, "turn_orchestrator", None), "_last_turn_context", None)
+        if ctx is None:
+            return {}
+        metadata = dict(getattr(ctx, "metadata", {}) or {})
+        controls = dict(metadata.get("turn_controls") or {})
+        return controls
 
     def _should_calibrate_pushback(self, user_input: str, current_mood: str) -> bool:
         settings = self.bot.relationship_calibration_settings()
@@ -71,6 +91,21 @@ class PersonalityServiceManager:
             user_input,
             current_mood,
         )
+        controls = self._current_turn_controls()
+        pep_override = controls.get("pep_factor")
+        if isinstance(pep_override, (int, float)):
+            self._get_spice_engine().pep_level = float(max(0.0, min(1.0, float(pep_override))))
+        spice_enabled = any(
+            controls.get(key) is not None
+            for key in ("pep_factor", "temperature", "presence_penalty", "frequency_penalty")
+        )
+        if not spice_enabled:
+            return str(voiced_reply or "")
+        # Dad Spice: inject warmth/wit/energy after all other voice transforms
+        spice_context = self._build_spice_context(current_mood, user_input)
+        if controls:
+            spice_context["turn_controls"] = controls
+        voiced_reply = self._get_spice_engine().spice_response(str(voiced_reply or ""), spice_context)
         return str(voiced_reply or "")
 
     def build_personality_context(self, current_mood: str) -> str | None:
@@ -79,7 +114,52 @@ class PersonalityServiceManager:
         Single authority — all callers must go through here rather than
         calling ``tone_context.build_mood_context`` directly.
         """
-        return self.bot.tone_context.build_mood_context(current_mood)
+        mood_section = self.bot.tone_context.build_mood_context(current_mood)
+        pep_directive = self._get_spice_engine().get_pep_injection()
+        controls = self._current_turn_controls()
+        if controls:
+            style_bits: list[str] = []
+            if controls.get("temperature") is not None:
+                style_bits.append(f"Target creativity temperature: {float(controls.get('temperature')):.2f}.")
+            if controls.get("presence_penalty") is not None:
+                style_bits.append(f"Presence penalty: {float(controls.get('presence_penalty')):.2f}.")
+            if controls.get("frequency_penalty") is not None:
+                style_bits.append(f"Frequency penalty: {float(controls.get('frequency_penalty')):.2f}.")
+            if controls.get("pep_factor") is not None:
+                style_bits.append(f"Dad pep factor: {float(controls.get('pep_factor')):.2f} (0-1 scale).")
+            if style_bits:
+                pep_directive = f"{pep_directive} {' '.join(style_bits)}"
+        if mood_section:
+            return f"{mood_section}\n\n{pep_directive}"
+        return pep_directive
+
+    def _build_spice_context(self, current_mood: str, user_input: str | None) -> dict:
+        """Derive lightweight context dict for DadSpiceEngine from available bot state."""
+        # Infer user energy from surface signals in the raw input
+        text = str(user_input or "").strip().lower()
+        if not text:
+            user_energy = "neutral"
+        elif any(w in text for w in ("please", "help", "scared", "anxious", "crisis", "hurt")):
+            user_energy = "distressed"
+        elif text.endswith("!") or "haha" in text or "lol" in text or "lmao" in text:
+            user_energy = "playful"
+        elif text.endswith("?") or any(w in text for w in ("why", "how", "what", "explain")):
+            user_energy = "curious"
+        else:
+            user_energy = "neutral"
+
+        # Relationship score: probe calibration settings as a proxy
+        try:
+            calibration = self.bot.relationship_calibration_settings()
+            rel_score = 0.9 if calibration.get("enabled", True) else 0.5
+        except Exception:
+            rel_score = 0.8
+
+        return {
+            "mood": str(current_mood or "warm"),
+            "relationship_score": rel_score,
+            "user_energy": user_energy,
+        }
 
 
 __all__ = ["PersonalityServiceManager"]

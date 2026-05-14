@@ -79,7 +79,10 @@ class FloatNormalizer:
         if isinstance(obj, float):
             return _round_float(obj, self._precision)
         if isinstance(obj, dict):
-            return {k: self.normalize(v, _depth=_depth + 1) for k, v in obj.items()}
+            # Snapshot entries first so concurrent state updates cannot mutate
+            # the underlying mapping during recursive normalization.
+            items = list(obj.items())
+            return {k: self.normalize(v, _depth=_depth + 1) for k, v in items}
         if isinstance(obj, (list, tuple)):
             normalised = [self.normalize(v, _depth=_depth + 1) for v in obj]
             return type(obj)(normalised) if isinstance(obj, tuple) else normalised

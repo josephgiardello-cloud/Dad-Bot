@@ -4,7 +4,7 @@
 		{
 			"label": "Test Lane: DEV",
 			"type": "shell",
-			"command": "${workspaceFolder}/.venv/Scripts/python.exe",
+			"command": "${command:python.interpreterPath}",
 			"args": [
 				"-m",
 				"pytest",
@@ -18,7 +18,7 @@
 		{
 			"label": "Test Lane: INTEGRATION",
 			"type": "shell",
-			"command": "${workspaceFolder}/.venv/Scripts/python.exe",
+			"command": "${command:python.interpreterPath}",
 			"args": [
 				"-m",
 				"pytest",
@@ -31,7 +31,7 @@
 		{
 			"label": "Test Lane: THIN-SPINE VS LEGACY",
 			"type": "shell",
-			"command": "${workspaceFolder}/.venv/Scripts/python.exe",
+			"command": "${command:python.interpreterPath}",
 			"args": [
 				"-m",
 				"pytest",
@@ -43,7 +43,7 @@
 		{
 			"label": "Test Lane: DURABILITY / PHASE4",
 			"type": "shell",
-			"command": "${workspaceFolder}/.venv/Scripts/python.exe",
+			"command": "${command:python.interpreterPath}",
 			"args": [
 				"-m",
 				"pytest",
@@ -57,7 +57,7 @@
 		{
 			"label": "Test Lane: SOAK",
 			"type": "shell",
-			"command": "${workspaceFolder}/.venv/Scripts/python.exe",
+			"command": "${command:python.interpreterPath}",
 			"args": [
 				"-m",
 				"pytest",
@@ -70,7 +70,7 @@
 		{
 			"label": "Test Lane: DETERMINISM STRESS",
 			"type": "shell",
-			"command": "${workspaceFolder}/.venv/Scripts/python.exe",
+			"command": "${command:python.interpreterPath}",
 			"args": [
 				"-m",
 				"pytest",
@@ -83,9 +83,24 @@
 			"group": "test"
 		},
 		{
+			"label": "Test Lane: STABILITY SWEEP",
+			"type": "shell",
+			"command": "${command:python.interpreterPath}",
+			"args": [
+				"-m",
+				"pytest",
+				"--run-stress",
+				"-m",
+				"durability or phase4 or stress",
+				"--durations=25",
+				"-q"
+			],
+			"group": "test"
+		},
+		{
 			"label": "Test Lane: UI",
 			"type": "shell",
-			"command": "${workspaceFolder}/.venv/Scripts/python.exe",
+			"command": "${command:python.interpreterPath}",
 			"args": [
 				"-m",
 				"pytest",
@@ -98,7 +113,7 @@
 		{
 			"label": "Test Lane: CERT / REGRESSION",
 			"type": "shell",
-			"command": "${workspaceFolder}/.venv/Scripts/python.exe",
+			"command": "${command:python.interpreterPath}",
 			"args": [
 				"tools/cert_baseline_capture.py",
 				"--durations",
@@ -111,7 +126,7 @@
 		{
 			"label": "Test Lane: FULL CERT",
 			"type": "shell",
-			"command": "${workspaceFolder}/.venv/Scripts/python.exe",
+			"command": "${command:python.interpreterPath}",
 			"args": [
 				"-m",
 				"pytest",
@@ -122,7 +137,7 @@
 		{
 			"label": "Run Dad Bot",
 			"type": "shell",
-			"command": "${workspaceFolder}/.venv/Scripts/python.exe",
+			"command": "${command:python.interpreterPath}",
 			"args": [
 				"Dad.py",
 				"--model",
@@ -139,14 +154,18 @@
 		{
 			"label": "Run Dad Bot MCP Server",
 			"type": "shell",
-			"command": "${workspaceFolder}/.venv/Scripts/python.exe -m dadbot_system.local_mcp_server *> session_logs/local_mcp_server.task.log",
+			"command": "${command:python.interpreterPath}",
+			"args": [
+				"-m",
+				"dadbot_system.local_mcp_server"
+			],
 			"isBackground": true,
 			"group": "build"
 		},
 		{
 			"label": "Run Sovereign Heartbeat Daemon",
 			"type": "shell",
-			"command": "${workspaceFolder}/.venv/Scripts/python.exe",
+			"command": "${command:python.interpreterPath}",
 			"args": [
 				"Dad.py",
 				"heartbeat-daemon",
@@ -161,7 +180,7 @@
 		{
 			"label": "Run HUD Watch",
 			"type": "shell",
-			"command": "${workspaceFolder}/.venv/Scripts/python.exe",
+			"command": "${command:python.interpreterPath}",
 			"args": [
 				"Dad.py",
 				"hud",
@@ -174,7 +193,7 @@
 		{
 			"label": "Contract Gate: STRICT",
 			"type": "shell",
-			"command": "${workspaceFolder}/.venv/Scripts/python.exe",
+			"command": "${command:python.interpreterPath}",
 			"args": [
 				"_ci_gate_check.py",
 				"--contract-gate"
@@ -184,7 +203,7 @@
 		{
 			"label": "Inspect: System Health",
 			"type": "shell",
-			"command": "${workspaceFolder}/.venv/Scripts/python.exe",
+			"command": "${command:python.interpreterPath}",
 			"args": [
 				"tools/inspect_system.py",
 				"--health"
@@ -195,7 +214,7 @@
 		{
 			"label": "Inspect: Tool Capabilities",
 			"type": "shell",
-			"command": "${workspaceFolder}/.venv/Scripts/python.exe",
+			"command": "${command:python.interpreterPath}",
 			"args": [
 				"tools/inspect_system.py",
 				"--tools"
@@ -206,7 +225,7 @@
 		{
 			"label": "Inspect: Last Scale Report",
 			"type": "shell",
-			"command": "${workspaceFolder}/.venv/Scripts/python.exe",
+			"command": "${command:python.interpreterPath}",
 			"args": [
 				"tools/inspect_system.py",
 				"--last-report"
@@ -217,7 +236,7 @@
 		{
 			"label": "Inspect: Invariant Violations",
 			"type": "shell",
-			"command": "${workspaceFolder}/.venv/Scripts/python.exe",
+			"command": "${command:python.interpreterPath}",
 			"args": [
 				"tools/inspect_system.py",
 				"--violations"
@@ -228,7 +247,7 @@
 		{
 			"label": "System: Scale Validation (10k)",
 			"type": "shell",
-			"command": "${workspaceFolder}/.venv/Scripts/python.exe",
+			"command": "${command:python.interpreterPath}",
 			"args": [
 				"tools/system_validation_at_scale.py",
 				"--turns",
@@ -240,7 +259,7 @@
 		{
 			"label": "System: Scale Validation + Recovery",
 			"type": "shell",
-			"command": "${workspaceFolder}/.venv/Scripts/python.exe",
+			"command": "${command:python.interpreterPath}",
 			"args": [
 				"tools/system_validation_at_scale.py",
 				"--turns",
@@ -285,3 +304,4 @@
 		}
 	]
 }
+

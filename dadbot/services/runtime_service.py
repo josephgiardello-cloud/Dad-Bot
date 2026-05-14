@@ -24,7 +24,7 @@ class RuntimeService:
             self.bot.model_candidates(),
             status_callback=status_callback,
             deliver_status=self.bot.deliver_status_message,
-            finalize_reply=self.bot.finalize_reply,
+            finalize_reply=getattr(getattr(self.bot, "reply_finalization", None), "append_signoff", None),
             retryable_errors=self.bot.ollama_retryable_errors(),
         )
         if selected:

@@ -34,7 +34,7 @@ def _name_contains_ledger(node: ast.AST) -> bool:
 
 
 def test_single_execution_mutation_ledger_path_enforced() -> None:
-    control_plane_source = (CORE / "control_plane.py").read_text(encoding="utf-8")
+    control_plane_source = (CORE / "control_plane.py").read_text(encoding="utf-8-sig")
     control_plane_tree = ast.parse(control_plane_source)
 
     adapter_constructions = 0
@@ -55,7 +55,7 @@ def test_single_execution_mutation_ledger_path_enforced() -> None:
         rel = pyfile.relative_to(ROOT).as_posix()
         if rel in ALLOWED_LEDGER_WRITE_FILES:
             continue
-        tree = ast.parse(pyfile.read_text(encoding="utf-8"), filename=rel)
+        tree = ast.parse(pyfile.read_text(encoding="utf-8-sig"), filename=rel)
         for node in ast.walk(tree):
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
                 if node.func.attr in {"write", "append"} and _name_contains_ledger(node.func.value):

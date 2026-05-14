@@ -19,7 +19,7 @@ import hashlib
 import logging
 import math
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Mapping
 
 from dadbot.core.emotion_state import EmotionState
 
@@ -760,7 +760,11 @@ class ResponseEngine:
         except (TypeError, ValueError):
             relationship_trust = 0.5
 
-        safety_boundaries = dict(getattr(context, "safety_boundaries", {}) or {})
+        raw_boundaries = getattr(context, "safety_boundaries", None)
+        if isinstance(raw_boundaries, Mapping):
+            safety_boundaries = dict(raw_boundaries)
+        else:
+            safety_boundaries = {}
         decision = evaluate(
             str(getattr(context, "user_input", "") or ""),
             str(candidate.text or ""),
@@ -769,7 +773,10 @@ class ResponseEngine:
                 "safety_boundaries": safety_boundaries,
             },
         )
-        decision_payload = dict(decision or {})
+        if isinstance(decision, Mapping):
+            decision_payload = dict(decision)
+        else:
+            decision_payload = {}
         self._last_turn_telemetry["safety_critic"] = {
             "decision": str(decision_payload.get("decision") or "PASS"),
             "risk_score": float(decision_payload.get("risk_score") or 0.0),

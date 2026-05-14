@@ -78,6 +78,14 @@ class TestCanonicalExecutionPathStructure:
         # Should be async
         assert iscoroutinefunction(DadBotOrchestrator._submit_turn_via_control_plane)
 
+    def test_replay_mode_disables_alias_layer_at_execution_entry(self):
+        """Execution contract: replay mode must hard-disable facade alias layer."""
+        import inspect
+
+        source = inspect.getsource(DadBotOrchestrator._prepare_execution_mode_from_checkpoint)
+        assert "alias_layer_enabled = not replay_mode" in source
+        assert "self.bot._alias_layer_enabled = alias_layer_enabled" in source
+
     def test_turn_mixin_has_no_runtime_thin_toggle_branch(self):
         """Thin-spine migration guard: no runtime env toggle checks in turn mixin."""
         import inspect

@@ -110,11 +110,12 @@ class ToolPipelineMixin:
     def _deterministic_tool_route(self, stripped_input: str) -> tuple[str, dict[str, object], str] | None:
         parse_tool_command = getattr(self.bot, "parse_tool_command", None)
         if not callable(parse_tool_command):
-            return None
+            command = None
+        else:
+            command = parse_tool_command(stripped_input)
 
-        command = parse_tool_command(stripped_input)
         if not isinstance(command, dict):
-            return None
+            command = {}
 
         action = str(command.get("action") or "").strip()
         if action == _SET_REMINDER_TOOL:
@@ -129,6 +130,32 @@ class ToolPipelineMixin:
             if not query:
                 return None
             return _WEB_SEARCH_TOOL, {"query": query}, "Deterministic web lookup command routed to executor."
+
+        normalized = str(stripped_input or "").strip()
+        lowered = normalized.lower()
+        reminder_prefixes = (
+            "remind me to ",
+            "remind me ",
+            "set a reminder to ",
+            "set reminder to ",
+        )
+        if any(lowered.startswith(prefix) for prefix in reminder_prefixes):
+            detail = normalized
+            for prefix in reminder_prefixes:
+                if lowered.startswith(prefix):
+                    detail = normalized[len(prefix):].strip()
+                    break
+            detail = detail or normalized
+            split_details = getattr(self.bot, "split_reminder_details", None)
+            if callable(split_details):
+                title, due_text = split_details(detail)
+            else:
+                title, due_text = detail, ""
+            params = {
+                "title": str(title or detail or normalized[:100]).strip(),
+                "due_text": str(due_text or "").strip(),
+            }
+            return _SET_REMINDER_TOOL, params, "Natural-language reminder request routed to executor."
 
         return None
 
@@ -1025,7 +1052,9 @@ Return ONLY valid JSON (no extra text):
                     metadata={"tool": "set_reminder", "status": "success", "path": "sync"},
                     turn_context=turn_context,
                 )
-            return None, observation
+            # Legacy planning contract: reminder confirmations are returned as
+            # tool replies, not planner observations.
+            return observation, None
         self.bot.update_planner_debug(
             planner_status="execution_failed",
             planner_reason="Planner selected set_reminder, but Dad couldn't create the reminder cleanly.",
@@ -1115,7 +1144,8 @@ Return ONLY valid JSON (no extra text):
                     metadata={"tool": "set_reminder", "status": "success", "path": "async"},
                     turn_context=turn_context,
                 )
-            return None, observation
+            # Keep async contract aligned with sync reminder planning behavior.
+            return observation, None
         self.bot.update_planner_debug(
             planner_status="execution_failed",
             planner_reason="Planner selected set_reminder, but Dad couldn't create the reminder cleanly.",

@@ -26,12 +26,13 @@ import hashlib
 import json
 import time
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from enum import Enum
 from threading import RLock
 from typing import Any
 
 from dadbot.core.runtime_errors import ReplayMismatch
+from dadbot.core.tool_recording import ToolIOLedger
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -121,7 +122,12 @@ class NodeExecutionSnapshot:
 
 @dataclass
 class ExecutionCheckpoint:
-    """An immutable point-in-time snapshot of all node execution states."""
+    """An immutable point-in-time snapshot of all node execution states.
+    
+    Also includes tool_io_ledger for deterministic replay: all recorded tool
+    inputs/outputs are persisted so replay can return recorded outputs instead
+    of re-executing tools.
+    """
 
     checkpoint_id: str
     label: str
@@ -129,6 +135,7 @@ class ExecutionCheckpoint:
     node_snapshots: dict[str, NodeExecutionSnapshot]  # node_id → snapshot
     prev_checkpoint_hash: str
     checkpoint_hash: str = field(default="")
+    tool_io_ledger: ToolIOLedger = field(default_factory=ToolIOLedger)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -138,6 +145,66 @@ class ExecutionCheckpoint:
             "nodes": {k: v.to_dict() for k, v in self.node_snapshots.items()},
             "prev_checkpoint_hash": self.prev_checkpoint_hash,
             "checkpoint_hash": self.checkpoint_hash,
+            "tool_io_ledger": self.tool_io_ledger.to_dict(),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ExecutionCheckpoint:
+        """Reconstruct checkpoint from dict (e.g., from storage)."""
+        tool_io_ledger = ToolIOLedger.from_dict(data.get("tool_io_ledger", {}))
+        node_snapshots = {}
+        for node_id, node_dict in data.get("nodes", {}).items():
+            if isinstance(node_dict, dict):
+                node_snapshots[node_id] = NodeExecutionSnapshot(
+                    node_id=node_id,
+                    node_type=str(node_dict.get("node_type", "")),
+                    state=NodeState(str(node_dict.get("state", "pending"))),
+                    tool_name=str(node_dict.get("tool_name", "")),
+                    intent=str(node_dict.get("intent", "")),
+                    request_hash=str(node_dict.get("request_hash", "")),
+                    attempt_count=int(node_dict.get("attempt_count", 0)),
+                    last_error=str(node_dict.get("last_error", "")),
+                    output_type=str(node_dict.get("output_type", "")),
+                    partial_confidence=float(node_dict.get("partial_confidence", 1.0)),
+                    partial_output_available=bool(node_dict.get("partial_output_available", False)),
+                    created_at=float(node_dict.get("created_at", 0)),
+                    updated_at=float(node_dict.get("updated_at", 0)),
+                )
+        
+        return cls(
+            checkpoint_id=str(data.get("checkpoint_id", "")),
+            label=str(data.get("label", "")),
+            created_at=float(data.get("created_at", 0)),
+            node_snapshots=node_snapshots,
+            prev_checkpoint_hash=str(data.get("prev_checkpoint_hash", "")),
+            checkpoint_hash=str(data.get("checkpoint_hash", "")),
+            tool_io_ledger=tool_io_ledger,
+        )
+
+
+@dataclass(frozen=True)
+class ExecutionBranch:
+    """Represents a causal fork anchored to a historical checkpoint."""
+
+    branch_id: str
+    label: str
+    created_at: float
+    source_checkpoint_id: str
+    source_checkpoint_hash: str
+    fork_checkpoint_hash: str
+    patch: dict[str, Any] = field(default_factory=dict)
+    reason: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "branch_id": self.branch_id,
+            "label": self.label,
+            "created_at": self.created_at,
+            "source_checkpoint_id": self.source_checkpoint_id,
+            "source_checkpoint_hash": self.source_checkpoint_hash,
+            "fork_checkpoint_hash": self.fork_checkpoint_hash,
+            "patch": dict(self.patch or {}),
+            "reason": self.reason,
         }
 
 
@@ -170,6 +237,7 @@ class ExecutionCheckpointKernel:
         self._lock = RLock()
         self._node_states: dict[str, NodeExecutionSnapshot] = {}
         self._checkpoints: list[ExecutionCheckpoint] = []
+        self._branches: dict[str, ExecutionBranch] = {}
 
     # ------------------------------------------------------------------
     # Node state management
@@ -291,6 +359,143 @@ class ExecutionCheckpointKernel:
     def all_checkpoints(self) -> list[ExecutionCheckpoint]:
         with self._lock:
             return list(self._checkpoints)
+
+    def fork(
+        self,
+        *,
+        label: str,
+        reason: str = "",
+        from_checkpoint_hash: str = "",
+        patch: dict[str, Any] | None = None,
+    ) -> ExecutionBranch:
+        """Create a causal fork from a historical checkpoint.
+
+        `patch` is optional and currently supports:
+          - `node_state_overrides`: mapping[node_id] -> partial snapshot overrides
+          - `label`: optional branch-specific checkpoint label override
+        """
+        with self._lock:
+            if not self._checkpoints:
+                raise CheckpointIntegrityError("Cannot fork without at least one checkpoint")
+            source = self._checkpoints[-1]
+            if str(from_checkpoint_hash or "").strip():
+                match = next(
+                    (cp for cp in self._checkpoints if cp.checkpoint_hash == str(from_checkpoint_hash).strip()),
+                    None,
+                )
+                if match is None:
+                    raise CheckpointIntegrityError(
+                        f"Cannot fork: checkpoint hash not found: {from_checkpoint_hash[:12]!r}",
+                    )
+                source = match
+
+            branch_patch = dict(patch or {})
+            fork_nodes = {k: deepcopy(v) for k, v in source.node_snapshots.items()}
+            overrides = dict(branch_patch.get("node_state_overrides") or {})
+            now = time.time()
+            for node_id, override in overrides.items():
+                if not isinstance(override, dict):
+                    continue
+                existing = fork_nodes.get(str(node_id))
+                if existing is None:
+                    existing = NodeExecutionSnapshot(
+                        node_id=str(node_id),
+                        node_type=str(override.get("node_type") or "tool"),
+                        state=NodeState(str(override.get("state") or NodeState.PENDING.value)),
+                    )
+                    fork_nodes[str(node_id)] = existing
+                if "state" in override:
+                    existing.state = NodeState(str(override.get("state") or existing.state.value))
+                if "last_error" in override:
+                    existing.last_error = str(override.get("last_error") or "")
+                if "attempt_count" in override:
+                    existing.attempt_count = max(0, int(override.get("attempt_count") or 0))
+                if "partial_output_available" in override:
+                    existing.partial_output_available = bool(override.get("partial_output_available"))
+                existing.updated_at = now
+
+            fork_label = str(branch_patch.get("label") or label or "causal_fork").strip() or "causal_fork"
+            fork_cp_id = _sha256(
+                {
+                    "label": fork_label,
+                    "source_hash": source.checkpoint_hash,
+                    "ts": now,
+                    "patch": branch_patch,
+                }
+            )[:16]
+            fork_cp = ExecutionCheckpoint(
+                checkpoint_id=fork_cp_id,
+                label=fork_label,
+                created_at=now,
+                node_snapshots=fork_nodes,
+                prev_checkpoint_hash=source.checkpoint_hash,
+                tool_io_ledger=deepcopy(source.tool_io_ledger),
+            )
+            fork_hash_payload = {k: v for k, v in fork_cp.to_dict().items() if k != "checkpoint_hash"}
+            fork_cp.checkpoint_hash = _sha256(fork_hash_payload)
+            self._checkpoints.append(fork_cp)
+
+            branch_id = _sha256(
+                {
+                    "source_hash": source.checkpoint_hash,
+                    "fork_hash": fork_cp.checkpoint_hash,
+                    "label": fork_label,
+                }
+            )[:16]
+            branch = ExecutionBranch(
+                branch_id=branch_id,
+                label=fork_label,
+                created_at=now,
+                source_checkpoint_id=source.checkpoint_id,
+                source_checkpoint_hash=source.checkpoint_hash,
+                fork_checkpoint_hash=fork_cp.checkpoint_hash,
+                patch=branch_patch,
+                reason=str(reason or ""),
+            )
+            self._branches[branch_id] = branch
+            self._node_states = {k: deepcopy(v) for k, v in fork_nodes.items()}
+            return branch
+
+    def branch_catalog(self) -> list[dict[str, Any]]:
+        with self._lock:
+            branches = list(self._branches.values())
+        return [item.to_dict() for item in sorted(branches, key=lambda b: b.created_at)]
+
+    def compare_branch_to_source(self, branch_id: str) -> dict[str, Any]:
+        with self._lock:
+            branch = self._branches.get(str(branch_id or ""))
+            if branch is None:
+                raise CheckpointIntegrityError(f"Unknown branch id: {branch_id!r}")
+            source = next((cp for cp in self._checkpoints if cp.checkpoint_hash == branch.source_checkpoint_hash), None)
+            fork_cp = next((cp for cp in self._checkpoints if cp.checkpoint_hash == branch.fork_checkpoint_hash), None)
+        if source is None or fork_cp is None:
+            raise CheckpointIntegrityError("Branch references missing checkpoint(s)")
+
+        source_nodes = source.node_snapshots
+        fork_nodes = fork_cp.node_snapshots
+        changed: list[str] = []
+        added: list[str] = []
+        removed: list[str] = []
+
+        source_keys = set(source_nodes.keys())
+        fork_keys = set(fork_nodes.keys())
+        for node_id in sorted(fork_keys - source_keys):
+            added.append(node_id)
+        for node_id in sorted(source_keys - fork_keys):
+            removed.append(node_id)
+        for node_id in sorted(source_keys & fork_keys):
+            if asdict(source_nodes[node_id]) != asdict(fork_nodes[node_id]):
+                changed.append(node_id)
+
+        return {
+            "branch": branch.to_dict(),
+            "source_node_count": len(source_nodes),
+            "fork_node_count": len(fork_nodes),
+            "changed_nodes": changed,
+            "added_nodes": added,
+            "removed_nodes": removed,
+            "changed_count": len(changed),
+        }
 
     # ------------------------------------------------------------------
     # Integrity

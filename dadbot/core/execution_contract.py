@@ -88,6 +88,7 @@ class TurnRequest(BaseModel):
     session_id: str = "default"
     timeout_seconds: float | None = None
     context: SovereignContext | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class TurnResponse(BaseModel):
@@ -177,6 +178,7 @@ def live_turn_request(
     delivery: TurnDelivery = TurnDelivery.SYNC,
     timeout_seconds: float | None = None,
     context: SovereignContext | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> TurnRequest:
     resolved_context = context or SovereignContext()
     return TurnRequest(
@@ -186,4 +188,5 @@ def live_turn_request(
         session_id=str(resolved_context.session_id or "default"),
         timeout_seconds=timeout_seconds,
         context=resolved_context,
+        metadata=dict(metadata or {}),
     )

@@ -30,7 +30,7 @@ Pivot to **Phase 4.1.B: The Enforcement Hardening** — execute the Phase 4 runt
 - **What**: Remove hardcoded machine-specific paths from configuration and test artifacts.
 - **Why**: Dev configs must be portable across machines and CI environments without manual edits.
 - **How**:
-  - Replace `c:/Users/josep/OneDrive/Desktop/Dad-Bot/.venv/Scripts/python.exe` in `.vscode/tasks.json` with `${workspaceFolder}/.venv/Scripts/python.exe`.
+  - Replace machine-specific Python paths in `.vscode/tasks.json` with `${command:python.interpreterPath}`.
   - Normalize command strings in `tests/phase4_baselines.json` to use `${WORKSPACE_ROOT}` tokens.
   - Move hardcoded dev secrets (e.g., `POSTGRES_PASSWORD: dadbot`) to `.env.template` with `${POSTGRES_PASSWORD}` references.
 - **Owner**: Config layer (enable cross-machine development).
