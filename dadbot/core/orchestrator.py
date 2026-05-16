@@ -1356,34 +1356,6 @@ class DadBotOrchestrator:
 
         return result
 
-    async def _submit_turn_via_control_plane(
-        self,
-        user_input: str,
-        attachments: AttachmentList | None = None,
-        *,
-        session_id: str = "default",
-        confluence_key: str | None = None,
-        metadata: dict[str, Any] | None = None,
-        timeout_seconds: float | None = None,
-    ) -> FinalizedTurnResult:
-        normalized_timeout = _normalize_timeout_seconds(timeout_seconds)
-        explicit_key = str(confluence_key or "").strip()
-        if not explicit_key:
-            raise CanonicalInvariantViolation(
-                "Missing explicit confluence key in enforce mode.",
-                context={"session_id": str(session_id or "default")},
-            )
-        outbound_metadata: dict[str, Any] = {"confluence_mode": "enforce", "confluence_key": explicit_key}
-        if isinstance(metadata, dict) and metadata:
-            outbound_metadata.update(dict(metadata))
-        return await self.control_plane.submit_turn(
-            session_id=session_id,
-            user_input=user_input,
-            attachments=attachments,
-            metadata=outbound_metadata,
-            timeout_seconds=normalized_timeout,
-        )
-
     async def handle_turn(
         self,
         user_input: str,
@@ -1404,12 +1376,20 @@ class DadBotOrchestrator:
             assert_surface()
         try:
             normalized_timeout = _normalize_timeout_seconds(timeout_seconds)
-            return await self._submit_turn_via_control_plane(
-                user_input,
-                attachments=attachments,
+            explicit_key = str(confluence_key or "").strip()
+            if not explicit_key:
+                raise CanonicalInvariantViolation(
+                    "Missing explicit confluence key in enforce mode.",
+                    context={"session_id": str(session_id or "default")},
+                )
+            outbound_metadata: dict[str, Any] = {"confluence_mode": "enforce", "confluence_key": explicit_key}
+            if isinstance(metadata, dict) and metadata:
+                outbound_metadata.update(dict(metadata))
+            return await self.control_plane.submit_turn(
                 session_id=session_id,
-                confluence_key=confluence_key,
-                metadata=metadata,
+                user_input=user_input,
+                attachments=attachments,
+                metadata=outbound_metadata,
                 timeout_seconds=normalized_timeout,
             )
         except TimeoutError as exc:
