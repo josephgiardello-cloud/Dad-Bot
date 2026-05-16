@@ -1,4 +1,4 @@
-# 🧔 DadBot — Your Local AI Dad
+# 🧔 DadBot Sovereign — Your Local AI Dad
 
 A warm, private AI companion with long-term memory that remembers you, grows with you, and feels like having a supportive dad in your corner.
 
