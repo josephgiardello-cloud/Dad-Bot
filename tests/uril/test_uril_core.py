@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from dadbot.uril.report import build_uril_report
-from dadbot.uril.signal_bus import SignalCollectionOptions
+from dadbot.utils.report import build_uril_report
+from dadbot.utils.signal_bus import SignalCollectionOptions
 
 pytestmark = pytest.mark.unit
 

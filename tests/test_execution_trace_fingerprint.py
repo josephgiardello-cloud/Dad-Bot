@@ -24,7 +24,7 @@ import json
 import pytest
 
 from dadbot.core.execution_receipt import ExecutionReceipt, ReceiptChain, ReceiptSigner
-from dadbot.uril.truth_binding import compute_receipt_chain_hash
+from dadbot.utils.truth_binding import compute_receipt_chain_hash
 
 pytestmark = pytest.mark.unit
 

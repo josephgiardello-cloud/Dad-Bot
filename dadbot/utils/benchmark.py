@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict
 from typing import Any
 
-from dadbot.uril.models import BenchmarkProfile, RepoSignalBus, SubsystemHealth
+from dadbot.utils.models import BenchmarkProfile, RepoSignalBus, SubsystemHealth
 
 TIER_A_OSS = BenchmarkProfile(
     planning=0.62,

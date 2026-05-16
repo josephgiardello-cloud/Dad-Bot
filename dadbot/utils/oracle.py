@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dadbot.uril.models import RefactorSuggestion, RepoSignalBus, SubsystemHealth
+from dadbot.utils.models import RefactorSuggestion, RepoSignalBus, SubsystemHealth
 
 
 def _mean(values: list[float]) -> float:

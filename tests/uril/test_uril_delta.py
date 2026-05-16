@@ -8,7 +8,7 @@ Tests that:
   4. CI gate: a live URIL report compared to a snapshot within a healthy
      tolerance does not raise.
 
-The delta_compare function is in dadbot.uril.report.
+The delta_compare function is in dadbot.utils.report.
 """
 
 from __future__ import annotations
@@ -18,8 +18,8 @@ from typing import Any
 
 import pytest
 
-from dadbot.uril.report import build_uril_report, delta_compare
-from dadbot.uril.signal_bus import SignalCollectionOptions
+from dadbot.utils.report import build_uril_report, delta_compare
+from dadbot.utils.signal_bus import SignalCollectionOptions
 
 pytestmark = pytest.mark.unit
 

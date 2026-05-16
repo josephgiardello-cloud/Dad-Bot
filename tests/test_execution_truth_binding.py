@@ -30,7 +30,7 @@ from typing import Any
 
 import pytest
 
-from dadbot.uril.truth_binding import (
+from dadbot.utils.truth_binding import (
     ClaimBindingResult,
     ClaimEvidenceValidator,
     ExecutionClaim,
