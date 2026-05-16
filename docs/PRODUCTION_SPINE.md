@@ -15,8 +15,8 @@ A production turn must follow this path:
 
 Public process entry wrappers route into dadbot.app_runtime.main:
 
-- Dad.py
 - launch.py
+- Dad.py (compatibility wrapper)
 - api_entrypoint.py
 
 ## 2) Required Runtime Modules

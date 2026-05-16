@@ -20,6 +20,7 @@ FROM base AS builder
 RUN python -m venv "$VIRTUAL_ENV"
 
 COPY pyproject.toml ./
+COPY launch.py ./
 COPY Dad.py ./
 COPY dad_streamlit.py ./
 COPY dad_profile.template.json ./
@@ -35,6 +36,7 @@ FROM base AS runtime
 RUN groupadd --system dadbot && useradd --system --gid dadbot --create-home dadbot
 
 COPY --from=builder /opt/venv /opt/venv
+COPY launch.py ./
 COPY Dad.py ./
 COPY dad_streamlit.py ./
 COPY dad_profile.template.json ./

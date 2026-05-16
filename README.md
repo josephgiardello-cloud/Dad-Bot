@@ -34,8 +34,8 @@ A warm, private AI companion with long-term memory that remembers you, grows wit
 ### Install and Run
 
 ```bash
-git clone https://github.com/josephreisinger/dadbot.git
-cd dadbot
+git clone https://github.com/josephgiardello-cloud/Dad-Bot.git
+cd Dad-Bot
 python install.py
 ```
 
@@ -60,23 +60,21 @@ Then open [http://localhost:8501](http://localhost:8501) in your browser.
 
 ## 📸 Screenshots & Demo
 
-Capture this set for the first polished README pass:
+No screenshots are checked in yet. The first polished pass should include real captures for:
 
 - Main chat view with an active thread
-- Workshop status view (health + confluence)
+- Workshop status view with health and confluence visible
 - Voice panel with local STT/TTS status visible
-- Memory/relationship context panel showing long-term continuity
+- Memory or relationship context panel showing continuity
 - Mobile PWA chat view
 
-Suggested naming convention:
+Suggested file names for the first capture set:
 
 - `docs/screenshots/01-chat-main.png`
 - `docs/screenshots/02-workshop-status.png`
 - `docs/screenshots/03-voice-panel.png`
 - `docs/screenshots/04-memory-context.png`
 - `docs/screenshots/05-mobile-pwa.png`
-
-Once images are added, embed them directly in this section for a complete first-run visual tour.
 
 ---
 
@@ -193,9 +191,9 @@ This validates long-horizon behavior, adversarial fuzzing, and replay equivalenc
 ## 📦 Packaging & Entrypoints
 
 - **Core**: `dadbot/core/dadbot.py` (main DadBot class)
-- **Compatibility**: `Dad.py` (legacy re-export, preserves old imports)
-- **CLI**: `Dad.py` (console chat, API server)
-- **UI**: `dad_streamlit.py` (web interface)
+- **Canonical launcher**: `launch.py` (`python launch.py`, optional `--api` / `--ui`)
+- **Compatibility**: `Dad.py` (legacy re-export for old imports only)
+- **UI shell**: `dad_streamlit.py` (Streamlit surface used by `launch.py --ui`)
 
 ### Feature Groups
 

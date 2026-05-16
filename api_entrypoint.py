@@ -9,12 +9,11 @@ from __future__ import annotations
 
 import sys
 
-from dadbot.app_runtime import main as run_app_main
-from Dad import DadBot
+from launch import main as run_launch_main
 
 
 def main() -> int:
-    return run_app_main(["--serve-api", *sys.argv[1:]], dadbot_cls=DadBot, script_path=__file__)
+    return run_launch_main(["--api", *sys.argv[1:]])
 
 
 if __name__ == "__main__":
