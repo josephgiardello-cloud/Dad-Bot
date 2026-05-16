@@ -40,6 +40,8 @@ artifacts/
 # Diagnostic / process logs
 _dad_stop_stdout.txt
 _dad_stop_stderr.txt
+_debug_out.txt
+_test_out.txt
 dad_run_stdout.log
 dad_run_stderr.log
 *.log
