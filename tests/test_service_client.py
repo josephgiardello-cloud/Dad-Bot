@@ -210,13 +210,13 @@ def test_service_client_build_local_command_includes_production_persistence_flag
             postgres_dsn="postgresql://dad:secret@db.example:5432/dadbot",
             otel_enabled=True,
             python_executable="python",
-            script_path="Dad.py",
+            script_path="launch.py",
         )
     )
 
     command = client.build_local_service_command(preferred_model="llama3.2")
 
-    assert command[:3] == ["python", "Dad.py", "--serve-api"]
+    assert command[:3] == ["python", "launch.py", "--serve-api"]
     assert "--worker-count" in command
     assert "4" in command
     assert "--redis-url" in command

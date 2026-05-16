@@ -9,11 +9,11 @@ from __future__ import annotations
 
 import sys
 
-from launch import main as run_launch_main
+import launch
 
 
 def main() -> int:
-    return run_launch_main(["--api", *sys.argv[1:]])
+    return int(launch.main(["--api", *sys.argv[1:]]) or 0)
 
 
 if __name__ == "__main__":
