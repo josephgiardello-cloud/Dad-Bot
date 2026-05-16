@@ -212,11 +212,15 @@ class AgentDriverLoop:
                     result.consecutive_noop = 0
                 else:
                     result.consecutive_noop += 1
+                action_type = str(reflection.get("action_type") or "kernel_turn").strip() or "kernel_turn"
                 self._emit(
                     "loop_turn_completed",
                     thread_id=str(session_id or "default"),
                     payload={
                         "turn_index": turn_index,
+                        "action_type": action_type,
+                        "action_input": action_input,
+                        "commit_status": "committed",
                         "reply": reply,
                         "should_end": should_end,
                         "duration_ms": elapsed_ms,

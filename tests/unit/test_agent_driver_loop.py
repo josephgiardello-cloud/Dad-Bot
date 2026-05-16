@@ -84,6 +84,11 @@ def test_driver_loop_emits_telemetry_events():
     assert types[-1] == "loop_stopped"
     # all events carry the session thread_id
     assert all(e.thread_id == "sess-1" for e in events)
+    turn_event = next(e for e in events if e.type == "loop_turn_completed")
+    assert turn_event.payload["turn_index"] == 1
+    assert turn_event.payload["action_type"] == "kernel_turn"
+    assert turn_event.payload["commit_status"] == "committed"
+    assert turn_event.payload["duration_ms"] >= 0.0
     # loop_stopped payload has stop_reason
     stopped = next(e for e in events if e.type == "loop_stopped")
     assert stopped.payload["stop_reason"] == "kernel_should_end"
