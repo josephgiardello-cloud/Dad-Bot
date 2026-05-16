@@ -60,7 +60,8 @@ Then open [http://localhost:8501](http://localhost:8501) in your browser.
 
 ## 📸 Screenshots & Demo
 
-No screenshots are checked in yet. The first polished pass should include real captures for:
+Screenshots are intentionally kept out of the repo until they can be captured from the shipped UI.
+When you add them, keep the set small and honest:
 
 - Main chat view with an active thread
 - Workshop status view with health and confluence visible
@@ -116,23 +117,21 @@ python launch.py
 pytest tests/
 ```
 
-For regular stability validation, run the broader replay/durability/stress lane:
+For regular stability validation, keep to the core lanes:
 
 ```bash
-pytest --run-stress -m "durability or phase4 or stress" --durations=25 -q
+pytest -m unit -q
+pytest -m integration -q
+pytest -m durability -q
 ```
 
 ### Test Lanes Quick Map
 
 - `Test Lane: DEV` (`-m unit`) for fast local iteration
 - `Test Lane: INTEGRATION` (`-m integration`) for service/storage boundaries
-- `Test Lane: THIN-SPINE VS LEGACY` for parity checks on the migration seam
-- `Test Lane: DURABILITY / PHASE4` (`-m "durability or phase4"`) for restart/commit integrity
-- `Test Lane: DETERMINISM STRESS` (`--run-stress -m stress`) for replay and strict-equivalence pressure
-- `Test Lane: STABILITY SWEEP` (`--run-stress -m "durability or phase4 or stress"`) for broad regular validation
-- `Test Lane: CERT / REGRESSION` and `Test Lane: FULL CERT` for certification-oriented full passes
+- `Test Lane: DURABILITY / PHASE4` (`-m durability`) for restart/commit integrity
 
-Source of truth: `.vscode/tasks.json`.
+Anything beyond those lanes should be treated as supplemental, not mandatory.
 
 ### Feature Maturity Matrix
 
