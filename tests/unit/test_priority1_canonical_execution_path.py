@@ -11,7 +11,6 @@ Invariants validated:
 """
 
 import asyncio
-from inspect import iscoroutinefunction
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -45,8 +44,12 @@ class TestCanonicalExecutionPathStructure:
         assert "execute_turn" not in source
         assert "TurnDelivery.ASYNC" not in source
         assert "live_turn_request" not in source
-        # Should reference control plane
-        assert "_submit_turn_via_control_plane" in source
+        # Should call the control plane directly
+        assert "self.control_plane.submit_turn" in source
+
+    def test_orchestrator_has_no_submit_turn_passthrough(self):
+        """Verify the redundant control-plane passthrough method was removed."""
+        assert not hasattr(DadBotOrchestrator, "_submit_turn_via_control_plane")
 
     def test_run_method_delegates_to_handle_turn(self):
         """Verify run() delegates to handle_turn() instead of duplicating logic."""
@@ -73,10 +76,8 @@ class TestCanonicalExecutionPathStructure:
         assert "handle_turn" in source
 
     def test_submit_turn_via_control_plane_exists(self):
-        """Verify _submit_turn_via_control_plane() exists and routes correctly."""
-        assert hasattr(DadBotOrchestrator, "_submit_turn_via_control_plane")
-        # Should be async
-        assert iscoroutinefunction(DadBotOrchestrator._submit_turn_via_control_plane)
+        """Verify the redundant passthrough was removed."""
+        assert not hasattr(DadBotOrchestrator, "_submit_turn_via_control_plane")
 
     def test_replay_mode_disables_alias_layer_at_execution_entry(self):
         """Execution contract: replay mode must hard-disable facade alias layer."""
@@ -92,7 +93,7 @@ class TestCanonicalExecutionPathStructure:
 
         source = inspect.getsource(DadBotTurnMixin._run_graph_turn_async)
         assert "thin_turn_handler_enabled" not in source
-        assert "_submit_turn_via_control_plane" in source
+        assert "submit_turn" in source
         assert "TurnHandler(" in source
 
     def test_turn_mixin_has_no_chunk_callback_compat_wrappers(self):
@@ -306,7 +307,8 @@ class TestBackpressureHandling:
     def test_handle_turn_raises_transient_error_on_backpressure(self):
         async def _exercise() -> None:
             orchestrator = DadBotOrchestrator.__new__(DadBotOrchestrator)
-            orchestrator._submit_turn_via_control_plane = AsyncMock(
+            orchestrator.control_plane = MagicMock()
+            orchestrator.control_plane.submit_turn = AsyncMock(
                 side_effect=BackpressureSignal(
                     reason="max inflight jobs reached",
                     retry_after_ms=1000.0,
@@ -315,7 +317,7 @@ class TestBackpressureHandling:
             )
 
             with pytest.raises(TransientExecutionError, match="backpressure"):
-                await orchestrator.handle_turn("hello")
+                await orchestrator.handle_turn("hello", confluence_key="test:backpressure")
 
         asyncio.run(_exercise())
 

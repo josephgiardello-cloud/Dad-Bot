@@ -250,25 +250,25 @@ class TestControlPlaneWiring:
     def test_handle_turn_routes_through_control_plane(self):
         """Canonical orchestrator entrypoints must route through control plane."""
         from dadbot.core.orchestrator import DadBotOrchestrator
-
-        calls: list[str] = []
+        from unittest.mock import AsyncMock, MagicMock
 
         class _OrchestratorLike:
-            @staticmethod
-            async def _submit_turn_via_control_plane(*args, **kwargs):
-                calls.append("control_plane")
-                return ("ok", False)
+            def __init__(self) -> None:
+                self.control_plane = MagicMock()
+                self.control_plane.submit_turn = AsyncMock(return_value=("ok", False))
 
         async def _run() -> None:
+            orchestrator = _OrchestratorLike()
             result = await DadBotOrchestrator.handle_turn(
-                _OrchestratorLike(),
+                orchestrator,
                 "hello",
                 session_id="wire-test",
+                confluence_key="wire:test",
             )
             assert result == ("ok", False)
+            assert orchestrator.control_plane.submit_turn.await_count == 1
 
         asyncio.run(_run())
-        assert calls == ["control_plane"]
 
     def test_submit_turn_produces_ledger_events(self):
         """Every submit_turn must write at least one event to the ledger."""

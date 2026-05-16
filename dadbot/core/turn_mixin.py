@@ -166,11 +166,16 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
             user_input=str(user_input or ""),
             attachments=attachments,
         )
-        submit_turn = getattr(orchestrator, "_submit_turn_via_control_plane", None)
+        control_plane = getattr(orchestrator, "control_plane", None)
+        submit_turn = getattr(control_plane, "submit_turn", None)
         if not callable(submit_turn):
             raise ConfigurationError(
                 "Canonical execution gate violation: control-plane submit entrypoint missing.",
             )
+
+        normalized_timeout = None
+        if getattr(self, "_execute_turn_request_metadata", None) is not None:
+            normalized_timeout = getattr(self, "_execute_turn_request_metadata", {})
 
         handler = TurnHandler(
             submit_turn=cast(Any, submit_turn),
@@ -180,15 +185,14 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
             relationship_snapshotter=self._get_relationship_snapshotter(),
             world_model_store=self._get_world_model_store(),
         )
-        return await handler.process_turn(
-            TurnContext(
-                user_input=str(user_input or ""),
-                attachments=attachments,
-                session_id=session_id,
-                confluence_key=confluence_key,
-                metadata=dict(getattr(self, "_execute_turn_request_metadata", {}) or {}),
-            ),
+        turn_context = TurnContext(
+            user_input=str(user_input or ""),
+            attachments=attachments,
+            session_id=session_id,
+            confluence_key=confluence_key,
+            metadata=dict(getattr(self, "_execute_turn_request_metadata", {}) or {}),
         )
+        return await handler.process_turn(turn_context)
 
     @staticmethod
     def _run_coro_in_thread(coro):
