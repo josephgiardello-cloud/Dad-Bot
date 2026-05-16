@@ -156,6 +156,16 @@ from dadbot.core.control_plane_trace_invariants import (
     _trace_event_invariant_counts_impl,
     _validate_trace_invariant_impl,
 )
+from dadbot.core.control_plane_composition_contracts import (
+    _build_composition_payload_impl,
+    _build_confluence_payload_impl,
+    _confluence_config_from_metadata_impl,
+    _enforce_global_confluence_law_impl,
+    _expected_hashes_from_metadata_impl,
+    _record_turn_composition_contract_impl,
+    _result_output_payload_impl,
+    _validate_composition_expectations_impl,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -3327,10 +3337,7 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
 
     @staticmethod
     def _result_output_payload(result: FinalizedTurnResult) -> dict[str, Any]:
-        return {
-            "response": str(result[0] if isinstance(result, tuple) and len(result) >= 1 else ""),
-            "should_end": bool(result[1] if isinstance(result, tuple) and len(result) >= 2 else False),
-        }
+        return _result_output_payload_impl(result)
 
     def _build_composition_payload(
         self,
@@ -3342,32 +3349,15 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         state_before_hash: str,
         state_after_hash: str,
     ) -> dict[str, Any]:
-        state_delta_hash = self._stable_hash(
-            {
-                "before": str(state_before_hash or ""),
-                "after": str(state_after_hash or ""),
-            },
+        return _build_composition_payload_impl(
+            self,
+            job=job,
+            terminal_state=terminal_state,
+            output_payload=output_payload,
+            trace_events=trace_events,
+            state_before_hash=state_before_hash,
+            state_after_hash=state_after_hash,
         )
-        event_log_hash = self._event_stream_digest(trace_events)
-        return {
-            "contract_version": "turn-composition-v1",
-            "context_input_hash": self._stable_hash(
-                {
-                    "session_id": str(job.session_id or ""),
-                    "trace_id": str(job.trace_id or ""),
-                    "user_input": str(job.user_input or ""),
-                    "attachments": list(job.attachments or []),
-                    "metadata": dict(job.metadata or {}),
-                },
-            ),
-            "execution_dag_hash": str(terminal_state.get("execution_dag_hash") or ""),
-            "policy_hash": str(terminal_state.get("policy_hash") or ""),
-            "state_delta_hash": state_delta_hash,
-            "event_log_hash": event_log_hash,
-            "output_hash": self._stable_hash(output_payload),
-            "mutation_effects_hash": str(terminal_state.get("post_commit_mutation_effects_hash") or ""),
-            "determinism_closure_hash": str(terminal_state.get("determinism_closure_hash") or ""),
-        }
 
     def _build_confluence_payload(
         self,
@@ -3377,36 +3367,21 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         output_payload: dict[str, Any],
         trace_events: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        return {
-            "contract_version": "turn-confluence-v1",
-            "semantic_input_hash": self._stable_hash(
-                {
-                    "user_input": str(job.user_input or ""),
-                    "attachments": list(job.attachments or []),
-                    "semantic_eval_input_hash": str(dict(job.metadata or {}).get("semantic_eval_input_hash") or ""),
-                },
-            ),
-            "execution_dag_hash": str(terminal_state.get("execution_dag_hash") or ""),
-            "policy_hash": str(terminal_state.get("policy_hash") or ""),
-            "output_hash": self._stable_hash(output_payload),
-            "mutation_effects_hash": str(terminal_state.get("post_commit_mutation_effects_hash") or ""),
-            "determinism_closure_hash": str(terminal_state.get("determinism_closure_hash") or ""),
-            "event_semantic_hash": self._event_semantic_digest(trace_events),
-        }
+        return _build_confluence_payload_impl(
+            self,
+            job=job,
+            terminal_state=terminal_state,
+            output_payload=output_payload,
+            trace_events=trace_events,
+        )
 
     @staticmethod
     def _expected_hashes_from_metadata(metadata: dict[str, Any]) -> tuple[str, str]:
-        expected = str(dict(metadata or {}).get("expected_execution_composition_hash") or "").strip()
-        expected_confluence = str(
-            dict(metadata or {}).get("expected_execution_confluence_hash") or "",
-        ).strip()
-        return expected, expected_confluence
+        return _expected_hashes_from_metadata_impl(metadata)
 
     @staticmethod
     def _confluence_config_from_metadata(metadata: dict[str, Any]) -> tuple[str, str]:
-        confluence_key = str(dict(metadata or {}).get("_global_confluence_key") or "").strip()
-        confluence_mode = str(dict(metadata or {}).get("_global_confluence_mode") or "off").strip().lower()
-        return confluence_key, confluence_mode
+        return _confluence_config_from_metadata_impl(metadata)
 
     def _validate_composition_expectations(
         self,
@@ -3416,14 +3391,12 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         composition_hash: str,
         confluence_class_hash: str,
     ) -> None:
-        if expected and expected != composition_hash:
-            raise RuntimeError(
-                f"Execution composition mismatch: expected={expected!r}, actual={composition_hash!r}",
-            )
-        if expected_confluence and expected_confluence != confluence_class_hash:
-            raise RuntimeError(
-                f"Execution confluence mismatch: expected={expected_confluence!r}, actual={confluence_class_hash!r}",
-            )
+        _validate_composition_expectations_impl(
+            expected=expected,
+            expected_confluence=expected_confluence,
+            composition_hash=composition_hash,
+            confluence_class_hash=confluence_class_hash,
+        )
 
     def _enforce_global_confluence_law(
         self,
@@ -3433,59 +3406,14 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         confluence_class_hash: str,
         expected_confluence: str,
     ) -> dict[str, Any]:
-        confluence_report = {
-            "enforced": False,
-            "mode": confluence_mode,
-            "key": confluence_key,
-            "observed_hash": confluence_class_hash,
-            "expected_hash": expected_confluence,
-            "contract_version": "turn-confluence-v1",
-        }
-        if not confluence_key or confluence_mode == "off":
-            return confluence_report
-
-        self._confluence_metrics["attempted"] = int(self._confluence_metrics.get("attempted", 0)) + 1
-        known = str(self._global_confluence_contracts.get(confluence_key) or "")
-        if not known:
-            self._global_confluence_contracts[confluence_key] = confluence_class_hash
-            confluence_report["enforced"] = True
-            confluence_report["action"] = "bound_first_observation"
-            self._confluence_metrics["bound_first_observation"] = int(
-                self._confluence_metrics.get("bound_first_observation", 0),
-            ) + 1
-            return confluence_report
-
-        if known != confluence_class_hash:
-            confluence_report["enforced"] = True
-            confluence_report["expected_hash"] = known
-            confluence_report["action"] = "mismatch"
-            self._last_confluence_report = dict(confluence_report)
-            self._confluence_metrics["mismatch"] = int(self._confluence_metrics.get("mismatch", 0)) + 1
-            fail_mode = str(
-                os.environ.get("DADBOT_CONFLUENCE_VIOLATION_MODE", "fail"),
-            ).strip().lower()
-            if fail_mode != "audit":
-                self._confluence_metrics["enforced_blocked"] = int(
-                    self._confluence_metrics.get("enforced_blocked", 0),
-                ) + 1
-                raise RuntimeError(
-                    "Global confluence law violated for key="
-                    f"{confluence_key!r}: expected={known!r}, "
-                    f"actual={confluence_class_hash!r}",
-                )
-            logger.warning(
-                "Global confluence law mismatch (audit override): key=%s expected=%s actual=%s",
-                confluence_key,
-                known,
-                confluence_class_hash,
-            )
-            return confluence_report
-
-        confluence_report["enforced"] = True
-        confluence_report["expected_hash"] = known
-        confluence_report["action"] = "matched"
-        self._confluence_metrics["matched"] = int(self._confluence_metrics.get("matched", 0)) + 1
-        return confluence_report
+        return _enforce_global_confluence_law_impl(
+            self,
+            confluence_key=confluence_key,
+            confluence_mode=confluence_mode,
+            confluence_class_hash=confluence_class_hash,
+            expected_confluence=expected_confluence,
+            logger=logger,
+        )
 
     def _record_turn_composition_contract(
         self,
@@ -3495,56 +3423,14 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         result: FinalizedTurnResult,
         state_before_hash: str,
     ) -> dict[str, Any]:
-        state = dict(session.get("state") or {})
-        state_after_hash = self._stable_hash(state)
-        terminal_state = dict(state.get("last_terminal_state") or {})
-        trace_events = self._job_trace_events(job)
-        if any(str(event.get("type") or "").strip() for event in list(trace_events or [])):
-            self._assert_lifecycle_order(trace_events)
-
-        output_payload = self._result_output_payload(result)
-        composition_payload = self._build_composition_payload(
+        return _record_turn_composition_contract_impl(
+            self,
+            session=session,
             job=job,
-            terminal_state=terminal_state,
-            output_payload=output_payload,
-            trace_events=trace_events,
+            result=result,
             state_before_hash=state_before_hash,
-            state_after_hash=state_after_hash,
+            logger=logger,
         )
-        composition_hash = self._stable_hash(composition_payload)
-        confluence_payload = self._build_confluence_payload(
-            job=job,
-            terminal_state=terminal_state,
-            output_payload=output_payload,
-            trace_events=trace_events,
-        )
-        confluence_class_hash = self._stable_hash(confluence_payload)
-        contract = dict(composition_payload)
-        contract["composition_hash"] = composition_hash
-        contract["confluence_class_hash"] = confluence_class_hash
-
-        expected, expected_confluence = self._expected_hashes_from_metadata(dict(job.metadata or {}))
-        self._validate_composition_expectations(
-            expected=expected,
-            expected_confluence=expected_confluence,
-            composition_hash=composition_hash,
-            confluence_class_hash=confluence_class_hash,
-        )
-
-        confluence_key, confluence_mode = self._confluence_config_from_metadata(dict(job.metadata or {}))
-        confluence_report = self._enforce_global_confluence_law(
-            confluence_key=confluence_key,
-            confluence_mode=confluence_mode,
-            confluence_class_hash=confluence_class_hash,
-            expected_confluence=expected_confluence,
-        )
-        self._last_confluence_report = dict(confluence_report)
-
-        state_mut = session.setdefault("state", {})
-        if isinstance(state_mut, dict):
-            state_mut["last_execution_composition_contract"] = dict(contract)
-            state_mut["last_execution_confluence_report"] = dict(confluence_report)
-        return contract
 
     async def _register_submit_job(
         self,
