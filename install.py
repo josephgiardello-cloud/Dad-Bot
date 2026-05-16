@@ -133,18 +133,16 @@ def launch():
     print("   Opening browser to http://localhost:8501")
     time.sleep(1)
     try:
-        # Use streamlit command for better subprocess management
         subprocess.check_call([
-            sys.executable, "-m", "streamlit", "run", 
-            "dad_streamlit.py", 
-            "--logger.level=info"
+            sys.executable,
+            "launch.py",
         ])
     except subprocess.CalledProcessError as e:
         print(f"❌ Launch failed with error code {e.returncode}")
         print("\n   Troubleshooting:")
         print("   • Check that Ollama is running: ollama serve")
         print("   • Port 8501 already in use? Check: lsof -i :8501")
-        print("   • Try launching manually: streamlit run dad_streamlit.py")
+        print("   • Try launching manually: python launch.py")
         sys.exit(1)
     except Exception as e:
         print(f"❌ Failed to launch: {e}")
@@ -162,7 +160,6 @@ def main():
     else:
         print("\nAfter starting Ollama, run this script again or just run:")
         print("   python launch.py")
-        print("   python Dad.py")
 
 
 if __name__ == "__main__":

@@ -7,13 +7,10 @@ mkdir -p "${DADBOT_HOME:-/var/lib/dadbot}" "${DADBOT_LOG_ROOT:-/var/log/dadbot}"
 
 case "$MODE" in
   streamlit|ui)
-    exec python -m streamlit run dad_streamlit.py \
-      --server.port=8501 \
-      --server.address=0.0.0.0 \
-      --browser.gatherUsageStats=false
+    exec python launch.py --ui
     ;;
   api|serve-api)
-    exec python Dad.py --serve-api
+    exec python launch.py --api
     ;;
   *)
     exec "$@"
