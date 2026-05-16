@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import pytest
 
-from dadbot.uril.architecture import (
+from dadbot.utils.architecture import (
     FORBIDDEN_IMPORT_EDGES,
     detect_cycles,
     find_forbidden_cycles,

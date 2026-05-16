@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from dadbot.uril.models import RepoSignal, RepoSignalBus
+from dadbot.utils.models import RepoSignal, RepoSignalBus
 
 ROOT = Path(__file__).resolve().parents[2]
 

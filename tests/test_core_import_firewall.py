@@ -12,7 +12,13 @@ DADBOT_ROOT = ROOT / "dadbot"
 
 
 TOOLING_PREFIXES = (
-    "dadbot.uril",
+    "dadbot.utils.architecture",
+    "dadbot.utils.benchmark",
+    "dadbot.utils.models",
+    "dadbot.utils.oracle",
+    "dadbot.utils.report",
+    "dadbot.utils.signal_bus",
+    "dadbot.utils.truth_binding",
     "dadbot.ux_overlay",
     "tools",
     "tests",

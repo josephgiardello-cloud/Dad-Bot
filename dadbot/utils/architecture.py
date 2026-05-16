@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from dadbot.uril.models import RepoSignalBus, SubsystemHealth
+from dadbot.utils.models import RepoSignalBus, SubsystemHealth
 
 ROOT = Path(__file__).resolve().parents[2]
 DADBOT_ROOT = ROOT / "dadbot"

@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from dadbot.uril.truth_binding import ClaimEvidenceValidator, build_synthetic_state
+from dadbot.utils.truth_binding import ClaimEvidenceValidator, build_synthetic_state
 from dadbot.ux_overlay import (
     ConversationContinuityEngine,
     InteractionState,

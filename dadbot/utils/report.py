@@ -5,15 +5,15 @@ import json
 from pathlib import Path
 from typing import Any
 
-from dadbot.uril.architecture import (
+from dadbot.utils.architecture import (
     build_subsystem_health,
     subsystem_health_map,
     subsystem_risk_heatmap,
 )
-from dadbot.uril.benchmark import benchmark_alignment_report, build_system_profile
-from dadbot.uril.models import UrailReport
-from dadbot.uril.oracle import generate_refactor_suggestions
-from dadbot.uril.signal_bus import SignalCollectionOptions, collect_signal_bus
+from dadbot.utils.benchmark import benchmark_alignment_report, build_system_profile
+from dadbot.utils.models import UrailReport
+from dadbot.utils.oracle import generate_refactor_suggestions
+from dadbot.utils.signal_bus import SignalCollectionOptions, collect_signal_bus
 
 ROOT = Path(__file__).resolve().parents[2]
 
