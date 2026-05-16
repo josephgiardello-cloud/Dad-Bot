@@ -3217,7 +3217,7 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
             note="submit_turn resolved",
             extra={"loop_iterations": loop_iterations},
         )
-        return cast(
+        finalized = cast(
             FinalizedTurnResult,
             _apply_submit_success_postprocessing_impl(
                 self,
@@ -3228,6 +3228,12 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
                 loop_iterations=loop_iterations,
             ),
         )
+        self._assert_complete_run_contract(
+            job=job,
+            result=finalized,
+            phase="submit_success",
+        )
+        return finalized
 
     def _record_submit_exception(
         self,
@@ -3727,6 +3733,71 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
             state_before_hash=state_before_hash,
             logger=logger,
         )
+
+    def _assert_complete_run_contract(
+        self,
+        *,
+        job: ExecutionJob,
+        result: FinalizedTurnResult,
+        phase: str,
+    ) -> None:
+        """Enforce complete-run contract before returning a finalized turn result."""
+        trace_id = str(job.trace_id or "").strip()
+        job_id = str(job.job_id or "").strip()
+        if not trace_id or not job_id:
+            raise InvariantViolation(
+                "Complete-run contract violated: missing stable execution identity",
+                context={"phase": str(phase or ""), "trace_id": trace_id, "job_id": job_id},
+            )
+
+        projection = self.lifecycle_projection.get(job_id)
+        if projection is None or projection.status not in {ExecutionStatus.COMPLETED, ExecutionStatus.FAILED}:
+            raise InvariantViolation(
+                "Complete-run contract violated: execution lifecycle is not terminal",
+                context={
+                    "phase": str(phase or ""),
+                    "trace_id": trace_id,
+                    "job_id": job_id,
+                    "projection_status": "" if projection is None else str(projection.status.value),
+                },
+            )
+
+        execution_result = ensure_unified_execution_result(dict(job.metadata.get("execution_result") or {}))
+        status = str(execution_result.get("status") or "").strip().lower()
+        if status not in _TERMINAL_STATUS_VALUES:
+            raise InvariantViolation(
+                "Complete-run contract violated: execution_result status is not terminal",
+                context={
+                    "phase": str(phase or ""),
+                    "trace_id": trace_id,
+                    "job_id": job_id,
+                    "execution_result_status": status,
+                },
+            )
+
+        execution_state = dict(job.metadata.get("execution_state") or {})
+        terminal_turn_state = str(
+            execution_state.get("terminal_turn_state") or job.metadata.get("terminal_turn_state") or "",
+        ).strip().upper()
+        allowed_terminal_turn_states = {state.value for state in TurnTerminalState}
+        if terminal_turn_state not in allowed_terminal_turn_states:
+            raise InvariantViolation(
+                "Complete-run contract violated: missing or invalid terminal_turn_state",
+                context={
+                    "phase": str(phase or ""),
+                    "trace_id": trace_id,
+                    "job_id": job_id,
+                    "terminal_turn_state": terminal_turn_state,
+                    "allowed_terminal_turn_states": sorted(allowed_terminal_turn_states),
+                },
+            )
+
+        response_text = str(result[0] if isinstance(result, tuple) and len(result) >= 1 else "")
+        if not response_text:
+            raise InvariantViolation(
+                "Complete-run contract violated: empty terminal response payload",
+                context={"phase": str(phase or ""), "trace_id": trace_id, "job_id": job_id},
+            )
 
     def _apply_turn_committed_core_state(
         self,

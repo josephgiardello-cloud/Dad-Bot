@@ -159,13 +159,18 @@ See `docker-compose.yml` for profile options.
 
 ## 📚 Technical Documentation
 
+### Production Spine (Authoritative)
+
+- Runtime spine contract: `docs/PRODUCTION_SPINE.md`
+- Archive policy and source-of-truth boundary: `docs/ARCHIVE_POLICY.md`
+
 ### Architecture & Internals
 
 - **Execution Model** — `docs/explicit-execution-model.md`
 - **Explainability** — `docs/system-level-explainability.md`
 - **Failure Handling** — `docs/failure-model.md`
 - **Confluence & Semantics** — `docs/confluence-law.md`
-- **Historical migration notes** — `archive/docs/legacy-root-notes/`
+- **Historical migration notes** — `archive/docs/legacy-root-notes/` (reference only, not runtime authority)
 
 ### Deep Validation
 
