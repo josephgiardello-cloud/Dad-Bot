@@ -189,10 +189,10 @@ This validates long-horizon behavior, adversarial fuzzing, and replay equivalenc
 
 ## 📦 Packaging & Entrypoints
 
-- **Core**: `dadbot/core/dadbot.py` (main DadBot class)
-- **Canonical launcher**: `launch.py` (`python launch.py`, optional `--api` / `--ui`)
-- **Compatibility**: `Dad.py` (legacy re-export for old imports only)
-- **UI shell**: `dad_streamlit.py` (Streamlit surface used by `launch.py --ui`)
+### Entrypoints
+- **Primary**: `launch.py` (recommended for all use cases)
+- **Compatibility**: `Dad.py` (legacy shim - preserves old import/usage patterns)
+- **UI**: `dad_streamlit.py` (called via `launch.py --ui`)
 
 ### Feature Groups
 

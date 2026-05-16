@@ -15,7 +15,7 @@ The happy path should stay short and readable:
 
 - Keep the default conversation path simple.
 - Treat advanced graph, confluence, and replay machinery as optional safeguards.
-- Keep `Dad.py` and `api_entrypoint.py` as compatibility shims only.
+- Keep legacy wrapper scripts as compatibility shims only.
 - Keep `dad_streamlit.py` as the legacy Streamlit surface until the package UI wrapper fully replaces it.
 
 ## Complete-Run Contract

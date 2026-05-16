@@ -2,6 +2,12 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+import sys
+
+import Dad as dad_entrypoint
+import api_entrypoint
+import install
+import launch
 
 import pytest
 
@@ -144,15 +150,30 @@ def test_dependency_direction_registry_must_not_import_core_layer() -> None:
     assert violations == [], "Direction violations (registry -> core). Found imports: " + ", ".join(violations)
 
 
-def test_entrypoints_route_startup_through_app_runtime_main() -> None:
-    """Execution startup must route through dadbot.app_runtime.main()."""
-    dad_py = (ROOT / "Dad.py").read_text(encoding="utf-8", errors="replace")
-    api_entrypoint_py = (ROOT / "api_entrypoint.py").read_text(encoding="utf-8", errors="replace")
-    launch_py = (ROOT / "launch.py").read_text(encoding="utf-8", errors="replace")
-    install_py = (ROOT / "install.py").read_text(encoding="utf-8", errors="replace")
+def test_entrypoints_delegate_startup_through_launch_main(monkeypatch) -> None:
+    """Execution startup must funnel through launch.main() with behavior-preserving flags."""
+    calls: list[list[str]] = []
 
-    assert "dadbot.app_runtime" in dad_py and "run_app_main" in dad_py
-    assert "dadbot.app_runtime" in api_entrypoint_py and "run_app_main" in api_entrypoint_py
-    assert "dadbot.app_runtime" in launch_py and "app_main" in launch_py
-    # install.py may launch Dad.py, which is accepted as an app_runtime.main wrapper.
-    assert "Dad.py" in install_py
+    def fake_launch_main(argv=None):
+        calls.append(list(argv or []))
+        return 0
+
+    monkeypatch.setattr(launch, "main", fake_launch_main)
+
+    monkeypatch.setattr(sys, "argv", ["launch.py", "--ui", "--model", "llama3.2"], raising=False)
+    assert dad_entrypoint.main() == 0
+    assert calls.pop(0) == ["--ui", "--model", "llama3.2"]
+
+    monkeypatch.setattr(sys, "argv", ["api_entrypoint.py", "--api-port", "9123"], raising=False)
+    assert api_entrypoint.main() == 0
+    assert calls.pop(0) == ["--api", "--api-port", "9123"]
+
+    captured: list[list[str]] = []
+
+    def fake_check_call(command):
+        captured.append(list(command))
+
+    monkeypatch.setattr(install.subprocess, "check_call", fake_check_call)
+    monkeypatch.setattr(install.time, "sleep", lambda *_args, **_kwargs: None)
+    install.launch()
+    assert captured[-1][-1] == "launch.py"

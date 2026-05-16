@@ -59,7 +59,7 @@ class ServiceClientConfig:
     token_ttl_seconds: int = field(default_factory=lambda: env_int("DADBOT_API_TOKEN_TTL_SECONDS", 3600))
     otel_enabled: bool = field(default_factory=lambda: env_flag("DADBOT_OTEL_ENABLED", False))
     python_executable: str = field(default_factory=lambda: sys.executable)
-    script_path: str = field(default_factory=lambda: str(repo_root_path() / "Dad.py"))
+    script_path: str = field(default_factory=lambda: str(repo_root_path() / "launch.py"))
 
 
 @dataclass(slots=True)
