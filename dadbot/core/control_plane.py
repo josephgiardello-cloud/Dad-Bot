@@ -130,6 +130,9 @@ from dadbot.core.control_plane_lifecycle import (
 from dadbot.core.control_plane_submit_phase import (
     _append_submit_turn_phase,
     _assert_submit_turn_phase_boundary,
+    _assert_submit_turn_phase_trace_complete,
+    _validate_submit_turn_phase_progress,
+    submit_turn_phase_order,
 )
 from dadbot.core.control_plane_submission import (
     _initialize_submit_scope_impl,

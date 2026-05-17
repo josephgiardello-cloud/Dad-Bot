@@ -60,7 +60,7 @@ mcp = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["dadbot*", "dadbot_system*", "caaf*"]
+include = ["dadbot*", "dadbot_system*", "caaf*", "evaluation*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
