@@ -1228,13 +1228,7 @@ Return only JSON:
     def build_family_echo_prompt(self, user_input, current_mood):
         listener_name = str(self.bot.STYLE.get("listener_name") or "the user").strip() or "the user"
         caregiver_name = str(self.bot.STYLE.get("name") or "Dad").strip() or "Dad"
-        family = self.bot.FAMILY if isinstance(getattr(self.bot, "FAMILY", None), dict) else {}
-        family_member_name = ""
-        carrie = family.get("carrie") if isinstance(family, dict) else None
-        if isinstance(carrie, dict):
-            family_member_name = str(carrie.get("full_name") or "").strip()
-        if not family_member_name:
-            family_member_name = "a trusted family member"
+        family_member_name = self._family_member_name()
         return DadPrompts.family_echo(
             user_input,
             self.bot.normalize_mood(current_mood),
@@ -1242,6 +1236,23 @@ Return only JSON:
             caregiver_name=caregiver_name,
             family_member_name=family_member_name,
         )
+
+    def _family_member_name(self) -> str:
+        family = self.bot.FAMILY if isinstance(getattr(self.bot, "FAMILY", None), dict) else {}
+        if not isinstance(family, dict):
+            return "a trusted family member"
+        preferred_keys = ("co_parent", "partner", "spouse", "mom", "mother", "carrie")
+        for key in preferred_keys:
+            member = family.get(key)
+            if not isinstance(member, dict):
+                continue
+            full_name = str(member.get("full_name") or "").strip()
+            if full_name:
+                return full_name
+            display_name = str(member.get("name") or "").strip()
+            if display_name:
+                return display_name
+        return "a trusted family member"
 
     def should_offer_family_echo(self, user_input, current_mood):
         lowered = str(user_input or "").lower()
