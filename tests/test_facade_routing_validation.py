@@ -4,7 +4,7 @@ These tests validate the consolidated routing structure in dadbot.py:
   1. Routing integrity (all 50 entries have valid targets)
   2. Get/Set roundtrip (mutations preserve values)
   3. No shadow collisions (unique keys in routing dict)
-  4. Fallback delegation (unmapped attrs resolve through manager chain)
+    4. Fallback delegation (unmapped attrs resolve through the service container)
 
 User's gating criteria: ALL 4 MUST PASS before Phase 2 can proceed.
 """
@@ -90,31 +90,9 @@ class TestFacadeRoutingStructural:
         assert total_by_type == 50, \
             f"Expected 50 total routes, got {total_by_type}"
     
-    def test_1a_delegate_chain_defined(self, bot_class):
-        """Verify manager delegate chain is properly defined."""
-        chain = bot_class._MANAGER_DELEGATE_CHAIN
-        
-        assert isinstance(chain, tuple), \
-            f"_MANAGER_DELEGATE_CHAIN is {type(chain)}, not tuple"
-        assert len(chain) == 36, \
-            f"Expected 36 managers in delegate chain, got {len(chain)}"
-        
-        # Check all are non-empty strings
-        for i, mgr_name in enumerate(chain):
-            assert isinstance(mgr_name, str), \
-                f"Chain element {i} is {type(mgr_name)}, not str"
-            assert len(mgr_name) > 0, \
-                f"Chain element {i} is empty string"
-        
-        # Verify expected managers are present
-        expected_in_chain = {
-            "health_manager", "mood_manager", "context_service",
-            "runtime_state_manager", "memory_manager", "relationship_manager",
-            "reply_finalization", "profile_runtime"
-        }
-        chain_set = set(chain)
-        assert expected_in_chain.issubset(chain_set), \
-            f"Missing managers from chain: {expected_in_chain - chain_set}"
+    def test_1a_manager_chain_removed_in_favor_of_service_container(self, bot_class):
+        """Verify broad implicit manager sweeping is no longer part of the facade contract."""
+        assert not hasattr(bot_class, "_MANAGER_DELEGATE_CHAIN")
 
 
 class TestFacadeRoutingFunctional:
@@ -239,7 +217,7 @@ class TestFacadeRoutingFunctional:
         """Test 4: Fallback delegation works for unmapped attributes.
         
         Verify that attributes NOT in _UNIFIED_ROUTING still resolve correctly
-        through the _MANAGER_DELEGATE_CHAIN fallback.
+        through the service container fallback.
         
         Test by accessing known manager attributes that are NOT explicitly routed.
         """
@@ -247,7 +225,7 @@ class TestFacadeRoutingFunctional:
         routing = DadBot._UNIFIED_ROUTING
         
         # These attributes should NOT be in routing but SHOULD resolve
-        # via delegate chain (they exist on managers in the chain)
+        # via explicit service-name lookup on the container
         unmapped_test_cases = [
             # (attr_name, expected_type_or_none)
             ("health_manager", type(None).__bases__[0]),  # Should be a manager object
@@ -262,17 +240,17 @@ class TestFacadeRoutingFunctional:
                 continue  # Skip if explicitly routed
             
             try:
-                # Access it (should go through delegate chain)
+                # Access it (should go through the service container)
                 value = getattr(bot_instance, attr_name)
                 
                 # If we got here, delegation worked
                 if value is None:
                     delegation_failures.append(
-                        f"  {attr_name}: resolved via delegate chain but is None"
+                        f"  {attr_name}: resolved via service container but is None"
                     )
             except AttributeError as e:
                 delegation_failures.append(
-                    f"  {attr_name}: failed to resolve via delegate chain: {e}"
+                    f"  {attr_name}: failed to resolve via service container: {e}"
                 )
         
         if delegation_failures:
@@ -284,26 +262,19 @@ class TestFacadeRoutingFunctional:
 class TestFacadeRoutingComprehensive:
     """Comprehensive cross-check tests."""
 
-    def test_routing_and_delegate_chain_coverage(self):
-        """Verify that routing dict and delegate chain together cover expected surface."""
+    def test_routing_and_service_container_coverage(self):
+        """Verify that routing dict plus service-container resolution cover expected surface."""
         from dadbot.core.dadbot import DadBot
         
         routing = DadBot._UNIFIED_ROUTING
-        chain = DadBot._MANAGER_DELEGATE_CHAIN
         
         # The routing dict should have ~50 entries
         assert len(routing) >= 45, f"Too few routing entries: {len(routing)}"
-        
-        # The delegate chain should have ~36 entries
-        assert len(chain) >= 30, f"Too few delegate chain entries: {len(chain)}"
-        
-        # No overlap between routing target object names and delegate chain manager names
-        # (though there may be some commonality by design)
+
         routing_targets = set(target_obj for _, (target_obj, _) in routing.items())
-        chain_set = set(chain)
         
         # Key objects (config, runtime_state_manager, _internal_runtime) should not be
-        # in delegate chain (they're special targets)
+        # resolved as raw services (they're special targets)
         special_targets = {"config", "runtime_state_manager", "_internal_runtime"}
         assert special_targets.issubset(routing_targets), \
             f"Missing special routing targets: {special_targets - routing_targets}"

@@ -126,6 +126,16 @@ class TestDadBotConfigInstantiation:
         assert config.context_token_budget == rc.context_token_budget
         assert config.stream_timeout_seconds == rc.stream_timeout_seconds
 
+    def test_backend_and_story_mode_configs_are_materialized(self):
+        from dadbot.config import DadBotConfig
+
+        config = DadBotConfig()
+        assert hasattr(config, "graph_store")
+        assert hasattr(config, "semantic_index")
+        assert hasattr(config, "story_mode")
+        assert config.graph_store.table_prefix
+        assert config.semantic_index.table
+
 
 class TestDadBotConfigNoDriftFromMapKeys:
     """Detect ghost entries: map keys that no longer correspond to anything useful."""

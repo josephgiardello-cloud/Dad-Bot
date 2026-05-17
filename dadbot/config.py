@@ -9,6 +9,30 @@ from typing import Any
 from dadbot.utils import env_truthy
 from dadbot_system import ServiceConfig, normalize_tenant_id
 
+
+@dataclass(frozen=True)
+class GraphStoreBackendConfig:
+    postgres_dsn: str = ""
+    table_prefix: str = "dadbot_graph"
+
+
+@dataclass(frozen=True)
+class SemanticIndexBackendConfig:
+    postgres_dsn: str = ""
+    table: str = "semantic_memories"
+    vector_dimensions: int | None = None
+    ann_index: str | None = None
+    distance_metric: str = "cosine"
+    hnsw_m: int = 16
+    hnsw_ef_construction: int = 64
+    ivfflat_lists: int = 100
+
+
+@dataclass(frozen=True)
+class StoryModeSecurityConfig:
+    password: str = ""
+    password_hash_sha256: str = ""
+
 MOOD_CATEGORIES = {
     "positive": "happy, excited, proud, energetic, or upbeat",
     "neutral": "calm, neutral, or reflective",
@@ -293,6 +317,8 @@ class DadBotConfig:
         self.strict_graph_mode = bool(self.strict_graph_mode and not test_only_non_strict)
         self.active_model = str(self.model_name).strip() or "llama3.2"
         self.active_embedding_model = None
+        self.redis_url = str(self.service_config.persistence.redis_url or "").strip()
+        self.postgres_dsn = str(self.service_config.persistence.postgres_dsn or "").strip()
         self.llm_provider = str(os.environ.get("DADBOT_LLM_PROVIDER", "ollama")).strip().lower() or "ollama"
         self.llm_model = str(os.environ.get("DADBOT_LLM_MODEL", self.active_model)).strip() or self.active_model
         self.preferred_embedding_models = tuple(
@@ -362,6 +388,32 @@ class DadBotConfig:
             and env_truthy("DADBOT_GOAL_ALIGNMENT_GUARD_ENABLED", default=True),
         )
         self.primary_identity_log_filenames = tuple(self.runtime_config.primary_identity_log_filenames)
+        graph_table_prefix = str(os.environ.get("DADBOT_GRAPH_TABLE_PREFIX") or "dadbot_graph").strip() or "dadbot_graph"
+        semantic_table = str(os.environ.get("DADBOT_SEMANTIC_INDEX_TABLE") or "semantic_memories").strip() or "semantic_memories"
+        vector_dimensions = str(os.environ.get("DADBOT_SEMANTIC_VECTOR_DIM") or "").strip()
+        ann_index = str(os.environ.get("DADBOT_SEMANTIC_ANN_INDEX") or "").strip().lower() or None
+        distance_metric = str(os.environ.get("DADBOT_SEMANTIC_DISTANCE_METRIC") or "cosine").strip().lower() or "cosine"
+        hnsw_m = str(os.environ.get("DADBOT_SEMANTIC_HNSW_M") or "16").strip() or "16"
+        hnsw_ef_construction = str(os.environ.get("DADBOT_SEMANTIC_HNSW_EF_CONSTRUCTION") or "64").strip() or "64"
+        ivfflat_lists = str(os.environ.get("DADBOT_SEMANTIC_IVFFLAT_LISTS") or "100").strip() or "100"
+        self.graph_store = GraphStoreBackendConfig(
+            postgres_dsn=self.postgres_dsn,
+            table_prefix=graph_table_prefix,
+        )
+        self.semantic_index = SemanticIndexBackendConfig(
+            postgres_dsn=self.postgres_dsn,
+            table=semantic_table,
+            vector_dimensions=int(vector_dimensions) if vector_dimensions else None,
+            ann_index=ann_index,
+            distance_metric=distance_metric,
+            hnsw_m=int(hnsw_m),
+            hnsw_ef_construction=int(hnsw_ef_construction),
+            ivfflat_lists=int(ivfflat_lists),
+        )
+        self.story_mode = StoryModeSecurityConfig(
+            password=str(os.environ.get("DADBOT_STORY_MODE_PASSWORD") or "").strip(),
+            password_hash_sha256=str(os.environ.get("DADBOT_STORY_MODE_PASSWORD_SHA256") or "").strip().lower(),
+        )
         self._approval_workflow = None
 
     def apply_profile_llm_settings(self, provider: str, model: str) -> None:

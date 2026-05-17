@@ -52,6 +52,14 @@ def test_validate_startup_environment_requires_token_for_api_auth(monkeypatch: p
     assert any("DADBOT_API_TOKEN_SECRET" in message for message in errors)
 
 
+def test_validate_startup_environment_rejects_short_api_token_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DADBOT_API_AUTH_REQUIRED", "1")
+    monkeypatch.setenv("DADBOT_API_TOKEN_SECRET", "short-secret")
+
+    errors = validate_startup_environment(serve_api=True)
+    assert any("at least 32 characters" in message for message in errors)
+
+
 def test_validate_startup_environment_requires_egress_allowlist_when_enforced(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -60,3 +68,10 @@ def test_validate_startup_environment_requires_egress_allowlist_when_enforced(
 
     errors = validate_startup_environment(serve_api=False)
     assert any("DADBOT_EGRESS_ALLOWLIST" in message for message in errors)
+
+
+def test_validate_startup_environment_rejects_invalid_story_mode_hash(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DADBOT_STORY_MODE_PASSWORD_SHA256", "xyz")
+
+    errors = validate_startup_environment(serve_api=False)
+    assert any("DADBOT_STORY_MODE_PASSWORD_SHA256" in message for message in errors)

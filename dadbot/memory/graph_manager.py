@@ -7,7 +7,6 @@ from __future__ import annotations
 import copy
 import hashlib
 import logging
-import os
 import re
 from dadbot.memory.graph_entity_resolver import GraphEntityResolver
 from dadbot.memory.graph_views import (
@@ -60,8 +59,9 @@ class MemoryGraphManager:
     # ------------------------------------------------------------------
 
     def _build_graph_store_backend(self):
-        postgres_dsn = str(os.environ.get("DADBOT_POSTGRES_DSN") or "").strip()
-        table_prefix = str(os.environ.get("DADBOT_GRAPH_TABLE_PREFIX") or "dadbot_graph").strip() or "dadbot_graph"
+        graph_store_config = getattr(getattr(self._bot, "config", None), "graph_store", None)
+        postgres_dsn = str(getattr(graph_store_config, "postgres_dsn", "") or "").strip()
+        table_prefix = str(getattr(graph_store_config, "table_prefix", "dadbot_graph") or "dadbot_graph").strip() or "dadbot_graph"
         if postgres_dsn:
             try:
                 backend = PostgresGraphStore(postgres_dsn, table_prefix=table_prefix)

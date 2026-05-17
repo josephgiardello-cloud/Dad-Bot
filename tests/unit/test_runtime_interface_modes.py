@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from types import SimpleNamespace
 
 import pytest
@@ -15,6 +16,7 @@ def _manager_with_bot(bot) -> RuntimeInterfaceManager:
     manager.bot = bot
     manager.ui_mode = "chat"
     manager.story_mode_password = ""
+    manager.story_mode_password_hash = ""
     manager.story_mode_failed_attempts = 0
     manager.story_mode_locked_until_ts = 0.0
     return manager
@@ -121,6 +123,17 @@ def test_story_mode_password_is_case_sensitive() -> None:
     assert manager._handle_ui_command("/mode story casesensitive!") is True
     assert manager.ui_mode == "chat"
     assert any("Incorrect story mode password" in message for message in messages)
+
+
+def test_story_mode_accepts_sha256_hash_configuration() -> None:
+    messages: list[str] = []
+    bot = SimpleNamespace(print_system_message=lambda text: messages.append(text))
+    manager = _manager_with_bot(bot)
+    manager.story_mode_password_hash = hashlib.sha256(b"secret").hexdigest()
+
+    assert manager._handle_ui_command("/mode story secret") is True
+    assert manager.ui_mode == "story"
+    assert any("UI mode switched" in message for message in messages)
 
 
 def test_story_mode_lockout_backoff_after_failed_attempts(monkeypatch) -> None:

@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""
-DadBot One-Command Installer + Launcher
-Run: python install.py
+"""DadBot installer and launcher.
+
+Run ``python install.py`` for the minimal local UI install.
+Add ``--with-service`` or ``--with-voice`` to opt into heavier extras.
 """
 
+import argparse
 import json
 import shutil
 import subprocess
@@ -15,6 +17,29 @@ REQUIRED_MODELS = ["llama3.2", "nomic-embed-text"]
 OPTIONAL_MODELS = ["flux"]  # large image model — skip if slow
 
 
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description="Install DadBot and optionally launch the local UI")
+    parser.add_argument("--with-service", action="store_true", help="Install API/Redis/Postgres service extras")
+    parser.add_argument("--with-voice", action="store_true", help="Install voice/whisper extras")
+    parser.add_argument("--with-dev", action="store_true", help="Install developer/test extras")
+    parser.add_argument("--skip-model-pull", action="store_true", help="Do not pull Ollama models during setup")
+    parser.add_argument("--no-launch", action="store_true", help="Install and prepare files without launching the UI")
+    return parser.parse_args(argv)
+
+
+def build_install_target(args) -> str:
+    extras: list[str] = []
+    if args.with_dev:
+        extras.append("dev")
+    if args.with_service:
+        extras.append("service")
+    if args.with_voice:
+        extras.append("voice")
+    if not extras:
+        return "."
+    return ".[" + ",".join(extras) + "]"
+
+
 def check_python():
     if sys.version_info < (3, 13):
         print(f"❌ Python 3.13+ required (you have {sys.version_info.major}.{sys.version_info.minor})")
@@ -23,10 +48,11 @@ def check_python():
     print(f"✅ Python {sys.version_info.major}.{sys.version_info.minor} OK")
 
 
-def install_dependencies():
+def install_dependencies(args):
     print("\n📦 Installing dependencies...")
+    install_target = build_install_target(args)
     try:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "-e", ".[voice,service]"])
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "-e", install_target])
     except subprocess.CalledProcessError as e:
         print("❌ Dependency installation failed.")
         print("   Error:", str(e))
@@ -34,9 +60,12 @@ def install_dependencies():
         print("   1. Ensure you're using a fresh Python virtual environment")
         print("   2. Check that pip is up-to-date: python -m pip install --upgrade pip")
         print("   3. On Windows, you may need Visual Studio Build Tools for C++ support")
-        print("   4. Run again with: python install.py")
+        print("   4. Re-run with only the extras you need, for example:")
+        print("      python install.py --with-service")
         sys.exit(1)
     print("✅ Dependencies installed")
+    if install_target == ".":
+        print("   Installed base UI/runtime only. Use --with-service and/or --with-voice for optional features.")
 
 
 def setup_static_and_profile():
@@ -149,14 +178,17 @@ def launch():
         print("\n   Try manually: python launch.py")
 
 
-def main():
+def main(argv=None):
+    args = parse_args(argv)
     print("🧔 DadBot Installer & Launcher\n" + "=" * 35)
     check_python()
-    install_dependencies()
+    install_dependencies(args)
     setup_static_and_profile()
     if check_ollama():
-        pull_models()
-        launch()
+        if not args.skip_model_pull:
+            pull_models()
+        if not args.no_launch:
+            launch()
     else:
         print("\nAfter starting Ollama, run this script again or just run:")
         print("   python launch.py")

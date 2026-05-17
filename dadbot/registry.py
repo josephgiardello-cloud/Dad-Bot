@@ -666,14 +666,53 @@ def wire_runtime_managers(bot: Any) -> None:
     )
 
 
-_EXTRA_MANAGER_ATTRS = ("internal_state_manager",)
+_WIRED_MANAGER_ATTRS = (
+    "runtime_storage",
+    "profile_runtime",
+    "memory_manager",
+    "long_term_signals",
+    "memory_query",
+    "memory_commands",
+    "memory_coordinator",
+    "sovereign_memory",
+    "safety_support",
+    "profile_context",
+    "context_builder",
+    "tone_context",
+    "personality_service",
+    "conversation_surface",
+    "mood_manager",
+    "relationship_manager",
+    "internal_state_manager",
+    "prompt_assembly",
+    "multimodal_handler",
+    "turn_service",
+    "reply_supervisor",
+    "reply_finalization",
+    "conversation_persistence",
+    "runtime_orchestration",
+    "status_reporting",
+    "maintenance_scheduler",
+    "runtime_interface",
+    "tool_registry",
+    "agentic_handler",
+    "health_manager",
+    "tts_manager",
+    "avatar_manager",
+    "calendar_manager",
+    "email_manager",
+    "runtime_state_manager",
+    "model_runtime",
+    "runtime_client",
+    "session_summary_manager",
+)
 
 
 def build_manager_registry(bot: Any) -> ServiceRegistry:
     """Return a ``ServiceRegistry`` populated with all wired bot manager instances.
 
-    Walks ``DadBot._MANAGER_DELEGATE_CHAIN`` (plus a short list of extra manager
-    attributes not in the chain) and registers each instance by name.  Uses
+    Walks the explicit set of wired manager/service attributes and registers each
+    instance by name. Uses
     ``object.__getattribute__`` so that the lookup never recurses through
     ``DadBot.__getattr__``.
 
@@ -684,8 +723,7 @@ def build_manager_registry(bot: Any) -> ServiceRegistry:
     boot_declaration = getattr(bot, "_boundary_contracts", {}).get("boot")
     if boot_declaration is not None:
         registry.declare_boundary_compliance(boot_declaration)
-    chain = getattr(type(bot), "_MANAGER_DELEGATE_CHAIN", ())
-    for manager_name in (*chain, *_EXTRA_MANAGER_ATTRS):
+    for manager_name in _WIRED_MANAGER_ATTRS:
         try:
             manager = object.__getattribute__(bot, manager_name)
         except AttributeError:
