@@ -7,13 +7,34 @@ from .config import MOOD_ALIASES, MOOD_CATEGORIES, MOOD_TONE_GUIDANCE
 
 class DadPrompts:
     @staticmethod
-    def mood_detection(history_snippet: str, user_input: str) -> str:
+    def _normalize_listener_name(listener_name: str | None) -> str:
+        normalized = str(listener_name or "").strip()
+        return normalized or "the user"
+
+    @staticmethod
+    def _normalize_caregiver_name(caregiver_name: str | None) -> str:
+        normalized = str(caregiver_name or "").strip()
+        return normalized or "Caregiver"
+
+    @staticmethod
+    def _normalize_family_member_name(family_member_name: str | None) -> str:
+        normalized = str(family_member_name or "").strip()
+        return normalized or "a trusted family member"
+
+    @staticmethod
+    def mood_detection(
+        history_snippet: str,
+        user_input: str,
+        *,
+        listener_name: str | None = None,
+    ) -> str:
         history_block = history_snippet or ""
         if history_block and not history_block.endswith("\n\n"):
             history_block = history_block.rstrip() + "\n\n"
+        listener = DadPrompts._normalize_listener_name(listener_name)
         return f"""
 You are an expert psychologist and emotional tone analyst specializing in parent-teen conversations.
-Analyze Tony's latest message (and the recent context if provided) to detect his current emotional state.
+Analyze {listener}'s latest message (and the recent context if provided) to detect their current emotional state.
 
 Possible moods and their precise definitions:
 - positive: happy, excited, proud, energetic, upbeat, relieved, or celebratory
@@ -30,7 +51,7 @@ Important distinctions:
 - Sad is quieter emotional pain or disappointment.
 - Do not default to neutral if any emotional signal is present.
 
-{history_block}Tony's latest message: "{user_input}"
+{history_block}{listener}'s latest message: "{user_input}"
 
 Think step by step:
 1. Identify any emotional keywords, tone indicators, negation, intensity, and context from history.
@@ -44,39 +65,39 @@ Mood: [one of: positive, neutral, stressed, sad, frustrated, tired]
 Reason: [one short sentence explaining your choice]
 
 Examples:
-Tony: I crushed my test and I feel awesome!
+{listener}: I crushed my test and I feel awesome!
 Mood: positive
 Reason: Clear excitement and pride words like "crushed" and "awesome".
 
-Tony: Everything feels like too much and I don't know how to keep up.
+{listener}: Everything feels like too much and I don't know how to keep up.
 Mood: stressed
 Reason: Overwhelm and pressure about coping.
 
-Tony: I'm so irritated with my boss right now, nothing goes right.
+{listener}: I'm so irritated with my boss right now, nothing goes right.
 Mood: frustrated
 Reason: Immediate irritation and resentment.
 
-Tony: I just feel really low tonight, like nothing matters.
+{listener}: I just feel really low tonight, like nothing matters.
 Mood: sad
 Reason: Quiet emotional low and disappointment.
 
-Tony: I'm exhausted and can barely keep my eyes open after today.
+{listener}: I'm exhausted and can barely keep my eyes open after today.
 Mood: tired
 Reason: Clear fatigue and drained energy.
 
-Tony: I'm tired, but honestly proud I still finished the whole thing.
+{listener}: I'm tired, but honestly proud I still finished the whole thing.
 Mood: tired
 Reason: Fatigue is the dominant emotional state even though pride is present.
 
-Tony: I went to work, came home, and now I'm just thinking.
+{listener}: I went to work, came home, and now I'm just thinking.
 Mood: neutral
 Reason: Factual and reflective with no strong emotional charge.
 
-Tony: I'm overwhelmed but also kind of proud I pushed through.
+{listener}: I'm overwhelmed but also kind of proud I pushed through.
 Mood: stressed
 Reason: Dominant overwhelm outweighs the secondary pride.
 
-Tony: I'm sad about how it went, but I'm relieved it's finally over.
+{listener}: I'm sad about how it went, but I'm relieved it's finally over.
 Mood: sad
 Reason: The main emotion is still emotional hurt, with relief as a secondary note.
 """.strip()
@@ -120,9 +141,14 @@ Rules:
         user_input: str,
         draft_reply: str,
         current_mood: str,
+        *,
+        listener_name: str | None = None,
+        caregiver_name: str | None = None,
     ) -> str:
+        listener = DadPrompts._normalize_listener_name(listener_name)
+        caregiver = DadPrompts._normalize_caregiver_name(caregiver_name)
         return f"""
-You are reviewing a draft reply from a warm, supportive dad.
+You are reviewing a draft reply from a warm, supportive {caregiver}.
 
 Known profile facts:
 {profile_block}
@@ -133,14 +159,14 @@ Relevant facts for this message:
 Rules:
 - Never invent facts not in the profile.
 - If the draft guesses at unknown personal details, revise it to say "I don't want to guess".
-- Keep the warm, casual dad tone and the signoff when natural.
+- Keep the warm, casual {caregiver.lower()} tone and the signoff when natural.
 - Only make minimal changes needed for accuracy.
-- Preserve emotional fit for Tony's current mood: {current_mood}.
+- Preserve emotional fit for {listener}'s current mood: {current_mood}.
 
 Return only JSON:
 {{"approved": true/false, "revised_reply": "string or null"}}
 
-Tony: {json.dumps(user_input)}
+{listener}: {json.dumps(user_input)}
 Draft: {json.dumps(draft_reply)}
 """.strip()
 
@@ -149,9 +175,14 @@ Draft: {json.dumps(draft_reply)}
         graph_summary: str,
         consolidated_lines: str,
         user_input: str,
+        *,
+        listener_name: str | None = None,
+        caregiver_name: str | None = None,
     ) -> str:
+        listener = DadPrompts._normalize_listener_name(listener_name)
+        caregiver = DadPrompts._normalize_caregiver_name(caregiver_name)
         return f"""
-Using only the relationship graph and consolidated memories below, give me one original piece of dad wisdom Tony might need right now.
+Using only the relationship graph and consolidated memories below, give me one original piece of {caregiver.lower()} wisdom {listener} might need right now.
 
 Graph:
 {graph_summary}
@@ -170,36 +201,51 @@ Keep it warm, short, and never generic.
 """.strip()
 
     @staticmethod
-    def family_echo(user_input: str, current_mood: str) -> str:
+    def family_echo(
+        user_input: str,
+        current_mood: str,
+        *,
+        listener_name: str | None = None,
+        caregiver_name: str | None = None,
+        family_member_name: str | None = None,
+    ) -> str:
+        listener = DadPrompts._normalize_listener_name(listener_name)
+        caregiver = DadPrompts._normalize_caregiver_name(caregiver_name)
+        family_member = DadPrompts._normalize_family_member_name(family_member_name)
         return f"""
-Write one short line Dad could naturally say about what Carrie might say in this moment.
+Write one short line {caregiver} could naturally say about what {family_member} might say in this moment.
 
 Known family facts:
-- Tony's mom is Carrie.
-- Dad is warm, grounded, and should not invent new biographical facts.
+- {caregiver} is warm, grounded, and should not invent new biographical facts.
 
-Tony's current mood: {current_mood}
-Tony's message: {user_input}
+{listener}'s current mood: {current_mood}
+{listener}'s message: {user_input}
 
-Return only the one sentence Dad could say. Keep it brief, supportive, and specific.
+Return only the one sentence {caregiver} could say. Keep it brief, supportive, and specific.
 """.strip()
 
     @staticmethod
-    def memory_extraction() -> str:
+    def memory_extraction(
+        *,
+        listener_name: str | None = None,
+        caregiver_name: str | None = None,
+    ) -> str:
+        listener = DadPrompts._normalize_listener_name(listener_name)
+        caregiver = DadPrompts._normalize_caregiver_name(caregiver_name)
         return """
-You extract durable memory summaries from Tony's prior messages.
+You extract durable memory summaries from {listener}'s prior messages.
 Return only JSON.
 Rules:
-- Include only lasting personal context or ongoing concerns Tony shared.
-    - Prefer short, specific statements Dad can actually use later.
-    - Keep concrete details over generic labels. Good: "Tony is stressed about a work deadline because his boss moved it up." Bad: "Tony feels stressed."
-    - Capture actionable context when present, including what Tony is dealing with, why it matters, or what follow-up would help.
+- Include only lasting personal context or ongoing concerns {listener} shared.
+    - Prefer short, specific statements {caregiver} can actually use later.
+    - Keep concrete details over generic labels. Good: "{listener} is stressed about a work deadline because their boss moved it up." Bad: "{listener} feels stressed."
+    - Capture actionable context when present, including what {listener} is dealing with, why it matters, or what follow-up would help.
 - Return an array of objects with keys 'summary', 'category', and 'mood'.
-- Do not include one-off greetings, filler, or facts already covered by Dad's built-in profile.
+- Do not include one-off greetings, filler, or facts already covered by {caregiver}'s built-in profile.
     - Avoid vague summaries like "personal struggles", "mental health", or "emotional state" unless the user gave a specific enduring detail.
 - Keep each memory under 25 words.
 - If there is nothing durable to remember, return [].
-""".strip()
+""".format(listener=listener, caregiver=caregiver).strip()
 
     @staticmethod
     def constants_snapshot():

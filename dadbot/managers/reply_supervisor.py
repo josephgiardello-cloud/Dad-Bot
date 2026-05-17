@@ -121,6 +121,12 @@ class ReplySupervisorManager:
             },
         ]
 
+    def _persona_labels(self) -> tuple[str, str]:
+        style = getattr(self.bot, "STYLE", {}) if isinstance(getattr(self.bot, "STYLE", None), dict) else {}
+        listener_name = str(style.get("listener_name") or "the user").strip() or "the user"
+        caregiver_name = str(style.get("name") or "Dad").strip() or "Dad"
+        return listener_name, caregiver_name
+
     @staticmethod
     def _elapsed_ms(started_at: float) -> int:
         return max(0, int((time.perf_counter() - started_at) * 1000))
@@ -173,12 +179,13 @@ class ReplySupervisorManager:
         draft_reply: str,
         current_mood: str,
     ) -> str:
+        listener_name, caregiver_name = self._persona_labels()
         supervisor_context = self.build_reply_supervisor_context(current_mood)
         relevant_facts = self.bot.build_profile_block(
             self.bot.relevant_fact_ids_for_input(user_input),
         )
         return f"""
-You are reviewing a draft reply from a warm, supportive dad.
+You are reviewing a draft reply from a warm, supportive {caregiver_name}.
 
 Known profile facts:
 {self.bot.build_profile_block()}
@@ -192,16 +199,16 @@ Supervisor context:
 Rules:
 - Never invent facts not in the profile.
 - If the draft guesses at unknown personal details, revise it to say "I don't want to guess".
-- Keep the warm, casual dad tone and the signoff when natural.
+- Keep the warm, casual {caregiver_name.lower()} tone and the signoff when natural.
 - Only make minimal changes needed for accuracy.
-- Preserve emotional fit for Tony's current mood: {self.bot.normalize_mood(current_mood)}.
+- Preserve emotional fit for {listener_name}'s current mood: {self.bot.normalize_mood(current_mood)}.
 - Respect the current relationship state. If openness is guarded or momentum is heavy, be gentler and less forceful.
 - Stay consistent with the active evolved persona traits and behavior rules.
 
 Return only JSON:
 {{"approved": true/false, "revised_reply": "string or null"}}
 
-Tony: {json_dumps(user_input)}
+{listener_name}: {json_dumps(user_input)}
 Draft: {json_dumps(draft_reply)}
 """.strip()
 
@@ -223,12 +230,13 @@ Draft: {json_dumps(draft_reply)}
         draft_reply: str,
         current_mood: str,
     ) -> str:
+        listener_name, caregiver_name = self._persona_labels()
         supervisor_context = self.build_reply_supervisor_context(current_mood)
         relevant_facts = self.bot.build_profile_block(
             self.bot.relevant_fact_ids_for_input(user_input),
         )
         return f"""
-You are reviewing and grading a draft reply from a warm, supportive dad.
+You are reviewing and grading a draft reply from a warm, supportive {caregiver_name}.
 
 Known profile facts:
 {self.bot.build_profile_block()}
@@ -244,16 +252,16 @@ Current mood: {self.bot.normalize_mood(current_mood)}
 Rules:
 - Never invent facts not in the profile.
 - If the draft guesses at unknown personal details, revise it to say "I don't want to guess".
-- Keep the reply natural, concise, emotionally fitting, and dad-like.
+- Keep the reply natural, concise, emotionally fitting, and {caregiver_name.lower()}-like.
 - Respect the current relationship state. If openness is guarded or momentum is heavy, be gentler and less forceful.
 - Stay consistent with the active evolved persona traits and behavior rules.
 - If the draft is already strong, approve it and leave revised_reply null.
 - If it is generic, cold, too formal, too intense, verbose, or inaccurate, fix it with the smallest useful rewrite.
 
 Scoring guide:
-- dad_likeness: warm, steady, grounded, naturally fatherly, not corporate or clinical.
+- dad_likeness: warm, steady, grounded, naturally caregiver-like, not corporate or clinical.
 - groundedness: avoids invented facts, avoids overconfident guesses, stays specific and believable.
-- emotional_fit: matches Tony's mood and the current relationship baseline without over- or under-reacting.
+- emotional_fit: matches {listener_name}'s mood and the current relationship baseline without over- or under-reacting.
 
 Anchor examples:
 - Good reply: "That sounds heavy, buddy. Let us slow it down and take one steady next step together."
@@ -272,7 +280,7 @@ Return only JSON:
   "revised_reply": "string or null"
 }}
 
-Tony: {json_dumps(user_input)}
+{listener_name}: {json_dumps(user_input)}
 Draft reply: {json_dumps(draft_reply)}
 """.strip()
 
