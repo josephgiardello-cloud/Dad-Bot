@@ -8,10 +8,12 @@ version = "0.1.0"
 description = "Dad-Bot conversational assistant"
 requires-python = ">=3.13"
 dependencies = [
+    "chromadb>=1.0",
     "ollama",
     "orjson>=3.10",
     "pydantic>=2.0",
     "python-dateutil",
+    "streamlit>=1.45",
 ]
 
 [project.scripts]
@@ -20,6 +22,7 @@ dadbot = "dadbot.cli:main"
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
+    "pytest-timeout>=2.3",
     "pytest-xdist>=3.6",
     "pytest-profiling>=1.8",
     "pytest-mock>=3.14",
@@ -54,6 +57,10 @@ heritage = [
 mcp = [
     "mcp>=1.6",
 ]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["dadbot*", "dadbot_system*", "caaf*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import importlib
 import json
 import logging
@@ -363,12 +364,45 @@ def _cli_trace(dadbot_cls, *, turn_id: str, limit: int, as_json: bool) -> int:
     return _emit_operator_output(payload, as_json=as_json)
 
 
+@contextmanager
+def _doctor_runtime_environment():
+    overrides = {
+        "DADBOT_POSTGRES_DSN": "",
+        "DADBOT_REDIS_URL": "",
+    }
+    previous_values = {key: os.environ.get(key) for key in overrides}
+    try:
+        for key, value in overrides.items():
+            os.environ[key] = value
+        yield
+    finally:
+        for key, previous in previous_values.items():
+            if previous is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = previous
+
+
 def _cli_doctor(dadbot_cls, *, as_json: bool) -> int:
     supervisor = get_runtime_supervisor()
     preflight_ok, preflight_issues = supervisor.preflight_check()
 
-    bot = dadbot_cls(light_mode=True)
-    health = dict(bot.current_runtime_health_snapshot(force=True, log_warnings=False, persist=False) or {})
+    with _doctor_runtime_environment():
+        bot = dadbot_cls(light_mode=True, document_store=InMemoryStateStore())
+        shutdown_error: str | None = None
+        try:
+            health = dict(bot.current_runtime_health_snapshot(force=True, log_warnings=False, persist=False) or {})
+        finally:
+            shutdown = getattr(bot, "shutdown", None)
+            if callable(shutdown):
+                try:
+                    shutdown()
+                except Exception as exc:  # noqa: BLE001
+                    shutdown_error = str(exc)
+
+    if shutdown_error:
+        preflight_ok = False
+        preflight_issues = [*list(preflight_issues or []), f"runtime shutdown failed: {shutdown_error}"]
 
     payload = {
         "command": "doctor",

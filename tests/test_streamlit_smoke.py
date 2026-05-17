@@ -23,6 +23,27 @@ def _copytree_ignore_runtime_artifacts(_src: str, names: list[str]) -> set[str]:
     return ignored
 
 
+def _prepare_streamlit_sandbox(repo_root: Path, sandbox_root: Path) -> None:
+    for file_name in ("Dad.py", "dad_streamlit.py", "dad_profile.json", "dad_profile.template.json"):
+        shutil.copy2(repo_root / file_name, sandbox_root / file_name)
+
+    shutil.copytree(repo_root / "dadbot", sandbox_root / "dadbot", ignore=_copytree_ignore_runtime_artifacts)
+    shutil.copytree(repo_root / "dadbot_system", sandbox_root / "dadbot_system", ignore=_copytree_ignore_runtime_artifacts)
+    shutil.copytree(repo_root / "static", sandbox_root / "static", ignore=_copytree_ignore_runtime_artifacts)
+
+    source_streamlit_dir = repo_root / ".streamlit"
+    target_streamlit_dir = sandbox_root / ".streamlit"
+    if source_streamlit_dir.exists():
+        shutil.copytree(source_streamlit_dir, target_streamlit_dir, ignore=_copytree_ignore_runtime_artifacts)
+        return
+
+    target_streamlit_dir.mkdir()
+    (target_streamlit_dir / "config.toml").write_text(
+        "[server]\nenableStaticServing = true\n",
+        encoding="utf-8",
+    )
+
+
 def test_ensure_streamlit_app_file_creates_minimal_stub(tmp_path):
     target = tmp_path / "dad_streamlit.py"
 
@@ -39,14 +60,7 @@ def test_dad_streamlit_app_starts_without_streamlit_exceptions(tmp_path):
     repo_root = Path(__file__).resolve().parents[1]
     sandbox_root = tmp_path / "app_sandbox"
     sandbox_root.mkdir()
-
-    for file_name in ("Dad.py", "dad_streamlit.py", "dad_profile.json", "dad_profile.template.json"):
-        shutil.copy2(repo_root / file_name, sandbox_root / file_name)
-
-    shutil.copytree(repo_root / "dadbot", sandbox_root / "dadbot", ignore=_copytree_ignore_runtime_artifacts)
-    shutil.copytree(repo_root / "dadbot_system", sandbox_root / "dadbot_system", ignore=_copytree_ignore_runtime_artifacts)
-    shutil.copytree(repo_root / "static", sandbox_root / "static", ignore=_copytree_ignore_runtime_artifacts)
-    shutil.copytree(repo_root / ".streamlit", sandbox_root / ".streamlit", ignore=_copytree_ignore_runtime_artifacts)
+    _prepare_streamlit_sandbox(repo_root, sandbox_root)
 
     smoke_code = textwrap.dedent(
         """
@@ -95,14 +109,7 @@ def test_preferences_tab_shows_detected_cloud_llm_api_key_hint(tmp_path):
     repo_root = Path(__file__).resolve().parents[1]
     sandbox_root = tmp_path / "app_sandbox"
     sandbox_root.mkdir()
-
-    for file_name in ("Dad.py", "dad_streamlit.py", "dad_profile.json", "dad_profile.template.json"):
-        shutil.copy2(repo_root / file_name, sandbox_root / file_name)
-
-    shutil.copytree(repo_root / "dadbot", sandbox_root / "dadbot", ignore=_copytree_ignore_runtime_artifacts)
-    shutil.copytree(repo_root / "dadbot_system", sandbox_root / "dadbot_system", ignore=_copytree_ignore_runtime_artifacts)
-    shutil.copytree(repo_root / "static", sandbox_root / "static", ignore=_copytree_ignore_runtime_artifacts)
-    shutil.copytree(repo_root / ".streamlit", sandbox_root / ".streamlit", ignore=_copytree_ignore_runtime_artifacts)
+    _prepare_streamlit_sandbox(repo_root, sandbox_root)
 
     profile_path = sandbox_root / "dad_profile.json"
     profile_payload = json.loads(profile_path.read_text(encoding="utf-8"))
@@ -169,14 +176,7 @@ def test_sidebar_and_button_surface_accessible(tmp_path):
     repo_root = Path(__file__).resolve().parents[1]
     sandbox_root = tmp_path / "app_sandbox"
     sandbox_root.mkdir()
-
-    for file_name in ("Dad.py", "dad_streamlit.py", "dad_profile.json", "dad_profile.template.json"):
-        shutil.copy2(repo_root / file_name, sandbox_root / file_name)
-
-    shutil.copytree(repo_root / "dadbot", sandbox_root / "dadbot", ignore=_copytree_ignore_runtime_artifacts)
-    shutil.copytree(repo_root / "dadbot_system", sandbox_root / "dadbot_system", ignore=_copytree_ignore_runtime_artifacts)
-    shutil.copytree(repo_root / "static", sandbox_root / "static", ignore=_copytree_ignore_runtime_artifacts)
-    shutil.copytree(repo_root / ".streamlit", sandbox_root / ".streamlit", ignore=_copytree_ignore_runtime_artifacts)
+    _prepare_streamlit_sandbox(repo_root, sandbox_root)
 
     smoke_code = textwrap.dedent(
         """
