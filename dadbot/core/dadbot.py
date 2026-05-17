@@ -10,7 +10,7 @@ DadBot is intentionally thin.  Logic lives in dedicated managers held by
     DadBotHealthMixin   health/UX state and checkpoint/replay
 
 The remaining body of this class is pure delegation plumbing:
-    * Class-level routing maps (_CONFIG_ATTR_MAP, _MANAGER_DELEGATE_CHAIN, etc.)
+    * Class-level routing maps (_CONFIG_ATTR_MAP, explicit service names, etc.)
     * __getattr__ / __setattr__ for zero-overhead manager attribute routing
     * Explicit @property getters/setters for every registered manager
     * Config and runtime-state property aliases (PROFILE, MEMORY_STORE, ...)
@@ -140,8 +140,8 @@ class DadBot(
     1. **Behaviour mixins** -- grouped logical concerns (boot, turn, LLM, MCP, health).
     2. **Explicit @property delegation** -- thin shims for every registered manager so
        that IDE discoverability and static analysis work.
-    3. **Auto-delegation via __getattr__** -- unknown attribute lookups are forwarded in
-       priority order through ``_MANAGER_DELEGATE_CHAIN``; first match wins.
+     3. **Indexed service/provider lookup** -- unknown attribute lookups resolve through
+         the service container by explicit service name or provider ownership.
     """
 
     # ------------------------------------------------------------------
@@ -224,23 +224,6 @@ class DadBot(
         if target_obj == "_internal_runtime"
     }
 
-    # ------------------------------------------------------------------
-    # Fallback manager delegation chain
-    # ------------------------------------------------------------------
-
-    _MANAGER_DELEGATE_CHAIN: tuple[str, ...] = (
-        "health_manager", "tts_manager", "avatar_manager", "calendar_manager",
-        "email_manager", "runtime_storage", "profile_runtime", "memory_manager",
-        "memory_coordinator", "long_term_signals", "relationship_manager",
-        "runtime_state_manager", "status_reporting",  # legacy
-        "maintenance_scheduler", "conversation_persistence", "session_summary_manager",
-        "turn_service", "memory_query", "memory_commands", "safety_support",
-        "profile_context", "reply_supervisor", "reply_finalization", "multimodal_handler",
-        "model_runtime", "agentic_handler", "tool_registry", "context_service",
-        "tone_context", "personality_service", "conversation_surface", "prompt_assembly",
-        "runtime_client", "runtime_orchestration", "runtime_interface", "mood_manager",
-    )
-
     _DEPRECATED_FACADE_ALIASES: dict[str, str] = {
         "detect_mood": "mood_manager.detect",
         "detect_mood_async": "mood_manager.detect_async",
@@ -286,7 +269,7 @@ class DadBot(
         return alias_name in denied
 
     def __getattr__(self, name: str) -> Any:
-        """Route attribute lookups via unified routing map or manager delegation chain."""
+        """Route attribute lookups via explicit routing, service names, or provider ownership."""
         if name.startswith("__"):
             raise AttributeError(name)
 
@@ -332,29 +315,15 @@ class DadBot(
             except AttributeError:
                 pass
 
-        # Services provider fallback
+        # Service-name fallback: explicit service access via container registration.
         try:
             services = object.__getattribute__(self, "services")
+            service = services.get(name, optional=True)
+            if service is not None:
+                return service
             provider = services.get_provider(name)
             if provider is not None:
                 return getattr(provider, name)
-        except AttributeError:
-            pass
-
-        # Manager delegation chain fallback
-        # Managers are stored in services, so we access them through there
-        _sentinel = object()
-        try:
-            services = object.__getattribute__(self, "services")
-            for _mgr_attr in self.__class__._MANAGER_DELEGATE_CHAIN:
-                try:
-                    _mgr = getattr(services, _mgr_attr, _sentinel)
-                    if _mgr is not _sentinel:
-                        _val = getattr(_mgr, name, _sentinel)
-                        if _val is not _sentinel:
-                            return _val
-                except AttributeError:
-                    continue
         except AttributeError:
             pass
         
@@ -479,19 +448,31 @@ class DadBot(
 
     @property
     def memory(self) -> Any:
-        return getattr(self.services, "memory_manager", None)
+        try:
+            return self._get_explicit_manager("memory_manager")
+        except AttributeError:
+            return getattr(self.services, "memory_manager", None)
 
     @property
     def relationship(self) -> Any:
-        return getattr(self.services, "relationship_manager", None)
+        try:
+            return self._get_explicit_manager("relationship_manager")
+        except AttributeError:
+            return getattr(self.services, "relationship_manager", None)
 
     @property
     def mood(self) -> Any:
-        return getattr(self.services, "mood_manager", None)
+        try:
+            return self._get_explicit_manager("mood_manager")
+        except AttributeError:
+            return getattr(self.services, "mood_manager", None)
 
     @property
     def profile(self) -> Any:
-        return getattr(self.services, "profile_runtime", None)
+        try:
+            return self._get_explicit_manager("profile_runtime")
+        except AttributeError:
+            return getattr(self.services, "profile_runtime", None)
 
     @property
     def turn_orchestrator(self) -> Any:
@@ -547,12 +528,12 @@ class DadBot(
 
     @property
     def memory_query(self) -> Any:
-        """Alias for memory_manager."""
-        return self._get_explicit_manager("memory_manager")
+        """Explicit runtime manager for semantic/query memory helpers."""
+        return self._get_explicit_manager("memory_query")
 
     @memory_query.setter
     def memory_query(self, value: Any) -> None:
-        self._set_explicit_manager("memory_manager", value)
+        self._set_explicit_manager("memory_query", value)
 
     # ------------------------------------------------------------------
     # Config properties

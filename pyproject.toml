@@ -8,12 +8,12 @@ version = "0.1.0"
 description = "Dad-Bot conversational assistant"
 requires-python = ">=3.13"
 dependencies = [
-    "chromadb>=1.0",
-    "ollama",
-    "orjson>=3.10",
-    "pydantic>=2.0",
-    "python-dateutil",
-    "streamlit>=1.45",
+    "chromadb>=1.0,<2",
+    "ollama>=0.6,<1",
+    "orjson>=3.10,<4",
+    "pydantic>=2.0,<3",
+    "python-dateutil>=2.9,<3",
+    "streamlit>=1.45,<2",
 ]
 
 [project.scripts]

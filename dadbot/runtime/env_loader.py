@@ -88,10 +88,17 @@ def validate_startup_environment(*, serve_api: bool) -> list[str]:
     token_secret = str(os.environ.get("DADBOT_API_TOKEN_SECRET") or "").strip()
     if serve_api and auth_required and not token_secret:
         errors.append("DADBOT_API_TOKEN_SECRET is required when API auth is enabled.")
+    if serve_api and auth_required and token_secret and len(token_secret) < 32:
+        errors.append("DADBOT_API_TOKEN_SECRET must be at least 32 characters when API auth is enabled.")
 
     enforce_egress = env_truthy("DADBOT_EGRESS_ENFORCE", default=False)
     allowlist = str(os.environ.get("DADBOT_EGRESS_ALLOWLIST") or "").strip()
     if enforce_egress and not allowlist:
         errors.append("DADBOT_EGRESS_ALLOWLIST is required when DADBOT_EGRESS_ENFORCE is enabled.")
+
+    story_mode_password_hash = str(os.environ.get("DADBOT_STORY_MODE_PASSWORD_SHA256") or "").strip().lower()
+    if story_mode_password_hash:
+        if len(story_mode_password_hash) != 64 or any(ch not in "0123456789abcdef" for ch in story_mode_password_hash):
+            errors.append("DADBOT_STORY_MODE_PASSWORD_SHA256 must be a 64-character lowercase SHA-256 hex digest.")
 
     return errors

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
 import sys
@@ -263,9 +265,17 @@ class RuntimeInterfaceManager:
             or "chat"
         ).strip().lower()
         self.ui_mode = configured_mode if configured_mode in {"chat", "debug", "operator", "story"} else "chat"
+        story_mode = getattr(getattr(self.bot, "config", None), "story_mode", None)
         self.story_mode_password = str(
-            getattr(self.bot, "STORY_MODE_PASSWORD", "") or os.environ.get("DADBOT_STORY_MODE_PASSWORD", ""),
+            getattr(self.bot, "STORY_MODE_PASSWORD", "")
+            or getattr(story_mode, "password", "")
+            or os.environ.get("DADBOT_STORY_MODE_PASSWORD", ""),
         ).strip()
+        self.story_mode_password_hash = str(
+            getattr(self.bot, "STORY_MODE_PASSWORD_SHA256", "")
+            or getattr(story_mode, "password_hash_sha256", "")
+            or os.environ.get("DADBOT_STORY_MODE_PASSWORD_SHA256", ""),
+        ).strip().lower()
         self.story_mode_failed_attempts = 0
         self.story_mode_locked_until_ts = 0.0
         self._sovereign_monitor: SovereignMonitor | None = None
@@ -316,6 +326,20 @@ class RuntimeInterfaceManager:
         lockout_seconds = min(lockout_seconds, int(self.STORY_MODE_LOCKOUT_MAX_SECONDS))
         self.story_mode_locked_until_ts = time.monotonic() + float(lockout_seconds)
         return lockout_seconds
+
+    @staticmethod
+    def _story_mode_password_matches(
+        provided_password: str,
+        *,
+        configured_password: str,
+        configured_password_hash: str,
+    ) -> bool:
+        if configured_password_hash:
+            digest = hashlib.sha256(str(provided_password or "").encode("utf-8")).hexdigest()
+            return hmac.compare_digest(digest, configured_password_hash)
+        if configured_password:
+            return hmac.compare_digest(str(provided_password or ""), configured_password)
+        return False
 
     @staticmethod
     def _ansi(enabled: bool, code: str) -> str:
@@ -464,6 +488,7 @@ class RuntimeInterfaceManager:
             if requested in {"chat", "debug", "operator", "story"}:
                 if requested == "story":
                     configured_password = str(getattr(self, "story_mode_password", "") or "").strip()
+                    configured_password_hash = str(getattr(self, "story_mode_password_hash", "") or "").strip().lower()
                     provided_password = str(parts[2]).strip() if len(parts) > 2 else ""
                     lockout_remaining = self._story_mode_lockout_remaining_seconds()
                     if lockout_remaining > 0:
@@ -471,13 +496,18 @@ class RuntimeInterfaceManager:
                             f"Story mode is temporarily locked after failed attempts. Try again in {lockout_remaining}s.",
                         )
                         return True
-                    if not configured_password:
+                    if not configured_password and not configured_password_hash:
                         self.bot.print_system_message(
-                            "Story mode is locked. Set DADBOT_STORY_MODE_PASSWORD first, then use /mode story <password>."
-                            " Example (PowerShell): $env:DADBOT_STORY_MODE_PASSWORD='your-password'",
+                            "Story mode is locked. Set DADBOT_STORY_MODE_PASSWORD or DADBOT_STORY_MODE_PASSWORD_SHA256 first,"
+                            " then use /mode story <password>. Example (PowerShell):"
+                            " $env:DADBOT_STORY_MODE_PASSWORD='your-password'",
                         )
                         return True
-                    if provided_password != configured_password:
+                    if not self._story_mode_password_matches(
+                        provided_password,
+                        configured_password=configured_password,
+                        configured_password_hash=configured_password_hash,
+                    ):
                         lockout_seconds = self._register_story_mode_password_failure()
                         if lockout_seconds > 0:
                             self.bot.print_system_message(
@@ -517,7 +547,7 @@ class RuntimeInterfaceManager:
         if normalized == "/help ui":
             self.bot.print_system_message("UI commands: /mode chat|debug|operator|story, /insight, /hud")
             self.bot.print_system_message(
-                "Story mode setup: set DADBOT_STORY_MODE_PASSWORD, then run /mode story <password>.",
+                "Story mode setup: set DADBOT_STORY_MODE_PASSWORD or DADBOT_STORY_MODE_PASSWORD_SHA256, then run /mode story <password>.",
             )
             return True
 

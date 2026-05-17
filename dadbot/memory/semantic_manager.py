@@ -36,32 +36,26 @@ class SemanticIndexManager:
     # ------------------------------------------------------------------
 
     def _build_semantic_index_backend(self):
-        postgres_dsn = str(os.environ.get("DADBOT_POSTGRES_DSN") or "").strip()
-        semantic_table = (
-            str(
-                os.environ.get("DADBOT_SEMANTIC_INDEX_TABLE") or "semantic_memories",
-            ).strip()
-            or "semantic_memories"
-        )
-        vector_dimensions = str(
-            os.environ.get("DADBOT_SEMANTIC_VECTOR_DIM") or "",
-        ).strip()
-        ann_index = str(os.environ.get("DADBOT_SEMANTIC_ANN_INDEX") or "").strip().lower()
-        distance_metric = str(os.environ.get("DADBOT_SEMANTIC_DISTANCE_METRIC") or "cosine").strip().lower() or "cosine"
-        hnsw_m = str(os.environ.get("DADBOT_SEMANTIC_HNSW_M") or "16").strip() or "16"
-        hnsw_ef_construction = str(os.environ.get("DADBOT_SEMANTIC_HNSW_EF_CONSTRUCTION") or "64").strip() or "64"
-        ivfflat_lists = str(os.environ.get("DADBOT_SEMANTIC_IVFFLAT_LISTS") or "100").strip() or "100"
+        semantic_index_config = getattr(getattr(self._bot, "config", None), "semantic_index", None)
+        postgres_dsn = str(getattr(semantic_index_config, "postgres_dsn", "") or "").strip()
+        semantic_table = str(getattr(semantic_index_config, "table", "semantic_memories") or "semantic_memories").strip() or "semantic_memories"
+        vector_dimensions = getattr(semantic_index_config, "vector_dimensions", None)
+        ann_index = getattr(semantic_index_config, "ann_index", None)
+        distance_metric = str(getattr(semantic_index_config, "distance_metric", "cosine") or "cosine").strip().lower() or "cosine"
+        hnsw_m = int(getattr(semantic_index_config, "hnsw_m", 16) or 16)
+        hnsw_ef_construction = int(getattr(semantic_index_config, "hnsw_ef_construction", 64) or 64)
+        ivfflat_lists = int(getattr(semantic_index_config, "ivfflat_lists", 100) or 100)
         if postgres_dsn:
             try:
                 backend = PGVectorSemanticIndex(
                     postgres_dsn,
                     table=semantic_table,
-                    vector_dimensions=int(vector_dimensions) if vector_dimensions else None,
+                    vector_dimensions=vector_dimensions,
                     ann_index=ann_index or None,
                     distance_metric=distance_metric,
-                    hnsw_m=int(hnsw_m),
-                    hnsw_ef_construction=int(hnsw_ef_construction),
-                    ivfflat_lists=int(ivfflat_lists),
+                    hnsw_m=hnsw_m,
+                    hnsw_ef_construction=hnsw_ef_construction,
+                    ivfflat_lists=ivfflat_lists,
                 )
                 backend.ensure_storage()
                 return backend
