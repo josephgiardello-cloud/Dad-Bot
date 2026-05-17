@@ -5,7 +5,10 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.egg-info/
 .streamlit/
+!.streamlit/
+!.streamlit/config.toml
 
 # ── Runtime / memory data boundary ─────────────────────────────────────────
 # These files are mutable operational state — never tracked in git.

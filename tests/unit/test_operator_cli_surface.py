@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -155,6 +156,38 @@ def test_cli_doctor_preflight_failure_returns_one(capsys) -> None:
         code = app_runtime._cli_doctor(mock_dadbot_cls, as_json=False)
 
     assert code == 1
+
+
+@pytest.mark.unit
+def test_cli_doctor_restores_persistence_env_after_run(capsys) -> None:
+    mock_supervisor = MagicMock()
+    mock_supervisor.preflight_check.return_value = (True, [])
+    mock_supervisor.get_status.return_value = {"status": "no_lock"}
+
+    observed = {}
+
+    def _build_bot(**kwargs):
+        observed["postgres_dsn_during_boot"] = os.environ.get("DADBOT_POSTGRES_DSN")
+        observed["redis_url_during_boot"] = os.environ.get("DADBOT_REDIS_URL")
+        mock_bot = MagicMock()
+        mock_bot.current_runtime_health_snapshot.return_value = {"healthy": True}
+        return mock_bot
+
+    with (
+        patch.dict(
+            os.environ,
+            {"DADBOT_POSTGRES_DSN": "postgresql://example", "DADBOT_REDIS_URL": "redis://example"},
+            clear=False,
+        ),
+        patch("dadbot.app_runtime.get_runtime_supervisor", return_value=mock_supervisor),
+    ):
+        code = app_runtime._cli_doctor(_build_bot, as_json=True)
+        assert os.environ["DADBOT_POSTGRES_DSN"] == "postgresql://example"
+        assert os.environ["DADBOT_REDIS_URL"] == "redis://example"
+
+    assert code == 0
+    assert observed["postgres_dsn_during_boot"] == ""
+    assert observed["redis_url_during_boot"] == ""
 
 
 @pytest.mark.unit

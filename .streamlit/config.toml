@@ -1,0 +1,41 @@
+[server]
+[server]
+# Checked in so clean clones can boot the Streamlit app and UI smoke tests.
+enableStaticServing = true
+[theme]
+base = "dark"
+primaryColor = "#B5793F"
+backgroundColor = "#121517"
+secondaryBackgroundColor = "#1E2327"
+textColor = "#F0E5D6"
+font = "sans serif"
+baseRadius = "large"
+borderColor = "#4C4034"
+showSidebarBorder = true
+
+[theme.light]
+primaryColor = "#8E5C2B"
+backgroundColor = "#EFE5D8"
+secondaryBackgroundColor = "#DDD0C1"
+textColor = "#1F2427"
+borderColor = "#B59B82"
+
+[theme.light.sidebar]
+backgroundColor = "#D9CCBD"
+secondaryBackgroundColor = "#CCBEAE"
+textColor = "#20292E"
+borderColor = "#B19880"
+
+[theme.dark]
+primaryColor = "#B5793F"
+backgroundColor = "#121517"
+secondaryBackgroundColor = "#1E2327"
+textColor = "#F0E5D6"
+borderColor = "#4C4034"
+
+[theme.dark.sidebar]
+backgroundColor = "#161C20"
+secondaryBackgroundColor = "#232A30"
+textColor = "#E7DDCF"
+borderColor = "#3A312A"
+
