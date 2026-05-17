@@ -232,7 +232,7 @@ Return only the one sentence {caregiver} could say. Keep it brief, supportive, a
     ) -> str:
         listener = DadPrompts._normalize_listener_name(listener_name)
         caregiver = DadPrompts._normalize_caregiver_name(caregiver_name)
-        return """
+        return f"""
 You extract durable memory summaries from {listener}'s prior messages.
 Return only JSON.
 Rules:
@@ -245,7 +245,7 @@ Rules:
     - Avoid vague summaries like "personal struggles", "mental health", or "emotional state" unless the user gave a specific enduring detail.
 - Keep each memory under 25 words.
 - If there is nothing durable to remember, return [].
-""".format(listener=listener, caregiver=caregiver).strip()
+""".strip()
 
     @staticmethod
     def constants_snapshot():
