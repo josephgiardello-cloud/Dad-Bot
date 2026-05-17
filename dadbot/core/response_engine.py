@@ -113,6 +113,8 @@ class ResponseEngine:
         candidates: list[ResponseCandidate] = []
         user_input = str(getattr(context, "user_input", "") or "")
         intent = self._infer_intent(user_input)
+        authoritative_text = self._authoritative_candidate_text(context)
+        has_authoritative_candidate = bool(authoritative_text)
 
         # Strategy 1: Direct response (base approach)
         direct = self._generate_direct_response(context)
@@ -196,48 +198,85 @@ class ResponseEngine:
                 )
 
         # Diversity injection: reinterpret intent and change response goal.
-        reinterpret = self._generate_reinterpreted_intent(context, intent=intent)
-        if reinterpret:
-            candidates.append(
-                ResponseCandidate(
-                    text=reinterpret,
-                    source="reinterpret_intent",
-                    confidence=0.78,
-                    tone="analytical",
-                    intensity=0.50,
-                    stance="reframing",
-                    response_goal="clarify",
-                    risk_level=0.35,
+        if not has_authoritative_candidate:
+            reinterpret = self._generate_reinterpreted_intent(context, intent=intent)
+            if reinterpret:
+                candidates.append(
+                    ResponseCandidate(
+                        text=reinterpret,
+                        source="reinterpret_intent",
+                        confidence=0.78,
+                        tone="analytical",
+                        intensity=0.50,
+                        stance="reframing",
+                        response_goal="clarify",
+                        risk_level=0.35,
+                    )
                 )
-            )
 
-        goal_shift = self._generate_goal_shift_variant(context, intent=intent)
-        if goal_shift:
-            candidates.append(
-                ResponseCandidate(
-                    text=goal_shift,
-                    source="goal_shift",
-                    confidence=0.76,
-                    tone="engaging",
-                    intensity=0.60,
-                    stance="forward",
-                    response_goal="engage",
-                    risk_level=0.55,
-                    depth="short",
+            goal_shift = self._generate_goal_shift_variant(context, intent=intent)
+            if goal_shift:
+                candidates.append(
+                    ResponseCandidate(
+                        text=goal_shift,
+                        source="goal_shift",
+                        confidence=0.76,
+                        tone="engaging",
+                        intensity=0.60,
+                        stance="forward",
+                        response_goal="engage",
+                        risk_level=0.55,
+                        depth="short",
+                    )
                 )
-            )
 
-        # Structured diversity axes: tone/depth/risk/intensity combinations.
-        if direct:
-            candidates.extend(self._generate_structured_variants(base_text=direct, intent=intent))
+            # Structured diversity axes: tone/depth/risk/intensity combinations.
+            if direct:
+                candidates.extend(self._generate_structured_variants(base_text=direct, intent=intent))
 
-        # Stochastic prompt-style variants (deterministic seed by context).
-        candidates.extend(self._generate_stochastic_variants(context=context, intent=intent))
+            # Stochastic prompt-style variants (deterministic seed by context).
+            candidates.extend(self._generate_stochastic_variants(context=context, intent=intent))
 
         # Optional multi-model candidate ingestion when provided by runtime metadata.
         candidates.extend(self._ingest_external_model_candidates(context=context))
 
         return candidates[:n]  # cap at requested count
+
+    @staticmethod
+    def _is_authoritative_response(candidate: str, user_input: str) -> bool:
+        text = str(candidate or "").strip()
+        if not text:
+            return False
+        if len(text) < 8:
+            return False
+        normalized_text = " ".join(text.lower().split())
+        normalized_input = " ".join(str(user_input or "").lower().split())
+        if normalized_input and normalized_text == normalized_input:
+            return False
+        return True
+
+    def _authoritative_candidate_text(self, context: Any) -> str:
+        user_input = str(getattr(context, "user_input", "") or "")
+        metadata = getattr(context, "job_metadata", None)
+        session_state = getattr(context, "session_state", None)
+
+        candidates: list[str] = [str(getattr(context, "initial_response", "") or "")]
+        if isinstance(metadata, dict):
+            execution_result = metadata.get("execution_result")
+            if isinstance(execution_result, dict):
+                candidates.append(str(execution_result.get("response") or ""))
+            submit_finalization = metadata.get("submit_finalization")
+            if isinstance(submit_finalization, dict):
+                candidates.append(str(submit_finalization.get("response") or ""))
+            candidates.append(str(metadata.get("candidate_response") or ""))
+        if isinstance(session_state, dict):
+            candidates.append(str(session_state.get("candidate_response") or ""))
+            candidates.append(str(session_state.get("last_response") or ""))
+
+        for value in candidates:
+            if self._is_authoritative_response(value, user_input):
+                return str(value).strip()
+        return ""
 
     def _seed_for_context(self, context: Any) -> str:
         raw_trace_id = getattr(context, "trace_id", "")
@@ -939,19 +978,22 @@ class ResponseEngine:
 
     def _generate_direct_response(self, context: Any) -> str | None:
         """Base strategy: straightforward, factual response."""
-        # Placeholder: would extract from execution context
-        user_input = getattr(context, "user_input", "")
+        authoritative = self._authoritative_candidate_text(context)
+        if authoritative:
+            return authoritative
+        user_input = str(getattr(context, "user_input", "") or "").strip()
         if not user_input:
             return None
-        return f"I hear you: {user_input.strip()[:50]}..."
+        return f"I hear you: {user_input[:50]}..."
 
     def _generate_persona_inflected(self, context: Any) -> str | None:
         """Add persona flavor: inject personality traits."""
+        if self._authoritative_candidate_text(context):
+            return None
         base = self._generate_direct_response(context)
         if not base:
             return None
-        # In real implementation, would apply persona transforms
-        return f"[Dad voice] {base}"
+        return f"I hear you and I'm with you. {base}"
 
     def _generate_question_echo(self, context: Any) -> str | None:
         """Reflect back the question as part of response."""
