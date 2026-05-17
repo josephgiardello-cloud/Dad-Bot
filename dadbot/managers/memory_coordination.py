@@ -10,6 +10,7 @@ from datetime import date
 from dadbot.memory.conflict_detector import ConflictDetector
 from dadbot.memory.scoring import MemoryScorer
 from dadbot.pii_scrubber import scrub_memory_entry
+from dadbot.prompts import DadPrompts
 
 logger = logging.getLogger(__name__)
 
@@ -145,24 +146,13 @@ class MemoryCoordinator:
             )
         return wall_date
 
-    @staticmethod
-    def memory_extraction_prompt():
-        return """
-You extract durable memory summaries from Tony's prior messages.
-Return only JSON.
-Rules:
-- Include only lasting personal context or ongoing concerns Tony shared.
-    - Prefer short, specific statements Dad can actually use later.
-    - Keep concrete details over generic labels. Good: "Tony is stressed about a work deadline because his boss moved it up." Bad: "Tony feels stressed."
-    - Capture actionable context when present, including what Tony is dealing with, why it matters, or what follow-up would help.
-- Return an array of objects with keys 'summary', 'category', and 'mood'.
-- Return ONLY a JSON array of objects. Example:
-    [{"summary": "Tony is stressed about a work deadline his boss moved up.", "category": "work", "mood": "stressed"}]
-- Do not include one-off greetings, filler, or facts already covered by Dad's built-in profile.
-    - Avoid vague summaries like "personal struggles", "mental health", or "emotional state" unless the user gave a specific enduring detail.
-- Keep each memory under 25 words.
-- If there is nothing durable to remember, return [].
-""".strip()
+    def memory_extraction_prompt(self):
+        listener_name = str(self.bot.STYLE.get("listener_name") or "the user").strip() or "the user"
+        caregiver_name = str(self.bot.STYLE.get("name") or "Dad").strip() or "Dad"
+        return DadPrompts.memory_extraction(
+            listener_name=listener_name,
+            caregiver_name=caregiver_name,
+        )
 
     def normalize_parsed_memories(self, parsed):
         if isinstance(parsed, dict):

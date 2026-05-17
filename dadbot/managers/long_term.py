@@ -648,10 +648,14 @@ Return only JSON:
             "\n".join(f"- {entry.get('summary', '')}" for entry in self.bot.consolidated_memories()[-5:])
             or "- None yet."
         )
+        listener_name = str(self.bot.STYLE.get("listener_name") or "the user").strip() or "the user"
+        caregiver_name = str(self.bot.STYLE.get("name") or "Dad").strip() or "Dad"
         return DadPrompts.wisdom_prompt(
             self.summarize_memory_graph(),
             consolidated_lines,
             user_input,
+            listener_name=listener_name,
+            caregiver_name=caregiver_name,
         )
 
     def generate_wisdom_insight(self, user_input, force=False):
@@ -1222,7 +1226,22 @@ Return only JSON:
         return []
 
     def build_family_echo_prompt(self, user_input, current_mood):
-        return DadPrompts.family_echo(user_input, self.bot.normalize_mood(current_mood))
+        listener_name = str(self.bot.STYLE.get("listener_name") or "the user").strip() or "the user"
+        caregiver_name = str(self.bot.STYLE.get("name") or "Dad").strip() or "Dad"
+        family = self.bot.FAMILY if isinstance(getattr(self.bot, "FAMILY", None), dict) else {}
+        family_member_name = ""
+        carrie = family.get("carrie") if isinstance(family, dict) else None
+        if isinstance(carrie, dict):
+            family_member_name = str(carrie.get("full_name") or "").strip()
+        if not family_member_name:
+            family_member_name = "a trusted family member"
+        return DadPrompts.family_echo(
+            user_input,
+            self.bot.normalize_mood(current_mood),
+            listener_name=listener_name,
+            caregiver_name=caregiver_name,
+            family_member_name=family_member_name,
+        )
 
     def should_offer_family_echo(self, user_input, current_mood):
         lowered = str(user_input or "").lower()
