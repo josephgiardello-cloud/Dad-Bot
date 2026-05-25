@@ -39,6 +39,7 @@ from dadbot.core.boot_mixin import DadBotBootMixin
 from dadbot.core.compat_mixin import DadBotCompatMixin
 from dadbot.core.health_mixin import DadBotHealthMixin
 from dadbot.core.llm_mixin import DadBotLlmMixin
+from dadbot.core.services import build_services
 from dadbot.core.mcp_mixin import DadBotMcpMixin
 from dadbot.core.turn_mixin import DadBotTurnMixin
 from dadbot.core.execution_contract import ExecutionEntry
@@ -70,14 +71,18 @@ class DadBot(
     def __init__(
         self,
         *,
-        memory_manager: MemoryManager,
-        relationship_manager: RelationshipManager,
-        mood_manager: MoodManager,
-        profile_runtime: ProfileRuntime,
-        event_bus: EventBus,
+        memory_manager: Any,
+        relationship_manager: Any,
+        mood_manager: Any,
+        profile_runtime: Any,
+        event_bus: Any,
         **kwargs: Any,
     ):
         # Set manager attributes BEFORE calling boot mixin
+        if 'services' in kwargs and kwargs['services'] is not None:
+            self.services = kwargs.pop('services')
+        else:
+            self.services = build_services()
         self._memory_manager = memory_manager
         self._relationship_manager = relationship_manager
         self._mood_manager = mood_manager
@@ -92,6 +97,30 @@ class DadBot(
     @property
     def model_name(self) -> str:
         return self.config.model_name
+    
+    @property
+    def tool_registry(self):
+        return self.services.tool_registry
+
+    @property
+    def metrics(self):
+        return self.services.metrics
+
+    @property
+    def planner(self):
+        return self.services.planner
+
+    @property
+    def smart_home(self):
+        return getattr(self.services, 'smart_home', None)
+
+    @property
+    def asr(self):
+        return getattr(self.services, 'asr', None)
+
+    @property
+    def tts(self):
+        return getattr(self.services, 'tts', None)
 
     @property
     def fallback_models(self):

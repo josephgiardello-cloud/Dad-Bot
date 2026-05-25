@@ -1388,13 +1388,13 @@ class TestPhase4ALargeStateCheckpoint:
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(60)
-    async de test_orchestrator_handles_large_preloaded_state(sel, phase4a_db_path):
+    async def test_orchestrator_handles_large_preloaded_state(self, phase4a_db_path):
         """Orchestrator loads a large pre-seeded checkpoint without OOM or corruption."""
         import hashlib as _hashlib
-        rom dadbot.core.persistence import SQLiteCheckpointer
+        from dadbot.core.persistence import SQLiteCheckpointer
 
         cp_seed = SQLiteCheckpointer(phase4a_db_path, auto_migrate=True, prune_every=0)
-        large_state = sel._build_large_state(target_kb=256)
+        large_state = self._build_large_state(target_kb=256)
 
         seed_hash = _hashlib.sha256(b"orchestrator-large-seed").hexdigest()
         seed_cp = {
@@ -1413,7 +1413,7 @@ class TestPhase4ALargeStateCheckpoint:
 
         # Now run a real orchestrator turn — it will load the large checkpoint irst.
         try:
-            rom dadbot.core.orchestrator import DadBotOrchestrator
+            from dadbot.core.orchestrator import DadBotOrchestrator
             bot = make_test_dadbot()
             checkpointer = SQLiteCheckpointer(phase4a_db_path, auto_migrate=True, prune_every=0)
             orchestrator = DadBotOrchestrator(bot=bot, strict=False, checkpointer=checkpointer)
@@ -1434,5 +1434,6 @@ class TestPhase4ALargeStateCheckpoint:
         assert count >= 2, "Expected ≥2 checkpoints ater loading large state + 1 real turn, got {count}"
 
 
-i __name__ == "__main__":
-    pytest.main([__ile__, "-v", "-s"])
+if __name__ == "__main__":
+    import pytest
+    pytest.main([__file__, "-v", "-s"])
