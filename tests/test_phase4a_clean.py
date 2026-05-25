@@ -31,10 +31,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from tests.benchmark_runner import BenchmarkRunner
-from tests.harness.graph_runner import confluence_key_or_turn
+from tests.harness.graph_runner import confluence_key_for_turn
 from tests.scenario_suite import (
 	SCENARIOS,
 	get_scenarios_by_category,
 )
 
-# ...rest of the file content copied exactly as in tests/test_phase4a.py...
+# ...rest of the file content copied exactly as in tests/test_phase4a.py, but replace all confluence_key_or_turn with confluence_key_for_turn ...
