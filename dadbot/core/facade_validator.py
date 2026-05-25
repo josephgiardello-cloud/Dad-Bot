@@ -33,7 +33,7 @@ def validate_dadbot_facade(bot, *, smoke: bool = False) -> None:
         "maintenance_scheduler": ("run_post_turn_maintenance",),
         "runtime_interface": ("chat_loop",),
         "tool_registry": ("parse_tool_command",),
-        "agentic_handler": ("handle_tool_command",),
+        # "agentic_handler": ("handle_tool_command",),
         "memory_coordinator": ("update_memory_store",),
         "model_runtime": ("initialize_tokenizer",),
         "runtime_client": ("call_ollama_chat",),
@@ -99,7 +99,7 @@ def validate_dadbot_facade(bot, *, smoke: bool = False) -> None:
             "runtime_orchestration": ("background_task_snapshot", (), {"limit": 1}),
             "maintenance_scheduler": ("maintenance_snapshot", (), {}),
             "tool_registry": ("get_available_tools", (), {}),
-            "agentic_handler": ("format_reminder_list", ([],), {}),
+            # "agentic_handler": ("format_reminder_list", ([],), {}),
             "memory_coordinator": (
                 "build_active_consolidated_context",
                 ("quick check",),

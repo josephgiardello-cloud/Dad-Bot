@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 from dadbot.core.turn_coherence import assert_personality_applied_exactly_once, mark_turn_coherence
 from dadbot.managers.advice_audit import ShadowAuditManager
@@ -99,6 +100,7 @@ class ReplyFinalizationManager:
         mark_turn_coherence(self.bot, "finalizer_called")
         base_reply = str(reply or "")
         shadow_voiced = base_reply
+        shadow_supervised = base_reply
         shadow_moderated = base_reply
         try:
             shadow_voiced = self.bot.personality_service.apply_authoritative_voice(
@@ -106,9 +108,32 @@ class ReplyFinalizationManager:
                 str(current_mood or "neutral"),
                 user_input,
             )
+
+            enable_supervisor = str(os.environ.get("DADBOT_REPLY_SUPERVISOR_ENABLED") or "").strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+            supervisor = getattr(self.bot, "reply_supervisor", None)
+            can_supervise = (
+                enable_supervisor
+                and supervisor is not None
+                and callable(getattr(supervisor, "run_reply_supervisor", None))
+                and not bool(getattr(self.bot, "LIGHT_MODE", False))
+            )
+            if can_supervise and user_input is not None:
+                shadow_supervised = supervisor.run_reply_supervisor(
+                    str(user_input or ""),
+                    str(shadow_voiced or ""),
+                    str(current_mood or "neutral"),
+                    stage="final_polish",
+                )
+            else:
+                shadow_supervised = shadow_voiced
             shadow_moderated = self.bot.moderate_output_reply(
                 user_input,
-                shadow_voiced,
+                shadow_supervised,
                 current_mood,
             )
             self._record_shadow_pipeline(
@@ -116,6 +141,7 @@ class ReplyFinalizationManager:
                     "path": "sync",
                     "base_reply": base_reply,
                     "shadow_voiced_reply": str(shadow_voiced or ""),
+                    "shadow_supervised_reply": str(shadow_supervised or ""),
                     "shadow_moderated_reply": str(shadow_moderated or ""),
                     "applied": False,
                 },
@@ -173,6 +199,7 @@ class ReplyFinalizationManager:
         mark_turn_coherence(self.bot, "finalizer_called")
         base_reply = str(reply or "")
         shadow_voiced = base_reply
+        shadow_supervised = base_reply
         shadow_moderated = base_reply
         try:
             shadow_voiced = self.bot.personality_service.apply_authoritative_voice(
@@ -180,9 +207,32 @@ class ReplyFinalizationManager:
                 str(current_mood or "neutral"),
                 user_input,
             )
+
+            enable_supervisor = str(os.environ.get("DADBOT_REPLY_SUPERVISOR_ENABLED") or "").strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+            supervisor = getattr(self.bot, "reply_supervisor", None)
+            can_supervise = (
+                enable_supervisor
+                and supervisor is not None
+                and callable(getattr(supervisor, "run_reply_supervisor_async", None))
+                and not bool(getattr(self.bot, "LIGHT_MODE", False))
+            )
+            if can_supervise and user_input is not None:
+                shadow_supervised = await supervisor.run_reply_supervisor_async(
+                    str(user_input or ""),
+                    str(shadow_voiced or ""),
+                    str(current_mood or "neutral"),
+                    stage="final_polish",
+                )
+            else:
+                shadow_supervised = shadow_voiced
             shadow_moderated = await self.bot.moderate_output_reply_async(
                 user_input,
-                shadow_voiced,
+                shadow_supervised,
                 current_mood,
             )
             self._record_shadow_pipeline(
@@ -190,6 +240,7 @@ class ReplyFinalizationManager:
                     "path": "async",
                     "base_reply": base_reply,
                     "shadow_voiced_reply": str(shadow_voiced or ""),
+                    "shadow_supervised_reply": str(shadow_supervised or ""),
                     "shadow_moderated_reply": str(shadow_moderated or ""),
                     "applied": False,
                 },

@@ -63,14 +63,26 @@ def voice_profile_catalog() -> dict:
 
 def render_voice_dependency_help(*, context_key: str) -> None:
     st.markdown(
-        "Check installed packages: "
-        "[faster-whisper](https://pypi.org/project/faster-whisper/), "
-        "[openai-whisper](https://pypi.org/project/openai-whisper/), "
-        "[pyttsx3](https://pypi.org/project/pyttsx3/).",
+        "Voice features use optional local packages. Dad can still chat without them, "
+        "but STT/TTS needs: "
+        "[faster-whisper](https://pypi.org/project/faster-whisper/) or "
+        "[openai-whisper](https://pypi.org/project/openai-whisper/) for transcription, and "
+        "[pyttsx3](https://pypi.org/project/pyttsx3/) or [Piper](https://github.com/rhasspy/piper) for speech.",
     )
-    st.caption("Install optional local voice dependencies in your environment:")
-    st.code("pip install .[voice]", language="bash")
-    st.caption("If install succeeds, rerun the app and try voice again.")
+
+    stt_ok, stt_backend, stt_status = local_stt_backend_status(None)
+    tts_ok, tts_backend, tts_status = local_tts_backend_status()
+    status_col1, status_col2 = st.columns(2)
+    status_col1.caption("Speech-to-text (STT)")
+    (status_col1.success if stt_ok else status_col1.warning)(f"{stt_backend}: {stt_status}")
+    status_col2.caption("Text-to-speech (TTS)")
+    (status_col2.success if tts_ok else status_col2.warning)(f"{tts_backend}: {tts_status}")
+
+    st.caption("Fastest install (recommended):")
+    st.code("python install.py --with-voice", language="shell")
+    st.caption("Or install just the extras:")
+    st.code("pip install .[voice]", language="shell")
+    st.caption("After installing, restart the app and try voice again.")
 
 
 def local_stt_backend_status(preferences) -> tuple[bool, str, str]:

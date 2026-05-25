@@ -1,22 +1,26 @@
 # DadBot Assistant API Contract
 
-**Version:** 1.0  
-**Status:** STABLE (locked)  
-**Last Updated:** 2026-05-06
+**Version:** 1.1  
+**Status:** STABLE (core locked)  
+**Last Updated:** 2026-05-24
 
 ---
 
 ## Executive Summary
 
-The **Assistant API** is the sole public interface for all external interactions with the DadBot execution kernel. This contract defines a stable, immutable five-method surface that shields users from 100+ internal modules, deterministic reducers, replay engines, execution policies, invariant gates, and graph machinery.
+The **Assistant API** is the public interface for external interactions with the DadBot execution kernel.
+
+This contract defines a stable **core** five-method surface that shields users from 100+ internal modules, deterministic reducers, replay engines, execution policies, invariant gates, and graph machinery.
+
+Additional helper methods may exist on the shipped `AssistantRuntime` implementation for local operations (maintenance, browser tools, development diagnostics). Those helper methods are **explicitly non-contract**: best-effort, subject to change, and not guaranteed stable across versions.
 
 **Core principle:** Users see only materialized results; kernels and internal state remain hidden.
 
 ---
 
-## Immutable Public Surface
+## Stable Core Surface (Immutable)
 
-The following five methods constitute the complete public API. **No additional methods may be added without explicit user approval.**
+The following five methods constitute the **stable core** Assistant API. These signatures and response shapes are locked.
 
 ### 1. `chat(message: str, debug: bool = False) -> dict`
 
@@ -202,7 +206,7 @@ for mem in memories:
 ### EXPOSED (Public Contract)
 
 - ✅ `AssistantRuntime` class (entry point)
-- ✅ Five immutable methods: `chat()`, `run_task()`, `get_state()`, `reset_session()`, `memory()`
+- ✅ Five stable core methods: `chat()`, `run_task()`, `get_state()`, `reset_session()`, `memory()`
 - ✅ Return dictionaries with documented keys
 - ✅ Optional `debug` parameter for diagnostics
 
@@ -239,6 +243,26 @@ def memory(self, query: str, limit: int = 5) -> list[dict]
 
 **Parameter additions or removals are breaking changes** and require major version bump.
 
+---
+
+## Non-Contract Helper Methods (Best-Effort)
+
+The shipped `AssistantRuntime` implementation may include additional helper methods intended for **local-only operations** and **developer tooling**.
+
+These helpers are:
+- **Not part of the stable core contract**
+- Allowed to change without a major version bump
+- Allowed to raise `RuntimeError` if the underlying manager/service is not available in the current runtime configuration
+
+Examples of non-contract helpers currently present in the implementation include:
+- `run_heartbeat(force: bool = True) -> dict`
+- `run_self_improvement(force: bool = True, background: bool = False) -> dict`
+- `browser_status() -> dict`
+- `start_browser_tools(restart: bool = False) -> dict`
+- `stop_browser_tools() -> dict`
+- `run_agent_loop(...) -> DriverLoopResult`
+- `run_memory_consolidation(...) -> dict`
+
 ### Response Shape Stability
 
 Response dictionaries have fixed keys. New fields may be added only in reserved slots (`memory_updates`, `tool_calls` in `chat()`). Existing fields are immutable.
@@ -253,11 +277,11 @@ Response dictionaries have fixed keys. New fields may be added only in reserved 
 
 ## Versioning
 
-**Current Version:** 1.0
+**Current Version:** 1.1
 
-- **Major bump (2.0):** Breaking signature changes, return type changes, method removals
-- **Minor bump (1.1):** New optional parameters, new reserved fields populated, new methods (requires user approval)
-- **Patch bump (1.0.1):** Bug fixes, behavior corrections, internal optimizations with stable contract
+- **Major bump (2.0):** Breaking core signature changes, core return type changes, core method removals
+- **Minor bump (1.x):** New optional parameters for core methods, new reserved fields populated
+- **Patch bump:** Bug fixes, behavior corrections, internal optimizations with stable core contract
 
 ---
 

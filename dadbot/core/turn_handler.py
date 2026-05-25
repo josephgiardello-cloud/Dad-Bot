@@ -333,10 +333,9 @@ class TurnHandler:
         await self._inject_prompt_context(outbound_metadata)
 
         result = await self._submit_turn(
-            str(ctx.user_input or ""),
-            attachments=ctx.attachments,
             session_id=str(ctx.session_id or "default"),
-            confluence_key=str(ctx.confluence_key or ""),
+            user_input=str(ctx.user_input or ""),
+            attachments=ctx.attachments,
             metadata=outbound_metadata,
             timeout_seconds=ctx.timeout_seconds,
         )

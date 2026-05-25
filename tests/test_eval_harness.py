@@ -33,12 +33,16 @@ pytestmark = pytest.mark.unit
 # ---------------------------------------------------------------------------
 
 
-def _make_bot(temp_path: Path) -> DadBot:
-    bot = DadBot()
-    bot.MEMORY_PATH = temp_path / "dad_memory.json"
-    bot.SEMANTIC_MEMORY_DB_PATH = temp_path / "dad_memory_semantic.sqlite3"
-    bot.GRAPH_STORE_DB_PATH = temp_path / "dad_memory_graph.sqlite3"
-    bot.SESSION_LOG_DIR = temp_path / "session_logs"
+
+import pytest
+
+@pytest.fixture
+def _make_bot(tmp_path, make_test_dadbot):
+    bot = make_test_dadbot()
+    bot.MEMORY_PATH = tmp_path / "dad_memory.json"
+    bot.SEMANTIC_MEMORY_DB_PATH = tmp_path / "dad_memory_semantic.sqlite3"
+    bot.GRAPH_STORE_DB_PATH = tmp_path / "dad_memory_graph.sqlite3"
+    bot.SESSION_LOG_DIR = tmp_path / "session_logs"
     bot.MEMORY_STORE = bot.default_memory_store()
     bot.save_memory_store()
     bot.embed_texts = lambda texts, purpose="semantic retrieval": (
@@ -158,13 +162,14 @@ def score_emotional_alignment(user_input: str, reply: str, detected_mood: str) -
 # ---------------------------------------------------------------------------
 
 
+
 class TestFaithfulnessEval(unittest.TestCase):
-    def setUp(self):
-        self.temp_dir = TemporaryDirectory()
-        self.addCleanup(self.temp_dir.cleanup)
-        self.bot = _make_bot(Path(self.temp_dir.name))
-        self.addCleanup(self.bot.shutdown)
-        self.addCleanup(self.bot.wait_for_semantic_index_idle, 5)
+    @pytest.fixture(autouse=True)
+    def setup_bot(self, _make_bot, tmp_path):
+        self.bot = _make_bot
+        yield
+        self.bot.shutdown()
+        self.bot.wait_for_semantic_index_idle(5)
 
     def _profile_dict(self) -> dict:
         return {

@@ -80,31 +80,18 @@ class DadBotBootMixin:
         },
     }
 
-    if TYPE_CHECKING:
-        config: Any
-        runtime_config: Any
-        _service_config: Any
-        profile_runtime: Any
-        memory: Any
-        runtime_client: Any
-        model_runtime: Any
-        maintenance_scheduler: Any
-        CONTEXT_TOKEN_BUDGET: int
-        _DEPRECATED_FACADE_ALIASES: dict[str, Any]
 
-        def _resolve_dependency(self, key: str, default_factory: Any) -> Any: ...
 
-        def initialize_tokenizer(self, model_name: str) -> Any: ...
-
-        def refresh_memory_graph(self, *, force: bool = False) -> Any: ...
-
-        def ical_feed_url(self) -> str: ...
-
-        def schedule_calendar_sync(self) -> Any: ...
-
-        def _validate_managers(self, *, smoke: bool = False) -> Any: ...
-
-        def reset_session_state(self) -> Any: ...
+    def _resolve_dependency(self, key: str, default_factory: Any) -> Any:
+        """
+        Resolve a dependency by key, using an override if present, otherwise using the default_factory.
+        """
+        if not hasattr(self, "_dependency_overrides"):
+            self._dependency_overrides = {}
+        overrides = self._dependency_overrides
+        if key in overrides:
+            return overrides[key]
+        return default_factory()
 
     @staticmethod
     def runtime_root_path() -> Path:
@@ -433,9 +420,8 @@ class DadBotBootMixin:
         if runtime_services is not None:
             explicit_dependencies["core_runtime_services"] = runtime_services
         self._explicit_dependencies = explicit_dependencies
-        self._facade_compat = DadBotFacadeCompat(
-            self.__class__._DEPRECATED_FACADE_ALIASES,
-        )
+        # Facade alias compatibility removed in elite refactor
+        self._facade_compat = None
         self._lifecycle_state = DadBotLifecycleState.UNINITIALIZED
         self._initialize_config(
             model_name=model_name,

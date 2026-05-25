@@ -28,7 +28,7 @@ def test_dadbot_composes_split_services(bot):
     assert bot.services.turn_service is bot.turn_service
     assert bot.memory is bot.services.memory_manager
     assert bot.relationship is bot.services.relationship_manager
-    assert bot.mood_manager is bot.services.mood_manager
+    assert bot.mood is bot.services.mood_manager
     assert bot.runtime_storage is bot.services.runtime_storage
     assert bot.profile_runtime is bot.services.profile_runtime
     assert bot.turn_service is bot.services.turn_service
@@ -40,7 +40,7 @@ def test_dadbot_composes_split_services(bot):
     assert bot.maintenance_scheduler is bot.services.maintenance_scheduler
     assert bot.PROFILE is bot.profile_runtime.profile
     assert dict(bot.MEMORY_STORE) == bot.memory.memory_store
-    assert bot.memory_coordinator is not bot.memory_manager
+    assert bot.memory_coordinator is not bot.memory
     assert bot.profile_runtime is not None
     assert bot.long_term_signals is not None
     assert bot.multimodal_handler is not None
@@ -61,8 +61,8 @@ def test_dadbot_composes_split_services(bot):
     assert bot.profile_context is not None
     assert bot.context_builder is not None
     assert bot.tone_context is not None
-    assert bot.mood_manager is not None
-    assert bot.relationship_manager is not None
+    assert bot.mood is not None
+    assert bot.relationship is not None
     assert bot.internal_state_manager is not None
     assert bot.reply_finalization is not None
     assert bot.maintenance_scheduler is not None
@@ -77,10 +77,10 @@ def test_shared_dadbot_context_is_live_and_used_by_extracted_managers(bot):
     assert bot.profile_runtime.context.bot is bot
     assert bot.context_builder.context.bot is bot
     assert bot.tone_context.context.bot is bot
-    assert bot.relationship_manager.context.bot is bot
+    assert bot.relationship.context.bot is bot
     assert bot.prompt_assembly.context.bot is bot
     assert bot.turn_service.context.bot is bot
-    assert bot.memory_manager.context.bot is bot
+    assert bot.memory.context.bot is bot
     assert bot.runtime_client.context.bot is bot
     assert bot.model_runtime.context.bot is bot
     assert bot.runtime_storage.context.bot is bot
@@ -95,7 +95,7 @@ def test_shared_dadbot_context_is_live_and_used_by_extracted_managers(bot):
     assert bot.bot_context.active_model == "phase1-test-model"
     assert bot.context_builder.context.active_model == "phase1-test-model"
     assert bot.tone_context.context.active_model == "phase1-test-model"
-    assert bot.relationship_manager.context.active_model == "phase1-test-model"
+    assert bot.relationship.context.active_model == "phase1-test-model"
     assert bot.prompt_assembly.context.active_model == "phase1-test-model"
 
 

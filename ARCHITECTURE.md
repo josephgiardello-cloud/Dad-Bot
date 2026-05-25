@@ -33,9 +33,10 @@ Role:
 
 ## Feature Flags Reference
 - `DADBOT_USE_THIN_TURN_HANDLER`
-  - `0`/unset: legacy path.
-  - `1`: thin path enabled.
-  - Controlled in Streamlit sidebar via Execution Path toggle.
+  - **Deprecated (legacy compatibility only).**
+  - Thin-spine is now canonical and effectively always enabled in the shipped runtime.
+  - Older documentation and UI affordances may still refer to a “toggle”, but routing should be treated as converged.
+  - If a legacy-path comparison is needed, use the explicit equivalence validation tooling rather than a runtime toggle.
 
 ## Migration Table
 | Surface | Status | Target | Notes |

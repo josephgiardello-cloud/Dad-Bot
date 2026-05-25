@@ -29,6 +29,7 @@ from dadbot.core.control_plane import (
     ExecutionJob,
     SessionRegistry,
 )
+from dadbot.core.control_plane_lifecycle import _apply_projection_execution_state
 from dadbot.core.execution_binder import TraceBinder
 from dadbot.core.execution_mode import ExecutionModeResolver
 from dadbot.core.execution_boundary import ControlPlaneExecutionBoundary
@@ -828,6 +829,14 @@ class DadBotOrchestrator:
     ) -> str:
         loaded_checkpoint = self._load_checkpoint_data(str(job.session_id or "default"), manifest)
         loaded_checkpoint_anchor = str((session_state or {}).get("last_checkpoint_hash") or "") if isinstance(session_state, dict) else ""
+
+        # Correctness Matrix #1: decisions must reason from projection-derived lifecycle state.
+        # Refresh execution_state from the lifecycle projection right before mode resolution.
+        try:
+            projected = self.control_plane.lifecycle_projection.get(str(job.job_id or ""))
+        except Exception:
+            projected = None
+        _apply_projection_execution_state(job, projected)
         
         # Unified execution mode resolution (canonical entry point)
         mode_context = ExecutionModeResolver.resolve(job, loaded_checkpoint)

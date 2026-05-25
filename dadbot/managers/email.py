@@ -6,7 +6,7 @@ import os
 
 
 class EmailManager:
-    """Owns email drafting via AgenticHandler and optional live SMTP delivery."""
+    """Owns email drafting via tool registry and optional live SMTP delivery."""
 
     def __init__(self, bot):
         self.bot = bot
@@ -21,7 +21,22 @@ class EmailManager:
         To actually deliver mail, configure DADBOT_SMTP_* env vars; without them
         the draft is saved to email_drafts/ as an .eml file for manual sending.
         """
-        draft = self.bot.agentic_handler.draft_email(recipient, subject, body)
+        # Use the new tool registry for drafting emails
+        tool_registry = getattr(self.bot, "tool_registry", None)
+        if tool_registry is None:
+            return None
+        invocation = {
+            "tool_spec": tool_registry.get_spec("draft_email"),
+            "arguments": {"recipient": recipient, "subject": subject, "body": body},
+            "invocation_id": None  # Not needed for direct call
+        }
+        executor = tool_registry.get_executor("draft_email")
+        if executor is None:
+            return None
+        result = executor(type("ToolInvocation", (), invocation)())
+        draft = result.payload if result and hasattr(result, "payload") else None
+        if not draft:
+            return None
         if not draft:
             return None
 

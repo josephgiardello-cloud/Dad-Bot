@@ -299,6 +299,8 @@ def _apply_projection_execution_state(
     metadata = dict(getattr(job, "metadata", {}) or {})
     prior = dict(metadata.get("execution_state") or {})
     projected = {
+        "_derived_from_ledger": True,
+        "_derived_from_ledger_reason": "lifecycle_projection",
         "lifecycle_state": _lifecycle_state_from_projection(state),
         "redelivery_count": max(0, int((state.attempt_count if state is not None else 0)) - 1),
         "lease_conflict_count": int(prior.get("lease_conflict_count") or 0),

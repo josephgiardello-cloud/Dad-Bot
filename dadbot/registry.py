@@ -9,6 +9,9 @@ from typing import Any
 from dadbot.kernel_boundary import KernelBoundary
 from dadbot.models import BoundaryComplianceDeclaration
 
+# Import the ToolRegistry builder for Phase B wiring
+from dadbot.tool_registry_builder import _build_and_register_tool_registry
+
 
 @cache
 def _invariance_contract_api() -> tuple[Any, Any, Any, Any]:
@@ -584,19 +587,13 @@ def wire_runtime_managers(bot: Any) -> None:
                 bot.bot_context,
             ),
         ),
+        # ── new declarative tool registry (Phase B) ──
         ServiceDescriptor(
             "tool_registry",
-            lambda: _instantiate("dadbot.agentic:ToolRegistry", bot),
+            lambda: _build_and_register_tool_registry(bot),
         ),
-        ServiceDescriptor(
-            "agentic_handler",
-            lambda: _instantiate(
-                "dadbot.agentic:AgenticHandler",
-                bot,
-                bot.tool_registry,
-            ),
-            depends_on=("tool_registry",),
-        ),
+
+
         # ── peripheral managers ─────────────────────────────────────────────
         ServiceDescriptor(
             "health_manager",
@@ -695,7 +692,6 @@ _WIRED_MANAGER_ATTRS = (
     "maintenance_scheduler",
     "runtime_interface",
     "tool_registry",
-    "agentic_handler",
     "health_manager",
     "tts_manager",
     "avatar_manager",

@@ -449,22 +449,11 @@ class MemoryGraphManager:
         cached = self._llm_fact_cache.get(cache_key)
         if cached is not None:
             return copy.deepcopy(cached)
-        prompt = f"""
-From the text below, extract entities and typed relations as JSON.
-Return a JSON array of objects with keys:
-- object
-- object_type
-- predicate
-- confidence
 
-Use short canonical object names when possible.
-Prefer predicates from this vocabulary:
-feels, concerns, mentions, plans_for, struggles_with, proud_of, mentioned_on, responds_to.
-Do not include duplicates.
-
-Source type: {source_type}
-Text: {summary}
-""".strip()
+        prompt = self._build_llm_fact_extraction_prompt(
+            summary=summary,
+            source_type=str(source_type or ""),
+        )
         try:
             response = self._bot.call_ollama_chat(
                 messages=[{"role": "user", "content": prompt}],
@@ -475,11 +464,134 @@ Text: {summary}
             parsed = self._bot.parse_model_json_content(response["message"]["content"])
         except Exception:
             return []
-        if not isinstance(parsed, list):
+
+        candidate_items = parsed
+        if isinstance(parsed, dict) and isinstance(parsed.get("facts"), list):
+            candidate_items = parsed.get("facts")
+
+        if not isinstance(candidate_items, list):
             return []
-        facts = [item for item in parsed if isinstance(item, dict)]
-        self._llm_fact_cache[cache_key] = copy.deepcopy(facts)
-        return facts
+
+        allowed_predicates = set(self._llm_fact_extraction_predicates())
+        allowed_types = set(self._llm_fact_extraction_object_types())
+        normalized: list[dict] = []
+        seen: set[tuple[str, str, str]] = set()
+
+        for item in candidate_items:
+            if not isinstance(item, dict):
+                continue
+            raw_object = str(item.get("object") or item.get("label") or "").strip()
+            if not raw_object:
+                continue
+            raw_type = str(item.get("object_type") or item.get("entity_type") or "topic").strip().lower() or "topic"
+            raw_pred = str(item.get("predicate") or item.get("relation_type") or "mentions").strip()
+            pred = self.normalize_relation_type(raw_pred)
+            if pred not in allowed_predicates:
+                pred = "mentions"
+
+            object_type = raw_type if raw_type in allowed_types else "topic"
+
+            try:
+                confidence = float(item.get("confidence", 0.7) or 0.7)
+            except (TypeError, ValueError):
+                confidence = 0.7
+            confidence = max(0.35, min(0.95, confidence))
+
+            entity_type, canonical = self.canonical_graph_entity(
+                raw_object,
+                semantic_type=object_type,
+            )
+            if not canonical:
+                continue
+
+            key = (entity_type, canonical, pred)
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(
+                {
+                    "object": canonical,
+                    "object_type": entity_type,
+                    "predicate": pred,
+                    "confidence": round(confidence, 3),
+                },
+            )
+            if len(normalized) >= 10:
+                break
+
+        self._llm_fact_cache[cache_key] = copy.deepcopy(normalized)
+        return normalized
+
+    def _llm_fact_extraction_predicates(self) -> list[str]:
+        return sorted(set(self.GRAPH_RELATION_VOCAB))
+
+    @staticmethod
+    def _llm_fact_extraction_object_types() -> list[str]:
+        # Keep this permissive: GraphEntityResolver canonicalizes most types.
+        return [
+            "topic",
+            "category",
+            "emotion",
+            "mood",
+            "stressor",
+            "goal",
+            "habit",
+            "person",
+            "day",
+            "trait",
+            "advice_pattern",
+            "contradiction",
+        ]
+
+    def _build_llm_fact_extraction_prompt(self, *, summary: str, source_type: str) -> str:
+        predicates = ", ".join(self._llm_fact_extraction_predicates())
+        object_types = ", ".join(self._llm_fact_extraction_object_types())
+        return f"""
+You are extracting graph facts for a personal memory system.
+
+CRITICAL RULES (must follow):
+- Output MUST be valid JSON.
+- Output MUST be a JSON array only (no wrapper object, no prose, no markdown).
+- Only extract facts that are explicitly grounded in the provided text.
+- Do NOT invent names, events, or relationships.
+- Prefer fewer, higher-confidence facts over speculative ones.
+- No duplicates (same object_type + object + predicate).
+- Keep object short and canonical (snake_case is preferred).
+- If the text contains no stable entities, return [].
+
+Schema for each array item:
+{{"object": string, "object_type": string, "predicate": string, "confidence": number}}
+
+Allowed object_type values:
+{object_types}
+
+Allowed predicate vocabulary (use exactly one of these):
+{predicates}
+
+Few-shot examples:
+
+Text: "I'm really stressed about deadlines at work lately."
+Output:
+[
+  {{"object": "work_deadlines", "object_type": "stressor", "predicate": "struggles_with", "confidence": 0.84}},
+  {{"object": "stress", "object_type": "emotion", "predicate": "feels", "confidence": 0.72}}
+]
+
+Text: "I want to start budgeting and build an emergency fund."
+Output:
+[
+  {{"object": "budgeting", "object_type": "habit", "predicate": "plans_for", "confidence": 0.86}},
+  {{"object": "emergency_fund", "object_type": "goal", "predicate": "plans_for", "confidence": 0.88}}
+]
+
+Text: "Not sure what to do."  
+Output:
+[]
+
+Now extract facts.
+Source type: {source_type}
+Text: {summary}
+""".strip()
 
     # ------------------------------------------------------------------
     # Source confidence / weight
@@ -1414,12 +1526,68 @@ Text: {summary}
         )
         contradictions = len(attributes.get("contradictions", []))
         contradiction_penalty = max(0.5, 1.0 - contradictions * 0.12)
+        elapsed_days = self._bot.days_since_iso_date(node.get("updated_at"))
+        if elapsed_days is None:
+            recency_boost = 1.0
+        elif elapsed_days <= 2:
+            recency_boost = float(getattr(self._bot.runtime_config, "graph_retrieval_recency_boost_2d", 1.15) or 1.15)
+        elif elapsed_days <= 7:
+            recency_boost = float(getattr(self._bot.runtime_config, "graph_retrieval_recency_boost_7d", 1.08) or 1.08)
+        elif elapsed_days <= 30:
+            recency_boost = float(getattr(self._bot.runtime_config, "graph_retrieval_recency_boost_30d", 1.03) or 1.03)
+        else:
+            recency_boost = 1.0
+
+        node_type = str(node.get("node_type") or node.get("source_type") or "")
+        importance_boost = 1.0
+        if node_type == "consolidated_memory":
+            try:
+                source_count = max(1, int(attributes.get("source_count", 1) or 1))
+            except (TypeError, ValueError):
+                source_count = 1
+            importance_boost += min(0.24, 0.06 * max(0, source_count - 1))
+        elif node_type == "archive_session":
+            try:
+                turn_count = max(0, int(attributes.get("turn_count", 0) or 0))
+            except (TypeError, ValueError):
+                turn_count = 0
+            importance_boost += min(0.18, 0.03 * min(6, turn_count))
+        elif node_type == "persona_trait":
+            try:
+                impact = float(attributes.get("impact_score", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                impact = 0.0
+            try:
+                strength = float(attributes.get("strength", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                strength = 0.0
+            importance_boost += min(0.22, max(0.0, impact) * 0.04 + max(0.0, strength) * 0.03)
+        elif node_type == "life_pattern":
+            try:
+                pattern_conf = max(0, min(100, int(attributes.get("confidence", 0) or 0)))
+            except (TypeError, ValueError):
+                pattern_conf = 0
+            importance_boost += min(0.18, pattern_conf / 500.0)
+
+        node_mood = self._bot.normalize_mood(node.get("mood"))
+        emotional_boost_value = float(getattr(self._bot.runtime_config, "graph_retrieval_emotional_boost", 1.05) or 1.05)
+        emotional_boost = emotional_boost_value if node_mood != "neutral" else 1.0
+
+        source_weights = (
+            getattr(self._bot.runtime_config, "graph_retrieval_source_type_weights", None)
+            or self._RETRIEVAL_SOURCE_TYPE_WEIGHTS
+        )
+        source_weight = float(source_weights.get(node.get("node_type"), 1.0) or 1.0)
+
         score = (
             overlap
             * freshness
             * confidence
             * contradiction_penalty
-            * self._RETRIEVAL_SOURCE_TYPE_WEIGHTS.get(node.get("node_type"), 1.0)
+            * source_weight
+            * recency_boost
+            * importance_boost
+            * emotional_boost
         )
         return score
 
@@ -1459,11 +1627,37 @@ Text: {summary}
             recent_topics=recent_topics,
         )
         overlap += overlap_bonus
+
+        affect_tokens = {
+            "stress",
+            "stressed",
+            "anxious",
+            "anxiety",
+            "worried",
+            "overwhelmed",
+            "panic",
+            "sad",
+            "lonely",
+            "angry",
+            "frustrated",
+            "burnout",
+            "tired",
+            "exhausted",
+            "scared",
+        }
+        if query_tokens and (query_tokens & affect_tokens):
+            node_mood = self._bot.normalize_mood(node.get("mood"))
+            if node_mood != "neutral":
+                overlap += 0.65
+            elif any("pressure" in label or "stress" in label for label in matched_labels):
+                overlap += 0.4
+
         overlap, should_skip = self._graph_overlap_gate(overlap=overlap, query_tokens=query_tokens, text=text)
         if should_skip:
             return None
         score = self._graph_score_value(node=node, attributes=attributes, overlap=overlap)
-        if score <= 0.15:
+        min_score = float(getattr(self._bot.runtime_config, "graph_retrieval_min_score", 0.15) or 0.15)
+        if score <= min_score:
             return None
         return round(score, 4), sorted(set(matched_labels))
 

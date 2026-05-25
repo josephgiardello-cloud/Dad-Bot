@@ -5,12 +5,13 @@ from tempfile import TemporaryDirectory
 
 import pytest
 
-from Dad import DadBot
+
+import pytest
 
 
 @pytest.mark.integration
 @pytest.mark.postgres
-def test_graph_store_can_sync_and_query_through_postgres(monkeypatch, postgres_test_dsn):
+def test_graph_store_can_sync_and_query_through_postgres(monkeypatch, postgres_test_dsn, make_test_dadbot):
     psycopg = pytest.importorskip("psycopg")
     table_prefix = f"dadbot_graph_test_{uuid.uuid4().hex[:10]}"
     today = date.today().isoformat()
@@ -22,7 +23,7 @@ def test_graph_store_can_sync_and_query_through_postgres(monkeypatch, postgres_t
         temp_path = Path(temp_dir)
         bot = None
         try:
-            bot = DadBot()
+            bot = make_test_dadbot()
             bot.MEMORY_PATH = temp_path / "dad_memory.json"
             bot.SEMANTIC_MEMORY_DB_PATH = temp_path / "dad_memory_semantic.sqlite3"
             bot.GRAPH_STORE_DB_PATH = temp_path / "dad_memory_graph.sqlite3"

@@ -12,7 +12,9 @@ from dadbot.base.memory_base import (
 from dadbot.contracts import DadBotContext, SupportsDadBotAccess
 from dadbot.core.execution_boundary import MemoryWriteOwnerScope
 from dadbot.core.execution_context import ensure_execution_trace_root
+from dadbot.core.execution_context import get_active_core_state
 from dadbot.core.core_state import CoreState
+from dadbot.core.core_state import memory_projection
 from dadbot.memory.lifecycle import MemoryLifecycleManager
 from dadbot.memory.normalizers import MemoryNormalizer
 from dadbot.memory.semantic_manager import SemanticIndexManager
@@ -21,8 +23,21 @@ from dadbot.memory.storage import MemoryStorageBackend
 logger = logging.getLogger(__name__)
 
 
+
 class MemoryManager(MemoryLifecycleMixin, MemorySearchMixin, MemoryIntegrationMixin):
     """Owns memory normalization, catalog access, and semantic-memory persistence."""
+
+    def store(self, key: str, value: object) -> None:
+        """Store a value in the memory store under the given key."""
+        self.mutate_memory_store(**{key: value})
+
+    def delete(self, key: str) -> None:
+        """Delete a value from the memory store by key."""
+        if hasattr(self._storage, "delete"):
+            self._storage.delete(key)
+        else:
+            # Fallback: set the key to None (legacy behavior)
+            self.mutate_memory_store(**{key: None})
 
     def __init__(self, bot: DadBotContext | SupportsDadBotAccess):
         from dadbot.memory.graph_manager import MemoryGraphManager
@@ -31,6 +46,7 @@ class MemoryManager(MemoryLifecycleMixin, MemorySearchMixin, MemoryIntegrationMi
         self.bot = self.context.bot
         self._memory_projection_cache: dict = {}
         self._memory_core_state_cache: CoreState = CoreState()
+        self._memory_projection_version: int | None = None
         self._graph_manager: GraphManagerProtocol = MemoryGraphManager(self.bot, self)
         self._semantic_manager = SemanticIndexManager(self.bot)
         self._normalizer = MemoryNormalizer(self.bot)  # data-shape policy
@@ -38,6 +54,27 @@ class MemoryManager(MemoryLifecycleMixin, MemorySearchMixin, MemoryIntegrationMi
         self._lifecycle = MemoryLifecycleManager(self.bot, self)  # catalog access
 
     def memory_projection(self) -> dict:
+        active = get_active_core_state()
+        if isinstance(active, CoreState):
+            state = active
+        else:
+            state = self._memory_core_state_cache
+
+        if isinstance(state, CoreState):
+            version = int(getattr(state, "version", 0) or 0)
+            if self._memory_projection_version == version and self._memory_projection_cache:
+                return dict(self._memory_projection_cache or {})
+
+            projected = memory_projection(
+                state,
+                defaults=self.bot.default_memory_store(),
+            )
+            normalized = self._normalizer.normalize_memory_store(projected)
+            self._memory_core_state_cache = state
+            self._memory_projection_cache = dict(normalized or {})
+            self._memory_projection_version = version
+            return dict(self._memory_projection_cache or {})
+
         return dict(self._memory_projection_cache or {})
 
     @property
@@ -47,6 +84,7 @@ class MemoryManager(MemoryLifecycleMixin, MemorySearchMixin, MemoryIntegrationMi
 
     def _set_memory_projection_cache(self, value: dict | None) -> dict:
         self._memory_projection_cache = dict(value or {})
+        self._memory_projection_version = int(getattr(self._memory_core_state_cache, "version", 0) or 0)
         return dict(self._memory_projection_cache)
 
     def memory_core_state(self) -> CoreState:
@@ -54,6 +92,8 @@ class MemoryManager(MemoryLifecycleMixin, MemorySearchMixin, MemoryIntegrationMi
 
     def _set_memory_core_state_cache(self, state: CoreState) -> CoreState:
         self._memory_core_state_cache = state if isinstance(state, CoreState) else CoreState()
+        # Invalidate projection cache version so reads re-project from authority.
+        self._memory_projection_version = None
         return self._memory_core_state_cache
 
     def load_memory_store(self):
