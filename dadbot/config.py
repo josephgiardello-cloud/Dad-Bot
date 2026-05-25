@@ -158,6 +158,20 @@ class DadRuntimeConfig:
     graph_walk_hops: int = 2
     graph_walk_edge_limit: int = 18
     graph_walk_node_limit: int = 16
+
+    graph_retrieval_min_score: float = 0.15
+    graph_retrieval_recency_boost_2d: float = 1.15
+    graph_retrieval_recency_boost_7d: float = 1.08
+    graph_retrieval_recency_boost_30d: float = 1.03
+    graph_retrieval_emotional_boost: float = 1.05
+    graph_retrieval_source_type_weights: dict[str, float] = field(
+        default_factory=lambda: {
+            "consolidated_memory": 1.18,
+            "archive_session": 1.0,
+            "persona_trait": 1.08,
+            "life_pattern": 1.05,
+        },
+    )
     egress_allowlist: tuple[str, ...] = (
         "localhost",
         "127.0.0.1",

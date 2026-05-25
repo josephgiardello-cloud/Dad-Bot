@@ -10,139 +10,19 @@ User's gating criteria: ALL 4 MUST PASS before Phase 2 can proceed.
 """
 import pytest
 from typing import Any, Tuple
-import sys
 
 
-class TestFacadeRoutingStructural:
-    """Structural validation tests (no instantiation required)."""
-
-    @pytest.fixture
-    def bot_class(self):
-        """Load DadBot class for structural analysis."""
-        from dadbot.core.dadbot import DadBot
-        return DadBot
-
-    def test_1_routing_dict_structure(self, bot_class):
-        """Test 1a: Routing dict exists and has correct structure."""
-        routing = bot_class._UNIFIED_ROUTING
-        
-        # Check it's a dict
-        assert isinstance(routing, dict), f"_UNIFIED_ROUTING is {type(routing)}, not dict"
-        
-        # Check it has exactly 50 entries (consolidated from 3 maps)
-        assert len(routing) == 50, \
-            f"Expected 50 routing entries, got {len(routing)}"
-        
-        # Check all keys are strings, all values are tuples of (str, str)
-        for attr_name, route_value in routing.items():
-            assert isinstance(attr_name, str), \
-                f"Key {attr_name!r} is {type(attr_name)}, not str"
-            assert isinstance(route_value, tuple), \
-                f"Value for {attr_name!r} is {type(route_value)}, not tuple"
-            assert len(route_value) == 2, \
-                f"Value for {attr_name!r} has {len(route_value)} elements, not 2"
-            
-            target_obj_name, target_attr = route_value
-            assert isinstance(target_obj_name, str), \
-                f"Target obj for {attr_name!r} is {type(target_obj_name)}, not str"
-            assert isinstance(target_attr, str), \
-                f"Target attr for {attr_name!r} is {type(target_attr)}, not str"
-            assert len(target_obj_name) > 0, \
-                f"Target obj for {attr_name!r} is empty string"
-            assert len(target_attr) > 0, \
-                f"Target attr for {attr_name!r} is empty string"
-    
-    def test_3_no_shadow_collisions(self, bot_class):
-        """Test 3: No duplicate keys in _UNIFIED_ROUTING."""
-        routing = bot_class._UNIFIED_ROUTING
-        unique_keys = set(routing.keys())
-        total_keys = len(routing)
-        unique_count = len(unique_keys)
-        
-        assert unique_count == total_keys, \
-            f"Shadow collisions detected: {total_keys} entries but {unique_count} unique keys"
-        
-        # Breakdown by target: verify counts match original 3 maps
-        config_routes = sum(
-            1 for k, v in routing.items() if v[0] == "config"
-        )
-        runtime_routes = sum(
-            1 for k, v in routing.items() if v[0] == "runtime_state_manager"
-        )
-        internal_routes = sum(
-            1 for k, v in routing.items() if v[0] == "_internal_runtime"
-        )
-        
-        total_by_type = config_routes + runtime_routes + internal_routes
-        
-        # Per original consolidation, we expect:
-        # - 27 config routes
-        # - 13 runtime_state routes
-        # - 10 internal_runtime routes
-        # = 50 total
-        
-        assert config_routes == 27, \
-            f"Expected 27 config routes, got {config_routes}"
-        assert runtime_routes == 13, \
-            f"Expected 13 runtime_state routes, got {runtime_routes}"
-        assert internal_routes == 10, \
-            f"Expected 10 internal_runtime routes, got {internal_routes}"
-        assert total_by_type == 50, \
-            f"Expected 50 total routes, got {total_by_type}"
-    
-    def test_1a_manager_chain_removed_in_favor_of_service_container(self, bot_class):
-        """Verify broad implicit manager sweeping is no longer part of the facade contract."""
-        assert not hasattr(bot_class, "_MANAGER_DELEGATE_CHAIN")
+# Only imports, fixtures, and class definitions should be at the module level
 
 
 class TestFacadeRoutingFunctional:
     """Functional validation tests (requires instantiation)."""
 
     @pytest.fixture
-    def bot_instance(self):
-        """Instantiate DadBot with timeout and error handling.
-        
-        This fixture implements a safety mechanism to avoid hanging tests.
-        If boot fails or times out, it skips the test with diagnostics.
-        """
-        from dadbot.core.dadbot import DadBot
-        import threading
-        
-        bot_result = [None]
-        boot_exception = [None]
-        
-        def boot_with_capture():
-            """Capture bot or exception in thread-safe way."""
-            try:
-                bot_result[0] = DadBot()
-            except Exception as e:
-                boot_exception[0] = e
-        
-        try:
-            # Spawn boot in daemon thread with timeout
-            boot_thread = threading.Thread(target=boot_with_capture, daemon=True)
-            boot_thread.start()
-            boot_thread.join(timeout=15)  # Wait max 15 seconds
-            
-            if boot_thread.is_alive():
-                pytest.skip(
-                    "Boot timeout after 15 seconds (Phase 1 refactoring may have introduced initialization issue)"
-                )
-            
-            if boot_exception[0] is not None:
-                e = boot_exception[0]
-                pytest.skip(
-                    f"Boot failed during instantiation: {type(e).__name__}: {e}"
-                )
-            
-            if bot_result[0] is None:
-                pytest.skip("Boot returned None")
-            
-            return bot_result[0]
-        except Exception as e:
-            pytest.skip(
-                f"Unexpected error during boot setup: {type(e).__name__}: {e}"
-            )
+    def bot_instance(self, make_test_dadbot):
+        bot = make_test_dadbot()
+        yield bot
+        bot.shutdown()
 
     def test_2_getset_roundtrip(self, bot_instance):
         """Test 2: Get/Set roundtrip preserves values for routed attributes.

@@ -57,10 +57,11 @@ class TestExecutionModeResolution:
         assert context.redelivery_count == 1
 
     def test_resolve_recovery_on_recovery_pending_lifecycle(self):
-        """RECOVERY mode when lifecycle_state == 'recovery_pending'."""
+        """RECOVERY mode when lifecycle_state == 'recovery_pending' (projection-derived)."""
         job = SimpleNamespace(
             metadata={
                 "execution_state": {
+                    "_derived_from_ledger": True,
                     "redelivery_count": 0,
                     "lifecycle_state": "recovery_pending",
                 }
@@ -71,6 +72,22 @@ class TestExecutionModeResolution:
         
         assert context.mode == ExecutionMode.RECOVERY
         assert context.is_redelivery
+
+    def test_rejects_untrusted_lifecycle_state_shortcut(self):
+        """Untrusted lifecycle_state must not influence execution mode decisions."""
+        job = SimpleNamespace(
+            metadata={
+                "execution_state": {
+                    "redelivery_count": 0,
+                    "lifecycle_state": "recovery_pending",
+                }
+            }
+        )
+
+        context = ExecutionModeResolver.resolve(job, checkpoint=None)
+
+        assert context.mode == ExecutionMode.LIVE
+        assert not context.is_redelivery
 
     def test_resolve_explicit_mode_takes_precedence(self):
         """Explicit execution_mode in metadata overrides automatic detection."""

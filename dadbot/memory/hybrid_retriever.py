@@ -54,7 +54,7 @@ class HybridRetriever:
         vector_ranked: list[tuple[float, dict[str, Any]]],
         bm25_ranked: list[tuple[float, dict[str, Any]]],
         k: int = 60,
-    ) -> list[dict[str, Any]]:
+    ) -> list[tuple[float, dict[str, Any]]]:
         """Merge two ranked lists using Weighted Reciprocal Rank Fusion.
 
         Weighted RRF formula: score = sum(original_score * 1 / (k + rank))
@@ -83,16 +83,71 @@ class HybridRetriever:
                 rrf_scores[item_id] = rrf_scores.get(item_id, 0.0) + weighted_score
                 id_to_item[item_id] = item
 
-        # Sort by weighted RRF score and return merged list
-        merged = sorted(
-            [
-                (score, id_to_item[item_id])
-                for item_id, score in rrf_scores.items()
-            ],
+        # Sort by weighted RRF score and return merged scored list
+        return sorted(
+            [(score, id_to_item[item_id]) for item_id, score in rrf_scores.items()],
             key=lambda pair: pair[0],
             reverse=True,
         )
-        return [item for _score, item in merged]
+
+    @staticmethod
+    def _stable_dedupe(items: list[dict[str, Any]], *, key_field: str) -> list[dict[str, Any]]:
+        seen: set[str] = set()
+        deduped: list[dict[str, Any]] = []
+        for item in items:
+            key = str(item.get(key_field) or "").strip().lower()
+            if not key:
+                deduped.append(item)
+                continue
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(item)
+        return deduped
+
+    @staticmethod
+    def _diversity_rerank(
+        scored_items: list[tuple[float, dict[str, Any]]],
+        *,
+        limit: int,
+        max_per_bucket: int = 2,
+    ) -> list[dict[str, Any]]:
+        """Greedy diversity selection.
+
+        Buckets on (category, type/source) when available to avoid near-duplicate
+        context blocks from the same theme dominating the top-N.
+        """
+        selected: list[dict[str, Any]] = []
+        bucket_counts: dict[tuple[str, str], int] = {}
+
+        def bucket_for(item: dict[str, Any]) -> tuple[str, str]:
+            category = str(item.get("category") or "").strip().lower() or "general"
+            source = str(item.get("source_type") or item.get("type") or item.get("kind") or "").strip().lower()
+            if not source:
+                source = "memory"
+            return category, source
+
+        for _score, item in scored_items:
+            bucket = bucket_for(item)
+            count = int(bucket_counts.get(bucket, 0) or 0)
+            if count >= max_per_bucket:
+                continue
+            bucket_counts[bucket] = count + 1
+            selected.append(item)
+            if len(selected) >= limit:
+                return selected
+
+        # If diversity gate was too strict (missing metadata, etc.), backfill.
+        if len(selected) < limit:
+            selected_ids = {str(item.get("id") or item.get("doc_id") or "") for item in selected}
+            for _score, item in scored_items:
+                item_id = str(item.get("id") or item.get("doc_id") or "")
+                if item_id and item_id in selected_ids:
+                    continue
+                selected.append(item)
+                if len(selected) >= limit:
+                    break
+        return selected
 
     def rank_with_hybrid(
         self,
@@ -155,10 +210,21 @@ class HybridRetriever:
         bm25_ranked.sort(key=lambda pair: pair[0], reverse=True)
 
         # Merge via RRF
-        merged = self._reciprocal_rank_fusion(
+        merged_scored = self._reciprocal_rank_fusion(
             vector_ranked,
             bm25_ranked,
             k=60,
         )
 
-        return merged[:max(0, int(limit))]
+        limit = max(0, int(limit))
+        merged_items = [item for _score, item in merged_scored]
+
+        # Post-process: content dedupe + diversity
+        merged_items = self._stable_dedupe(merged_items, key_field="id")
+        merged_items = self._stable_dedupe(merged_items, key_field="doc_id")
+        merged_items = self._stable_dedupe(merged_items, key_field="text")
+        merged_items = self._stable_dedupe(merged_items, key_field="content")
+
+        # Re-score list for diversity selection: keep original RRF order/score.
+        scored_for_diversity = [(score, item) for score, item in merged_scored if item in merged_items]
+        return self._diversity_rerank(scored_for_diversity, limit=limit)

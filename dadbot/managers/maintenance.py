@@ -214,9 +214,20 @@ class MaintenanceScheduler:
         }
 
         try:
-            for event in self.bot.agentic_handler.list_calendar_events(limit=8) or []:
-                if isinstance(event, dict):
-                    signals["calendar_events"].append(dict(event))
+            tool_registry = getattr(self.bot, "tool_registry", None)
+            if tool_registry is not None:
+                executor = tool_registry.get_executor("list_calendar_events")
+                if executor is not None:
+                    invocation = type("ToolInvocation", (), {
+                        "tool_spec": tool_registry.get_spec("list_calendar_events"),
+                        "arguments": {"limit": 8},
+                        "invocation_id": None
+                    })()
+                    result = executor(invocation)
+                    events = result.payload if result and hasattr(result, "payload") else []
+                    for event in events or []:
+                        if isinstance(event, dict):
+                            signals["calendar_events"].append(dict(event))
         except Exception:
             pass
 

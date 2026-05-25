@@ -653,11 +653,8 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
         mode: ExecutionMode = ExecutionMode.LIVE,
         context: SovereignContext | None = None,
     ) -> TurnResult:
-        """Canonical deterministic turn execution contract.
-
-        LIVE delegates to the graph-backed process_user_message path.
-        REPLAY requires an explicit replay handler on the facade.
-        """
+        """Canonical deterministic turn execution contract with agentic planning loop."""
+        # Continue with original turn logic
         state.recompute_invariance_hash()
         sovereign_context = context or self._build_sovereign_context(
             mode=mode,

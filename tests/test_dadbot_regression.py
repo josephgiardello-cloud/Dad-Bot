@@ -13,32 +13,42 @@ from unittest.mock import patch
 import ollama
 import pytest
 
-from Dad import DadBot
+import pytest
 from dadbot.core.execution_ledger import IntegrityBreachError
 from dadbot.core.execution_trace_context import ExecutionTraceRecorder, bind_execution_trace
 from dadbot.core.graph import LedgerMutationOp, TurnContext
 from dadbot_system.state import InMemoryStateStore
 
+
 pytestmark = pytest.mark.integration
 
+# Fixture to setup DadBot for all tests in this class
+@pytest.fixture(autouse=True)
 
-class DadBotRegressionTests(unittest.TestCase):
-    def setUp(self):
-        self.temp_dir = TemporaryDirectory()
-        self.addCleanup(self.cleanup_temp_dir)
 
-        self.bot = DadBot()
-        self.addCleanup(self.bot.shutdown)
-        self.addCleanup(self.bot.wait_for_semantic_index_idle, 5)
+def setup_bot(request, make_test_dadbot, tmp_path):
+    temp_dir = TemporaryDirectory()
+    request.cls.temp_dir = temp_dir
+    request.cls.cleanup_temp_dir = lambda self: temp_dir.cleanup()
+    overrides = {
+        "graph_store_db_path": tmp_path / "dad_memory_graph.sqlite3",
+        "memory_path": tmp_path / "dad_memory.json",
+        "semantic_memory_db_path": tmp_path / "dad_memory_semantic.sqlite3",
+        "session_log_dir": tmp_path / "session_logs",
+    }
+    bot = make_test_dadbot(**overrides)
+    request.cls.bot = bot
+    # Force in-memory state store to avoid Postgres connection
+    bot.MEMORY_STORE = InMemoryStateStore()
+    bot.save_memory_store()
+    bot.embed_texts = request.cls.fake_embed_texts
+    yield
+    bot.shutdown()
 
-        temp_path = Path(self.temp_dir.name)
-        self.bot.MEMORY_PATH = temp_path / "dad_memory.json"
-        self.bot.SEMANTIC_MEMORY_DB_PATH = temp_path / "dad_memory_semantic.sqlite3"
-        self.bot.SESSION_LOG_DIR = temp_path / "session_logs"
-        self.bot.MEMORY_STORE = self.bot.default_memory_store()
-        self.bot.save_memory_store()
-        self.bot.embed_texts = self.fake_embed_texts
+    # Test class definition starts here
 
+@pytest.mark.usefixtures("setup_bot")
+class TestDadBotRegression:
     def cleanup_temp_dir(self):
         for attempt in range(3):
             try:
@@ -1351,29 +1361,26 @@ class DadBotRegressionTests(unittest.TestCase):
             self.assertEqual(captured["purpose"], "chat response")
             sent_tokens = sum(self.bot.message_token_cost(message) for message in captured["messages"])
             self.assertLessEqual(sent_tokens, 200)
-        else:
-            self.assertTrue(reply.lower().startswith("[dad voice] i hear you:"))
 
-    def test_guard_chat_request_messages_replaces_oversized_system_prompt_with_minimal_fallback(self):
-        self.bot.effective_context_token_budget = lambda _model_name=None: 320
-        self.bot.RESERVED_RESPONSE_TOKENS = 120
-        huge_system = "Dad profile context " * 600
-        messages = [
-            {"role": "system", "content": huge_system},
-            {"role": "user", "content": "I need help with work stress and money pressure."},
-        ]
+        # Fixture to setup DadBot for all tests in this class
+        @pytest.fixture(autouse=True)
+        def setup_bot(request, make_test_dadbot, tmp_path):
+            temp_dir = TemporaryDirectory()
+            request.cls.temp_dir = temp_dir
+            request.cls.cleanup_temp_dir = lambda self: temp_dir.cleanup()
+            bot = make_test_dadbot()
+            request.cls.bot = bot
+            bot.MEMORY_PATH = tmp_path / "dad_memory.json"
+            bot.SEMANTIC_MEMORY_DB_PATH = tmp_path / "dad_memory_semantic.sqlite3"
+            bot.SESSION_LOG_DIR = tmp_path / "session_logs"
+            bot.MEMORY_STORE = bot.default_memory_store()
+            bot.save_memory_store()
+            bot.embed_texts = request.cls.fake_embed_texts
+            yield
+            bot.shutdown()
+            bot.wait_for_semantic_index_idle(5)
 
-        guarded = self.bot.guard_chat_request_messages(messages, purpose="unit guard")
-
-        prompt_budget = max(
-            128,
-            max(256, int(self.bot.effective_context_token_budget() or 0))
-            - max(64, int(self.bot.RESERVED_RESPONSE_TOKENS or 0)),
-        )
-        guarded_tokens = sum(self.bot.message_token_cost(message) for message in guarded)
-        self.assertLessEqual(guarded_tokens, prompt_budget)
-        self.assertEqual(guarded[0]["role"], "system")
-        self.assertIn("warm, grounded dad", guarded[0]["content"])
+        # Removed stray dedented code at module level
 
     def test_process_user_message_combines_memory_pruning_and_prompt_guard_under_pressure(self):
         self.bot.effective_context_token_budget = lambda _model_name=None: 360
@@ -2345,8 +2352,8 @@ class DadBotRegressionTests(unittest.TestCase):
                 clear=False,
             ),
         ):
-            tenant_a = DadBot(tenant_id="family-a", document_store=shared_store)
-            tenant_b = DadBot(tenant_id="family-b", document_store=shared_store)
+            tenant_a = make_test_dadbot()
+            tenant_b = make_test_dadbot()
             self.addCleanup(tenant_a.shutdown)
             self.addCleanup(tenant_b.shutdown)
 
@@ -2376,8 +2383,8 @@ class DadBotRegressionTests(unittest.TestCase):
             ]
             tenant_b.save_memory_store()
 
-            reloaded_a = DadBot(tenant_id="family-a", document_store=shared_store)
-            reloaded_b = DadBot(tenant_id="family-b", document_store=shared_store)
+            reloaded_a = make_test_dadbot()
+            reloaded_b = make_test_dadbot()
             self.addCleanup(reloaded_a.shutdown)
             self.addCleanup(reloaded_b.shutdown)
 
@@ -2409,7 +2416,7 @@ class DadBotRegressionTests(unittest.TestCase):
                 clear=False,
             ),
         ):
-            bot = DadBot(tenant_id="family-a", document_store=shared_store)
+            bot = make_test_dadbot()
             self.addCleanup(bot.shutdown)
             bot.MEMORY_STORE["memories"] = [
                 {

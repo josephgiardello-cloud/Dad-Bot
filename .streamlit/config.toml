@@ -1,5 +1,4 @@
 [server]
-[server]
 # Checked in so clean clones can boot the Streamlit app and UI smoke tests.
 enableStaticServing = true
 [theme]

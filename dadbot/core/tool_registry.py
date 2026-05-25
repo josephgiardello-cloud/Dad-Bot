@@ -35,6 +35,160 @@ class ToolExecutor(Protocol):
 
 
 class ToolRegistry:
+
+    # ----------------------------------------------------------------------
+    # ToolExecutor implementations for built-in tools (Phase 1)
+    # Each executor is a standalone function that takes only dependencies needed.
+    # These wrap the logic from AgenticHandler and bot methods.
+    # ----------------------------------------------------------------------
+    import logging
+    from dadbot.core.runtime_types import CanonicalPayload
+
+    def make_set_reminder_executor(bot):
+        def executor(invocation):
+            title = str(invocation.arguments.get("title") or "").strip()
+            due_text = str(invocation.arguments.get("due_text") or "").strip()
+            result = bot.add_reminder(title, due_text)
+            if result is None:
+                return ToolResult(
+                    tool_name=invocation.tool_spec.name,
+                    invocation_id=invocation.invocation_id,
+                    status=ToolExecutionStatus.ERROR,
+                    error="Could not create reminder.",
+                    replay_safe=False,
+                )
+            payload = CanonicalPayload(result, payload_type="reminder")
+            return ToolResult(
+                tool_name=invocation.tool_spec.name,
+                invocation_id=invocation.invocation_id,
+                status=ToolExecutionStatus.OK,
+                payload=payload,
+                replay_safe=True,
+            )
+        return executor
+
+    def make_web_search_executor(bot):
+        def executor(invocation):
+            query = str(invocation.arguments.get("query") or "").strip()
+            result = bot.lookup_web(query)
+            if result is None:
+                return ToolResult(
+                    tool_name=invocation.tool_spec.name,
+                    invocation_id=invocation.invocation_id,
+                    status=ToolExecutionStatus.ERROR,
+                    error="No web result found.",
+                    replay_safe=False,
+                )
+            payload = CanonicalPayload(result, payload_type="web_search")
+            return ToolResult(
+                tool_name=invocation.tool_spec.name,
+                invocation_id=invocation.invocation_id,
+                status=ToolExecutionStatus.OK,
+                payload=payload,
+                replay_safe=False,  # web_search is nondeterministic
+            )
+        return executor
+
+    def make_create_calendar_event_executor(bot, tool_registry):
+        def executor(invocation):
+            title = str(invocation.arguments.get("title") or "").strip()
+            due_text = str(invocation.arguments.get("due_text") or "").strip()
+            # Use tool_registry to parse details if needed
+            if not due_text:
+                title, due_text = tool_registry.split_reminder_details(title)
+            result = bot.add_calendar_event(title, due_text)
+            if result is None:
+                return ToolResult(
+                    tool_name=invocation.tool_spec.name,
+                    invocation_id=invocation.invocation_id,
+                    status=ToolExecutionStatus.ERROR,
+                    error="Could not create calendar event.",
+                    replay_safe=False,
+                )
+            payload = CanonicalPayload(result, payload_type="calendar_event")
+            return ToolResult(
+                tool_name=invocation.tool_spec.name,
+                invocation_id=invocation.invocation_id,
+                status=ToolExecutionStatus.OK,
+                payload=payload,
+                replay_safe=True,
+            )
+        return executor
+
+    def make_draft_email_executor(bot):
+        def executor(invocation):
+            recipient = str(invocation.arguments.get("recipient") or "").strip()
+            subject = str(invocation.arguments.get("subject") or "").strip()
+            body = str(invocation.arguments.get("body") or "").strip()
+            result = bot.draft_email(recipient, subject, body)
+            if result is None:
+                return ToolResult(
+                    tool_name=invocation.tool_spec.name,
+                    invocation_id=invocation.invocation_id,
+                    status=ToolExecutionStatus.ERROR,
+                    error="Could not draft email.",
+                    replay_safe=False,
+                )
+            payload = CanonicalPayload(result, payload_type="email_draft")
+            return ToolResult(
+                tool_name=invocation.tool_spec.name,
+                invocation_id=invocation.invocation_id,
+                status=ToolExecutionStatus.OK,
+                payload=payload,
+                replay_safe=True,
+            )
+        return executor
+    """
+    Phase 1: Built-in ToolSpec definitions for core tools.
+    """
+
+    # ToolSpec imports
+    from dadbot.core.runtime_types import (
+        ToolDeterminismClass,
+        ToolSideEffectClass,
+        ToolSpec,
+    )
+
+    # Built-in ToolSpec definitions (version 1.0.0)
+    SET_REMINDER_SPEC = ToolSpec(
+        name="set_reminder",
+        version="1.0.0",
+        determinism=ToolDeterminismClass.DETERMINISTIC,
+        side_effect_class=ToolSideEffectClass.LOGGED,
+        capabilities=frozenset({"reminder", "schedule", "memory"}),
+        required_permissions=frozenset({"tool.execute"}),
+        description="Create a reminder for the user. Use when the user mentions something to remember or do later.",
+    )
+
+    WEB_SEARCH_SPEC = ToolSpec(
+        name="web_search",
+        version="1.0.0",
+        determinism=ToolDeterminismClass.NONDETERMINISTIC,
+        side_effect_class=ToolSideEffectClass.PURE,
+        capabilities=frozenset({"search", "web", "lookup"}),
+        required_permissions=frozenset({"tool.execute"}),
+        description="Look up factual information on the web (weather, news, facts, how-to, etc.). Use for current or external info.",
+    )
+
+    CREATE_CALENDAR_EVENT_SPEC = ToolSpec(
+        name="create_calendar_event",
+        version="1.0.0",
+        determinism=ToolDeterminismClass.DETERMINISTIC,
+        side_effect_class=ToolSideEffectClass.LOGGED,
+        capabilities=frozenset({"calendar", "event", "schedule"}),
+        required_permissions=frozenset({"tool.execute"}),
+        description="Create a local calendar event in Dad Bot storage. Use for scheduling commitments and appointments.",
+    )
+
+    DRAFT_EMAIL_SPEC = ToolSpec(
+        name="draft_email",
+        version="1.0.0",
+        determinism=ToolDeterminismClass.DETERMINISTIC,
+        side_effect_class=ToolSideEffectClass.LOGGED,
+        capabilities=frozenset({"email", "draft", "compose"}),
+        required_permissions=frozenset({"tool.execute"}),
+        description="Create a local .eml draft message without sending anything.",
+    )
     """Central registry for tool specs and executors.
     
     Enables:

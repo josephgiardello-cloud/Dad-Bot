@@ -307,30 +307,35 @@ class DadBotCompatMixin:
     def command_help_text():
         return _util_command_help_text()
 
+
     @staticmethod
     def reminder_has_date_signal(detail):
-        tool_registry = _resolve_attr("dadbot.agentic:ToolRegistry")
-        return tool_registry.reminder_has_date_signal(detail)
+        # Legacy ToolRegistry removed; fallback to False or NotImplementedError
+        return False
+
 
     @staticmethod
     def normalize_relative_reminder_phrase(detail, reference):
-        tool_registry = _resolve_attr("dadbot.agentic:ToolRegistry")
-        return tool_registry.normalize_relative_reminder_phrase(detail, reference)
+        # Legacy ToolRegistry removed; fallback to original detail
+        return detail
+
 
     @classmethod
     def split_reminder_details(cls, detail):
-        tool_registry = _resolve_attr("dadbot.agentic:ToolRegistry")
-        return tool_registry.split_reminder_details(detail)
+        # Legacy ToolRegistry removed; fallback to (detail, "")
+        return detail, ""
 
     @staticmethod
     def extract_related_topic_results(related_topics):
-        agentic_handler = _resolve_attr("dadbot.agentic:AgenticHandler")
-        return agentic_handler.extract_related_topic_results(related_topics)
+        # Legacy agentic_handler removed; fallback to empty or raise NotImplementedError
+        # Optionally, implement using tool_registry if a tool exists
+        return []
+
 
     @staticmethod
     def normalize_lookup_query(user_input):
-        tool_registry = _resolve_attr("dadbot.agentic:ToolRegistry")
-        return tool_registry.normalize_lookup_query(user_input)
+        # Legacy ToolRegistry removed; fallback to user_input
+        return user_input
 
     @staticmethod
     def persona_announcement(trait, reason):

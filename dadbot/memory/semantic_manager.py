@@ -369,7 +369,30 @@ class SemanticIndexManager:
         ordered_inputs = [str(text) for text in inputs]
         unique_inputs = list(dict.fromkeys(ordered_inputs))
 
-        for candidate in self._bot.embedding_model_candidates():
+        locked_model = ""
+        try:
+            lock_row = self.embedding_version_lock()
+            locked_model = str(lock_row.get("model_name") or "").strip()
+        except Exception:
+            locked_model = ""
+
+        active_model = str(getattr(self._bot, "ACTIVE_EMBEDDING_MODEL", "") or "").strip()
+        base_candidates = list(self._bot.embedding_model_candidates())
+        ordered_candidates: list[str] = []
+        if locked_model:
+            # Once locked, do not drift to other models for retrieval/index compatibility.
+            ordered_candidates = [locked_model]
+        else:
+            if active_model:
+                ordered_candidates.append(active_model)
+            ordered_candidates.extend(base_candidates)
+            # Stable de-dupe
+            seen = set()
+            ordered_candidates = [m for m in ordered_candidates if not (m in seen or seen.add(m))]
+
+        lock_enforced = bool(locked_model)
+
+        for candidate in ordered_candidates:
             cached_embeddings = self.cached_embeddings_for_texts(
                 candidate,
                 unique_inputs,
@@ -382,10 +405,33 @@ class SemanticIndexManager:
                     response = ollama.embed(model=candidate, input=missing_inputs)
                     embeddings = self._extract_embeddings_from_response(response)
                     if embeddings is None:
+                        if lock_enforced:
+                            self._bot.record_runtime_issue(
+                                "embedding",
+                                "embedding lock enforced; locked model returned no embeddings",
+                                metadata={
+                                    "model": candidate,
+                                    "purpose": str(purpose or ""),
+                                    "inputs": len(missing_inputs),
+                                },
+                            )
+                            return []
                         continue
                     if embeddings and isinstance(embeddings[0], (int, float)):
                         embeddings = [embeddings]
                     if len(embeddings) != len(missing_inputs):
+                        if lock_enforced:
+                            self._bot.record_runtime_issue(
+                                "embedding",
+                                "embedding lock enforced; locked model returned mismatched embedding count",
+                                metadata={
+                                    "model": candidate,
+                                    "purpose": str(purpose or ""),
+                                    "inputs": len(missing_inputs),
+                                    "embeddings": len(list(embeddings or [])),
+                                },
+                            )
+                            return []
                         continue
                     fresh_embeddings = {
                         text: embedding
@@ -393,9 +439,33 @@ class SemanticIndexManager:
                         if embedding and isinstance(embedding, list) and len(embedding) > 10
                     }
                     if len(fresh_embeddings) != len(missing_inputs):
+                        if lock_enforced:
+                            self._bot.record_runtime_issue(
+                                "embedding",
+                                "embedding lock enforced; locked model returned invalid embedding payload",
+                                metadata={
+                                    "model": candidate,
+                                    "purpose": str(purpose or ""),
+                                    "inputs": len(missing_inputs),
+                                    "valid": len(fresh_embeddings),
+                                },
+                            )
+                            return []
                         continue
                     self.store_cached_embeddings(candidate, fresh_embeddings)
-                except self._bot.ollama_retryable_errors():
+                except self._bot.ollama_retryable_errors() as exc:
+                    if lock_enforced:
+                        self._bot.record_runtime_issue(
+                            "embedding",
+                            "embedding lock enforced; locked model embedding call failed",
+                            exc,
+                            metadata={
+                                "model": candidate,
+                                "purpose": str(purpose or ""),
+                                "inputs": len(missing_inputs),
+                            },
+                        )
+                        return []
                     continue
 
             resolved = []
@@ -408,12 +478,24 @@ class SemanticIndexManager:
 
             if resolved:
                 self._bot.ACTIVE_EMBEDDING_MODEL = candidate
+                # Enforce lock consistency when locked; initialize lock on first success.
                 self._lock_embedding_version(
                     model_name=candidate,
                     vector_size=len(list(resolved[0] or [])),
                     enforce=True,
                 )
                 return resolved
+
+        if lock_enforced and locked_model:
+            self._bot.record_runtime_issue(
+                "embedding",
+                "embedding lock enforced; no embeddings could be produced",
+                metadata={
+                    "model": locked_model,
+                    "purpose": str(purpose or ""),
+                    "inputs": len(unique_inputs),
+                },
+            )
 
         return []
 

@@ -89,7 +89,11 @@ class ExecutionModeResolver:
             )
 
         # Check recovery conditions
-        lifecycle_state = str(execution_state.get("lifecycle_state") or "").strip().lower()
+        # Runtime invariant (Correctness Matrix #1): lifecycle state reads that influence decisions
+        # must be projection-derived from ledger events.
+        lifecycle_state = ""
+        if bool(execution_state.get("_derived_from_ledger", False)):
+            lifecycle_state = str(execution_state.get("lifecycle_state") or "").strip().lower()
         redelivery_count = int(execution_state.get("redelivery_count") or 0)
 
         if redelivery_count > 0 or lifecycle_state == "recovery_pending":

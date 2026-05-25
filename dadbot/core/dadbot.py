@@ -25,6 +25,8 @@ import os
 import time
 import warnings
 from typing import Any, cast
+from pathlib import Path
+from dadbot.typing import MemoryManager, RelationshipManager, MoodManager, ProfileRuntime, EventBus
 
 try:
     import ollama
@@ -35,7 +37,6 @@ from dadbot.assistant_runtime import AssistantRuntime
 from dadbot.core.action_mixin import DadBotActionMixin
 from dadbot.core.boot_mixin import DadBotBootMixin
 from dadbot.core.compat_mixin import DadBotCompatMixin
-from dadbot.core.convenience_helpers import ConvenienceHelpers
 from dadbot.core.health_mixin import DadBotHealthMixin
 from dadbot.core.llm_mixin import DadBotLlmMixin
 from dadbot.core.mcp_mixin import DadBotMcpMixin
@@ -56,64 +57,6 @@ logger = logging.getLogger(__name__)
 
 
 
-class _MemoryProjectionProxy(dict):
-    """Compatibility dict facade that routes writes through canonical events."""
-
-    def __init__(self, bot: "DadBot") -> None:
-        super().__init__()
-        self._bot = bot
-
-    def _snapshot(self) -> dict[str, Any]:
-        memory = getattr(self._bot, "memory", None)
-        if memory is None:
-            return {}
-        return dict(memory.memory_projection() or {})
-
-    def __getitem__(self, key: Any) -> Any:
-        return self._snapshot()[key]
-
-    def get(self, key: Any, default: Any = None) -> Any:
-        return self._snapshot().get(key, default)
-
-    def __iter__(self):
-        return iter(self._snapshot())
-
-    def __len__(self) -> int:
-        return len(self._snapshot())
-
-    def keys(self):
-        return self._snapshot().keys()
-
-    def values(self):
-        return self._snapshot().values()
-
-    def items(self):
-        return self._snapshot().items()
-
-    def __eq__(self, other: Any) -> bool:
-        if isinstance(other, _MemoryProjectionProxy):
-            return self._snapshot() == other._snapshot()
-        if isinstance(other, dict):
-            return self._snapshot() == other
-        return self._snapshot() == other
-
-    def __repr__(self) -> str:
-        return repr(self._snapshot())
-
-    def __setitem__(self, key: Any, value: Any) -> None:
-        self._bot.mutate_memory_store(save=False, **{str(key): value})
-
-    def __delitem__(self, key: Any) -> None:
-        self._bot.mutate_memory_store(save=False, **{str(key): None})
-
-    def update(self, *args: Any, **kwargs: Any) -> None:
-        updates = dict(*args, **kwargs)
-        if updates:
-            self._bot.mutate_memory_store(save=False, **updates)
-
-    def clear(self) -> None:
-        self._bot.memory.clear_memory_store()
-
 
 class DadBot(
     DadBotBootMixin,
@@ -124,6 +67,238 @@ class DadBot(
     DadBotCompatMixin,
     DadBotActionMixin,
 ):
+    def __init__(
+        self,
+        *,
+        memory_manager: MemoryManager,
+        relationship_manager: RelationshipManager,
+        mood_manager: MoodManager,
+        profile_runtime: ProfileRuntime,
+        event_bus: EventBus,
+        **kwargs: Any,
+    ):
+        # Set manager attributes BEFORE calling boot mixin
+        self._memory_manager = memory_manager
+        self._relationship_manager = relationship_manager
+        self._mood_manager = mood_manager
+        self._profile_runtime = profile_runtime
+        self._event_bus = event_bus
+        # Now safe to call super (which may access self.memory etc.)
+        super().__init__(**kwargs)
+    # ------------------------------------------------------------------
+    # Explicit properties for config attributes (formerly unified routing)
+    # ------------------------------------------------------------------
+
+    @property
+    def model_name(self) -> str:
+        return self.config.model_name
+
+    @property
+    def fallback_models(self):
+        return self.config.fallback_models
+
+
+    @property
+    def active_model(self) -> str:
+        return self.config.active_model
+
+    @property
+    def active_embedding_model(self) -> str:
+        return self.config.active_embedding_model or ""
+
+    @property
+    def llm_provider(self) -> str:
+        return self.config.llm_provider
+
+    @property
+    def llm_model(self) -> str:
+        return self.config.llm_model
+
+    @property
+    def tenant_id(self) -> str:
+        return self.config.tenant_id
+
+    @property
+    def append_signoff(self) -> bool:
+        return self.config.append_signoff
+
+    @property
+    def light_mode(self) -> bool:
+        return self.config.light_mode
+
+    @property
+    def preferred_embedding_models(self) -> list[str]:
+        return list(self.config.preferred_embedding_models)
+
+    @property
+    def recent_history_window(self) -> int:
+        return self.config.recent_history_window
+
+    @property
+    def max_history_messages_scan(self) -> int:
+        return self.config.max_history_messages_scan
+
+    @property
+    def summary_trigger_messages(self) -> int:
+        return self.config.summary_trigger_messages
+
+    @property
+    def relationship_reflection_interval(self) -> int:
+        return self.config.relationship_reflection_interval
+
+    @property
+    def context_token_budget(self) -> int:
+        return self.config.context_token_budget
+
+    @property
+    def reserved_response_tokens(self) -> int:
+        return self.config.reserved_response_tokens
+
+    @property
+    def approx_chars_per_token(self) -> float:
+        return self.config.approx_chars_per_token
+
+    @property
+    def mood_detection_temperature(self) -> float:
+        return self.config.mood_detection_temperature
+
+
+    @property
+    def stream_timeout_seconds(self) -> float:
+        return self.config.stream_timeout_seconds
+
+    @property
+    def stream_max_chars(self) -> int:
+        return self.config.stream_max_chars
+
+    @property
+    def profile_path(self) -> str:
+        return str(self.config.profile_path)
+
+    @property
+    def memory_path(self) -> str:
+        return str(self.config.memory_path)
+
+    @property
+    def semantic_memory_db_path(self) -> str:
+        return str(self.config.semantic_memory_db_path)
+
+    @property
+    def graph_store_db_path(self) -> str:
+        return str(self.config.graph_store_db_path)
+
+    @property
+    def session_log_dir(self) -> str:
+        return str(self.config.session_log_dir)
+
+    # ------------------------------------------------------------------
+    # Explicit properties for runtime state attributes
+    # ------------------------------------------------------------------
+
+
+    @property
+    def runtime_state_container(self) -> Any:
+        return self._memory_manager.container if hasattr(self._memory_manager, 'container') else None
+
+    @property
+    def history(self) -> Any:
+        return self._memory_manager.history if hasattr(self._memory_manager, 'history') else None
+
+    @property
+    def session_moods(self) -> Any:
+        return self._mood_manager.session_moods if hasattr(self._mood_manager, 'session_moods') else None
+
+    @property
+    def session_summary(self) -> Any:
+        return self._memory_manager.session_summary if hasattr(self._memory_manager, 'session_summary') else None
+
+    @property
+    def session_summary_updated_at(self) -> Any:
+        return self._memory_manager.session_summary_updated_at if hasattr(self._memory_manager, 'session_summary_updated_at') else None
+
+    @property
+    def session_summary_covered_messages(self) -> Any:
+        return self._memory_manager.session_summary_covered_messages if hasattr(self._memory_manager, 'session_summary_covered_messages') else None
+
+    @property
+    def last_relationship_reflection_turn(self) -> Any:
+        return self._relationship_manager.last_relationship_reflection_turn if hasattr(self._relationship_manager, 'last_relationship_reflection_turn') else None
+
+
+    @property
+    def pending_daily_checkin_context(self) -> Any:
+        return self._mood_manager.pending_daily_checkin_context if hasattr(self._mood_manager, 'pending_daily_checkin_context') else None
+
+    @property
+    def active_tool_observation_context(self) -> Any:
+        return self._memory_manager.active_tool_observation_context if hasattr(self._memory_manager, 'active_tool_observation_context') else None
+
+    @property
+    def planner_debug(self) -> Any:
+        return self._memory_manager.planner_debug if hasattr(self._memory_manager, 'planner_debug') else None
+
+    @property
+    def chat_threads(self) -> Any:
+        return self._memory_manager.chat_threads if hasattr(self._memory_manager, 'chat_threads') else None
+
+    @property
+    def active_thread_id(self) -> Any:
+        return self._memory_manager.active_thread_id if hasattr(self._memory_manager, 'active_thread_id') else None
+
+    @property
+    def thread_snapshots(self) -> Any:
+        return self._memory_manager.thread_snapshots if hasattr(self._memory_manager, 'thread_snapshots') else None
+
+    # ------------------------------------------------------------------
+    # Explicit properties for internal runtime attributes
+    # ------------------------------------------------------------------
+
+
+    @property
+    def prompt_guard_stats(self) -> Any:
+        return self._internal_runtime.prompt_guard_stats
+
+    @property
+    def last_memory_context_stats(self) -> Any:
+        return self._internal_runtime.last_memory_context_stats
+
+    @property
+    def last_output_moderation(self) -> Any:
+        return self._internal_runtime.last_output_moderation
+
+    @property
+    def last_reply_supervisor(self) -> Any:
+        return self._internal_runtime.last_reply_supervisor
+
+    @property
+    def last_turn_pipeline(self) -> Any:
+        return self._internal_runtime.last_turn_pipeline
+
+    @property
+    def last_turn_health_state(self) -> Any:
+        return self._internal_runtime.last_turn_health_state
+
+    @property
+    def last_turn_ux_feedback(self) -> Any:
+        return self._internal_runtime.last_turn_ux_feedback
+
+    @property
+    def shadow_decision_bus(self) -> Any:
+        return self._internal_runtime.shadow_decision_bus
+
+    @property
+    def last_shadow_decision_report(self) -> Any:
+        return self._internal_runtime.last_shadow_decision_report
+
+    @property
+    def background_task_ids(self) -> Any:
+        return self._internal_runtime.background_task_ids
+
+    # (Add more explicit properties as needed for full coverage)
+    # ------------------------------------------------------------------
+    # Agentic Planning/Reasoning Loop (ReAct-style)
+    # ------------------------------------------------------------------
+
     """Thin public facade for the Dad Bot persona.
 
     This facade is intentionally thin -- prefer direct manager access in new code.
@@ -144,335 +319,93 @@ class DadBot(
          the service container by explicit service name or provider ownership.
     """
 
-    # ------------------------------------------------------------------
-    # Unified routing: combined config, runtime state, and internal maps
-    # ------------------------------------------------------------------
-    # Format: name -> (target_object, target_attr) for delegation
 
-    _UNIFIED_ROUTING: dict[str, tuple[str, str]] = {
-        # CONFIG mappings: route to self.config.<attr>
-        "MODEL_NAME": ("config", "model_name"),
-        "FALLBACK_MODELS": ("config", "fallback_models"),
-        "ACTIVE_MODEL": ("config", "active_model"),
-        "active_model": ("config", "active_model"),
-        "ACTIVE_EMBEDDING_MODEL": ("config", "active_embedding_model"),
-        "LLM_PROVIDER": ("config", "llm_provider"),
-        "LLM_MODEL": ("config", "llm_model"),
-        "TENANT_ID": ("config", "tenant_id"),
-        "tenant_id": ("config", "tenant_id"),
-        "APPEND_SIGNOFF": ("config", "append_signoff"),
-        "LIGHT_MODE": ("config", "light_mode"),
-        "PREFERRED_EMBEDDING_MODELS": ("config", "preferred_embedding_models"),
-        "RECENT_HISTORY_WINDOW": ("config", "recent_history_window"),
-        "MAX_HISTORY_MESSAGES_SCAN": ("config", "max_history_messages_scan"),
-        "SUMMARY_TRIGGER_MESSAGES": ("config", "summary_trigger_messages"),
-        "RELATIONSHIP_REFLECTION_INTERVAL": ("config", "relationship_reflection_interval"),
-        "CONTEXT_TOKEN_BUDGET": ("config", "context_token_budget"),
-        "RESERVED_RESPONSE_TOKENS": ("config", "reserved_response_tokens"),
-        "APPROX_CHARS_PER_TOKEN": ("config", "approx_chars_per_token"),
-        "MOOD_DETECTION_TEMPERATURE": ("config", "mood_detection_temperature"),
-        "STREAM_TIMEOUT_SECONDS": ("config", "stream_timeout_seconds"),
-        "STREAM_MAX_CHARS": ("config", "stream_max_chars"),
-        "PROFILE_PATH": ("config", "profile_path"),
-        "MEMORY_PATH": ("config", "memory_path"),
-        "SEMANTIC_MEMORY_DB_PATH": ("config", "semantic_memory_db_path"),
-        "GRAPH_STORE_DB_PATH": ("config", "graph_store_db_path"),
-        "SESSION_LOG_DIR": ("config", "session_log_dir"),
-        # RUNTIME_STATE mappings: route to self.runtime_state_manager.<attr>
-        "runtime_state_container": ("runtime_state_manager", "container"),
-        "history": ("runtime_state_manager", "history"),
-        "session_moods": ("runtime_state_manager", "session_moods"),
-        "session_summary": ("runtime_state_manager", "session_summary"),
-        "session_summary_updated_at": ("runtime_state_manager", "session_summary_updated_at"),
-        "session_summary_covered_messages": ("runtime_state_manager", "session_summary_covered_messages"),
-        "last_relationship_reflection_turn": ("runtime_state_manager", "last_relationship_reflection_turn"),
-        "_pending_daily_checkin_context": ("runtime_state_manager", "pending_daily_checkin_context"),
-        "_active_tool_observation_context": ("runtime_state_manager", "active_tool_observation_context"),
-        "_last_planner_debug": ("runtime_state_manager", "planner_debug"),
-        "chat_threads": ("runtime_state_manager", "chat_threads"),
-        "active_thread_id": ("runtime_state_manager", "active_thread_id"),
-        "thread_snapshots": ("runtime_state_manager", "thread_snapshots"),
-        # INTERNAL_RUNTIME mappings: route to self._internal_runtime.<attr>
-        "_prompt_guard_stats": ("_internal_runtime", "prompt_guard_stats"),
-        "_last_memory_context_stats": ("_internal_runtime", "last_memory_context_stats"),
-        "_last_output_moderation": ("_internal_runtime", "last_output_moderation"),
-        "_last_reply_supervisor": ("_internal_runtime", "last_reply_supervisor"),
-        "_last_turn_pipeline": ("_internal_runtime", "last_turn_pipeline"),
-        "_last_turn_health_state": ("_internal_runtime", "last_turn_health_state"),
-        "_last_turn_ux_feedback": ("_internal_runtime", "last_turn_ux_feedback"),
-        "_shadow_decision_bus": ("_internal_runtime", "shadow_decision_bus"),
-        "_last_shadow_decision_report": ("_internal_runtime", "last_shadow_decision_report"),
-        "_background_task_ids": ("_internal_runtime", "background_task_ids"),
-    }
+    # --- All dynamic attribute routing, unified routing, and deprecated alias logic removed. ---
 
-    # Legacy compatibility maps retained for drift-contract tests and tooling.
-    _CONFIG_ATTR_MAP: dict[str, str] = {
-        name: target_attr
-        for name, (target_obj, target_attr) in _UNIFIED_ROUTING.items()
-        if target_obj == "config"
-    }
 
-    _RUNTIME_STATE_ATTR_MAP: dict[str, str] = {
-        name: target_attr
-        for name, (target_obj, target_attr) in _UNIFIED_ROUTING.items()
-        if target_obj == "runtime_state_manager"
-    }
 
-    _INTERNAL_RUNTIME_ATTR_MAP: dict[str, str] = {
-        name: target_attr
-        for name, (target_obj, target_attr) in _UNIFIED_ROUTING.items()
-        if target_obj == "_internal_runtime"
-    }
 
-    _DEPRECATED_FACADE_ALIASES: dict[str, str] = {
-        "detect_mood": "mood_manager.detect",
-        "detect_mood_async": "mood_manager.detect_async",
-        "fastpath_detect_mood": "mood_manager.fastpath_detect",
-        "prepare_final_reply": "reply_finalization.finalize",
-        "prepare_final_reply_async": "reply_finalization.finalize_async",
-        "relationship_emotional_momentum": "relationship.emotional_momentum",
-        "top_relationship_topics": "relationship.top_topics",
-        "relationship_hypotheses": "relationship.hypotheses",
-        "relationship_snapshot": "relationship.snapshot",
-        "update_relationship_state": "relationship.current_state",
-        "build_relationship_reflection_prompt": "relationship.build_reflection_prompt",
-        "reflect_relationship_state": "relationship.current_state",
-        "reflect_internal_state": "internal_state_manager.reflect_after_turn",
-        "record_user_turn_state": "turn_service.record_user_turn_state",
-        "evolved_persona_traits": "profile_runtime.evolved_persona_traits",
-        "active_persona_traits": "profile_runtime.active_persona_traits",
-        "effective_behavior_rules": "profile_runtime.effective_behavior_rules",
-    }
 
-    _DEPRECATED_ALIAS_MODE_ENV = "DADBOT_DEPRECATED_FACADE_ALIAS_MODE"
-    _DEPRECATED_ALIAS_DENYLIST_ENV = "DADBOT_DEPRECATED_FACADE_ALIAS_DENYLIST"
+    def deliver_status_message(self, message: str, status_callback: Any = None) -> None:
+        from dadbot.core.facade_utils import DadBotFacadeUtils
+        DadBotFacadeUtils.deliver_status_message(self, message, status_callback=status_callback)
 
-    # ------------------------------------------------------------------
-    # Unified attribute routing
-    # ------------------------------------------------------------------
 
-    @classmethod
-    def _deprecated_alias_mode(cls) -> str:
-        raw = str(os.getenv(cls._DEPRECATED_ALIAS_MODE_ENV, "allow") or "allow").strip().lower()
-        if raw in {"warn", "deny"}:
-            return raw
-        return "allow"
-
-    @classmethod
-    def _deprecated_alias_denied(cls, alias_name: str) -> bool:
-        raw = str(os.getenv(cls._DEPRECATED_ALIAS_DENYLIST_ENV, "") or "").strip()
-        if not raw:
-            return False
-        if raw == "*":
-            return True
-        denied = {item.strip() for item in raw.split(",") if item.strip()}
-        return alias_name in denied
-
-    def __getattr__(self, name: str) -> Any:
-        """Route attribute lookups via explicit routing, service names, or provider ownership."""
-        if name.startswith("__"):
-            raise AttributeError(name)
-
-        # Deprecated facade aliases are explicit compatibility surfaces.
-        alias = self.__class__._DEPRECATED_FACADE_ALIASES.get(name)
-        if alias:
-            replay_mode = bool(getattr(self, "_replay_mode", False))
-            alias_layer_enabled = bool(getattr(self, "_alias_layer_enabled", True))
-            if replay_mode:
-                alias_layer_enabled = False
-            if not alias_layer_enabled:
-                if replay_mode:
-                    raise ReplayInvariantViolation("Alias path invoked during replay")
-                raise AttributeError(
-                    f"Deprecated facade alias '{name}' is disabled; use '{alias}' instead.",
-                )
-            mode = self.__class__._deprecated_alias_mode()
-            if mode == "deny" or self.__class__._deprecated_alias_denied(name):
-                raise AttributeError(
-                    f"Deprecated facade alias '{name}' is disabled; use '{alias}' instead.",
-                )
-            if mode == "warn":
-                warnings.warn(
-                    f"DadBot.{name} is deprecated; prefer DadBot.{alias}.",
-                    DeprecationWarning,
-                    stacklevel=2,
-                )
-            target: Any = self
-            try:
-                for part in alias.split("."):
-                    target = getattr(target, part)
-                return target
-            except AttributeError:
-                pass
-
-        # Unified routing: check config, runtime_state, internal_runtime
-        route = self.__class__._UNIFIED_ROUTING.get(name)
-        if route is not None:
-            target_obj_name, target_attr = route
-            try:
-                target = object.__getattribute__(self, target_obj_name)
-                return getattr(target, target_attr)
-            except AttributeError:
-                pass
-
-        # Service-name fallback: explicit service access via container registration.
-        try:
-            services = object.__getattribute__(self, "services")
-            service = services.get(name, optional=True)
-            if service is not None:
-                return service
-            provider = services.get_provider(name)
-            if provider is not None:
-                return getattr(provider, name)
-        except AttributeError:
-            pass
-        
-        raise AttributeError(
-            f"'{type(self).__name__}' object has no attribute '{name!r}'",
-        )
-
-    def __setattr__(self, name: str, value: Any) -> None:
-        """Route mutations via unified routing map."""
-        # Unified routing: check config, runtime_state, internal_runtime
-        route = self.__class__._UNIFIED_ROUTING.get(name)
-        if route is not None:
-            target_obj_name, target_attr = route
-            try:
-                target = object.__getattribute__(self, target_obj_name)
-                setattr(target, target_attr, value)
-                return
-            except AttributeError:
-                pass
-
-        object.__setattr__(self, name, value)
-
-    def _get_explicit_manager(self, name: str) -> Any:
-        sentinel = object()
-        value = self.__dict__.get(f"_{name}", sentinel)
-        if value is not sentinel:
-            return value
-        services = self.__dict__.get("services")
-        if services is not None:
-            value = getattr(services, name, sentinel)
-            if value is not sentinel:
-                return value
-        raise AttributeError(name)
-
-    def _set_explicit_manager(self, name: str, value: Any) -> None:
-        object.__setattr__(self, f"_{name}", value)
-
-    def _resolve_dependency(self, name: str, factory: Any) -> Any:
-        """Resolve a runtime dependency from the optional injection registry."""
-        explicit = getattr(self, "_explicit_dependencies", None)
-        candidate = None
-        if isinstance(explicit, dict):
-            candidate = explicit.get(name)
-        if callable(candidate):
-            candidate = candidate()
-        if candidate is not None:
-            return candidate
-
-        registry = getattr(self, "_dependency_registry", None)
-        candidate = None
-        if registry is not None and hasattr(registry, "get"):
-            try:
-                candidate = registry.get(name)
-            except KeyError:
-                candidate = None
-            except TypeError:
-                try:
-                    candidate = registry.get(name, optional=True)
-                except Exception:
-                    candidate = None
-        if callable(candidate):
-            candidate = candidate()
-        if candidate is not None:
-            return candidate
-        return factory()
-
-    @property
-    def convenience(self) -> ConvenienceHelpers:
-        cached = getattr(self, "_convenience_helpers", None)
-        if cached is None:
-            cached = ConvenienceHelpers(self)
-            object.__setattr__(self, "_convenience_helpers", cached)
-        return cast(ConvenienceHelpers, cached)
-
-    def deliver_status_message(self, message, status_callback=None):
-        self.convenience.deliver_status_message(message, status_callback=status_callback)
 
     @staticmethod
-    def terminal_width():
-        return ConvenienceHelpers.terminal_width()
+    def terminal_width() -> int:
+        from dadbot.core.facade_utils import DadBotFacadeUtils
+        return DadBotFacadeUtils.terminal_width()
 
-    def print_system_message(self, message):
-        self.convenience.print_system_message(message)
+
+
+    def print_system_message(self, message: str) -> None:
+        from dadbot.core.facade_utils import DadBotFacadeUtils
+        DadBotFacadeUtils.print_system_message(message)
+
+
 
     @staticmethod
-    def print_speaker_message(speaker, message):
-        ConvenienceHelpers.print_speaker_message(speaker, message)
+    def print_speaker_message(speaker: str, message: str) -> None:
+        from dadbot.core.facade_utils import DadBotFacadeUtils
+        DadBotFacadeUtils.print_speaker_message(speaker, message)
+
+
 
     def build_system_prompt(self) -> str:
-        return self.convenience.build_system_prompt()
+        from dadbot.core.facade_utils import DadBotFacadeUtils
+        return DadBotFacadeUtils.build_system_prompt(self)
 
     def build_cross_session_context(self, user_input: str = "") -> str | None:
-        builder = getattr(getattr(self, "context_builder", None), "build_cross_session_context", None)
-        if callable(builder):
-            return cast(str | None, builder(user_input))
+        return self.context_builder.build_cross_session_context(user_input)
 
-        context_service = getattr(self, "context_service", None)
-        builder = getattr(context_service, "build_cross_session_context", None)
-        if callable(builder):
-            return cast(str | None, builder(user_input))
 
-        context_builder = getattr(context_service, "context_builder", None)
-        builder = getattr(context_builder, "build_cross_session_context", None)
-        if callable(builder):
-            return cast(str | None, builder(user_input))
-        return None
 
     @staticmethod
-    def flatten_memory_payload(payload):
-        return ConvenienceHelpers.flatten_memory_payload(payload)
+    def flatten_memory_payload(payload: Any) -> Any:
+        from dadbot.core.facade_utils import DadBotFacadeUtils
+        return DadBotFacadeUtils.flatten_memory_payload(payload)
+
+
 
     @staticmethod
-    def coerce_memory_summary(value):
-        return ConvenienceHelpers.coerce_memory_summary(value)
+    def coerce_memory_summary(value: Any) -> Any:
+        from dadbot.core.facade_utils import DadBotFacadeUtils
+        return DadBotFacadeUtils.coerce_memory_summary(value)
 
-    def new_chat_session(self):
-        return self.convenience.new_chat_session()
+
+
+    def new_chat_session(self) -> Any:
+        from dadbot.core.facade_utils import DadBotFacadeUtils
+        return DadBotFacadeUtils.new_chat_session(self)
 
     # ------------------------------------------------------------------
     # Core manager properties
     # ------------------------------------------------------------------
 
-    @property
-    def memory(self) -> Any:
-        try:
-            return self._get_explicit_manager("memory_manager")
-        except AttributeError:
-            return getattr(self.services, "memory_manager", None)
 
     @property
-    def relationship(self) -> Any:
-        try:
-            return self._get_explicit_manager("relationship_manager")
-        except AttributeError:
-            return getattr(self.services, "relationship_manager", None)
+    def memory(self) -> MemoryManager:
+        """Returns the memory manager. Guaranteed non-None."""
+        return self._memory_manager
+
 
     @property
-    def mood(self) -> Any:
-        try:
-            return self._get_explicit_manager("mood_manager")
-        except AttributeError:
-            return getattr(self.services, "mood_manager", None)
+    def relationship(self) -> RelationshipManager:
+        """Returns the relationship manager. Guaranteed non-None."""
+        return self._relationship_manager
+
 
     @property
-    def profile(self) -> Any:
-        try:
-            return self._get_explicit_manager("profile_runtime")
-        except AttributeError:
-            return getattr(self.services, "profile_runtime", None)
+    def mood(self) -> MoodManager:
+        """Returns the mood manager. Guaranteed non-None."""
+        return self._mood_manager
+
+
+    @property
+    def profile(self) -> ProfileRuntime:
+        """Returns the profile runtime. Guaranteed non-None."""
+        return self._profile_runtime
 
     @property
     def turn_orchestrator(self) -> Any:
@@ -526,57 +459,47 @@ class DadBot(
         """Delegate to context_builder for persona prompt composition."""
         return self.context_builder.build_core_persona_prompt()
 
-    @property
-    def memory_query(self) -> Any:
-        """Explicit runtime manager for semantic/query memory helpers."""
-        return self._get_explicit_manager("memory_query")
-
-    @memory_query.setter
-    def memory_query(self, value: Any) -> None:
-        self._set_explicit_manager("memory_query", value)
 
     # ------------------------------------------------------------------
     # Config properties
     # ------------------------------------------------------------------
 
     @property
-    def PROFILE(self):
-        return self.profile_runtime.profile
+    def PROFILE(self) -> Any:
+        return self._profile_runtime.profile
 
     @PROFILE.setter
-    def PROFILE(self, value: Any):
-        self.profile_runtime.profile = value
+    def PROFILE(self, value: Any) -> None:
+        self._profile_runtime.profile = value
+
+
 
     @property
-    def MEMORY_STORE(self):
-        proxy = getattr(self, "_memory_store_proxy", None)
-        if proxy is None:
-            proxy = _MemoryProjectionProxy(self)
-            self._memory_store_proxy = proxy
-        return proxy
+    def memory_store(self) -> dict[str, Any]:
+        """Read-only projection of memory store."""
+        mem = self.memory
+        if mem is not None and hasattr(mem, "memory_projection"):
+            return mem.memory_projection()
+        return {}
 
-    @MEMORY_STORE.setter
-    def MEMORY_STORE(self, value: Any):
-        # Compatibility surface remains, but reset must still flow through
-        # canonical event routing to preserve deterministic state transitions.
-        _mem = self.memory
-        if _mem is not None:
-            store: dict[str, Any] = cast("dict[str, Any]", value) if isinstance(value, dict) else {}
-            replace_canonical = getattr(_mem._storage, "replace_projection_via_canonical_event", None)
-            if callable(replace_canonical):
-                replace_canonical(store, save=False)
-                return
-            replace_projection = getattr(_mem, "_set_memory_projection_cache", None)
-            if callable(replace_projection):
-                replace_projection(store)
+    def store_memory(self, key: str, value: Any) -> None:
+        mem = self.memory
+        if mem is not None and hasattr(mem, "store"):
+            mem.store(key, value)
+
+    def delete_memory(self, key: str) -> None:
+        mem = self.memory
+        if mem is not None and hasattr(mem, "delete"):
+            mem.delete(key)
+
 
     @property
-    def STYLE(self):
-        return self.profile_runtime.style
+    def STYLE(self) -> Any:
+        return self._profile_runtime.style
 
     @STYLE.setter
-    def STYLE(self, value: Any):
-        self.profile_runtime.style = value
+    def STYLE(self, value: Any) -> None:
+        self._profile_runtime.style = value
 
     # ------------------------------------------------------------------
     # Deterministic model port and UX gateway
@@ -609,8 +532,8 @@ class DadBot(
 
     def reset_session_state(self) -> Any:
         """Explicit facade delegate for runtime session reset."""
-        mgr = getattr(self, "runtime_state_manager", None)
-        if mgr is not None:
+        mgr = getattr(self, "_memory_manager", None)
+        if mgr is not None and hasattr(mgr, 'reset_session_state'):
             result = mgr.reset_session_state()
         else:
             result = None
@@ -623,11 +546,74 @@ class DadBot(
                 pass
         return result
 
+    def direct_reply_for_input(
+        self,
+        stripped_input: str,
+        current_mood: str,
+    ) -> str | None:
+        """Explicit facade delegate for TurnService direct reply helpers.
+
+        This avoids accidental routing to similarly-named safety helpers.
+        """
+
+        turn_service = getattr(self, 'turn_service', None)
+        if turn_service and hasattr(turn_service, 'direct_reply_for_input'):
+            return turn_service.direct_reply_for_input(stripped_input, current_mood)
+        return None
+
+    def build_image_analysis_prompt(
+        self,
+        note: str = "",
+        *,
+        user_input: str = "",
+        attachment: dict | None = None,
+    ) -> str:
+        """Explicit facade delegate for multimodal image prompt assembly.
+
+        Ensures the facade routes through the multimodal manager, even if other
+        services expose the same method name.
+        """
+
+        multimodal = getattr(self, "multimodal_handler", None)
+        builder = getattr(multimodal, "build_image_analysis_prompt", None)
+        if callable(builder):
+            return str(
+                builder(
+                    note=note,
+                    user_input=user_input,
+                    attachment=attachment,
+                )
+                or ""
+            )
+        return ""
+
+    def _load_memory_store(self) -> dict[str, Any]:
+        """Explicit compatibility delegate for memory-store loading.
+
+        Some regression tests and operational tooling call this private helper
+        directly to validate corruption recovery behaviour.
+        """
+
+        memory = getattr(self, "memory", None)
+        loader = getattr(memory, "load_memory_store", None)
+        if callable(loader):
+            loaded = loader()
+            return dict(loaded or {}) if isinstance(loaded, dict) else {}
+        return {}
+
     def _thread_timestamp(self) -> Any:
-        return self.runtime_state_manager.thread_timestamp()
+        mgr = getattr(self, '_memory_manager', None)
+        if mgr and hasattr(mgr, 'thread_timestamp'):
+            return mgr.thread_timestamp()
+        return None
 
     def _apply_thread_snapshot_unlocked(self, snapshot: Any) -> Any:
-        return self.runtime_state_manager.apply_thread_snapshot_unlocked(snapshot)
+        mgr = getattr(self, '_memory_manager', None)
+        if mgr and hasattr(mgr, 'apply_thread_snapshot_unlocked'):
+            return mgr.apply_thread_snapshot_unlocked(snapshot)
+        return None
+
+
 
     def record_shadow_decision(
         self,
@@ -642,15 +628,10 @@ class DadBot(
         metadata: dict[str, Any] | None = None,
         turn_context: Any | None = None,
     ) -> dict[str, Any]:
-        """Record a normalized observational shadow-decision event.
-
-        This event stream is strictly telemetry and does not participate in
-        response selection authority.
-        """
+        """Emit a shadow-decision event via the event bus."""
         raw_type = str(type or "suggestion").strip().lower()
         allowed_types = {"override_attempt", "veto", "suggestion", "transform"}
         normalized_type = raw_type if raw_type in allowed_types else "suggestion"
-
         event: dict[str, Any] = {
             "source": str(source or "unknown").strip().lower() or "unknown",
             "type": normalized_type,
@@ -662,31 +643,18 @@ class DadBot(
         }
         if isinstance(metadata, dict) and metadata:
             event["metadata"] = dict(metadata)
-
-        bus = list(getattr(self, "_shadow_decision_bus", []) or [])
-        bus.append(event)
-        # Keep bounded in memory for diagnostics without unbounded growth.
-        self._shadow_decision_bus = bus[-256:]
-
-        context_meta = getattr(turn_context, "metadata", None)
-        if isinstance(context_meta, dict):
-            context_stream = list(context_meta.get("shadow_decision_bus") or [])
-            context_stream.append(dict(event))
-            context_meta["shadow_decision_bus"] = context_stream[-128:]
-
+        self._event_bus.emit(event)
         return event
 
+
+
     def peek_shadow_decisions(self, limit: int = 64) -> list[dict[str, Any]]:
-        stream = list(getattr(self, "_shadow_decision_bus", []) or [])
-        max_items = max(1, int(limit or 1))
-        return stream[-max_items:]
+        return self._event_bus.peek(limit)
+
+
 
     def consume_shadow_decisions(self, limit: int = 128) -> list[dict[str, Any]]:
-        stream = list(getattr(self, "_shadow_decision_bus", []) or [])
-        max_items = max(1, int(limit or 1))
-        consumed = stream[-max_items:]
-        self._shadow_decision_bus = []
-        return consumed
+        return self._event_bus.consume(limit)
 
     def record_shadow_decision_report(self, report: dict[str, Any]) -> dict[str, Any]:
         payload = dict(report or {})
@@ -697,7 +665,7 @@ class DadBot(
         return dict(getattr(self, "_last_shadow_decision_report", {}) or {})
 
     @property
-    def script_path(self):
+    def script_path(self) -> Any:
         """Resolved runtime entry script path used by persistence helpers."""
         return self.runtime_script_path()
 

@@ -34,8 +34,8 @@ return await orchestrator.control_plane.submit_turn(...)
 
 ### Failure Conditions
 1. `thin_turn_handler_enabled()` returns False
-   - Environment variable `DADBOT_USE_THIN_TURN_HANDLER` not set
-   - Feature flag disabled
+    - **Deprecated condition**: in the shipped runtime, thin-spine is canonical and this helper is effectively always enabled.
+    - The historical environment variable `DADBOT_USE_THIN_TURN_HANDLER` is legacy-only and should not be relied on for routing control.
 2. `TurnHandler` not callable
 3. `_submit_turn_via_control_plane` not available on orchestrator
 

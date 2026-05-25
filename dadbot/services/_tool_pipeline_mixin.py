@@ -865,9 +865,12 @@ Current mood: {current_mood}
 Available tools:
 {json.dumps(tools, indent=2)}
 
-Decide if you should use a tool before replying:
-- set_reminder: if he mentions something he wants to remember or do later
-- web_search: if he asks for facts, weather, news, how-to, or current info
+Tool decision rubric:
+- Default to no tool. Only use a tool if it materially improves the answer.
+- If the request is ambiguous and a tool call would be guessy, do NOT use a tool yet; ask a clarifying question in your normal reply.
+- set_reminder: only when Tony clearly wants to remember something or do it later (due_text may be empty if timing is unknown).
+- web_search: only when Tony explicitly asks for current facts/news/weather/prices, or when up-to-date information is required.
+- Never use web_search for personal/profile questions; those must be grounded in the profile or clarified.
 
 Return ONLY valid JSON (no extra text):
 

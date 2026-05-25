@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from dadbot.agentic import AgenticHandler, ToolRegistry
+ 
 from dadbot.core.egress_policy import evaluate_url
 
 pytestmark = pytest.mark.phase4
@@ -17,7 +17,3 @@ def test_evaluate_url_allowlist_decision() -> None:
     assert blocked.allowed is False
 
 
-def test_agentic_lookup_web_blocked_by_allowlist() -> None:
-    bot = SimpleNamespace(config=SimpleNamespace(egress_allowlist=("localhost",)))
-    handler = AgenticHandler(bot=bot, tool_registry=ToolRegistry(bot))
-    assert handler.lookup_web("weather") is None
