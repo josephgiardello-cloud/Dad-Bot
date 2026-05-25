@@ -16,16 +16,36 @@ A warm, private AI companion with long-term memory that remembers you, grows wit
 
 ---
 
+
 ## ✨ Key Features
 
 - 🧠 **Deep Long-Term Memory** — Remembers conversations, goals, relationships, and emotional context
 - 💭 **Relationship Modeling** — Understands trust, emotional momentum, and personal history
 - 🎤 **Voice Pipeline (Experimental)** — Local STT/TTS integration hooks are present; full turnkey setup is still maturing
 - 📅 **Calendar & Proactive Flows (Partial)** — Core reminder/check-in plumbing exists; full calendar-sync automation remains in progress
-- 📬 **Proactive Nudges** — Reminders and check-ins tailored to you
+- 📬 **Proactive Flows** — Daily check-in is fully supported; calendar sync and advanced scheduling are in development.
 - 🎨 **Avatar Support (Partial)** — Avatar rendering exists with fallback paths; generation workflows vary by environment
 - 📱 **Mobile-Friendly** — PWA works on phone browsers
 - 🔒 **100% Private** — No cloud, no tracking, fully local
+
+---
+
+## 🏠 Smart Home Capabilities
+
+Dad-Bot now includes foundational smart home support:
+
+- **DeviceManager** — Centralizes device state and metadata (lights, thermostats, etc.)
+- **Scheduler** — Schedules actions and routines for devices or scenes
+- **SceneManager** — Groups devices into named scenes for one-touch activation
+- **Intent Parsing** — (In progress) Maps user text to canonical actions/intents for smart home control
+
+You can add custom tools (e.g., for smart home devices) by registering them with the tool registry. See `dadbot/core/nodes.py` for examples.
+
+---
+
+## ⚠️ Experimental Features & Warnings
+
+- **Replay and deterministic recovery are experimental and currently disabled pending implementation.**
 
 ---
 
