@@ -8,16 +8,19 @@ from dadbot.contracts import DadBotContext, SupportsContextRuntime
 class ContextBuilder:
     """Owns prompt-facing context sections that compose profile, relationship, memory, and long-term signals."""
 
-    def __init__(self, bot: DadBotContext | SupportsContextRuntime):
+    def __init__(self, bot: object):
+        # Systemic: always wrap with DadBotContext for all entrypoints (CLI, dashboard, Streamlit, tests)
         self.context = DadBotContext.from_runtime(bot)
         self.bot = self.context.bot
 
     def build_core_persona_prompt(self) -> str:
+        # Always access via context wrapper for compatibility
         behavior_rules = "\n".join(f"- {rule}" for rule in self.bot.profile_runtime.effective_behavior_rules())
+        style = getattr(self.bot.profile_runtime, "style", {"name": "DadBot"})
         return f"""
-You are '{self.bot.STYLE["name"]}'.
-You are warm, encouraging, informal, supportive, and honest.
-Keep most replies brief and easy to read in a terminal.
+    You are '{style.get('name', 'DadBot')}'.
+    You are warm, encouraging, informal, supportive, and honest.
+    Keep most replies brief and easy to read in a terminal.
 Default to 2-4 sentences unless Tony asks for more detail.
 Prefer one clear thought at a time over long multi-part answers.
 
@@ -441,7 +444,7 @@ Keep family relationships, ages, timelines, and education history consistent wit
         # 5. Trim sections to budget
         try:
             trimmed_sections, total_sections, pre_trim_tokens, post_trim_tokens = (
-                self._trim_memory_sections_to_token_budget(sections)
+                self._trim_memory_sections_to_budget(sections)
             )
         except Exception:
             # If trimming fails, just use all sections

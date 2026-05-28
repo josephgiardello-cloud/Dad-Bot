@@ -42,16 +42,27 @@ class MemoryGraphManager:
     def __init__(self, bot, memory_manager) -> None:
         self._bot = bot
         self._mm = memory_manager
-        self._entity_resolver = GraphEntityResolver(bot)
-        self._graph_store_backend = self._build_graph_store_backend()
+        self._entity_resolver = None
+        self._graph_store_backend = None
         self._projection_cache: dict[tuple[int, str, str], dict] = {}
         self._llm_fact_cache: dict[tuple[str, str], list[dict]] = {}
+        self._graph_prompt_compressor = None
+        # Only initialize if bot is not None
+        if self._bot is not None:
+            self.initialize()
+
+    def initialize(self):
+        # Call this after self._bot is set to a real bot
+        if self._bot is None:
+            return
+        self._entity_resolver = GraphEntityResolver(self._bot)
+        self._graph_store_backend = self._build_graph_store_backend()
         self._graph_prompt_compressor = GraphPromptCompressor(
-            bot,
-            max_tokens=bot.runtime_config.graph_context_token_budget,
-            max_hops=bot.runtime_config.graph_walk_hops,
-            max_edges=bot.runtime_config.graph_walk_edge_limit,
-            max_nodes=bot.runtime_config.graph_walk_node_limit,
+            self._bot,
+            max_tokens=getattr(getattr(self._bot, 'runtime_config', None), 'graph_context_token_budget', 1024),
+            max_hops=getattr(getattr(self._bot, 'runtime_config', None), 'graph_walk_hops', 2),
+            max_edges=getattr(getattr(self._bot, 'runtime_config', None), 'graph_walk_edge_limit', 32),
+            max_nodes=getattr(getattr(self._bot, 'runtime_config', None), 'graph_walk_node_limit', 64),
         )
 
     # ------------------------------------------------------------------
@@ -72,7 +83,9 @@ class MemoryGraphManager:
                     "Postgres graph store unavailable, falling back to SQLite: %s",
                     exc,
                 )
-        return SQLiteGraphStore(self._bot, self._bot.GRAPH_STORE_DB_PATH)
+        # Only access graph_store_db_path if present
+        db_path = getattr(self._bot, 'graph_store_db_path', ':memory:')
+        return SQLiteGraphStore(self._bot, db_path)
 
     def ensure_graph_store(self):
         self._graph_store_backend.ensure_storage()

@@ -17,11 +17,15 @@ from dadbot.core.runtime_errors import InvariantViolation
 from dadbot.core.tool_ir import ToolContractResult, ToolStatus, deterministic_tool_id
 
 # Device, Scheduler, Scene integration
-from dadbot.infrastructure.device_state import DeviceManager, Scheduler, SceneManager, parse_intent
+from dadbot.infrastructure.device_state import DeviceManager, Scheduler, SceneManager
+from dadbot.smart_home.intent_parser import parse_intent
 from dadbot.core.tool_executor import execute_tool
 """
 Device, Scheduler, and SceneManager integration
 """
+
+
+
 # Singleton instances (could be replaced with DI or context injection)
 device_manager = DeviceManager()
 scheduler = Scheduler()
@@ -37,6 +41,7 @@ def _builtin_device_set_state(args: dict[str, Any], context: TurnContext) -> Any
     command = args.get("command")
     return device_manager.set_state(device_id, command)
 
+
 def _builtin_scene_activate(args: dict[str, Any], context: TurnContext) -> Any:
     scene_name = args.get("scene_name")
     return scene_manager.activate(scene_name)
@@ -45,39 +50,83 @@ def _builtin_schedule_action(args: dict[str, Any], context: TurnContext) -> Any:
     timestamp = args.get("timestamp")
     action = args.get("action")
     sched_context = args.get("context", {})
-    # For demo, action must be a callable or a string mapping to a known action
-    # Here, just a stub
+    # For demo, action must be a callable; if not, skip scheduling
+    if not callable(action):
+        return None
     return scheduler.schedule(timestamp, action, sched_context)
 
+
+
+
+# ToolRegistration must be defined before register_tool and _register_builtin_tools
+@dataclass(frozen=True)
+class ToolRegistration:
+    handler: Any
+    required_args: frozenset[str] = frozenset()
+    allowed_intents: frozenset[str] | None = None
+    require_expected_output: bool = True
+    output_validator: Any | None = None
+    retryable_exceptions: tuple[type[Exception], ...] = ()
+
+_TOOL_REGISTRY: dict[str, ToolRegistration] = {}
+
+def register_tool(
+    name: str,
+    *,
+    handler: Any,
+    required_args: set[str] | frozenset[str] | None = None,
+    allowed_intents: set[str] | frozenset[str] | None = None,
+    require_expected_output: bool = True,
+    output_validator: Any | None = None,
+    retryable_exceptions: tuple[type[Exception], ...] = (),
+) -> None:
+    tool_name = str(name or "").strip().lower()
+    if not tool_name:
+        raise ValueError("Tool name must be non-empty")
+    if not callable(handler):
+        raise ValueError(f"Tool handler for {tool_name!r} must be callable")
+    _TOOL_REGISTRY[tool_name] = ToolRegistration(
+        handler=handler,
+        required_args=frozenset(required_args or ()),
+        allowed_intents=frozenset(allowed_intents) if allowed_intents is not None else None,
+        require_expected_output=bool(require_expected_output),
+        output_validator=output_validator,
+        retryable_exceptions=tuple(retryable_exceptions or ()),
+    )
+
 # Register as tools (expand as needed)
-register_tool(
-    "device_get_state",
-    handler=_builtin_device_get_state,
-    required_args={"device_id"},
-    allowed_intents={"get_device_state"},
-    require_expected_output=False,
-)
-register_tool(
-    "device_set_state",
-    handler=_builtin_device_set_state,
-    required_args={"device_id", "command"},
-    allowed_intents={"set_device_state"},
-    require_expected_output=False,
-)
-register_tool(
-    "scene_activate",
-    handler=_builtin_scene_activate,
-    required_args={"scene_name"},
-    allowed_intents={"activate_scene"},
-    require_expected_output=False,
-)
-register_tool(
-    "schedule_action",
-    handler=_builtin_schedule_action,
-    required_args={"timestamp", "action"},
-    allowed_intents={"schedule_action"},
-    require_expected_output=False,
-)
+def _register_builtin_tools():
+    register_tool(
+        "device_get_state",
+        handler=_builtin_device_get_state,
+        required_args={"device_id"},
+        allowed_intents={"get_device_state"},
+        require_expected_output=False,
+    )
+    register_tool(
+        "device_set_state",
+        handler=_builtin_device_set_state,
+        required_args={"device_id", "command"},
+        allowed_intents={"set_device_state"},
+        require_expected_output=False,
+    )
+    register_tool(
+        "scene_activate",
+        handler=_builtin_scene_activate,
+        required_args={"scene_name"},
+        allowed_intents={"activate_scene"},
+        require_expected_output=False,
+    )
+    register_tool(
+        "schedule_action",
+        handler=_builtin_schedule_action,
+        required_args={"timestamp", "action"},
+        allowed_intents={"schedule_action"},
+        require_expected_output=False,
+    )
+
+# Call this after all function definitions
+_register_builtin_tools()
 
 _MAX_DELEGATION_DEPTH: int = 2
 _MAX_DELEGATION_SUBTASKS: int = 8

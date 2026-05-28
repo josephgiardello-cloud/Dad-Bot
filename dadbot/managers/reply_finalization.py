@@ -51,7 +51,7 @@ class ReplyFinalizationManager:
             except Exception:
                 pass
         reply = str(reply or "").strip()
-        signoff = str(self.bot.STYLE.get("signoff") or "").strip()
+        signoff = str(self.bot.profile_runtime.style.get("signoff") or "").strip()
 
         if not reply or not self.bot.APPEND_SIGNOFF or not signoff:
             return reply

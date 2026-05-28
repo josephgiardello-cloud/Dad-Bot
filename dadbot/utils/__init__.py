@@ -88,8 +88,12 @@ def json_dump(value, file_handle, *, indent=None, sort_keys=False):
 
 
 def json_loads(value):
-    if orjson is not None:
-        return orjson.loads(value)
+    # Defensive: check for orjson and orjson.loads, fallback to stdlib if missing or broken
+    if orjson is not None and hasattr(orjson, "loads"):
+        try:
+            return orjson.loads(value)
+        except Exception:
+            pass
     return json.loads(value)
 
 

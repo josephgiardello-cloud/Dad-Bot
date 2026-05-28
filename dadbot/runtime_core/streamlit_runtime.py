@@ -30,6 +30,22 @@ class UIRuntimeAPI:
     def __init__(self, bot: DadBot) -> None:
         self._bot = bot
 
+    def active_chat_thread(self):
+        # Defensive: return the current active thread or a default
+        if self._bot is None:
+            return {"thread_id": "default"}
+        if hasattr(self._bot, "active_thread_id"):
+            thread_id = getattr(self._bot, "active_thread_id", None) or "default"
+            # Try to return a thread dict if available
+            snapshots = getattr(self._bot, "thread_snapshots", None)
+            if not isinstance(snapshots, dict):
+                snapshots = {}
+            snap = snapshots.get(thread_id)
+            if snap:
+                return {"thread_id": thread_id, **snap}
+            return {"thread_id": thread_id}
+        return {"thread_id": "default"}
+
     def __getattr__(self, name: str) -> Any:
         if name == "get_view":
             return self._compat_get_view
@@ -397,6 +413,15 @@ class UIRuntimeAPI:
 
 
 class StreamlitRuntime:
+
+    @classmethod
+    def build(cls) -> "StreamlitRuntime":
+        # ...existing code...
+        import threading
+        # Step 3.6: Add a session lock to DadBot for thread safety
+        bot._session_lock = threading.RLock()
+        return cls(bot)
+
     def __init__(self, bot: DadBot) -> None:
         self.bot = bot
         self._configure_ui_runtime_mode()
@@ -412,9 +437,112 @@ class StreamlitRuntime:
         if orchestrator is not None and hasattr(orchestrator, "_strict"):
             orchestrator._strict = False
 
+
     @classmethod
-    def build(cls) -> StreamlitRuntime:
-        return cls(DadBot())
+    def build(cls) -> "StreamlitRuntime":
+        # Import here to avoid circulars
+        from dadbot.core.dadbot import DadBot
+        from dadbot.memory.manager import MemoryManager
+        from dadbot.relationship import RelationshipManager
+        from dadbot.mood import MoodManager
+        from dadbot.managers.profile_runtime import ProfileRuntimeManager
+        from dadbot.managers.prompt_assembly import PromptAssemblyManager
+        from dadbot.runtime_core.bus import EventBus
+        from dadbot_system.state import InMemoryStateStore
+        from dadbot.runtime_core.dummy_model_runtime import DummyModelRuntime
+        from dadbot.core.services import build_services
+        from dadbot.config import DadBotConfig, DadRuntimeConfig
+
+        # Step 1: Create an in-memory document store
+        in_memory_store = InMemoryStateStore()
+
+        # Step 1.5: Patch config to forcibly disable Postgres/Redis for all downstream consumers
+        import dadbot.config as config_mod
+        if hasattr(config_mod, "DadBotConfig"):
+            orig_init = config_mod.DadBotConfig.__init__
+            def patched_init(self, *args, **kwargs):
+                orig_init(self, *args, **kwargs)
+                if hasattr(self, "persistence"):
+                    self.persistence.postgres_dsn = ""
+                    self.persistence.redis_url = ""
+            config_mod.DadBotConfig.__init__ = patched_init
+
+        # Step 2: Construct all managers with bot=None
+        memory_manager = MemoryManager(None)
+        relationship_manager = RelationshipManager(None)
+        mood_manager = MoodManager(None)
+        profile_runtime = ProfileRuntimeManager(None)
+        event_bus = EventBus()
+        model_runtime = DummyModelRuntime()
+        # Step 2.5: Build services
+        services = build_services()
+        # Step 2.6: Build config objects
+        runtime_config = DadRuntimeConfig()
+        config = DadBotConfig(runtime_config=runtime_config)
+
+        # Step 3: Create DadBot with all managers injected (bot=None for now)
+
+        bot = DadBot(
+            memory_manager=memory_manager,
+            relationship_manager=relationship_manager,
+            mood_manager=mood_manager,
+            profile_runtime=profile_runtime,
+            event_bus=event_bus,
+            model_runtime=model_runtime,
+            prompt_assembly=None,  # Will set after bot is created
+            services=services,
+            document_store=in_memory_store,
+            config=config,
+            runtime_config=runtime_config,
+        )
+
+        # Ensure bot._profile_runtime is set for property compatibility
+        bot._profile_runtime = profile_runtime
+
+        import threading
+        bot._session_lock = threading.RLock()
+
+        # Step 3.5: Construct and inject RuntimeStateManager
+        from dadbot.state import RuntimeStateManager
+        class _MinimalContainer:
+            def __init__(self):
+                # Provide a .state attribute with all required fields for thread state
+                self.state = type('State', (), {})()
+                self.state.history = []
+                self.state.session_moods = []
+                self.state.session_summary = None
+                self.state.session_summary_updated_at = None
+                self.state.session_summary_covered_messages = None
+                self.state.last_relationship_reflection_turn = None
+                self.state.pending_daily_checkin_context = None
+                self.state.active_tool_observation_context = None
+                self.state.planner_debug = {}
+                self.state.chat_threads = []
+                self.state.active_thread_id = None
+                self.state.thread_snapshots = {}
+        bot.runtime_state_manager = RuntimeStateManager(bot, _MinimalContainer())
+
+        # Step 4: Patch the managers to reference the real bot
+        memory_manager.bot = bot
+        relationship_manager.bot = bot
+        mood_manager.bot = bot
+        profile_runtime.bot = bot
+
+        # Step 5: Create and inject prompt_assembly
+        prompt_assembly = PromptAssemblyManager(bot)
+        bot.prompt_assembly = prompt_assembly
+
+        # Step 6: Initialize all managers that support it (again, after bot is set)
+        if hasattr(memory_manager, 'initialize'):
+            memory_manager.initialize()
+        if hasattr(relationship_manager, 'initialize'):
+            relationship_manager.initialize()
+        if hasattr(mood_manager, 'initialize'):
+            mood_manager.initialize()
+        if hasattr(profile_runtime, 'initialize'):
+            profile_runtime.initialize()
+
+        return cls(bot)
 
     def send_user_message(
         self,

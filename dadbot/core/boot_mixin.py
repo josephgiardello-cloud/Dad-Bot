@@ -291,7 +291,7 @@ class DadBotBootMixin:
                 str(profile_llm.get("provider", "")).strip().lower(),
                 str(profile_llm.get("model", "")).strip(),
             )
-        self.memory.load_memory_store()
+        # Memory loading is now explicit; do not call here
         self.profile_runtime.refresh_profile_runtime()
         self.services.wire_runtime()
         self.service_registry = self.services.registry
@@ -408,6 +408,8 @@ class DadBotBootMixin:
         personality_service: Any = None,
         policy_service: Any = None,
         runtime_services: Any = None,
+        model_runtime: Any = None,
+        skip_manager_validation: bool = False,
     ) -> None:
         self._dependency_registry = dependency_registry
         explicit_dependencies = dict(service_overrides or {})
@@ -423,6 +425,12 @@ class DadBotBootMixin:
         # Facade alias compatibility removed in elite refactor
         self._facade_compat = None
         self._lifecycle_state = DadBotLifecycleState.UNINITIALIZED
+        # --- PATCH: Assign model_runtime from service_overrides if present ---
+        if self.model_runtime is None:
+            if service_overrides and "model_runtime" in service_overrides:
+                self.model_runtime = service_overrides["model_runtime"]
+            else:
+                self.model_runtime = model_runtime
         self._initialize_config(
             model_name=model_name,
             fallback_models=fallback_models,
@@ -433,12 +441,13 @@ class DadBotBootMixin:
         self._ensure_runtime_paths()
         self._initialize_document_store(document_store)
         self._initialize_services()
-        self._hydrate_profile_and_memory()
+        # self._hydrate_profile_and_memory()  # Removed: now must be called explicitly after initialization
         self._initialize_runtime_caches()
         self._initialize_turn_orchestration()
-        self._validate_managers(
-            smoke=env_truthy("DADBOT_VALIDATE_MANAGERS_SMOKE", default=False),
-        )
+        if not skip_manager_validation:
+            self._validate_managers(
+                smoke=env_truthy("DADBOT_VALIDATE_MANAGERS_SMOKE", default=False),
+            )
         atexit.register(self.shutdown)
         self.reset_session_state()
         self._start_boot_background_tasks()

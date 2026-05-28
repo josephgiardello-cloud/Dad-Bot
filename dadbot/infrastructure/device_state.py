@@ -68,8 +68,3 @@ class SceneManager:
         for device_id, command in self.scenes.get(name, []):
             self.device_manager.set_state(device_id, command)
 
-# Natural Language to Action Parser
-def parse_intent(text: str) -> dict:
-    # Use LLM or regex/rules for MVP
-    # Example output: {"domain": "light", "action": "turn_off", "target": "living_room"}
-    pass

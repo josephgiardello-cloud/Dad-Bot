@@ -10,10 +10,11 @@ from typing import Any, Protocol
 from .contracts import DEFAULT_TENANT_ID, ChatResponse, EventEnvelope, EventType, normalize_tenant_id
 
 import types
+
 try:
     import redis
 except ImportError:
-    redis = types.SimpleNamespace()  # type: ignore[assignment]
+    pass
 
 try:
     import psycopg
@@ -137,6 +138,30 @@ class InMemoryStateStore:
     def list_events(self, session_id: str) -> list[dict[str, Any]]:
         with self._lock:
             return json.loads(json.dumps(self._events.get(session_id, [])))
+
+    # Dict-like interface for test compatibility
+    def __getitem__(self, key):
+        # Try sessions, then tasks, then responses
+        if key in self._sessions:
+            return self._sessions[key]
+        if key in self._tasks:
+            return self._tasks[key]
+        if key in self._responses:
+            return self._responses[key]
+        raise KeyError(key)
+
+    def __setitem__(self, key, value):
+        # Default to sessions for assignment
+        self._sessions[key] = value
+
+    def get(self, key, default=None):
+        if key in self._sessions:
+            return self._sessions.get(key, default)
+        if key in self._tasks:
+            return self._tasks.get(key, default)
+        if key in self._responses:
+            return self._responses.get(key, default)
+        return default
 
 
 class CompositeStateStore:

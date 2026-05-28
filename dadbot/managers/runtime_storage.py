@@ -91,29 +91,29 @@ class RuntimeStorageManager:
             if isinstance(persisted, dict) and persisted:
                 return persisted
 
-            if self.bot.PROFILE_PATH.exists():
-                with self.bot.PROFILE_PATH.open("r", encoding="utf-8") as profile_file:
+            if self.bot.profile_path and Path(self.bot.profile_path).exists():
+                with Path(self.bot.profile_path).open("r", encoding="utf-8") as profile_file:
                     profile = json_load(profile_file)
             else:
                 profile = self.bot.default_profile()
             self.bot._tenant_document_store.save_session_state("profile", profile)
             return profile
 
-        if not self.bot.PROFILE_PATH.exists():
+        if not Path(self.bot.profile_path).exists():
             # Deterministic bootstrap: always initialize a missing profile artifact.
             self.bot.initialize_profile_file(
-                profile_path=self.bot.PROFILE_PATH,
+                profile_path=self.bot.profile_path,
                 force=False,
             )
 
-        if not self.bot.PROFILE_PATH.exists():
+        if not Path(self.bot.profile_path).exists():
             # Final fallback if custom initialization hook did not materialize the file.
             self.write_json_atomically(
-                self.bot.PROFILE_PATH,
+                self.bot.profile_path,
                 self.bot.default_profile(),
                 backup=False,
             )
-        with self.bot.PROFILE_PATH.open("r", encoding="utf-8") as profile_file:
+        with Path(self.bot.profile_path).open("r", encoding="utf-8") as profile_file:
             return json_load(profile_file)
 
     def save_profile(self):

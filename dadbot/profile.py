@@ -40,9 +40,10 @@ class ProfileContextManager:
         return f"{', '.join(items[:-1])}, and {items[-1]}"
 
     def template_context(self):
+        style = self.bot.profile_runtime.style
         return {
-            "listener_name": self.bot.STYLE["listener_name"],
-            "signoff": self.bot.STYLE["signoff"],
+            "listener_name": style.get("listener_name", "Tony"),
+            "signoff": style.get("signoff", "Love you, buddy."),
             "dad_birthdate_long": self.format_long_date(self.bot.DAD_BIRTHDATE),
             "dad_age": self.age_on_date(self.bot.DAD_BIRTHDATE),
             "dad_birthplace": self.bot.FAMILY["dad"]["birthplace"],
