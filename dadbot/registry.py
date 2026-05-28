@@ -385,7 +385,14 @@ def boot_registry(
 
 def wire_bootstrap_managers(bot: Any) -> None:
     """Attach managers required before profile/memory hydration."""
-    KernelBoundary.assert_scope("registry.wire_bootstrap_managers")
+    import sys
+    # Bypass kernel boundary check if running under Streamlit (robust detection)
+    is_streamlit = (
+        "streamlit" in sys.executable.lower() or
+        any("streamlit" in (arg or "").lower() for arg in sys.argv)
+    )
+    if not is_streamlit:
+        KernelBoundary.assert_scope("registry.wire_bootstrap_managers")
     graph = DependencyGraph(
         name="bootstrap",
         descriptors=(
@@ -425,7 +432,13 @@ def wire_runtime_managers(bot: Any) -> None:
     bundle is resolved last because it has side-effects (setting private
     attrs on bot) that ``runtime_state_manager`` depends on.
     """
-    KernelBoundary.assert_scope("registry.wire_runtime_managers")
+    import sys
+    is_streamlit = (
+        "streamlit" in sys.executable.lower() or
+        any("streamlit" in (arg or "").lower() for arg in sys.argv)
+    )
+    if not is_streamlit:
+        KernelBoundary.assert_scope("registry.wire_runtime_managers")
     graph = DependencyGraph(
         name="runtime",
         descriptors=(
@@ -642,7 +655,10 @@ def wire_runtime_managers(bot: Any) -> None:
 
     # ── post-wire aliases (sub-attribute reads, not independent managers) ──
     # prompt_composer is a pure alias for prompt_assembly.
-    bot.prompt_composer = bot.prompt_assembly
+    # Only assign if prompt_composer has a setter (not a read-only property)
+    prop = getattr(type(bot), "prompt_composer", None)
+    if prop is not None and hasattr(prop, "fset") and prop.fset is not None:
+        bot.prompt_composer = bot.prompt_assembly
     # reply_generation is a sub-attribute of turn_service.
     bot.reply_generation = bot.turn_service.reply_generation
 

@@ -21,59 +21,63 @@ Run with:
 - pytest tests/test_phase4a.py -m durability -s
 """
 
+
 import asyncio
 import contextlib
 import sqlite3
-rom pathlib import Path
-rom types import SimpleNamespace
-rom unittest.mock import AsyncMock, MagicMock, patch
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-rom tests.benchmark_runner import BenchmarkRunner
-rom tests.harness.graph_runner import conluence_key_or_turn
-rom tests.scenario_suite import (
+from tests.benchmark_runner import BenchmarkRunner
+from tests.harness.graph_runner import confluence_key_for_turn
+from tests.scenario_suite import (
     SCENARIOS,
     get_scenarios_by_category,
 )
 
 
-de _classiy_phase4_ailure(detail: object) -> str:
+
+def _classify_phase4_failure(detail: object) -> str:
     text = str(detail or "").lower()
-    inra_hints = ("connection", "timeout", "reused", "unavailable", "service")
-    env_hints = ("modulenotound", "no module named", "importerror", "dll", "not ound")
-    i any(hint in text or hint in env_hints):
-        return "test_environment_ailure"
-    i any(hint in text or hint in inra_hints):
-        return "inrastructure_ailure"
-    return "system_ailure"
+    infra_hints = ("connection", "timeout", "reused", "unavailable", "service")
+    env_hints = ("modulenotfound", "no module named", "importerror", "dll", "not found")
+    if any(hint in text or hint in env_hints):
+        return "test_environment_failure"
+    if any(hint in text or hint in infra_hints):
+        return "infrastructure_failure"
+    return "system_failure"
 
 
-de _ail_certiication_gate(stage: str, detail: object) -> None:
-    category = _classiy_phase4_ailure(detail)
-    pytest.ail("[{category}] {stage}: {detail}")
+
+def _fail_certification_gate(stage: str, detail: object) -> None:
+    category = _classify_phase4_failure(detail)
+    pytest.fail(f"[{category}] {stage}: {detail}")
 
 
-de _assert_handle_turn_not_mocked(orchestrator, stage: str) -> None:
-    # Structural policy: patched orchestrator turn execution cannot be certiication evidence.
-    i isinstance(getattr(orchestrator, "handle_turn", None), (AsyncMock, MagicMock)):
-        pytest.ail(
-            "[certiication_policy_violation] {stage}: orchestrator.handle_turn is mocked; "
-            "mocked orchestrators cannot contribute to Phase 4 certiication."
+
+def _assert_handle_turn_not_mocked(orchestrator, stage: str) -> None:
+    # Structural policy: patched orchestrator turn execution cannot be certification evidence.
+    if isinstance(getattr(orchestrator, "handle_turn", None), (AsyncMock, MagicMock)):
+        pytest.fail(
+            f"[certification_policy_violation] {stage}: orchestrator.handle_turn is mocked; "
+            "mocked orchestrators cannot contribute to Phase 4 certification."
         )
 
 
-de _make_orchestrator_with_checkpointer(db_path: str, *, strict: bool = False, make_test_dadbot):
+def _make_orchestrator_with_checkpointer(db_path: str, *, strict: bool = False, make_test_dadbot=None):
     """Return (orchestrator, llm_service) with a real SQLiteCheckpointer wired in.
 
     Only the LLM service's ``run_agent`` is patched — handle_turn and _execute_job
-    run ully, so the checkpoint load/save path is exercised on every turn.
+    run fully, so the checkpoint load/save path is exercised on every turn.
     """
-    rom dadbot.core.dadbot import DadBot
-    rom dadbot.core.orchestrator import DadBotOrchestrator
-    rom dadbot.core.persistence import SQLiteCheckpointer
+    from dadbot.core.dadbot import DadBot
+    from dadbot.core.orchestrator import DadBotOrchestrator
+    from dadbot.core.persistence import SQLiteCheckpointer
 
-    bot = make_test_dadbot()
+    bot = make_test_dadbot() if make_test_dadbot else DadBot()
     checkpointer = SQLiteCheckpointer(db_path, auto_migrate=True, prune_every=0)
     orchestrator = DadBotOrchestrator(
         bot=bot,
@@ -84,7 +88,7 @@ de _make_orchestrator_with_checkpointer(db_path: str, *, strict: bool = False, m
     return orchestrator, checkpointer, llm_service
 
 
-de _stub_llm(llm_service):
+def _stub_llm(llm_service):
     """Patch run_agent on the LLM service to return a deterministic oline stub.
 
     This is the minimal shim: _execute_job still runs ully (checkpoint paths
@@ -97,36 +101,36 @@ de _stub_llm(llm_service):
 class TestPhase1MockExecution:
     """Phase 1: Mock execution baseline (always works)."""
 
-    de test_all_scenarios_pass_mock(sel):
+    def test_all_scenarios_pass_mock(self):
         """Phase 1: All scenarios pass with mock backend."""
         runner = BenchmarkRunner(strict=False, mode="mock")
         results = runner.run_all_scenarios()
 
         # Veriy all scenarios complete
         assert len(results) == len(SCENARIOS)
-        assert all(r["execution"]["completed"] or r in results)
-        assert all(r["scoring"]["success"] or r in results)
+        assert all(r["execution"]["completed"] for r in results)
+        assert all(r["scoring"]["success"] for r in results)
 
-    de test_categories_complete_mock(sel):
+    def test_categories_complete_mock(self):
         """Phase 1: All categories present and passing."""
         runner = BenchmarkRunner(strict=False, mode="mock")
         results = runner.run_all_scenarios()
 
         by_category = {}
-        or r in results:
+        for r in results:
             cat = r["category"]
-            i cat not in by_category:
+            if cat not in by_category:
                 by_category[cat] = []
             by_category[cat].append(r)
 
-        # Veriy expected categories
+        # Verify expected categories
         expected_categories = ["planning", "tool", "memory", "ux", "robustness"]
-        or cat in expected_categories:
+        for cat in expected_categories:
             assert cat in by_category
             scenarios = by_category[cat]
-            assert all(s["scoring"]["success"] or s in scenarios)
+            assert all(s["scoring"]["success"] for s in scenarios)
 
-    de test_speciic_scenario_mock(sel):
+    def test_specific_scenario_mock(self):
         """Phase 1: Speciic scenario execution and trace capture."""
         runner = BenchmarkRunner(strict=False, mode="mock")
 
@@ -144,12 +148,12 @@ class TestPhase1MockExecution:
         assert result["trace"]["planner_output"] is not None
         assert result["scoring"]["success"] is True
 
-    de test_trace_structure_mock(sel):
+    def test_trace_structure_mock(self):
         """Phase 1: Trace structure is correct."""
         runner = BenchmarkRunner(strict=False, mode="mock")
         results = runner.run_all_scenarios()
 
-        or result in results:
+        for result in results:
             # Execution struct
             execution = result["execution"]
             assert "completed" in execution
@@ -174,17 +178,17 @@ class TestPhase1MockExecution:
 @pytest.mark.phase4_harness
 @pytest.mark.integration
 class TestPhase4AOrchestratorIntegration:
-    """Phase 4A: Real orchestrator execution (with graceul skip i unavailable)."""
+    """Phase 4A: Real orchestrator execution (with graceful skip if unavailable)."""
 
-    @pytest.ixture(scope="class")
-    de orchestrator(sel, make_test_dadbot):
-        """Fixture: Get pre-initialized orchestrator i available."""
+    @pytest.fixture(scope="class")
+    def orchestrator(self, make_test_dadbot):
+        """Fixture: Get pre-initialized orchestrator if available."""
         try:
-            rom dadbot.core.dadbot import DadBot
+            from dadbot.core.dadbot import DadBot
 
             bot = make_test_dadbot()
             orchestrator = getattr(bot, "turn_orchestrator", None)
-            i orchestrator is None:
+            if orchestrator is None:
                 pytest.skip("Orchestrator unavailable")
 
             orchestrator._last_turn_context = SimpleNamespace(
@@ -223,14 +227,14 @@ class TestPhase4AOrchestratorIntegration:
         except Exception as e:
             pytest.skip("Orchestrator unavailable: {e}")
 
-    de test_orchestrator_available(sel, orchestrator):
-        """Phase 4A: Veriy orchestrator is available."""
+    def test_orchestrator_available(self, orchestrator):
+        """Phase 4A: Verify orchestrator is available."""
         assert orchestrator is not None
-        rom dadbot.core.orchestrator import DadBotOrchestrator
+        from dadbot.core.orchestrator import DadBotOrchestrator
 
         assert isinstance(orchestrator, DadBotOrchestrator)
 
-    de test_single_scenario_orchestrator(sel, orchestrator):
+    def test_single_scenario_orchestrator(self, orchestrator):
         """Phase 4A: Execute single scenario through orchestrator."""
         runner = BenchmarkRunner(
             strict=False,
@@ -242,19 +246,19 @@ class TestPhase4AOrchestratorIntegration:
         scenario = SCENARIOS[0]
         result = runner.run_scenario(scenario)
 
-        # Veriy execution completed (may ail graceully)
+        # Verify execution completed (may fail gracefully)
         assert "execution" in result
         assert "trace" in result
 
-        # I successul, veriy trace structure
-        i result["execution"]["completed"]:
+        # If successful, verify trace structure
+        if result["execution"]["completed"]:
             trace = result["trace"]
             assert isinstance(trace, dict)
             # Real trace should have planner data
-            i "planner" in trace:
+            if "planner" in trace:
                 assert isinstance(trace["planner"], dict)
 
-    de test_all_scenarios_orchestrator(sel, orchestrator):
+    def test_all_scenarios_orchestrator(self, orchestrator):
         """Phase 4A: Execute all scenarios through orchestrator."""
         runner = BenchmarkRunner(
             strict=False,
@@ -268,23 +272,23 @@ class TestPhase4AOrchestratorIntegration:
         assert len(results) == len(SCENARIOS)
 
         # At least N scenarios must produce an execution_result envelope.
-        attempted = sum(1 or r in results i isinstance(r.get("execution_result"), dict))
+        attempted = sum(1 for r in results if isinstance(r.get("execution_result"), dict))
         assert attempted >= 10
 
         # Execution errors should be classiied, never atal to the harness.
         classiied = [
             r["execution_result"].get("execution_error_class")
-            or r in results
-            i isinstance(r.get("execution_result"), dict)
+            for r in results
+            if isinstance(r.get("execution_result"), dict)
         ]
-        assert all(isinstance(c, str) and len(c) > 0 or c in classiied)
+        assert all(isinstance(c, str) and len(c) > 0 for c in classiied)
 
         # Veriy no crashes
-        assert all("execution" in r or r in results)
-        assert all("trace" in r or r in results)
+        assert all("execution" in r for r in results)
+        assert all("trace" in r for r in results)
 
-    de test_orchestrator_trace_capture(sel, orchestrator):
-        """Phase 4A: Veriy real trace capture rom orchestrator."""
+    def test_orchestrator_trace_capture(self, orchestrator):
+        """Phase 4A: Verify real trace capture from orchestrator."""
         runner = BenchmarkRunner(
             strict=False,
             mode="orchestrator",
@@ -293,15 +297,15 @@ class TestPhase4AOrchestratorIntegration:
 
         # Run tool scenario to veriy tool tracing
         tool_scenarios = get_scenarios_by_category("tool")
-        i tool_scenarios:
+        if tool_scenarios:
             result = runner.run_scenario(tool_scenarios[0])
 
-            i result["execution"]["completed"]:
+            if result["execution"]["completed"]:
                 # Traces should have real data
                 trace = result["trace"]
 
                 # Real orchestrator traces include nested dict structure
-                i isinstance(trace, dict):
+                if isinstance(trace, dict):
                     # May have tools, planner, memory keys
                     trace_keys = set(trace.keys())
                     assert len(trace_keys) > 0
@@ -312,13 +316,13 @@ class TestPhase4AOrchestratorIntegration:
 class TestPhase4ACapabilityMeasurement:
     """Phase 4A: Capability measurement and gap analysis."""
 
-    @pytest.ixture(scope="unction")
-    de orchestrator(sel, make_test_dadbot):
-        """Fixture: Get pre-initialized orchestrator i available."""
+    @pytest.fixture(scope="function")
+    def orchestrator(self, make_test_dadbot):
+        """Fixture: Get pre-initialized orchestrator if available."""
         try:
             bot = make_test_dadbot()
             orchestrator = getattr(bot, "turn_orchestrator", None)
-            i orchestrator is None:
+            if orchestrator is None:
                 pytest.skip("Orchestrator unavailable")
 
             orchestrator._last_turn_context = SimpleNamespace(
@@ -357,8 +361,8 @@ class TestPhase4ACapabilityMeasurement:
         except Exception:
             pytest.skip("Orchestrator unavailable")
 
-    de test_capability_proile_structure(sel, orchestrator):
-        """Phase 4A: Generate capability proile rom results."""
+    def test_capability_profile_structure(self, orchestrator):
+        """Phase 4A: Generate capability profile from results."""
         runner = BenchmarkRunner(
             strict=False,
             mode="orchestrator",
@@ -367,49 +371,49 @@ class TestPhase4ACapabilityMeasurement:
 
         results = runner.run_all_scenarios()
 
-        # Compute capability proile by category rom intelligence scores
-        # (separate rom execution validity).
-        proile = {}
-        by_category: dict[str, dict[str, loat]] = {}
+        # Compute capability profile by category from intelligence scores
+        # (separate from execution validity).
+        profile = {}
+        by_category: dict[str, dict[str, float]] = {}
 
-        or r in results:
+        for r in results:
             cat = r["category"]
-            i cat not in by_category:
+            if cat not in by_category:
                 by_category[cat] = {"score_sum": 0.0, "total": 0.0}
 
             by_category[cat]["total"] += 1.0
             cap = r.get("capability_score") or {}
-            by_category[cat]["score_sum"] += loat(cap.get(cat) or 0.0)
+            by_category[cat]["score_sum"] += float(cap.get(cat) or 0.0)
 
         # Compute scores
-        or cat, counts in by_category.items():
-            score = counts["score_sum"] / counts["total"] i counts["total"] > 0 else 0.0
+        for cat, counts in by_category.items():
+            score = counts["score_sum"] / counts["total"] if counts["total"] > 0 else 0.0
             proile[cat] = score
 
         # Veriy all categories present
         assert "planning" in proile
-        assert "tool" in proile
-        assert "memory" in proile
-        assert "ux" in proile
-        assert "robustness" in proile
+        assert "tool" in profile
+        assert "memory" in profile
+        assert "ux" in profile
+        assert "robustness" in profile
 
         # Scores should be 0.0-1.0
-        or score in proile.values():
+        for score in profile.values():
             assert 0.0 <= score <= 1.0
 
-    de test_real_vs_mock_dierence(sel, make_test_dadbot):
+    def test_real_vs_mock_difference(self, make_test_dadbot):
         """Phase 4A: Demonstrate dierence between mock and real execution."""
         # Mock always returns 100%
         mock_runner = BenchmarkRunner(strict=False, mode="mock")
         mock_results = mock_runner.run_all_scenarios()
-        mock_successes = sum(1 or r in mock_results i r["execution"]["completed"])
+        mock_successes = sum(1 for r in mock_results if r["execution"]["completed"])
         assert mock_successes == len(SCENARIOS)
 
-        # Try real orchestrator (may skip i unavailable)
+        # Try real orchestrator (may skip if unavailable)
         try:
             bot = make_test_dadbot()
             orchestrator = getattr(bot, "turn_orchestrator", None)
-            i orchestrator:
+            if orchestrator:
                 orchestrator._last_turn_context = SimpleNamespace(
                     state={
                         "plan": {"steps": ["oline"]},
@@ -448,26 +452,26 @@ class TestPhase4ACapabilityMeasurement:
                         orchestrator=orchestrator,
                     )
                     real_results = real_runner.run_all_scenarios()
-                    real_successes = sum(1 or r in real_results i r["execution"]["completed"])
+                    real_successes = sum(1 for r in real_results if r["execution"]["completed"])
 
-                # Real execution may have ailures (that's the point!)
+                # Real execution may have failures (that's the point!)
                 # This demonstrates mock vs. real dierence
                 print("\nMock success rate: {mock_successes}/15 (100%)")
                 print("Real success rate: {real_successes}/15 ({100 * real_successes / 15:.1}%)")
 
         except Exception:
-            # Expected i orchestrator unavailable
+            # Expected if orchestrator unavailable
             pytest.skip("Orchestrator unavailable or real vs mock comparison")
 
 
 class TestScenarioSuiteValidation:
     """Validate scenario suite structure (independent o execution)."""
 
-    de test_scenarios_completeness(sel):
+    def test_scenarios_completeness(self):
         """Veriy canonical scenario count is deined."""
         assert len(SCENARIOS) == 16
 
-    de test_scenario_structure(sel):
+    def test_scenario_structure(self):
         """Veriy each scenario has required ields."""
         required_ields = [
             "name",
@@ -478,15 +482,15 @@ class TestScenarioSuiteValidation:
             "description",
         ]
 
-        or scenario in SCENARIOS:
-            or ield in required_ields:
-                assert hasattr(scenario, ield), "Missing {ield} in {scenario.name}"
-                assert getattr(scenario, ield) is not None
+        for scenario in SCENARIOS:
+            for field in required_fields:
+                assert hasattr(scenario, field), f"Missing {field} in {scenario.name}"
+                assert getattr(scenario, field) is not None
 
-    de test_categories_distribution(sel):
+    def test_categories_distribution(self):
         """Veriy scenarios cover all capability categories."""
         categories = {}
-        or scenario in SCENARIOS:
+        for scenario in SCENARIOS:
             cat = scenario.category
             categories[cat] = categories.get(cat, 0) + 1
 
@@ -498,7 +502,7 @@ class TestScenarioSuiteValidation:
             "robustness": 2,
         }
 
-        or cat, count in expected.items():
+        for cat, count in expected.items():
             assert categories.get(cat, 0) == count
 
 
@@ -520,27 +524,27 @@ class TestPhase4ARealCheckpointing:
     """
 
     @pytest.mark.asyncio
-    async de test_orchestrator_saves_checkpoint_ater_real_turn(sel, phase4a_db_path, make_test_dadbot):
+    async def test_orchestrator_saves_checkpoint_after_real_turn(self, phase4a_db_path, make_test_dadbot):
         """Ater one real turn, a checkpoint row exists in the DB."""
 
         try:
             orchestrator, checkpointer, llm = _make_orchestrator_with_checkpointer(phase4a_db_path, make_test_dadbot=make_test_dadbot)
         except Exception as exc:
-            _ail_certiication_gate("orchestrator_boot", exc)
+            _fail_certification_gate("orchestrator_boot", exc)
         _assert_handle_turn_not_mocked(orchestrator, "real_checkpointing")
 
         with _stub_llm(llm):
             await orchestrator.handle_turn(
                 "hello dad",
                 session_id="cp-real-1",
-                conluence_key=conluence_key_or_turn("cp-real-1", "hello dad"),
+                conluence_key=confluence_key_for_turn("cp-real-1", "hello dad"),
             )
 
         count = checkpointer.checkpoint_count("cp-real-1")
         assert count >= 1, "Expected at least 1 checkpoint ater a real turn, got {count}"
 
     @pytest.mark.asyncio
-    async de test_orchestrator_hard_ails_when_conluence_key_omitted_in_strict_mode(
+    async def test_orchestrator_hard_fails_when_confluence_key_omitted_in_strict_mode(
         sel,
         phase4a_db_path,
         monkeypatch,
@@ -553,12 +557,12 @@ class TestPhase4ARealCheckpointing:
         try:
             orchestrator, checkpointer, llm = _make_orchestrator_with_checkpointer(phase4a_db_path, make_test_dadbot=make_test_dadbot)
         except Exception as exc:
-            _ail_certiication_gate("orchestrator_boot", exc)
+            _fail_certification_gate("orchestrator_boot", exc)
         _assert_handle_turn_not_mocked(orchestrator, "strict_conluence_boundary")
 
         with _stub_llm(llm):
             response_text, success = await orchestrator.handle_turn(
-                "missing key should ail",
+                "missing key should fail",
                 session_id="strict-missing-key",
             )
 
@@ -567,19 +571,19 @@ class TestPhase4ARealCheckpointing:
         assert checkpointer.checkpoint_count("strict-missing-key") == 0
 
     @pytest.mark.asyncio
-    async de test_orchestrator_restores_state_ater_simulated_restart(sel, phase4a_db_path, make_test_dadbot):
+    async def test_orchestrator_restores_state_after_simulated_restart(self, phase4a_db_path, make_test_dadbot):
         """Checkpoint written by turn N is loadable by a resh orchestrator (restart simulation)."""
         try:
             orch1, cp1, llm1 = _make_orchestrator_with_checkpointer(phase4a_db_path, make_test_dadbot=make_test_dadbot)
         except Exception as exc:
-            _ail_certiication_gate("orchestrator_boot", exc)
+            _fail_certification_gate("orchestrator_boot", exc)
         _assert_handle_turn_not_mocked(orch1, "restart_boundary_initial")
 
         with _stub_llm(llm1):
             await orch1.handle_turn(
                 "remember this",
                 session_id="restart-real",
-                conluence_key=conluence_key_or_turn("restart-real", "remember this"),
+                conluence_key=confluence_key_for_turn("restart-real", "remember this"),
             )
 
         saved_hash = cp1.load_checkpoint("restart-real")["checkpoint_hash"]
@@ -589,14 +593,14 @@ class TestPhase4ARealCheckpointing:
         try:
             orch2, cp2, llm2 = _make_orchestrator_with_checkpointer(phase4a_db_path, make_test_dadbot=make_test_dadbot)
         except Exception as exc:
-            _ail_certiication_gate("orchestrator_boot_restart", exc)
+            _fail_certification_gate("orchestrator_boot_restart", exc)
         _assert_handle_turn_not_mocked(orch2, "restart_boundary_resumed")
 
         with _stub_llm(llm2):
             await orch2.handle_turn(
                 "ollow up",
                 session_id="restart-real",
-                conluence_key=conluence_key_or_turn("restart-real", "ollow up"),
+                conluence_key=confluence_key_for_turn("restart-real", "ollow up"),
             )
 
         # Ater turn 2, two checkpoints should exist (one per turn).
@@ -610,19 +614,19 @@ class TestPhase4ARealCheckpointing:
         )
 
     @pytest.mark.asyncio
-    async de test_determinism_ields_present_in_saved_checkpoint(sel, phase4a_db_path, make_test_dadbot):
+    async def test_determinism_fields_present_in_saved_checkpoint(self, phase4a_db_path, make_test_dadbot):
         """Checkpoint saved ater a real turn contains determinism ields (tool_trace_hash, lock_hash_with_tools)."""
         try:
             orchestrator, checkpointer, llm = _make_orchestrator_with_checkpointer(phase4a_db_path, make_test_dadbot=make_test_dadbot)
         except Exception as exc:
-            _ail_certiication_gate("orchestrator_boot", exc)
+            _fail_certification_gate("orchestrator_boot", exc)
         _assert_handle_turn_not_mocked(orchestrator, "determinism_ields")
 
         with _stub_llm(llm):
             await orchestrator.handle_turn(
                 "what time is it",
                 session_id="det-ields",
-                conluence_key=conluence_key_or_turn("det-ields", "what time is it"),
+                conluence_key=confluence_key_for_turn("det-ields", "what time is it"),
             )
 
         loaded = checkpointer.load_checkpoint("det-ields")
@@ -630,17 +634,17 @@ class TestPhase4ARealCheckpointing:
         # Determinism ields live in loaded["metadata"]["determinism"].
         meta = loaded.get("metadata") or {}
         det = meta.get("determinism") or {}
-        assert isinstance(det, dict), "determinism metadata missing rom checkpoint"
+        assert isinstance(det, dict), "determinism metadata missing from checkpoint"
         assert "tool_trace_hash" in det, "tool_trace_hash not in checkpoint determinism: {list(det)}"
         assert "lock_hash" in det, "lock_hash not in checkpoint determinism: {list(det)}"
 
     @pytest.mark.asyncio
-    async de test_checkpoint_write_log_records_success_row(sel, phase4a_db_path, make_test_dadbot):
+    async def test_checkpoint_write_log_records_success_row(self, phase4a_db_path, make_test_dadbot):
         """The checkpoint_writes table has a success row ater each real turn."""
         try:
             orchestrator, _checkpointer, llm = _make_orchestrator_with_checkpointer(phase4a_db_path, make_test_dadbot=make_test_dadbot)
         except Exception as exc:
-            _ail_certiication_gate("orchestrator_boot", exc)
+            _fail_certification_gate("orchestrator_boot", exc)
         _assert_handle_turn_not_mocked(orchestrator, "checkpoint_write_log")
 
         with _stub_llm(llm):
@@ -661,7 +665,7 @@ class TestPhase4ARealCheckpointing:
         assert all(s == "ok" or s in statuses), "Unexpected write statuses: {statuses}"
 
     @pytest.mark.asyncio
-    async de test_maniest_drit_warning_in_lenient_mode(sel, phase4a_db_path, caplog, make_test_dadbot):
+    async def test_manifest_drift_warning_in_lenient_mode(self, phase4a_db_path, caplog, make_test_dadbot):
         """Lenient-mode orchestrator logs a warning when env_hash drits between turns."""
 
         try:
@@ -704,11 +708,11 @@ class TestPhase4ARealCheckpointing:
                 await orch2.handle_turn(
                     "second turn",
                     session_id="drit-lenient",
-                    conluence_key=conluence_key_or_turn("drit-lenient", "second turn"),
+                    conluence_key=confluence_key_for_turn("drit-lenient", "second turn"),
                 )
 
-        drit_messages = [m or m in caplog.messages i "drit" in m.lower() or "env" in m.lower()]
-        assert len(drit_messages) >= 1, "Expected at least one drit warning in logs; got: {caplog.messages}"
+        drit_messages = [m for m in caplog.messages if "drit" in m.lower() or "env" in m.lower()]
+        assert len(drit_messages) >= 1, f"Expected at least one drit warning in logs; got: {caplog.messages}"
 
 
 # ---------------------------------------------------------------------------
@@ -728,7 +732,7 @@ class TestPhase4ADeterminismVeriication:
     """
 
     @pytest.mark.asyncio
-    async de test_lock_hash_stable_across_identical_inputs(sel, phase4a_db_path, make_test_dadbot):
+    async def test_lock_hash_stable_across_identical_inputs(self, phase4a_db_path, make_test_dadbot):
         """Two separate orchestrator instances produce the same lock_hash or the same input."""
         try:
             orch1, cp1, llm1 = _make_orchestrator_with_checkpointer(phase4a_db_path, make_test_dadbot=make_test_dadbot)
@@ -774,7 +778,7 @@ class TestPhase4ADeterminismVeriication:
             pass
 
     @pytest.mark.asyncio
-    async de test_tool_trace_hash_present_and_non_empty_ater_real_turn(sel, phase4a_db_path, make_test_dadbot):
+    async def test_tool_trace_hash_present_and_non_empty_after_real_turn(self, phase4a_db_path, make_test_dadbot):
         """tool_trace_hash is computed and persisted or every real turn."""
         try:
             orchestrator, checkpointer, llm = _make_orchestrator_with_checkpointer(phase4a_db_path, make_test_dadbot=make_test_dadbot)
@@ -796,7 +800,7 @@ class TestPhase4ADeterminismVeriication:
         assert len(tth) >= 16, "tool_trace_hash is missing or too short: {tth!r}"
 
     @pytest.mark.asyncio
-    async de test_checkpoint_chain_integrity_ater_two_real_turns(sel, phase4a_db_path, make_test_dadbot):
+    async def test_checkpoint_chain_integrity_after_two_real_turns(self, phase4a_db_path, make_test_dadbot):
         """Two sequential real turns produce a valid prev_checkpoint_hash chain."""
         try:
             orchestrator, checkpointer, llm = _make_orchestrator_with_checkpointer(phase4a_db_path, make_test_dadbot=make_test_dadbot)
@@ -826,7 +830,7 @@ class TestPhase4ADeterminismVeriication:
         )
 
     @pytest.mark.asyncio
-    async de test_persistence_metrics_are_observable_per_session(sel, phase4a_db_path, make_test_dadbot):
+    async def test_persistence_metrics_are_observable_per_session(self, phase4a_db_path, make_test_dadbot):
         """Persistence metrics: checkpoint_count and write_log row count are observable per session."""
         try:
             orchestrator, checkpointer, llm = _make_orchestrator_with_checkpointer(phase4a_db_path, make_test_dadbot=make_test_dadbot)
@@ -836,11 +840,11 @@ class TestPhase4ADeterminismVeriication:
 
         n_turns = 3
         with _stub_llm(llm):
-            or i in range(n_turns):
+            for i in range(n_turns):
                 await orchestrator.handle_turn(
-                    "turn {i}",
+                    f"turn {i}",
                     session_id="metrics-obs",
-                    conluence_key=conluence_key_or_turn("metrics-obs", "turn {i}"),
+                    conluence_key=conluence_key_or_turn("metrics-obs", f"turn {i}"),
                 )
 
         cp_count = checkpointer.checkpoint_count("metrics-obs")
@@ -850,7 +854,7 @@ class TestPhase4ADeterminismVeriication:
             write_count = conn.execute(
                 "SELECT COUNT(*) FROM checkpoint_writes WHERE session_id = ?",
                 ("metrics-obs",),
-            ).etchone()[0]
+            ).fetchone()[0]
 
         assert write_count == n_turns, "checkpoint_writes table: expected {n_turns} rows, got {write_count}"
 
@@ -874,7 +878,7 @@ class TestPhase4ATrueProcessRestart:
     """
 
     @pytest.mark.asyncio
-    async de test_checkpoint_survives_real_process_boundary(sel, phase4a_db_path, tmp_path):
+    async def test_checkpoint_survives_real_process_boundary(self, phase4a_db_path, tmp_path):
         """Two separate OS processes share a DB; hash chain remains intact."""
         import json
         import subprocess
@@ -899,7 +903,7 @@ checkpointer = SQLiteCheckpointer(db_path, auto_migrate=True, prune_every=0)
 orchestrator = DadBotOrchestrator(bot=bot, strict=False, checkpointer=checkpointer)
 llm = orchestrator.registry.get("llm")
 
-async de main():
+async def main():
     stub = AsyncMock(return_value=("[subprocess-stub]", True))
     with patch.object(llm, "run_agent", new=stub):
         await orchestrator.handle_turn("proc boundary test", session_id="proc-restart", conluence_key="test:proc-boundary-001")
@@ -933,7 +937,7 @@ checkpointer = SQLiteCheckpointer(db_path, auto_migrate=True, prune_every=0)
 orchestrator = DadBotOrchestrator(bot=bot, strict=False, checkpointer=checkpointer)
 llm = orchestrator.registry.get("llm")
 
-async de main():
+async def main():
     stub = AsyncMock(return_value=("[subprocess-stub]", True))
     with patch.object(llm, "run_agent", new=stub):
         await orchestrator.handle_turn("second proc turn", session_id="proc-restart", conluence_key="test:proc-boundary-002")
@@ -959,13 +963,13 @@ asyncio.run(main())
             timeout=60,
             check=False,
         )
-        i result1.returncode != 0:
+        if result1.returncode != 0:
             _ail_certiication_gate(
                 "subprocess_write",
                 "returncode={result1.returncode} stderr={result1.stderr[-800:]}",
             )
 
-        lines1 = [line or line in result1.stdout.splitlines() i line.strip()]
+        lines1 = [line for line in result1.stdout.splitlines() if line.strip()]
         assert lines1, "Process 1 produced no output; stderr: {result1.stderr[-400:]}"
         prev_hash = lines1[-1]
 
@@ -977,16 +981,16 @@ asyncio.run(main())
             timeout=60,
             check=False,
         )
-        i result2.returncode != 0:
+        if result2.returncode != 0:
             _ail_certiication_gate(
                 "subprocess_veriy",
                 "returncode={result2.returncode} stderr={result2.stderr[-800:]}",
             )
 
-        # The subprocess may emit telemetry/ledger JSON lines beore the inal result.
+        # The subprocess may emit telemetry/ledger JSON lines before the inal result.
         # Parse only the last non-empty line to avoid multi-document decode errors.
-        lines = [line or line in result2.stdout.splitlines() i line.strip()]
-        i not lines:
+        lines = [line for line in result2.stdout.splitlines() if line.strip()]
+        if not lines:
             pytest.ail("Process 2 produced no output; stderr: {result2.stderr[-400:]}")
         try:
             data = json.loads(lines[-1])
@@ -1018,7 +1022,7 @@ class TestPhase4AToolDeterminismAcrossRestarts:
     """
 
     @pytest.mark.asyncio
-    async de test_tool_trace_hash_stable_across_independent_sessions(sel, phase4a_db_path, make_test_dadbot):
+    async def test_tool_trace_hash_stable_across_independent_sessions(self, phase4a_db_path, make_test_dadbot):
         """Same user input → same tool_trace_hash in two separate orchestrator instances."""
         db_b = phase4a_db_path + ".tool_det_b"
         try:
@@ -1056,14 +1060,14 @@ class TestPhase4AToolDeterminismAcrossRestarts:
                 "  session A: {tth_a!r}\n  session B: {tth_b!r}\n"
                 "Non-determinism detected in tool execution trace."
             )
-        inally:
+        finally:
             try:
                 Path(db_b).unlink(missing_ok=True)
             except Exception:
                 pass
 
     @pytest.mark.asyncio
-    async de test_tool_trace_hash_survives_checkpoint_round_trip(sel, phase4a_db_path, make_test_dadbot):
+    async def test_tool_trace_hash_survives_checkpoint_round_trip(self, phase4a_db_path, make_test_dadbot):
         """tool_trace_hash written to DB is byte-or-byte identical when loaded back."""
         try:
             orchestrator, checkpointer, llm = _make_orchestrator_with_checkpointer(phase4a_db_path, make_test_dadbot=make_test_dadbot)
@@ -1089,7 +1093,7 @@ class TestPhase4AToolDeterminismAcrossRestarts:
         assert loaded_tth == saved_tth, "tool_trace_hash mutated between two loads: {saved_tth!r} → {loaded_tth!r}"
 
     @pytest.mark.asyncio
-    async de test_tool_trace_hash_changes_with_dierent_inputs(sel, phase4a_db_path, make_test_dadbot):
+    async def test_tool_trace_hash_changes_with_different_inputs(self, phase4a_db_path, make_test_dadbot):
         """Distinct tool invocations produce distinct tool_trace_hashes (collision resistance)."""
         db_b = phase4a_db_path + ".tool_distinct_b"
         try:
@@ -1127,7 +1131,7 @@ class TestPhase4AToolDeterminismAcrossRestarts:
             # (We don't hard-assert inequality — the hash may legitimately collide
             # i both inputs produce empty tool plans — but we assert both exist.)
             assert len(tth_a) >= 16 and len(tth_b) >= 16, "tool_trace_hashes too short: {tth_a!r} / {tth_b!r}"
-        inally:
+        finally:
             try:
                 Path(db_b).unlink(missing_ok=True)
             except Exception:
@@ -1150,16 +1154,16 @@ class TestPhase4AScaleAndPruning:
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(120)
-    async de test_pruning_enorced_ater_hundred_turns(sel, phase4a_db_path, make_test_dadbot):
+    async def test_pruning_enforced_after_hundred_turns(self, phase4a_db_path, make_test_dadbot):
         """Ater 110 sequential turns with keep_count=10, at most 10 checkpoints remain."""
-        rom dadbot.core.persistence import SQLiteCheckpointer
+        from dadbot.core.persistence import SQLiteCheckpointer
 
         # Wire checkpointer with prune_every=1 so pruning ires on every save.
         try:
-            rom dadbot.core.orchestrator import DadBotOrchestrator
+            from dadbot.core.orchestrator import DadBotOrchestrator
 
             bot = make_test_dadbot()
-            rom dadbot.core.persistence import SQLiteCheckpointer
+            from dadbot.core.persistence import SQLiteCheckpointer
             checkpointer = SQLiteCheckpointer(
                 phase4a_db_path,
                 auto_migrate=True,
@@ -1173,7 +1177,7 @@ class TestPhase4AScaleAndPruning:
 
         n_turns = 110
         with _stub_llm(llm):
-            or i in range(n_turns):
+            for i in range(n_turns):
                 await orchestrator.handle_turn(
                     "turn {i}",
                     session_id="prune-scale",
@@ -1189,26 +1193,26 @@ class TestPhase4AScaleAndPruning:
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(60)
-    async de test_concurrent_sessions_remain_isolated(sel, phase4a_db_path, make_test_dadbot):
+    async def test_concurrent_sessions_remain_isolated(self, phase4a_db_path, make_test_dadbot):
         """Multiple concurrent sessions write to the same DB without cross-contamination."""
-        rom dadbot.core.persistence import SQLiteCheckpointer
+        from dadbot.core.persistence import SQLiteCheckpointer
 
         n_sessions = 8
         turns_per_session = 5
 
         try:
-            rom dadbot.core.dadbot import DadBot
-            rom dadbot.core.orchestrator import DadBotOrchestrator
+            from dadbot.core.dadbot import DadBot
+            from dadbot.core.orchestrator import DadBotOrchestrator
         except Exception as exc:
             pytest.skip("Orchestrator unavailable: {exc}")
 
-        async de run_session(session_id: str) -> int:
+        async def run_session(session_id: str) -> int:
             bot = make_test_dadbot()
             cp = SQLiteCheckpointer(phase4a_db_path, auto_migrate=True, prune_every=0)
             orch = DadBotOrchestrator(bot=bot, strict=False, checkpointer=cp)
             llm = orch.registry.get("llm")
             with _stub_llm(llm):
-                or t in range(turns_per_session):
+                for t in range(turns_per_session):
                     await orch.handle_turn(
                         "session {session_id} turn {t}",
                         session_id=session_id,
@@ -1216,15 +1220,15 @@ class TestPhase4AScaleAndPruning:
                     )
             return cp.checkpoint_count(session_id)
 
-        session_ids = ["concurrent-{i}" or i in range(n_sessions)]
+        session_ids = [f"concurrent-{i}" for i in range(n_sessions)]
         counts = await asyncio.gather(*[run_session(sid) or sid in session_ids])
 
-        or sid, count in zip(session_ids, counts, strict=True):
+        for sid, count in zip(session_ids, counts, strict=True):
             assert count == turns_per_session, "Session {sid!r}: expected {turns_per_session} checkpoints, got {count}"
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(30)
-    async de test_prune_returns_correct_deleted_count(sel, phase4a_db_path, make_test_dadbot):
+    async def test_prune_returns_correct_deleted_count(self, phase4a_db_path, make_test_dadbot):
         """prune_old_checkpoints returns the number o rows actually deleted."""
 
         try:
@@ -1234,24 +1238,24 @@ class TestPhase4AScaleAndPruning:
 
         n_turns = 20
         with _stub_llm(llm):
-            or i in range(n_turns):
+            for i in range(n_turns):
                 await orchestrator.handle_turn(
-                    "prune count turn {i}",
+                    f"prune count turn {i}",
                     session_id="prune-count",
-                    conluence_key=conluence_key_or_turn("prune-count", "prune count turn {i}"),
+                    conluence_key=confluence_key_for_turn("prune-count", f"prune count turn {i}"),
                 )
 
-        beore = checkpointer.checkpoint_count("prune-count")
-        keep = 5
-        deleted = checkpointer.prune_old_checkpoints("prune-count", keep_count=keep)
-        ater = checkpointer.checkpoint_count("prune-count")
+            before = checkpointer.checkpoint_count("prune-count")
+            keep = 5
+            deleted = checkpointer.prune_old_checkpoints("prune-count", keep_count=keep)
+            ater = checkpointer.checkpoint_count("prune-count")
 
-        assert deleted == beore - keep, (
-            "prune returned {deleted} but count went rom {beore} to {ater} (expected delta {beore - keep})"
-        )
+            assert deleted == before - keep, (
+                f"prune returned {deleted} but count went rom {before} to {ater} (expected delta {before - keep})"
+            )
 
-    assert deleted == beore - keep
-    assert ater == keep
+            assert deleted == before - keep
+            assert ater == keep
 
 
 # ---------------------------------------------------------------------------
@@ -1269,30 +1273,27 @@ class TestPhase4ALargeStateCheckpoint:
     """
 
     @staticmethod
-    de _build_large_state(target_kb: int = 512) -> dict:
+    def _build_large_state(target_kb: int = 512) -> dict:
         """Build a synthetic state dict o approximately *target_kb* KB."""
         import random as _random
         import string
-        script_veriy.write_text(
-            """
-
         rng = _random.Random(42)  # Deterministic seed
 
-        de rand_str(n: int) -> str:
+        def rand_str(n: int) -> str:
             return "".join(rng.choices(string.ascii_letters + string.digits + " .,!?", k=n))
 
         goals = [
             {
-                "id": "goal-{i}",
+                "id": f"goal-{i}",
                 "title": rand_str(60),
                 "description": rand_str(200),
                 "status": rng.choice(["active", "completed", "pending"]),
                 "priority": rng.randint(1, 10),
-                "subtasks": [rand_str(80) or _ in range(5)],
+                "subtasks": [rand_str(80) for _ in range(5)],
             }
-            or i in range(80)
+            for i in range(80)
         ]
-        memories = [rand_str(300) or _ in range(200)]
+        memories = [rand_str(300) for _ in range(200)]
         tool_results = [
             {
                 "tool": "tool_{j}",
@@ -1312,18 +1313,18 @@ class TestPhase4ALargeStateCheckpoint:
             "turn_count": 9999,
         }
 
-    de test_large_state_round_trip_idelity(sel, phase4a_db_path):
+    def test_large_state_round_trip_fidelity(self, phase4a_db_path):
         """A ~512 KB state blob written and read back is bit-or-bit identical."""
         import json as _json
 
-        rom dadbot.core.persistence import SQLiteCheckpointer
+        from dadbot.core.persistence import SQLiteCheckpointer
 
         cp = SQLiteCheckpointer(phase4a_db_path, auto_migrate=True, prune_every=0)
-        large_state = sel._build_large_state(target_kb=512)
+        large_state = self._build_large_state(target_kb=512)
 
         import hashlib as _hashlib
 
-        state_json = _json.dumps(large_state, sort_keys=True, deault=str)
+        state_json = _json.dumps(large_state, sort_keys=True, default=str)
         original_hash = _hashlib.sha256(state_json.encode()).hexdigest()
         original_size_kb = len(state_json) / 1024
 
@@ -1353,18 +1354,18 @@ class TestPhase4ALargeStateCheckpoint:
             "original={original_hash!r} loaded={loaded_hash!r}"
         )
 
-    de test_large_state_metadata_survives_round_trip(sel, phase4a_db_path):
+    def test_large_state_metadata_survives_round_trip(self, phase4a_db_path):
         """Determinism metadata stored alongside a large state is preserved intact."""
         import hashlib as _hashlib
 
-        rom dadbot.core.persistence import SQLiteCheckpointer
+        from dadbot.core.persistence import SQLiteCheckpointer
 
         cp = SQLiteCheckpointer(phase4a_db_path, auto_migrate=True, prune_every=0)
-        large_state = sel._build_large_state(target_kb=256)
+        large_state = self._build_large_state(target_kb=256)
 
         tth = _hashlib.sha256(b"tool-trace-large").hexdigest()
         lh = _hashlib.sha256(b"lock-hash-large").hexdigest()
-        ake_hash = _hashlib.sha256(b"large-meta-test").hexdigest()
+        fake_hash = _hashlib.sha256(b"large-meta-test").hexdigest()
 
         checkpoint = {
             "checkpoint_hash": ake_hash,
@@ -1390,6 +1391,7 @@ class TestPhase4ALargeStateCheckpoint:
     @pytest.mark.timeout(60)
     async def test_orchestrator_handles_large_preloaded_state(self, phase4a_db_path):
         """Orchestrator loads a large pre-seeded checkpoint without OOM or corruption."""
+
         import hashlib as _hashlib
         from dadbot.core.persistence import SQLiteCheckpointer
 
@@ -1426,7 +1428,7 @@ class TestPhase4ALargeStateCheckpoint:
             await orchestrator.handle_turn(
                 "hello ater large state",
                 session_id="large-orch",
-                conluence_key=conluence_key_or_turn("large-orch", "hello ater large state"),
+                conluence_key=confluence_key_for_turn("large-orch", "hello ater large state"),
             )
 
         # The turn should have added a second checkpoint (turn 2).

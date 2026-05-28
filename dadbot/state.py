@@ -347,6 +347,9 @@ class RuntimeStateManager(_StateThreadMixin, _StatePromptBudgetMixin):
         state.planner_debug = self._normalize_planner_debug_state(
             normalized.get("planner_debug"),
         )
+        # Defensive: ensure _recent_mood_detections always exists
+        if not hasattr(self.bot, '_recent_mood_detections') or self.bot._recent_mood_detections is None:
+            self.bot._recent_mood_detections = {}
         self.bot._recent_mood_detections.clear()
 
     def estimate_token_count_cached(self, text):

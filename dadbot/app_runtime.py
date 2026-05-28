@@ -904,18 +904,29 @@ def build_customer_document_store(config):
     durable_store = None
 
     if config.persistence.redis_url:
-        fast_store = RedisStateStore(config.persistence.redis_url)
+        try:
+            fast_store = RedisStateStore(config.persistence.redis_url)
+        except Exception as e:
+            print(f"[DadBot] Redis unavailable or misconfigured: {e}. Falling back to in-memory store.")
+            fast_store = None
 
     if config.persistence.postgres_dsn:
-        durable_store = PostgresStateStore(
-            config.persistence.postgres_dsn,
-            session_table=config.persistence.session_table,
-            task_table=config.persistence.task_table,
-            event_table=config.persistence.event_table,
-        )
+        try:
+            durable_store = PostgresStateStore(
+                config.persistence.postgres_dsn,
+                session_table=config.persistence.session_table,
+                task_table=config.persistence.task_table,
+                event_table=config.persistence.event_table,
+            )
+        except Exception as e:
+            print(f"[DadBot] Postgres unavailable or misconfigured: {e}. Falling back to in-memory store.")
+            durable_store = None
 
+    if durable_store is None and fast_store is None:
+        print("[DadBot] No durable store available, using in-memory state store.")
+        return InMemoryStateStore()
     if durable_store is None:
-        return None
+        return fast_store
     if fast_store is None:
         return durable_store
     return CompositeStateStore(fast_store=fast_store, durable_store=durable_store)

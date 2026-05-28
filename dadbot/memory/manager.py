@@ -40,18 +40,37 @@ class MemoryManager(MemoryLifecycleMixin, MemorySearchMixin, MemoryIntegrationMi
             self.mutate_memory_store(**{key: None})
 
     def __init__(self, bot: DadBotContext | SupportsDadBotAccess):
-        from dadbot.memory.graph_manager import MemoryGraphManager
-
-        self.context = DadBotContext.from_runtime(bot)
-        self.bot = self.context.bot
+        # Defer all property access on bot until initialize()
+        self.context = None
+        self.bot = bot if bot is not None else None
         self._memory_projection_cache: dict = {}
         self._memory_core_state_cache: CoreState = CoreState()
         self._memory_projection_version: int | None = None
-        self._graph_manager: GraphManagerProtocol = MemoryGraphManager(self.bot, self)
-        self._semantic_manager = SemanticIndexManager(self.bot)
-        self._normalizer = MemoryNormalizer(self.bot)  # data-shape policy
-        self._storage = MemoryStorageBackend(self.bot, self)  # persistence I/O
-        self._lifecycle = MemoryLifecycleManager(self.bot, self)  # catalog access
+        self._graph_manager: GraphManagerProtocol = None
+        self._semantic_manager = None
+        self._normalizer = None
+        self._storage = None
+        self._lifecycle = None
+        # Do not create sub-managers here; always defer to initialize()
+
+    def initialize(self):
+        from dadbot.memory.graph_manager import MemoryGraphManager
+        from dadbot.memory.semantic_manager import SemanticIndexManager
+        from dadbot.memory.normalizers import MemoryNormalizer
+        from dadbot.memory.storage import MemoryStorageBackend
+        from dadbot.memory.lifecycle import MemoryLifecycleManager
+        from dadbot.contracts import DadBotContext
+
+        self.context = DadBotContext.from_runtime(self.bot)
+        self.bot = self.context.bot
+        if self.bot is not None:
+            self._graph_manager = MemoryGraphManager(self.bot, self)
+            if hasattr(self._graph_manager, 'initialize'):
+                self._graph_manager.initialize()
+            self._semantic_manager = SemanticIndexManager(self.bot)
+            self._normalizer = MemoryNormalizer(self.bot)
+            self._storage = MemoryStorageBackend(self.bot, self)
+            self._lifecycle = MemoryLifecycleManager(self.bot, self)
 
     def memory_projection(self) -> dict:
         active = get_active_core_state()

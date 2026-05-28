@@ -1,5 +1,6 @@
 import unittest
-from dadbot.infrastructure.device_state import Device, DeviceManager, Scheduler, SceneManager, parse_intent
+from dadbot.infrastructure.device_state import Device, DeviceManager, Scheduler, SceneManager
+from dadbot.smart_home.intent_parser import parse_intent
 import time
 
 def dummy_action(context):

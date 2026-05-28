@@ -56,7 +56,7 @@ class ProfileRuntimeManager:
         return self._profile
 
     def refresh_profile_runtime(self):
-        self.bot.STYLE = self.bot.PROFILE["style"]
+        self.bot.profile_runtime.style = self.bot.PROFILE["style"]
         self.bot.FAMILY = self.bot.PROFILE["family"]
         self.bot.EDUCATION = self.bot.PROFILE["education"]
         self.bot.SECURITY = self.bot.PROFILE.get("security", {})
@@ -107,7 +107,7 @@ class ProfileRuntimeManager:
         return normalized
 
     def current_persona_preset(self):
-        preset = str(self.bot.STYLE.get("persona_preset") or "").strip().lower()
+        preset = str(self.bot.profile_runtime.style.get("persona_preset") or "").strip().lower()
         if preset in self.bot.persona_preset_catalog():
             return preset
         return "classic"

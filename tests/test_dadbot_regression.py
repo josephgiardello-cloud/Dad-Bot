@@ -12,8 +12,6 @@ from unittest.mock import patch
 
 import ollama
 import pytest
-
-import pytest
 from dadbot.core.execution_ledger import IntegrityBreachError
 from dadbot.core.execution_trace_context import ExecutionTraceRecorder, bind_execution_trace
 from dadbot.core.graph import LedgerMutationOp, TurnContext
@@ -47,8 +45,8 @@ def setup_bot(request, make_test_dadbot, tmp_path):
 
     # Test class definition starts here
 
-@pytest.mark.usefixtures("setup_bot")
-class TestDadBotRegression:
+class TestDadBotRegression(unittest.TestCase):
+    pytestmark = pytest.mark.usefixtures("setup_bot")
     def cleanup_temp_dir(self):
         for attempt in range(3):
             try:

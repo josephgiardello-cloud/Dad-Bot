@@ -48,21 +48,22 @@ def _render_persona_section(bot: DadBot, preset_catalog: dict) -> None:
                 index=preset_options.index(bot.current_persona_preset()),
                 format_func=lambda key: preset_catalog[key]["label"],
             )
+            style = bot.profile_runtime.style
             dad_name = st.text_input(
                 "Dad display name",
-                value=bot.STYLE.get("name", "Dad"),
+                value=style.get("name", "Dad"),
             )
             listener_name = st.text_input(
                 "Listener name",
-                value=bot.STYLE.get("listener_name", "Tony"),
+                value=style.get("listener_name", "Tony"),
             )
             signoff = st.text_input(
                 "Signoff",
-                value=bot.STYLE.get("signoff", "Love you, buddy."),
+                value=style.get("signoff", "Love you, buddy."),
             )
             behavior_rules = st.text_area(
                 "Behavior rules",
-                value="\n".join(bot.STYLE.get("behavior_rules", [])),
+                value="\n".join(style.get("behavior_rules", [])),
                 height=180,
             )
             opening_messages = st.text_area(
