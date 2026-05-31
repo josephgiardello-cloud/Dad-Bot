@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import shutil
 import subprocess
+from contextlib import suppress
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 from pathlib import Path
 
 from dadbot.utils import create_temp_file_path, safe_unlink
@@ -17,9 +22,88 @@ try:
 except Exception:  # pragma: no cover - optional dependency
     edge_tts = None
 
+try:
+    import streamlit as st  # type: ignore[import-not-found]
+except Exception:  # pragma: no cover - optional runtime dependency
+    st = None
+
 
 def edge_tts_available() -> bool:
     return edge_tts is not None
+
+
+def _elevenlabs_credentials(voice_cfg: dict | None = None) -> tuple[str, str]:
+    config = voice_cfg if isinstance(voice_cfg, dict) else {}
+    secret_api_key = ""
+    if st is not None:
+        with suppress(Exception):
+            secret_api_key = str(st.secrets.get("DADBOT_ELEVENLABS_API_KEY", "") or "").strip()
+    api_key = str(
+        config.get("elevenlabs_api_key")
+        or os.environ.get("DADBOT_ELEVENLABS_API_KEY")
+        or secret_api_key
+        or ""
+    ).strip()
+    voice_id = str(
+        config.get("elevenlabs_voice_id")
+        or os.environ.get("DADBOT_ELEVENLABS_VOICE_ID")
+        or ""
+    ).strip()
+    return api_key, voice_id
+
+
+def elevenlabs_available(voice_cfg: dict | None = None) -> bool:
+    api_key, voice_id = _elevenlabs_credentials(voice_cfg)
+    return bool(api_key and voice_id)
+
+
+def synthesize_elevenlabs_audio(reply_text, *, voice_cfg: dict | None = None):
+    text = str(reply_text or "").strip()
+    if not text:
+        return None, ""
+
+    config = voice_cfg if isinstance(voice_cfg, dict) else {}
+    api_key, voice_id = _elevenlabs_credentials(config)
+    if not api_key or not voice_id:
+        return None, "ElevenLabs requires API key and voice ID."
+
+    model_id = str(config.get("elevenlabs_model_id") or "eleven_turbo_v2_5").strip() or "eleven_turbo_v2_5"
+    payload = {
+        "text": text,
+        "model_id": model_id,
+        "voice_settings": {
+            "stability": float(config.get("elevenlabs_stability", 0.45) or 0.45),
+            "similarity_boost": float(config.get("elevenlabs_similarity_boost", 0.80) or 0.80),
+            "style": float(config.get("elevenlabs_style", 0.15) or 0.15),
+            "use_speaker_boost": bool(config.get("elevenlabs_speaker_boost", True)),
+        },
+    }
+    request = Request(
+        url=f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream?output_format=mp3_44100_128",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "xi-api-key": api_key,
+            "Content-Type": "application/json",
+            "Accept": "audio/mpeg",
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=30) as response:
+            audio_bytes = response.read()
+        if not audio_bytes:
+            return None, "ElevenLabs returned empty audio."
+        return audio_bytes, ""
+    except HTTPError as exc:
+        body = ""
+        with suppress(Exception):
+            body = exc.read().decode("utf-8", errors="ignore").strip()
+        detail = body or str(exc.reason or exc)
+        return None, f"ElevenLabs failed: HTTP {exc.code} {detail}"
+    except URLError as exc:
+        return None, f"ElevenLabs failed: {exc.reason}"
+    except Exception as exc:
+        return None, f"ElevenLabs failed: {exc}"
 
 
 def _run_async(coro):

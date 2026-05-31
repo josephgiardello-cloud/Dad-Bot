@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from dadbot.core.dadbot import DadBot
 
 _STATIC_DIR = Path("static")
-DAD_AVATAR_PATH = _STATIC_DIR / "dad_avatar.png"
+DAD_AVATAR_PATH = _STATIC_DIR / "assets" / "dad_avatar.jpg"
 
 __all__ = ["render_preferences_tab"]
 
@@ -403,9 +403,10 @@ def _render_col2_llm_tools_audio(
         value=bool(voice.get("tts_enabled", True)),
     )
     _piper_avail = bool(shutil.which("piper"))
-    tts_backend_options = ["auto", "edge_tts", "piper", "pyttsx3"]
+    tts_backend_options = ["auto", "elevenlabs", "edge_tts", "piper", "pyttsx3"]
     tts_backend_labels = {
-        "auto": "Auto (best available: Piper -> edge-tts -> pyttsx3)",
+        "auto": "Auto (best available: ElevenLabs -> Piper -> edge-tts -> pyttsx3)",
+        "elevenlabs": "ElevenLabs (voice clone)",
         "edge_tts": "edge-tts (neural, natural)",
         "piper": "Piper (neural, local)",
         "pyttsx3": "pyttsx3 (system voices)",
@@ -422,7 +423,12 @@ def _render_col2_llm_tools_audio(
         disabled=not tts_enabled,
         help="Auto picks the most natural available backend. Piper requires executable + .onnx model.",
     )
-    if tts_backend_pref == "piper":
+    if tts_backend_pref == "elevenlabs":
+        st.info(
+            "Set `DADBOT_ELEVENLABS_API_KEY` in your environment or Streamlit secrets, and keep `DADBOT_ELEVENLABS_VOICE_ID` in your profile or environment to enable cloned voice output.",
+        )
+        tts_piper_model_path = str(voice.get("tts_piper_model_path") or "")
+    elif tts_backend_pref == "piper":
         if _piper_avail:
             st.success("Piper executable detected on PATH.")
         else:
@@ -572,6 +578,12 @@ def _save_preferences(
         "tts_voice": c2["tts_voice"],
         "tts_backend": c2["tts_backend_pref"],
         "tts_piper_model_path": str(c2["tts_piper_model_path"] or "").strip(),
+        "elevenlabs_voice_id": str(voice.get("elevenlabs_voice_id") or "").strip(),
+        "elevenlabs_model_id": str(voice.get("elevenlabs_model_id") or "eleven_turbo_v2_5").strip() or "eleven_turbo_v2_5",
+        "elevenlabs_stability": float(voice.get("elevenlabs_stability", 0.45) or 0.45),
+        "elevenlabs_similarity_boost": float(voice.get("elevenlabs_similarity_boost", 0.80) or 0.80),
+        "elevenlabs_style": float(voice.get("elevenlabs_style", 0.15) or 0.15),
+        "elevenlabs_speaker_boost": bool(voice.get("elevenlabs_speaker_boost", True)),
         "tts_rate": int(c2["tts_rate"]),
         "warmth": int(c2["warmth"]),
         "dad_joke_frequency": int(c2["dad_joke_frequency"]),

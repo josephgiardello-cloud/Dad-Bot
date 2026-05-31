@@ -31,7 +31,7 @@ class AvatarManager:
         self.bot = bot
 
     def avatar_path(self) -> Path:
-        return Path(__file__).parent.parent.parent / "static" / "dad_avatar.png"
+        return Path(__file__).parent.parent.parent / "static" / "assets" / "dad_avatar.jpg"
 
     def current_avatar_exists(self) -> bool:
         return self.avatar_path().exists()
