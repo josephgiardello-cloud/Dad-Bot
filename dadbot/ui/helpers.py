@@ -7,7 +7,9 @@ never import from dad_streamlit (no circular deps).
 from __future__ import annotations
 
 import re
+import os
 import shutil
+from contextlib import suppress
 from datetime import datetime
 from typing import TYPE_CHECKING
 from urllib.error import URLError
@@ -120,9 +122,25 @@ def local_tts_backend_status(preferences: dict | None = None) -> tuple[bool, str
     requested = str(voice.get("tts_backend") or "auto").strip().lower()
 
     piper_model_path = str(voice.get("tts_piper_model_path") or "").strip()
+    secret_elevenlabs_key = ""
+    with suppress(Exception):
+        secret_elevenlabs_key = str(st.secrets.get("DADBOT_ELEVENLABS_API_KEY", "") or "").strip()
+    elevenlabs_key = str(
+        voice.get("elevenlabs_api_key")
+        or os.environ.get("DADBOT_ELEVENLABS_API_KEY")
+        or secret_elevenlabs_key
+        or ""
+    ).strip()
+    elevenlabs_voice_id = str(voice.get("elevenlabs_voice_id") or os.environ.get("DADBOT_ELEVENLABS_VOICE_ID") or "").strip()
+    elevenlabs_ready = bool(elevenlabs_key and elevenlabs_voice_id)
     piper_ready = bool(shutil.which("piper") and piper_model_path)
     edge_ready = edge_tts is not None
     pyttsx3_ready = pyttsx3 is not None
+
+    if requested in {"elevenlabs", "voice_clone", "11labs"}:
+        if elevenlabs_ready:
+            return True, "elevenlabs", "Using ElevenLabs voice clone TTS."
+        return False, "none", "ElevenLabs selected, but API key or voice ID is missing."
 
     if requested == "piper":
         if piper_ready:
@@ -135,6 +153,8 @@ def local_tts_backend_status(preferences: dict | None = None) -> tuple[bool, str
         return False, "none", "edge-tts selected, but package is not installed."
 
     if requested == "auto":
+        if elevenlabs_ready:
+            return True, "elevenlabs", "Auto-selected ElevenLabs voice clone TTS."
         if piper_ready:
             return True, "piper", "Auto-selected Piper neural TTS."
         if edge_ready:

@@ -1,0 +1,1059 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DadBot Spatial Live Mock</title>
+  <style>
+    :root {
+      --bg0: #091321;
+      --bg1: #152a45;
+      --ink: #eef7ff;
+      --muted: #b5cce4;
+      --ok: #7de4c8;
+      --err: #ffb4b4;
+      --ring: rgba(137, 228, 255, 0.6);
+    }
+
+    html, body {
+      margin: 0;
+      height: 100%;
+      font-family: "Segoe UI", Tahoma, sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 14% 16%, rgba(98, 133, 255, 0.22), transparent 36%),
+        radial-gradient(circle at 85% 20%, rgba(47, 163, 217, 0.18), transparent 30%),
+        linear-gradient(160deg, var(--bg0), var(--bg1));
+    }
+
+    .layout {
+      height: 100%;
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      gap: 12px;
+      padding: 12px;
+      box-sizing: border-box;
+    }
+
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 10px 12px;
+      border-radius: 14px;
+      border: 1px solid rgba(172, 208, 255, 0.24);
+      background: rgba(7, 14, 28, 0.72);
+    }
+
+    .title {
+      font-size: 12px;
+      letter-spacing: 0.13em;
+      text-transform: uppercase;
+      color: var(--muted);
+      font-weight: 700;
+    }
+
+    .status {
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      color: var(--err);
+    }
+
+    .status.connected {
+      color: var(--ok);
+    }
+
+    .stage {
+      position: relative;
+      border-radius: 18px;
+      border: 1px solid rgba(168, 205, 255, 0.24);
+      background:
+        radial-gradient(circle at 50% 10%, rgba(148, 223, 255, 0.16), transparent 30%),
+        linear-gradient(180deg, rgba(7, 14, 27, 0.72), rgba(8, 14, 27, 0.93));
+      display: grid;
+      place-items: center;
+      overflow: hidden;
+      isolation: isolate;
+    }
+
+    .stage::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background:
+        radial-gradient(circle at 22% 20%, rgba(194, 240, 255, 0.12), transparent 36%),
+        radial-gradient(circle at 78% 78%, rgba(111, 171, 224, 0.12), transparent 34%);
+      pointer-events: none;
+    }
+
+    .stage::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background-image: radial-gradient(rgba(255, 255, 255, 0.06) 0.45px, transparent 0.45px);
+      background-size: 2px 2px;
+      opacity: 0.1;
+      mix-blend-mode: soft-light;
+      pointer-events: none;
+    }
+
+    .glow {
+      position: absolute;
+      width: min(340px, 84%);
+      aspect-ratio: 1;
+      border-radius: 999px;
+      background: radial-gradient(circle, rgba(124, 225, 255, 0.35), rgba(126, 185, 255, 0));
+      filter: blur(22px);
+      opacity: 0.45;
+      transition: opacity 220ms ease, transform 240ms ease;
+      pointer-events: none;
+    }
+
+    .stage.speaking .glow {
+      opacity: 0.74;
+      transform: scale(1.05);
+    }
+
+    #avatarCanvas {
+      width: min(560px, 95%);
+      aspect-ratio: 1;
+      max-height: 92%;
+      image-rendering: auto;
+      filter: drop-shadow(0 20px 34px rgba(4, 10, 18, 0.48));
+      display: block;
+    }
+
+    .subtitle {
+      position: absolute;
+      bottom: 12px;
+      left: 14px;
+      right: 14px;
+      text-align: center;
+      font-size: 12px;
+      color: var(--muted);
+      text-shadow: 0 1px 1px rgba(0, 0, 0, 0.36);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .controls {
+      display: grid;
+      grid-template-columns: 1fr auto auto;
+      gap: 8px;
+      border-radius: 14px;
+      border: 1px solid rgba(172, 208, 255, 0.24);
+      background: rgba(8, 15, 30, 0.72);
+      padding: 10px;
+    }
+
+    .controls.dev-upload-only {
+      grid-template-columns: 1fr;
+      justify-items: end;
+    }
+
+    input, button {
+      border-radius: 10px;
+      border: 1px solid rgba(171, 206, 255, 0.24);
+      background: rgba(11, 20, 38, 0.94);
+      color: var(--ink);
+      font-size: 14px;
+      padding: 10px 12px;
+      outline: none;
+    }
+
+    input:focus {
+      box-shadow: 0 0 0 2px var(--ring);
+    }
+
+    button {
+      min-width: 92px;
+      cursor: pointer;
+      font-weight: 700;
+      background: linear-gradient(180deg, #669de8, #3f6fb6);
+    }
+
+    .ghost-button {
+      min-width: 118px;
+      text-align: center;
+      cursor: pointer;
+      font-weight: 700;
+      border-radius: 10px;
+      border: 1px solid rgba(171, 206, 255, 0.34);
+      background: rgba(18, 30, 51, 0.92);
+      color: var(--ink);
+      font-size: 13px;
+      padding: 10px 12px;
+      box-sizing: border-box;
+    }
+
+    #referenceImageInput {
+      display: none;
+    }
+
+    button:disabled {
+      opacity: 0.55;
+      cursor: default;
+    }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <div class="header">
+      <div class="title">DadBot Live Avatar</div>
+      <div id="status" class="status">Disconnected</div>
+    </div>
+
+    <div id="stage" class="stage">
+      <div class="glow"></div>
+      <canvas id="avatarCanvas" width="420" height="420"></canvas>
+      <div id="log" class="subtitle">Waiting for websocket...</div>
+    </div>
+
+    <form id="chatForm" class="controls">
+      <input id="chatInput" type="text" placeholder="Say something to Dad..." autocomplete="off" />
+      <button id="sendButton" type="submit">Send</button>
+      <label class="ghost-button" for="referenceImageInput">Load HD Reference</label>
+      <input id="referenceImageInput" type="file" accept="image/*" />
+    </form>
+  </div>
+
+  <audio id="player"></audio>
+
+  <script>
+    const statusEl = document.getElementById("status");
+    const stageEl = document.getElementById("stage");
+    const logEl = document.getElementById("log");
+    const formEl = document.getElementById("chatForm");
+    const inputEl = document.getElementById("chatInput");
+    const sendEl = document.getElementById("sendButton");
+    const referenceImageInputEl = document.getElementById("referenceImageInput");
+    const player = document.getElementById("player");
+    const canvas = document.getElementById("avatarCanvas");
+    const ctx = canvas.getContext("2d", { alpha: true, desynchronized: true });
+
+    const injectedQuery = typeof window.__DADBOT_QUERY__ === "string" ? window.__DADBOT_QUERY__ : "";
+    const params = new URLSearchParams(injectedQuery || window.location.search || "");
+    const wsUrl = params.get("dadbot_ws") || params.get("dadbotWs") || "ws://127.0.0.1:8787/v1/spatial/ws";
+    const injectedAvatarImage = typeof window.__DADBOT_AVATAR_IMAGE__ === "string" ? window.__DADBOT_AVATAR_IMAGE__ : "";
+    const avatarImageUrl = params.get("dadbot_avatar_image") || params.get("avatarImage") || injectedAvatarImage || "dad_avatar.jpg";
+    const showDevAvatarUpload =
+      params.get("dadbot_dev_avatar_upload") === "1" ||
+      params.get("devAvatarUpload") === "1" ||
+      params.get("dev") === "1";
+
+    let socket = null;
+    let reconnectDelayMs = 900;
+    let logicalCanvasSize = 480;
+    let avatarTexture = null;
+    let avatarTextureReady = false;
+    const HD_REFERENCE_STORAGE_KEY = "dadbot_spatial_hd_reference_data_url";
+    const HD_DEFAULT_STORAGE_KEY = "dadbot_spatial_default_hd_reference_data_url";
+    let audioContext = null;
+    let mediaSource = null;
+    let audioAnalyser = null;
+    let audioData = null;
+    let speechVoice = null;
+
+    const avatar = {
+      blink: 1,
+      targetBlink: 1,
+      mouthOpen: 0.08,
+      targetMouthOpen: 0.08,
+      headTilt: 0,
+      bobPhase: 0,
+      talkingUntil: 0,
+      speechEnergy: 0,
+      pupilOffsetX: 0,
+      pupilOffsetY: 0,
+      browLift: 0,
+      targetBrowLift: 0,
+      jawShift: 0,
+    };
+
+    function nowMs() {
+      return performance.now();
+    }
+
+    function setStatus(text, connected) {
+      statusEl.textContent = text;
+      statusEl.className = connected ? "status connected" : "status";
+      sendEl.disabled = true;
+    }
+
+    function setLog(text) {
+      const value = String(text || "");
+      const isImportant = /^Error:|^Waiting for websocket|^WebSocket|^Invalid payload|^Failed/i.test(value);
+      const shouldShow = !avatarTextureReady || isImportant;
+      logEl.textContent = shouldShow ? value : "";
+      logEl.style.opacity = shouldShow ? "1" : "0";
+    }
+
+    function setupCanvas() {
+      const dpr = Math.max(1, Math.min(window.devicePixelRatio || 1, 2.2));
+      const cssWidth = canvas.clientWidth || 360;
+      logicalCanvasSize = Math.round(Math.max(440, cssWidth * 1.28));
+      canvas.width = Math.round(logicalCanvasSize * dpr);
+      canvas.height = Math.round(logicalCanvasSize * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+
+    function applyAvatarTexture(image, sourceLabel) {
+      avatarTexture = image;
+      avatarTextureReady = true;
+      setLog("HD reference loaded" + (sourceLabel ? ": " + sourceLabel : ""));
+      persistAvatarAsDefault(image);
+    }
+
+    function persistAvatarAsDefault(image) {
+      if (!image) {
+        return;
+      }
+
+      let dataUrl = "";
+      const src = String(image.currentSrc || image.src || "");
+      if (src.startsWith("data:image/")) {
+        dataUrl = src;
+      }
+
+      if (!dataUrl) {
+        try {
+          const scratch = document.createElement("canvas");
+          scratch.width = Math.max(1, image.naturalWidth || image.width || 1);
+          scratch.height = Math.max(1, image.naturalHeight || image.height || 1);
+          const scratchCtx = scratch.getContext("2d");
+          if (!scratchCtx) {
+            return;
+          }
+          scratchCtx.drawImage(image, 0, 0, scratch.width, scratch.height);
+          dataUrl = scratch.toDataURL("image/png");
+        } catch (_) {
+          // Cross-origin image sources may block canvas export.
+          return;
+        }
+      }
+
+      try {
+        localStorage.setItem(HD_REFERENCE_STORAGE_KEY, dataUrl);
+        localStorage.setItem(HD_DEFAULT_STORAGE_KEY, dataUrl);
+      } catch (_) {
+        // Ignore storage quota and sandbox restrictions.
+      }
+    }
+
+    function loadAvatarTextureFromDataUrl(dataUrl, sourceLabel) {
+      if (!dataUrl) {
+        return;
+      }
+
+      const image = new Image();
+      image.onload = () => applyAvatarTexture(image, sourceLabel || "saved");
+      image.onerror = () => {
+        avatarTexture = null;
+        avatarTextureReady = false;
+      };
+      image.src = dataUrl;
+    }
+
+    function loadAvatarTexture() {
+      if (!avatarImageUrl) {
+        return;
+      }
+
+      const image = new Image();
+      image.crossOrigin = "anonymous";
+      image.onload = () => {
+        applyAvatarTexture(image, "url");
+      };
+      image.onerror = () => {
+        avatarTexture = null;
+        avatarTextureReady = false;
+      };
+      image.src = avatarImageUrl;
+    }
+
+    function loadAvatarTextureFromStorage() {
+      try {
+        const saved = localStorage.getItem(HD_DEFAULT_STORAGE_KEY) || localStorage.getItem(HD_REFERENCE_STORAGE_KEY);
+        if (saved) {
+          loadAvatarTextureFromDataUrl(saved, "default");
+        }
+      } catch (_) {
+        // Ignore storage access issues.
+      }
+    }
+
+    function loadAvatarTextureFromFile(file) {
+      if (!file) {
+        return;
+      }
+
+      const reader = new FileReader();
+      reader.onload = () => {
+        const dataUrl = String(reader.result || "");
+        if (!dataUrl) {
+          setLog("Failed to parse selected image");
+          return;
+        }
+
+        try {
+          localStorage.setItem(HD_REFERENCE_STORAGE_KEY, dataUrl);
+          localStorage.setItem(HD_DEFAULT_STORAGE_KEY, dataUrl);
+          setLog("HD reference saved as avatar: " + (file.name || "file"));
+        } catch (_) {
+          // Ignore storage quota and sandbox errors.
+        }
+
+        loadAvatarTextureFromDataUrl(dataUrl, file.name || "file");
+      };
+      reader.onerror = () => setLog("Failed to read selected image");
+      reader.readAsDataURL(file);
+    }
+
+    function scheduleBlink() {
+      const delay = 2200 + Math.random() * 3200;
+      setTimeout(() => {
+        avatar.targetBlink = 0.08;
+        setTimeout(() => {
+          avatar.targetBlink = 1;
+          scheduleBlink();
+        }, 95 + Math.random() * 60);
+      }, delay);
+    }
+
+    function speakFor(durationMs, strength) {
+      const until = nowMs() + durationMs;
+      avatar.talkingUntil = Math.max(avatar.talkingUntil, until);
+      avatar.speechEnergy = Math.max(avatar.speechEnergy, Math.min(1, strength));
+      avatar.targetBrowLift = Math.min(0.35, 0.08 + strength * 0.24);
+      stageEl.classList.add("speaking");
+    }
+
+    function base64ToUint8Array(base64) {
+      const binary = atob(base64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i += 1) {
+        bytes[i] = binary.charCodeAt(i);
+      }
+      return bytes;
+    }
+
+    function ensureAudioAnalyser() {
+      if (audioAnalyser || !player) {
+        return;
+      }
+
+      try {
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        if (!Ctx) {
+          return;
+        }
+
+        audioContext = new Ctx();
+        mediaSource = audioContext.createMediaElementSource(player);
+        audioAnalyser = audioContext.createAnalyser();
+        audioAnalyser.fftSize = 256;
+        audioAnalyser.smoothingTimeConstant = 0.78;
+        mediaSource.connect(audioAnalyser);
+        audioAnalyser.connect(audioContext.destination);
+        audioData = new Uint8Array(audioAnalyser.frequencyBinCount);
+      } catch (_) {
+        audioAnalyser = null;
+        audioData = null;
+      }
+    }
+
+    function initSpeechVoice() {
+      if (!("speechSynthesis" in window)) {
+        return;
+      }
+      const pickVoice = () => {
+        const voices = window.speechSynthesis.getVoices();
+        if (!voices || !voices.length) {
+          return;
+        }
+        const preferred = voices.find((voice) => /en(-|_|$)/i.test(voice.lang || "")) || voices[0];
+        speechVoice = preferred || null;
+      };
+      pickVoice();
+      window.speechSynthesis.addEventListener("voiceschanged", pickVoice);
+    }
+
+    function speakTextFallback(text) {
+      const reply = String(text || "").trim();
+      if (!reply || !("speechSynthesis" in window)) {
+        return false;
+      }
+      try {
+        const utterance = new SpeechSynthesisUtterance(reply);
+        if (speechVoice) {
+          utterance.voice = speechVoice;
+        }
+        utterance.rate = 1;
+        utterance.pitch = 1;
+        utterance.volume = 1;
+        window.speechSynthesis.cancel();
+        window.speechSynthesis.speak(utterance);
+        return true;
+      } catch (_) {
+        return false;
+      }
+    }
+
+    function installSpeechCancelGuard() {
+      if (!("speechSynthesis" in window)) {
+        return;
+      }
+      const stopSpeech = () => {
+        try {
+          window.speechSynthesis.cancel();
+        } catch (_) {
+          // ignore
+        }
+      };
+      stopSpeech();
+      window.addEventListener("beforeunload", stopSpeech);
+      window.addEventListener("pagehide", stopSpeech);
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "hidden") {
+          stopSpeech();
+        }
+      });
+    }
+
+    function sampleAudioEnergy() {
+      if (!audioAnalyser || !audioData) {
+        return 0;
+      }
+
+      audioAnalyser.getByteFrequencyData(audioData);
+      let total = 0;
+      for (let i = 0; i < audioData.length; i += 1) {
+        total += audioData[i];
+      }
+      return (total / audioData.length) / 255;
+    }
+
+    async function playAudioBase64(base64Audio, mimeType) {
+      if (!base64Audio) {
+        return;
+      }
+      try {
+        ensureAudioAnalyser();
+        if (audioContext && audioContext.state === "suspended") {
+          await audioContext.resume();
+        }
+
+        const bytes = base64ToUint8Array(base64Audio);
+        const blob = new Blob([bytes], { type: mimeType || "audio/wav" });
+        const url = URL.createObjectURL(blob);
+        player.src = url;
+        await player.play();
+        player.onended = () => URL.revokeObjectURL(url);
+      } catch (_) {
+        // Ignore autoplay and decode failures in the mock frontend.
+      }
+    }
+
+    function drawShoulders(cx, cy) {
+      const jacket = ctx.createLinearGradient(cx, cy + 130, cx, cy + 312);
+      jacket.addColorStop(0, "#425e86");
+      jacket.addColorStop(1, "#223754");
+      ctx.fillStyle = jacket;
+      ctx.beginPath();
+      ctx.ellipse(cx, cy + 236, 188, 118, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = "#f3f8ff";
+      ctx.beginPath();
+      ctx.moveTo(cx - 54, cy + 162);
+      ctx.lineTo(cx, cy + 232);
+      ctx.lineTo(cx + 54, cy + 162);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.fillStyle = "#2e4f74";
+      ctx.beginPath();
+      ctx.moveTo(cx - 36, cy + 164);
+      ctx.lineTo(cx, cy + 214);
+      ctx.lineTo(cx + 36, cy + 164);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.strokeStyle = "rgba(147, 229, 255, 0.52)";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(cx - 126, cy + 216);
+      ctx.quadraticCurveTo(cx, cy + 196, cx + 126, cy + 216);
+      ctx.stroke();
+    }
+
+    function drawTexturedHologram(cx, cy, t, talking) {
+      const frameW = logicalCanvasSize * 0.66;
+      const frameH = logicalCanvasSize * 0.88;
+      const headLeft = cx - frameW * 0.5;
+      const headRight = cx + frameW * 0.5;
+      const headTop = cy - frameH * 0.5;
+      const headBottom = cy + frameH * 0.5;
+      const frameX = headLeft - logicalCanvasSize * 0.018;
+      const frameY = headTop - logicalCanvasSize * 0.014;
+      const frameWExpanded = frameW + logicalCanvasSize * 0.036;
+      const frameHExpanded = frameH + logicalCanvasSize * 0.028;
+
+      ctx.save();
+      ctx.beginPath();
+      ctx.roundRect(frameX, frameY, frameWExpanded, frameHExpanded, 26);
+      ctx.clip();
+
+      const sourceW = avatarTexture.width;
+      const sourceH = avatarTexture.height;
+      const drawW = frameWExpanded;
+      const drawH = frameHExpanded;
+      const frameAspect = drawW / Math.max(1, drawH);
+      const sourceAspect = sourceW / Math.max(1, sourceH);
+      let cropX = 0;
+      let cropY = 0;
+      let cropW = sourceW;
+      let cropH = sourceH;
+      if (sourceAspect > frameAspect) {
+        cropW = sourceH * frameAspect;
+        cropX = (sourceW - cropW) * 0.5;
+      } else {
+        cropH = sourceW / frameAspect;
+        cropY = (sourceH - cropH) * 0.12;
+      }
+
+      const reactive = Math.min(1, avatar.speechEnergy * 1.55);
+      const response = talking ? Math.max(0.3, reactive) : 0;
+      const microX = Math.sin(t * 0.95) * (0.02 + response * 0.14);
+      const microY = Math.cos(t * 0.9) * (0.02 + response * 0.12);
+      const baseX = frameX + microX;
+      const baseY = frameY + microY;
+
+      // Draw the portrait cleanly first.
+      ctx.globalAlpha = 1;
+      ctx.drawImage(
+        avatarTexture,
+        cropX,
+        cropY,
+        cropW,
+        cropH,
+        baseX,
+        baseY,
+        drawW,
+        drawH
+      );
+
+      // During speech, animate only lower-face region for a realistic "live" feel.
+      if (response > 0.03) {
+        const mouthBandTop = Math.floor(cropH * 0.57);
+        const mouthBandBottom = Math.floor(cropH * 0.92);
+        const mouthBandHeight = Math.max(8, mouthBandBottom - mouthBandTop);
+        const sliceStep = Math.max(2, Math.floor(mouthBandHeight / 38));
+
+        for (let sy = 0; sy < mouthBandHeight; sy += sliceStep) {
+          const srcSliceH = Math.min(sliceStep, mouthBandHeight - sy);
+          const ratio = sy / Math.max(1, mouthBandHeight - 1);
+          const envelope = Math.sin(ratio * Math.PI);
+          const mouthWave = Math.sin((t * 18.5) + (ratio * 7.2));
+          const shiftX = mouthWave * envelope * (0.25 + response * 1.9);
+          const dropY = envelope * (avatar.mouthOpen * 2.1 + response * 2.8);
+          const srcY = cropY + mouthBandTop + sy;
+          const destY = baseY + ((mouthBandTop + sy) / cropH) * drawH + dropY;
+          const destH = (srcSliceH / cropH) * drawH;
+
+          ctx.drawImage(
+            avatarTexture,
+            cropX,
+            srcY,
+            cropW,
+            srcSliceH,
+            baseX + shiftX,
+            destY,
+            drawW,
+            destH + 0.35
+          );
+        }
+
+        const jawStart = Math.floor(cropH * 0.83);
+        const jawH = Math.max(6, cropH - jawStart);
+        const jawDrop = 0.6 + response * 2.6;
+        ctx.drawImage(
+          avatarTexture,
+          cropX,
+          cropY + jawStart,
+          cropW,
+          jawH,
+          baseX,
+          baseY + (jawStart / cropH) * drawH + jawDrop,
+          drawW,
+          (jawH / cropH) * drawH + (response * 0.9)
+        );
+      }
+
+      // Subtle frame edge keeps portrait readable without stylized effects.
+      ctx.globalAlpha = 0.22;
+      ctx.strokeStyle = "rgba(210, 225, 240, 0.88)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.roundRect(frameX + 0.5, frameY + 0.5, frameWExpanded - 1, frameHExpanded - 1, 26);
+      ctx.stroke();
+
+      ctx.restore();
+      ctx.globalAlpha = 1;
+    }
+
+    function drawFace(cx, cy, t, talking) {
+      const skin = ctx.createRadialGradient(cx - 32, cy - 90, 10, cx, cy + 28, 174);
+      skin.addColorStop(0, "#f4ddca");
+      skin.addColorStop(0.6, "#e3c1a7");
+      skin.addColorStop(1, "#cfa186");
+
+      // Draw a slimmer face silhouette with a more natural jawline.
+      ctx.fillStyle = skin;
+      ctx.beginPath();
+      ctx.moveTo(cx, cy - 128);
+      ctx.bezierCurveTo(cx - 64, cy - 124, cx - 96, cy - 32, cx - 88, cy + 24);
+      ctx.bezierCurveTo(cx - 82, cy + 72, cx - 54, cy + 112, cx - 24, cy + 128);
+      ctx.quadraticCurveTo(cx, cy + 146, cx + 24, cy + 128);
+      ctx.bezierCurveTo(cx + 54, cy + 112, cx + 82, cy + 72, cx + 88, cy + 24);
+      ctx.bezierCurveTo(cx + 96, cy - 32, cx + 64, cy - 124, cx, cy - 128);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.fillStyle = "#deb89c";
+      ctx.beginPath();
+      ctx.ellipse(cx - 90, cy + 10, 7, 14, -0.03, 0, Math.PI * 2);
+      ctx.ellipse(cx + 90, cy + 10, 7, 14, 0.03, 0, Math.PI * 2);
+      ctx.fill();
+
+      const hair = ctx.createLinearGradient(cx, cy - 192, cx, cy - 16);
+      hair.addColorStop(0, "#edf2fa");
+      hair.addColorStop(1, "#bac6d9");
+      ctx.fillStyle = hair;
+      ctx.beginPath();
+      ctx.moveTo(cx - 102, cy - 24);
+      ctx.quadraticCurveTo(cx - 114, cy - 124, cx - 26, cy - 162);
+      ctx.quadraticCurveTo(cx + 20, cy - 178, cx + 72, cy - 142);
+      ctx.quadraticCurveTo(cx + 108, cy - 114, cx + 102, cy - 48);
+      ctx.quadraticCurveTo(cx + 48, cy - 84, cx + 8, cy - 92);
+      ctx.quadraticCurveTo(cx - 38, cy - 88, cx - 84, cy - 56);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.fillStyle = "#d8e0ee";
+      ctx.beginPath();
+      ctx.moveTo(cx - 20, cy - 152);
+      ctx.quadraticCurveTo(cx + 6, cy - 170, cx + 34, cy - 154);
+      ctx.quadraticCurveTo(cx + 8, cy - 136, cx - 20, cy - 152);
+      ctx.fill();
+
+      ctx.fillStyle = "#aeb8cb";
+      ctx.beginPath();
+      ctx.moveTo(cx - 90, cy - 8);
+      ctx.quadraticCurveTo(cx - 122, cy + 30, cx - 84, cy + 102);
+      ctx.quadraticCurveTo(cx - 64, cy + 56, cx - 64, cy + 8);
+      ctx.closePath();
+      ctx.moveTo(cx + 86, cy - 4);
+      ctx.quadraticCurveTo(cx + 116, cy + 30, cx + 82, cy + 100);
+      ctx.quadraticCurveTo(cx + 62, cy + 56, cx + 60, cy + 8);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.fillStyle = "rgba(255,255,255,0.16)";
+      ctx.beginPath();
+      ctx.ellipse(cx - 28, cy - 74, 24, 10, -0.35, 0, Math.PI * 2);
+      ctx.fill();
+
+      const eyeY = cy - 6;
+      const eyeOpen = Math.max(2.2, 9.4 * avatar.blink);
+      const browLiftPx = avatar.browLift * 9;
+
+      ctx.strokeStyle = "#8c776a";
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.moveTo(cx - 64, eyeY - 12 - browLiftPx);
+      ctx.quadraticCurveTo(cx - 46, eyeY - 20 - browLiftPx, cx - 28, eyeY - 12 - browLiftPx);
+      ctx.moveTo(cx + 28, eyeY - 12 - browLiftPx);
+      ctx.quadraticCurveTo(cx + 46, eyeY - 20 - browLiftPx, cx + 64, eyeY - 12 - browLiftPx);
+      ctx.stroke();
+
+      ctx.fillStyle = "#ffffff";
+      ctx.beginPath();
+      ctx.ellipse(cx - 42, eyeY, 15.5, eyeOpen, 0, 0, Math.PI * 2);
+      ctx.ellipse(cx + 42, eyeY, 15.5, eyeOpen, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      if (avatar.blink > 0.38) {
+        ctx.fillStyle = "#76d5ff";
+        ctx.beginPath();
+        ctx.ellipse(cx - 42 + avatar.pupilOffsetX, eyeY + avatar.pupilOffsetY, 6.2, 6.2, 0, 0, Math.PI * 2);
+        ctx.ellipse(cx + 42 + avatar.pupilOffsetX, eyeY + avatar.pupilOffsetY, 6.2, 6.2, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = "#173048";
+        ctx.beginPath();
+        ctx.ellipse(cx - 42 + avatar.pupilOffsetX, eyeY + avatar.pupilOffsetY, 2.8, 2.8, 0, 0, Math.PI * 2);
+        ctx.ellipse(cx + 42 + avatar.pupilOffsetX, eyeY + avatar.pupilOffsetY, 2.8, 2.8, 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      ctx.strokeStyle = "rgba(120, 87, 67, 0.56)";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(cx + 1, cy + 8);
+      ctx.quadraticCurveTo(cx - 4, cy + 22, cx, cy + 32);
+      ctx.stroke();
+
+      ctx.fillStyle = "rgba(207, 127, 111, 0.14)";
+      ctx.beginPath();
+      ctx.ellipse(cx - 56, cy + 24, 14, 6, -0.12, 0, Math.PI * 2);
+      ctx.ellipse(cx + 56, cy + 24, 14, 6, 0.12, 0, Math.PI * 2);
+      ctx.fill();
+
+      const mouthY = cy + 58;
+      const mouthW = 26;
+      const mouthH = 8 + avatar.mouthOpen * 19;
+      ctx.lineWidth = 2.4;
+      ctx.strokeStyle = "#8f5f4d";
+      ctx.beginPath();
+      ctx.moveTo(cx - mouthW, mouthY);
+      ctx.quadraticCurveTo(cx, mouthY + mouthH * 0.45, cx + mouthW, mouthY);
+      ctx.stroke();
+
+      if (talking) {
+        ctx.fillStyle = "rgba(103, 34, 39, 0.68)";
+        ctx.beginPath();
+        ctx.ellipse(cx, mouthY + 7, Math.max(13, mouthW * 0.36), Math.max(5, mouthH * 0.36), 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      ctx.strokeStyle = "rgba(86, 72, 63, 0.36)";
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.moveTo(cx - 44, cy + 96);
+      ctx.quadraticCurveTo(cx, cy + 106 + Math.sin(t * 2) * 1.1, cx + 44, cy + 96);
+      ctx.stroke();
+    }
+
+    function drawAbstractHologram(cx, cy, t, talking) {
+      const pulse = 0.5 + Math.sin(t * 1.6) * 0.08;
+      const glow = ctx.createRadialGradient(cx, cy - 10, 20, cx, cy, 180);
+      glow.addColorStop(0, "rgba(163, 238, 255, 0.42)");
+      glow.addColorStop(1, "rgba(83, 174, 233, 0)");
+      ctx.fillStyle = glow;
+      ctx.beginPath();
+      ctx.ellipse(cx, cy + 8, 118, 146, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.strokeStyle = "rgba(136, 227, 255, 0.52)";
+      ctx.lineWidth = 1.6;
+      for (let i = 0; i < 9; i += 1) {
+        const y = cy - 110 + i * 26;
+        const w = 24 + (i < 5 ? i * 16 : (8 - i) * 16);
+        ctx.beginPath();
+        ctx.ellipse(cx, y, w + 56, 13, 0, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+
+      ctx.strokeStyle = "rgba(108, 204, 255, 0.38)";
+      for (let i = -4; i <= 4; i += 1) {
+        ctx.beginPath();
+        ctx.moveTo(cx + i * 18, cy - 114);
+        ctx.quadraticCurveTo(cx + i * 24, cy + 8, cx + i * 10, cy + 136);
+        ctx.stroke();
+      }
+
+      ctx.strokeStyle = "rgba(182, 242, 255, 0.66)";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.ellipse(cx, cy + 4, 96 * pulse, 126, 0, 0, Math.PI * 2);
+      ctx.stroke();
+
+      if (talking) {
+        ctx.fillStyle = "rgba(138, 236, 255, 0.56)";
+        ctx.beginPath();
+        ctx.ellipse(cx, cy + 64, 18, 5 + avatar.mouthOpen * 8, 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    function drawAvatar(ts) {
+      const t = ts / 1000;
+      const w = logicalCanvasSize;
+      const h = logicalCanvasSize;
+      const cx = w / 2;
+      const cy = h * 0.41;
+      const talking = nowMs() < avatar.talkingUntil;
+
+      avatar.blink += (avatar.targetBlink - avatar.blink) * 0.2;
+      avatar.bobPhase += 0.018;
+      const bob = Math.sin(avatar.bobPhase) * (talking ? 0.1 : 0);
+      avatar.headTilt = Math.sin(t * 0.34) * (talking ? 0.0014 : 0);
+      avatar.pupilOffsetX = Math.sin(t * 0.42) * 2.2;
+      avatar.pupilOffsetY = Math.cos(t * 0.38) * 1.4;
+      avatar.browLift += (avatar.targetBrowLift - avatar.browLift) * 0.14;
+      avatar.targetBrowLift *= 0.93;
+
+      const liveAudioEnergy = sampleAudioEnergy();
+      if (liveAudioEnergy > 0.035) {
+        avatar.speechEnergy = Math.max(avatar.speechEnergy, Math.min(1, liveAudioEnergy * 1.7));
+        avatar.talkingUntil = Math.max(avatar.talkingUntil, nowMs() + 140);
+      }
+
+      if (talking) {
+        const pulse = 0.16 + Math.abs(Math.sin(t * 10.5)) * (0.11 + avatar.speechEnergy * 0.19);
+        avatar.targetMouthOpen = Math.min(0.46, pulse);
+        avatar.jawShift = Math.sin(t * 8.6) * 0.5;
+      } else {
+        avatar.targetMouthOpen = 0.08 + Math.abs(Math.sin(t * 1.9)) * 0.018;
+        avatar.speechEnergy *= 0.95;
+        avatar.jawShift *= 0.86;
+        if (avatar.speechEnergy < 0.025) {
+          stageEl.classList.remove("speaking");
+        }
+      }
+      avatar.mouthOpen += (avatar.targetMouthOpen - avatar.mouthOpen) * 0.22;
+
+      ctx.clearRect(0, 0, w, h);
+
+      const bgHalo = ctx.createRadialGradient(cx, cy + 12, 42, cx, cy + 12, 190);
+      bgHalo.addColorStop(0, "rgba(129, 230, 255, 0.34)");
+      bgHalo.addColorStop(1, "rgba(129, 230, 255, 0)");
+      ctx.fillStyle = bgHalo;
+      ctx.beginPath();
+      ctx.arc(cx, cy + 12, 190, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.save();
+      ctx.translate(cx, cy + bob);
+      ctx.rotate(avatar.headTilt);
+
+      if (avatarTextureReady && avatarTexture) {
+        drawTexturedHologram(0, 0, t, talking);
+      } else {
+        ctx.fillStyle = "rgba(20, 35, 58, 0.86)";
+        ctx.beginPath();
+        ctx.ellipse(0, 188, 92, 44, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        drawShoulders(0, 0);
+        drawAbstractHologram(0, 0, t, talking);
+      }
+
+      ctx.restore();
+
+      requestAnimationFrame(drawAvatar);
+    }
+
+    async function handleResponse(payload) {
+      const text = String(payload.text || payload.reply || payload.message || "").trim();
+      if (text) {
+        setLog(text);
+      }
+
+      const audio = payload.audio || payload.audio_base64 || payload.audioBase64;
+      const mime = payload.audio_mime || payload.audioMime || "audio/wav";
+      if (audio) {
+        const estimatedMs = Math.min(3200, Math.max(900, Math.floor((audio.length / 150) * 1000)));
+        speakFor(estimatedMs, 0.9);
+        await playAudioBase64(audio, mime);
+      } else if (text) {
+        const estimatedMs = Math.min(2600, Math.max(1000, text.length * 30));
+        speakFor(estimatedMs, 0.72);
+        speakTextFallback(text);
+      }
+    }
+
+    function connect() {
+      try {
+        socket = new WebSocket(wsUrl);
+      } catch (err) {
+        setStatus("Disconnected", false);
+        setLog("WebSocket init failed: " + err);
+        setTimeout(connect, reconnectDelayMs);
+        reconnectDelayMs = Math.min(7000, reconnectDelayMs * 1.7);
+        return;
+      }
+
+      socket.addEventListener("open", () => {
+        reconnectDelayMs = 900;
+        setStatus("Connected", true);
+        if (avatarTextureReady) {
+          setLog("");
+        } else {
+          setLog("Connected. Click 'Load HD Reference'.");
+        }
+      });
+
+      socket.addEventListener("close", () => {
+        setStatus("Disconnected", false);
+        setLog("Waiting for websocket...");
+        setTimeout(connect, reconnectDelayMs);
+        reconnectDelayMs = Math.min(7000, reconnectDelayMs * 1.7);
+      });
+
+      socket.addEventListener("error", () => {
+        setStatus("Disconnected", false);
+      });
+
+      socket.addEventListener("message", async (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === "error") {
+            setLog("Error: " + (data.message || data.error || "unknown"));
+            speakFor(550, 0.18);
+            return;
+          }
+          if (data.type && data.type !== "response") {
+            setLog("Message: " + event.data);
+            return;
+          }
+          await handleResponse(data);
+        } catch (err) {
+          setLog("Invalid payload: " + err);
+        }
+      });
+    }
+
+    formEl.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const text = String(inputEl.value || "").trim();
+      if (!text || !socket || socket.readyState !== WebSocket.OPEN) {
+        return;
+      }
+
+      socket.send(JSON.stringify({ text }));
+      setLog("");
+      speakFor(1100, 0.62);
+      inputEl.value = "";
+    });
+
+    referenceImageInputEl.addEventListener("change", (event) => {
+      const files = event.target && event.target.files ? event.target.files : null;
+      if (!files || !files.length) {
+        return;
+      }
+      loadAvatarTextureFromFile(files[0]);
+    });
+
+    scheduleBlink();
+    initSpeechVoice();
+    installSpeechCancelGuard();
+    inputEl.style.display = "none";
+    sendEl.style.display = "none";
+    if (showDevAvatarUpload) {
+      formEl.classList.add("dev-upload-only");
+    } else {
+      formEl.style.display = "none";
+    }
+    setupCanvas();
+    loadAvatarTextureFromStorage();
+    loadAvatarTexture();
+    window.addEventListener("resize", setupCanvas);
+    requestAnimationFrame(drawAvatar);
+    connect();
+  </script>
+</body>
+</html>

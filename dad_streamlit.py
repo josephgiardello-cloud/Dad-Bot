@@ -1,13 +1,18 @@
 import asyncio
+import base64
+import json
 import datetime
 import json
+import os
 import traceback
 import uuid
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 from dadbot.components.voice import render_realtime_voice_call, render_reply_tts, render_voice_controls
 from dadbot.config import DadBotConfig, DadRuntimeConfig
@@ -17,6 +22,7 @@ from dadbot.managers.memory_manager import MemoryManager
 from dadbot.managers.mood_manager import MoodManager
 from dadbot.managers.profile_runtime import ProfileRuntimeManager
 from dadbot.managers.relationship_manager import RelationshipManager
+from dadbot.managers.tts import TTSManager
 from dadbot.runtime.model.model_call_port import ModelConfig
 from dadbot.ui.media.service import MediaService
 from dadbot_system.events import InMemoryEventBus
@@ -45,6 +51,498 @@ def _ensure_ui_runtime_state() -> None:
 
     if "message_outbox" not in st.session_state:
         st.session_state.message_outbox = []
+
+
+def _presence_avatar_markup() -> str:
+    live_video_candidates = (
+        (Path("static/dad_avatar_live.webm"), "video/webm"),
+        (Path("static/dad_avatar_live.mp4"), "video/mp4"),
+        (Path("static/dad_avatar_live.mov"), "video/quicktime"),
+    )
+    for file_path, mime in live_video_candidates:
+        if file_path.exists():
+            with suppress(Exception):
+                payload = base64.b64encode(file_path.read_bytes()).decode("ascii")
+                return (
+                    '<video class="presence-avatar-media" autoplay muted loop playsinline>'
+                    f'<source src="data:{mime};base64,{payload}" type="{mime}" />'
+                    "</video>"
+                )
+
+    live_image_candidates = (
+        (Path("static/assets/dad_avatar.jpg"), "image/jpeg"),
+        (Path("static/dad_avatar_live.gif"), "image/gif"),
+        (Path("static/dad_avatar.gif"), "image/gif"),
+        (Path("static/dad_avatar.png"), "image/png"),
+        (Path("static/dad_avatar.jpg"), "image/jpeg"),
+        (Path("static/dad_avatar.jpeg"), "image/jpeg"),
+        (Path("static/dad_avatar.webp"), "image/webp"),
+    )
+    for file_path, mime in live_image_candidates:
+        if file_path.exists():
+            with suppress(Exception):
+                payload = base64.b64encode(file_path.read_bytes()).decode("ascii")
+                return f'<img class="presence-avatar-media" src="data:{mime};base64,{payload}" alt="Dad avatar" />'
+
+    return '<div class="presence-avatar-fallback">D</div>'
+
+
+def _spatial_avatar_embed_url() -> str:
+    env_url = str(os.getenv("DADBOT_SPATIAL_AVATAR_URL", "")).strip()
+    if env_url:
+        return env_url
+
+    with suppress(Exception):
+        secret_url = str(st.secrets.get("DADBOT_SPATIAL_AVATAR_URL", "")).strip()
+        if secret_url:
+            return secret_url
+
+    return ""
+
+
+def _spatial_avatar_relay_ws_url() -> str:
+    env_url = str(os.getenv("DADBOT_SPATIAL_RELAY_WS_URL", "")).strip()
+    if env_url:
+        return env_url
+
+    with suppress(Exception):
+        secret_url = str(st.secrets.get("DADBOT_SPATIAL_RELAY_WS_URL", "")).strip()
+        if secret_url:
+            return secret_url
+
+    return "ws://127.0.0.1:8787/v1/spatial/ws"
+
+
+def _spatial_avatar_image_url() -> str:
+    env_url = str(os.getenv("DADBOT_SPATIAL_AVATAR_IMAGE_URL", "")).strip()
+    if env_url:
+        return env_url
+
+    with suppress(Exception):
+        secret_url = str(st.secrets.get("DADBOT_SPATIAL_AVATAR_IMAGE_URL", "")).strip()
+        if secret_url:
+            return secret_url
+
+    return ""
+
+
+def _spatial_embed_src(embed_url: str) -> str:
+    relay_ws = _spatial_avatar_relay_ws_url()
+    if not embed_url or not relay_ws:
+        return embed_url
+
+    avatar_image = _spatial_avatar_image_url()
+    split = urlsplit(embed_url)
+    pairs = [
+        (k, v)
+        for k, v in parse_qsl(split.query, keep_blank_values=True)
+        if k not in {"dadbot_ws", "dadbotWs", "dadbot_avatar_image", "avatarImage"}
+    ]
+    pairs.append(("dadbot_ws", relay_ws))
+    pairs.append(("dadbotWs", relay_ws))
+    if avatar_image:
+        pairs.append(("dadbot_avatar_image", avatar_image))
+        pairs.append(("avatarImage", avatar_image))
+    query = urlencode(pairs)
+    return urlunsplit((split.scheme, split.netloc, split.path, query, split.fragment))
+
+
+def _spatial_avatar_inline_html(embed_src: str) -> str:
+    html_path = Path("static/spatial_live_mock/index.html")
+    html_text = html_path.read_text(encoding="utf-8")
+    query = urlsplit(embed_src).query if embed_src else ""
+    query_json = json.dumps(query)
+    avatar_asset = Path("static/assets/dad_avatar.jpg")
+    avatar_data_url = ""
+    if avatar_asset.exists():
+        avatar_bytes = avatar_asset.read_bytes()
+        avatar_data_url = f"data:image/jpeg;base64,{base64.b64encode(avatar_bytes).decode('ascii')}"
+    avatar_data_json = json.dumps(avatar_data_url)
+    html_text = html_text.replace(
+        '    const params = new URLSearchParams(window.location.search);',
+        '    const injectedQuery = typeof window.__DADBOT_QUERY__ === "string" ? window.__DADBOT_QUERY__ : "";\n'
+        '    const params = new URLSearchParams(injectedQuery || window.location.search || "");',
+    )
+    html_text = html_text.replace(
+        '    const avatarImageUrl = params.get("dadbot_avatar_image") || params.get("avatarImage") || "";',
+        '    const injectedAvatarImage = typeof window.__DADBOT_AVATAR_IMAGE__ === "string" ? window.__DADBOT_AVATAR_IMAGE__ : "";\n'
+        '    const avatarImageUrl = params.get("dadbot_avatar_image") || params.get("avatarImage") || injectedAvatarImage || "";',
+    )
+    return (
+        f"<script>window.__DADBOT_QUERY__ = {query_json};</script>"
+        f"<script>window.__DADBOT_AVATAR_IMAGE__ = {avatar_data_json};</script>"
+        f"{html_text}"
+    )
+
+
+def _inject_modern_theme() -> None:
+    st.markdown(
+        """
+        <style>
+        @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Serif:wght@500;600&display=swap');
+
+        :root {
+            --dad-bg: #10151f;
+            --dad-panel: rgba(13, 21, 33, 0.92);
+            --dad-panel-strong: rgba(14, 23, 36, 0.98);
+            --dad-border: rgba(175, 197, 231, 0.32);
+            --dad-ink: #f4f8ff;
+            --dad-muted: #c4d3ea;
+            --dad-accent: #8da9d6;
+            --dad-accent-2: #9dc4ff;
+            --dad-shadow: 0 30px 90px rgba(2, 7, 14, 0.55);
+        }
+
+        html, body, [class*="css"] {
+            font-family: 'IBM Plex Sans', 'Segoe UI', sans-serif;
+        }
+
+        .stApp {
+            background:
+                radial-gradient(circle at 14% 16%, rgba(90, 110, 255, 0.28), transparent 34%),
+                radial-gradient(circle at 84% 10%, rgba(79, 205, 225, 0.22), transparent 30%),
+                radial-gradient(circle at 76% 84%, rgba(102, 126, 214, 0.22), transparent 30%),
+                radial-gradient(circle at 10% 82%, rgba(79, 98, 193, 0.24), transparent 26%),
+                linear-gradient(168deg, #080d15 0%, #0b1320 44%, #111c2e 100%);
+            color: var(--dad-ink);
+        }
+
+        .stApp p,
+        .stApp li,
+        .stApp label,
+        .stApp div {
+            color: var(--dad-ink);
+        }
+
+        header[data-testid="stHeader"], #MainMenu, footer {
+            visibility: hidden;
+            height: 0;
+        }
+
+        .block-container {
+            max-width: 980px;
+            padding-top: 0.8rem;
+            padding-bottom: 1.5rem;
+        }
+
+        [data-testid="stSidebar"] {
+            background: linear-gradient(180deg, rgba(6, 11, 19, 0.86), rgba(10, 16, 27, 0.84));
+            border-right: 1px solid rgba(255, 255, 255, 0.06);
+            backdrop-filter: blur(14px);
+        }
+
+        [data-testid="stSidebar"] * {
+            color: #f5f2eb !important;
+        }
+
+        [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
+        [data-testid="stSidebar"] label,
+        [data-testid="stSidebar"] span {
+            color: rgba(245, 242, 235, 0.92) !important;
+        }
+
+        [data-testid="stSidebar"] h1,
+        [data-testid="stSidebar"] h2,
+        [data-testid="stSidebar"] h3 {
+            letter-spacing: -0.03em;
+        }
+
+        .dad-app-shell {
+            margin: 0.15rem 0 0.8rem;
+            padding: 0.45rem 0.2rem 0.2rem;
+            border-bottom: 1px solid rgba(196, 210, 238, 0.14);
+        }
+
+        .dad-app-shell .eyebrow {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.45rem;
+            margin-bottom: 0.3rem;
+            padding: 0.24rem 0.7rem;
+            border-radius: 999px;
+            background: rgba(157, 196, 255, 0.16);
+            color: #cfe2ff;
+            font-size: 0.74rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.12em;
+        }
+
+        .dad-app-shell h1 {
+            margin: 0;
+            color: var(--dad-ink);
+            font-family: 'IBM Plex Serif', Georgia, serif;
+            font-size: clamp(1.6rem, 2.2vw, 2.3rem);
+            letter-spacing: -0.045em;
+            line-height: 1;
+        }
+
+        .dad-app-shell p {
+            margin: 0.25rem 0 0;
+            max-width: 72ch;
+            color: var(--dad-muted);
+            font-size: 0.92rem;
+            line-height: 1.45;
+        }
+
+        h1, h2, h3 {
+            letter-spacing: -0.04em;
+            color: var(--dad-ink);
+        }
+
+        [data-testid="stChatMessage"] {
+            padding: 0.1rem 0;
+            max-width: 100%;
+        }
+
+        [data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] {
+            background: var(--dad-panel);
+            border: 1px solid var(--dad-border);
+            border-radius: 24px;
+            padding: 0.96rem 1.08rem;
+            box-shadow: 0 14px 30px rgba(2, 8, 16, 0.42);
+            backdrop-filter: blur(18px);
+            line-height: 1.62;
+            color: var(--dad-ink);
+        }
+
+        [data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] p {
+            margin-bottom: 0.25rem;
+        }
+
+        [data-testid="stChatMessage"] [data-testid="stCaptionContainer"] {
+            color: var(--dad-muted);
+        }
+
+        div[data-testid="stChatInput"] {
+            background: rgba(11, 19, 31, 0.96) !important;
+            border: 1px solid rgba(179, 201, 235, 0.34) !important;
+            border-radius: 20px !important;
+            box-shadow: 0 18px 38px rgba(2, 8, 16, 0.44) !important;
+            border-top: 1px solid rgba(161, 179, 206, 0.2);
+            padding: 0.6rem 0.7rem 0.55rem;
+            margin-top: 0.8rem;
+        }
+
+        div[data-testid="stElementContainer"]:has(div[data-testid="stChatInput"]) {
+            background: transparent !important;
+        }
+
+        div[data-testid="stChatInput"] > div,
+        div[data-testid="stChatInput"] [data-baseweb="textarea"],
+        div[data-testid="stChatInput"] [data-baseweb="base-input"] {
+            background: transparent !important;
+        }
+
+        div[data-testid="stChatInput"] * {
+            background-color: transparent !important;
+        }
+
+        div[data-testid="stChatInput"] textarea,
+        div[data-testid="stChatInput"] input {
+            border-radius: 999px !important;
+            background: rgba(10, 18, 30, 0.98) !important;
+            color: #f5f9ff !important;
+            border: 1px solid rgba(179, 201, 235, 0.38) !important;
+            box-shadow: 0 14px 34px rgba(2, 8, 16, 0.38);
+        }
+
+        div[data-testid="stChatInput"] textarea::placeholder,
+        div[data-testid="stChatInput"] input::placeholder {
+            color: #9db3d6 !important;
+            opacity: 1 !important;
+        }
+
+        div[data-testid="stChatInput"] button {
+            color: #d9e7ff !important;
+        }
+
+        div[data-testid="stChatInput"] [data-testid="stChatInputFileUploadButton"] button,
+        div[data-testid="stChatInput"] [data-testid="stChatInputSubmitButton"] {
+            background: rgba(148, 184, 235, 0.08) !important;
+            border: 1px solid rgba(179, 201, 235, 0.24) !important;
+        }
+
+        div[data-testid="stButton"] button {
+            border-radius: 14px;
+            border: 1px solid rgba(39, 75, 95, 0.14);
+            background: linear-gradient(180deg, rgba(255,255,255,0.96), rgba(244,240,233,0.92));
+            color: var(--dad-ink);
+            box-shadow: 0 10px 24px rgba(22, 33, 47, 0.08);
+            transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+        }
+
+        div[data-testid="stButton"] button:hover {
+            transform: translateY(-1px);
+            border-color: rgba(39, 75, 95, 0.28);
+            box-shadow: 0 14px 28px rgba(22, 33, 47, 0.12);
+        }
+
+        div[data-testid="stMetric"] {
+            background: var(--dad-panel);
+            border: 1px solid var(--dad-border);
+            border-radius: 20px;
+            padding: 0.85rem 0.9rem;
+            box-shadow: 0 12px 28px rgba(22, 33, 47, 0.05);
+        }
+
+        div[data-testid="stDataFrame"] {
+            border-radius: 18px;
+            overflow: hidden;
+            border: 1px solid var(--dad-border);
+            box-shadow: 0 12px 30px rgba(22, 33, 47, 0.06);
+        }
+
+        .chat-layout {
+            margin-top: 0.25rem;
+        }
+
+        .chat-layout .main-column {
+            max-width: 760px;
+            margin: 0 auto;
+        }
+
+        .chat-shell {
+            padding: 0.25rem 0 0;
+        }
+
+        .presence-shell {
+            margin: 0.1rem 0 1rem;
+            padding: 1.1rem 1rem 1rem;
+            border-radius: 34px;
+            border: 1px solid rgba(174, 198, 235, 0.24);
+            background:
+                radial-gradient(circle at 50% 10%, rgba(170, 203, 255, 0.2), transparent 45%),
+                linear-gradient(180deg, rgba(16, 25, 40, 0.95), rgba(13, 21, 33, 0.93));
+            box-shadow: 0 24px 58px rgba(1, 7, 15, 0.52);
+            text-align: center;
+        }
+
+        .presence-pill {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0.3rem 0.82rem;
+            border-radius: 999px;
+            border: 1px solid rgba(174, 198, 235, 0.35);
+            color: #d7e6ff;
+            background: rgba(157, 196, 255, 0.12);
+            letter-spacing: 0.12em;
+            text-transform: uppercase;
+            font-size: 0.72rem;
+            font-weight: 700;
+        }
+
+        .presence-avatar-wrap {
+            position: relative;
+            width: 212px;
+            height: 212px;
+            border-radius: 999px;
+            margin: 0.9rem auto 0;
+            padding: 8px;
+            background: radial-gradient(circle at 50% 50%, rgba(164, 205, 255, 0.46), rgba(164, 205, 255, 0.12) 58%, rgba(164, 205, 255, 0.04) 72%);
+            box-shadow: 0 24px 42px rgba(2, 10, 20, 0.55);
+        }
+
+        .presence-embed-wrap {
+            position: relative;
+            width: min(720px, 100%);
+            height: 380px;
+            border-radius: 24px;
+            margin: 0.9rem auto 0;
+            overflow: hidden;
+            border: 1px solid rgba(174, 198, 235, 0.26);
+            background: rgba(9, 15, 25, 0.9);
+            box-shadow: 0 24px 42px rgba(2, 10, 20, 0.55);
+        }
+
+        .presence-avatar-wrap img,
+        .presence-avatar-wrap video,
+        .presence-avatar-wrap .presence-avatar-media,
+        .presence-avatar-fallback {
+            width: 100%;
+            height: 100%;
+            border-radius: 999px;
+            object-fit: cover;
+            display: block;
+        }
+
+        .presence-avatar-fallback {
+            background: linear-gradient(180deg, #31466f, #1c2942);
+            color: #edf5ff;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 3.2rem;
+            font-weight: 600;
+            letter-spacing: -0.04em;
+        }
+
+        .chat-hero .hero-copy {
+            margin-top: 0.45rem;
+            color: var(--dad-muted);
+            font-size: 0.9rem;
+            line-height: 1.58;
+            max-width: 62ch;
+        }
+
+        .chat-hero .hero-badges {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+            margin-top: 0.85rem;
+        }
+
+        .chat-hero .hero-badge {
+            padding: 0.38rem 0.72rem;
+            border-radius: 999px;
+            background: rgba(255,255,255,0.82);
+            border: 1px solid rgba(53, 64, 78, 0.08);
+            color: var(--dad-ink);
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+
+        @media (max-width: 960px) {
+            .presence-avatar-wrap {
+                width: 172px;
+                height: 172px;
+            }
+
+            .presence-embed-wrap {
+                height: 320px;
+            }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_app_shell(page: str) -> None:
+    page_meta = {
+        "Chat": ("Conversation surface", "Warm, direct, live chat with profile-safe replies and durable thread handling."),
+        "Smart Home": ("Home control", "MQTT controls with a cleaner operational panel."),
+        "Voice": ("Voice runtime", "Push-to-talk and realtime voice surfaces with the same dad persona."),
+        "Status": ("System status", "Operational health, runtime events, and guardrail feed in one place."),
+        "Workshop": ("Workbench", "Recovery tools, outbox management, and thread export/import."),
+    }
+    eyebrow, description = page_meta.get(page, ("DadBot", "A focused control surface for the family runtime."))
+    st.markdown(
+        f"""
+        <section class="dad-app-shell">
+          <div class="eyebrow">{eyebrow}</div>
+          <h1>DadBot</h1>
+          <p>{description}</p>
+          <div class="dad-chip-row">
+            <span class="dad-chip">Persona-safe replies</span>
+            <span class="dad-chip">Threaded chat</span>
+            <span class="dad-chip">Live runtime</span>
+          </div>
+        </section>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def _active_thread_id() -> str:
@@ -88,10 +586,26 @@ def _set_thread_messages(messages: list[dict[str, Any]], thread_id: str | None =
         st.session_state.chat_history = list(threads[tid])
 
 
-def _append_chat_message(role: str, text: str, *, stamp: str, thread_id: str | None = None) -> None:
+def _append_chat_message(
+    role: str,
+    text: str,
+    *,
+    stamp: str,
+    thread_id: str | None = None,
+    audio_base64: str = "",
+    audio_mime: str = "",
+) -> None:
     tid = str(thread_id or _active_thread_id())
     messages = _thread_messages(tid)
-    messages.append({"role": str(role or "assistant"), "text": str(text or ""), "time": str(stamp or _now_stamp())})
+    message = {
+        "role": str(role or "assistant"),
+        "text": str(text or ""),
+        "time": str(stamp or _now_stamp()),
+    }
+    if audio_base64:
+        message["audio_base64"] = str(audio_base64)
+        message["audio_mime"] = str(audio_mime or "audio/mpeg")
+    messages.append(message)
     _set_thread_messages(messages, tid)
 
 
@@ -140,6 +654,61 @@ def _record_runtime_event(event_type: str, summary: str, *, severity: str = "inf
     st.session_state.runtime_events = events[-250:]
 
 
+def _speak_reply_client_side(text: str) -> None:
+    content = str(text or "").strip()
+    if not content:
+        return
+    payload = json.dumps(content)
+    components.html(
+        f"""
+        <script>
+        (function() {{
+            const text = {payload};
+            if (!text || !('speechSynthesis' in window)) return;
+            try {{
+                const synth = window.speechSynthesis;
+                const voices = synth.getVoices() || [];
+                const prefer = (v) => /en-US/i.test(v.lang || '') && /(neural|guy|davis|christopher|eric|david|male)/i.test((v.name || '') + ' ' + (v.voiceURI || ''));
+                const voice = voices.find(prefer) || voices.find((v) => /en-US/i.test(v.lang || '')) || voices[0] || null;
+                const utter = new SpeechSynthesisUtterance(text);
+                if (voice) utter.voice = voice;
+                utter.rate = 1.0;
+                utter.pitch = 1.0;
+                utter.volume = 1.0;
+                synth.cancel();
+                synth.speak(utter);
+            }} catch (_err) {{}}
+        }})();
+        </script>
+        """,
+        height=0,
+    )
+
+
+def _install_client_speech_cancel_guard() -> None:
+        components.html(
+                """
+                <script>
+                (function() {
+                    if (window.__dadbotSpeechGuardInstalled) return;
+                    window.__dadbotSpeechGuardInstalled = true;
+                    const stopSpeech = function () {
+                        if (!('speechSynthesis' in window)) return;
+                        try { window.speechSynthesis.cancel(); } catch (_err) {}
+                    };
+                    stopSpeech();
+                    window.addEventListener('beforeunload', stopSpeech);
+                    window.addEventListener('pagehide', stopSpeech);
+                    document.addEventListener('visibilitychange', function () {
+                        if (document.visibilityState === 'hidden') stopSpeech();
+                    });
+                })();
+                </script>
+                """,
+                height=0,
+        )
+
+
 def _record_guardrail(rule: str, detail: str, *, severity: str = "warning") -> None:
     guardrails = list(st.session_state.get("runtime_guardrails") or [])
     guardrails.append(
@@ -152,6 +721,12 @@ def _record_guardrail(rule: str, detail: str, *, severity: str = "warning") -> N
         }
     )
     st.session_state.runtime_guardrails = guardrails[-120:]
+
+
+def _auto_speak_replies_enabled() -> bool:
+    if "auto_speak_replies" not in st.session_state:
+        st.session_state.auto_speak_replies = True
+    return bool(st.session_state.auto_speak_replies)
 
 
 def _queue_failed_message(prompt: str, error: str) -> None:
@@ -167,8 +742,16 @@ def _queue_failed_message(prompt: str, error: str) -> None:
     st.session_state.message_outbox = queue[-100:]
 
 
-def _render_thread_sidebar() -> None:
-    st.sidebar.subheader("Threads")
+def _render_thread_sidebar(page: str | None = None) -> None:
+    chat_mode = str(page or "").strip().lower() == "chat"
+    if chat_mode:
+        st.sidebar.markdown(
+            "<div style='font-size:0.8rem; letter-spacing:0.14em; text-transform:uppercase; opacity:0.72; margin-bottom:0.35rem;'>Conversation drawer</div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.sidebar.subheader("Threads")
+
     thread_ids = _thread_ids()
     active = _active_thread_id()
     if active not in thread_ids:
@@ -177,24 +760,25 @@ def _render_thread_sidebar() -> None:
         active = _active_thread_id()
 
     index = thread_ids.index(active) if active in thread_ids else 0
-    selected = st.sidebar.selectbox("Active thread", thread_ids, index=index, key="thread-picker")
+    selected = st.sidebar.selectbox("Active conversation", thread_ids, index=index, key="thread-picker")
     if str(selected) != active:
         _switch_active_thread(str(selected))
         st.rerun()
 
     col1, col2 = st.sidebar.columns(2)
     with col1:
-        if st.button("New", use_container_width=True):
+        if st.button("New chat" if chat_mode else "New", use_container_width=True):
             new_tid = _create_new_thread()
             _record_runtime_event("thread_created", f"Created {new_tid}")
             st.rerun()
     with col2:
-        if st.button("Fork", use_container_width=True):
+        if st.button("Duplicate" if chat_mode else "Fork", use_container_width=True):
             new_tid = _fork_active_thread()
             _record_runtime_event("thread_forked", f"Forked into {new_tid}")
             st.rerun()
 
-    st.sidebar.caption(f"Messages: {len(_thread_messages(active))}")
+    if not chat_mode:
+        st.sidebar.caption(f"Messages: {len(_thread_messages(active))}")
 
 
 def _render_guardrail_strip() -> None:
@@ -546,8 +1130,34 @@ class StrictLLMService:
 
 def _build_bot() -> DadBot:
     class MinimalPersistenceService:
+        def __init__(self) -> None:
+            self.bot: Any | None = None
+
         def finalize_turn(self, turn_context: Any, result: Any):
-            return result
+            if isinstance(result, tuple):
+                raw_reply = result[0] if len(result) >= 1 else ""
+                should_end = bool(result[1]) if len(result) >= 2 else False
+            else:
+                raw_reply = result
+                should_end = bool(getattr(turn_context, "state", {}).get("should_end", False))
+
+            reply = str(raw_reply or "")
+            bot = self.bot
+            if bot is not None:
+                finalization = getattr(bot, "reply_finalization", None)
+                finalize = getattr(finalization, "finalize", None)
+                if callable(finalize):
+                    mood = str(getattr(turn_context, "state", {}).get("mood") or "neutral")
+                    user_input = str(getattr(turn_context, "user_input", "") or "")
+                    with suppress(Exception):
+                        reply = str(finalize(reply, mood, user_input=user_input) or reply)
+                else:
+                    append_signoff = getattr(finalization, "append_signoff", None)
+                    if callable(append_signoff):
+                        with suppress(Exception):
+                            reply = str(append_signoff(reply) or reply)
+
+            return reply, should_end
 
         def save_turn(self, turn_context: Any, result: Any) -> None:
             pass
@@ -679,7 +1289,8 @@ def _build_bot() -> DadBot:
     registry.register("health", StrictHealthService())
     registry.register("context_service", MinimalContextService())
     registry.register("maintenance_service", MinimalMaintenanceService())
-    registry.register("persistence_service", MinimalPersistenceService())
+    persistence_service = MinimalPersistenceService()
+    registry.register("persistence_service", persistence_service)
     registry.register("safety_service", MinimalSafetyService())
     registry.register("reflection", MinimalReflectionService())
 
@@ -717,11 +1328,29 @@ def _build_bot() -> DadBot:
     bot._profile_runtime = profile_runtime
     bot.services = None
     llm_service.bot = bot
+    persistence_service.bot = bot
+
+    with suppress(Exception):
+        profile_path = getattr(runtime_config, "profile_path", None)
+        if profile_path and Path(profile_path).is_file():
+            loaded_profile = json.loads(Path(profile_path).read_text(encoding="utf-8"))
+            if isinstance(loaded_profile, dict):
+                bot.PROFILE = loaded_profile
+    if not isinstance(getattr(bot, "PROFILE", None), dict):
+        bot.PROFILE = {}
+    bot.PROFILE.setdefault("voice", {})
 
     return bot
 
 
-_STREAMLIT_RUNTIME_BUILD = "2026-05-31-persona-system-prompt-v3"
+_STREAMLIT_RUNTIME_BUILD = "2026-05-31-persona-system-prompt-v10"
+
+st.set_page_config(
+    page_title="DadBot",
+    page_icon="🧭",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
 
 if "bot" not in st.session_state:
     st.session_state.bot = _build_bot()
@@ -732,72 +1361,434 @@ elif str(st.session_state.get("_streamlit_runtime_build") or "") != _STREAMLIT_R
 
 _ensure_ui_runtime_state()
 _switch_active_thread(_active_thread_id())
+_inject_modern_theme()
 
 bot = st.session_state.bot
 media_service = MediaService()
 
-avatar_path = Path("static/dad_avatar.png")
+
+def _fallback_dad_story() -> str:
+    family = getattr(bot, "FAMILY", {}) if bot is not None else {}
+    education = getattr(bot, "EDUCATION", {}) if bot is not None else {}
+    dad = family.get("dad", {}) if isinstance(family, dict) else {}
+    style = getattr(getattr(bot, "profile_runtime", None), "style", {}) or {}
+    listener_name = str(style.get("listener_name") or "Tony")
+
+    birthplace = str(dad.get("birthplace") or "Providence, Rhode Island")
+    moved_to = str(dad.get("moved_to") or "Albion, Maine")
+    move_age = int(dad.get("move_age") or 5)
+    boarding_school = str(education.get("boarding_school") or "Kents Hill School")
+    university = str(education.get("university") or "University of Maine")
+
+    return (
+        f"I'm your dad - born in {birthplace}. "
+        f"We moved to {moved_to} when I was {move_age}. "
+        f"I went to {boarding_school} and then {university} for English. "
+        f"You're my son, {listener_name}."
+    )
+
+
+def _fallback_dad_full_story() -> str:
+    profile = getattr(bot, "PROFILE", {}) if bot is not None else {}
+    family = getattr(bot, "FAMILY", {}) if bot is not None else {}
+    education = getattr(bot, "EDUCATION", {}) if bot is not None else {}
+    style = getattr(getattr(bot, "profile_runtime", None), "style", {}) or {}
+    sports = profile.get("sports_preferences", {}) if isinstance(profile, dict) else {}
+
+    listener_name = str(style.get("listener_name") or "Tony")
+    dad = family.get("dad", {}) if isinstance(family, dict) else {}
+    birthplace = str(dad.get("birthplace") or "Providence, Rhode Island")
+    moved_to = str(dad.get("moved_to") or "Albion, Maine")
+    move_age = int(dad.get("move_age") or 5)
+    childhood = str(dad.get("childhood") or "grew up in a small town in Maine")
+    boarding_school = str(education.get("boarding_school") or "Kents Hill School")
+    university = str(education.get("university") or "University of Maine")
+    degree = str(education.get("degree") or "English")
+    baseball_team = str(sports.get("baseball_team") or "New York Yankees")
+    football_team = str(sports.get("football_team") or "Chicago Bears")
+    soccer_team = str(sports.get("soccer_team") or "Naples (Napoli)")
+    basketball_interest = str(sports.get("basketball_interest") or "don't really watch basketball")
+
+    return (
+        f"Full version, {listener_name}: I was born in {birthplace}, and we moved to {moved_to} when I was {move_age}. "
+        f"I {childhood}. I went to {boarding_school}, then {university}, where I studied {degree}. "
+        f"I care a lot about family continuity and keeping life steady over time. "
+        f"For sports, I'm a {baseball_team} fan in baseball, a {football_team} fan in football, and a {soccer_team} fan in soccer, and I {basketball_interest}."
+    )
+
+
+def _fallback_dad_age() -> str:
+    style = getattr(getattr(bot, "profile_runtime", None), "style", {}) or {}
+    listener_name = str(style.get("listener_name") or "Tony")
+    age_on_date = getattr(bot, "age_on_date", None)
+    dad_birthdate = getattr(bot, "DAD_BIRTHDATE", None)
+    dad_age = 47
+    if callable(age_on_date) and dad_birthdate is not None:
+        with suppress(Exception):
+            dad_age = int(age_on_date(dad_birthdate))
+    return f"I'm {dad_age} years old, {listener_name}."
+
+
+def _fallback_preference_reply(user_input: str = "") -> str:
+    prompt = str(user_input or "").strip().lower()
+    style = getattr(getattr(bot, "profile_runtime", None), "style", {}) or {}
+    listener_name = str(style.get("listener_name") or "Tony")
+    profile = getattr(bot, "PROFILE", {}) if bot is not None else {}
+    sports = profile.get("sports_preferences", {}) if isinstance(profile, dict) else {}
+    baseball_team = str(sports.get("baseball_team") or "New York Yankees")
+    football_team = str(sports.get("football_team") or "Chicago Bears")
+    soccer_team = str(sports.get("soccer_team") or "Naples (Napoli)")
+    basketball_interest = str(sports.get("basketball_interest") or "don't really watch basketball")
+
+    if "baseball" in prompt and "team" in prompt:
+        return f"I'm a {baseball_team} fan for baseball, buddy."
+    if "football" in prompt and "team" in prompt:
+        return f"I'm a {football_team} fan for football."
+    if "soccer" in prompt and "team" in prompt:
+        return f"For soccer, I'm a {soccer_team} fan."
+    if "basketball" in prompt:
+        return f"I {basketball_interest}, buddy."
+    return (
+        f"I keep it simple, {listener_name}: {baseball_team} for baseball, {football_team} for football, "
+        f"{soccer_team} for soccer, and I {basketball_interest}."
+    )
+
+
+def _local_prompt_fallback(user_input: str = "") -> str:
+    user_text = str(user_input or "").strip().lower()
+    if not user_text:
+        return ""
+
+    identity_prompt_markers = (
+        "who are you",
+        "what's your story",
+        "whats your story",
+        "tell me your story",
+        "your story",
+        "about yourself",
+        "tell me about yourself",
+    )
+    detail_markers = (
+        "full life story",
+        "full story",
+        "detailed",
+        "detail",
+        "long version",
+        "more about you",
+        "what can you tell me about you",
+    )
+    if any(marker in user_text for marker in identity_prompt_markers):
+        if any(marker in user_text for marker in detail_markers):
+            return _fallback_dad_full_story()
+        return _fallback_dad_story()
+
+    age_prompt_markers = (
+        "how old are you",
+        "your age",
+        "dad age",
+        "what year were you born",
+        "when were you born",
+        "your birthday",
+    )
+    if any(marker in user_text for marker in age_prompt_markers):
+        return _fallback_dad_age()
+
+    preference_prompt_markers = (
+        "favorite",
+        "favourite",
+        "which team do you like",
+        "what team do you like",
+        "your team",
+        "preference",
+        "sports",
+        "play any",
+        "what can you tell me about you",
+        "about you",
+    )
+    if any(marker in user_text for marker in preference_prompt_markers):
+        return _fallback_preference_reply(user_input)
+
+    return ""
+
+
+def _normalize_ui_reply(reply: Any, *, user_input: str = "") -> str:
+    text = str(reply or "")
+    finalization = getattr(bot, "reply_finalization", None)
+    user_text = str(user_input or "").strip().lower()
+
+    # Deterministic guard: profile fact routing for identity/story prompts.
+    identity_prompt_markers = (
+        "who are you",
+        "what's your story",
+        "whats your story",
+        "tell me your story",
+        "your story",
+        "about yourself",
+        "tell me about yourself",
+    )
+    detail_markers = (
+        "full life story",
+        "full story",
+        "detailed",
+        "detail",
+        "long version",
+        "more about you",
+        "what can you tell me about you",
+    )
+    if any(marker in user_text for marker in identity_prompt_markers):
+        resolved_fact = ""
+        get_fact_reply = getattr(bot, "get_fact_reply", None)
+        if callable(get_fact_reply):
+            with suppress(Exception):
+                fact_reply = str(get_fact_reply(user_input) or "").strip()
+                if fact_reply:
+                    resolved_fact = fact_reply
+        if any(marker in user_text for marker in detail_markers):
+            text = _fallback_dad_full_story()
+        else:
+            text = resolved_fact or _fallback_dad_story()
+
+    age_prompt_markers = (
+        "how old are you",
+        "your age",
+        "dad age",
+        "what year were you born",
+        "when were you born",
+        "your birthday",
+    )
+    if any(marker in user_text for marker in age_prompt_markers):
+        resolved_fact = ""
+        get_fact_reply = getattr(bot, "get_fact_reply", None)
+        if callable(get_fact_reply):
+            with suppress(Exception):
+                fact_reply = str(get_fact_reply(user_input) or "").strip()
+                if fact_reply:
+                    resolved_fact = fact_reply
+        text = resolved_fact or _fallback_dad_age()
+
+    preference_prompt_markers = (
+        "favorite",
+        "favourite",
+        "which team do you like",
+        "what team do you like",
+        "your team",
+        "preference",
+        "sports",
+        "play any",
+        "what can you tell me about you",
+        "about you",
+    )
+    if any(marker in user_text for marker in preference_prompt_markers):
+        resolved_fact = ""
+        get_fact_reply = getattr(bot, "get_fact_reply", None)
+        if callable(get_fact_reply):
+            with suppress(Exception):
+                fact_reply = str(get_fact_reply(user_input) or "").strip()
+                if fact_reply:
+                    resolved_fact = fact_reply
+        text = resolved_fact or _fallback_preference_reply(user_input)
+
+    lowered = text.strip().lower()
+    raw_identity_markers = (
+        "i'm an ai assistant",
+        "i am an ai assistant",
+        "i'm an artificial intelligence model",
+        "i am an artificial intelligence model",
+        "artificial intelligence model known as llama",
+        "large language model meta ai",
+        "i am llama",
+        "i'm llama",
+        "known as llama",
+        "released to the public in",
+        "released in 2023",
+        "i'm not your dad",
+        "i'm dadbot, and i'm here with you",
+        "i am dadbot, and i am here with you",
+        "i don't have a personal life outside this chat",
+        "i do not have a personal life outside this chat",
+        "i exist solely to provide information",
+        "i don't have personal experiences",
+        "i do not have personal experiences",
+        "i don't have a physical existence",
+        "i do not have a physical existence",
+        "i don't have a personal preference",
+        "i do not have a personal preference",
+        "i don't have preferences or feelings",
+        "i do not have preferences or feelings",
+        "i don't have personal preferences",
+        "i do not have personal preferences",
+        "i don't have personal experiences",
+        "i do not have personal experiences",
+        "i'm an ai designed",
+        "i am an ai designed",
+        "i'm a large language model",
+        "i am a large language model",
+        "i don't participate in physical activities",
+        "i do not participate in physical activities",
+    )
+    if any(marker in lowered for marker in raw_identity_markers):
+        dad_bio = getattr(finalization, "_dad_bio_reply", None)
+        if callable(dad_bio):
+            with suppress(Exception):
+                text = str(dad_bio() or text)
+        if not text or any(marker in str(text).lower() for marker in raw_identity_markers):
+            if any(marker in user_text for marker in preference_prompt_markers):
+                text = _fallback_preference_reply(user_input)
+            elif any(marker in user_text for marker in detail_markers):
+                text = _fallback_dad_full_story()
+            else:
+                text = _fallback_dad_story()
+
+    if any(marker in user_text for marker in age_prompt_markers) and any(
+        marker in str(text).lower() for marker in raw_identity_markers
+    ):
+        text = _fallback_dad_age()
+
+    if any(marker in user_text for marker in preference_prompt_markers) and any(
+        marker in str(text).lower() for marker in raw_identity_markers
+    ):
+        text = _fallback_preference_reply(user_input)
+
+    finalize = getattr(finalization, "finalize", None)
+    if callable(finalize):
+        with suppress(Exception):
+            return str(finalize(text, "neutral", user_input=user_input) or text)
+
+    append_signoff = getattr(finalization, "append_signoff", None)
+    if callable(append_signoff):
+        with suppress(Exception):
+            return str(append_signoff(text) or text)
+    return text
+
+avatar_path = Path("static/assets/dad_avatar.jpg")
 if avatar_path.exists():
     st.sidebar.image(str(avatar_path), width=80)
-st.sidebar.title("DadBot")
+st.sidebar.markdown(
+    """
+    <div style="padding:0.25rem 0 0.9rem;">
+      <div style="font-size:0.72rem; letter-spacing:0.16em; text-transform:uppercase; opacity:0.78;">Family runtime</div>
+      <div style="font-size:1.75rem; font-weight:700; line-height:1; margin-top:0.2rem;">DadBot</div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 page = st.sidebar.radio("Navigation", ["Chat", "Smart Home", "Voice", "Status", "Workshop"])
-_render_thread_sidebar()
+_render_thread_sidebar(page)
+if page != "Chat":
+    _render_app_shell(page)
 
 if page == "Chat":
-    st.title("DadBot Chat")
-    _render_guardrail_strip()
+    st.markdown('<div class="chat-layout">', unsafe_allow_html=True)
+    main_col = st.container()
+    _install_client_speech_cancel_guard()
+    st.sidebar.checkbox(
+        "Auto-speak replies",
+        key="auto_speak_replies",
+        value=bool(st.session_state.get("auto_speak_replies", True)),
+        help="When enabled, Dad speaks each assistant reply automatically.",
+    )
+    auto_speak_replies = _auto_speak_replies_enabled()
 
-    for msg in _thread_messages():
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["text"])
-            st.caption(msg["time"])
+    with main_col:
+        st.markdown('<div class="main-column">', unsafe_allow_html=True)
+        embed_url = _spatial_avatar_embed_url()
+        embed_src = _spatial_embed_src(embed_url)
+        avatar_markup = _presence_avatar_markup()
 
-    try:
-        chat_input_value = st.chat_input("Say something to Dad...", accept_file="multiple")
-    except TypeError:
-        chat_input_value = st.chat_input("Say something to Dad...")
-
-    prompt, uploaded_files = _chat_input_payload(chat_input_value)
-    if prompt or uploaded_files:
-        attachments, attachment_issues = media_service.process_upload(uploaded_files)
-        for issue in list(attachment_issues or []):
-            st.warning(str(issue))
-        if attachments:
-            st.caption(f"Attachments ready: {len(attachments)}")
-        if not prompt and attachments:
-            prompt = "Please review the attached files."
-
-        now = datetime.datetime.now().strftime("%H:%M")
-        _append_chat_message("user", prompt, stamp=now)
-        _record_runtime_event(
-            "chat_user_message",
-            "User submitted message",
-            payload={"length": len(prompt), "attachments": len(attachments)},
+        st.markdown(
+            f"""
+            <section class="presence-shell">
+                <div class="presence-pill">DadBot</div>
+                {('' if embed_url else f'<div class="presence-avatar-wrap">{avatar_markup}</div>')}
+            </section>
+            """,
+            unsafe_allow_html=True,
         )
-        with st.chat_message("user"):
-            st.markdown(prompt)
+        if embed_url:
+            components.html(_spatial_avatar_inline_html(embed_src), height=720, scrolling=False)
 
-        with st.spinner("Dad is thinking..."):
-            try:
-                reply, _ = bot.process_user_message(prompt, attachments=attachments)
-                reply = str(reply or "")
-                _record_runtime_event("chat_response_ok", "Assistant response generated", payload={"length": len(reply)})
-            except Exception as exc:
-                traceback.print_exc()
-                reply = f"Sorry, I hit a snag: {exc}"
-                _record_runtime_event("chat_response_error", "Assistant response failed", severity="error", payload={"error": str(exc)})
-                _record_guardrail("turn_execution_error", str(exc), severity="error")
-                _queue_failed_message(prompt, str(exc))
+        for msg in _thread_messages():
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["text"])
+                audio_payload = str(msg.get("audio_base64") or "").strip()
+                if audio_payload and auto_speak_replies:
+                    with suppress(Exception):
+                        st.audio(
+                            base64.b64decode(audio_payload),
+                            format=str(msg.get("audio_mime") or "audio/mpeg"),
+                            autoplay=True,
+                        )
+                st.caption(msg["time"])
 
-        _append_chat_message("assistant", reply, stamp=now)
-        with st.chat_message("assistant"):
-            st.markdown(reply)
-        with suppress(Exception):
-            render_reply_tts(bot, reply)
-        st.rerun()
+        try:
+            chat_input_value = st.chat_input("Message Dad...", accept_file="multiple")
+        except TypeError:
+            chat_input_value = st.chat_input("Message Dad...")
+
+        prompt, uploaded_files = _chat_input_payload(chat_input_value)
+        if prompt or uploaded_files:
+            attachments, attachment_issues = media_service.process_upload(uploaded_files)
+            for issue in list(attachment_issues or []):
+                st.warning(str(issue))
+            if not prompt and attachments:
+                prompt = "Please review the attached files."
+
+            now = datetime.datetime.now().strftime("%H:%M")
+            _append_chat_message("user", prompt, stamp=now)
+            _record_runtime_event(
+                "chat_user_message",
+                "User submitted message",
+                payload={"length": len(prompt), "attachments": len(attachments)},
+            )
+            with st.chat_message("user"):
+                st.markdown(prompt)
+
+            with st.spinner("Dad is thinking..."):
+                try:
+                    reply, _ = bot.process_user_message(prompt, attachments=attachments)
+                    reply = _normalize_ui_reply(reply, user_input=prompt)
+                    _record_runtime_event("chat_response_ok", "Assistant response generated", payload={"length": len(reply)})
+                except Exception as exc:
+                    traceback.print_exc()
+                    fallback = _local_prompt_fallback(prompt)
+                    if fallback:
+                        reply = fallback
+                        _record_runtime_event(
+                            "chat_response_fallback",
+                            "Assistant recovered with local fallback",
+                            severity="warning",
+                            payload={"error": str(exc)},
+                        )
+                    else:
+                        reply = f"Sorry, I hit a snag: {exc}"
+                        _record_runtime_event("chat_response_error", "Assistant response failed", severity="error", payload={"error": str(exc)})
+                    _record_guardrail("turn_execution_error", str(exc), severity="error")
+                    _queue_failed_message(prompt, str(exc))
+
+            assistant_audio_b64 = ""
+            assistant_audio_mime = ""
+            with st.chat_message("assistant"):
+                st.markdown(reply)
+                with suppress(Exception):
+                    if auto_speak_replies:
+                        manager = TTSManager(bot)
+                        audio_bytes, _audio_error, audio_mime = manager.get_tts_audio(reply)
+                        if audio_bytes:
+                            assistant_audio_b64 = base64.b64encode(audio_bytes).decode("ascii")
+                            assistant_audio_mime = str(audio_mime or "audio/mpeg")
+                            st.audio(audio_bytes, format=assistant_audio_mime, autoplay=True)
+                        else:
+                            _speak_reply_client_side(reply)
+            _append_chat_message(
+                "assistant",
+                reply,
+                stamp=now,
+                audio_base64=assistant_audio_b64,
+                audio_mime=assistant_audio_mime,
+            )
+    st.markdown('</div>', unsafe_allow_html=True)
 
 elif page == "Smart Home":
-    st.title("Smart Home Controls")
     st.caption("MQTT controls are live when a broker is configured.")
 
     broker = st.text_input("Broker host", value=str(st.session_state.get("smarthome_broker") or "localhost"))
@@ -841,7 +1832,6 @@ elif page == "Smart Home":
             st.info("Disconnected")
 
 elif page == "Voice":
-    st.title("Voice")
     st.caption("Restored voice controls from the previous UI surface.")
     try:
         render_voice_controls(bot)
@@ -850,7 +1840,6 @@ elif page == "Voice":
         st.error(f"Voice surface failed: {exc}")
 
 elif page == "Status":
-    st.title("Runtime Status")
     _render_guardrail_strip()
     shell = dict(bot.ui_shell_snapshot() or {})
     ollama = dict(shell.get("ollama") or {})
@@ -873,6 +1862,7 @@ elif page == "Status":
     if st.button("Probe one turn", use_container_width=True):
         try:
             probe_reply, _ = bot.process_user_message("Health probe: reply with one short sentence.")
+            probe_reply = _normalize_ui_reply(probe_reply, user_input="Health probe: reply with one short sentence.")
             _record_runtime_event("status_probe_ok", "Status probe completed")
             st.success(str(probe_reply or "ok"))
         except Exception as exc:
@@ -903,7 +1893,6 @@ elif page == "Status":
         )
 
 elif page == "Workshop":
-    st.title("Workshop")
     st.caption("Operational tools restored for fast runtime inspection and recovery.")
     _render_guardrail_strip()
 
@@ -912,6 +1901,7 @@ elif page == "Workshop":
         if st.button("Run live probe", use_container_width=True):
             try:
                 reply, _ = bot.process_user_message("Workshop probe: confirm system ready.")
+                reply = _normalize_ui_reply(reply, user_input="Workshop probe: confirm system ready.")
                 _record_runtime_event("workshop_probe_ok", "Workshop probe completed")
                 st.success(str(reply or "ok"))
             except Exception as exc:
@@ -972,7 +1962,8 @@ elif page == "Workshop":
                         now = datetime.datetime.now().strftime("%H:%M")
                         _append_chat_message("user", prompt, stamp=now, thread_id=thread_id)
                         reply, _ = bot.process_user_message(prompt)
-                        _append_chat_message("assistant", str(reply or ""), stamp=now, thread_id=thread_id)
+                        reply = _normalize_ui_reply(reply, user_input=prompt)
+                        _append_chat_message("assistant", reply, stamp=now, thread_id=thread_id)
                         retried += 1
                     except Exception as exc:
                         remaining.append(

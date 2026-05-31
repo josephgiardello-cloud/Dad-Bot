@@ -565,6 +565,8 @@ class MediaService:
                 + "|"
                 + str(voice.get("tts_voice") or "warm_dad")
                 + "|"
+                + str(voice.get("elevenlabs_voice_id") or "")
+                + "|"
                 + str(int(voice.get("tts_rate") or 0))
             ).encode("utf-8"),
         ).hexdigest()
@@ -582,6 +584,11 @@ class MediaService:
                         text,
                         model_path=piper_model,
                     )
+                elif tts_backend in {"elevenlabs", "voice_clone", "11labs"} or (
+                    tts_backend == "auto" and tts.elevenlabs_available(voice)
+                ):
+                    audio_bytes, error = tts.synthesize_elevenlabs_audio(text, voice_cfg=voice)
+                    audio_format = "audio/mpeg"
                 elif tts_backend == "edge_tts" or (tts_backend == "auto" and tts.edge_tts_available()):
                     audio_bytes, error = tts.synthesize_edge_tts_audio(
                         text,
