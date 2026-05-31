@@ -89,27 +89,7 @@ class DadBot(
         """Stub: Always returns False unless implemented by subclass or manager."""
         return False
 
-    # Manager/facade attributes for test compatibility
-    memory_manager = None
-    profile_manager = None
-    runtime_manager = None
-    services = None
-    background_manager = None
-    mood_manager = None
-    reply_supervisor = None
-    maintenance_manager = None
-    scheduler = None
-    agentic_services = None
-    model_runtime = None
-    personality_service = None
-    dependency_registry = None
-    runtime_state_manager = None
-    memory_coordinator = None
-    health_manager = None
-    state_store = None
-    embedding_model = None
-    graph_manager = None
-    document_store = None
+    # Remove all test compatibility manager defaults. All must be real and present.
 
     # Compatibility shims for test expectations
     _CONFIG_ATTR_MAP = {}
@@ -119,12 +99,12 @@ class DadBot(
     def __getattr__(self, name):
         required = [
             'memory_manager', 'profile_runtime', 'relationship_manager', 'mood_manager',
-            'event_bus', 'model_runtime', 'runtime_state_manager', 'services'
+            'event_bus', 'model_runtime', 'runtime_state_manager', 'services',
+            'reply_finalization', 'reply_supervisor', 'turn_service', 'service_registry'
         ]
         if name in required:
             raise AttributeError(f"DadBot is missing required manager attribute: {name}")
-        from unittest.mock import MagicMock
-        return MagicMock()
+        raise AttributeError(f"DadBot has no attribute '{name}'")
 
     """
     DadBot is intentionally thin.  Logic lives in dedicated managers held by
@@ -223,25 +203,18 @@ class DadBot(
         validate_managers: bool = True,
         **kwargs: Any,
     ):
-
-        # --- Manager defaults ---
-        from unittest.mock import MagicMock
-        from dadbot.typing import MemoryManager, RelationshipManager, MoodManager, ProfileRuntime, EventBus
-        if memory_manager is None:
-            memory_manager = MagicMock(spec=MemoryManager)
-        if relationship_manager is None:
-            relationship_manager = MagicMock(spec=RelationshipManager)
-        if mood_manager is None:
-            mood_manager = MagicMock(spec=MoodManager)
-        if event_bus is None:
-            event_bus = MagicMock(spec=EventBus)
-        if model_runtime is None:
-            try:
-                from dadbot.runtime_core.dummy_model_runtime import DummyModelRuntime
-                model_runtime = DummyModelRuntime()
-            except Exception:
-                model_runtime = None
-
+        # Enforce all required managers must be provided, no mocks allowed
+        if validate_managers:
+            required = [
+                ('memory_manager', memory_manager),
+                ('relationship_manager', relationship_manager),
+                ('mood_manager', mood_manager),
+                ('profile_runtime', profile_runtime),
+                ('event_bus', event_bus),
+            ]
+            for name, value in required:
+                if value is None:
+                    raise ValueError(f"DadBot requires a real '{name}' instance, got None")
         self._memory_manager = memory_manager
         self._relationship_manager = relationship_manager
         self._mood_manager = mood_manager
@@ -304,12 +277,7 @@ class DadBot(
                 from dadbot.core.internal_runtime import DadBotInternalRuntime
                 self._internal_runtime = DadBotInternalRuntime(context_token_budget=self.CONTEXT_TOKEN_BUDGET)
             except Exception:
-                # Patch: MagicStub for all attribute access
-                from unittest.mock import MagicMock
-                class _InternalRuntimeStub:
-                    def __getattr__(self, name):
-                        return MagicMock()
-                self._internal_runtime = _InternalRuntimeStub()
+                raise RuntimeError("DadBot failed to initialize internal runtime and no fallback is allowed.")
 
     def active_persona_trait_entries(self, limit=None):
         # Stub for profile_runtime compatibility

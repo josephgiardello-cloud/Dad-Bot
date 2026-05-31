@@ -1,0 +1,7 @@
+# Minimal config.yaml for DadBot
+runtime:
+  model: llama3.2:latest
+  persona: default
+  memory_path: dad_memory.json
+  profile_path: dad_profile.json
+  semantic_memory_db_path: dad_memory_semantic.sqlite3
