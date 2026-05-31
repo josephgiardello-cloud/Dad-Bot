@@ -192,5 +192,6 @@ class DadBotGraphFailureHandlerMixin:
         except ImportError:
             pass
         raise RuntimeError(
-            "Graph execution failed in strict mode; legacy path is disabled",
+            f"Graph execution failed in strict mode; legacy path is disabled.\n"
+            f"Original error: {type(exc).__name__}: {exc}",
         ) from exc

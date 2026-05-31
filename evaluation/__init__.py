@@ -14,5 +14,9 @@ _legacy_eval_dir = (
     / "evaluation"
 )
 
-if _legacy_eval_dir.exists():
-    __path__.append(str(_legacy_eval_dir))
+_package_path = list(globals().get("__path__", []))
+if _legacy_eval_dir.exists() and str(_legacy_eval_dir) not in _package_path:
+    _package_path.append(str(_legacy_eval_dir))
+
+# Defensive fallback for explicit imports like `evaluation.__init__`.
+__path__ = _package_path
