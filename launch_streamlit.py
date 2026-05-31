@@ -3,5 +3,5 @@ try:
     from dotenv import load_dotenv
     load_dotenv(override=True)
 except ImportError:
-    pass
+    load_dotenv = None
 import dad_streamlit

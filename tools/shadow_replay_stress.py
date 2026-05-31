@@ -75,7 +75,7 @@ def _load_records(log_path: Path) -> list[dict[str, Any]]:
             try:
                 records.append(json.loads(line))
             except json.JSONDecodeError:
-                pass
+                continue
     return records
 
 
@@ -113,7 +113,7 @@ def _apply_mode(records: list[dict], mode: str, seed: int) -> list[dict]:
                     interleaved.append(next(it))
                     next_iters.append(it)
                 except StopIteration:
-                    pass
+                    continue
             iters = next_iters
         return interleaved
     raise ValueError(f"Unknown mode: {mode!r}")

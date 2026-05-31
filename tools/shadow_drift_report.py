@@ -49,7 +49,7 @@ def _load_records(log_path: Path) -> list[dict[str, Any]]:
             try:
                 records.append(json.loads(line))
             except json.JSONDecodeError:
-                pass
+                continue
     return records
 
 

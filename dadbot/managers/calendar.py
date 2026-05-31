@@ -52,7 +52,7 @@ class CalendarManager:
                             )
                         current["DTSTART"] = dt
                     except Exception:
-                        pass
+                        continue
                 elif line.startswith("DESCRIPTION:"):
                     current["DESCRIPTION"] = line[12:].strip()
                 elif line.startswith("LOCATION:"):

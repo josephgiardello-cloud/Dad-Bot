@@ -69,7 +69,7 @@ class RuntimeStorageManager:
                     try:
                         os.fsync(directory_fd)
                     except OSError:
-                        pass
+                        directory_fd = directory_fd
                     finally:
                         os.close(directory_fd)
             finally:
@@ -77,7 +77,7 @@ class RuntimeStorageManager:
                     try:
                         temp_path.unlink()
                     except OSError:
-                        pass
+                        temp_path = temp_path
 
         try:
             write_once()

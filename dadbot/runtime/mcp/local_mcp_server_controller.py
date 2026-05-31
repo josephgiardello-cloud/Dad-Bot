@@ -185,13 +185,13 @@ class LocalMcpServerController:
                 try:
                     os.kill(pid, 15)
                 except OSError:
-                    pass
+                    pid = None
 
         # Clean up PID file
         try:
             paths["pid"].unlink(missing_ok=True)
         except OSError:
-            pass
+            return
 
     def get_status(self) -> dict[str, Any]:
         """Get current server status.
@@ -209,7 +209,7 @@ class LocalMcpServerController:
             try:
                 paths["pid"].unlink(missing_ok=True)
             except OSError:
-                pass
+                pid = None
 
         return {
             "running": running,

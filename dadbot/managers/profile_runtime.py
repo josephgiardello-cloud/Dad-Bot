@@ -49,7 +49,7 @@ class ProfileRuntimeManager:
         return self.profile
 
     def initialize_profile_defaults(self):
-        self._profile.setdefault("voice", {}).setdefault("tts_backend", "pyttsx3")
+        self._profile.setdefault("voice", {}).setdefault("tts_backend", "auto")
         self._profile.setdefault("voice", {}).setdefault("piper_model_path", "")
         self._profile.setdefault("avatar", {})
         self._profile.setdefault("ical_feed_url", "")

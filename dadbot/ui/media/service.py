@@ -559,22 +559,37 @@ class MediaService:
         cache = st.session_state.setdefault("voice_tts_cache", {})
         key = hashlib.sha1(
             (
-                text + "|" + str(voice.get("tts_voice") or "warm_dad") + "|" + str(int(voice.get("tts_rate") or 0))
+                text
+                + "|"
+                + str(voice.get("tts_backend") or "auto")
+                + "|"
+                + str(voice.get("tts_voice") or "warm_dad")
+                + "|"
+                + str(int(voice.get("tts_rate") or 0))
             ).encode("utf-8"),
         ).hexdigest()
 
         audio_bytes = cache.get(key)
         error = ""
+        audio_format = "audio/wav"
         if audio_bytes is None:
-            tts_backend = str(voice.get("tts_backend") or "pyttsx3").strip().lower()
+            tts_backend = str(voice.get("tts_backend") or "auto").strip().lower()
             piper_model = str(voice.get("tts_piper_model_path") or "").strip()
             controller.begin_speaking()
-            with st.spinner("Generating local Dad voice audio..."):
+            with st.spinner("Generating Dad voice audio..."):
                 if tts_backend == "piper" or (tts_backend == "auto" and shutil.which("piper") and piper_model):
                     audio_bytes, error = tts.synthesize_piper_audio(
                         text,
                         model_path=piper_model,
                     )
+                elif tts_backend == "edge_tts" or (tts_backend == "auto" and tts.edge_tts_available()):
+                    audio_bytes, error = tts.synthesize_edge_tts_audio(
+                        text,
+                        voice_profile=str(voice.get("tts_voice") or "warm_dad"),
+                        rate_delta=int(voice.get("tts_rate") or 0),
+                        pacing=int(voice.get("pacing", 50) or 50),
+                    )
+                    audio_format = "audio/mpeg"
                 else:
                     audio_bytes, error = tts.synthesize_tts_audio(
                         text,
@@ -603,7 +618,7 @@ class MediaService:
                 return
             st.audio(
                 audio_bytes,
-                format="audio/wav",
+                format=audio_format,
                 autoplay=bool(voice.get("tts_autoplay", False)),
             )
             controller.complete_turn()

@@ -403,17 +403,24 @@ def _render_col2_llm_tools_audio(
         value=bool(voice.get("tts_enabled", True)),
     )
     _piper_avail = bool(shutil.which("piper"))
+    tts_backend_options = ["auto", "edge_tts", "piper", "pyttsx3"]
+    tts_backend_labels = {
+        "auto": "Auto (best available: Piper -> edge-tts -> pyttsx3)",
+        "edge_tts": "edge-tts (neural, natural)",
+        "piper": "Piper (neural, local)",
+        "pyttsx3": "pyttsx3 (system voices)",
+    }
     tts_backend_pref = st.selectbox(
         "TTS backend",
-        options=["pyttsx3", "piper"],
+        options=tts_backend_options,
         index=option_index(
-            ["pyttsx3", "piper"],
-            str(voice.get("tts_backend") or "pyttsx3"),
+            tts_backend_options,
+            str(voice.get("tts_backend") or "auto"),
             fallback=0,
         ),
-        format_func=lambda v: "Piper (neural, high-quality)" if v == "piper" else "pyttsx3 (system voices)",
+        format_func=lambda v: tts_backend_labels.get(v, v),
         disabled=not tts_enabled,
-        help="Piper requires the piper executable on PATH and a .onnx model file.",
+        help="Auto picks the most natural available backend. Piper requires executable + .onnx model.",
     )
     if tts_backend_pref == "piper":
         if _piper_avail:

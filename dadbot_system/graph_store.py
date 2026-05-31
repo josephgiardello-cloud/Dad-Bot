@@ -1,27 +1,33 @@
 import json
 import sqlite3
 import time
+from abc import ABC, abstractmethod
 from contextlib import closing
 from pathlib import Path
 
 
-class GraphStoreBackend:
+class GraphStoreBackend(ABC):
     name = "unknown"
 
+    @abstractmethod
     def ensure_storage(self):
-        raise NotImplementedError
+        ...
 
+    @abstractmethod
     def replace_graph(self, nodes, edges):
-        raise NotImplementedError
+        ...
 
+    @abstractmethod
     def fetch_graph(self):
-        raise NotImplementedError
+        ...
 
+    @abstractmethod
     def clear(self):
-        raise NotImplementedError
+        ...
 
+    @abstractmethod
     def stats(self):
-        raise NotImplementedError
+        ...
 
 
 class SQLiteGraphStore(GraphStoreBackend):
@@ -256,7 +262,7 @@ class SQLiteGraphStore(GraphStoreBackend):
             try:
                 self.db_path.unlink()
             except Exception:
-                pass
+                return
 
     def stats(self):
         if not self.db_path.exists():

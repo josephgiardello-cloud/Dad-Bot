@@ -45,6 +45,7 @@ service = [
 voice = [
     "faster-whisper>=1.1",
     "openai-whisper>=20231117",
+    "edge-tts>=6.1",
     "pyttsx3>=2.98",
 ]
 notifications = [

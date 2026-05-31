@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import shutil
 import subprocess
 from pathlib import Path
@@ -10,6 +11,28 @@ try:
     import pyttsx3  # type: ignore[import-not-found]
 except Exception:  # pragma: no cover - optional dependency
     pyttsx3 = None
+
+try:
+    import edge_tts  # type: ignore[import-not-found]
+except Exception:  # pragma: no cover - optional dependency
+    edge_tts = None
+
+
+def edge_tts_available() -> bool:
+    return edge_tts is not None
+
+
+def _run_async(coro):
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
 
 
 def synthesize_piper_audio(
@@ -76,6 +99,53 @@ def resolve_tts_voice_id(engine, voice_profile):
     scored.sort(key=lambda item: item[0], reverse=True)
     best_id = scored[0][1] if scored and scored[0][1] else ""
     return best_id
+
+
+def resolve_edge_voice_name(voice_profile: str) -> str:
+    profile = str(voice_profile or "warm_dad").strip().lower()
+    mapping = {
+        "warm_dad": "en-US-GuyNeural",
+        "deep_dad": "en-US-ChristopherNeural",
+        "gentle_dad": "en-US-EricNeural",
+    }
+    return mapping.get(profile, "en-US-GuyNeural")
+
+
+def synthesize_edge_tts_audio(
+    reply_text,
+    *,
+    voice_profile: str = "warm_dad",
+    rate_delta: int = 0,
+    pacing: int = 50,
+):
+    if edge_tts is None:
+        return None, "edge-tts is not installed."
+
+    text = str(reply_text or "").strip()
+    if not text:
+        return None, ""
+
+    pace_delta = int((max(0, min(100, int(pacing or 50))) - 50) * 0.6)
+    rate_percent = max(-50, min(50, int(rate_delta or 0) + pace_delta))
+    rate = f"{rate_percent:+d}%"
+    edge_voice = resolve_edge_voice_name(voice_profile)
+
+    temp_path = None
+    try:
+        temp_path = create_temp_file_path(suffix=".mp3", prefix="dadbot_tts_")
+
+        async def _synthesize() -> None:
+            communicator = edge_tts.Communicate(text=text, voice=edge_voice, rate=rate)
+            await communicator.save(temp_path)
+
+        _run_async(_synthesize())
+        audio_bytes = Path(temp_path).read_bytes()
+        return audio_bytes, ""
+    except Exception as exc:
+        return None, f"edge-tts failed: {exc}"
+    finally:
+        if temp_path:
+            safe_unlink(temp_path)
 
 
 def synthesize_tts_audio(

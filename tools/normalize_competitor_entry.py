@@ -120,7 +120,7 @@ def main() -> int:
     try:
         rel_path = out_path.relative_to(ROOT)
     except ValueError:
-        pass
+        rel_path = out_path
     print(f"WROTE_COMPETITOR_ENTRY={str(rel_path).replace('\\', '/')}")
     print(f"ROWS_NORMALIZED={len(normalized)}")
     return 0

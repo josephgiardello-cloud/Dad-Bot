@@ -93,7 +93,7 @@ def shadow_log(
             latency_ms=float(latency_ms),
         )
     except Exception:  # noqa: BLE001 — never let shadow mode affect the caller
-        pass
+        return
 
 
 # ---------------------------------------------------------------------------
@@ -288,7 +288,7 @@ def _build_runtime_fingerprint(snapshot: dict[str, Any]) -> dict[str, str | None
         inference = dict(snapshot.get("inference") or snapshot.get("inputs") or {})
         model_id = str(inference.get("model") or inference.get("model_id") or "") or None
     except Exception:  # noqa: BLE001
-        pass
+        model_id = None
 
     # config_hash — hash of whatever config fields the snapshot carries
     config_hash: str | None = None
@@ -297,7 +297,7 @@ def _build_runtime_fingerprint(snapshot: dict[str, Any]) -> dict[str, str | None
         if config_fields:
             config_hash = _stable_sha256(config_fields)
     except Exception:  # noqa: BLE001
-        pass
+        config_hash = None
 
     return {
         "code_version": code_version,

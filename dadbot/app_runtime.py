@@ -1060,7 +1060,7 @@ def main(
             if _r.returncode == 0 and _r.stdout.strip():
                 os.environ["DADBOT_CODE_VERSION"] = _r.stdout.strip()
         except Exception:
-            pass
+            os.environ.setdefault("DADBOT_CODE_VERSION", "unknown")
 
     if args.init_profile:
         created = resolved_dadbot_cls.initialize_profile_file()

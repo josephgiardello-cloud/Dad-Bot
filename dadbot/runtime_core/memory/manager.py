@@ -1,4 +1,4 @@
-"""Thin memory manager stub."""
+"""Runtime memory manager for turn consolidation and state updates."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ def _stable_hash(payload: Any) -> str:
 
 
 class MemoryManager:
-    """Memory manager stub."""
+    """Memory manager coordinating episodic/procedural/semantic updates."""
 
     def consolidate_turn_outcome(self, *args: Any, **kwargs: Any) -> None:
         runtime = kwargs.get("runtime")

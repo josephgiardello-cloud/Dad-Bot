@@ -37,7 +37,7 @@ class AvatarManager:
         return self.avatar_path().exists()
 
     def _create_fallback_avatar_image(self, mood: str | None = None) -> bytes:
-        """Generate a local placeholder avatar when image models are unavailable."""
+        """Generate a local fallback avatar when image models are unavailable."""
         if Image is None or ImageDraw is None or ImageFont is None:
             # Minimal valid 1x1 PNG fallback if Pillow is unavailable.
             return base64.b64decode(

@@ -371,6 +371,84 @@ class StrictLLMService:
         rich_context: dict[str, Any],
         attachments: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
+        def _resolve_current_mood() -> str:
+            mood_candidates: list[str] = []
+            if isinstance(rich_context, dict):
+                for key in ("mood", "current_mood"):
+                    value = rich_context.get(key)
+                    if value:
+                        mood_candidates.append(str(value))
+                temporal = rich_context.get("temporal")
+                if isinstance(temporal, dict) and temporal.get("mood"):
+                    mood_candidates.append(str(temporal.get("mood")))
+
+            state = getattr(context, "state", None)
+            if isinstance(state, dict):
+                for key in ("mood", "current_mood"):
+                    value = state.get(key)
+                    if value:
+                        mood_candidates.append(str(value))
+                temporal = state.get("temporal")
+                if isinstance(temporal, dict) and temporal.get("mood"):
+                    mood_candidates.append(str(temporal.get("mood")))
+
+            last_saved_mood = getattr(self.bot, "last_saved_mood", None)
+            if callable(last_saved_mood):
+                with suppress(Exception):
+                    value = last_saved_mood()
+                    if value:
+                        mood_candidates.append(str(value))
+
+            normalize_mood = getattr(self.bot, "normalize_mood", None)
+            for candidate in mood_candidates:
+                normalized = str(candidate or "").strip()
+                if not normalized:
+                    continue
+                if callable(normalize_mood):
+                    with suppress(Exception):
+                        return str(normalize_mood(normalized) or "neutral")
+                return normalized.lower()
+            return "neutral"
+
+        def _build_persona_system_prompt(
+            user_input: str,
+            current_mood: str,
+            selected_attachments: list[dict[str, Any]],
+        ) -> str:
+            if self.bot is None:
+                return ""
+
+            prompt_assembly = getattr(self.bot, "prompt_assembly", None)
+            request_builder = getattr(prompt_assembly, "build_request_system_prompt", None)
+            if callable(request_builder):
+                with suppress(Exception):
+                    return str(
+                        request_builder(
+                            user_input,
+                            current_mood,
+                            selected_attachments,
+                        )
+                        or ""
+                    ).strip()
+
+            sections: list[str] = []
+            core_persona = getattr(self.bot, "build_core_persona_prompt", None)
+            if callable(core_persona):
+                with suppress(Exception):
+                    content = str(core_persona() or "").strip()
+                    if content:
+                        sections.append(content)
+
+            tone_context = getattr(self.bot, "tone_context", None)
+            mood_builder = getattr(tone_context, "build_mood_context", None)
+            if callable(mood_builder):
+                with suppress(Exception):
+                    content = str(mood_builder(current_mood) or "").strip()
+                    if content:
+                        sections.append(content)
+
+            return "\n\n".join(section for section in sections if section).strip()
+
         raw_messages = rich_context.get("messages") if isinstance(rich_context, dict) else None
         normalized: list[dict[str, Any]] = []
         if isinstance(raw_messages, list):
@@ -390,6 +468,30 @@ class StrictLLMService:
                 normalized = [{"role": "user", "content": "Hello"}]
 
         selected_attachments = list(attachments or self._collect_attachments(context, rich_context))
+
+        has_system_message = any(
+            str(message.get("role") or "").strip().lower() == "system"
+            for message in normalized
+            if isinstance(message, dict)
+        )
+        if not has_system_message:
+            user_input = ""
+            for message in reversed(normalized):
+                if str(message.get("role") or "").strip().lower() != "user":
+                    continue
+                user_input = str(message.get("content") or "").strip()
+                if user_input:
+                    break
+
+            current_mood = _resolve_current_mood()
+            system_prompt = _build_persona_system_prompt(
+                user_input=user_input,
+                current_mood=current_mood,
+                selected_attachments=selected_attachments,
+            )
+            if system_prompt:
+                normalized = [{"role": "system", "content": system_prompt}, *normalized]
+
         images = self._extract_image_payload(selected_attachments)
         if images:
             attached = False
@@ -619,7 +721,7 @@ def _build_bot() -> DadBot:
     return bot
 
 
-_STREAMLIT_RUNTIME_BUILD = "2026-05-30-inline-upload-v2"
+_STREAMLIT_RUNTIME_BUILD = "2026-05-31-persona-system-prompt-v3"
 
 if "bot" not in st.session_state:
     st.session_state.bot = _build_bot()

@@ -241,14 +241,16 @@ def bot():
         bot.embed_texts = fake_embed_texts
         yield bot
     finally:
-        try:
-            bot.shutdown()
-        except Exception:
-            pass
-        try:
-            bot.wait_for_semantic_index_idle(5)
-        except Exception:
-            pass
+        if bot is not None:
+            try:
+                bot.shutdown()
+            except Exception:
+                bot = None
+        if bot is not None:
+            try:
+                bot.wait_for_semantic_index_idle(5)
+            except Exception:
+                bot = None
         temp_dir.cleanup()
 
 

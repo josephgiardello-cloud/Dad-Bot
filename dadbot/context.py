@@ -370,7 +370,7 @@ Keep family relationships, ages, timelines, and education history consistent wit
         try:
             graph_result = self.bot.graph_retrieval_for_input(user_input_str, limit=3) if user_input_str else None
         except Exception:
-            pass
+            graph_result = None
 
         try:
             if not graph_result and user_input_str:
@@ -378,7 +378,7 @@ Keep family relationships, ages, timelines, and education history consistent wit
                     self.bot.relevant_archive_entries_for_input(user_input_str, limit=2) or [],
                 )
         except Exception:
-            pass
+            archive_entries = []
 
         try:
             if user_input_str:
@@ -391,7 +391,7 @@ Keep family relationships, ages, timelines, and education history consistent wit
                     or [],
                 )
         except Exception:
-            pass
+            semantic_memories = []
 
         # 2. Get consolidated and deep pattern context
         deep_pattern_context = None
@@ -403,13 +403,13 @@ Keep family relationships, ages, timelines, and education history consistent wit
                     user_input_str,
                 )
             except Exception:
-                pass
+                deep_pattern_context = None
             try:
                 consolidated_context = self.bot.build_active_consolidated_context(
                     user_input_str,
                 )
             except Exception:
-                pass
+                consolidated_context = None
 
         # 3. Build all sections using _build_memory_sections
         if deep_pattern_context or consolidated_context or graph_result or archive_entries or semantic_memories:
