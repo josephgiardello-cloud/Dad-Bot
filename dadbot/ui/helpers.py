@@ -37,6 +37,11 @@ try:
 except Exception:
     pyttsx3 = None
 
+try:
+    import edge_tts  # type: ignore[import-not-found]
+except Exception:
+    edge_tts = None
+
 __all__ = [
     "apply_power_mode",
     "apply_ui_preferences",
@@ -67,7 +72,8 @@ def render_voice_dependency_help(*, context_key: str) -> None:
         "but STT/TTS needs: "
         "[faster-whisper](https://pypi.org/project/faster-whisper/) or "
         "[openai-whisper](https://pypi.org/project/openai-whisper/) for transcription, and "
-        "[pyttsx3](https://pypi.org/project/pyttsx3/) or [Piper](https://github.com/rhasspy/piper) for speech.",
+        "[edge-tts](https://pypi.org/project/edge-tts/), [pyttsx3](https://pypi.org/project/pyttsx3/), "
+        "or [Piper](https://github.com/rhasspy/piper) for speech.",
     )
 
     stt_ok, stt_backend, stt_status = local_stt_backend_status(None)
@@ -109,16 +115,37 @@ def local_stt_backend_status(preferences) -> tuple[bool, str, str]:
     )
 
 
-def local_tts_backend_status() -> tuple[bool, str, str]:
-    if pyttsx3 is None and not shutil.which("piper"):
-        return (
-            False,
-            "none",
-            "Install pyttsx3 or Piper for local text-to-speech playback.",
-        )
-    if shutil.which("piper"):
-        return True, "piper", "Piper neural TTS is available (high-quality)."
-    return True, "pyttsx3", "Using local pyttsx3 text-to-speech."
+def local_tts_backend_status(preferences: dict | None = None) -> tuple[bool, str, str]:
+    voice = voice_preferences() if preferences is None else preferences
+    requested = str(voice.get("tts_backend") or "auto").strip().lower()
+
+    piper_model_path = str(voice.get("tts_piper_model_path") or "").strip()
+    piper_ready = bool(shutil.which("piper") and piper_model_path)
+    edge_ready = edge_tts is not None
+    pyttsx3_ready = pyttsx3 is not None
+
+    if requested == "piper":
+        if piper_ready:
+            return True, "piper", "Using Piper neural TTS."
+        return False, "none", "Piper selected, but executable or model path is missing."
+
+    if requested == "edge_tts":
+        if edge_ready:
+            return True, "edge_tts", "Using edge-tts neural voice."
+        return False, "none", "edge-tts selected, but package is not installed."
+
+    if requested == "auto":
+        if piper_ready:
+            return True, "piper", "Auto-selected Piper neural TTS."
+        if edge_ready:
+            return True, "edge_tts", "Auto-selected edge-tts neural voice."
+        if pyttsx3_ready:
+            return True, "pyttsx3", "Auto-selected pyttsx3 system voice."
+        return False, "none", "No TTS backend found. Install edge-tts, pyttsx3, or Piper."
+
+    if pyttsx3_ready:
+        return True, "pyttsx3", "Using local pyttsx3 text-to-speech."
+    return False, "none", "pyttsx3 selected, but package is not installed."
 
 
 def apply_power_mode(bot: DadBot, mode: str) -> str:
@@ -207,7 +234,7 @@ def fetch_ical_events(url: str, max_events: int = 10) -> tuple[list[dict], str]:
             if event_date and _dc2.fromisoformat(event_date) < _dc2.today():
                 continue
         except Exception:
-            pass
+            event_date = event_date
 
         events.append(
             {

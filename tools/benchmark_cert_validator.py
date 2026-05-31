@@ -5,7 +5,7 @@ Validates:
 1. Artifact schema strictness (cert mode)
 2. Hash drift detection (scenario/script SHA unchanged)
 3. Entrant roster lock (same entrants across comparable runs)
-4. Offline stub prohibition (cert runs cannot use offline LLM patch)
+4. Offline patch prohibition (cert runs cannot use offline LLM patch)
 5. Required field presence (completed, error, response always present)
 
 Usage:
@@ -188,7 +188,7 @@ def compare_scorecards(baseline: dict[str, Any], candidate: dict[str, Any]) -> l
         if extra:
             issues.append(f"Entrant roster drift: added {extra}")
     
-    # Check offline stub consistency.
+    # Check offline patch consistency.
     baseline_offline = baseline.get("cert_mode", False)
     candidate_offline = candidate.get("cert_mode", False)
     if baseline_offline != candidate_offline:

@@ -49,7 +49,7 @@ def default_ui_preferences() -> dict:
             "tts_enabled": True,
             "tts_autoplay": False,
             "tts_voice": "warm_dad",
-            "tts_backend": "pyttsx3",
+            "tts_backend": "auto",
             "tts_piper_model_path": "",
             "tts_rate": 0,
             "warmth": 70,

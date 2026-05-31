@@ -101,7 +101,7 @@ class _StatePromptBudgetMixin:
                     trimmed = trimmed.rstrip(" ,.;:") + "..."
                 return trimmed
             except Exception:  # noqa: BLE001
-                pass
+                tokenizer = None
 
         estimated_tokens = self.bot.estimate_token_count(normalized)
         if estimated_tokens <= token_budget:

@@ -9,7 +9,7 @@ def _print(msg: str) -> None:
 
 
 def main() -> int:
-    _print("[PrimeMemory] Starting mock-free Gideon readiness check")
+    _print("[PrimeMemory] Starting dependency-free Gideon readiness check")
 
     mro_names = [cls.__name__ for cls in MemoryManager.__mro__]
     _print(f"[PrimeMemory] MemoryManager MRO: {mro_names}")

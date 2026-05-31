@@ -2,6 +2,7 @@ import json
 import math
 import sqlite3
 import time
+from abc import ABC, abstractmethod
 from contextlib import closing
 from pathlib import Path
 
@@ -21,32 +22,40 @@ def _stable_row_tiebreaker(row):
     )
 
 
-class SemanticIndexBackend:
+class SemanticIndexBackend(ABC):
     name = "unknown"
 
+    @abstractmethod
     def ensure_storage(self):
-        raise NotImplementedError
+        ...
 
+    @abstractmethod
     def existing_content_hashes(self):
-        raise NotImplementedError
+        ...
 
+    @abstractmethod
     def delete_keys(self, keys):
-        raise NotImplementedError
+        ...
 
+    @abstractmethod
     def upsert_rows(self, rows):
-        raise NotImplementedError
+        ...
 
+    @abstractmethod
     def fetch_recent(self, limit):
-        raise NotImplementedError
+        ...
 
+    @abstractmethod
     def fetch_candidates(self, query_embedding, query_tokens, query_category, query_mood, limit):
-        raise NotImplementedError
+        ...
 
+    @abstractmethod
     def count(self):
-        raise NotImplementedError
+        ...
 
+    @abstractmethod
     def clear(self):
-        raise NotImplementedError
+        ...
 
 
 class SQLiteSemanticIndex(SemanticIndexBackend):
@@ -345,7 +354,7 @@ class SQLiteSemanticIndex(SemanticIndexBackend):
             try:
                 self.db_path.unlink()
             except Exception:
-                pass
+                return
 
 
 class PGVectorSemanticIndex(SemanticIndexBackend):

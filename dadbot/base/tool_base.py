@@ -1,6 +1,7 @@
-from typing import Any, Dict, Callable
+from abc import ABC, abstractmethod
+from typing import Any, Dict
 
-class Tool:
+class Tool(ABC):
     """
     Base class for agent tools. Each tool must implement the `run` method.
     """
@@ -13,8 +14,9 @@ class Tool:
         self.description = description
         self.parameters = parameters
 
+    @abstractmethod
     def run(self, **kwargs) -> Any:
-        raise NotImplementedError("Tool must implement run()")
+        """Execute the tool operation and return a serializable result."""
 
 class ToolRegistryDynamic:
     """

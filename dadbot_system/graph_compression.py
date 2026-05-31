@@ -48,7 +48,7 @@ Compressed summary:
                     return compressed
                 return self._truncate_to_budget(compressed, budget)
         except Exception:
-            pass
+            compressed = ""
         return self._truncate_to_budget(raw_text, budget)
 
     def _extract_relevant_subgraph(self, nodes, edges, query):

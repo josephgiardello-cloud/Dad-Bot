@@ -169,7 +169,7 @@ class AbstractAsyncCheckpointer(ABC):
         checkpoint: dict[str, Any],
         manifest: dict[str, Any],
     ) -> bool:
-        pass
+        ...
 
     @abstractmethod
     async def load_checkpoint(
@@ -180,7 +180,7 @@ class AbstractAsyncCheckpointer(ABC):
         current_manifest: dict[str, Any] | None = None,
         strict: bool = False,
     ) -> dict[str, Any]:
-        pass
+        ...
 
     @abstractmethod
     async def prune_old_checkpoints(
@@ -189,11 +189,11 @@ class AbstractAsyncCheckpointer(ABC):
         keep_count: int = 10,
         older_than_days: int | None = None,
     ) -> int:
-        pass
+        ...
 
     @abstractmethod
     async def migrate(self) -> None:
-        pass
+        ...
 
     async def save(
         self,
@@ -238,4 +238,4 @@ class AbstractAsyncCheckpointer(ABC):
 def delete(session_id: str) -> int:
     """Module-level alias retained for canonical PersistenceBase contract checks."""
     _ = session_id
-    raise NotImplementedError("Persistence delete alias must be implemented by a concrete backend")
+    raise RuntimeError("Persistence delete alias must be implemented by a concrete backend")

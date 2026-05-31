@@ -31,7 +31,7 @@ def _get_git_commit_sha() -> str:
         if result.returncode == 0:
             return result.stdout.strip()
     except Exception:
-        pass
+        return ""
     return ""
 
 
@@ -97,11 +97,11 @@ def _run_orchestrator(*, offline_llm_stub: bool = False) -> list[dict[str, Any]]
             try:
                 runner.close()
             except Exception:
-                pass
+                runner = None
         try:
             bot.shutdown()
         except Exception:
-            pass
+            bot = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -188,7 +188,7 @@ def main() -> int:
         try:
             rel_path = out_path.relative_to(ROOT)
         except ValueError:
-            pass
+            rel_path = out_path
         print(f"WROTE_DADBOT_ENTRY={str(rel_path).replace('\\', '/')}")
         if bool(args.cert):
             print(f"CERT_MODE=true GIT_SHA={payload.get('git_commit_sha', 'unknown')}")

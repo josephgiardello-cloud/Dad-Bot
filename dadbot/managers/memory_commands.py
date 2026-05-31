@@ -129,7 +129,7 @@ class MemoryCommandManager:
             try:
                 relationship = self.bot.relationship_state()
             except Exception:
-                pass
+                relationship = {}
 
             export_data = {
                 "export_version": "1.0",
@@ -172,7 +172,7 @@ class MemoryCommandManager:
                 if callable(reset):
                     reset()
             except Exception:
-                pass
+                reset = None
             config = getattr(self.bot, "config", None)
             session_log_dir = getattr(self.bot, "SESSION_LOG_DIR", None)
             if bool(getattr(config, "rtbf_proof_enabled", True)) and session_log_dir is not None:
@@ -215,7 +215,7 @@ class MemoryCommandManager:
             try:
                 relationship = self.bot.relationship_state()
             except Exception:
-                pass
+                relationship = {}
 
             categories: dict[str, int] = {}
             for m in memories:

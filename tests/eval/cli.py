@@ -37,7 +37,7 @@ def production_bootstrap() -> tuple[DadBotOrchestrator, Any | None, dict[str, An
             try:
                 registry.register("tool_registry", tool_registry)
             except Exception:
-                pass
+                services = dict(getattr(registry, "_services", {}) or {})
             services = dict(getattr(registry, "_services", {}) or {})
         if tool_registry is None:
             try:

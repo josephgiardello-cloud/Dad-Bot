@@ -20,7 +20,7 @@ class DummyModelRuntime:
         try:
             # Try to connect to the Ollama server quickly (timeout 0.5s)
             with socket.create_connection(("localhost", 11434), timeout=0.5):
-                pass
+                status["connected"] = True
         except Exception as e:
             status["error"] = f"Ollama not reachable: {e}"
             return status
