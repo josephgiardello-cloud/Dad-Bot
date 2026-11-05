@@ -19,8 +19,6 @@ from uuid import uuid4
 
 
 from dadbot.contracts import AttachmentList, ChunkCallback, FinalizedTurnResult
-from dadbot.smart_home.intent_parser import parse_intent
-from dadbot.smart_home.route_intent import route_intent
 from dadbot.core.execution_contract import (
     AgentState,
     ExecutionMode,
@@ -621,18 +619,7 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
                     final_reply = str(append_signoff(final_reply) or final_reply)
                 return final_reply, False
 
-        # 2. Intent parsing and routing (NEW)
-        intent = parse_intent(user_input)
-        if intent and intent.get("confidence", 0) >= 0.95:
-            routed_reply = route_intent(intent)
-            if routed_reply:
-                # Optionally sign off
-                append_signoff = getattr(getattr(self, "reply_finalization", None), "append_signoff", None)
-                if callable(append_signoff):
-                    routed_reply = str(append_signoff(routed_reply) or routed_reply)
-                return routed_reply, False
-
-        # 3. Normal turn flow
+        # All non-crisis requests use the canonical turn path; actions are delegated via MCP tools.
         pre_turn_daily_checkin_due = self._get_pre_turn_checkin_due()
         context = self._build_sovereign_context(mode=ExecutionMode.LIVE)
         response = cast(

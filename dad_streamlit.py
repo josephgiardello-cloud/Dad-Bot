@@ -24,7 +24,21 @@ from dadbot.managers.profile_runtime import ProfileRuntimeManager
 from dadbot.managers.relationship_manager import RelationshipManager
 from dadbot.managers.tts import TTSManager
 from dadbot.runtime.model.model_call_port import ModelConfig
+from dadbot.runtime.mcp.tool_client import (
+    MCPToolClient,
+    configured_ha_mcp_tools,
+    configured_ha_mcp_url,
+    run_mcp_with_fallback,
+)
 from dadbot.ui.media.service import MediaService
+from dadbot.ui.streamlit_context import (
+    SQLiteStreamlitThreadStore,
+    StreamlitContextService,
+    StreamlitReflectionService,
+    classify_profile_question,
+    serialize_thread_messages,
+    set_runtime_thread_id,
+)
 from dadbot_system.events import InMemoryEventBus
 
 
@@ -38,7 +52,10 @@ def _ensure_ui_runtime_state() -> None:
 
     if "chat_threads" not in st.session_state:
         seeded = list(st.session_state.chat_history or [])
-        st.session_state.chat_threads = {"default": seeded}
+        thread_store = getattr(st.session_state.get("bot"), "_streamlit_thread_store", None)
+        load_threads = getattr(thread_store, "load_threads", None)
+        restored = load_threads() if callable(load_threads) else {}
+        st.session_state.chat_threads = restored or {"default": seeded}
 
     if "active_thread_id" not in st.session_state:
         st.session_state.active_thread_id = "default"
@@ -584,6 +601,10 @@ def _set_thread_messages(messages: list[dict[str, Any]], thread_id: str | None =
     st.session_state.chat_threads = threads
     if tid == _active_thread_id():
         st.session_state.chat_history = list(threads[tid])
+    thread_store = getattr(st.session_state.get("bot"), "_streamlit_thread_store", None)
+    save_thread = getattr(thread_store, "save_thread", None)
+    if callable(save_thread):
+        save_thread(tid, threads[tid])
 
 
 def _append_chat_message(
@@ -617,6 +638,7 @@ def _switch_active_thread(thread_id: str) -> None:
         st.session_state.chat_threads = threads
     st.session_state.active_thread_id = tid
     st.session_state.chat_history = _thread_messages(tid)
+    set_runtime_thread_id(st.session_state.get("bot"), tid)
 
 
 def _create_new_thread() -> str:
@@ -1097,10 +1119,22 @@ class StrictLLMService:
 
         return normalized
 
-    def _chat_sync(self, messages: list[dict[str, Any]], attachments: list[dict[str, Any]]) -> str:
-        import ollama
-
-        selected_model = self.model_name
+    def _chat_sync(
+        self,
+        messages: list[dict[str, Any]],
+        attachments: list[dict[str, Any]],
+        *,
+        response_format: Any = None,
+        purpose: str = "chat",
+    ) -> str:
+        profile = getattr(self.bot, "PROFILE", {}) if self.bot is not None else {}
+        profile_llm = profile.get("llm", {}) if isinstance(profile, dict) else {}
+        bot_config = getattr(self.bot, "config", None)
+        selected_model = str(
+            (profile_llm.get("model") if isinstance(profile_llm, dict) else "")
+            or getattr(bot_config, "active_model", "")
+            or self.model_name
+        ).strip()
         image_turn = any(bool(list(item.get("images") or [])) for item in list(messages or []))
 
         if image_turn and not self._model_supports_image_input(selected_model):
@@ -1115,8 +1149,17 @@ class StrictLLMService:
         if image_turn and not self._model_supports_image_input(selected_model):
             selected_messages = self._augment_messages_with_attachment_note(selected_messages, attachments)
 
-        response = ollama.chat(model=selected_model, messages=selected_messages)
-        text = _extract_ollama_text(response)
+        model_port = getattr(self.bot, "model_port", None)
+        generate = getattr(model_port, "generate", None)
+        if not callable(generate):
+            raise RuntimeError("DadBot model port is not initialized")
+        response = generate(
+            selected_messages,
+            model=selected_model,
+            purpose=purpose,
+            response_format=response_format,
+        )
+        text = str(response or "").strip()
         if text:
             return text
         raise RuntimeError("Ollama returned an empty response")
@@ -1124,68 +1167,38 @@ class StrictLLMService:
     async def run_agent(self, context: Any, rich_context: dict[str, Any]) -> str:
         attachments = self._collect_attachments(context, rich_context)
         messages = self._to_messages(context, rich_context, attachments)
+        mcp_url = configured_ha_mcp_url()
+        allowed_tools = configured_ha_mcp_tools()
+        if mcp_url:
+            tool_client = MCPToolClient(
+                mcp_url,
+                bearer_token=str(os.environ.get("DADBOT_HA_MCP_TOKEN") or ""),
+            )
+            return await run_mcp_with_fallback(
+                messages,
+                tool_client,
+                allowed_tools,
+                model_call=lambda candidate_messages: self._chat_sync(
+                    candidate_messages,
+                    attachments,
+                    response_format="json",
+                    purpose="mcp_tool_plan",
+                ),
+                fallback_call=lambda candidate_messages: self._chat_sync(candidate_messages, attachments),
+            )
+
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, lambda: self._chat_sync(messages, attachments))
 
 
 def _build_bot() -> DadBot:
-    class MinimalPersistenceService:
-        def __init__(self) -> None:
-            self.bot: Any | None = None
-
-        def finalize_turn(self, turn_context: Any, result: Any):
-            if isinstance(result, tuple):
-                raw_reply = result[0] if len(result) >= 1 else ""
-                should_end = bool(result[1]) if len(result) >= 2 else False
-            else:
-                raw_reply = result
-                should_end = bool(getattr(turn_context, "state", {}).get("should_end", False))
-
-            reply = str(raw_reply or "")
-            bot = self.bot
-            if bot is not None:
-                finalization = getattr(bot, "reply_finalization", None)
-                finalize = getattr(finalization, "finalize", None)
-                if callable(finalize):
-                    mood = str(getattr(turn_context, "state", {}).get("mood") or "neutral")
-                    user_input = str(getattr(turn_context, "user_input", "") or "")
-                    with suppress(Exception):
-                        reply = str(finalize(reply, mood, user_input=user_input) or reply)
-                else:
-                    append_signoff = getattr(finalization, "append_signoff", None)
-                    if callable(append_signoff):
-                        with suppress(Exception):
-                            reply = str(append_signoff(reply) or reply)
-
-            return reply, should_end
-
-        def save_turn(self, turn_context: Any, result: Any) -> None:
-            pass
-
-        def save_turn_event(self, event: dict[str, Any]) -> None:
-            pass
-
-        def save_graph_checkpoint(self, checkpoint: dict[str, Any], _skip_turn_event: bool = False) -> None:
-            pass
-
     class MinimalSafetyService:
         def tick(self, context: Any = None) -> dict[str, Any]:
             return {"status": "ok"}
 
-    class MinimalContextService:
-        def build_context(self, turn_context: Any) -> dict[str, Any]:
-            return {"messages": [], "temporal": dict(getattr(turn_context, "state", {}).get("temporal") or {})}
-
     class MinimalMaintenanceService:
         def tick(self, context: Any = None) -> dict[str, Any]:
             return {"status": "ok"}
-
-    class MinimalReflectionService:
-        def reflect_after_turn(self, turn_text: str, current_mood: str, reply_text: str) -> dict[str, Any]:
-            return {"reflection": "noop"}
-
-        def reflect(self, turn_context: Any, result: Any) -> dict[str, Any]:
-            return {"reflection": "noop"}
 
     class ModelRuntimeStub:
         def __init__(self, active_model: str):
@@ -1283,16 +1296,14 @@ def _build_bot() -> DadBot:
     for key, value in build_services().items():
         registry.register(key, value)
 
+    context_service = StreamlitContextService()
     llm_service = StrictInferenceService(model_name)
     registry.register("llm", llm_service)
     registry.register("agent_service", llm_service)
     registry.register("health", StrictHealthService())
-    registry.register("context_service", MinimalContextService())
+    registry.register("context_service", context_service)
     registry.register("maintenance_service", MinimalMaintenanceService())
-    persistence_service = MinimalPersistenceService()
-    registry.register("persistence_service", persistence_service)
     registry.register("safety_service", MinimalSafetyService())
-    registry.register("reflection", MinimalReflectionService())
 
     class PatchedDadBot(DadBot):
         def _get_turn_orchestrator(self):
@@ -1322,13 +1333,31 @@ def _build_bot() -> DadBot:
         validate_managers=False,
     )
 
+    canonical_service_container = getattr(bot, "services", None)
+    canonical_registry = getattr(canonical_service_container, "registry", None)
+    canonical_persistence = (
+        canonical_registry.get("persistence_service", optional=True)
+        if canonical_registry is not None
+        else None
+    )
+    internal_state_manager = (
+        canonical_registry.get("internal_state_manager", optional=True)
+        if canonical_registry is not None
+        else None
+    )
+    if canonical_persistence is None:
+        raise RuntimeError("The Streamlit runtime requires the canonical PersistenceService")
+    registry.register("persistence_service", canonical_persistence)
+    registry.register("reflection", StreamlitReflectionService(bot, internal_state_manager))
+
     bot._memory_manager = memory_manager
     bot._relationship_manager = relationship_manager
     bot._mood_manager = mood_manager
     bot._profile_runtime = profile_runtime
     bot.services = None
+    setattr(bot, "_streamlit_thread_store", SQLiteStreamlitThreadStore())
     llm_service.bot = bot
-    persistence_service.bot = bot
+    context_service.bot = bot
 
     with suppress(Exception):
         profile_path = getattr(runtime_config, "profile_path", None)
@@ -1343,7 +1372,7 @@ def _build_bot() -> DadBot:
     return bot
 
 
-_STREAMLIT_RUNTIME_BUILD = "2026-05-31-persona-system-prompt-v10"
+_STREAMLIT_RUNTIME_BUILD = "2026-11-05-mcp-persistence-reflection-v12"
 
 st.set_page_config(
     page_title="DadBot",
@@ -1367,25 +1396,41 @@ bot = st.session_state.bot
 media_service = MediaService()
 
 
+def _process_user_message_with_thread(
+    user_input: str,
+    attachments: list[dict[str, Any]] | None = None,
+):
+    messages = serialize_thread_messages(_thread_messages(), user_input)
+    setattr(bot, "_streamlit_context_messages", messages)
+    return bot.process_user_message(user_input, attachments=attachments)
+
+
 def _fallback_dad_story() -> str:
     family = getattr(bot, "FAMILY", {}) if bot is not None else {}
     education = getattr(bot, "EDUCATION", {}) if bot is not None else {}
     dad = family.get("dad", {}) if isinstance(family, dict) else {}
     style = getattr(getattr(bot, "profile_runtime", None), "style", {}) or {}
-    listener_name = str(style.get("listener_name") or "Tony")
-
-    birthplace = str(dad.get("birthplace") or "Providence, Rhode Island")
-    moved_to = str(dad.get("moved_to") or "Albion, Maine")
-    move_age = int(dad.get("move_age") or 5)
-    boarding_school = str(education.get("boarding_school") or "Kents Hill School")
-    university = str(education.get("university") or "University of Maine")
-
-    return (
-        f"I'm your dad - born in {birthplace}. "
-        f"We moved to {moved_to} when I was {move_age}. "
-        f"I went to {boarding_school} and then {university} for English. "
-        f"You're my son, {listener_name}."
-    )
+    listener_name = str(style.get("listener_name") or "buddy")
+    details = []
+    birthplace = str(dad.get("birthplace") or "").strip()
+    moved_to = str(dad.get("moved_to") or "").strip()
+    move_age = dad.get("move_age")
+    boarding_school = str(education.get("boarding_school") or "").strip()
+    university = str(education.get("university") or "").strip()
+    degree = str(education.get("degree") or "").strip()
+    if birthplace:
+        details.append(f"I was born in {birthplace}")
+    if moved_to:
+        age_fragment = f" when I was {move_age}" if move_age is not None else ""
+        details.append(f"we moved to {moved_to}{age_fragment}")
+    if boarding_school:
+        details.append(f"I went to {boarding_school}")
+    if university:
+        study_fragment = f" for {degree}" if degree else ""
+        details.append(f"I studied at {university}{study_fragment}")
+    if not details:
+        return f"I'm here with you, {listener_name}. What would you like to know?"
+    return f"Here's the short version, {listener_name}: " + ". ".join(details) + "."
 
 
 def _fallback_dad_full_story() -> str:
@@ -1395,117 +1440,61 @@ def _fallback_dad_full_story() -> str:
     style = getattr(getattr(bot, "profile_runtime", None), "style", {}) or {}
     sports = profile.get("sports_preferences", {}) if isinstance(profile, dict) else {}
 
-    listener_name = str(style.get("listener_name") or "Tony")
+    listener_name = str(style.get("listener_name") or "buddy")
     dad = family.get("dad", {}) if isinstance(family, dict) else {}
-    birthplace = str(dad.get("birthplace") or "Providence, Rhode Island")
-    moved_to = str(dad.get("moved_to") or "Albion, Maine")
-    move_age = int(dad.get("move_age") or 5)
-    childhood = str(dad.get("childhood") or "grew up in a small town in Maine")
-    boarding_school = str(education.get("boarding_school") or "Kents Hill School")
-    university = str(education.get("university") or "University of Maine")
-    degree = str(education.get("degree") or "English")
-    baseball_team = str(sports.get("baseball_team") or "New York Yankees")
-    football_team = str(sports.get("football_team") or "Chicago Bears")
-    soccer_team = str(sports.get("soccer_team") or "Naples (Napoli)")
-    basketball_interest = str(sports.get("basketball_interest") or "don't really watch basketball")
-
-    return (
-        f"Full version, {listener_name}: I was born in {birthplace}, and we moved to {moved_to} when I was {move_age}. "
-        f"I {childhood}. I went to {boarding_school}, then {university}, where I studied {degree}. "
-        f"I care a lot about family continuity and keeping life steady over time. "
-        f"For sports, I'm a {baseball_team} fan in baseball, a {football_team} fan in football, and a {soccer_team} fan in soccer, and I {basketball_interest}."
-    )
+    story = _fallback_dad_story()
+    childhood = str(dad.get("childhood") or "").strip()
+    other_subjects = education.get("other_subjects", [])
+    if isinstance(other_subjects, list) and other_subjects:
+        story += " I also studied " + ", ".join(str(item) for item in other_subjects if str(item).strip()) + "."
+    if childhood:
+        story += f" {childhood}"
+    sports = {key: str(value).strip() for key, value in sports.items() if str(value).strip()} if isinstance(sports, dict) else {}
+    if sports:
+        sports_text = "; ".join(f"{key.replace('_', ' ')}: {value}" for key, value in sorted(sports.items()))
+        story += f" My sports preferences are {sports_text}."
+    return f"Full version, {listener_name}: {story}"
 
 
 def _fallback_dad_age() -> str:
     style = getattr(getattr(bot, "profile_runtime", None), "style", {}) or {}
-    listener_name = str(style.get("listener_name") or "Tony")
+    listener_name = str(style.get("listener_name") or "buddy")
     age_on_date = getattr(bot, "age_on_date", None)
     dad_birthdate = getattr(bot, "DAD_BIRTHDATE", None)
-    dad_age = 47
     if callable(age_on_date) and dad_birthdate is not None:
         with suppress(Exception):
-            dad_age = int(age_on_date(dad_birthdate))
-    return f"I'm {dad_age} years old, {listener_name}."
+            age_text = str(age_on_date(dad_birthdate) or "").strip()
+            if not age_text:
+                return f"I don't have a birth date in my profile, {listener_name}."
+            dad_age = int(age_text)
+            return f"I'm {dad_age} years old, {listener_name}."
+    return f"I don't have a birth date in my profile, {listener_name}."
 
 
 def _fallback_preference_reply(user_input: str = "") -> str:
     prompt = str(user_input or "").strip().lower()
     style = getattr(getattr(bot, "profile_runtime", None), "style", {}) or {}
-    listener_name = str(style.get("listener_name") or "Tony")
+    listener_name = str(style.get("listener_name") or "buddy")
     profile = getattr(bot, "PROFILE", {}) if bot is not None else {}
     sports = profile.get("sports_preferences", {}) if isinstance(profile, dict) else {}
-    baseball_team = str(sports.get("baseball_team") or "New York Yankees")
-    football_team = str(sports.get("football_team") or "Chicago Bears")
-    soccer_team = str(sports.get("soccer_team") or "Naples (Napoli)")
-    basketball_interest = str(sports.get("basketball_interest") or "don't really watch basketball")
+    if not isinstance(sports, dict) or not sports:
+        return f"I don't have a sports preference saved in my profile yet, {listener_name}."
 
-    if "baseball" in prompt and "team" in prompt:
-        return f"I'm a {baseball_team} fan for baseball, buddy."
-    if "football" in prompt and "team" in prompt:
-        return f"I'm a {football_team} fan for football."
-    if "soccer" in prompt and "team" in prompt:
-        return f"For soccer, I'm a {soccer_team} fan."
-    if "basketball" in prompt:
-        return f"I {basketball_interest}, buddy."
-    return (
-        f"I keep it simple, {listener_name}: {baseball_team} for baseball, {football_team} for football, "
-        f"{soccer_team} for soccer, and I {basketball_interest}."
-    )
+    matched = [f"{key.replace('_', ' ')}: {value}" for key, value in sports.items() if key.split("_")[0] in prompt]
+    preferences = matched or [f"{key.replace('_', ' ')}: {value}" for key, value in sorted(sports.items())]
+    return f"Here's what my profile says, {listener_name}: " + "; ".join(preferences) + "."
 
 
 def _local_prompt_fallback(user_input: str = "") -> str:
     user_text = str(user_input or "").strip().lower()
-    if not user_text:
-        return ""
-
-    identity_prompt_markers = (
-        "who are you",
-        "what's your story",
-        "whats your story",
-        "tell me your story",
-        "your story",
-        "about yourself",
-        "tell me about yourself",
-    )
-    detail_markers = (
-        "full life story",
-        "full story",
-        "detailed",
-        "detail",
-        "long version",
-        "more about you",
-        "what can you tell me about you",
-    )
-    if any(marker in user_text for marker in identity_prompt_markers):
-        if any(marker in user_text for marker in detail_markers):
+    kind = classify_profile_question(user_text)
+    if kind == "identity":
+        if any(marker in user_text for marker in ("full life story", "full story", "detailed", "detail", "long version", "more about you")):
             return _fallback_dad_full_story()
         return _fallback_dad_story()
-
-    age_prompt_markers = (
-        "how old are you",
-        "your age",
-        "dad age",
-        "what year were you born",
-        "when were you born",
-        "your birthday",
-    )
-    if any(marker in user_text for marker in age_prompt_markers):
+    if kind == "age":
         return _fallback_dad_age()
-
-    preference_prompt_markers = (
-        "favorite",
-        "favourite",
-        "which team do you like",
-        "what team do you like",
-        "your team",
-        "preference",
-        "sports",
-        "play any",
-        "what can you tell me about you",
-        "about you",
-    )
-    if any(marker in user_text for marker in preference_prompt_markers):
+    if kind == "preferences":
         return _fallback_preference_reply(user_input)
 
     return ""
@@ -1515,27 +1504,9 @@ def _normalize_ui_reply(reply: Any, *, user_input: str = "") -> str:
     text = str(reply or "")
     finalization = getattr(bot, "reply_finalization", None)
     user_text = str(user_input or "").strip().lower()
+    profile_question = classify_profile_question(user_text)
 
-    # Deterministic guard: profile fact routing for identity/story prompts.
-    identity_prompt_markers = (
-        "who are you",
-        "what's your story",
-        "whats your story",
-        "tell me your story",
-        "your story",
-        "about yourself",
-        "tell me about yourself",
-    )
-    detail_markers = (
-        "full life story",
-        "full story",
-        "detailed",
-        "detail",
-        "long version",
-        "more about you",
-        "what can you tell me about you",
-    )
-    if any(marker in user_text for marker in identity_prompt_markers):
+    if profile_question == "identity":
         resolved_fact = ""
         get_fact_reply = getattr(bot, "get_fact_reply", None)
         if callable(get_fact_reply):
@@ -1543,20 +1514,12 @@ def _normalize_ui_reply(reply: Any, *, user_input: str = "") -> str:
                 fact_reply = str(get_fact_reply(user_input) or "").strip()
                 if fact_reply:
                     resolved_fact = fact_reply
-        if any(marker in user_text for marker in detail_markers):
+        if any(marker in user_text for marker in ("full life story", "full story", "detailed", "detail", "long version", "more about you")):
             text = _fallback_dad_full_story()
         else:
             text = resolved_fact or _fallback_dad_story()
 
-    age_prompt_markers = (
-        "how old are you",
-        "your age",
-        "dad age",
-        "what year were you born",
-        "when were you born",
-        "your birthday",
-    )
-    if any(marker in user_text for marker in age_prompt_markers):
+    if profile_question == "age":
         resolved_fact = ""
         get_fact_reply = getattr(bot, "get_fact_reply", None)
         if callable(get_fact_reply):
@@ -1566,19 +1529,7 @@ def _normalize_ui_reply(reply: Any, *, user_input: str = "") -> str:
                     resolved_fact = fact_reply
         text = resolved_fact or _fallback_dad_age()
 
-    preference_prompt_markers = (
-        "favorite",
-        "favourite",
-        "which team do you like",
-        "what team do you like",
-        "your team",
-        "preference",
-        "sports",
-        "play any",
-        "what can you tell me about you",
-        "about you",
-    )
-    if any(marker in user_text for marker in preference_prompt_markers):
+    if profile_question == "preferences":
         resolved_fact = ""
         get_fact_reply = getattr(bot, "get_fact_reply", None)
         if callable(get_fact_reply):
@@ -1626,25 +1577,28 @@ def _normalize_ui_reply(reply: Any, *, user_input: str = "") -> str:
         "i don't participate in physical activities",
         "i do not participate in physical activities",
     )
-    if any(marker in lowered for marker in raw_identity_markers):
+    if profile_question and any(marker in lowered for marker in raw_identity_markers):
         dad_bio = getattr(finalization, "_dad_bio_reply", None)
         if callable(dad_bio):
             with suppress(Exception):
                 text = str(dad_bio() or text)
         if not text or any(marker in str(text).lower() for marker in raw_identity_markers):
-            if any(marker in user_text for marker in preference_prompt_markers):
+            if profile_question == "preferences":
                 text = _fallback_preference_reply(user_input)
-            elif any(marker in user_text for marker in detail_markers):
+            elif profile_question == "identity" and any(
+                marker in user_text
+                for marker in ("full life story", "full story", "detailed", "detail", "long version", "more about you")
+            ):
                 text = _fallback_dad_full_story()
-            else:
+            elif profile_question == "identity":
                 text = _fallback_dad_story()
 
-    if any(marker in user_text for marker in age_prompt_markers) and any(
+    if profile_question == "age" and any(
         marker in str(text).lower() for marker in raw_identity_markers
     ):
         text = _fallback_dad_age()
 
-    if any(marker in user_text for marker in preference_prompt_markers) and any(
+    if profile_question == "preferences" and any(
         marker in str(text).lower() for marker in raw_identity_markers
     ):
         text = _fallback_preference_reply(user_input)
@@ -1745,7 +1699,7 @@ if page == "Chat":
 
             with st.spinner("Dad is thinking..."):
                 try:
-                    reply, _ = bot.process_user_message(prompt, attachments=attachments)
+                    reply, _ = _process_user_message_with_thread(prompt, attachments=attachments)
                     reply = _normalize_ui_reply(reply, user_input=prompt)
                     _record_runtime_event("chat_response_ok", "Assistant response generated", payload={"length": len(reply)})
                 except Exception as exc:
@@ -1789,47 +1743,36 @@ if page == "Chat":
     st.markdown('</div>', unsafe_allow_html=True)
 
 elif page == "Smart Home":
-    st.caption("MQTT controls are live when a broker is configured.")
+    st.caption("Home Assistant actions are provided by an explicitly configured MCP server.")
+    mcp_url = configured_ha_mcp_url()
+    allowed_tools = configured_ha_mcp_tools()
 
-    broker = st.text_input("Broker host", value=str(st.session_state.get("smarthome_broker") or "localhost"))
-    port = st.number_input("Broker port", min_value=1, max_value=65535, value=int(st.session_state.get("smarthome_port") or 1883), step=1)
-    st.session_state.smarthome_broker = broker
-    st.session_state.smarthome_port = int(port)
+    if not mcp_url:
+        st.warning("Home Assistant MCP is not configured.")
+        st.code("DADBOT_HA_MCP_URL\nDADBOT_HA_MCP_TOKEN\nDADBOT_HA_MCP_ALLOWED_TOOLS", language="text")
+    else:
+        st.write({"MCP endpoint": mcp_url, "Allowed tool names": sorted(allowed_tools)})
+        if not allowed_tools:
+            st.warning("No Home Assistant tools are allowlisted; chat will not execute home actions.")
+        elif st.button("Check Home Assistant MCP", use_container_width=True):
+            async def _check_mcp_connection() -> list[str]:
+                client = MCPToolClient(
+                    mcp_url,
+                    bearer_token=str(os.environ.get("DADBOT_HA_MCP_TOKEN") or ""),
+                )
+                async with client.connect() as session:
+                    tools = await client.list_allowed_tools(session, allowed_tools)
+                    return [str(tool.get("name") or "") for tool in tools]
 
-    topic = st.text_input("Topic", value="dadbot/home/living_room/light")
-    payload = st.text_input("Payload", value="ON")
-
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        if st.button("Connect MQTT", use_container_width=True):
             try:
-                from dadbot.smart_home.mqtt_client import SmartHomeMQTTClient
-
-                client = SmartHomeMQTTClient(broker, int(port))
-                client.connect()
-                st.session_state.mqtt_client = client
-                st.success("Connected to MQTT broker")
+                available_tools = asyncio.run(_check_mcp_connection())
+                if available_tools:
+                    st.success(f"Connected. {len(available_tools)} allowlisted tool(s) are available.")
+                    st.write(available_tools)
+                else:
+                    st.warning("Connected, but none of the configured tool names were offered by the MCP server.")
             except Exception as exc:
-                st.error(f"Connect failed: {exc}")
-    with col2:
-        if st.button("Publish", use_container_width=True):
-            client = st.session_state.get("mqtt_client")
-            if client is None:
-                st.warning("Connect first")
-            else:
-                try:
-                    client.publish(topic, payload)
-                    st.success(f"Published to {topic}")
-                except Exception as exc:
-                    st.error(f"Publish failed: {exc}")
-    with col3:
-        if st.button("Disconnect", use_container_width=True):
-            client = st.session_state.get("mqtt_client")
-            if client is not None:
-                with suppress(Exception):
-                    client.disconnect()
-            st.session_state.mqtt_client = None
-            st.info("Disconnected")
+                st.error(f"MCP connection failed: {exc}")
 
 elif page == "Voice":
     st.caption("Restored voice controls from the previous UI surface.")
@@ -1861,7 +1804,7 @@ elif page == "Status":
 
     if st.button("Probe one turn", use_container_width=True):
         try:
-            probe_reply, _ = bot.process_user_message("Health probe: reply with one short sentence.")
+            probe_reply, _ = _process_user_message_with_thread("Health probe: reply with one short sentence.")
             probe_reply = _normalize_ui_reply(probe_reply, user_input="Health probe: reply with one short sentence.")
             _record_runtime_event("status_probe_ok", "Status probe completed")
             st.success(str(probe_reply or "ok"))
@@ -1900,7 +1843,7 @@ elif page == "Workshop":
     with col1:
         if st.button("Run live probe", use_container_width=True):
             try:
-                reply, _ = bot.process_user_message("Workshop probe: confirm system ready.")
+                reply, _ = _process_user_message_with_thread("Workshop probe: confirm system ready.")
                 reply = _normalize_ui_reply(reply, user_input="Workshop probe: confirm system ready.")
                 _record_runtime_event("workshop_probe_ok", "Workshop probe completed")
                 st.success(str(reply or "ok"))
@@ -1961,7 +1904,7 @@ elif page == "Workshop":
                     try:
                         now = datetime.datetime.now().strftime("%H:%M")
                         _append_chat_message("user", prompt, stamp=now, thread_id=thread_id)
-                        reply, _ = bot.process_user_message(prompt)
+                        reply, _ = _process_user_message_with_thread(prompt)
                         reply = _normalize_ui_reply(reply, user_input=prompt)
                         _append_chat_message("assistant", reply, stamp=now, thread_id=thread_id)
                         retried += 1

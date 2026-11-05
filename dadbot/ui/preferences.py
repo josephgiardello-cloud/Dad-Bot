@@ -399,7 +399,7 @@ def _render_col2_llm_tools_audio(
         ),
     )
     tts_enabled = st.checkbox(
-        "Enable local TTS",
+        "Enable voice replies",
         value=bool(voice.get("tts_enabled", True)),
     )
     _piper_avail = bool(shutil.which("piper"))

@@ -66,13 +66,35 @@ def apply_mutations(state: Any) -> Any:
 def _coerce_eval_input(input_value: Any) -> Any:
     from dadbot.core.turn_ir import SemanticEvalInput
 
+    if isinstance(input_value, SemanticEvalInput):
+        return input_value
+
+    payload: dict[str, Any] | None = None
     if isinstance(input_value, dict):
+        payload = dict(input_value)
+    elif hasattr(input_value, "model_dump") and callable(getattr(input_value, "model_dump", None)):
+        try:
+            dumped = input_value.model_dump()
+            if isinstance(dumped, dict):
+                payload = dict(dumped)
+        except Exception:
+            payload = None
+    elif hasattr(input_value, "__dict__"):
+        payload = {
+            "intent_hash": getattr(input_value, "intent_hash", ""),
+            "policy_view_hash": getattr(input_value, "policy_view_hash", ""),
+            "tool_request_count": getattr(input_value, "tool_request_count", 0),
+            "session_id": getattr(input_value, "session_id", "default"),
+            "mode": getattr(input_value, "mode", "live"),
+        }
+
+    if isinstance(payload, dict):
         return SemanticEvalInput(
-            intent_hash=str(input_value.get("intent_hash") or ""),
-            policy_view_hash=str(input_value.get("policy_view_hash") or ""),
-            tool_request_count=int(input_value.get("tool_request_count") or 0),
-            session_id=str(input_value.get("session_id") or "default"),
-            mode=str(input_value.get("mode") or "live"),
+            intent_hash=str(payload.get("intent_hash") or ""),
+            policy_view_hash=str(payload.get("policy_view_hash") or ""),
+            tool_request_count=int(payload.get("tool_request_count") or 0),
+            session_id=str(payload.get("session_id") or "default"),
+            mode=str(payload.get("mode") or "live"),
         )
     return input_value
 

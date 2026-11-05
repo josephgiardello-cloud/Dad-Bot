@@ -16,49 +16,8 @@ from dadbot.core.policy_compiler import PolicyCompiler
 from dadbot.core.runtime_errors import InvariantViolation
 from dadbot.core.tool_ir import ToolContractResult, ToolStatus, deterministic_tool_id
 
-# Device, Scheduler, Scene integration
-from dadbot.infrastructure.device_state import DeviceManager, Scheduler, SceneManager
-from dadbot.smart_home.intent_parser import parse_intent
 from dadbot.core.tool_executor import execute_tool
-"""
-Device, Scheduler, and SceneManager integration
-"""
-
-
-
-# Singleton instances (could be replaced with DI or context injection)
-device_manager = DeviceManager()
-scheduler = Scheduler()
-scene_manager = SceneManager(device_manager)
-
-# Example: register a tool for device state
-def _builtin_device_get_state(args: dict[str, Any], context: TurnContext) -> Any:
-    device_id = args.get("device_id")
-    return device_manager.get_state(device_id)
-
-def _builtin_device_set_state(args: dict[str, Any], context: TurnContext) -> Any:
-    device_id = args.get("device_id")
-    command = args.get("command")
-    return device_manager.set_state(device_id, command)
-
-
-def _builtin_scene_activate(args: dict[str, Any], context: TurnContext) -> Any:
-    scene_name = args.get("scene_name")
-    return scene_manager.activate(scene_name)
-
-def _builtin_schedule_action(args: dict[str, Any], context: TurnContext) -> Any:
-    timestamp = args.get("timestamp")
-    action = args.get("action")
-    sched_context = args.get("context", {})
-    # For demo, action must be a callable; if not, skip scheduling
-    if not callable(action):
-        return None
-    return scheduler.schedule(timestamp, action, sched_context)
-
-
-
-
-# ToolRegistration must be defined before register_tool and _register_builtin_tools
+# ToolRegistration must be defined before register_tool.
 @dataclass(frozen=True)
 class ToolRegistration:
     handler: Any
@@ -93,40 +52,6 @@ def register_tool(
         output_validator=output_validator,
         retryable_exceptions=tuple(retryable_exceptions or ()),
     )
-
-# Register as tools (expand as needed)
-def _register_builtin_tools():
-    register_tool(
-        "device_get_state",
-        handler=_builtin_device_get_state,
-        required_args={"device_id"},
-        allowed_intents={"get_device_state"},
-        require_expected_output=False,
-    )
-    register_tool(
-        "device_set_state",
-        handler=_builtin_device_set_state,
-        required_args={"device_id", "command"},
-        allowed_intents={"set_device_state"},
-        require_expected_output=False,
-    )
-    register_tool(
-        "scene_activate",
-        handler=_builtin_scene_activate,
-        required_args={"scene_name"},
-        allowed_intents={"activate_scene"},
-        require_expected_output=False,
-    )
-    register_tool(
-        "schedule_action",
-        handler=_builtin_schedule_action,
-        required_args={"timestamp", "action"},
-        allowed_intents={"schedule_action"},
-        require_expected_output=False,
-    )
-
-# Call this after all function definitions
-_register_builtin_tools()
 
 _MAX_DELEGATION_DEPTH: int = 2
 _MAX_DELEGATION_SUBTASKS: int = 8
@@ -1144,9 +1069,6 @@ register_tool(
 
 
 __all__ = [
-    "device_manager",
-    "scheduler",
-    "scene_manager",
     "_MAX_DELEGATION_DEPTH",
     "_MAX_DELEGATION_SUBTASKS",
     "ContextBuilderNode",

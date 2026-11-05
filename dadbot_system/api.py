@@ -2,6 +2,7 @@ from __future__ import annotations
 
 # ruff: noqa: B008, C901, PLR0913, PLR0915
 import asyncio
+import base64
 import hmac
 import json
 import os
@@ -12,6 +13,7 @@ from typing import Any, cast
 from dadbot.core.execution_contract import ExecutionMode, SovereignContext
 from dadbot.core.execution_ledger import IntegrityBreachError
 from dadbot.api_models import build_pulse_envelope, build_turn_envelope
+from dadbot.managers.tts import TTSManager
 
 from .contracts import (
     DEFAULT_TENANT_ID,
@@ -296,6 +298,43 @@ def create_api_app(
         if bot is None:
             raise HTTPException(status_code=503, detail="Runtime bot is not available for automation controls")
         return bot
+
+    def _extract_spatial_text(payload: dict[str, Any]) -> str:
+        for key in ("text", "transcript", "message", "prompt", "user_input"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        user = payload.get("user")
+        if isinstance(user, dict):
+            for key in ("text", "transcript", "message"):
+                value = user.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        return ""
+
+    def _call_runtime_reply(bot: Any, user_text: str) -> str:
+        processor = getattr(bot, "process_user_message", None)
+        if callable(processor):
+            result = processor(user_text)
+            if isinstance(result, tuple) and result:
+                return str(result[0] or "").strip()
+            return str(result or "").strip()
+        raise RuntimeError("Runtime bot does not expose process_user_message")
+
+    def _encode_spatial_audio(bot: Any, reply_text: str) -> tuple[str, str, str]:
+        if not reply_text.strip():
+            return "", "", ""
+        manager = getattr(bot, "tts_manager", None)
+        if manager is None or not callable(getattr(manager, "get_tts_audio", None)):
+            manager = TTSManager(bot)
+        try:
+            audio_bytes, audio_error, audio_mime = manager.get_tts_audio(reply_text)
+        except Exception as exc:
+            return "", f"tts_unavailable: {exc}", ""
+        if audio_error or not audio_bytes:
+            return "", str(audio_error or ""), ""
+        encoded = base64.b64encode(audio_bytes).decode("ascii")
+        return encoded, "", str(audio_mime or "audio/wav")
 
     def _publish_service_intervention_event(
         *,
@@ -1127,6 +1166,84 @@ def create_api_app(
                 await asyncio.sleep(1.0)
         except WebSocketDisconnect:
             return
+
+    @router.websocket("/spatial/ws")
+    async def spatial_avatar_bridge(websocket: WebSocket):
+        try:
+            provided_secret = str(
+                websocket.query_params.get("dadbot_key")
+                or websocket.query_params.get("x_dadbot_key")
+                or websocket.headers.get("x-dadbot-key")
+                or ""
+            )
+            if dadbot_secret_key and not _is_valid_secret_key(provided_secret):
+                raise HTTPException(status_code=401, detail="Invalid or missing X-DADBOT-KEY")
+            if security_config.auth_required:
+                principal = _resolve_principal(
+                    _extract_bearer_token(
+                        websocket.headers.get("authorization"),
+                        websocket.query_params.get("access_token"),
+                    )
+                )
+                _enforce_scope(principal, "write")
+                _enforce_rate_limit(principal, "write")
+        except HTTPException:
+            await websocket.close(code=4401)
+            return
+
+        await websocket.accept()
+        bot = _resolve_runtime_bot()
+        while True:
+            try:
+                raw_message = await websocket.receive_text()
+            except WebSocketDisconnect:
+                return
+
+            try:
+                payload = json.loads(raw_message)
+            except json.JSONDecodeError:
+                await websocket.send_json({"type": "error", "error": "invalid_json"})
+                continue
+
+            if not isinstance(payload, dict):
+                await websocket.send_json({"type": "error", "error": "invalid_payload"})
+                continue
+
+            user_text = _extract_spatial_text(payload)
+            if not user_text:
+                await websocket.send_json(
+                    {
+                        "type": "error",
+                        "error": "text_required",
+                        "message": "Provide text/transcript in the websocket payload.",
+                    }
+                )
+                continue
+
+            try:
+                reply_text = _call_runtime_reply(bot, user_text)
+            except Exception as exc:
+                await websocket.send_json(
+                    {
+                        "type": "error",
+                        "error": "runtime_failure",
+                        "message": str(exc),
+                    }
+                )
+                continue
+
+            audio_base64, audio_error, audio_mime = _encode_spatial_audio(bot, reply_text)
+            response_payload = {
+                "type": "response",
+                "user": {"text": user_text},
+                "text": reply_text,
+                "audio_base64": audio_base64,
+                "audio_mime": audio_mime or "audio/wav",
+                "audio_mime_type": audio_mime or "audio/wav",
+            }
+            if audio_error:
+                response_payload["audio_error"] = audio_error
+            await websocket.send_json(response_payload)
 
     version_prefix = _version_prefix()
     if version_prefix:

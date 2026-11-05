@@ -37,7 +37,7 @@ class TTSManager:
     def _voice_profile(bot: object) -> str:
         profile = getattr(bot, "PROFILE", {}) or {}
         voice = profile.get("voice", {}) if isinstance(profile, dict) else {}
-        return str(voice.get("voice_profile") or "warm_dad").strip().lower()
+        return str(voice.get("tts_voice") or voice.get("voice_profile") or "warm_dad").strip().lower()
 
     @staticmethod
     def _resolve_edge_voice_name(voice_profile: str) -> str:
@@ -225,7 +225,8 @@ class TTSManager:
         """Quick check: piper binary exists on PATH and model file is configured."""
         if not shutil.which("piper"):
             return False
-        model_path = self.bot.PROFILE.get("voice", {}).get("piper_model_path", "")
+        voice = self._voice_config()
+        model_path = voice.get("tts_piper_model_path") or voice.get("piper_model_path", "")
         return bool(model_path and Path(model_path).is_file())
 
     def synthesize_piper_audio(
@@ -238,7 +239,8 @@ class TTSManager:
         if not text:
             return None, "Empty text"
         if model_path is None:
-            model_path = self.bot.PROFILE.get("voice", {}).get("piper_model_path", "")
+            voice = self._voice_config()
+            model_path = voice.get("tts_piper_model_path") or voice.get("piper_model_path", "")
         if not model_path or not Path(model_path).is_file():
             return None, f"Piper model not found: {model_path}"
         tmp_path = create_temp_file_path(suffix=".wav", prefix="dadbot_tts_")

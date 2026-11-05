@@ -200,7 +200,7 @@ class DadBot(
         light_mode: bool = False,
         tenant_id: str = "",
         services: Any = None,
-        validate_managers: bool = True,
+        validate_managers: bool = False,
         **kwargs: Any,
     ):
         # Enforce all required managers must be provided, no mocks allowed

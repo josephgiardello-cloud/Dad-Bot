@@ -152,6 +152,74 @@
 			"group": "build"
 		},
 		{
+			"label": "Run Dad Bot API (Spatial Relay)",
+			"type": "shell",
+			"command": "${command:python.interpreterPath}",
+			"args": [
+				"Dad.py",
+				"--api",
+				"--api-host",
+				"127.0.0.1",
+				"--api-port",
+				"8787"
+			],
+			"options": {
+				"env": {
+					"DADBOT_API_AUTH_REQUIRED": "0",
+					"DADBOT_API_TOKEN_SECRET": "dev-local-token-secret-1234567890-abcdef",
+					"DADBOT_POSTGRES_DSN": " ",
+					"DADBOT_REDIS_URL": " "
+				}
+			},
+			"isBackground": true,
+			"group": "build"
+		},
+		{
+			"label": "Run Dad Bot UI (Spatial Embed)",
+			"type": "shell",
+			"command": "${command:python.interpreterPath}",
+			"args": [
+				"-m",
+				"streamlit",
+				"run",
+				"dad_streamlit.py",
+				"--server.port",
+				"8501"
+			],
+			"options": {
+				"env": {
+					"DADBOT_SPATIAL_AVATAR_URL": "http://127.0.0.1:8080/index.html",
+					"DADBOT_SPATIAL_RELAY_WS_URL": "ws://127.0.0.1:8787/v1/spatial/ws"
+				}
+			},
+			"isBackground": true,
+			"group": "build"
+		},
+		{
+			"label": "Run Spatial Live Mock Frontend",
+			"type": "shell",
+			"command": "${command:python.interpreterPath}",
+			"args": [
+				"-m",
+				"http.server",
+				"8080",
+				"--directory",
+				"static/spatial_live_mock"
+			],
+			"isBackground": true,
+			"group": "build"
+		},
+		{
+			"label": "Run Dad Bot Spatial Stack",
+			"dependsOrder": "parallel",
+			"dependsOn": [
+				"Run Spatial Live Mock Frontend",
+				"Run Dad Bot UI (Spatial Embed)",
+				"Run Dad Bot API (Spatial Relay)"
+			],
+			"group": "build"
+		},
+		{
 			"label": "Run Dad Bot MCP Server",
 			"type": "shell",
 			"command": "${command:python.interpreterPath}",

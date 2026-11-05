@@ -1,4 +1,5 @@
 import socket
+import base64
 import threading
 import time
 
@@ -233,6 +234,20 @@ class RuntimeSafetyConfiguredBot(FakeRuntimeBot):
         )()
 
 
+class SpatialRuntimeBot(FakeRuntimeBot):
+    def __init__(self) -> None:
+        super().__init__()
+        self.tts_manager = type(
+            "TTSManagerStub",
+            (),
+            {"get_tts_audio": lambda _self, _text: (b"RIFFTEST", "")},
+        )()
+
+    def process_user_message(self, user_input: str, attachments=None):
+        _ = attachments
+        return f"Dad heard: {user_input}", False
+
+
 def reserve_free_port():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
@@ -367,6 +382,36 @@ def test_api_pulse_websocket_streams_vitals_and_thinking_state():
     assert initial["session_id"] == "pulse-session"
     assert updated["session_id"] == "pulse-session"
     assert updated["trust_meter"]["trust_level"] == 50
+
+
+def test_api_spatial_websocket_relays_text_and_audio_payload():
+    from fastapi.testclient import TestClient
+
+    broker = ImmediateResultBroker()
+    orchestrator = DadBotOrchestrator(
+        broker,
+        state_store=InMemoryStateStore(),
+        planner_debug_factory=planner_debug_factory,
+    )
+    runtime_bot = SpatialRuntimeBot()
+    app = create_api_app(orchestrator, config=service_config(), runtime_bot=runtime_bot)
+
+    with TestClient(app) as client:
+        websocket_token = ServiceTokenManager(SERVICE_TOKEN_SECRET, issuer="dadbot").issue(
+            subject="integration-client",
+            tenant_id="family-a",
+            scopes={"read", "write"},
+            ttl_seconds=3600.0,
+        )
+        with client.websocket_connect(f"/v1/spatial/ws?access_token={websocket_token}") as websocket:
+            websocket.send_json({"text": "hey dad"})
+            response = websocket.receive_json()
+
+    assert response["type"] == "response"
+    assert response["user"]["text"] == "hey dad"
+    assert response["text"] == "Dad heard: hey dad"
+    assert response["audio_mime_type"] == "audio/wav"
+    assert base64.b64decode(response["audio_base64"]) == b"RIFFTEST"
 
 
 def test_api_turn_endpoint_blocks_until_response():
