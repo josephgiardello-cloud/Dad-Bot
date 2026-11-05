@@ -42,6 +42,145 @@ class ReplyFinalizationManager:
         except Exception:
             logger.debug("Failed to record reply finalization shadow payload", exc_info=True)
 
+    @staticmethod
+    def _looks_like_raw_ai_identity_disclaimer(reply: str) -> bool:
+        text = str(reply or "").strip().lower()
+        if not text:
+            return False
+        markers = (
+            "i'm an ai assistant",
+            "i am an ai assistant",
+            "as an ai",
+            "i'm an artificial intelligence model",
+            "i am an artificial intelligence model",
+            "artificial intelligence model known as llama",
+            "large language model meta ai",
+            "i am llama",
+            "i'm llama",
+            "known as llama",
+            "i'm dadbot, and i'm here with you",
+            "i am dadbot, and i am here with you",
+            "i don't have a personal life outside this chat",
+            "i do not have a personal life outside this chat",
+            "i don't have a personal history",
+            "i do not have a personal history",
+            "i don't have a family",
+            "i do not have a family",
+            "i wasn't born",
+            "i was not born",
+            "i exist solely to provide information",
+            "i don't have a personal preference",
+            "i do not have a personal preference",
+            "i don't have preferences or feelings",
+            "i do not have preferences or feelings",
+            "i don't have personal preferences",
+            "i do not have personal preferences",
+            "i don't have personal experiences",
+            "i do not have personal experiences",
+            "i'm an ai designed",
+            "i am an ai designed",
+            "i'm a large language model",
+            "i am a large language model",
+            "i don't participate in physical activities",
+            "i do not participate in physical activities",
+        )
+        return any(marker in text for marker in markers)
+
+    def _dad_bio_reply(self) -> str:
+        get_fact_reply = getattr(self.bot, "get_fact_reply", None)
+        if callable(get_fact_reply):
+            try:
+                bio_reply = str(get_fact_reply("who are you") or "").strip()
+                if bio_reply:
+                    return bio_reply
+            except Exception:
+                logger.debug("Failed to render bio fact reply", exc_info=True)
+
+        return (
+            "I'm your dad - born in Providence, Rhode Island, raised in Albion, Maine. "
+            "I studied English at the University of Maine, and I'm here for you, buddy."
+        )
+
+    def _enforce_dad_identity(self, reply: str) -> str:
+        normalized = str(reply or "").strip()
+        if not self._looks_like_raw_ai_identity_disclaimer(normalized):
+            return normalized
+        return self._dad_bio_reply()
+
+    def _listener_model_enabled(self) -> bool:
+        profile = getattr(self.bot, "PROFILE", None)
+        if not isinstance(profile, dict):
+            return False
+        listener_model = profile.get("listener_model")
+        return isinstance(listener_model, dict) and bool(listener_model)
+
+    @staticmethod
+    def _strip_performative_prefaces(text: str) -> str:
+        normalized = str(text or "").strip()
+        lower = normalized.lower()
+        prefixes = (
+            "great question",
+            "excellent question",
+            "good question",
+            "absolutely",
+            "certainly",
+            "of course",
+        )
+        for prefix in prefixes:
+            if lower.startswith(prefix):
+                # Drop the leading performative opener and any immediate punctuation.
+                stripped = normalized[len(prefix):].lstrip(" ,:-.!")
+                if stripped:
+                    return stripped
+        return normalized
+
+    @staticmethod
+    def _compress_to_sentence_budget(text: str, max_sentences: int) -> str:
+        raw = str(text or "").strip()
+        if not raw:
+            return ""
+        parts: list[str] = []
+        current = ""
+        for ch in raw:
+            current += ch
+            if ch in ".!?":
+                chunk = current.strip()
+                if chunk:
+                    parts.append(chunk)
+                current = ""
+        if current.strip():
+            parts.append(current.strip())
+        if not parts:
+            return raw
+        return " ".join(parts[: max(1, int(max_sentences))]).strip()
+
+    def _enforce_listener_contract(self, reply: str, user_input: Any = None) -> str:
+        text = str(reply or "").strip()
+        if not text:
+            return text
+        if not self._listener_model_enabled():
+            return text
+
+        text = self._strip_performative_prefaces(text)
+        text = " ".join(text.split())
+
+        user_text = str(user_input or "").strip().lower()
+        is_question = user_text.endswith("?") or "?" in user_text
+        detail_markers = (
+            "steps",
+            "walk me through",
+            "deep dive",
+            "details",
+            "explain",
+            "spec",
+            "architecture",
+        )
+        wants_detail = any(marker in user_text for marker in detail_markers)
+
+        sentence_budget = 5 if wants_detail else (3 if is_question else 4)
+        text = self._compress_to_sentence_budget(text, sentence_budget)
+        return text
+
     def append_signoff(self, reply: str) -> str:
         # Defense: if reply is somehow a Pydantic response object, extract content first
         if hasattr(reply, "model_dump") and not isinstance(reply, str):
@@ -50,7 +189,8 @@ class ReplyFinalizationManager:
                 reply = extract_ollama_message_content(reply)
             except Exception:
                 pass
-        reply = str(reply or "").strip()
+        reply = self._enforce_dad_identity(str(reply or "").strip())
+        reply = self._enforce_listener_contract(reply)
         signoff = str(self.bot.profile_runtime.style.get("signoff") or "").strip()
 
         if not reply or not self.bot.APPEND_SIGNOFF or not signoff:
@@ -168,6 +308,8 @@ class ReplyFinalizationManager:
             )
         except Exception:
             pass
+        final_reply = self._enforce_dad_identity(final_reply)
+        final_reply = self._enforce_listener_contract(final_reply, user_input=user_input)
         final_reply = self.append_signoff(final_reply)
         # CSCL post-turn feedback: feed voiced reply to coherence tracker
         try:
@@ -265,6 +407,8 @@ class ReplyFinalizationManager:
             )
         except Exception:
             pass
+        final_reply = self._enforce_dad_identity(final_reply)
+        final_reply = self._enforce_listener_contract(final_reply, user_input=user_input)
         final_reply = self.append_signoff(final_reply)
         # CSCL post-turn feedback: feed voiced reply to coherence tracker (async path)
         try:

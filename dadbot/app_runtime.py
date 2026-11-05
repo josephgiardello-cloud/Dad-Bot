@@ -883,15 +883,23 @@ def build_service_state_store(config):
     durable_store = None
 
     if config.persistence.redis_url:
-        fast_store = RedisStateStore(config.persistence.redis_url)
+        try:
+            fast_store = RedisStateStore(config.persistence.redis_url)
+        except Exception as e:
+            print(f"[DadBot] Redis unavailable or misconfigured: {e}. Falling back to in-memory store.")
+            fast_store = None
 
     if config.persistence.postgres_dsn:
-        durable_store = PostgresStateStore(
-            config.persistence.postgres_dsn,
-            session_table=config.persistence.session_table,
-            task_table=config.persistence.task_table,
-            event_table=config.persistence.event_table,
-        )
+        try:
+            durable_store = PostgresStateStore(
+                config.persistence.postgres_dsn,
+                session_table=config.persistence.session_table,
+                task_table=config.persistence.task_table,
+                event_table=config.persistence.event_table,
+            )
+        except Exception as e:
+            print(f"[DadBot] Postgres unavailable or misconfigured: {e}. Falling back to in-memory store.")
+            durable_store = None
 
     if fast_store is None and durable_store is None:
         return InMemoryStateStore()
@@ -975,18 +983,71 @@ def launch_api_service(args, *, dadbot_cls=None):
     broker = LocalMultiprocessBroker(max_queue_size=config.queue.max_queue_size)
     event_bus = InMemoryEventBus()
     state_store = build_service_state_store(config)
-    runtime_bot = resolved_dadbot_cls(
-        model_name=args.model or config.default_model,
-        append_signoff=not args.no_signoff,
-        light_mode=args.light,
-        tenant_id=args.tenant_id,
-    )
     orchestrator = DadBotOrchestrator(
         broker,
         state_store=state_store,
         event_bus=event_bus,
         planner_debug_factory=resolved_dadbot_cls.default_planner_debug_state,
     )
+
+    class ServiceRuntimeBotAdapter:
+        def __init__(self, orchestrator_ref, *, model_name: str, tenant_id: str) -> None:
+            self._orchestrator = orchestrator_ref
+            self._model_name = str(model_name or "llama3.2:latest")
+            self._tenant_id = normalize_tenant_id(tenant_id)
+            self._session_id = "spatial-avatar"
+            self.PROFILE = {"voice": {"tts_backend": "auto", "voice_profile": "warm_dad"}}
+
+        def process_user_message(self, user_input: str, attachments=None):
+            from dadbot_system.contracts import ChatRequest
+
+            _ = attachments
+            user_text = str(user_input or "").strip()
+            request = ChatRequest(
+                session_id=self._session_id,
+                user_input=user_text,
+                tenant_id=self._tenant_id,
+                requested_model=self._model_name,
+            )
+            try:
+                task = self._orchestrator.submit_chat(request)
+                deadline = time.monotonic() + 45.0
+                while time.monotonic() < deadline:
+                    self._orchestrator.drain_results(limit=100)
+                    response = self._orchestrator.response_for_task(task.task_id)
+                    if response is not None:
+                        reply = str(response.get("reply") or "")
+                        should_end = bool(response.get("should_end", False))
+                        return reply, should_end
+                    status = self._orchestrator.task_status(task.task_id) or {}
+                    if str(status.get("status") or "").strip().lower() == "failed":
+                        raise RuntimeError(str(status.get("error") or "Worker execution failed"))
+                    time.sleep(0.05)
+                raise TimeoutError("Timed out waiting for runtime bot response")
+            except Exception as exc:
+                logger.warning("ServiceRuntimeBotAdapter fell back to deterministic reply", exc_info=True)
+                fallback = user_text or "I'm here with you."
+                return f"I'm here with you. I heard: {fallback}", False
+
+        def shutdown(self):
+            return None
+
+    try:
+        runtime_bot = resolved_dadbot_cls(
+            model_name=args.model or config.default_model,
+            append_signoff=not args.no_signoff,
+            light_mode=args.light,
+            tenant_id=args.tenant_id,
+        )
+    except Exception as exc:
+        logger.warning("DadBot bootstrap failed in API mode, using orchestrator adapter fallback", exc_info=True)
+        print(f"[DadBot] API runtime fallback enabled due to DadBot bootstrap error: {exc}")
+        runtime_bot = ServiceRuntimeBotAdapter(
+            orchestrator,
+            model_name=args.model or config.default_model,
+            tenant_id=args.tenant_id,
+        )
+
     worker_manager = WorkerProcessManager(broker, config)
     worker_manager.start()
     app = create_api_app(orchestrator, worker_manager=worker_manager, config=config, runtime_bot=runtime_bot)

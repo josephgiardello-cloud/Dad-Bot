@@ -16,8 +16,9 @@ from dadbot.ui.helpers import (
 )
 from dadbot.ui.prefs_state import voice_preferences
 from dadbot.ui.voice_control_plane import VoiceSessionController
+from dadbot.managers.tts import TTSManager
 
-from . import stt, tts, uploads, webrtc
+from . import stt, uploads, webrtc
 
 logger = logging.getLogger(__name__)
 
@@ -575,35 +576,10 @@ class MediaService:
         error = ""
         audio_format = "audio/wav"
         if audio_bytes is None:
-            tts_backend = str(voice.get("tts_backend") or "auto").strip().lower()
-            piper_model = str(voice.get("tts_piper_model_path") or "").strip()
+            persist_voice_profile_if_changed(bot, voice)
             controller.begin_speaking()
             with st.spinner("Generating Dad voice audio..."):
-                if tts_backend == "piper" or (tts_backend == "auto" and shutil.which("piper") and piper_model):
-                    audio_bytes, error = tts.synthesize_piper_audio(
-                        text,
-                        model_path=piper_model,
-                    )
-                elif tts_backend in {"elevenlabs", "voice_clone", "11labs"} or (
-                    tts_backend == "auto" and tts.elevenlabs_available(voice)
-                ):
-                    audio_bytes, error = tts.synthesize_elevenlabs_audio(text, voice_cfg=voice)
-                    audio_format = "audio/mpeg"
-                elif tts_backend == "edge_tts" or (tts_backend == "auto" and tts.edge_tts_available()):
-                    audio_bytes, error = tts.synthesize_edge_tts_audio(
-                        text,
-                        voice_profile=str(voice.get("tts_voice") or "warm_dad"),
-                        rate_delta=int(voice.get("tts_rate") or 0),
-                        pacing=int(voice.get("pacing", 50) or 50),
-                    )
-                    audio_format = "audio/mpeg"
-                else:
-                    audio_bytes, error = tts.synthesize_tts_audio(
-                        text,
-                        voice_profile=str(voice.get("tts_voice") or "warm_dad"),
-                        rate_delta=int(voice.get("tts_rate") or 0),
-                        pacing=int(voice.get("pacing", 50) or 50),
-                    )
+                audio_bytes, error, audio_format = TTSManager(bot).get_tts_audio(text)
             if audio_bytes:
                 cache[key] = audio_bytes
             if error:

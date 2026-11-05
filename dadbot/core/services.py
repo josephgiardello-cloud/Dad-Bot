@@ -21,7 +21,6 @@ class ToolRegistry:
     def get(self, name): return self._tools.get(name)
 from dadbot.core.logging_config import configure_logging
 from dadbot.core.metrics import metrics
-from dadbot.smart_home.mqtt_client import SmartHomeMQTTClient
 from dadbot.speech.asr import ASR
 from dadbot.speech.tts import TTS
 
@@ -42,7 +41,6 @@ def build_services(**overrides):
         'planner': planner,
         'tool_registry': tool_registry,
         'metrics': overrides.get('metrics', metrics),
-        'smart_home': overrides.get('smart_home', SmartHomeMQTTClient('localhost')),
         'asr': overrides.get('asr', ASR()),
         'tts': overrides.get('tts', TTS()),
     }

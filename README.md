@@ -2,7 +2,7 @@
 
 A warm, private AI companion with long-term memory that remembers you, grows with you, and feels like having a supportive dad in your corner.
 
-**Runs 100% locally. No data leaves your machine.**
+**Local processing is available.** Ollama chat, local memory, local STT, and Piper TTS can run on your machine. Auto voice may use edge-tts or ElevenLabs and send reply text to external services; choose Piper or pyttsx3 for local speech.
 
 ---
 
@@ -10,8 +10,8 @@ A warm, private AI companion with long-term memory that remembers you, grows wit
 
 - **Actually remembers you**: Learns from your conversations over weeks/months. Tracks your goals, relationships, mood patterns.
 - **Feels real**: Adaptive personality, emotional awareness, proactive check-ins. More than a chatbot.
-- **Privacy-first**: Ollama-powered, runs on your computer. Your data is yours.
-- **Voice support path**: Local voice stack integration points are included; setup maturity depends on your machine tooling.
+- **Privacy controls**: Ollama chat and local voice backends are available; Auto voice may select a cloud-backed TTS service when installed/configured.
+- **Voice support path**: Local STT/Piper options and optional edge-tts/ElevenLabs backends are included; setup maturity depends on your machine tooling.
 - **No subscriptions**: Install once, use forever.
 
 ---
@@ -26,26 +26,86 @@ A warm, private AI companion with long-term memory that remembers you, grows wit
 - 📬 **Proactive Flows** — Daily check-in is fully supported; calendar sync and advanced scheduling are in development.
 - 🎨 **Avatar Support (Partial)** — Avatar rendering exists with fallback paths; generation workflows vary by environment
 - 📱 **Mobile-Friendly** — PWA works on phone browsers
-- 🔒 **100% Private** — No cloud, no tracking, fully local
+- 🔒 **Local modes available** — Auto voice may use cloud services; select a local backend for on-device speech
+
+### Spatial Agent Live Avatar Integration
+
+Dad-Bot can embed a live avatar frontend (for example a fork of josepeon/spatial-agent) directly in the chat presence stage.
+
+Set in .env:
+
+```bash
+DADBOT_SPATIAL_AVATAR_URL=http://localhost:8080/index.html
+DADBOT_SPATIAL_RELAY_WS_URL=ws://127.0.0.1:8787/v1/spatial/ws
+# Local dev convenience: disable API auth for direct browser websocket testing
+DADBOT_API_AUTH_REQUIRED=0
+```
+
+Recommended local wiring on Windows:
+
+```powershell
+# Terminal 1: run Dad-Bot API (includes Spatial relay websocket at /v1/spatial/ws)
+cd C:\Users\josep\OneDrive\Desktop\Dad-Bot
+.\.venv\Scripts\python.exe Dad.py --api --api-host 127.0.0.1 --api-port 8787
+
+# Terminal 2: run your Spatial Agent backend
+cd C:\path\to\spatial-agent
+.\.venv\Scripts\python.exe -m uvicorn backend:app --reload --host 0.0.0.0 --port 8001
+
+# Terminal 3: serve the Spatial Agent frontend over HTTP
+cd C:\path\to\spatial-agent\frontend
+python -m http.server 8080
+
+# Terminal 4: run Dad-Bot UI with embed + relay URLs
+cd C:\Users\josep\OneDrive\Desktop\Dad-Bot
+$env:DADBOT_SPATIAL_AVATAR_URL = "http://localhost:8080/index.html"
+$env:DADBOT_SPATIAL_RELAY_WS_URL = "ws://127.0.0.1:8787/v1/spatial/ws"
+.\.venv\Scripts\python.exe -m streamlit run dad_streamlit.py --server.port 8501
+```
+
+VS Code tasks are also available:
+- `Run Dad Bot API (Spatial Relay)`
+- `Run Spatial Live Mock Frontend`
+- `Run Dad Bot UI (Spatial Embed)`
+- `Run Dad Bot Spatial Stack` (launches mock frontend + UI + API together)
+
+Local live mock avatar client:
+- A websocket-enabled demo avatar is included at `static/spatial_live_mock/index.html`.
+- It reads the relay URL from `dadbot_ws`/`dadbotWs` query parameters, sends text turns, and plays returned base64 WAV audio.
+
+Notes:
+- The Dad-Bot chat stack stays in Dad-Bot; the avatar panel embeds the external frontend.
+- If the URL is empty or unavailable, Dad-Bot falls back to local avatar media files.
+- The iframe URL gets `dadbot_ws` and `dadbotWs` query params automatically so avatar clients can discover the relay endpoint.
+- Ensure the embedded frontend allows being framed (no restrictive X-Frame-Options/CSP frame-ancestors).
 
 ---
 
 ## 🏠 Smart Home Capabilities
 
-Dad-Bot now includes foundational smart home support:
+Home actions use an external Home Assistant MCP server. The old in-memory device/scene classes remain only as dormant compatibility scaffolding; chat no longer routes actions through them. Dad-Bot does not discover devices itself or maintain a parallel device registry. The MCP connection is disabled until an endpoint and explicit tool allowlist are configured.
 
-- **DeviceManager** — Centralizes device state and metadata (lights, thermostats, etc.)
-- **Scheduler** — Schedules actions and routines for devices or scenes
-- **SceneManager** — Groups devices into named scenes for one-touch activation
-- **Intent Parsing** — (In progress) Maps user text to canonical actions/intents for smart home control
+Install the MCP extra:
 
-You can add custom tools (e.g., for smart home devices) by registering them with the tool registry. See `dadbot/core/nodes.py` for examples.
+```bash
+pip install -e .[mcp]
+```
+
+Configure the MCP server endpoint and allow only the tool names you intend Dad-Bot to call. The optional token is sent only as an HTTP bearer header and is never added to model prompts:
+
+```powershell
+$env:DADBOT_HA_MCP_URL = "https://your-home-assistant-mcp-endpoint"
+$env:DADBOT_HA_MCP_TOKEN = "your-mcp-bearer-token"
+$env:DADBOT_HA_MCP_ALLOWED_TOOLS = "tool_name_one,tool_name_two"
+```
+
+The endpoint must support MCP Streamable HTTP. Use the tool names returned by that server in `DADBOT_HA_MCP_ALLOWED_TOOLS`. The Smart Home page can verify the connection and report which allowlisted tools are available. No tool is callable from chat unless it is both offered by the MCP server and included in this allowlist.
 
 ---
 
 ## ⚠️ Experimental Features & Warnings
 
-- **Replay and deterministic recovery are experimental and currently disabled pending implementation.**
+- **Replay and deterministic recovery infrastructure exists but is experimental and disabled in the default product path; it is not currently a certified user-facing capability.**
 
 ---
 
@@ -80,22 +140,7 @@ Then open [http://localhost:8501](http://localhost:8501) in your browser.
 
 ## 📸 Screenshots & Demo
 
-Screenshots are intentionally kept out of the repo until they can be captured from the shipped UI.
-When you add them, keep the set small and honest:
-
-- Main chat view with an active thread
-- Workshop status view with health and confluence visible
-- Voice panel with local STT/TTS status visible
-- Memory or relationship context panel showing continuity
-- Mobile PWA chat view
-
-Suggested file names for the first capture set:
-
-- `docs/screenshots/01-chat-main.png`
-- `docs/screenshots/02-workshop-status.png`
-- `docs/screenshots/03-voice-panel.png`
-- `docs/screenshots/04-memory-context.png`
-- `docs/screenshots/05-mobile-pwa.png`
+No sanitized product screenshots are currently included. Capture demo views using a clean test profile and synthetic conversation data; do not commit personal avatars, user conversations, credentials, or device details.
 
 ---
 
@@ -157,12 +202,14 @@ Anything beyond those lanes should be treated as supplemental, not mandatory.
 
 | Capability | Maturity | Evidence |
 |---|---|---|
-| Core local chat + memory pipeline | Shipped | `dadbot/core/dadbot.py`, `dadbot/core/turn_mixin.py`, `dadbot/core/graph.py` |
+| Core local chat + memory pipeline | Available, with UI limitations | `dadbot/core/dadbot.py`, `dadbot/core/turn_mixin.py`, `dadbot/core/graph.py`; the Streamlit sample currently uses no-op turn-event/checkpoint persistence services. Profile and memory storage are separate. |
 | Voice stack hooks and optional deps | Experimental | `pyproject.toml` (`[project.optional-dependencies].voice`), `dad_streamlit.py`, `dadbot/agentic.py` |
 | Local reminders + local calendar events | Shipped (local storage) | `dadbot/agentic.py` (`add_reminder`, `add_calendar_event`, `list_calendar_events`) |
 | Calendar feed synchronization | Partial | `dadbot/core/boot_mixin.py` (`ical_feed_url`, `schedule_calendar_sync`) |
 | Proactive heartbeat/nudges | Partial | `dadbot/core/boot_mixin.py` (`_run_proactive_heartbeat_loop`), `dadbot/assistant_runtime.py` |
 | Avatar rendering support | Partial | `dad_streamlit.py`, `pyproject.toml` (`[project.optional-dependencies].heritage`) |
+
+The Streamlit runtime is a development/demo composition, not the durable service profile: its turn-event and checkpoint persistence methods are no-ops, and its event bus is in-memory. Do not treat those records as restart-durable.
 
 ### Docker (Dev & Production)
 
@@ -191,13 +238,15 @@ See `docker-compose.yml` for profile options.
 
 ### Deep Validation
 
-Proof-of-correctness runs under chaos/fuzz/replay pressure:
+Supplemental scale and stress harness:
 
 ```bash
 python tools/system_validation_at_scale.py --turns 1000
 ```
 
-This validates long-horizon behavior, adversarial fuzzing, and replay equivalence.
+This exercises selected long-horizon and adversarial scenarios. It does not establish production reliability or end-to-end replay equivalence. Replay and deterministic recovery remain experimental and are disabled in the default product path.
+
+The checked-in [system audit report](artifacts/system_audit_matrix_report.json) records 15/15 checks passing with `deep_scan: false`. These are selected structural and invariant checks, not a full deep scan, live-provider evaluation, smart-home integration test, or certification of replay behavior.
 
 ### Runtime Health & Observability
 
@@ -210,21 +259,23 @@ This validates long-horizon behavior, adversarial fuzzing, and replay equivalenc
 ## 📦 Packaging & Entrypoints
 
 ### Entrypoints
-- **Primary**: `launch.py` (recommended for all use cases)
-- **Compatibility**: `Dad.py` (legacy shim - preserves old import/usage patterns)
-- **UI**: `dad_streamlit.py` (called via `launch.py --ui`)
+- **Primary**: `launch.py` (routes CLI, UI, and API startup)
+- **Compatibility**: `Dad.py` (legacy import/launch shim)
+- **API wrapper**: `api_entrypoint.py` (forwards API startup through `launch.py`)
+- **UI wrapper/surface**: `launch_streamlit.py` and `dad_streamlit.py` (direct Streamlit entrypoints)
 
 ### Feature Groups
 
 ```bash
-pip install -e .[service,voice,notifications,heritage]
+pip install -e .[service,voice,notifications,heritage,mcp]
 ```
 
 ---
 
 ## 🔒 Privacy & Security
 
-- **No cloud calls** — All processing is local via Ollama
+- **Local mode** — Ollama chat, local STT, and Piper TTS can be configured to stay on-device.
+- **Cloud voice mode** — edge-tts and ElevenLabs send reply text to their respective services; the Auto backend can choose them when available. Do not use Auto when strict local-only processing is required.
 - **No telemetry** — We don't collect usage data
 - **Story Mode Lock** — Optional password protection for sensitive contexts
 - **Data export** — Full access to your memory files (JSON, SQLite)

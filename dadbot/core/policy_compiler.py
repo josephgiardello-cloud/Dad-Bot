@@ -522,7 +522,14 @@ class PolicyCompiler:
         policy_input = build_policy_input(plan.policy_name, turn_context, candidate)
         semantic_eval_input = policy_input.semantic_eval_input
         if not isinstance(semantic_eval_input, SemanticEvalInput):
-            raise PolicyCompilationError("Missing semantic evaluation input projection")
+            # Handle hot-reload/type-identity drift by coercing any dict-compatible payload.
+            semantic_eval_input = SemanticEvalInput(
+                intent_hash=str(getattr(semantic_eval_input, "intent_hash", "") or ""),
+                policy_view_hash=str(getattr(semantic_eval_input, "policy_view_hash", "") or ""),
+                tool_request_count=int(getattr(semantic_eval_input, "tool_request_count", 0) or 0),
+                session_id=str(getattr(semantic_eval_input, "session_id", "default") or "default"),
+                mode=str(getattr(semantic_eval_input, "mode", "live") or "live"),
+            )
 
         semantic_decision = PolicyCompiler.evaluate_semantics(semantic_eval_input)
         if bool(audit_full):

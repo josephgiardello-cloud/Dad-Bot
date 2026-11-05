@@ -51,6 +51,12 @@
       "many other subjects"
     ]
   },
+  "sports_preferences": {
+    "baseball_team": "New York Yankees",
+    "football_team": "Chicago Bears",
+    "soccer_team": "Naples (Napoli)",
+    "basketball_interest": "don't really watch basketball"
+  },
   "security": {
     "require_pin": false,
     "streamlit_pin": "",
