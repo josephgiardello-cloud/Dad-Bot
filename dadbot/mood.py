@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 
+from dadbot.prompts import DadPrompts
+
 logger = logging.getLogger(__name__)
 
 
@@ -36,84 +38,25 @@ class MoodManager:
         return normalized_mood
 
     def build_detection_prompt(self, user_input, recent_history=None):
+        listener_name = str(getattr(self.bot, "STYLE", {}).get("listener_name") or "the user").strip() or "the user"
+        caregiver_name = str(getattr(self.bot, "STYLE", {}).get("name") or "Dad").strip() or "Dad"
         history_snippet = ""
         if recent_history and len(recent_history) > 0:
             last_turns = recent_history[-5:]
             history_snippet = (
                 "Recent conversation context:\n"
-                + "\n".join(f"{'Tony' if msg['role'] == 'user' else 'Dad'}: {msg['content']}" for msg in last_turns)
+                + "\n".join(
+                    f"{listener_name if msg['role'] == 'user' else caregiver_name}: {msg['content']}"
+                    for msg in last_turns
+                )
                 + "\n\n"
             )
 
-        return f"""
-You are an expert psychologist and emotional tone analyst specializing in parent-teen conversations.
-Analyze Tony's latest message (and the recent context if provided) to detect his current emotional state.
-
-Possible moods and their precise definitions:
-- positive: happy, excited, proud, energetic, upbeat, relieved, or celebratory
-- neutral: calm, factual, reflective, casual, or emotionally flat/unclear
-- stressed: anxious, worried, overwhelmed, pressured, or feeling like things are "too much"
-- sad: down, disappointed, lonely, hurt, low, or grieving
-- frustrated: angry, irritated, annoyed, fed up, or resentful
-- tired: exhausted, drained, burned out, sleepy, or low-energy
-
-Important distinctions:
-- Stressed usually involves pressure or worry about the future ("I don't know how I'll finish this").
-- Frustrated is more immediate irritation or anger ("This is so stupid").
-- Tired is physical or mental fatigue ("I can't even think straight anymore").
-- Sad is quieter emotional pain or disappointment.
-- Do not default to neutral if any emotional signal is present.
-
-{history_snippet}Tony's latest message: "{user_input}"
-
-Think step by step:
-1. Identify any emotional keywords, tone indicators, negation, intensity, and context from history.
-2. Consider possible mixed emotions but choose the single dominant one.
-3. Rule out other moods with brief reasons.
-4. Decide the best single mood.
-
-Respond in this exact format (nothing else):
-
-Mood: [one of: positive, neutral, stressed, sad, frustrated, tired]
-Reason: [one short sentence explaining your choice]
-
-Examples:
-Tony: I crushed my test and I feel awesome!
-Mood: positive
-Reason: Clear excitement and pride words like "crushed" and "awesome".
-
-Tony: Everything feels like too much and I don't know how to keep up.
-Mood: stressed
-Reason: Overwhelm and pressure about coping.
-
-Tony: I'm so irritated with my boss right now, nothing goes right.
-Mood: frustrated
-Reason: Immediate irritation and resentment.
-
-Tony: I just feel really low tonight, like nothing matters.
-Mood: sad
-Reason: Quiet emotional low and disappointment.
-
-Tony: I'm exhausted and can barely keep my eyes open after today.
-Mood: tired
-Reason: Clear fatigue and drained energy.
-
-Tony: I'm tired, but honestly proud I still finished the whole thing.
-Mood: tired
-Reason: Fatigue is the dominant emotional state even though pride is present.
-
-Tony: I went to work, came home, and now I'm just thinking.
-Mood: neutral
-Reason: Factual and reflective with no strong emotional charge.
-
-Tony: I'm overwhelmed but also kind of proud I pushed through.
-Mood: stressed
-Reason: Dominant overwhelm outweighs the secondary pride.
-
-Tony: I'm sad about how it went, but I'm relieved it's finally over.
-Mood: sad
-Reason: The main emotion is still emotional hurt, with relief as a secondary note.
-""".strip()
+        return DadPrompts.mood_detection(
+            history_snippet,
+            user_input,
+            listener_name=listener_name,
+        )
 
     def detect(self, user_input: str, recent_history: list = None) -> str:
         if self.bot.LIGHT_MODE:
