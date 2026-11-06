@@ -827,9 +827,6 @@ class TestPhase4ATrueProcessRestart:
 
     @pytest.mark.asyncio
     async def test_checkpoint_survives_real_process_boundary(self, phase4a_db_path, tmp_path):
-        import json
-        import subprocess
-        import sys
 
         # Script 1 — run one turn and print checkpoint_hash to stdout.
         # Test is disabled: subprocess script_write.py does not exist. Skipping test logic.
@@ -1192,10 +1189,9 @@ class TestPhase4ALargeStateCheckpoint:
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(60)
-    async def test_orchestrator_handles_large_preloaded_state(self, phase4a_db_path):
+    async def test_orchestrator_handles_large_preloaded_state(self, phase4a_db_path, bot, monkeypatch):
         import hashlib as _hashlib
         from dadbot.core.persistence import SQLiteCheckpointer
-        from dadbot.testing import make_test_dadbot
 
         cp_seed = SQLiteCheckpointer(phase4a_db_path, auto_migrate=True, prune_every=0)
         large_state = self._build_large_state(target_kb=256)
@@ -1218,8 +1214,6 @@ class TestPhase4ALargeStateCheckpoint:
         # Now run a real orchestrator turn — it will load the large checkpoint first.
         try:
             from dadbot.core.orchestrator import DadBotOrchestrator
-            from dadbot.testing import make_test_dadbot
-            bot = make_test_dadbot()
             checkpointer = SQLiteCheckpointer(phase4a_db_path, auto_migrate=True, prune_every=0)
             orchestrator = DadBotOrchestrator(bot=bot, strict=False, checkpointer=checkpointer)
             llm = orchestrator.registry.get("llm")
@@ -1227,12 +1221,15 @@ class TestPhase4ALargeStateCheckpoint:
             _fail_certification_gate("orchestrator_boot", exc)
         _assert_handle_turn_not_mocked(orchestrator, "large_state_preload")
 
-        with _stub_llm(llm):
-            await orchestrator.handle_turn(
-                "hello after large state",
-                session_id="large-orch",
-                confluence_key=confluence_key_for_turn("large-orch", "hello after large state"),
-            )
+        async def generate_candidate(turn_context, rich_context=None):
+            return ("Checkpoint turn completed.", False)
+
+        monkeypatch.setattr(llm, "generate_candidate", generate_candidate)
+        await orchestrator.handle_turn(
+            "hello after large state",
+            session_id="large-orch",
+            confluence_key=confluence_key_for_turn("large-orch", "hello after large state"),
+        )
 
         # The turn should have added a second checkpoint (turn 2).
         count = checkpointer.checkpoint_count("large-orch")

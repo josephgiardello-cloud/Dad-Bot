@@ -290,16 +290,12 @@ def test_turn_service_reply_generation_patch_does_not_override_output_authority(
             f"generated::{stripped_input}::{turn_text}::{current_mood}::{stream}::{len(normalized_attachments)}"
         ),
     )
-    monkeypatch.setattr(
-        bot.turn_service,
-        "prepare_user_turn",
-        lambda user_input, attachments=None, turn_context=None: ("neutral", None, False, user_input, attachments or []),
-    )
-    monkeypatch.setattr(
-        bot.turn_service,
-        "finalize_user_turn",
-        lambda stripped_input, current_mood, dad_reply, attachments=None, turn_context=None: (dad_reply, False),
-    )
+    from dadbot.services.agent_service import AgentService
+
+    async def generate_candidate(self, turn_context, rich_context=None):
+        return ("Canonical candidate", False)
+
+    monkeypatch.setattr(AgentService, "generate_candidate", generate_candidate)
 
     reply, should_end = bot.turn_service.process_user_message("Need a hand.")
 

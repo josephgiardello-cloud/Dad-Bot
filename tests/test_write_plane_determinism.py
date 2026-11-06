@@ -429,7 +429,7 @@ class TestReplayComparison:
     ) -> tuple[object, list]:
         """Build, stub, run one turn, capture write log, shutdown."""
         import hashlib
-        from dadbot.core.write_plane import get_write_plane, reset_write_plane
+        from dadbot.core.write_plane import reset_write_plane
         from dadbot.core.event_clock import set_event_clock, reset_event_clock
 
         bot = _build_isolated_bot(bot_dir)

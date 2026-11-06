@@ -6,7 +6,6 @@ from tempfile import TemporaryDirectory
 import pytest
 
 
-import pytest
 
 
 @pytest.mark.integration

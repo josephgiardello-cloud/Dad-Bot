@@ -7,7 +7,7 @@ pytestmark = pytest.mark.unit
 
 @pytest.mark.slow
 def test_finalize_records_shadow_audit(bot):
-    bot.MEMORY_STORE["advice_audits"] = []
+    bot.MEMORY_STORE = {**bot.MEMORY_STORE, "advice_audits": []}
 
     reply = bot.reply_finalization.finalize(
         "You need to stop avoiding this and take one small step.",
@@ -24,7 +24,7 @@ def test_finalize_records_shadow_audit(bot):
 
 def test_maintenance_queues_environmental_and_shadow_repair(bot, mocker):
     now = datetime(2026, 4, 21, 9, 0, 0)
-    bot.MEMORY_STORE["advice_audits"] = [
+    audits = [
         {
             "recorded_at": "2026-04-20T19:00:00",
             "needs_repair": True,
@@ -33,24 +33,20 @@ def test_maintenance_queues_environmental_and_shadow_repair(bot, mocker):
             "reply_excerpt": "you should have done better",
         }
     ]
+    bot.MEMORY_STORE = {**bot.MEMORY_STORE, "advice_audits": audits}
 
-    mocker.patch.object(
-        bot.agentic_handler,
-        "list_calendar_events",
+    calendar_fetch = mocker.patch.object(
+        bot.calendar_manager, "fetch_upcoming_ical_events",
         return_value=[
-            {
-                "event_id": "evt-1",
-                "title": "Workshop: finish shelf",
-                "due_at": "2026-04-21T18:00:00",
-            }
+            {"UID": "evt-1", "SUMMARY": "Workshop: finish shelf", "DTSTART": "2026-04-21T18:00:00"},
         ],
     )
-    mocker.patch.object(bot.calendar_manager, "fetch_upcoming_ical_events", return_value=[])
 
     result = bot.maintenance_scheduler.run_scheduled_proactive_jobs(force=True, reference_time=now)
 
     assert result["queued_environmental"] >= 1
     assert result["queued_shadow_repairs"] == 1
+    calendar_fetch.assert_called_once_with(limit=6)
     sources = [item.get("source") for item in bot.pending_proactive_messages()]
     assert "environmental-cue" in sources
     assert "shadow-thread" in sources
@@ -68,7 +64,7 @@ def test_maintenance_queues_environmental_and_shadow_repair(bot, mocker):
 
 
 def test_longitudinal_synthesis_persists_insights(bot):
-    bot.MEMORY_STORE["session_archive"] = [
+    archive = [
         {
             "id": "a",
             "summary": "Electronics project got overwhelming again.",
@@ -102,6 +98,7 @@ def test_longitudinal_synthesis_persists_insights(bot):
             "turn_count": 4,
         },
     ]
+    bot.MEMORY_STORE = {**bot.MEMORY_STORE, "session_archive": archive}
 
     insights = bot.long_term_signals.synthesize_longitudinal_insights(force=True, reference_time="2026-04-21T09:00:00")
 

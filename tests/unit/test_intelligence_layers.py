@@ -2,13 +2,28 @@ from __future__ import annotations
 
 import pytest
 
+from dadbot.core.autonomous_goal_daemon import AutonomousGoalDaemon
 from dadbot.core.cognitive_policy_engine import CognitivePolicyEngine
+from dadbot.core.graph import TurnGraph
 from dadbot.core.control_plane import ExecutionControlPlane, SessionRegistry
+from dadbot.core.interactive_cognition_ui import InteractiveCognitionUI
+from dadbot.core.multi_agent_swarm import MultiAgentSwarm
 from dadbot.core.semantic_memory_graph import SemanticMemoryGraph
 from dadbot.core.semantic_safety_engine import SemanticSafetyEngine
+from dadbot.core.tool_ecosystem_hub import ToolEcosystemHub
 from dadbot.core.tool_routing_engine import ToolRoutingEngine
+from dadbot.registry import ServiceRegistry
 
 pytestmark = pytest.mark.unit
+
+
+def _graph_with_optional_services() -> TurnGraph:
+    registry = ServiceRegistry()
+    registry.register("autonomous_goal_daemon", AutonomousGoalDaemon())
+    registry.register("interactive_cognition_ui", InteractiveCognitionUI())
+    registry.register("multi_agent_swarm", MultiAgentSwarm())
+    registry.register("tool_ecosystem_hub", ToolEcosystemHub())
+    return TurnGraph(registry=registry)
 
 
 def test_cognitive_policy_builds_nontrivial_plan() -> None:
@@ -154,6 +169,37 @@ def test_semantic_safety_allow_review_block_transitions() -> None:
     assert str(block_state.get("decision") or "") == "block"
 
 
+def test_optional_control_plane_services_report_unavailable_when_not_registered() -> None:
+    async def _executor(_session: dict, _job) -> tuple[str, bool]:
+        return ("done", False)
+
+    plane = ExecutionControlPlane(registry=SessionRegistry(), kernel_executor=_executor)
+
+    assert plane.swarm_status(session_id="s-optional") == {
+        "available": False,
+        "reason": "multi_agent_swarm_unavailable",
+    }
+    assert plane.set_turn_steering(
+        session_id="s-optional",
+        steering={"strategy": "clarify"},
+    ) == {
+        "applied": False,
+        "reason": "interactive_cognition_service_unavailable",
+    }
+    assert plane.run_autonomous_goal_cycle(session_id="s-optional") == {
+        "ran": False,
+        "reason": "autonomous_goal_service_unavailable",
+    }
+    assert plane.register_external_connector(
+        session_id="s-optional",
+        name="calendar",
+        capabilities=["calendar"],
+    ) == {
+        "registered": False,
+        "reason": "tool_ecosystem_service_unavailable",
+    }
+
+
 @pytest.mark.asyncio
 async def test_control_plane_persists_hypotheses_memory_hierarchy_and_belief() -> None:
     async def _executor(_session: dict, _job) -> tuple[str, bool]:
@@ -177,7 +223,11 @@ async def test_control_plane_applies_turn_steering_and_autonomous_goal_cycle() -
     async def _executor(_session: dict, _job) -> tuple[str, bool]:
         return ("Steered", False)
 
-    plane = ExecutionControlPlane(registry=SessionRegistry(), kernel_executor=_executor)
+    plane = ExecutionControlPlane(
+        registry=SessionRegistry(),
+        kernel_executor=_executor,
+        graph=_graph_with_optional_services(),
+    )
     steering_result = plane.set_turn_steering(
         session_id="s-steer",
         steering={"strategy": "clarify_before_action", "note": "user requested caution"},
@@ -206,7 +256,11 @@ async def test_control_plane_real_time_ui_alignment_tools_and_swarm_layers() -> 
     async def _executor(_session: dict, _job) -> tuple[str, bool]:
         return ("Layer validation response", False)
 
-    plane = ExecutionControlPlane(registry=SessionRegistry(), kernel_executor=_executor)
+    plane = ExecutionControlPlane(
+        registry=SessionRegistry(),
+        kernel_executor=_executor,
+        graph=_graph_with_optional_services(),
+    )
     connector = plane.register_external_connector(
         session_id="s-layer",
         name="calendar-cloud",
