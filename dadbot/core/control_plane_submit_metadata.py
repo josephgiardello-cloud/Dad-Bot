@@ -27,7 +27,8 @@ def _prepare_submit_metadata_impl(
         attachments=attachments,
         metadata=md,
     )
-    resolved_timeout_seconds = 30.0 if timeout_seconds is None else max(0.0, float(timeout_seconds))
+    resolved_timeout_seconds = 120.0 if timeout_seconds is None else max(0.0, float(timeout_seconds))
+    md["timeout_seconds"] = resolved_timeout_seconds
     raw_execution_result = dict(
         md.get("execution_result")
         or build_unified_execution_result(

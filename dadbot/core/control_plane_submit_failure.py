@@ -56,7 +56,10 @@ def _record_submit_exception_impl(
         with contextlib.suppress(Exception):
             future.exception()
     if dedupe_future is not None and not dedupe_future.done():
-        dedupe_future.set_exception(exc)
+        if isinstance(exc, asyncio.CancelledError):
+            dedupe_future.cancel()
+        else:
+            dedupe_future.set_exception(exc)
     projected = control_plane.lifecycle_projection.get(job.job_id)
     projection_terminal = bool(
         projected is not None and projected.status in {ExecutionStatus.COMPLETED, ExecutionStatus.FAILED}

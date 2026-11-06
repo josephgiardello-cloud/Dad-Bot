@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
 import contextlib
 import hashlib
 import json as _json
@@ -11,6 +10,8 @@ import platform
 from datetime import datetime, timedelta, timezone
 from importlib import metadata as importlib_metadata
 from typing import Any, cast
+
+from dadbot.utils.async_bridge import run_coro_in_thread
 
 from dadbot.contracts import (
     AttachmentList,
@@ -120,7 +121,7 @@ def _build_determinism_manifest() -> dict[str, Any]:
 
 def _normalize_timeout_seconds(timeout_seconds: float | None) -> float:
     if timeout_seconds is None:
-        return 30.0
+        return 120.0
     return max(0.0, float(timeout_seconds))
 
 
@@ -1358,8 +1359,10 @@ class DadBotOrchestrator:
 
         if self.bot is not None:
             setattr(self.bot, "_active_turn_context", context)
+        timeout_seconds = _normalize_timeout_seconds(dict(job.metadata or {}).get("timeout_seconds"))
         try:
-            result = await self._run_graph_with_trace_binding(context=context, job=job)
+            async with asyncio.timeout(timeout_seconds):
+                result = await self._run_graph_with_trace_binding(context=context, job=job)
             self._finalize_orchestrator_success(
                 context=context,
                 job=job,
@@ -1368,6 +1371,9 @@ class DadBotOrchestrator:
                 manifest=manifest,
                 loaded_checkpoint_anchor=loaded_checkpoint_anchor,
             )
+        except TimeoutError as exc:
+            logger.error("Turn execution timed out for job_id=%s after %ss", job.job_id, timeout_seconds)
+            raise TransientExecutionError(f"Turn execution exceeded {timeout_seconds}s") from exc
         finally:
             if self.bot is not None and getattr(self.bot, "_active_turn_context", None) is context:
                 setattr(self.bot, "_active_turn_context", None)
@@ -1447,8 +1453,7 @@ class DadBotOrchestrator:
             metadata=metadata,
         )
         if loop is not None and loop.is_running():
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                return pool.submit(asyncio.run, coro).result()  # type: ignore[arg-type]
+            return run_coro_in_thread(coro)
         return asyncio.run(coro)
 
     async def run_async(

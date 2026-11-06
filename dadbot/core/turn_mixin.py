@@ -14,7 +14,6 @@ import hashlib
 import json
 import logging
 from collections.abc import Awaitable, Callable, Iterable, Mapping
-from contextvars import copy_context
 from typing import Any, cast
 from uuid import uuid4
 
@@ -44,11 +43,13 @@ from dadbot.core.runtime_errors import (
 )
 from dadbot.core.turn_handler import TurnContext, TurnHandler
 from dadbot.core.world_model import WorldModelStore
+from dadbot.utils.async_bridge import run_coro_in_thread
 
 logger = logging.getLogger(__name__)
 
 SYNC_DELIVERIES: set[TurnDelivery] = {TurnDelivery.SYNC, TurnDelivery.STREAM}
 ASYNC_DELIVERIES: set[TurnDelivery] = {TurnDelivery.ASYNC, TurnDelivery.STREAM_ASYNC}
+TURN_LOCK_TIMEOUT_SECONDS = 180.0
 
 
 class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
@@ -175,9 +176,7 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
                 "Canonical execution gate violation: control-plane submit entrypoint missing.",
             )
 
-        normalized_timeout = None
-        if getattr(self, "_execute_turn_request_metadata", None) is not None:
-            normalized_timeout = getattr(self, "_execute_turn_request_metadata", {})
+        request_metadata = dict(getattr(self, "_execute_turn_request_metadata", {}) or {})
 
         handler = TurnHandler(
             submit_turn=cast(Any, submit_turn),
@@ -192,7 +191,8 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
             attachments=attachments,
             session_id=session_id,
             confluence_key=confluence_key,
-            metadata=dict(getattr(self, "_execute_turn_request_metadata", {}) or {}),
+            metadata=request_metadata,
+            timeout_seconds=request_metadata.get("timeout_seconds"),
         )
         return await handler.process_turn(turn_context)
 
@@ -203,11 +203,7 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
         Used when the coroutine must be awaited from within an already-running
         loop (e.g. Streamlit, Jupyter) where asyncio.run() is forbidden.
         """
-        import concurrent.futures
-
-        context = copy_context()
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            return pool.submit(context.run, asyncio.run, coro).result()
+        return run_coro_in_thread(coro)
 
     def _run_graph_turn_sync(
         self,
@@ -221,7 +217,12 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
         coroutine is dispatched to a dedicated thread with its own event loop
         rather than falling back to the legacy TurnProcessingManager.
         """
-        with self._turn_execution_lock:
+        if not self._turn_execution_lock.acquire(timeout=TURN_LOCK_TIMEOUT_SECONDS):
+            logger.error("Turn execution lock remained held for %ss", TURN_LOCK_TIMEOUT_SECONDS)
+            raise TransientExecutionError(
+                f"Turn execution lock held by a prior turn > {TURN_LOCK_TIMEOUT_SECONDS}s",
+            )
+        try:
             try:
                 loop = asyncio.get_running_loop()
             except RuntimeError:
@@ -235,6 +236,8 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
             if loop is not None and loop.is_running():
                 return self._run_coro_in_thread(coro)
             return asyncio.run(coro)
+        finally:
+            self._turn_execution_lock.release()
 
     def _run_turn_request_sync(
         self,

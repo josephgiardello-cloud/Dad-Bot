@@ -56,7 +56,7 @@ async def _run_submit_execution_phase_impl(
         )
         _assert_submit_turn_phase_trace_complete(phase_trace)
         return finalized
-    except Exception as exc:
+    except (Exception, asyncio.CancelledError) as exc:
         if len(phase_trace) < len(submit_turn_phase_order()):
             _append_submit_turn_phase(phase_trace, "finalize")
         _assert_submit_turn_phase_boundary(

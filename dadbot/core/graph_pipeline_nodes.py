@@ -929,7 +929,8 @@ class ControlPlaneNode(_NodeContractMixin):
             )
 
         rich_context = turn_context.state.get("rich_context")
-        result = execute(
+        result = await asyncio.to_thread(
+            execute,
             turn_context,
             rich_context if isinstance(rich_context, dict) else {},
         )

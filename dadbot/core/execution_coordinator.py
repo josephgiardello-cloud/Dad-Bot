@@ -48,6 +48,7 @@ class ExecutionCoordinator:
         while not future.done():
             loop_iterations += 1
             if time.time() > deadline:
+                future.cancel()
                 projected_at_deadline = lifecycle_projection.get(job.job_id)
                 projection_terminal_at_deadline = bool(
                     projected_at_deadline is not None
@@ -70,7 +71,13 @@ class ExecutionCoordinator:
                 )
                 raise TimeoutError("submit_turn exceeded timeout")
 
-            drained = await scheduler.drain_once(kernel_executor)
+            remaining = max(0.0, deadline - time.time())
+            try:
+                async with asyncio.timeout(remaining):
+                    drained = await scheduler.drain_once(kernel_executor)
+            except (TimeoutError, asyncio.CancelledError):
+                future.cancel()
+                raise
             if drained:
                 consecutive_idle_drains = 0
                 continue
@@ -78,19 +85,32 @@ class ExecutionCoordinator:
             consecutive_idle_drains += 1
             remaining = max(0.0, deadline - time.time())
             if remaining <= 0.0:
+                future.cancel()
                 raise TimeoutError("submit_turn exceeded timeout")
 
             wait_task = asyncio.create_task(
                 scheduler.wait_for_work(timeout_seconds=remaining),
             )
-            done, _ = await asyncio.wait(
-                {future, wait_task},
-                return_when=asyncio.FIRST_COMPLETED,
-            )
+            try:
+                done, _ = await asyncio.wait(
+                    {future, wait_task},
+                    timeout=remaining,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if not done:
+                    future.cancel()
+                    raise TimeoutError("submit_turn exceeded timeout")
+            except asyncio.CancelledError:
+                future.cancel()
+                raise
+            finally:
+                if not wait_task.done():
+                    wait_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await wait_task
             wait_ready = False
             if wait_task in done:
-                with contextlib.suppress(Exception):
-                    wait_ready = bool(wait_task.result())
+                wait_ready = bool(wait_task.result())
 
             if (time.monotonic() - last_progress_emit) >= 1.0 or consecutive_idle_drains >= 5:
                 projected = lifecycle_projection.get(job.job_id)
@@ -143,8 +163,4 @@ class ExecutionCoordinator:
                 )
                 last_progress_emit = time.monotonic()
 
-            if wait_task not in done:
-                wait_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await wait_task
         return loop_iterations

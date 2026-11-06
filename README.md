@@ -5,9 +5,12 @@ A warm, private AI companion with long-term memory that remembers you, grows wit
 **Local processing is available.** Ollama chat, local memory, local STT, and Piper TTS can run on your machine. Auto voice may use edge-tts or ElevenLabs and send reply text to external services; choose Piper or pyttsx3 for local speech.
 
 Ollama chat clients use a 120-second transport timeout (including waiting for
-response headers or the next stream chunk). This is an inactivity limit, not a
-total-turn deadline; model retries and multi-step turns can take longer. A
-five-second health probe may time out during a normal cold model load.
+response headers or the next stream chunk). Separately, submitted turns default
+to a 120-second cooperative execution deadline; an explicit per-turn timeout
+overrides it. The synchronous turn lock and async thread bridge stop waiting
+after 180 seconds. Cancellation cannot forcibly stop a synchronous worker;
+the transport timeout still bounds network inactivity. A five-second health
+probe may time out during a normal cold model load.
 
 ---
 
