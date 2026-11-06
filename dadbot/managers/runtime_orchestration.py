@@ -94,8 +94,8 @@ class RuntimeOrchestrationManager:
 
         if task_store is not None:
             task_store.save_task(task_id, payload)
-        if task_id not in self.bot._background_task_ids:
-            self.bot._background_task_ids.append(task_id)
+        if task_id not in self.bot.background_task_ids:
+            self.bot.background_task_ids.append(task_id)
         self.bot.runtime_state_container.record_event(
             EventType.STATE_UPDATED,
             {
@@ -113,7 +113,7 @@ class RuntimeOrchestrationManager:
         task_store = getattr(self.bot.runtime_state_container, "store", None)
         task_payloads = []
         if task_store is not None:
-            for task_id in self.bot._background_task_ids:
+            for task_id in self.bot.background_task_ids:
                 payload = task_store.load_task(task_id)
                 if isinstance(payload, dict):
                     task_payloads.append(

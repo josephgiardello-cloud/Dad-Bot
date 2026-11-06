@@ -364,6 +364,54 @@ class DadBot(
         return self.config.llm_model
 
     @property
+    def ACTIVE_MODEL(self) -> str:
+        return self.config.active_model
+
+    @ACTIVE_MODEL.setter
+    def ACTIVE_MODEL(self, value: str) -> None:
+        self.config.active_model = value
+
+    @property
+    def LLM_PROVIDER(self) -> str:
+        return self.config.llm_provider
+
+    @LLM_PROVIDER.setter
+    def LLM_PROVIDER(self, value: str) -> None:
+        self.config.llm_provider = value
+
+    @property
+    def LLM_MODEL(self) -> str:
+        return self.config.llm_model
+
+    @LLM_MODEL.setter
+    def LLM_MODEL(self, value: str) -> None:
+        self.config.llm_model = value
+
+    @property
+    def ACTIVE_EMBEDDING_MODEL(self) -> str | None:
+        return self.config.active_embedding_model
+
+    @ACTIVE_EMBEDDING_MODEL.setter
+    def ACTIVE_EMBEDDING_MODEL(self, value: str | None) -> None:
+        self.config.active_embedding_model = value
+
+    @property
+    def APPEND_SIGNOFF(self) -> bool:
+        return self.config.append_signoff
+
+    @APPEND_SIGNOFF.setter
+    def APPEND_SIGNOFF(self, value: bool) -> None:
+        self.config.append_signoff = value
+
+    @property
+    def LIGHT_MODE(self) -> bool:
+        return self.config.light_mode
+
+    @LIGHT_MODE.setter
+    def LIGHT_MODE(self, value: bool) -> None:
+        self.config.light_mode = value
+
+    @property
     def tenant_id(self) -> str:
         return self.config.tenant_id
 
@@ -447,7 +495,7 @@ class DadBot(
 
     @property
     def runtime_state_container(self) -> Any:
-        return self._memory_manager.container if hasattr(self._memory_manager, 'container') else None
+        return self._runtime_state
 
     @property
     def history(self) -> Any:
