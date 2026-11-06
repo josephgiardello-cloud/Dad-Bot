@@ -349,6 +349,15 @@ class ServiceRegistry:
             "safety_service",
             _instantiate("dadbot.services.safety_service:SafetyService", bot),
         )
+        optional_runtime_services = {
+            "autonomous_goal_daemon": "dadbot.core.autonomous_goal_daemon:AutonomousGoalDaemon",
+            "interactive_cognition_ui": "dadbot.core.interactive_cognition_ui:InteractiveCognitionUI",
+            "multi_agent_swarm": "dadbot.core.multi_agent_swarm:MultiAgentSwarm",
+            "tool_ecosystem_hub": "dadbot.core.tool_ecosystem_hub:ToolEcosystemHub",
+        }
+        for name, import_path in optional_runtime_services.items():
+            if registry.get(name, optional=True) is None:
+                registry.register(name, _instantiate(import_path))
 
         # Canonical aliases used by DadBotOrchestrator node lookup
         registry.register("health", registry.get("maintenance_service"))

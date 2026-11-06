@@ -14,6 +14,7 @@ import hashlib
 import json
 import logging
 from collections.abc import Awaitable, Callable, Iterable, Mapping
+from contextvars import copy_context
 from typing import Any, cast
 from uuid import uuid4
 
@@ -204,8 +205,9 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
         """
         import concurrent.futures
 
+        context = copy_context()
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            return pool.submit(asyncio.run, coro).result()
+            return pool.submit(context.run, asyncio.run, coro).result()
 
     def _run_graph_turn_sync(
         self,

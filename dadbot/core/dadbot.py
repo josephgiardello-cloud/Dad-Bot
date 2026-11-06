@@ -432,8 +432,24 @@ class DadBot(
         return self.config.recent_history_window
 
     @property
+    def RECENT_HISTORY_WINDOW(self) -> int:  # noqa: N802
+        return self.config.recent_history_window
+
+    @RECENT_HISTORY_WINDOW.setter
+    def RECENT_HISTORY_WINDOW(self, value: int) -> None:  # noqa: N802
+        self.config.recent_history_window = value
+
+    @property
     def max_history_messages_scan(self) -> int:
         return self.config.max_history_messages_scan
+
+    @property
+    def MAX_HISTORY_MESSAGES_SCAN(self) -> int:  # noqa: N802
+        return self.config.max_history_messages_scan
+
+    @MAX_HISTORY_MESSAGES_SCAN.setter
+    def MAX_HISTORY_MESSAGES_SCAN(self, value: int) -> None:  # noqa: N802
+        self.config.max_history_messages_scan = value
 
     @property
     def summary_trigger_messages(self) -> int:
