@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 
 
 class ConfigSchema(BaseModel):
-    model_candidates: list[str] = Field(default_factory=lambda: ["llama3.2"])
+    model_candidates: list[str] = Field(default_factory=lambda: ["qwen3.5:9b"])
     embedding_model_candidates: list[str] = Field(
         default_factory=lambda: ["nomic-embed-text"],
     )

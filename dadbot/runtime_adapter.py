@@ -32,7 +32,7 @@ class AppRuntimeContract(Protocol):
 
     def __init__(
         self,
-        model_name: str = "llama3.2",
+        model_name: str = "qwen3.5:9b",
         *,
         append_signoff: bool = True,
         light_mode: bool = False,

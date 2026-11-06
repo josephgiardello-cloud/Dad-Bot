@@ -121,7 +121,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--model",
-        default="llama3.2:latest",
+        default="qwen3.5:9b",
         help="Model label to embed in artifact metadata.",
     )
     parser.add_argument(

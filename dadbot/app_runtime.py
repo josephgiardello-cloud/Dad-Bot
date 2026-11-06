@@ -993,7 +993,7 @@ def launch_api_service(args, *, dadbot_cls=None):
     class ServiceRuntimeBotAdapter:
         def __init__(self, orchestrator_ref, *, model_name: str, tenant_id: str) -> None:
             self._orchestrator = orchestrator_ref
-            self._model_name = str(model_name or "llama3.2:latest")
+            self._model_name = str(model_name or "qwen3.5:9b")
             self._tenant_id = normalize_tenant_id(tenant_id)
             self._session_id = "spatial-avatar"
             self.PROFILE = {"voice": {"tts_backend": "auto", "voice_profile": "warm_dad"}}
@@ -1138,7 +1138,7 @@ def main(
         return launch_api_service(args, dadbot_cls=resolved_dadbot_cls)
 
     bot = resolved_dadbot_cls(
-        model_name=args.model or "llama3.2",
+        model_name=args.model or "qwen3.5:9b",
         append_signoff=not args.no_signoff,
         light_mode=args.light,
         tenant_id=args.tenant_id,

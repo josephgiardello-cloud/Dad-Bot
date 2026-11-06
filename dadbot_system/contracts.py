@@ -10,6 +10,7 @@ from uuid import uuid4
 
 DEFAULT_TENANT_ID = "default"
 DEFAULT_CHANNEL_NAME = "chat"
+DEFAULT_MODEL = "qwen3.5:9b"
 
 
 class ChatRequestEnvelope(TypedDict):
@@ -318,7 +319,7 @@ class TelemetrySettings:
 
 @dataclass(slots=True)
 class ServiceConfig:
-    default_model: str = "llama3.2"
+    default_model: str = DEFAULT_MODEL
     api: ApiSettings = field(default_factory=ApiSettings)
     security: SecuritySettings = field(default_factory=SecuritySettings)
     queue: QueueSettings = field(default_factory=QueueSettings)
@@ -329,7 +330,7 @@ class ServiceConfig:
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> ServiceConfig:
         return cls(
-            default_model=str(payload.get("default_model") or "llama3.2"),
+            default_model=str(payload.get("default_model") or DEFAULT_MODEL),
             api=ApiSettings(**dict(payload.get("api") or {})),
             security=SecuritySettings(**dict(payload.get("security") or {})),
             queue=QueueSettings(**dict(payload.get("queue") or {})),

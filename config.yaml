@@ -1,6 +1,6 @@
 # Minimal config.yaml for DadBot
 runtime:
-  model: llama3.2:latest
+  model: qwen3.5:9b
   persona: default
   memory_path: dad_memory.json
   profile_path: dad_profile.json

@@ -310,7 +310,7 @@ class DadBotConfig:
         # Compatibility shim for tests expecting _project_root as a property
         return Path(__file__).resolve().parent.parent
 
-    model_name: str = "llama3.2"
+    model_name: str = "qwen3.5:9b"
     fallback_models: tuple[str, ...] = (
         "llama3.1:8b",
         "phi4:mini",
@@ -343,7 +343,7 @@ class DadBotConfig:
             and env_truthy("DADBOT_TEST_ALLOW_NONSTRICT_GRAPH_MODE", default=False)
         )
         self.strict_graph_mode = bool(self.strict_graph_mode and not test_only_non_strict)
-        self.active_model = str(self.model_name).strip() or "llama3.2"
+        self.active_model = str(self.model_name).strip() or "qwen3.5:9b"
         self.active_embedding_model = None
         self.redis_url = str(self.service_config.persistence.redis_url or "").strip()
         self.postgres_dsn = str(self.service_config.persistence.postgres_dsn or "").strip()

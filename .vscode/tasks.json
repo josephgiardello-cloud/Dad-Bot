@@ -141,11 +141,11 @@
 			"args": [
 				"Dad.py",
 				"--model",
-				"llama3.2:latest"
+				"qwen3.5:9b"
 			],
 			"options": {
 				"env": {
-					"DADBOT_LLM_MODEL": "llama3.2:latest"
+					"DADBOT_LLM_MODEL": "qwen3.5:9b"
 				}
 			},
 			"isBackground": true,
@@ -372,4 +372,3 @@
 		}
 	]
 }
-

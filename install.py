@@ -13,7 +13,7 @@ import sys
 import time
 from pathlib import Path
 
-REQUIRED_MODELS = ["llama3.2", "nomic-embed-text"]
+REQUIRED_MODELS = ["qwen3.5:9b", "nomic-embed-text"]
 OPTIONAL_MODELS = ["flux"]  # large image model — skip if slow
 
 
@@ -117,7 +117,7 @@ def check_ollama():
         print("      • macOS/Linux: https://ollama.com/download")
         print("      • Windows: https://ollama.com/download/windows")
         print("\n   After installation, run:")
-        print("      ollama pull llama3.2")
+        print("      ollama pull qwen3.5:9b")
         print("      ollama pull nomic-embed-text")
         print("\n   Then run this installer again:")
         print("      python install.py")

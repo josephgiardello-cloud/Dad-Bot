@@ -35,7 +35,7 @@ def canonical_profile(payload: dict) -> dict:
         "relationship": str(payload.get("relationship") or "father"),
         "signoff": str(style.get("signoff") or "Love you, buddy."),
         "llm_provider": str(llm.get("provider") or "ollama").strip().lower(),
-        "llm_model": str(llm.get("model") or "llama3.2").strip(),
+        "llm_model": str(llm.get("model") or "qwen3.5:9b").strip(),
         "append_signoff": bool(preferences.get("append_signoff", True)),
         "tone_family": tone_family,
     }

@@ -401,7 +401,7 @@ def dispatch_runtime_mode(
         )
 
     bot = dadbot_cls(
-        model_name=args.model or "llama3.2",
+        model_name=args.model or "qwen3.5:9b",
         append_signoff=not args.no_signoff,
         light_mode=args.light,
         tenant_id=args.tenant_id,
