@@ -270,6 +270,11 @@ def create_api_app(
 
     @asynccontextmanager
     async def lifespan(_app):
+        if service_config.telemetry.otel_enabled:
+            from .telemetry import configure_tracing
+
+            configure_tracing(service_config.telemetry)
+
         async def _kernel_execute(session_entry: dict, payload: dict) -> dict:
             _ = session_entry
             _session_id = str(payload.get("_session_id") or "")
@@ -300,6 +305,10 @@ def create_api_app(
                 runtime_bot.shutdown()
             if websocket_tickets is not None:
                 await asyncio.to_thread(websocket_tickets.close)
+            if service_config.telemetry.otel_enabled:
+                from dadbot.core.otel_bridge import shutdown_otel_bridge
+
+                shutdown_otel_bridge()
 
     app = FastAPI(title=service_config.api.title, lifespan=lifespan)
     app.add_middleware(

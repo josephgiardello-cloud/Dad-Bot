@@ -21,7 +21,7 @@ from .contracts import (
     WorkerTask,
     normalize_tenant_id,
 )
-from .runtime_signals import configure_logging, start_span
+from .runtime_signals import configure_logging, configure_tracing, start_span
 
 logger = logging.getLogger(__name__)
 
@@ -262,6 +262,7 @@ class DadBotTaskProcessor:
 def worker_process_main(config_payload: dict, request_queue, result_queue, event_queue=None):
     config = ServiceConfig.from_dict(config_payload)
     configure_logging(config.telemetry)
+    configure_tracing(config.telemetry)
     processor = DadBotTaskProcessor(config)
     worker_name = mp.current_process().name
 
@@ -275,12 +276,18 @@ def worker_process_main(config_payload: dict, request_queue, result_queue, event
             )
         )
 
-    while True:
-        task = request_queue.get()
-        if task is None:
-            break
-        result = processor.process(task)
-        result_queue.put(result)
+    try:
+        while True:
+            task = request_queue.get()
+            if task is None:
+                break
+            result = processor.process(task)
+            result_queue.put(result)
+    finally:
+        if config.telemetry.otel_enabled:
+            from dadbot.core.otel_bridge import shutdown_otel_bridge
+
+            shutdown_otel_bridge()
 
     if event_queue is not None:
         event_queue.put(

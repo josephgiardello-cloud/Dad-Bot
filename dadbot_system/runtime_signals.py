@@ -1,17 +1,10 @@
 from __future__ import annotations
 
-import importlib
 import json
 import logging
-from contextlib import contextmanager
 from typing import Any
 
 from .contracts import TelemetrySettings
-
-trace = None
-Resource = None
-TracerProvider = None
-
 
 STANDARD_LOG_FIELDS = {
     "name",
@@ -76,32 +69,12 @@ def configure_logging(settings: TelemetrySettings | None = None, *, force: bool 
 
 
 def configure_tracing(settings: TelemetrySettings | None = None):
-    telemetry = settings or TelemetrySettings()
-    if not telemetry.otel_enabled:
-        return None
+    from .telemetry import configure_tracing as configure_service_tracing
 
-    global trace, Resource, TracerProvider
-    if trace is None or Resource is None or TracerProvider is None:
-        try:
-            trace = importlib.import_module("opentelemetry.trace")
-            Resource = importlib.import_module("opentelemetry.sdk.resources").Resource
-            TracerProvider = importlib.import_module("opentelemetry.sdk.trace").TracerProvider
-        except Exception:
-            return None
-
-    provider = TracerProvider(resource=Resource.create({"service.name": telemetry.service_name}))
-    trace.set_tracer_provider(provider)
-    return provider
+    return configure_service_tracing(settings)
 
 
-@contextmanager
 def start_span(name: str, **attributes: Any):
-    if trace is None:
-        yield None
-        return
+    from .telemetry import start_span as service_start_span
 
-    tracer = trace.get_tracer("dadbot")
-    with tracer.start_as_current_span(name) as span:
-        for key, value in attributes.items():
-            span.set_attribute(key, value)
-        yield span
+    return service_start_span(name, **attributes)

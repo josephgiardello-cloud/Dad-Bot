@@ -13,6 +13,7 @@ from uuid import uuid4
 from jsonschema import validators
 from jsonschema.exceptions import ValidationError
 
+from dadbot.core.otel_bridge import start_span
 from dadbot.runtime.structured_output import AgentPlan, SchemaValidationError, parse_agent_plan
 
 logger = logging.getLogger(__name__)
@@ -219,7 +220,10 @@ class MCPToolClient:
 
     @staticmethod
     async def call_tool(session: Any, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        result = await session.call_tool(name, arguments=arguments)
+        with start_span("mcp.call_tool", **{"mcp.method.name": "tools/call"}) as span:
+            result = await session.call_tool(name, arguments=arguments)
+            if span is not None:
+                span.set_attribute("mcp.result.is_error", bool(result.is_error))
         structured = result.structured_content
         if structured is not None:
             payload: Any = structured

@@ -10,11 +10,15 @@ from __future__ import annotations
 
 import importlib
 import logging
+from contextlib import nullcontext
+from threading import RLock
 from typing import Any
 
 from dadbot.core.kernel_signals import EventStreamExporter, MetricsSink
 
 logger = logging.getLogger(__name__)
+_provider: Any = None
+_install_lock = RLock()
 
 
 class OpenTelemetryMetricsSink(MetricsSink):
@@ -66,24 +70,49 @@ class OpenTelemetryEventExporter(EventStreamExporter):
             logger.debug("OpenTelemetry event emission failed", exc_info=True)
 
 
-def install_otel_bridge() -> dict[str, Any]:
+def install_otel_bridge(*, service_name: str = "dadbot") -> dict[str, Any]:
     """Install OTel-backed observability adapters if SDK is available.
 
     Returns:
         dict with installation status and reason for diagnostics.
 
     """
-    try:
-        otel_metrics = importlib.import_module("opentelemetry.metrics")
-    except Exception as exc:  # noqa: BLE001
-        return {"installed": False, "reason": f"opentelemetry unavailable: {exc}"}
+    global _provider
+    with _install_lock:
+        if _provider is not None:
+            return {"installed": True, "reason": "already installed"}
+        try:
+            otel_metrics = importlib.import_module("opentelemetry.metrics")
+            from dadbot.core.trace_export import create_trace_provider
+        except ImportError as exc:
+            logger.warning("OpenTelemetry SDK unavailable; install the service dependencies")
+            return {"installed": False, "reason": f"opentelemetry unavailable: {exc}"}
 
-    try:
         import dadbot.core.kernel_signals as obs
 
-        meter = otel_metrics.get_meter("dadbot.core")
-        obs._global_metrics = OpenTelemetryMetricsSink(meter=meter)  # type: ignore[attr-defined]
-        obs.configure_exporter(enabled=True)
+        _provider = create_trace_provider(service_name)
+        obs._global_metrics = OpenTelemetryMetricsSink(meter=otel_metrics.get_meter("dadbot.core"))
+        obs._span_bridge = start_span
         return {"installed": True, "reason": "ok"}
-    except Exception as exc:  # noqa: BLE001
-        return {"installed": False, "reason": f"install failed: {exc}"}
+
+
+def get_trace_provider():
+    return _provider
+
+
+def start_span(name: str, **attributes: Any):
+    if _provider is None:
+        return nullcontext(None)
+    from dadbot.core.trace_export import start_span as sdk_start_span
+
+    return sdk_start_span(_provider, name, attributes)
+
+
+def shutdown_otel_bridge() -> None:
+    global _provider
+    with _install_lock:
+        provider, _provider = _provider, None
+        if provider is not None:
+            if not provider.force_flush():
+                logger.error("DadBot span flush did not complete")
+            provider.shutdown()

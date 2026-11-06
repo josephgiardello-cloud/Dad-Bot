@@ -13,6 +13,7 @@ import ollama  # type: ignore[reportMissingImports]
 
 from dadbot.contracts import DadBotContext, SupportsDadBotAccess
 from dadbot.core.execution_boundary import ModelGatewayScope, enforce_model_gateway
+from dadbot.core.otel_bridge import start_span
 
 logger = logging.getLogger(__name__)
 litellm = importlib.import_module("litellm") if importlib.util.find_spec("litellm") else None
@@ -436,11 +437,17 @@ class RuntimeClientManager:
         if kwargs.get("stream"):
             def bounded_stream():
                 with client._client:
-                    yield from client.chat(**kwargs)
+                    with start_span(
+                        "gen_ai.chat", **{"gen_ai.operation.name": "chat", "gen_ai.provider.name": "ollama"}
+                    ):
+                        yield from client.chat(**kwargs)
 
             return bounded_stream()
         with client._client:
-            return client.chat(**kwargs)
+            with start_span(
+                "gen_ai.chat", **{"gen_ai.operation.name": "chat", "gen_ai.provider.name": "ollama"}
+            ):
+                return client.chat(**kwargs)
 
     def call_ollama_chat(
         self,
@@ -541,7 +548,10 @@ class RuntimeClientManager:
                     response = await asyncio.to_thread(self._call_ollama_sync, **kwargs)
                 else:
                     try:
-                        response = await client.chat(**kwargs)
+                        with start_span(
+                            "gen_ai.chat", **{"gen_ai.operation.name": "chat", "gen_ai.provider.name": "ollama"}
+                        ):
+                            response = await client.chat(**kwargs)
                     except RuntimeError as exc:
                         if not self._is_event_loop_closed_error(exc):
                             raise
@@ -833,12 +843,15 @@ class RuntimeClientManager:
                     kwargs = {"model": candidate, "messages": guarded, "stream": True, "options": request_options}
                     if think is not None:
                         kwargs["think"] = think
-                    stream = await client.chat(**kwargs)
-                    chunks, truncated = await self._collect_stream_chunks_async(
-                        stream,
-                        purpose=purpose,
-                        chunk_callback=chunk_callback,
-                    )
+                    with start_span(
+                        "gen_ai.chat", **{"gen_ai.operation.name": "chat", "gen_ai.provider.name": "ollama"}
+                    ):
+                        stream = await client.chat(**kwargs)
+                        chunks, truncated = await self._collect_stream_chunks_async(
+                            stream,
+                            purpose=purpose,
+                            chunk_callback=chunk_callback,
+                        )
                     final_reply = "".join(chunks).strip()
                     if final_reply and truncated:
                         final_reply = final_reply.rstrip(" ,.;:") + "..."

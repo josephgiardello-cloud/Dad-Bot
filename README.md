@@ -115,7 +115,7 @@ Browser clients must exchange HTTP credentials for an opaque ticket before each 
 
 Tickets last **at most 60 seconds**, never outlive their original principal, and work exactly once. Redis 6.2+ provides atomic `GETDEL` consumption across API processes; configure `DADBOT_REDIS_URL` for ticket issuance. Missing/unavailable Redis fails closed (HTTP 503 or WebSocket close 1013); it never falls back to process-local ticket storage. The production Compose Redis 7 service supports this.
 
-Long-lived `access_token`, `dadbot_key` and `x_dadbot_key` query parameters are rejected on all three WebSocket endpoints. Non-browser clients may continue authenticating with headers. The Python service client's stream URL helper performs the HTTP exchange and returns a fresh, versioned ticket URL; request another URL after reconnecting.
+Long-lived `access_token`, `dadbot_key` and `x_dadbot_key` query parameters are rejected on all three WebSocket endpoints. Non-browser clients may continue authenticating with headers. The Python service client's `authenticated_session_event_stream_url(...)` performs the HTTP exchange and returns a fresh, versioned ticket URL; request another URL after reconnecting. Ordinary stream URL helpers remain side-effect-free descriptors so offline dashboard rendering does not contact the API.
 
 Use HTTPS/WSS outside loopback and redact WebSocket query strings in proxy/access logs, even though tickets are short-lived and single-use. `dadbot_dev_no_auth=1` is an explicit demo-only bypass of the exchange, usable only when the server itself has authentication disabled and no secret-key requirement; it does not bypass server authentication.
 
@@ -345,6 +345,16 @@ The checked-in [system audit report](artifacts/system_audit_matrix_report.json) 
 - **Health Levels**: `green` (normal) → `yellow` (pressure) → `red` (critical)
 - **Adaptive Guardrails**: Auto-throttling when memory/prompt pressure rises
 - **Status Dashboard**: Real-time memory usage, trim counters, runtime health signals
+
+#### Local OpenTelemetry span export
+
+Install the `service` extra and set `DADBOT_OTEL_ENABLED=1` (or use API `--otel`). Streamlit boot, API startup and spawned service workers share the same opt-in tracing setup. Set `DADBOT_SERVICE_NAME` to a non-sensitive deployment label.
+
+The DadBot-owned SDK provider uses a span processor and a local JSON-lines console exporter on **stderr**. It covers scheduler/service spans, synchronous/asynchronous Ollama requests (including full stream consumption), and executed MCP calls. Nested operations retain OpenTelemetry parent/child IDs without changing canonical kernel IDs. Export is immediate; API/worker shutdown explicitly flushes, and the SDK also registers process-exit cleanup.
+
+Exported fields are allowlisted: fixed operation names, generated trace/span IDs, timestamps, status, service label, and supported numeric/enum metadata. Prompts, replies, tool names/arguments/results, session/request IDs, exception messages/stacks, span events and arbitrary attributes are excluded. Unknown operation names are replaced with `dadbot.operation`. This does **not** scrub the application's other logs or stored history, nor enable automatic third-party instrumentation. Raw kernel event export is not enabled by installing the trace bridge.
+
+There is no remote trace exporter configured by default. Redirect stderr to an access-controlled local file if desired and include it in your retention policy. Explicitly enabling tracing without the SDK raises a configuration error; export failures are logged.
 
 ---
 

@@ -2,20 +2,9 @@ from __future__ import annotations
 
 import json
 import logging
-from contextlib import contextmanager
 from typing import Any
 
 from .contracts import TelemetrySettings
-
-try:
-    from opentelemetry import trace
-    from opentelemetry.sdk.resources import Resource
-    from opentelemetry.sdk.trace import TracerProvider
-except ImportError:
-    trace = None
-    Resource = None
-    TracerProvider = None
-
 
 STANDARD_LOG_FIELDS = {
     "name",
@@ -81,22 +70,17 @@ def configure_logging(settings: TelemetrySettings | None = None, *, force: bool 
 
 def configure_tracing(settings: TelemetrySettings | None = None):
     telemetry = settings or TelemetrySettings()
-    if not telemetry.otel_enabled or trace is None or Resource is None or TracerProvider is None:
+    if not telemetry.otel_enabled:
         return None
+    from dadbot.core.otel_bridge import get_trace_provider, install_otel_bridge
 
-    provider = TracerProvider(resource=Resource.create({"service.name": telemetry.service_name}))
-    trace.set_tracer_provider(provider)
-    return provider
+    status = install_otel_bridge(service_name=telemetry.service_name)
+    if not status["installed"]:
+        raise RuntimeError(status["reason"])
+    return get_trace_provider()
 
 
-@contextmanager
 def start_span(name: str, **attributes: Any):
-    if trace is None:
-        yield None
-        return
+    from dadbot.core.otel_bridge import start_span as bridge_start_span
 
-    tracer = trace.get_tracer("dadbot")
-    with tracer.start_as_current_span(name) as span:
-        for key, value in attributes.items():
-            span.set_attribute(key, value)
-        yield span
+    return bridge_start_span(name, **attributes)

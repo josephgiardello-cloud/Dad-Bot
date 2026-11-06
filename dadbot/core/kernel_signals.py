@@ -24,6 +24,8 @@ import sys
 import threading
 import time
 from collections import defaultdict
+from collections.abc import Callable
+from contextlib import AbstractContextManager
 from contextvars import ContextVar
 from enum import IntEnum
 from typing import Any
@@ -34,6 +36,7 @@ from typing import Any
 
 _current_trace_id: ContextVar[str] = ContextVar("_current_trace_id", default="")
 _current_span_id: ContextVar[str] = ContextVar("_current_span_id", default="")
+_span_bridge: Callable[[str], AbstractContextManager[Any]] | None = None
 
 
 class TraceLevel(IntEnum):
@@ -102,18 +105,26 @@ class Span:
         self.ended_at: float = 0.0
         self._trace_token = None
         self._span_token = None
+        self._otel_context: AbstractContextManager[Any] | None = None
 
     def __enter__(self) -> Span:
+        if _span_bridge is not None:
+            self._otel_context = _span_bridge(self.name)
+            self._otel_context.__enter__()
         self._trace_token = _current_trace_id.set(self.trace_id)
         self._span_token = _current_span_id.set(self.span_id)
         return self
 
-    def __exit__(self, *_) -> None:
+    def __exit__(self, *exc_info) -> None:
         self.ended_at = time.time()
-        if self._trace_token is not None:
-            _current_trace_id.reset(self._trace_token)
-        if self._span_token is not None:
-            _current_span_id.reset(self._span_token)
+        try:
+            if self._otel_context is not None:
+                self._otel_context.__exit__(*exc_info)
+        finally:
+            if self._trace_token is not None:
+                _current_trace_id.reset(self._trace_token)
+            if self._span_token is not None:
+                _current_span_id.reset(self._span_token)
 
     @property
     def duration_ms(self) -> float:

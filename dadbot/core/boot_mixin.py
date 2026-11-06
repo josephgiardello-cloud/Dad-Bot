@@ -364,6 +364,12 @@ class DadBotBootMixin:
         self._lifecycle_state = DadBotLifecycleState.ORCHESTRATION
 
     def _start_boot_background_tasks(self) -> None:
+        if env_truthy("DADBOT_OTEL_ENABLED", default=False):
+            from dadbot.core.otel_bridge import install_otel_bridge
+
+            status = install_otel_bridge(service_name=os.environ.get("DADBOT_SERVICE_NAME") or "dadbot")
+            if not status["installed"]:
+                raise RuntimeError(status["reason"])
         disable_graph_init_task = env_truthy(
             "DADBOT_DISABLE_GRAPH_INIT_TASK",
             default=False,
