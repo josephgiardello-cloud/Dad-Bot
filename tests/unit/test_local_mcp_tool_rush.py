@@ -1,12 +1,32 @@
 from __future__ import annotations
 
 import pathlib
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
 from dadbot_system import local_mcp_server as lms
 
 pytestmark = pytest.mark.unit
+
+
+def test_registered_reminder_uses_canonical_facade(monkeypatch: pytest.MonkeyPatch):
+    tools = {}
+
+    class Server:
+        def tool(self):
+            def register(function):
+                tools[function.__name__] = function
+                return function
+            return register
+
+    monkeypatch.setattr(lms, "FastMCP", lambda _name: Server())
+    reminder = {"title": "Call home", "due_at": "2026-06-01T10:00:00"}
+    bot = SimpleNamespace(add_reminder=Mock(return_value=reminder))
+    lms.build_server(bot)
+    assert tools["add_reminder"]("Call home", "tomorrow") == reminder
+    bot.add_reminder.assert_called_once_with("Call home", "tomorrow")
 
 
 def test_markdown_task_roundtrip(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path):

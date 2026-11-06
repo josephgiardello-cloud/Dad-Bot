@@ -350,7 +350,7 @@ def build_server(bot: DadBot | None = None):
     @server.tool()
     def add_reminder(title: str, due_text: str = "") -> dict[str, Any] | None:
         """Create or update a local reminder."""
-        result = _get_bot(bot).agentic_handler.add_reminder(title, due_text)
+        result = _get_bot(bot).add_reminder(title, due_text)
         return _json_safe(result) if result is not None else None
 
     @server.tool()
