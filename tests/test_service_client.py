@@ -228,6 +228,19 @@ def test_service_client_build_local_command_includes_production_persistence_flag
 
 def test_service_client_builds_websocket_event_stream_url(monkeypatch):
     client = DadServiceClient(ServiceClientConfig(base_url="https://dad.example/app", tenant_id="family-a"))
+
+    def unexpected_request(*args, **kwargs):
+        pytest.fail("Rendering a stream URL descriptor must not contact the API")
+
+    monkeypatch.setattr(client, "_request", unexpected_request)
+    assert client.session_event_stream_url("session-123") == (
+        "wss://dad.example/app/v1/sessions/session-123/events/stream?tenant_id=family-a"
+    )
+    assert client.stream_url("session-123") == client.session_event_stream_url("session-123")
+
+
+def test_service_client_exchanges_credentials_only_for_an_authenticated_stream_url(monkeypatch):
+    client = DadServiceClient(ServiceClientConfig(base_url="https://dad.example/app", tenant_id="family-a"))
     calls = []
 
     def request(method, path, payload=None):
@@ -236,7 +249,7 @@ def test_service_client_builds_websocket_event_stream_url(monkeypatch):
 
     monkeypatch.setattr(client, "_request", request)
 
-    url = client.session_event_stream_url("session-123")
+    url = client.authenticated_session_event_stream_url("session-123")
 
     assert (
         url == "wss://dad.example/app/v1/sessions/session-123/events/stream?tenant_id=family-a&ticket=single-use-ticket"

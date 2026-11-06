@@ -113,7 +113,8 @@ class DadServiceClient:
             ttl_seconds=float(self.config.token_ttl_seconds),
         )
 
-    def session_event_stream_url(self, session_id: str, *, tenant_id: str = "") -> str:
+    def authenticated_session_event_stream_url(self, session_id: str, *, tenant_id: str = "") -> str:
+        """Exchange HTTP credentials for a fresh single-use connection URL."""
         resolved_tenant_id = normalize_tenant_id(tenant_id or self.config.tenant_id)
         payload = self._request(
             "POST",
@@ -123,11 +124,19 @@ class DadServiceClient:
         ticket = payload.get("ticket")
         if not isinstance(ticket, str) or not ticket:
             raise RuntimeError("Dad Bot API did not return a WebSocket ticket")
+        return self.session_event_stream_url(session_id, tenant_id=resolved_tenant_id, ticket=ticket)
+
+    def session_event_stream_url(self, session_id: str, *, tenant_id: str = "", ticket: str = "") -> str:
+        """Build a descriptor without network I/O; supply a fresh ticket when connecting."""
+        resolved_tenant_id = normalize_tenant_id(tenant_id or self.config.tenant_id)
         parsed = urlparse(self.base_url)
         scheme = "wss" if parsed.scheme == "https" else "ws"
         base_path = parsed.path.rstrip("/")
         path = self._api_path(f"/sessions/{quote(session_id, safe='')}/events/stream")
-        query = urlencode({"tenant_id": resolved_tenant_id, "ticket": ticket})
+        parameters = {"tenant_id": resolved_tenant_id}
+        if ticket:
+            parameters["ticket"] = ticket
+        query = urlencode(parameters)
         return f"{scheme}://{parsed.netloc}{base_path}{path}?{query}"
 
     def stream_url(self, session_id: str, *, tenant_id: str = "") -> str:
