@@ -101,6 +101,17 @@ def test_configured_mcp_skips_planning_for_factual_turn(monkeypatch):
     generate.assert_not_called()
 
 
+def test_mcp_graph_node_allows_service_to_decline_non_tool_turn():
+    from dadbot.core.graph_pipeline_nodes import MCPToolNode
+
+    service = SimpleNamespace(is_enabled=True, generate_candidate=AsyncMock(return_value=None))
+    registry = SimpleNamespace(get=lambda *_args, **_kwargs: service)
+    context = SimpleNamespace(state={})
+    asyncio.run(MCPToolNode().execute(registry, context))
+    assert "candidate" not in context.state
+    assert "mcp_tool_candidate_ready" not in context.state
+
+
 def test_trimming_accounts_for_suffix_tokens_without_stalling():
     from dadbot.managers.state_prompt_budget_mixin import _StatePromptBudgetMixin
 
@@ -112,3 +123,33 @@ def test_trimming_accounts_for_suffix_tokens_without_stalling():
     trimmed = _StatePromptBudgetMixin.trim_text_to_token_budget(manager, "abcdefghi", 6)
     assert trimmed == "abcdef"
     assert len(trimmed) <= 6
+
+
+@pytest.mark.parametrize("strategy,single_pass", [
+    ("direct_answer", True), ("emotional_support", True), ("empathy_first", True),
+    ("task_plan", False), ("clarify", False),
+])
+def test_simple_strategies_keep_critique_but_skip_revision(strategy, single_pass):
+    from dadbot.core.nodes import InferenceNode
+
+    critique = Mock(return_value=SimpleNamespace(
+        passed=False, score=0.1, issues=["missing_detail"], revision_hint="Expand the answer",
+    ))
+    node = InferenceNode(None, critique_engine=SimpleNamespace(critique=critique))
+    context = SimpleNamespace(user_input="hello", state={"turn_plan": {"strategy": strategy}})
+    assert node._run_critique_check(context, ("hello", False), 0) is single_pass
+    critique.assert_called_once()
+    assert context.state["critique_record"]["passed"] is False
+    assert ("_critique_revision_context" in context.state) is not single_pass
+
+
+@pytest.mark.parametrize("payload", [
+    '{"mood":"invented","reply":"hello"}', '{"mood":"sad","reply":""}',
+    '{"mood":"sad","reply":"hello","extra":"hidden"}', "plain text",
+])
+def test_batched_mood_requires_valid_structured_output(payload):
+    from pydantic import ValidationError
+    from dadbot.services.agent_service import _EmotionalAnswer
+
+    with pytest.raises(ValidationError):
+        _EmotionalAnswer.model_validate_json(payload)

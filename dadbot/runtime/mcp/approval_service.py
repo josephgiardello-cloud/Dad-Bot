@@ -10,7 +10,6 @@ from dadbot.runtime.mcp.tool_client import (
     MCPToolClient,
     configured_ha_mcp_tools,
     configured_ha_mcp_url,
-    mcp_plan_schema,
     resume_mcp_with_fallback,
     run_mcp_with_fallback,
 )
@@ -112,7 +111,10 @@ class MCPApprovalService:
             and str(item.get("type") or "").strip().lower() in {"image", "audio", "document"}
         ][:6]
 
-    def _model_call(self, messages: list[dict[str, Any]], *, purpose: str) -> str:
+    def _model_call(
+        self, messages: list[dict[str, Any]], *, purpose: str,
+        response_format: dict[str, Any] | None = None,
+    ) -> str:
         model_port = getattr(self.bot, "model_port", None)
         generate = getattr(model_port, "generate", None)
         if not callable(generate):
@@ -120,11 +122,15 @@ class MCPApprovalService:
         model_name = str(getattr(self.bot, "ACTIVE_MODEL", "") or "").strip()
         if not model_name:
             raise RuntimeError("MCP approval service requires a configured active model")
+        generation_kwargs = {}
+        if purpose == "mcp_tool_plan" and self.bot.model_runtime.normalized_llm_provider() == "ollama":
+            generation_kwargs["think"] = False
         response = generate(
             messages,
             model=model_name,
-            response_format=mcp_plan_schema() if purpose == "mcp_tool_plan" else None,
+            response_format=response_format if purpose == "mcp_tool_plan" else None,
             purpose=purpose,
+            **generation_kwargs,
         )
         reply = str(response or "").strip()
         if not reply:
@@ -160,9 +166,10 @@ class MCPApprovalService:
             messages,
             client,
             allowed_tools,
-            model_call=lambda candidate_messages: self._model_call(
+            model_call=lambda candidate_messages, schema: self._model_call(
                 candidate_messages,
                 purpose="mcp_tool_plan",
+                response_format=schema,
             ),
             fallback_call=lambda candidate_messages: self._model_call(
                 candidate_messages,
@@ -204,9 +211,10 @@ class MCPApprovalService:
             client,
             configured_ha_mcp_tools(),
             approved=approved,
-            model_call=lambda candidate_messages: self._model_call(
+            model_call=lambda candidate_messages, schema: self._model_call(
                 candidate_messages,
                 purpose="mcp_tool_plan",
+                response_format=schema,
             ),
         )
         if isinstance(result, MCPApprovalRequest):

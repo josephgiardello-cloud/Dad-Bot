@@ -1071,6 +1071,11 @@ if page == "Chat":
             reply_thread_id = _active_thread_id()
             _append_chat_message("assistant", reply, stamp=now, thread_id=reply_thread_id)
             reply_message_index = len(_thread_messages(reply_thread_id)) - 1
+            if (
+                callable(getattr(mcp_service, "get_pending_mcp_approval", None))
+                and mcp_service.get_pending_mcp_approval(reply_thread_id) is not None
+            ):
+                st.rerun()
             with assistant_message:
                 assistant_output.markdown(reply)
                 with suppress(Exception):

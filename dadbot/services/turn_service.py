@@ -586,6 +586,11 @@ class TurnService(ToolPipelineMixin):
         )
         if self.bot.LIGHT_MODE:
             current_mood = "neutral"
+        elif turn_context is not None and turn_context.state.get("_batch_mood_with_reply"):
+            current_mood = self.bot.mood_manager.detect_without_model(
+                turn_text,
+                self.bot.prompt_history()[-mood_history_window:],
+            )
         else:
             current_mood = await self.bot.mood_manager.detect_async(
                 turn_text,
@@ -596,10 +601,15 @@ class TurnService(ToolPipelineMixin):
             "detect_mood",
             detail=f"current_mood={current_mood}",
         )
-        self.record_user_turn_state(turn_text, current_mood, turn_context=turn_context)
+        if turn_context is None or not turn_context.state.get("_batch_mood_with_reply"):
+            self.record_user_turn_state(turn_text, current_mood, turn_context=turn_context)
         self._append_turn_pipeline_step(
             "record_turn_state",
-            detail="saved mood and relationship state",
+            detail=(
+                "deferred mood state until batched answer classification"
+                if turn_context is not None and turn_context.state.get("_batch_mood_with_reply")
+                else "saved mood and relationship state"
+            ),
         )
         self.bot.begin_planner_debug(stripped_input, current_mood)
         self._append_turn_pipeline_step(

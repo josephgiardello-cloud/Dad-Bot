@@ -210,7 +210,7 @@ def test_mcp_approval_is_stored_for_the_active_streamlit_thread(monkeypatch):
         run_mcp_tool_loop(
             [{"role": "user", "content": "Turn off light.kitchen"}],
             [{"name": "light_control", "input_schema": {"type": "object"}}],
-            model_call=lambda _messages: proposal,
+            model_call=lambda _messages, _schema: proposal,
         )
     )
     assert isinstance(request, MCPApprovalRequest)
@@ -311,7 +311,8 @@ def test_hard_day_gets_signoff_even_with_neutral_mood(bot):
 
 @pytest.mark.parametrize("asynchronous", [False, True])
 @pytest.mark.parametrize("stream", [False, True])
-def test_runtime_preserves_selected_model_and_reasoning_defaults(monkeypatch, asynchronous, stream):
+@pytest.mark.parametrize("think", [None, False, True])
+def test_runtime_preserves_selected_model_and_reasoning_defaults(monkeypatch, asynchronous, stream, think):
     requests = []
     chunks = []
 
@@ -350,13 +351,18 @@ def test_runtime_preserves_selected_model_and_reasoning_defaults(monkeypatch, as
             "chunk_callback": chunks.append,
             "options": {"num_ctx": 4096},
         }
+        if think is not None:
+            kwargs["think"] = think
         if asynchronous:
             result = asyncio.run(client.call_llm_async([], **kwargs))
         else:
             result = client.call_llm([], **kwargs)
     assert result == ("Hello" if stream else {"message": {"content": "Hello"}})
     assert requests[0]["model"] == DEFAULT_MODEL
-    assert "think" not in requests[0]
+    if think is None:
+        assert "think" not in requests[0]
+    else:
+        assert requests[0]["think"] is think
     assert requests[0]["options"] == {"num_ctx": 4096, "temperature": 0.7}
     assert chunks == (["Hello"] if stream else [])
 
@@ -598,3 +604,41 @@ def test_chat_approval_blocks_input_and_validates_result(bot, monkeypatch, appro
     expected = "Action completed." if approved else "Action rejected."
     assert app.session_state["chat_threads"]["default"][-1]["text"] == expected
     assert app.chat_input
+
+
+def test_chat_new_approval_renders_immediately_after_proposal(bot, monkeypatch):
+    from streamlit.testing.v1 import AppTest
+
+    path = Path(__file__).resolve().parents[2] / "dad_streamlit.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    build = next(
+        ast.literal_eval(node.value)
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "_STREAMLIT_RUNTIME_BUILD" for target in node.targets)
+    )
+    pending = None
+
+    def propose(_text, attachments=None):
+        nonlocal pending
+        pending = SimpleNamespace(
+            tool_name="record_mock_event", arguments={"message": "approval-check"}, request_id="new-proposal",
+        )
+        return "Review the proposed action.", False
+
+    bot.services.registry.register("mcp_tool_service", SimpleNamespace(
+        get_pending_mcp_approval=lambda _thread_id: pending,
+    ))
+    monkeypatch.setattr(bot, "process_user_message", propose)
+    monkeypatch.delenv("DADBOT_SPATIAL_AVATAR_URL", raising=False)
+    app = AppTest.from_file(str(path))
+    app.session_state["bot"] = bot
+    app.session_state["_streamlit_runtime_build"] = build
+    app.run(timeout=20)
+    assert app.chat_input
+    app.chat_input[0].set_value("Record a mock event.").run(timeout=20)
+    assert not app.exception
+    assert not app.chat_input
+    assert any(button.label == "Approve this action" for button in app.button)
+    assert any(button.label == "Reject this action" for button in app.button)
+    assert app.session_state["chat_threads"]["default"][-1]["text"] == "Review the proposed action."

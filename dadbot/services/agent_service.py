@@ -2,11 +2,21 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Any
+from typing import Any, Literal
 
+from pydantic import BaseModel, ConfigDict, Field
+
+from dadbot.core.turn_coherence import mark_turn_coherence
 from dadbot.runtime.model.model_call_port import ModelPort
 
 logger = logging.getLogger(__name__)
+
+
+class _EmotionalAnswer(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    mood: Literal["positive", "neutral", "stressed", "sad", "frustrated", "tired"]
+    reply: str = Field(min_length=1)
 
 
 class AgentService:
@@ -233,6 +243,11 @@ class AgentService:
             turn_context.state["already_finalized"] = True
             return ("", False)
 
+        batch_mood = bool(
+            not bot.LIGHT_MODE
+            and bot.mood_manager.needs_model_detection(stripped, bot.prompt_history())
+        )
+        turn_context.state["_batch_mood_with_reply"] = batch_mood
         prepared = await self._prepare_user_turn(
             bot,
             stripped,
@@ -242,6 +257,8 @@ class AgentService:
         if prepared is None:
             raise RuntimeError("AgentService could not prepare the user turn")
         mood, early_reply, should_end, turn_text, norm_attachments = prepared
+        if batch_mood and early_reply is not None and not should_end:
+            bot.turn_service.record_user_turn_state(turn_text, str(mood or "neutral"), turn_context=turn_context)
 
         self._record_turn_preinference_state(
             turn_context,
@@ -311,11 +328,48 @@ class AgentService:
         active_model = str(getattr(bot, "ACTIVE_MODEL", "") or "").strip()
         if not active_model:
             raise RuntimeError("AgentService requires a configured active model")
-        response = await model_port.generate_async(
-            messages,
-            model=active_model,
-            purpose="chat",
-        )
+        generation_kwargs: dict[str, Any] = {}
+        if batch_mood:
+            instruction = (
+                "Classify the user's emotional state and answer in the same response. "
+                "Return JSON with exactly mood and reply. Mood must be positive, neutral, "
+                "stressed, sad, frustrated, or tired. The reply is the complete natural "
+                "answer to the user, not an explanation of the classification. "
+                "Be supportive and concise; acknowledge the feeling before giving advice. "
+                "Do not add a closing signoff; the reply finalizer adds it separately. "
+                "Do not include analysis or reasoning in either field."
+            )
+            cadence = bot.cadence_settings()
+            if bot.session_turn_count() % cadence["family_echo_turn_interval"] == 0:
+                instruction += (
+                    "\nIf mood is sad, stressed, or positive and the user hasn't mentioned "
+                    "their mother, you may weave this optional family reference into reply "
+                    "instead of generating it separately. Use the family facts below only; "
+                    "ignore their standalone output instructions and keep the JSON contract:\n"
+                    + bot.build_family_echo_prompt(turn_text, str(mood or "neutral"))
+                )
+            if messages and messages[0].get("role") == "system":
+                messages[0] = {**messages[0], "content": f"{instruction}\n\n{messages[0].get('content', '')}"}
+            else:
+                messages.insert(0, {"role": "system", "content": instruction})
+            generation_kwargs["response_format"] = _EmotionalAnswer.model_json_schema()
+            if bot.model_runtime.normalized_llm_provider() == "ollama":
+                generation_kwargs["think"] = False
+        response = await model_port.generate_async(messages, model=active_model, purpose="chat", **generation_kwargs)
+        if batch_mood:
+            answer = _EmotionalAnswer.model_validate_json(str(response or ""))
+            mark_turn_coherence(bot, "family_echo_batched")
+            mood = answer.mood
+            response = answer.reply
+            self._record_turn_preinference_state(
+                turn_context, mood=mood, turn_text=turn_text, stripped=stripped,
+                norm_attachments=norm_attachments,
+            )
+            self._record_bayesian_state(bot, turn_context, turn_text=turn_text, stripped=stripped, mood=mood)
+            bot.turn_service.record_user_turn_state(turn_text, mood, turn_context=turn_context)
+            bot.turn_service._update_turn_pipeline(current_mood=mood)
+            cache_key, _ = bot.mood_manager.get_cached_mood_detection(turn_text, bot.prompt_history())
+            bot.mood_manager.remember_mood_detection(cache_key, mood)
         reply = str(response or "").strip()
         if not reply:
             raise RuntimeError("AgentService received an empty model response")

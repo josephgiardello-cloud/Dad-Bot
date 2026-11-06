@@ -19,6 +19,12 @@ keywords, and contextual tool follow-ups remain eligible. The same planning
 gate applies to a configured Home Assistant MCP service; it never bypasses
 approval for an actual action. Answer generation remains on the canonical graph.
 
+Emotional chat turns classify mood and generate the supportive answer in one
+validated JSON request (Ollama thinking disabled); only the reply reaches the UI. Mood is committed once
+at the normal save boundary. An optional family reference shares that request.
+Direct-answer and empathy-first strategies retain critique diagnostics and
+safety checks but do not generate a second answer for critique revisions.
+
 Enable INFO logging for `dadbot.managers.runtime_client` to see per-purpose
 Ollama durations measured with `time.perf_counter()`, prompt/generation token
 counts, and completion reasons without logging prompts or reasoning text.
@@ -125,6 +131,12 @@ $env:DADBOT_HA_MCP_ALLOWED_TOOLS = "tool_name_one,tool_name_two"
 ```
 
 The endpoint must support MCP Streamable HTTP. Use the tool names returned by that server in `DADBOT_HA_MCP_ALLOWED_TOOLS`. The Smart Home page can verify the connection and report which allowlisted tools are available. No tool is callable from chat unless it is both offered by the MCP server and included in this allowlist.
+
+The client uses the MCP 2 SDK stream pair and snake-case schema/result fields.
+Planning is constrained by each live tool's argument schema, including required
+fields. An explicit named-tool request cannot be reported as completed without
+a tool call and confirmed result. Ollama planning uses non-thinking structured
+generation; validation failures remain explicit refusals, never device success.
 
 Every proposed MCP call pauses for explicit approval in the Chat page. The UI shows the exact tool name and validated arguments; each call in a multi-call plan requires a separate approval. Before an approved call is sent, Dad-Bot rechecks the live server's allowlist and input schema. Rejecting a call sends no request, and new chat input is held while an approval is pending in that conversation.
 

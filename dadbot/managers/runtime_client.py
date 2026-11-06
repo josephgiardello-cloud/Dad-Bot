@@ -237,6 +237,7 @@ class RuntimeClientManager:
         provider = self.bot.model_runtime.normalized_llm_provider()
         selected_model = self.bot.model_runtime.normalized_llm_model(model)
         temp = temperature if temperature is not None else self.bot.model_runtime.resolve_temperature(options)
+        thinking = {"think": kwargs["think"]} if "think" in kwargs else {}
 
         guarded_messages = messages
         if provider != "ollama" and litellm is not None:
@@ -254,6 +255,7 @@ class RuntimeClientManager:
                     options=ollama_options,
                     purpose=purpose,
                     chunk_callback=chunk_callback,
+                    **thinking,
                 )
             return self._invoke_ollama_sync(
                 self.call_ollama_chat_with_model,
@@ -263,6 +265,7 @@ class RuntimeClientManager:
                 options=ollama_options,
                 response_format=response_format,
                 purpose=purpose,
+                **thinking,
             )
 
         litellm_model = self.bot.model_runtime.litellm_model_identifier(selected_model)
@@ -307,6 +310,7 @@ class RuntimeClientManager:
                     options=ollama_options,
                     purpose=purpose,
                     chunk_callback=chunk_callback,
+                    **thinking,
                 )
             return self._invoke_ollama_sync(
                 self.call_ollama_chat,
@@ -315,6 +319,7 @@ class RuntimeClientManager:
                 options=ollama_options,
                 response_format=response_format,
                 purpose=purpose,
+                **thinking,
             )
 
     async def call_llm_async(
@@ -336,6 +341,7 @@ class RuntimeClientManager:
         provider = self.bot.model_runtime.normalized_llm_provider()
         selected_model = self.bot.model_runtime.normalized_llm_model(model)
         temp = temperature if temperature is not None else self.bot.model_runtime.resolve_temperature(options)
+        thinking = {"think": kwargs["think"]} if "think" in kwargs else {}
 
         guarded_messages = messages
         if provider != "ollama" and litellm is not None:
@@ -353,6 +359,7 @@ class RuntimeClientManager:
                     options=ollama_options,
                     purpose=purpose,
                     chunk_callback=chunk_callback,
+                    **thinking,
                 )
             return await self.call_ollama_chat_async(
                 guarded_messages,
@@ -361,6 +368,7 @@ class RuntimeClientManager:
                 options=ollama_options,
                 response_format=response_format,
                 purpose=purpose,
+                **thinking,
             )
 
         litellm_model = self.bot.model_runtime.litellm_model_identifier(selected_model)
@@ -405,6 +413,7 @@ class RuntimeClientManager:
                     options=ollama_options,
                     purpose=purpose,
                     chunk_callback=chunk_callback,
+                    **thinking,
                 )
             return await self.call_ollama_chat_async(
                 guarded_messages,
@@ -412,6 +421,7 @@ class RuntimeClientManager:
                 options=ollama_options,
                 response_format=response_format,
                 purpose=purpose,
+                **thinking,
             )
 
     def ollama_async_client(self):
@@ -439,6 +449,7 @@ class RuntimeClientManager:
         options=None,
         response_format=None,
         purpose="chat",
+        think: bool | None = None,
     ):
         normalized_caller = str(caller or "").strip()
         if normalized_caller == "ModelPort" and ModelGatewayScope.current() != "ModelPort":
@@ -449,6 +460,7 @@ class RuntimeClientManager:
                     options=options,
                     response_format=response_format,
                     purpose=purpose,
+                    think=think,
                 )
         enforce_model_gateway(caller=normalized_caller)
         last_error = None
@@ -466,6 +478,8 @@ class RuntimeClientManager:
                 }
                 if response_format is not None:
                     kwargs["format"] = response_format
+                if think is not None:
+                    kwargs["think"] = think
                 started = time.perf_counter()
                 response = self._call_ollama_sync(**kwargs)
                 self._record_ollama_response(response, model=candidate, purpose=purpose, started=started)
@@ -487,6 +501,7 @@ class RuntimeClientManager:
         response_format=None,
         purpose="chat",
         model=None,
+        think: bool | None = None,
     ):
         normalized_caller = str(caller or "").strip()
         if normalized_caller == "ModelPort" and ModelGatewayScope.current() != "ModelPort":
@@ -498,6 +513,7 @@ class RuntimeClientManager:
                     response_format=response_format,
                     purpose=purpose,
                     model=model,
+                    think=think,
                 )
         enforce_model_gateway(caller=normalized_caller)
         last_error = None
@@ -517,6 +533,8 @@ class RuntimeClientManager:
                 }
                 if response_format is not None:
                     kwargs["format"] = response_format
+                if think is not None:
+                    kwargs["think"] = think
                 started = time.perf_counter()
                 client = self.ollama_async_client()
                 if client is None:
@@ -555,6 +573,7 @@ class RuntimeClientManager:
         options=None,
         response_format=None,
         purpose="chat",
+        think: bool | None = None,
     ):
         enforce_model_gateway(caller=str(caller or ""))
         guarded, request_options = self._prepare_ollama_request(model_name, messages, options, purpose)
@@ -565,6 +584,8 @@ class RuntimeClientManager:
         }
         if response_format is not None:
             kwargs["format"] = response_format
+        if think is not None:
+            kwargs["think"] = think
         try:
             started = time.perf_counter()
             response = self._call_ollama_sync(**kwargs)
@@ -584,6 +605,7 @@ class RuntimeClientManager:
         purpose="chat",
         chunk_callback=None,
         model=None,
+        think: bool | None = None,
     ):
         enforce_model_gateway(caller=str(caller or ""))
         last_error = None
@@ -597,6 +619,8 @@ class RuntimeClientManager:
             try:
                 guarded, request_options = self._prepare_ollama_request(candidate, messages, options, purpose)
                 kwargs = {"model": candidate, "messages": guarded, "stream": True, "options": request_options}
+                if think is not None:
+                    kwargs["think"] = think
                 stream = self._call_ollama_sync(**kwargs)
                 try:
                     chunks, truncated = self._collect_stream_chunks(stream, purpose=purpose, chunk_callback=chunk_callback)
@@ -779,6 +803,7 @@ class RuntimeClientManager:
         purpose="chat",
         chunk_callback=None,
         model=None,
+        think: bool | None = None,
     ):
         enforce_model_gateway(caller=str(caller or ""))
         last_error = None
@@ -793,6 +818,7 @@ class RuntimeClientManager:
                 purpose,
                 chunk_callback,
                 model,
+                think,
             )
 
         try:
@@ -805,6 +831,8 @@ class RuntimeClientManager:
                 try:
                     guarded, request_options = self._prepare_ollama_request(candidate, messages, options, purpose)
                     kwargs = {"model": candidate, "messages": guarded, "stream": True, "options": request_options}
+                    if think is not None:
+                        kwargs["think"] = think
                     stream = await client.chat(**kwargs)
                     chunks, truncated = await self._collect_stream_chunks_async(
                         stream,

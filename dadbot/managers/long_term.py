@@ -1258,6 +1258,8 @@ Return only JSON:
         return line.strip().strip('"')
 
     def maybe_add_family_echo(self, reply, user_input, current_mood):
+        if getattr(self.bot, "_turn_coherence_counts", {}).get("family_echo_batched"):
+            return reply
         cadence = self.bot.cadence_settings()
         if not user_input or self.bot.session_turn_count() % cadence["family_echo_turn_interval"] != 0:
             return reply

@@ -192,6 +192,16 @@ Reason: The main emotion is still emotional hurt, with relief as a secondary not
     def detect_mood(self, user_input: str, recent_history: list = None) -> str:
         return self.detect(user_input, recent_history)
 
+    def detect_without_model(self, user_input: str, recent_history: list | None = None) -> str:
+        """Supply provisional tone while classification shares the answer request."""
+        if self.bot.LIGHT_MODE:
+            return "neutral"
+        heuristic = self.fastpath_detect(user_input)
+        if heuristic is not None:
+            return heuristic
+        _, cached = self.get_cached_mood_detection(user_input, recent_history)
+        return str(cached or "neutral")
+
     async def detect_async(self, user_input: str, recent_history: list = None) -> str:
         if self.bot.LIGHT_MODE:
             return "neutral"

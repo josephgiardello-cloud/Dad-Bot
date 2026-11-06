@@ -50,6 +50,7 @@ class _ModelPortStub(ModelPort):
 
 def test_agent_service_requires_bayesian_step_before_returning_direct_reply():
     bot = SimpleNamespace(
+        LIGHT_MODE=True,
         turn_service=_TurnServiceStub(mood="stressed", early_reply="tool handled", should_end=False),
         relationship_manager=_RelationshipStub(),
         planner_debug_snapshot=lambda: {
@@ -80,6 +81,7 @@ def test_agent_service_requires_bayesian_step_before_returning_direct_reply():
 
 def test_agent_service_attaches_tool_envelope_on_model_generation_path():
     bot = SimpleNamespace(
+        LIGHT_MODE=True,
         turn_service=_TurnServiceStub(mood="neutral", early_reply=None, should_end=False, turn_text="hi"),
         relationship_manager=_RelationshipStub(),
         planner_debug_snapshot=lambda: {

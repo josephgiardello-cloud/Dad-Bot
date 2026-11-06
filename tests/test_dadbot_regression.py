@@ -27,7 +27,11 @@ def model_transport_reply(content, calls=None):
     def sync_reply(**kwargs):
         if calls is not None:
             calls.append(kwargs)
-        return {"message": {"content": content}}
+        response_format = kwargs.get("format") or kwargs.get("response_format") or {}
+        payload = content
+        if isinstance(response_format, dict) and "mood" in response_format.get("properties", {}):
+            payload = json.dumps({"mood": "stressed", "reply": content})
+        return {"message": {"content": payload}}
 
     async def async_reply(_client, **kwargs):
         return sync_reply(**kwargs)
@@ -1389,6 +1393,38 @@ class TestDadBotRegression(unittest.TestCase):
         self.assertEqual(reply, "4")
         self.assertFalse(should_end)
         self.assertEqual(len(calls), 1)
+
+    def test_supportive_graph_turn_batches_mood_and_answer_in_one_request(self):
+        self.bot.MEMORY_STORE = {
+            **self.bot.MEMORY_STORE,
+            "last_mood_updated_at": date.today().isoformat(),
+        }
+        before_moods = list(self.bot.session_moods)
+        calls = []
+        with model_transport_reply("That sounds hard. Let's take one step at a time.", calls):
+            reply, should_end = self.bot.process_user_message("I'm having a hard day.")
+        self.assertFalse(should_end)
+        self.assertIn("That sounds hard", reply)
+        self.assertNotIn('"mood"', reply)
+        self.assertIn("Love you", reply)
+        self.assertEqual(len(calls), 1, [call["messages"][-1] for call in calls])
+        self.assertIn("mood", calls[0]["format"]["properties"])
+        self.assertIs(calls[0]["think"], False)
+        self.assertEqual(list(self.bot.session_moods), [*before_moods, "stressed"])
+
+    def test_mcp_turn_resets_personality_coherence_after_chat_turn(self):
+        from types import SimpleNamespace
+
+        with model_transport_reply("4"):
+            self.bot.process_user_message("What is 2+2? Reply with only the number.")
+        service = SimpleNamespace(
+            is_enabled=True, generate_candidate=AsyncMock(return_value=("Review the action.", False)),
+        )
+        self.bot.services.registry.register("mcp_tool_service", service)
+        reply, should_end = self.bot.process_user_message("Use the configured MCP tool.")
+        self.assertIn("Review the action", reply)
+        self.assertFalse(should_end)
+        self.assertEqual(self.bot._turn_coherence_counts["personality_applied"], 1)
 
     def test_shadow_decisions_use_default_runtime_buffer(self):
         event = self.bot.record_shadow_decision(source="test", type="suggestion", reason="coverage")

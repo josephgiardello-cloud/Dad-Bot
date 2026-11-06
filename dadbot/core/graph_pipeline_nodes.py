@@ -289,7 +289,9 @@ class MCPToolNode(_NodeContractMixin):
             rich_context if isinstance(rich_context, dict) else {},
         )
         candidate = await result if inspect.isawaitable(result) else result
-        if candidate is None or not InferenceNode._candidate_text(candidate).strip():
+        if candidate is None:
+            return
+        if not InferenceNode._candidate_text(candidate).strip():
             raise RuntimeError("Configured MCP tool service produced an empty candidate")
         turn_context.state["candidate"] = candidate
         turn_context.state["mcp_tool_candidate_ready"] = True

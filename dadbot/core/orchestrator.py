@@ -1307,6 +1307,10 @@ class DadBotOrchestrator:
         session: dict[str, Any],
         job: ExecutionJob,
     ) -> FinalizedTurnResult:
+        from dadbot.core.turn_coherence import reset_turn_coherence
+
+        if self.bot is not None:
+            reset_turn_coherence(self.bot)
         context = self._job_builder.build(
             user_input=str(job.user_input or ""),
             attachments=job.attachments,

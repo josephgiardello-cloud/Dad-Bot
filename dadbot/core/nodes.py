@@ -522,6 +522,9 @@ class InferenceNode:
         passed = bool(getattr(critique, "passed", False))
         hint = str(getattr(critique, "revision_hint", "") or "")
         context.state["critique_record"] = {"iteration": iteration, "score": getattr(critique, "score", 0.0), "passed": passed, "issues": list(getattr(critique, "issues", []) or []), "revision_hint": hint, "tool_necessity_score": getattr(critique, "tool_necessity_score", 0.0), "tool_correctness_score": getattr(critique, "tool_correctness_score", 0.0)}
+        if str(plan.get("strategy") or "") in {"direct_answer", "emotional_support", "empathy_first"}:
+            context.state["critique_record"]["revision_skipped"] = "single_pass_strategy"
+            return True
         if passed:
             return True
         context.state["_critique_revision_context"] = hint

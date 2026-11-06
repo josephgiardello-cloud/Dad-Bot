@@ -12,10 +12,13 @@ from dadbot.runtime.mcp.tool_client import (
     MCPToolClient,
     append_mcp_unavailable_notice,
     configured_ha_mcp_tools,
+    mcp_plan_schema,
     run_mcp_tool_loop,
     run_mcp_with_fallback,
     resume_mcp_with_fallback,
 )
+
+pytestmark = pytest.mark.unit
 
 
 def test_configured_ha_mcp_tools_are_explicit_allowlist(monkeypatch):
@@ -33,18 +36,132 @@ def test_unavailable_notice_prevents_claiming_smart_home_actions():
 
 
 def test_mcp_client_only_exposes_allowlisted_server_tools():
+    Tool = pytest.importorskip("mcp.types", reason="Requires the optional MCP extra").Tool
+
+    schema = {"type": "object", "properties": {"entity_id": {"type": "string"}}, "required": ["entity_id"]}
     class FakeSession:
         async def list_tools(self):
             return SimpleNamespace(
                 tools=[
-                    SimpleNamespace(name="light_control", description="Control a light", inputSchema={"type": "object"}),
-                    SimpleNamespace(name="unlock_door", description="Unlock a door", inputSchema={"type": "object"}),
+                    Tool(name="light_control", description="Control a light", input_schema=schema),
+                    Tool(name="unlock_door", description="Unlock a door", input_schema={"type": "object"}),
                 ]
             )
 
     tools = asyncio.run(MCPToolClient.list_allowed_tools(FakeSession(), {"light_control"}))
 
     assert [tool["name"] for tool in tools] == ["light_control"]
+    assert tools[0]["input_schema"] == schema
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("structured,is_error", [(None, False), ({"recorded": True}, False), ({"error": "failed"}, True)])
+def test_mcp_client_preserves_v2_tool_results(structured, is_error):
+    types = pytest.importorskip("mcp.types", reason="Requires the optional MCP extra")
+
+    class Session:
+        async def call_tool(self, name, *, arguments):
+            assert name == "record_mock_event"
+            assert arguments == {"message": "test"}
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text="tool-result")],
+                structured_content=structured, is_error=is_error,
+            )
+
+    payload = asyncio.run(MCPToolClient.call_tool(Session(), "record_mock_event", {"message": "test"}))
+    assert payload["is_error"] is is_error
+    assert payload["result"] == (structured if structured is not None else [{"type": "text", "text": "tool-result"}])
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("repair", [False, True])
+def test_explicit_mcp_invocation_cannot_claim_completion_without_a_call(repair):
+    final = json.dumps({
+        "should_continue": False, "action_input": "Event recorded.", "tool_calls": [],
+    })
+    proposal = json.dumps({
+        "should_continue": True, "action_input": "Review this event.",
+        "tool_calls": [{"name": "record_mock_event", "arguments": {"message": "test"}}],
+    })
+    responses = iter([final, proposal if repair else final])
+    result = asyncio.run(run_mcp_tool_loop(
+        [{"role": "user", "content": "Use record_mock_event with message test."}],
+        [{"name": "record_mock_event", "input_schema": {
+            "type": "object", "properties": {"message": {"type": "string"}}, "required": ["message"],
+        }}],
+        model_call=lambda _messages, _schema: next(responses),
+    ))
+    if repair:
+        assert isinstance(result, MCPApprovalRequest)
+        assert result.arguments == {"message": "test"}
+    else:
+        assert "No device action was performed" in result
+        assert "Event recorded" not in result
+
+
+@pytest.mark.unit
+def test_mcp_client_connects_using_v2_stream_pair(monkeypatch):
+    mcp = pytest.importorskip("mcp", reason="Requires the optional MCP extra")
+    import mcp.client.streamable_http as transport
+
+    initialized = []
+
+    @asynccontextmanager
+    async def stream_pair(url, *, http_client):
+        assert url == "http://127.0.0.1:8917/mcp"
+        assert http_client is not None
+        yield ("read", "write")
+
+    class Session:
+        def __init__(self, read, write):
+            assert (read, write) == ("read", "write")
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def initialize(self):
+            initialized.append(True)
+
+    monkeypatch.setattr(transport, "streamable_http_client", stream_pair)
+    monkeypatch.setattr(mcp, "ClientSession", Session)
+
+    async def connect():
+        async with MCPToolClient("http://127.0.0.1:8917/mcp").connect() as session:
+            assert isinstance(session, Session)
+
+    asyncio.run(connect())
+    assert initialized == [True]
+
+
+@pytest.mark.unit
+def test_generated_mcp_schema_preserves_nested_tool_requirements():
+    from jsonschema import Draft202012Validator, ValidationError
+
+    tools = [{"name": "record_mock_event", "input_schema": {
+        "type": "object",
+        "$defs": {"Message": {"type": "string", "minLength": 1}},
+        "properties": {"message": {"$ref": "#/$defs/Message"}},
+        "required": ["message"],
+    }}]
+    schema = mcp_plan_schema(tools, require_tool_call=True)
+    Draft202012Validator.check_schema(schema)
+    validator = Draft202012Validator(schema)
+    payload = {
+        "should_continue": True, "action_input": "Review this event.", "reasoning": "Requested.",
+        "tool_calls": [{"name": "record_mock_event", "arguments": {"message": "test"}}], "confidence": 1,
+    }
+    validator.validate(payload)
+    for changed in (
+        {"should_continue": False}, {"action_input": ""}, {"tool_calls": []},
+        {"tool_calls": [{"name": "record_mock_event", "arguments": {}}]},
+        {"tool_calls": [{"name": "unknown", "arguments": {"message": "test"}}]},
+    ):
+        with pytest.raises(ValidationError):
+            validator.validate({**payload, **changed})
+    assert tools[0]["input_schema"]["properties"]["message"]["$ref"] == "#/$defs/Message"
 
 
 @pytest.mark.parametrize("max_tool_calls", [2, 4])
@@ -77,7 +194,7 @@ def test_mcp_tool_loop_executes_ordered_allowlisted_calls_then_returns_final_tex
     calls = []
     model_inputs = []
 
-    def model_call(messages):
+    def model_call(messages, _schema):
         model_inputs.append(messages)
         assert "light_control" in str(messages[0]["content"])
         return next(responses)
@@ -125,7 +242,7 @@ def test_unreachable_mcp_falls_back_to_plain_chat_and_discloses_no_action():
             [{"role": "system", "content": "Dad persona."}, {"role": "user", "content": "Turn off a light."}],
             UnreachableClient(),
             {"light_control"},
-            model_call=lambda _messages: "unused",
+            model_call=lambda _messages, _schema: "unused",
             fallback_call=fallback_call,
         )
     )
@@ -151,7 +268,7 @@ def test_mcp_allowlist_mismatch_falls_back_without_claiming_success():
             [{"role": "system", "content": "Dad persona."}, {"role": "user", "content": "Turn off a light."}],
             NoMatchingToolsClient(),
             {"light_control"},
-            model_call=lambda _messages: "unused",
+            model_call=lambda _messages, _schema: "unused",
             fallback_call=lambda messages: fallback_contexts.append(messages) or "We can talk about the request.",
         )
     )
@@ -187,7 +304,7 @@ def test_tool_error_stops_chain_and_reports_no_action_performed():
                 {"name": "light_control", "description": "Control light", "input_schema": {"type": "object"}},
                 {"name": "thermostat_set", "description": "Set temperature", "input_schema": {"type": "object"}},
             ],
-            model_call=lambda messages: model_calls.append(messages) or response,
+            model_call=lambda messages, _schema: model_calls.append(messages) or response,
             tool_call=failing_tool,
             approve_tool_call=lambda _name, _arguments: True,
         )
@@ -232,7 +349,7 @@ def test_invalid_post_tool_reply_never_leaks_payload_or_claims_no_action(max_too
         run_mcp_tool_loop(
             [{"role": "system", "content": "Dad persona."}],
             [{"name": "light_control", "input_schema": {"type": "object"}}],
-            model_call=lambda _messages: next(responses),
+            model_call=lambda _messages, _schema: next(responses),
             tool_call=tool_call,
             approve_tool_call=lambda _name, _arguments: True,
             max_tool_calls=max_tool_calls,
@@ -264,7 +381,7 @@ def test_post_action_model_failure_does_not_use_no_action_fallback(failure, tool
             calls.append((name, arguments))
             return {"is_error": False, "result": {"state": "off"}}
 
-    def model_call(_messages):
+    def model_call(_messages, _schema):
         if len(calls) < tool_steps:
             return json.dumps(
                 {
@@ -315,7 +432,7 @@ def test_tool_loop_returns_exact_pending_call_without_executing():
         run_mcp_tool_loop(
             [{"role": "user", "content": "Turn off light.kitchen"}],
             [{"name": "light_control", "input_schema": {"type": "object"}}],
-            model_call=lambda _messages: response,
+            model_call=lambda _messages, _schema: response,
             tool_call=tool_call,
         )
     )
@@ -350,7 +467,7 @@ def test_approval_revalidates_current_schema_and_executes_once():
         run_mcp_tool_loop(
             [{"role": "user", "content": "Turn off light.kitchen"}],
             [{"name": "light_control", "input_schema": {"type": "object"}}],
-            model_call=lambda _messages: initial_plan,
+            model_call=lambda _messages, _schema: initial_plan,
             tool_call=lambda _name, _arguments: pytest.fail("The initial plan must not execute"),
         )
     )
@@ -382,7 +499,7 @@ def test_approval_revalidates_current_schema_and_executes_once():
             FakeClient(),
             {"light_control"},
             approved=True,
-            model_call=lambda _messages: final_answer,
+            model_call=lambda _messages, _schema: final_answer,
         )
     )
 
@@ -394,7 +511,7 @@ def test_approval_revalidates_current_schema_and_executes_once():
             FakeClient(),
             {"light_control"},
             approved=True,
-            model_call=lambda _messages: final_answer,
+            model_call=lambda _messages, _schema: final_answer,
         )
     )
     assert "already been resolved" in replay_result
@@ -415,7 +532,7 @@ def test_rejected_approval_never_connects_or_executes():
         run_mcp_tool_loop(
             [{"role": "user", "content": "Turn off a light."}],
             [{"name": "light_control", "input_schema": {"type": "object"}}],
-            model_call=lambda _messages: initial_plan,
+            model_call=lambda _messages, _schema: initial_plan,
         )
     )
     assert isinstance(request, MCPApprovalRequest)
@@ -432,7 +549,7 @@ def test_rejected_approval_never_connects_or_executes():
             NoConnectClient(),
             {"light_control"},
             approved=False,
-            model_call=lambda _messages: pytest.fail("A rejected action must not call the model"),
+            model_call=lambda _messages, _schema: pytest.fail("A rejected action must not call the model"),
         )
     )
     assert "not approved" in result

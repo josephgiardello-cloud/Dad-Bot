@@ -39,6 +39,7 @@ class _MCPToolLoopState:
     plan: AgentPlan | None = None
     call_index: int = 0
     results: list[dict[str, Any]] = field(default_factory=list)
+    requires_initial_call: bool = False
 
 
 @dataclass(slots=True)
@@ -52,12 +53,68 @@ class MCPApprovalRequest:
     consumed: bool = field(default=False, repr=False)
 
 
-def mcp_plan_schema() -> dict[str, Any]:
+def _rebase_schema_refs(value: Any, prefix: str) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: prefix + item[1:] if key == "$ref" and isinstance(item, str) and (item == "#" or item.startswith("#/"))
+            else _rebase_schema_refs(item, prefix)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_rebase_schema_refs(item, prefix) for item in value]
+    return value
+
+
+def mcp_plan_schema(
+    tools: list[dict[str, Any]] | None = None, *, require_tool_call: bool = False,
+) -> dict[str, Any]:
     """Constrain model output without changing the shared legacy AgentPlan contract."""
     schema = AgentPlan.model_json_schema()
     schema["required"] = ["should_continue", "action_input", "reasoning", "tool_calls", "confidence"]
     schema["additionalProperties"] = False
-    return schema
+    schema["$defs"]["ToolCall"]["required"] = ["name", "arguments"]
+    definitions = schema.pop("$defs")
+    properties = schema["properties"]
+    properties["action_input"] = {**properties["action_input"], "minLength": 1}
+    call_items: dict[str, Any] = properties["tool_calls"]["items"]
+    if tools:
+        # Preserve server-local references when argument schemas become plan definitions.
+        for index, tool in enumerate(tools):
+            name = f"MCPArguments{index}"
+            definitions[name] = _rebase_schema_refs(tool["input_schema"], f"#/$defs/{name}")
+        call_items = {
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "const": tool["name"]},
+                        "arguments": {"$ref": f"#/$defs/MCPArguments{index}"},
+                    },
+                    "required": ["name", "arguments"],
+                    "additionalProperties": False,
+                }
+                for index, tool in enumerate(tools)
+            ],
+        }
+    return {
+        "$defs": definitions,
+        "oneOf": [
+            {
+                **schema,
+                "properties": {
+                    **properties,
+                    "should_continue": {"type": "boolean", "const": should_continue},
+                    "tool_calls": {
+                        "type": "array", "items": call_items,
+                        **({"minItems": 1} if should_continue else {"maxItems": 0}),
+                    },
+                },
+            }
+            for should_continue in (True, False)
+            if not (require_tool_call and not should_continue)
+            and not (tools == [] and should_continue)
+        ],
+    }
 
 
 def _validate_mcp_plan(
@@ -133,7 +190,7 @@ class MCPToolClient:
         headers = {"Authorization": f"Bearer {self.bearer_token}"} if self.bearer_token else {}
         http_client = httpx2.AsyncClient(headers=headers, timeout=self.timeout_seconds)
         try:
-            async with streamable_http_client(self.url, http_client=http_client) as (read_stream, write_stream, _):
+            async with streamable_http_client(self.url, http_client=http_client) as (read_stream, write_stream):
                 async with ClientSession(read_stream, write_stream) as session:
                     await session.initialize()
                     yield session
@@ -155,7 +212,7 @@ class MCPToolClient:
                 {
                     "name": name,
                     "description": str(getattr(tool, "description", "") or "")[:1200],
-                    "input_schema": dict(getattr(tool, "inputSchema", {}) or {}),
+                    "input_schema": dict(tool.input_schema),
                 }
             )
         return tools
@@ -163,7 +220,7 @@ class MCPToolClient:
     @staticmethod
     async def call_tool(session: Any, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         result = await session.call_tool(name, arguments=arguments)
-        structured = getattr(result, "structuredContent", None)
+        structured = result.structured_content
         if structured is not None:
             payload: Any = structured
         else:
@@ -174,7 +231,7 @@ class MCPToolClient:
                 }
                 for block in list(getattr(result, "content", []) or [])
             ]
-        return {"is_error": bool(getattr(result, "isError", False)), "result": payload}
+        return {"is_error": bool(result.is_error), "result": payload}
 
 
 def _append_tool_instructions(messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -233,7 +290,7 @@ async def run_mcp_tool_loop(
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]],
     *,
-    model_call: Callable[[list[dict[str, Any]]], str],
+    model_call: Callable[[list[dict[str, Any]], dict[str, Any]], str],
     tool_call: Callable[[str, dict[str, Any]], Any] | None = None,
     approve_tool_call: Callable[[str, dict[str, Any]], bool] | None = None,
     max_tool_calls: int = 4,
@@ -251,7 +308,17 @@ async def run_mcp_tool_loop(
     )
     for message in reversed(messages):
         if message.get("role") == "user":
-            state.requested_entities = set(_ENTITY_ID.findall(str(message.get("content", ""))))
+            user_text = str(message.get("content", ""))
+            state.requested_entities = set(_ENTITY_ID.findall(user_text))
+            state.requires_initial_call = any(
+                re.search(
+                    r"\b(?:use|call|invoke|run|execute)\s+(?:the\s+)?(?:mcp\s+)?(?:tool\s+)?"
+                    + re.escape(str(tool["name"])) + r"\b",
+                    user_text,
+                    re.IGNORECASE,
+                )
+                for tool in tools
+            )
             break
 
     return await _advance_mcp_tool_loop(
@@ -265,11 +332,14 @@ async def run_mcp_tool_loop(
 async def _validated_response(
     state: _MCPToolLoopState,
     available_tools: list[dict[str, Any]],
-    model_call: Callable[[list[dict[str, Any]]], str],
+    model_call: Callable[[list[dict[str, Any]], dict[str, Any]], str],
 ) -> AgentPlan | None:
     async def model_response() -> str:
         try:
-            return str(await asyncio.to_thread(model_call, state.conversation) or "").strip()
+            response_schema = mcp_plan_schema(
+                available_tools, require_tool_call=state.requires_initial_call and not state.executed,
+            )
+            return str(await asyncio.to_thread(model_call, state.conversation, response_schema) or "").strip()
         except Exception:
             if not state.executed:
                 raise
@@ -282,7 +352,13 @@ async def _validated_response(
             logger.warning("MCP model returned no plan", extra={"executed_calls": state.executed})
             return None
         try:
-            return _validate_mcp_plan(raw_response, available_tools, state.requested_entities)
+            plan = _validate_mcp_plan(raw_response, available_tools, state.requested_entities)
+            if state.requires_initial_call and not state.executed and not plan.tool_calls:
+                raise SchemaValidationError(
+                    "The user explicitly requested a tool call. Propose its exact name and required arguments; "
+                    "do not claim completion without a confirmed tool result."
+                )
+            return plan
         except (SchemaValidationError, json.JSONDecodeError) as exc:
             logger.warning("MCP plan rejected", extra={"attempt": attempt + 1, "executed_calls": state.executed})
             if attempt == 0:
@@ -297,7 +373,7 @@ async def _validated_response(
 async def _advance_mcp_tool_loop(
     state: _MCPToolLoopState,
     *,
-    model_call: Callable[[list[dict[str, Any]]], str],
+    model_call: Callable[[list[dict[str, Any]], dict[str, Any]], str],
     tool_call: Callable[[str, dict[str, Any]], Any] | None,
     approve_tool_call: Callable[[str, dict[str, Any]], bool] | None,
     approval_limit: int | None = None,
@@ -379,7 +455,7 @@ async def resume_mcp_with_fallback(
     allowed_names: set[str],
     *,
     approved: bool,
-    model_call: Callable[[list[dict[str, Any]]], str],
+    model_call: Callable[[list[dict[str, Any]], dict[str, Any]], str],
 ) -> str | MCPApprovalRequest:
     """Revalidate a pending call against the live server before executing one approval."""
     if request.consumed:
@@ -449,7 +525,7 @@ async def run_mcp_with_fallback(
     client: MCPToolClient,
     allowed_names: set[str],
     *,
-    model_call: Callable[[list[dict[str, Any]]], str],
+    model_call: Callable[[list[dict[str, Any]], dict[str, Any]], str],
     fallback_call: Callable[[list[dict[str, Any]]], str],
     approve_tool_call: Callable[[str, dict[str, Any]], bool] | None = None,
 ) -> str | MCPApprovalRequest:
