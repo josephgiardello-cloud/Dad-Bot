@@ -185,6 +185,24 @@ The Streamlit runtime boots orchestration services into the bot's existing manag
 
 The install script will guide you through the rest.
 
+### Local Model Context and Timing
+
+Ollama requests explicitly set `num_ctx` from DadBot's configured
+`CONTEXT_TOKEN_BUDGET` (default 6000), capped by the model's context capacity.
+A Modelfile's default `num_ctx` is not treated as the architectural capacity.
+Before transport, the prompt guard drops older history and trims oversized
+messages, preserving the latest task where possible. Thinking-capable models
+reserve at least 3072 tokens for generation, capped at half the request window;
+other models use `RESERVED_RESPONSE_TOKENS` (minimum 64).
+
+Reasoning-only responses that end with `done_reason=length` raise an explicit
+budget-exhaustion error rather than succeeding with an empty answer. This
+does not guarantee unlimited reasoning fits; increase the configured context
+within available memory when necessary. INFO-level Ollama timing logs include
+request purpose, token counts, load/generation durations, and completion reason,
+but not prompt, answer, or hidden-reasoning text. Mood detection, tool planning,
+and chat can each incur a separate generation.
+
 ### Story Mode (Password Protected)
 
 Story Mode enables deeper personalization learning. Set a password before launch:
@@ -199,6 +217,14 @@ python launch.py
 ## 🧑‍💻 Development & Contribution
 
 ### Running Tests
+
+Install the declared development dependencies first (`pip install -e ".[dev]"`).
+Tests require `pytest-timeout`: each test has a 120-second default deadline and
+stalled-thread diagnostics after 30 seconds. On Windows the thread timeout
+terminates the test process; use `pytest -vv --timeout=30` to identify a stalled
+case sooner. The mock-backed bot fixtures reject accidental live inference and
+disable optional graph LLM extraction; tests must explicitly stub the model port
+or transport when needed.
 
 ```bash
 pytest tests/

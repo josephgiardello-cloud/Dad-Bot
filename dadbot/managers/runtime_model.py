@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import importlib
 import logging
-import re
 from typing import Any
 
 import ollama
@@ -114,11 +113,6 @@ class RuntimeModelManager:
                 if parsed > 0:
                     context_lengths.append(parsed)
 
-        parameters = str(payload.get("parameters") or "")
-        num_ctx_match = re.search(r"\bnum_ctx\s+(\d+)\b", parameters)
-        if num_ctx_match:
-            context_lengths.append(int(num_ctx_match.group(1)))
-
         if context_lengths:
             return min(context_lengths)
 
@@ -178,7 +172,7 @@ class RuntimeModelManager:
             if architecture.startswith(hint) or model_key.startswith(hint):
                 return estimate
 
-        return max(1.0, float(self.bot.APPROX_CHARS_PER_TOKEN or 4))
+        return max(1.0, float(self.bot.approx_chars_per_token or 4))
 
     def resolve_tiktoken_encoding_name(self, model_name=None):
         if tiktoken is None:

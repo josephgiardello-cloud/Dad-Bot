@@ -71,6 +71,45 @@ class RuntimeClientManager:
         self.context = DadBotContext.from_runtime(bot)
         self.bot = self.context.bot
 
+    def _prepare_ollama_request(self, model, messages, options, purpose):
+        request_options = dict(options or {})
+        runtime = self.bot.model_runtime
+        context_budget = int(request_options.get("num_ctx", runtime.effective_context_token_budget(model)))
+        model_limit = runtime.model_context_length(model)
+        if isinstance(model_limit, int) and model_limit > 0:
+            context_budget = min(context_budget, model_limit)
+        if context_budget < 256:
+            raise ValueError("Ollama num_ctx must allow at least 256 tokens")
+        request_options["num_ctx"] = context_budget
+        reserved = max(64, int(self.bot.RESERVED_RESPONSE_TOKENS))
+        capabilities = runtime.ollama_show_payload(model).get("capabilities") or []
+        if "thinking" in capabilities:
+            reserved = max(reserved, 3072)
+        reserved = min(reserved, context_budget // 2)
+        guarded = self.bot.guard_chat_request_messages(
+            messages, purpose=purpose, context_budget=context_budget,
+            reserved_response_tokens=reserved,
+        )
+        return guarded, request_options
+
+    def _record_ollama_response(self, response, *, model, purpose, started, stream_content=None):
+        payload = response if isinstance(response, dict) else response.model_dump()
+        logger.info(
+            "Ollama purpose=%s model=%s seconds=%.3f load_ms=%.1f prompt_tokens=%s "
+            "prompt_ms=%.1f generated_tokens=%s generation_ms=%.1f done_reason=%s",
+            purpose, model, time.monotonic() - started,
+            float(payload.get("load_duration") or 0) / 1e6,
+            payload.get("prompt_eval_count"), float(payload.get("prompt_eval_duration") or 0) / 1e6,
+            payload.get("eval_count"), float(payload.get("eval_duration") or 0) / 1e6,
+            payload.get("done_reason"),
+        )
+        visible = self.bot.extract_ollama_message_content(response) if stream_content is None else stream_content
+        if payload.get("done_reason") == "length" and not visible.strip():
+            raise RuntimeError(
+                f"Ollama {purpose} exhausted its context/generation budget without a visible answer "
+                f"(prompt_tokens={payload.get('prompt_eval_count')}, generated_tokens={payload.get('eval_count')})",
+            )
+
     @staticmethod
     def _is_event_loop_closed_error(exc: BaseException) -> bool:
         return isinstance(exc, RuntimeError) and "Event loop is closed" in str(exc)
@@ -199,10 +238,9 @@ class RuntimeClientManager:
         selected_model = self.bot.model_runtime.normalized_llm_model(model)
         temp = temperature if temperature is not None else self.bot.model_runtime.resolve_temperature(options)
 
-        guarded_messages = self.bot.guard_chat_request_messages(
-            messages,
-            purpose=purpose,
-        )
+        guarded_messages = messages
+        if provider != "ollama" and litellm is not None:
+            guarded_messages = self.bot.guard_chat_request_messages(messages, purpose=purpose)
 
         if provider == "ollama" or litellm is None:
             ollama_options = dict(options) if isinstance(options, dict) else {}
@@ -299,10 +337,9 @@ class RuntimeClientManager:
         selected_model = self.bot.model_runtime.normalized_llm_model(model)
         temp = temperature if temperature is not None else self.bot.model_runtime.resolve_temperature(options)
 
-        guarded_messages = self.bot.guard_chat_request_messages(
-            messages,
-            purpose=purpose,
-        )
+        guarded_messages = messages
+        if provider != "ollama" and litellm is not None:
+            guarded_messages = self.bot.guard_chat_request_messages(messages, purpose=purpose)
         ollama_options = dict(options) if isinstance(options, dict) else {}
         ollama_options.setdefault("temperature", temp)
 
@@ -421,15 +458,17 @@ class RuntimeClientManager:
             *[model for model in self.bot.model_candidates() if model != self.bot.ACTIVE_MODEL],
         ]:
             try:
+                guarded, request_options = self._prepare_ollama_request(candidate, messages, options, purpose)
                 kwargs = {
                     "model": candidate,
-                    "messages": messages,
+                    "messages": guarded,
+                    "options": request_options,
                 }
-                if options is not None:
-                    kwargs["options"] = options
                 if response_format is not None:
                     kwargs["format"] = response_format
+                started = time.monotonic()
                 response = self._call_ollama_sync(**kwargs)
+                self._record_ollama_response(response, model=candidate, purpose=purpose, started=started)
                 self.bot.ACTIVE_MODEL = candidate
                 return response
             except self.bot.ollama_retryable_errors() as exc:
@@ -470,14 +509,15 @@ class RuntimeClientManager:
             *[name for name in self.bot.model_candidates() if name != selected_model],
         ]:
             try:
+                guarded, request_options = self._prepare_ollama_request(candidate, messages, options, purpose)
                 kwargs = {
                     "model": candidate,
-                    "messages": messages,
+                    "messages": guarded,
+                    "options": request_options,
                 }
-                if options is not None:
-                    kwargs["options"] = options
                 if response_format is not None:
                     kwargs["format"] = response_format
+                started = time.monotonic()
                 client = self.ollama_async_client()
                 if client is None:
                     response = await asyncio.to_thread(self._call_ollama_sync, **kwargs)
@@ -491,6 +531,7 @@ class RuntimeClientManager:
                         response = await asyncio.to_thread(self._call_ollama_sync, **kwargs)
                     finally:
                         await self._close_ollama_async_client_instance(client)
+                self._record_ollama_response(response, model=candidate, purpose=purpose, started=started)
                 self.bot.ACTIVE_MODEL = candidate
                 return response
             except self.bot.ollama_retryable_errors() as exc:
@@ -516,16 +557,19 @@ class RuntimeClientManager:
         purpose="chat",
     ):
         enforce_model_gateway(caller=str(caller or ""))
+        guarded, request_options = self._prepare_ollama_request(model_name, messages, options, purpose)
         kwargs = {
             "model": model_name,
-            "messages": messages,
+            "messages": guarded,
+            "options": request_options,
         }
-        if options is not None:
-            kwargs["options"] = options
         if response_format is not None:
             kwargs["format"] = response_format
         try:
-            return self._call_ollama_sync(**kwargs)
+            started = time.monotonic()
+            response = self._call_ollama_sync(**kwargs)
+            self._record_ollama_response(response, model=model_name, purpose=purpose, started=started)
+            return response
         except self.bot.ollama_retryable_errors() as exc:
             error_summary = self.bot.ollama_error_summary(exc)
             raise RuntimeError(
@@ -551,9 +595,8 @@ class RuntimeClientManager:
         ]:
             chunks: list[str] = []
             try:
-                kwargs = {"model": candidate, "messages": messages, "stream": True}
-                if options is not None:
-                    kwargs["options"] = options
+                guarded, request_options = self._prepare_ollama_request(candidate, messages, options, purpose)
+                kwargs = {"model": candidate, "messages": guarded, "stream": True, "options": request_options}
                 stream = self._call_ollama_sync(**kwargs)
                 try:
                     chunks, truncated = self._collect_stream_chunks(stream, purpose=purpose, chunk_callback=chunk_callback)
@@ -621,9 +664,18 @@ class RuntimeClientManager:
         total_chars = 0
         truncated = False
         deadline = time.monotonic() + max(1, int(self.bot.STREAM_TIMEOUT_SECONDS or 1))
+        started = time.monotonic()
 
         try:
             for response in stream_iter:
+                done_reason = (
+                    response.get("done_reason") if isinstance(response, dict) else getattr(response, "done_reason", None)
+                )
+                if done_reason:
+                    self._record_ollama_response(
+                        response, model=self.bot.ACTIVE_MODEL, purpose=purpose, started=started,
+                        stream_content="".join(chunks) + self.bot.extract_ollama_message_content(response),
+                    )
                 if time.monotonic() > deadline:
                     logger.warning("Stopping %s stream after %s seconds", purpose, self.bot.STREAM_TIMEOUT_SECONDS)
                     truncated = True
@@ -672,9 +724,18 @@ class RuntimeClientManager:
         total_chars = 0
         truncated = False
         deadline = time.monotonic() + max(1, int(self.bot.STREAM_TIMEOUT_SECONDS or 1))
+        started = time.monotonic()
 
         try:
             async for response in stream_iter:
+                done_reason = (
+                    response.get("done_reason") if isinstance(response, dict) else getattr(response, "done_reason", None)
+                )
+                if done_reason:
+                    self._record_ollama_response(
+                        response, model=self.bot.ACTIVE_MODEL, purpose=purpose, started=started,
+                        stream_content="".join(chunks) + self.bot.extract_ollama_message_content(response),
+                    )
                 if time.monotonic() > deadline:
                     logger.warning("Stopping %s stream after %s seconds", purpose, self.bot.STREAM_TIMEOUT_SECONDS)
                     truncated = True
@@ -742,9 +803,8 @@ class RuntimeClientManager:
             ]:
                 chunks: list[str] = []
                 try:
-                    kwargs = {"model": candidate, "messages": messages, "stream": True}
-                    if options is not None:
-                        kwargs["options"] = options
+                    guarded, request_options = self._prepare_ollama_request(candidate, messages, options, purpose)
+                    kwargs = {"model": candidate, "messages": guarded, "stream": True, "options": request_options}
                     stream = await client.chat(**kwargs)
                     chunks, truncated = await self._collect_stream_chunks_async(
                         stream,

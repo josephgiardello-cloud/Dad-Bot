@@ -102,7 +102,7 @@ class ToolPipelineMixin:
             planner_status=status,
             planner_reason=reason,
         )
-        logger.warning("Agentic tool planning failed: %s", exc)
+        logger.warning("Agentic tool planning failed: %s", exc, exc_info=True)
         if status == "fallback":
             return None, None
         return None, reason
@@ -506,9 +506,8 @@ class ToolPipelineMixin:
         candidate_observation = observation_text
         message = {"role": "user", "content": _render_prompt(candidate_observation)}
         while self.bot.message_token_cost(message) > prompt_budget and len(candidate_observation) > 96:
-            candidate_observation = candidate_observation[: max(96, int(len(candidate_observation) * 0.75))].rstrip()
-            if not candidate_observation.endswith("..."):
-                candidate_observation += "..."
+            limit = max(96, int(len(candidate_observation) * 0.75))
+            candidate_observation = candidate_observation[: limit - 3].rstrip() + "..."
             message = {"role": "user", "content": _render_prompt(candidate_observation)}
         return str(message["content"])
 

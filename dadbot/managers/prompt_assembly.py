@@ -336,15 +336,20 @@ class PromptAssemblyManager:
     # guard_chat_request_messages pipeline helpers
     # ------------------------------------------------------------------
 
-    def _compute_prompt_budget(self) -> int:
+    def _compute_prompt_budget(self, context_budget=None, reserved_response_tokens=None) -> int:
         """Compute the effective token budget for the prompt, applying pressure factor."""
         context_budget = max(
             256,
             int(
-                self.bot.effective_context_token_budget(self.bot.ACTIVE_MODEL) or self.bot.CONTEXT_TOKEN_BUDGET or 0,
+                context_budget if context_budget is not None
+                else (
+                    self.bot.effective_context_token_budget(self.bot.ACTIVE_MODEL) or self.bot.CONTEXT_TOKEN_BUDGET or 0
+                ),
             ),
         )
-        reserved_tokens = max(64, int(self.bot.RESERVED_RESPONSE_TOKENS or 0))
+        reserved_tokens = max(64, int(
+            self.bot.RESERVED_RESPONSE_TOKENS if reserved_response_tokens is None else reserved_response_tokens
+        ))
         prompt_budget = max(128, context_budget - reserved_tokens)
         pressure_factor = self.bot.adaptive_prompt_pressure_factor()
         if pressure_factor < 1.0:
@@ -373,17 +378,6 @@ class PromptAssemblyManager:
             if not candidates:
                 break
             messages.pop(candidates[0])
-        return messages
-
-    def _trim_last_message(self, messages: list, prompt_budget: int) -> list:
-        """Trim the last message to fit within the remaining budget after leading messages."""
-        if self._total_message_tokens(messages) > prompt_budget and messages:
-            leading_cost = sum(self.bot.message_token_cost(m) for m in messages[:-1])
-            remaining_budget = max(32, prompt_budget - leading_cost)
-            messages[-1] = self.bot.trim_message_to_token_budget(
-                messages[-1],
-                remaining_budget,
-            )
         return messages
 
     def _trim_all_messages(self, messages: list, prompt_budget: int) -> list:
@@ -445,11 +439,7 @@ class PromptAssemblyManager:
                 allowed_budget,
             )
             if trimmed.get("content", "") == messages[last_idx].get("content", ""):
-                if len(messages) > 1:
-                    messages.pop(last_idx)
-                    continue
-                messages[last_idx] = {**trimmed, "content": "..."}
-                break
+                raise RuntimeError("Prompt guard could not trim the request without dropping the latest message")
             messages[last_idx] = trimmed
         return messages
 
@@ -494,7 +484,9 @@ class PromptAssemblyManager:
     # Orchestrator
     # ------------------------------------------------------------------
 
-    def guard_chat_request_messages(self, messages, purpose="chat"):
+    def guard_chat_request_messages(
+        self, messages, purpose="chat", *, context_budget=None, reserved_response_tokens=None,
+    ):
         """Apply a final prompt-size guard before calling Ollama.
 
         Strategy:
@@ -508,16 +500,12 @@ class PromptAssemblyManager:
         if not normalized_messages:
             return []
 
-        prompt_budget = self._compute_prompt_budget()
+        prompt_budget = self._compute_prompt_budget(context_budget, reserved_response_tokens)
         original_tokens = self._total_message_tokens(normalized_messages)
         if original_tokens <= prompt_budget:
             return normalized_messages
 
         normalized_messages = self._drop_oldest_messages(
-            normalized_messages,
-            prompt_budget,
-        )
-        normalized_messages = self._trim_last_message(
             normalized_messages,
             prompt_budget,
         )
@@ -535,9 +523,12 @@ class PromptAssemblyManager:
             prompt_budget,
         )
 
+        final_tokens = self._total_message_tokens(normalized_messages)
+        if final_tokens > prompt_budget:
+            raise RuntimeError(f"Prompt guard could not fit {purpose} within {prompt_budget} tokens")
         self._record_guard_stats(
             original_tokens,
-            self._total_message_tokens(normalized_messages),
+            final_tokens,
             purpose,
         )
         return normalized_messages
