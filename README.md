@@ -4,6 +4,11 @@ A warm, private AI companion with long-term memory that remembers you, grows wit
 
 **Local processing is available.** Ollama chat, local memory, local STT, and Piper TTS can run on your machine. Auto voice may use edge-tts or ElevenLabs and send reply text to external services; choose Piper or pyttsx3 for local speech.
 
+Ollama chat clients use a 120-second transport timeout (including waiting for
+response headers or the next stream chunk). This is an inactivity limit, not a
+total-turn deadline; model retries and multi-step turns can take longer. A
+five-second health probe may time out during a normal cold model load.
+
 ---
 
 ## Why Dad-Bot?
@@ -101,6 +106,10 @@ $env:DADBOT_HA_MCP_ALLOWED_TOOLS = "tool_name_one,tool_name_two"
 
 The endpoint must support MCP Streamable HTTP. Use the tool names returned by that server in `DADBOT_HA_MCP_ALLOWED_TOOLS`. The Smart Home page can verify the connection and report which allowlisted tools are available. No tool is callable from chat unless it is both offered by the MCP server and included in this allowlist.
 
+Every proposed MCP call pauses for explicit approval in the Chat page. The UI shows the exact tool name and validated arguments; each call in a multi-call plan requires a separate approval. Before an approved call is sent, Dad-Bot rechecks the live server's allowlist and input schema. Rejecting a call sends no request, and new chat input is held while an approval is pending in that conversation.
+
+The MCP loop returns the model's validated final answer, prompted in the Dad persona, rather than raw tool payloads or unparsed plans. If model finalization fails after tool execution, it reports that failure and warns that device actions may already have occurred; it does not claim success or fall back to a "no action performed" reply. This protection does not depend on Streamlit reply normalization.
+
 ---
 
 ## ⚠️ Experimental Features & Warnings
@@ -150,7 +159,17 @@ No sanitized product screenshots are currently included. Capture demo views usin
 
 - Python 3.13+
 - [Ollama](https://ollama.com) installed and running
-- Recommended: `ollama pull llama3.2` and `ollama pull nomic-embed-text`
+- Recommended: `ollama pull qwen3.5:9b` and `ollama pull nomic-embed-text`
+
+### Local chat model and streaming
+
+The default chat model is `qwen3.5:9b`. Explicit model selections and generation options are preserved; the runtime does not disable thinking or override the context window. Actual GPU usage and latency depend on the model, prompt, attachments, and other running applications.
+
+Existing profile model choices are not overwritten. If a saved profile selects another model, update its `llm.model` field to `qwen3.5:9b` and restart the app. `DADBOT_LLM_MODEL` can set the default; CLI `--model` and service `DADBOT_DEFAULT_MODEL` overrides remain available.
+
+Chat, Status probes, Workshop probes, and outbox retries call the canonical `process_user_message` entrypoint and validate replies through shared reply finalization. Chat displays, saves, and speaks only the finalized reply; it does not run a separate UI model executor or expose planning JSON as drafts. New chat and Duplicate controls are in the main chat column, and the conversation selector follows the new thread.
+
+The Streamlit runtime boots orchestration services into the bot's existing manager registry, then registers its UI adapters there. The service container, orchestrator, graphs, and persistence aliases share that registry. `ServiceRegistry.boot()` creates a new registry by default; passing `registry=existing` populates and returns that exact instance.
 
 ### Environment Setup
 
