@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import logging
 import re
+from typing import Any
 
 import ollama
 
@@ -19,6 +20,58 @@ class RuntimeModelManager:
     def __init__(self, bot: DadBotContext | SupportsDadBotAccess):
         self.context = DadBotContext.from_runtime(bot)
         self.bot = self.context.bot
+
+    @staticmethod
+    def models_from_response(response: Any) -> list[Any]:
+        models = response.get("models", []) if isinstance(response, dict) else getattr(response, "models", None)
+        if not isinstance(models, list):
+            raise ValueError("Ollama returned an unsupported model-list response.")
+        return models
+
+    @staticmethod
+    def model_record_name(model: Any) -> str:
+        if isinstance(model, dict):
+            name = model.get("model") or model.get("name")
+        else:
+            name = getattr(model, "model", None) or getattr(model, "name", None)
+        return str(name or "").strip().lower()
+
+    @classmethod
+    def model_names_from_response(cls, response: Any) -> list[str]:
+        names = []
+        for model in cls.models_from_response(response):
+            name = cls.model_record_name(model)
+            if name and name not in names:
+                names.append(name)
+        return names
+
+    def ollama_status(self) -> dict[str, object]:
+        status: dict[str, object] = {
+            "model": str(self.bot.ACTIVE_MODEL or ""),
+            "connected": False,
+            "models": [],
+            "models_count": 0,
+            "error": "",
+        }
+        try:
+            response = ollama.list()
+        except self.bot.ollama_retryable_errors() as exc:
+            logger.warning("Ollama status check failed: %s", exc)
+            status["error"] = self.bot.ollama_error_summary(exc)
+            return status
+
+        try:
+            names = self.model_names_from_response(response)
+        except ValueError as exc:
+            status["error"] = str(exc)
+            return status
+
+        status.update(
+            connected=True,
+            models=names,
+            models_count=len(names),
+        )
+        return status
 
     def ollama_show_payload(self, model_name=None):
         candidate = str(model_name or self.bot.ACTIVE_MODEL or self.bot.MODEL_NAME or "").strip().lower()
@@ -236,15 +289,18 @@ class RuntimeModelManager:
 
     @staticmethod
     def model_is_available(models, model_name):
-        available_names = {
-            model.get("model") or model.get("name") for model in models if model.get("model") or model.get("name")
-        }
+        available_names = set()
+        for model in models:
+            name = RuntimeModelManager.model_record_name(model)
+            if name:
+                available_names.add(name)
 
-        if model_name in available_names:
+        normalized_model_name = str(model_name or "").strip().lower()
+        if normalized_model_name in available_names:
             return True
 
-        if ":" not in model_name:
-            return any(name.startswith(f"{model_name}:") for name in available_names)
+        if ":" not in normalized_model_name:
+            return any(name.startswith(f"{normalized_model_name}:") for name in available_names)
 
         return False
 

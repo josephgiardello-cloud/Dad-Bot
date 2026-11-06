@@ -19,7 +19,24 @@ class OllamaModelAdapter:
 
     def list_models(self) -> list[dict[str, Any]]:
         response = ollama.list()
-        return list(response.get("models", []))
+        models = response.get("models", []) if isinstance(response, dict) else getattr(response, "models", None)
+        if not isinstance(models, list):
+            raise ValueError("Ollama returned an unsupported model-list response.")
+
+        normalized = []
+        for model in models:
+            if isinstance(model, dict):
+                normalized.append(model)
+                continue
+            model_dump = getattr(model, "model_dump", None)
+            if callable(model_dump):
+                normalized.append(model_dump())
+                continue
+            name = getattr(model, "model", None) or getattr(model, "name", None)
+            if not name:
+                raise ValueError("Ollama returned a model without a name.")
+            normalized.append({"model": name})
+        return normalized
 
     def pull_model(self, model_name: str) -> None:
         ollama.pull(model_name)
@@ -27,15 +44,22 @@ class OllamaModelAdapter:
     @staticmethod
     def model_is_available(models: Iterable[dict[str, Any]], model_name: str) -> bool:
         """Determines if a model is ready, handling Ollama tag quirks."""
-        available_names = {
-            model.get("model") or model.get("name") for model in models if model.get("model") or model.get("name")
-        }
+        available_names = set()
+        for model in models:
+            if isinstance(model, dict):
+                name = model.get("model") or model.get("name")
+            else:
+                name = getattr(model, "model", None) or getattr(model, "name", None)
+            if name:
+                available_names.add(str(name).strip().lower())
 
-        if model_name in available_names:
+        normalized_model_name = str(model_name or "").strip().lower()
+
+        if normalized_model_name in available_names:
             return True
 
-        if ":" not in model_name:
-            return any(str(name).startswith(f"{model_name}:") for name in available_names)
+        if ":" not in normalized_model_name:
+            return any(name.startswith(f"{normalized_model_name}:") for name in available_names)
 
         return False
 

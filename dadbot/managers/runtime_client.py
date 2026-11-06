@@ -769,14 +769,9 @@ class RuntimeClientManager:
     def available_model_names(self):
         try:
             response = ollama.list()
+            return self.bot.model_runtime.model_names_from_response(response)
         except self.bot.ollama_retryable_errors():
             return []
-        names = []
-        for model in response.get("models", []):
-            name = str(model.get("model") or model.get("name") or "").strip().lower()
-            if name and name not in names:
-                names.append(name)
-        return names
 
     def find_available_vision_model(self):
         active_model = str(self.bot.ACTIVE_MODEL or "").strip().lower()
@@ -807,7 +802,7 @@ class RuntimeClientManager:
     def ensure_ollama_ready(self, status_callback=None):
         try:
             response = ollama.list()
-            models = response.get("models", [])
+            models = self.bot.model_runtime.models_from_response(response)
         except self.bot.ollama_retryable_errors():
             self.bot.deliver_status_message(
                 self.bot.reply_finalization.append_signoff(
