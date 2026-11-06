@@ -601,7 +601,10 @@ class PolicyCompiler:
         if action not in PolicyCompiler._DENY_ACTIONS:
             return decision
 
-        repair_budget = PolicyCompiler._safety_repair_budget(service)
+        repair_budget = (
+            0 if turn_context.metadata.get("source_mode") is True
+            else PolicyCompiler._safety_repair_budget(service)
+        )
         repair_candidate = getattr(service, "repair_candidate", None)
         build_repair_prompt = getattr(service, "build_repair_prompt", None)
         build_safe_mode_output = getattr(service, "build_safe_mode_output", None)

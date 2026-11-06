@@ -191,6 +191,14 @@ class SafetyService:
 
         reply = str(candidate[0] or "")
         user_input = str(getattr(turn_context, "user_input", "") or "")
+        if turn_context.metadata.get("source_mode") is True:
+            from dadbot.services.source_grounding import SOURCE_SAFETY_REFUSAL
+
+            self.bot.service_registry.get("source_grounding_service").validate_reply(
+                user_input, reply, attachments=turn_context.attachments,
+            )
+            violation = self.bot.safety_support.detect_output_violation(reply)
+            return (SOURCE_SAFETY_REFUSAL, False) if violation is not None else candidate
 
         # Standard reply validation
         if hasattr(self.bot, "validate_reply"):

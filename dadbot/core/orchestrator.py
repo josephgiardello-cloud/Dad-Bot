@@ -1340,7 +1340,8 @@ class DadBotOrchestrator:
 
         # Gideon Reflex: read-only subconscious retrieval after checkpoint hydration
         # so resumed turns start from the canonical persisted execution state.
-        self._run_subconscious_retrieval(context, str(job.user_input or ""))
+        if context.metadata.get("source_mode") is not True:
+            self._run_subconscious_retrieval(context, str(job.user_input or ""))
 
         self._stamp_determinism_metadata(context, job, manifest)
         self._emit_sovereign_event(

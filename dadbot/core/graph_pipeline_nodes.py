@@ -106,6 +106,9 @@ class HealthNode(_NodeContractMixin):
     name = "health"
 
     async def execute(self, registry: Any, turn_context: TurnContext) -> None:
+        if turn_context.metadata.get("source_mode") is True:
+            turn_context.state["health"] = {"skipped": True, "reason": "source_mode"}
+            return
         service = _registry_get_optional(registry, "maintenance_service")
         tick = getattr(service, "tick", None)
         if callable(tick):
@@ -118,10 +121,24 @@ class ContextBuilderNode(_NodeContractMixin):
     name = "context_builder"
 
     async def execute(self, registry: Any, turn_context: TurnContext) -> None:
+        if turn_context.metadata.get("source_mode") is True:
+            service = registry.get("source_grounding_service")
+            turn_context.state["source_reply"] = service.answer(
+                turn_context.user_input, attachments=turn_context.attachments,
+            )
+            turn_context.state["rich_context"] = {
+                "temporal": dict(turn_context.state.get("temporal") or {}),
+            }
+            turn_context.state["tool_ir"] = {"requests": []}
+            turn_context.state["turn_plan"] = {"strategy": "source_excerpts"}
+            return
         service = _registry_get_optional(registry, "context_service")
         build_context = getattr(service, "build_context", None)
         if callable(build_context):
-            rich_context = dict(build_context(turn_context) or {})
+            built_context = build_context(turn_context)
+            if built_context is not None and not isinstance(built_context, dict):
+                raise TypeError("Context service must return a dictionary or None")
+            rich_context: dict[str, Any] = dict(built_context or {})
         else:
             rich_context = {}
         rich_context.setdefault("temporal", dict(turn_context.state.get("temporal") or {}))
@@ -277,6 +294,8 @@ class MCPToolNode(_NodeContractMixin):
     name = "mcp_tools"
 
     async def execute(self, registry: Any, turn_context: TurnContext) -> None:
+        if getattr(turn_context, "metadata", {}).get("source_mode") is True:
+            return
         service = _registry_get_optional(registry, "mcp_tool_service")
         if service is None or not bool(getattr(service, "is_enabled", False)):
             return
@@ -838,6 +857,13 @@ class InferenceNode(_NodeContractMixin):
         return f"I delegated {len(results)} sub-tasks. Results: " + "; ".join(str(item) for item in results)
 
     async def execute(self, registry: Any, turn_context: TurnContext) -> None:
+        if turn_context.metadata.get("source_mode") is True:
+            reply = turn_context.state["source_reply"]
+            registry.get("source_grounding_service").validate_reply(
+                turn_context.user_input, reply, attachments=turn_context.attachments,
+            )
+            turn_context.state["candidate"] = (reply, False)
+            return
         if bool(turn_context.state.pop("mcp_tool_candidate_ready", False)):
             candidate = turn_context.state.get("candidate")
             if candidate is None or not self._candidate_text(candidate).strip():
@@ -948,10 +974,14 @@ class ControlPlaneNode(_NodeContractMixin):
         finalize = getattr(getattr(bot, "reply_finalization", None), "finalize", None)
         if not callable(finalize):
             raise RuntimeError("Control-plane node requires reply_finalization.finalize")
+        finalization_options = (
+            {"source_grounded": True} if turn_context.metadata.get("source_mode") is True else {}
+        )
         finalized_reply = finalize(
             InferenceNode._candidate_text(candidate),
             str(turn_context.state.get("mood") or "neutral"),
             user_input=turn_context.user_input,
+            **finalization_options,
         )
         candidate = (
             str(finalized_reply or ""),
@@ -1085,6 +1115,16 @@ class SafetyNode(_NodeContractMixin):
             audit_full=audit_mode,
         )
         turn_context.state["safe_result"] = decision.output
+        if turn_context.metadata.get("source_mode") is True:
+            from dadbot.services.source_grounding import SOURCE_SAFETY_REFUSAL
+
+            if str(decision.action or "").lower() in {"denied", "deny", "blocked", "rejected"}:
+                turn_context.state["safe_result"] = (SOURCE_SAFETY_REFUSAL, False)
+            registry.get("source_grounding_service").validate_reply(
+                turn_context.user_input,
+                InferenceNode._candidate_text(turn_context.state["safe_result"]),
+                attachments=turn_context.attachments,
+            )
         repair_trace = dict((decision.trace or {}).get("repair") or {})
         if repair_trace:
             turn_context.state["safety_recovery"] = repair_trace
@@ -1298,6 +1338,9 @@ class ReflectionNode(_NodeContractMixin):
     node_type = NodeType.STANDARD
 
     async def execute(self, registry: Any, turn_context: TurnContext) -> None:
+        if turn_context.metadata.get("source_mode") is True:
+            turn_context.state["reflection"] = {"skipped": True, "reason": "source_mode"}
+            return
         try:
             service = registry.get("reflection")
         except (KeyError, AttributeError):

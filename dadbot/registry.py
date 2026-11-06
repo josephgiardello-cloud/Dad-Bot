@@ -347,6 +347,10 @@ class ServiceRegistry:
             _instantiate("dadbot.services.agent_service:AgentService", bot),
         )
         registry.register(
+            "source_grounding_service",
+            _instantiate("dadbot.services.source_grounding:SourceGroundingService", bot),
+        )
+        registry.register(
             "safety_service",
             _instantiate("dadbot.services.safety_service:SafetyService", bot),
         )

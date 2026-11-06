@@ -388,6 +388,50 @@ After an intentional dependency change, run `uv lock`, validate the selected env
 
 ---
 
+### Jor-El source mode
+
+In Chat, enable **Jor-El source mode** for the selected conversation. New chats
+default to ordinary chat; switching back restores that thread's selection during
+the current UI session. Status/Workshop probes retain their normal behavior.
+Queued retries preserve the original message's mode, even after changing the
+thread's selection.
+Python callers can pass `source_mode=True` to any `process_user_message*` delivery.
+
+This mode returns **exact source excerpts, not generated answers**. It makes no
+model, embedding, planner, or MCP calls, including when evidence exists. No
+qualifying source produces the fixed refusal: "I don't have a relevant approved
+source for that. Jor-El can only quote the profile and explicitly approved memories."
+Safety checks remain active; crisis responses take precedence, and unsafe excerpts
+are replaced with a fixed safety refusal. Persona rewrites, check-ins, signoffs,
+automatic speech, and turn-triggered model maintenance are disabled in this mode.
+Other independently running background jobs are unaffected.
+
+Sources are the profile's `family`, `education`, `sports_preferences`, `facts`,
+`biography`, `background`, `interests`, `hobbies`, `values`, `stories`, and `work`
+sections, plus style name, listener name, tone, and signoff. Runtime/security
+configuration and secret-named fields are excluded. Conversation history,
+attachments, and unapproved memories are never evidence.
+
+Use **Review memory citation approvals** to inspect and explicitly approve or
+revoke individual ordinary/consolidated memory summaries. Existing records start
+unapproved: pinning, model confidence, and model-written approval fields do not
+grant consent. Approval is tenant-scoped and bound to the exact text and record
+identity; edits invalidate it. Superseded records are excluded. Approvals persist
+separately from model-writable memories; revocation and corpus edits invalidate
+source-mode request reuse.
+
+Each excerpt includes a content-bound citation ID and its profile path or memory
+identity. Citation integrity is checked again after selection and at delivery;
+modified quotations, invented citations, or extra claims fail closed. Markdown
+inside quotes is displayed as inert code, not executable links/images.
+**Retrieval match strength** is the percentage of distinct significant query
+tokens found in the source text/label, using the existing English tokenizer.
+At least 50% is required; only the strongest tied matches (up to three) are
+returned. Matches below 100% are explicitly partial. This lexical score is
+neither semantic understanding nor calibrated confidence/probability of truth.
+An approved quotation proves provenance, not factual correctness; conservative
+refusals and lexical false positives remain possible.
+
 ## 🔒 Privacy & Security
 
 - **Local mode** — Ollama chat, local STT, and Piper TTS can be configured to stay on-device.
@@ -402,6 +446,7 @@ After an intentional dependency change, run `uv lock`, validate the selected env
 |---|---|
 | Profile and preferences | `dad_profile.json`; `DADBOT_PROFILE_PATH` |
 | Long-term memory and JSON mirror | `dad_memory.json`; `DADBOT_MEMORY_PATH` |
+| Human memory-citation consent (hashes and revision counters, not source text) | `<memory-file-stem>.citation-approvals.sqlite3` beside the configured memory file |
 | Semantic memory and relationship graph | `dad_memory_semantic.sqlite3`, `dad_memory_graph.sqlite3`; `DADBOT_SEMANTIC_DB_PATH`, `DADBOT_GRAPH_DB_PATH` |
 | Conversation histories, ledgers, checkpoints, and diagnostics | `session_logs`; `DADBOT_SESSION_LOG_DIR`; also inspect configured log, trace, and backup locations |
 | Service session/task/event state and vectors | Configured Redis, PostgreSQL, or vector backends; tenant-scoped data may exist independently of the local files |

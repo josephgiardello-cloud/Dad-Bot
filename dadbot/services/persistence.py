@@ -329,6 +329,8 @@ class PersistenceService(
 
     def _publish_post_commit_ready(self, runtime: Any, turn_context: Any) -> None:
         """Publish the post-commit readiness event and return immediately."""
+        if turn_context.metadata.get("source_mode") is True:
+            return
         event_bus = getattr(runtime, "_runtime_event_bus", None)
         publish = getattr(event_bus, "publish", None)
         if not callable(publish):
@@ -1511,4 +1513,3 @@ class PersistenceService(
 
     def persist_conversation(self) -> None:
         self.persistence_manager.persist_conversation()
-

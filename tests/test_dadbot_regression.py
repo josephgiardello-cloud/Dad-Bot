@@ -1477,7 +1477,11 @@ class TestDadBotRegression(unittest.TestCase):
 
         self.bot.mood_manager.detect_async = AsyncMock(return_value="stressed")
         captured = []
-        with model_transport_reply("I hear you, buddy. Let us take one calm step.", captured):
+        # These synthetic pressure records are not signed retrieval evidence.
+        with (
+            patch.object(self.bot._get_turn_orchestrator(), "_run_subconscious_retrieval", return_value=None),
+            model_transport_reply("I hear you, buddy. Let us take one calm step.", captured),
+        ):
             reply, should_end = self.bot.process_user_message("Work and bills have both been heavy this week.")
         self.assertFalse(should_end)
         self.assertIn("buddy", reply.lower())

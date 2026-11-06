@@ -25,6 +25,7 @@ from dadbot.runtime.mcp.tool_client import (
     configured_ha_mcp_url,
 )
 from dadbot.ui.media.service import MediaService
+from dadbot.ui.source_grounding import render_source_mode
 from dadbot.ui.streamlit_context import (
     SQLiteStreamlitThreadStore,
     StreamlitContextService,
@@ -751,7 +752,7 @@ def _auto_speak_replies_enabled() -> bool:
     return bool(st.session_state.auto_speak_replies)
 
 
-def _queue_failed_message(prompt: str, error: str) -> None:
+def _queue_failed_message(prompt: str, error: str, *, source_mode: bool = False) -> None:
     queue = list(st.session_state.get("message_outbox") or [])
     queue.append(
         {
@@ -759,6 +760,7 @@ def _queue_failed_message(prompt: str, error: str) -> None:
             "prompt": str(prompt or ""),
             "error": str(error or ""),
             "time": _now_stamp(),
+            "source_mode": source_mode,
         }
     )
     st.session_state.message_outbox = queue[-100:]
@@ -930,9 +932,13 @@ media_service = MediaService()
 def _process_user_message_with_thread(
     user_input: str,
     attachments: list[dict[str, Any]] | None = None,
+    *,
+    source_mode: bool = False,
 ):
     messages = serialize_thread_messages(_thread_messages(), user_input)
     setattr(bot, "_streamlit_context_messages", messages)
+    if source_mode:
+        return bot.process_user_message(user_input, attachments=attachments, source_mode=True)
     return bot.process_user_message(user_input, attachments=attachments)
 
 
@@ -954,6 +960,7 @@ if page != "Chat":
     _render_app_shell(page)
 
 if page == "Chat":
+    source_mode = render_source_mode(st, bot, _active_thread_id())
     st.markdown('<div class="chat-layout">', unsafe_allow_html=True)
     main_col = st.container()
     _install_client_speech_cancel_guard()
@@ -961,9 +968,10 @@ if page == "Chat":
         "Auto-speak replies",
         key="auto_speak_replies",
         value=bool(st.session_state.get("auto_speak_replies", True)),
+        disabled=source_mode,
         help="When enabled, Dad speaks each assistant reply automatically.",
     )
-    auto_speak_replies = _auto_speak_replies_enabled()
+    auto_speak_replies = _auto_speak_replies_enabled() and not source_mode
     with main_col:
         st.markdown('<div class="main-column">', unsafe_allow_html=True)
         embed_url = _spatial_avatar_embed_url()
@@ -1023,6 +1031,8 @@ if page == "Chat":
                 _append_chat_message("assistant", approval_reply, stamp=_now_stamp())
                 st.rerun()
             chat_input_value = None
+        elif source_mode:
+            chat_input_value = st.chat_input("Ask Jor-El about approved sources...")
         else:
             try:
                 chat_input_value = st.chat_input("Message Dad...", accept_file="multiple")
@@ -1056,6 +1066,7 @@ if page == "Chat":
                     reply, _ = _process_user_message_with_thread(
                         prompt,
                         attachments=attachments,
+                        source_mode=source_mode,
                     )
                     reply = bot.reply_finalization.normalize_reply(reply)
                     _record_runtime_event("chat_response_ok", "Assistant response generated", payload={"length": len(reply)})
@@ -1064,7 +1075,7 @@ if page == "Chat":
                     reply = f"Sorry, I hit a snag: {exc}"
                     _record_runtime_event("chat_response_error", "Assistant response failed", severity="error", payload={"error": str(exc)})
                     _record_guardrail("turn_execution_error", str(exc), severity="error")
-                    _queue_failed_message(prompt, str(exc))
+                    _queue_failed_message(prompt, str(exc), source_mode=source_mode)
 
             assistant_audio_b64 = ""
             assistant_audio_mime = ""
@@ -1251,13 +1262,14 @@ elif page == "Workshop":
                 for item in queue:
                     prompt = str(item.get("prompt") or "").strip()
                     thread_id = str(item.get("thread_id") or "default")
+                    source_mode = item.get("source_mode") is True
                     if not prompt:
                         continue
                     _switch_active_thread(thread_id)
                     try:
                         now = datetime.datetime.now().strftime("%H:%M")
                         _append_chat_message("user", prompt, stamp=now, thread_id=thread_id)
-                        reply, _ = _process_user_message_with_thread(prompt)
+                        reply, _ = _process_user_message_with_thread(prompt, source_mode=source_mode)
                         reply = bot.reply_finalization.normalize_reply(reply)
                         _append_chat_message("assistant", reply, stamp=now, thread_id=thread_id)
                         retried += 1
@@ -1268,6 +1280,7 @@ elif page == "Workshop":
                                 "prompt": prompt,
                                 "error": str(exc),
                                 "time": _now_stamp(),
+                                "source_mode": source_mode,
                             }
                         )
                         _record_guardrail("outbox_retry_error", str(exc), severity="error")

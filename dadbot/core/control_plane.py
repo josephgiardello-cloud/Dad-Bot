@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import os
+import sqlite3
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -1324,6 +1325,8 @@ class Scheduler:
             raise
         except (
             TimeoutError,
+            OSError,
+            sqlite3.Error,
             ExecutionStageError,
             InvariantViolation,
             MemorySetInvariantViolation,
@@ -2877,6 +2880,11 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
             response_text=final_response,
             user_input=str(getattr(turn_context, "user_input", "") or ""),
         )
+        if metadata.get("source_mode") is True:
+            self.graph.registry.get("source_grounding_service").validate_reply(
+                str(turn_context.user_input), final_response,
+                attachments=turn_context.attachments,
+            )
         if not final_response:
             self._record_canonical_gate_breach(
                 session_key=session_key,
@@ -3032,10 +3040,17 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
                 "Canonical response gate violation: response_engine ranking failed."
             ) from exc
 
-        shaped_response, continuity_telemetry = self._apply_continuity_shaping(
-            response_text=final_response,
-            session_state=continuity_state,
-        )
+        if job.metadata.get("source_mode") is True:
+            self.graph.registry.get("source_grounding_service").validate_reply(
+                str(job.user_input), final_response, attachments=job.attachments,
+            )
+            shaped_response = final_response
+            continuity_telemetry = {"skipped": True, "reason": "source_mode"}
+        else:
+            shaped_response, continuity_telemetry = self._apply_continuity_shaping(
+                response_text=final_response,
+                session_state=continuity_state,
+            )
         final_response = str(shaped_response or final_response)
         job.metadata["response_continuity"] = dict(continuity_telemetry)
         
@@ -3506,6 +3521,7 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         trace_token: str,
         job_id: str,
         resolved_timeout_seconds: float,
+        refresh_memory_records: bool = True,
     ) -> tuple[str, float, object]:
         return _initialize_submit_scope_impl(
             self,
@@ -3513,6 +3529,7 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
             trace_token=trace_token,
             job_id=job_id,
             resolved_timeout_seconds=resolved_timeout_seconds,
+            refresh_memory_records=refresh_memory_records,
         )
 
     async def _submit_turn_kernel(
@@ -3617,6 +3634,7 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
             trace_token=trace_id,
             job_id=job.job_id,
             resolved_timeout_seconds=resolved_timeout_seconds,
+            refresh_memory_records=str(job.metadata.get("execution_mode") or "live").lower() == "live",
         )
         try:
             return await _run_submit_execution_phase_impl(

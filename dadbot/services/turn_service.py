@@ -755,18 +755,19 @@ class TurnService(ToolPipelineMixin):
                 source="turn_service.finalize_user_turn.sync_thread_snapshot",
             ),
         )
-        mutation_queue.queue(
-            MutationIntent(
-                type=MutationKind.LEDGER,
-                payload={
-                    "op": LedgerMutationOp.SCHEDULE_MAINTENANCE.value,
-                    "turn_text": stripped_input,
-                    "mood": current_mood,
-                },
-                requires_temporal=False,
-                source="turn_service.finalize_user_turn.schedule_maintenance",
-            ),
-        )
+        if turn_context.metadata.get("source_mode") is not True:
+            mutation_queue.queue(
+                MutationIntent(
+                    type=MutationKind.LEDGER,
+                    payload={
+                        "op": LedgerMutationOp.SCHEDULE_MAINTENANCE.value,
+                        "turn_text": stripped_input,
+                        "mood": current_mood,
+                    },
+                    requires_temporal=False,
+                    source="turn_service.finalize_user_turn.schedule_maintenance",
+                ),
+            )
         mutation_queue.queue(
             MutationIntent(
                 type=MutationKind.LEDGER,

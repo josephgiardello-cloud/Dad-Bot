@@ -6,7 +6,7 @@ from typing import Any
 
 from dadbot.contracts import AttachmentList
 from dadbot.core.contracts.lifecycle_events import Submitted
-from dadbot.core.core_state import CoreState
+from dadbot.core.core_state import CoreState, InputEvent, transition
 from dadbot.core.execution_context import open_core_state_scope, push_core_state_event
 from dadbot.core.control_plane_lifecycle import (
     _apply_projection_execution_state,
@@ -79,6 +79,7 @@ def _initialize_submit_scope_impl(
     trace_token: str,
     job_id: str,
     resolved_timeout_seconds: float,
+    refresh_memory_records: bool = True,
 ) -> tuple[str, float, object]:
     session_before = control_plane.registry.get_or_create(session_key)
     before_state_hash = control_plane._stable_hash(dict(session_before.get("state") or {}))
@@ -87,7 +88,26 @@ def _initialize_submit_scope_impl(
     initial_core_state = CoreState.from_dict(
         dict(session_before.get("state") or {}).get("core_state"),
     )
+    agent_service = control_plane._get_optional_service("agent_service")
+    memory_manager = getattr(getattr(agent_service, "bot", None), "memory_manager", None)
+    memory_store = (
+        memory_manager.memory_projection()
+        if memory_manager is not None and refresh_memory_records else None
+    )
     deadline = time.time() + resolved_timeout_seconds
+    if memory_store is not None:
+        # MemoryManager owns global records; session execution state must not roll
+        # back records loaded or edited since this session's previous turn.
+        prior_records = {
+            "memories": initial_core_state.memory.to_dict_list(),
+            "consolidated_memories": initial_core_state.memory_kv.get("consolidated_memories", []),
+        }
+        for key, previous in prior_records.items():
+            current = list(memory_store.get(key) or [])
+            if current != previous:
+                initial_core_state = transition(
+                    initial_core_state, InputEvent("MemoryUpdated", {"key": key, "value": current}),
+                )
     cs_token = open_core_state_scope(initial_core_state)
     push_core_state_event(
         "job_submitted",

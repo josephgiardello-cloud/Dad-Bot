@@ -160,6 +160,7 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
         chunk_callback: ChunkCallback | None = None,
     ) -> FinalizedTurnResult:
         orchestrator = self._get_turn_orchestrator()
+        request_metadata = dict(getattr(self, "_execute_turn_request_metadata", {}) or {})
         session_id = str(getattr(self, "_execute_turn_session_id", "") or "").strip() or str(
             getattr(self, "active_thread_id", "") or "default",
         )
@@ -168,14 +169,17 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
             user_input=str(user_input or ""),
             attachments=attachments,
         )
+        grounding = None
+        if request_metadata.get("source_mode") is True:
+            grounding = orchestrator.graph.registry.get("source_grounding_service")
+            fingerprint = grounding.corpus_fingerprint()
+            confluence_key = f"{confluence_key}:source:{fingerprint}"
         control_plane = getattr(orchestrator, "control_plane", None)
         submit_turn = getattr(control_plane, "submit_turn", None)
         if not callable(submit_turn):
             raise ConfigurationError(
                 "Canonical execution gate violation: control-plane submit entrypoint missing.",
             )
-
-        request_metadata = dict(getattr(self, "_execute_turn_request_metadata", {}) or {})
 
         handler = TurnHandler(
             submit_turn=cast(Any, submit_turn),
@@ -193,7 +197,10 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
             metadata=request_metadata,
             timeout_seconds=request_metadata.get("timeout_seconds"),
         )
-        return await handler.process_turn(turn_context)
+        result = await handler.process_turn(turn_context)
+        if grounding is not None:
+            grounding.validate_reply(user_input, str(result[0] or ""), attachments=attachments)
+        return result
 
     @staticmethod
     def _run_coro_in_thread(coro):
@@ -601,6 +608,8 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
         user_input: str,
         attachments: AttachmentList | None = None,
         chunk_callback: ChunkCallback | None = None,
+        *,
+        source_mode: bool = False,
     ) -> FinalizedTurnResult:
         # 1. Safety/crisis checks (unchanged)
         safety_support = getattr(self, "safety_support", None)
@@ -634,6 +643,7 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
                     attachments=list(attachments or []),
                     delivery=TurnDelivery.SYNC,
                     context=context,
+                    metadata={"source_mode": True} if source_mode else {},
                 ),
                 chunk_callback=chunk_callback,
             ),
@@ -647,7 +657,8 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
             dad_reply = None if dad_reply is None else str(dad_reply)
             return dad_reply, should_end
 
-        dad_reply = self._blend_reply_with_daily_checkin(dad_reply, pre_turn_daily_checkin_due)
+        if not source_mode:
+            dad_reply = self._blend_reply_with_daily_checkin(dad_reply, pre_turn_daily_checkin_due)
         return cast(str | None, dad_reply), should_end
 
     def run_turn(
@@ -784,6 +795,8 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
         user_input: str,
         attachments: AttachmentList | None = None,
         chunk_callback: ChunkCallback | None = None,
+        *,
+        source_mode: bool = False,
     ) -> FinalizedTurnResult:
         response = await cast(
             Awaitable[TurnResponse],
@@ -792,6 +805,7 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
                     user_input,
                     attachments=list(attachments or []),
                     delivery=TurnDelivery.ASYNC,
+                    metadata={"source_mode": True} if source_mode else {},
                     context=self._build_sovereign_context(mode=ExecutionMode.LIVE),
                 ),
                 chunk_callback=chunk_callback,
@@ -804,6 +818,8 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
         user_input: str,
         attachments: AttachmentList | None = None,
         chunk_callback: ChunkCallback | None = None,
+        *,
+        source_mode: bool = False,
     ) -> FinalizedTurnResult:
         streamed = False
 
@@ -822,6 +838,7 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
                     user_input,
                     attachments=list(attachments or []),
                     delivery=TurnDelivery.STREAM,
+                    metadata={"source_mode": True} if source_mode else {},
                     context=self._build_sovereign_context(mode=ExecutionMode.LIVE),
                 ),
                 chunk_callback=_wrapped_chunk_callback,
@@ -837,6 +854,8 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
         user_input: str,
         attachments: AttachmentList | None = None,
         chunk_callback: ChunkCallback | None = None,
+        *,
+        source_mode: bool = False,
     ) -> FinalizedTurnResult:
         streamed = False
 
@@ -855,6 +874,7 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
                     user_input,
                     attachments=list(attachments or []),
                     delivery=TurnDelivery.STREAM_ASYNC,
+                    metadata={"source_mode": True} if source_mode else {},
                     context=self._build_sovereign_context(mode=ExecutionMode.LIVE),
                 ),
                 chunk_callback=_wrapped_chunk_callback,

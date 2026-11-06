@@ -489,12 +489,18 @@ class ReplyFinalizationManager:
             str(current_mood or "neutral"),
         )
 
-    def finalize(self, reply, current_mood, user_input=None):
+    def finalize(self, reply, current_mood, user_input=None, *, source_grounded=False):
         """Apply formatting pipeline to response (ENFORCEMENT LAYER — NOT a selection authority).
         
         PHASE 1: This method is only invoked by control-plane post-ResponseEngine selection.
         All formatting operations here are non-binding (they do not change which response was selected).
         """
+        if source_grounded:
+            mark_turn_coherence(self.bot, "finalizer_called")
+            mark_turn_coherence(self.bot, "personality_applied")
+            assert_personality_applied_exactly_once(self.bot)
+            # Source mode's surface policy is identity: no persona rewrites or signoff.
+            return self.normalize_reply(reply)
         # PHASE 1: Audit logging for enforcement layer
         logger.debug(
             "reply_finalization.finalize invoked (ENFORCEMENT LAYER formatting); "

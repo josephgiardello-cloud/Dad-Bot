@@ -192,7 +192,7 @@ def test_executor_timeout_cleans_active_context_without_finalizing(monkeypatch):
     from dadbot.core import orchestrator as module
 
     async def run():
-        context = SimpleNamespace(trace_id="trace")
+        context = SimpleNamespace(trace_id="trace", metadata={})
         job = SimpleNamespace(user_input="stall", attachments=[], session_id="s", job_id="job",
                               metadata={"timeout_seconds": 0.03})
         orchestrator = DadBotOrchestrator.__new__(DadBotOrchestrator)
