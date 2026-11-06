@@ -88,7 +88,7 @@ class TestPhase1ResponseAuthority:
         
         # append_signoff() should only add signoff, not change selection
         test_reply = "Test response"
-        result = finalize_mgr.append_signoff(test_reply)
+        result = finalize_mgr.append_signoff(test_reply, user_input="I feel sad.")
         
         # Assert: result includes the original response (formatting-only)
         assert test_reply in result, \
@@ -142,11 +142,20 @@ class TestPhase1ResponseAuthority:
         finalize = ReplyFinalizationManager(mock_bot)
         
         input_reply = "Here's my response"
-        output_reply = finalize.append_signoff(input_reply)
+        output_reply = finalize.append_signoff(input_reply, user_input="I'm feeling overwhelmed.")
         
         # Assert: finalize only adds signoff, does not change selection
         assert "—Dad" in output_reply, "append_signoff() must add configured signoff"
         assert input_reply in output_reply, "Original response must be preserved"
+
+    def test_signoff_is_omitted_from_routine_factual_reply(self):
+        from dadbot.managers.reply_finalization import ReplyFinalizationManager
+
+        mock_bot = Mock()
+        mock_bot.APPEND_SIGNOFF = True
+        mock_bot.STYLE = {"signoff": "—Dad"}
+
+        assert ReplyFinalizationManager(mock_bot).append_signoff("4") == "4"
 
     def test_personality_influences_scoring(self):
         """Assert: personality traits influence scoring, not output authority."""

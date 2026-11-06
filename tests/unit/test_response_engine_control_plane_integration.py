@@ -13,6 +13,25 @@ from dadbot.core.control_plane import ExecutionControlPlane
 class TestResponseEngineControlPlaneIntegration:
     """Test ResponseEngine integration with control-plane execution flow."""
 
+    def test_graph_candidate_tuple_is_normalized_to_reply_text(self):
+        assert ExecutionControlPlane._candidate_reply_text(("4", False)) == "4"
+
+    def test_graph_candidate_tuple_rejects_malformed_shape(self):
+        with pytest.raises(TypeError, match=r"\(reply_text, should_end\)"):
+            ExecutionControlPlane._candidate_reply_text(("4", "false"))
+
+    def test_graph_candidate_rejects_empty_reply(self):
+        with pytest.raises(RuntimeError, match="empty turn candidate reply"):
+            ExecutionControlPlane._candidate_reply_text(("", False))
+
+    def test_strict_trace_rejects_prompt_echo_fallback(self):
+        with pytest.raises(RuntimeError, match="repeated the user prompt"):
+            ExecutionControlPlane._stabilize_strict_response_text(
+                strict_trace=True,
+                response_text="I hear you: What is 2 + 2?",
+                user_input="What is 2 + 2?",
+            )
+
     def test_control_plane_initializes_response_engine(self):
         """ExecutionControlPlane initializes ResponseEngine on startup."""
         # Mock dependencies with proper values
@@ -104,6 +123,19 @@ class TestResponseEngineControlPlaneIntegration:
 
         assert isinstance(result, str)
         assert len(result) > 0
+
+    def test_response_engine_preserves_execution_reply_instead_of_echoing_prompt(self):
+        engine = ResponseEngine()
+        context = SimpleNamespace(
+            user_input="Reply only with the number: what is 2 + 2?",
+            initial_response="4",
+            session_state={},
+            job_metadata={},
+            trace_id="test",
+        )
+
+        assert engine.run(context) == "4"
+        assert engine.get_last_turn_telemetry()["selected"]["source"] == "execution_response"
 
     def test_response_engine_run_on_empty_input_returns_fallback(self):
         """ResponseEngine.run() returns fallback on empty user input."""

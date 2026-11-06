@@ -1501,7 +1501,15 @@ def _local_prompt_fallback(user_input: str = "") -> str:
 
 
 def _normalize_ui_reply(reply: Any, *, user_input: str = "") -> str:
-    text = str(reply or "")
+    while isinstance(reply, tuple):
+        if len(reply) != 2 or not isinstance(reply[1], bool):
+            raise TypeError("Turn result tuple must be (reply_text, should_end)")
+        reply = reply[0]
+    if not isinstance(reply, str):
+        raise TypeError(f"Assistant reply must be a string, got {type(reply).__name__}")
+    text = reply.strip()
+    if not text:
+        raise ValueError("Assistant returned an empty reply")
     finalization = getattr(bot, "reply_finalization", None)
     user_text = str(user_input or "").strip().lower()
     profile_question = classify_profile_question(user_text)

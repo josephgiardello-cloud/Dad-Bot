@@ -2834,12 +2834,13 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
             or getattr(turn_context, "trace_id", "")
             or "default",
         )
-        initial_response = str(
-            state.get("candidate")
-            or state.get("initial_response")
-            or getattr(turn_context, "user_input", "")
-            or "",
-        )
+        candidate = state.get("candidate")
+        if candidate is not None:
+            initial_response = self._candidate_reply_text(candidate)
+        else:
+            initial_response = self._candidate_reply_text(
+                state.get("initial_response"),
+            )
 
         engine_context = self._build_response_engine_context(
             job=job,
@@ -2900,6 +2901,23 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         return str(final_response or ""), False
 
     @staticmethod
+    def _candidate_reply_text(candidate: Any) -> str:
+        while isinstance(candidate, tuple):
+            if len(candidate) != 2 or not isinstance(candidate[1], bool):
+                raise TypeError("Turn candidate tuple must be (reply_text, should_end)")
+            candidate = candidate[0]
+        if candidate is None:
+            raise RuntimeError("Canonical response gate violation: missing turn candidate reply.")
+        if not isinstance(candidate, str):
+            raise TypeError(
+                f"Turn candidate reply must be a string, got {type(candidate).__name__}",
+            )
+        reply = candidate.strip()
+        if not reply:
+            raise RuntimeError("Canonical response gate violation: empty turn candidate reply.")
+        return reply
+
+    @staticmethod
     def _stabilize_strict_response_text(
         *,
         strict_trace: bool,
@@ -2909,10 +2927,11 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         text = str(response_text or "").strip()
         if not strict_trace:
             return text
-        if text.lower().startswith("i hear you:"):
-            user = str(user_input or "").strip()
-            if user:
-                return user
+        user = str(user_input or "").strip()
+        if text.lower().startswith("i hear you:") and user and user.casefold() in text.casefold():
+            raise RuntimeError(
+                "Canonical response gate violation: response repeated the user prompt.",
+            )
         return text
 
     def _finalize_submit_success(
@@ -2937,7 +2956,9 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
             dict(job.metadata.get("execution_result") or {}),
         )
         # Extract initial response from execution
-        initial_response = str(result[0] if isinstance(result, tuple) and len(result) >= 1 else "")
+        initial_response = self._candidate_reply_text(
+            result[0] if isinstance(result, tuple) and len(result) >= 1 else None,
+        )
         
         # Phase 1: Run ResponseEngine to rank and select best response
         # ResponseEngine takes the execution context and generates/ranks candidates

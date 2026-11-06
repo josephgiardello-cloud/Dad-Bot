@@ -22,6 +22,87 @@ class ReplyFinalizationManager:
     def __init__(self, bot):
         self.bot = bot
 
+    @staticmethod
+    def _reply_text(reply: Any) -> str:
+        if hasattr(reply, "model_dump") and not isinstance(reply, str):
+            from dadbot.utils.llm import extract_ollama_message_content
+
+            reply = extract_ollama_message_content(reply)
+        while isinstance(reply, tuple):
+            if len(reply) != 2 or not isinstance(reply[1], bool):
+                raise TypeError("Turn result tuple must be (reply_text, should_end)")
+            reply = reply[0]
+        if reply is None:
+            return ""
+        if not isinstance(reply, str):
+            raise TypeError(f"Reply must be a string, got {type(reply).__name__}")
+        return reply.strip()
+
+    @staticmethod
+    def _signoff_is_appropriate(
+        reply: str,
+        *,
+        user_input: Any = None,
+        current_mood: Any = None,
+    ) -> bool:
+        mood = str(current_mood or "").strip().lower()
+        if mood in {"positive", "sad", "stressed", "frustrated", "tired", "anxious", "worried"}:
+            return True
+
+        prompt = str(user_input or "").lower()
+        emotional_prompt_markers = (
+            "i feel",
+            "i'm feeling",
+            "i am feeling",
+            "i've been feeling",
+            "i'm struggling",
+            "i am struggling",
+            "struggling",
+            "overwhelmed",
+            "having a hard time",
+            "going through a lot",
+            "feeling down",
+            "lonely",
+            "grieving",
+            "grief",
+            "heartbroken",
+            "scared",
+            "afraid",
+            "frustrated",
+            "burned out",
+            "burnt out",
+            "exhausted",
+            "depressed",
+            "anxiety",
+            "stressed",
+            "sad",
+            "i love you",
+        )
+        if any(marker in prompt for marker in emotional_prompt_markers):
+            return True
+
+        reply_text = str(reply or "").lower()
+        emotional_reply_markers = (
+            "i'm proud of you",
+            "i am proud of you",
+            "i'm here for you",
+            "i am here for you",
+            "you are not alone",
+            "you're not alone",
+            "that sounds hard",
+            "that sounds painful",
+            "your feelings",
+            "your emotions",
+            "emotional support",
+            "anxiety",
+            "grief",
+            "loneliness",
+            "overwhelmed",
+            "struggling",
+            "feeling down",
+        )
+        return any(marker in reply_text for marker in emotional_reply_markers)
+
     def _record_shadow_pipeline(self, payload: dict[str, Any]) -> None:
         try:
             setattr(self.bot, "_last_reply_finalization_shadow", payload)
@@ -181,19 +262,30 @@ class ReplyFinalizationManager:
         text = self._compress_to_sentence_budget(text, sentence_budget)
         return text
 
-    def append_signoff(self, reply: str) -> str:
-        # Defense: if reply is somehow a Pydantic response object, extract content first
-        if hasattr(reply, "model_dump") and not isinstance(reply, str):
-            try:
-                from dadbot.utils.llm import extract_ollama_message_content
-                reply = extract_ollama_message_content(reply)
-            except Exception:
-                pass
-        reply = self._enforce_dad_identity(str(reply or "").strip())
+    def append_signoff(
+        self,
+        reply: Any,
+        *,
+        user_input: Any = None,
+        current_mood: Any = None,
+    ) -> str:
+        reply = self._enforce_dad_identity(self._reply_text(reply))
         reply = self._enforce_listener_contract(reply)
-        signoff = str(self.bot.profile_runtime.style.get("signoff") or "").strip()
+        profile_style = getattr(getattr(self.bot, "profile_runtime", None), "style", None)
+        if not isinstance(profile_style, dict):
+            profile_style = getattr(self.bot, "STYLE", {})
+        signoff = str(profile_style.get("signoff") or "").strip()
 
-        if not reply or not self.bot.APPEND_SIGNOFF or not signoff:
+        if (
+            not reply
+            or not self.bot.APPEND_SIGNOFF
+            or not signoff
+            or not self._signoff_is_appropriate(
+                reply,
+                user_input=user_input,
+                current_mood=current_mood,
+            )
+        ):
             return reply
 
         if reply.endswith(signoff):
@@ -202,8 +294,18 @@ class ReplyFinalizationManager:
             return f"{reply} {signoff}"
         return f"{reply}. {signoff}"
 
-    def finalize_reply(self, reply: str) -> str:
-        return self.append_signoff(reply)
+    def finalize_reply(
+        self,
+        reply: Any,
+        *,
+        user_input: Any = None,
+        current_mood: Any = None,
+    ) -> str:
+        return self.append_signoff(
+            reply,
+            user_input=user_input,
+            current_mood=current_mood,
+        )
 
     def should_calibrate_pushback(self, user_input, current_mood):
         return self.bot.personality_service._should_calibrate_pushback(
@@ -231,14 +333,8 @@ class ReplyFinalizationManager:
         )
         
         # Defense: if reply is somehow a Pydantic response object, extract content first
-        if hasattr(reply, "model_dump") and not isinstance(reply, str):
-            try:
-                from dadbot.utils.llm import extract_ollama_message_content
-                reply = extract_ollama_message_content(reply)
-            except Exception:
-                pass
         mark_turn_coherence(self.bot, "finalizer_called")
-        base_reply = str(reply or "")
+        base_reply = self._profile_fact_reply(user_input) or self._reply_text(reply)
         shadow_voiced = base_reply
         shadow_supervised = base_reply
         shadow_moderated = base_reply
@@ -310,7 +406,11 @@ class ReplyFinalizationManager:
             pass
         final_reply = self._enforce_dad_identity(final_reply)
         final_reply = self._enforce_listener_contract(final_reply, user_input=user_input)
-        final_reply = self.append_signoff(final_reply)
+        final_reply = self.append_signoff(
+            final_reply,
+            user_input=user_input,
+            current_mood=current_mood,
+        )
         # CSCL post-turn feedback: feed voiced reply to coherence tracker
         try:
             cscl = getattr(self.bot, "conversation_surface", None)
@@ -332,14 +432,8 @@ class ReplyFinalizationManager:
         )
         
         # Defense: if reply is somehow a Pydantic response object, extract content first
-        if hasattr(reply, "model_dump") and not isinstance(reply, str):
-            try:
-                from dadbot.utils.llm import extract_ollama_message_content
-                reply = extract_ollama_message_content(reply)
-            except Exception:
-                pass
         mark_turn_coherence(self.bot, "finalizer_called")
-        base_reply = str(reply or "")
+        base_reply = self._profile_fact_reply(user_input) or self._reply_text(reply)
         shadow_voiced = base_reply
         shadow_supervised = base_reply
         shadow_moderated = base_reply
@@ -409,7 +503,11 @@ class ReplyFinalizationManager:
             pass
         final_reply = self._enforce_dad_identity(final_reply)
         final_reply = self._enforce_listener_contract(final_reply, user_input=user_input)
-        final_reply = self.append_signoff(final_reply)
+        final_reply = self.append_signoff(
+            final_reply,
+            user_input=user_input,
+            current_mood=current_mood,
+        )
         # CSCL post-turn feedback: feed voiced reply to coherence tracker (async path)
         try:
             cscl = getattr(self.bot, "conversation_surface", None)

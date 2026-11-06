@@ -228,12 +228,15 @@ class TestDadBotRegression(unittest.TestCase):
             self.bot.is_high_quality_memory({"summary": "Tony shared that emotional state.", "category": "health"})
         )
 
-    def test_prepare_final_reply_blends_before_signoff(self):
+    def test_prepare_final_reply_blends_daily_checkin_without_unprompted_signoff(self):
         self.bot._pending_daily_checkin_context = True
 
-        reply = self.bot.reply_finalization.finalize("You're doing okay, buddy.", "neutral")
+        reply = self.bot.reply_finalization.finalize(
+            "You're doing okay, buddy.",
+            "neutral",
+        )
 
-        self.assertEqual(reply, "You're doing okay, buddy. How's your day shaping up so far? Love you, buddy.")
+        self.assertEqual(reply, "You're doing okay, buddy. How's your day shaping up so far?")
 
     def test_create_chat_thread_keeps_conversation_state_isolated(self):
         original_thread_id = self.bot.active_thread_id
