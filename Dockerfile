@@ -17,19 +17,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 FROM base AS builder
 
+RUN /usr/local/bin/python -m pip install uv==0.13.7
+ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
+    UV_PYTHON_DOWNLOADS=never
+
 RUN python -m venv "$VIRTUAL_ENV"
 
-COPY pyproject.toml ./
+COPY pyproject.toml uv.lock ./
 COPY launch.py ./
 COPY Dad.py ./
 COPY dad_streamlit.py ./
 COPY dad_profile.template.json ./
 COPY dadbot/ ./dadbot/
 COPY dadbot_system/ ./dadbot_system/
+COPY evaluation/ ./evaluation/
 COPY static/ ./static/
 
-RUN python -m pip install --upgrade pip && \
-    python -m pip install .[voice,service]
+RUN uv sync --locked --no-dev --no-editable --extra voice --extra service --extra mcp
 
 FROM base AS runtime
 
@@ -42,6 +46,7 @@ COPY dad_streamlit.py ./
 COPY dad_profile.template.json ./
 COPY dadbot/ ./dadbot/
 COPY dadbot_system/ ./dadbot_system/
+COPY evaluation/ ./evaluation/
 COPY static/ ./static/
 COPY docker/entrypoint.sh /usr/local/bin/dadbot-entrypoint
 

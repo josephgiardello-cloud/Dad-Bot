@@ -369,8 +369,22 @@ There is no remote trace exporter configured by default. Redirect stderr to an a
 ### Feature Groups
 
 ```bash
-pip install -e .[service,voice,notifications,heritage,mcp]
+uv sync --locked --extra service --extra voice --extra notifications --extra heritage --extra mcp
 ```
+
+### Reproducible dependency environments
+
+`uv.lock` is the authoritative, UTF-8 universal lock, generated from `pyproject.toml`; the old platform-specific `pip freeze` snapshot is retired. Use **uv 0.13.7**, enforced by project configuration and pinned in CI/Docker.
+
+```powershell
+python -m pip install uv==0.13.7
+uv sync --locked --extra dev --extra service --extra mcp
+uv run --no-sync python -m pytest -m unit -n 2 --timeout=30
+```
+
+`uv sync --locked` refuses manifest/lock drift and verifies pinned distribution hashes. CI installs the `dev`, `service` and `mcp` extras into its locked virtual environment; Docker installs `voice`, `service` and `mcp` from the same lock. Other optional extras can be selected explicitly with `--extra`. Do not run synchronization against a running application's virtual environment.
+
+After an intentional dependency change, run `uv lock`, validate the selected environments, and commit both the manifest and lock. Prefer `uv lock --upgrade-package NAME` for targeted upgrades. Do not hand-edit the lock or regenerate it with `pip freeze`. Platform markers keep Windows-only dependencies out of Linux installs; a universal resolution is not a claim that every Python/platform combination has been runtime-tested. OS packages, Python/base images and external models remain separate deployment inputs, not bit-for-bit image reproducibility guarantees.
 
 ---
 
