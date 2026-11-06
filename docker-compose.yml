@@ -13,7 +13,7 @@ services:
     image: ollama/ollama:latest
     container_name: dadbot-ollama
     ports:
-      - "11434:11434"
+      - "127.0.0.1:11434:11434"
     volumes:
       - ollama_data:/root/.ollama
     restart: unless-stopped
@@ -35,7 +35,7 @@ services:
       ollama:
         condition: service_healthy
     ports:
-      - "8501:8501"
+      - "127.0.0.1:8501:8501"
     volumes:
       - dadbot_dev_data:/var/lib/dadbot
       - dadbot_dev_logs:/var/log/dadbot
@@ -73,7 +73,7 @@ services:
       - DADBOT_GLOBAL_CONFLUENCE_MODE=enforce
       - DADBOT_ALLOW_LEGACY_CONFLUENCE_KEY=0
     ports:
-      - "8010:8010"
+      - "127.0.0.1:8010:8010"
     depends_on:
       redis:
         condition: service_healthy

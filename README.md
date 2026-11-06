@@ -353,9 +353,44 @@ pip install -e .[service,voice,notifications,heritage,mcp]
 
 - **Local mode** — Ollama chat, local STT, and Piper TTS can be configured to stay on-device.
 - **Cloud voice mode** — edge-tts and ElevenLabs send reply text to their respective services; the Auto backend can choose them when available. Do not use Auto when strict local-only processing is required.
-- **No telemetry** — We don't collect usage data
+- **Diagnostics** — Local logs, events, and snapshots may contain conversation text. Local inference does not mean that no data is written to disk.
 - **Story Mode Lock** — Optional password protection for sensitive contexts
 - **Data export** — Full access to your memory files (JSON, SQLite)
+
+### Storage, retention, and deletion
+
+| Data | Default local location / configuration |
+|---|---|
+| Profile and preferences | `dad_profile.json`; `DADBOT_PROFILE_PATH` |
+| Long-term memory and JSON mirror | `dad_memory.json`; `DADBOT_MEMORY_PATH` |
+| Semantic memory and relationship graph | `dad_memory_semantic.sqlite3`, `dad_memory_graph.sqlite3`; `DADBOT_SEMANTIC_DB_PATH`, `DADBOT_GRAPH_DB_PATH` |
+| Conversation histories, ledgers, checkpoints, and diagnostics | `session_logs`; `DADBOT_SESSION_LOG_DIR`; also inspect configured log, trace, and backup locations |
+| Service session/task/event state and vectors | Configured Redis, PostgreSQL, or vector backends; tenant-scoped data may exist independently of the local files |
+
+Memory-entry PII scrubbing is not a guarantee that conversation histories,
+events, logs, attachments, or backups are scrubbed. The optional
+`DADBOT_EVENT_ENCRYPTION_KEY` protects supported service event payloads, not every
+JSON file, SQLite database, log, or backup. Use filesystem permissions and
+appropriate disk/database encryption for the remaining stores.
+
+There is no single automatic retention period or complete erasure command
+covering all stores. New chat starts another conversation; it does **not** erase
+prior conversations or long-term memory. Operators must set and enforce their
+own retention policy, including logs, uploads, snapshots, backups, and replicas.
+
+For complete deletion, stop DadBot and its background workers first. Identify
+the affected tenant and the effective configured paths; remove that tenant's
+profile, memory, conversation, graph/vector, ledger, checkpoint, and uploaded
+data, including relevant SQLite WAL/SHM sidecars and backups. For service
+backends, delete the tenant's session/task/event/document/vector records using
+the backend's administration tools. Do not delete an entire shared database or
+volume to erase one tenant. Remove matching logs, exports, replicas, and backup
+copies as well; otherwise restoring them can restore deleted information.
+Restart and verify that the deleted data is no longer retrievable.
+
+Compose publishes the UI, API, and Ollama ports on `127.0.0.1` only. Remote access
+requires an explicitly configured authenticated TLS reverse proxy or a deliberate
+binding change; do not expose Ollama directly to an untrusted network.
 
 ---
 
