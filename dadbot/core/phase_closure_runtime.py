@@ -13,7 +13,6 @@ from dadbot.core.cognitive_policy_engine import CognitivePolicyEngine
 from dadbot.core.determinism import _content_hash
 from dadbot.core.execution_contract import TurnRequest
 from dadbot.core.memory_set_invariants import (
-    MemorySetInvariantViolation,
     assert_memory_set_invariants,
     validate_lifecycle_transition,
 )

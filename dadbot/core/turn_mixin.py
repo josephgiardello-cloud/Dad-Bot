@@ -37,7 +37,6 @@ from dadbot.memory.ledger import MemoryLedger
 from dadbot.core.policy_store import DadPolicyStore
 from dadbot.core.runtime_service_provider import DefaultCoreRuntimeServices
 from dadbot.core.runtime_errors import (
-    CanonicalInvariantViolation,
     ConfigurationError,
     TransientExecutionError,
 )

@@ -2,7 +2,6 @@
 
 import asyncio
 import contextlib
-import gzip
 import hashlib
 import json
 import logging
@@ -11,7 +10,6 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Any, Protocol, cast
 
 from dadbot.contracts import AttachmentList, FinalizedTurnResult
@@ -20,11 +18,9 @@ from dadbot.core.contracts.lifecycle_events import (
     Completed,
     Failed,
     LeaseExpired,
-    LeaseRenewed,
     Redelivered,
-    Released,
 )
-from dadbot.core.compaction import ArchiveTier, CompactionPolicy, EventCompactor
+from dadbot.core.compaction import EventCompactor
 from dadbot.core.belief_state_engine import BeliefStateEngine
 from dadbot.core.compositional_tool_planner import CompositionalToolPlanner
 from dadbot.core.behavior_alignment_trainer import BehaviorAlignmentTrainer
@@ -33,14 +29,12 @@ from dadbot.core.cognitive_policy_engine import CognitivePolicyEngine
 from dadbot.core.control_plane_projection import ExecutionProjection
 from dadbot.core.control_plane_reducer import ExecutionState as ReducedExecutionState
 from dadbot.core.control_plane_reducer import ExecutionStatus, lease_expired
-from dadbot.core.core_state import InputEvent, project_views, transition
 from dadbot.core.execution_boundary import ControlPlaneExecutionBoundary
 from dadbot.core.execution_context import (
     close_core_state_scope,
 )
-from dadbot.core.execution_lease import ExecutionLease, LeaseConflictError
+from dadbot.core.execution_lease import ExecutionLease
 from dadbot.core.execution_resource_budget import BackpressureSignal, resolve_dynamic_compute_ticket
-from dadbot.core.execution_context import get_active_core_state
 from dadbot.core.execution_ledger import ExecutionLedger
 from dadbot.core.execution_ledger_memory import InMemoryExecutionLedger
 from dadbot.core.execution_result_unified import (
@@ -72,7 +66,6 @@ from dadbot.core.runtime_contracts import (
 from dadbot.core.kernel_gateway import KernelGateway
 from dadbot.core.kernel_signals import get_exporter, get_metrics, get_tracer
 from dadbot.core.ledger_reader import LedgerReader
-from dadbot.core.ledger_writer import LedgerWriter
 from dadbot.core.ledger_writer_adapter import LedgerWriterAdapter
 from dadbot.core.ledger_coordinator import LedgerCoordinator
 from dadbot.core.invariant_enforcer import InvariantEnforcer
@@ -82,10 +75,8 @@ from dadbot.core.execution_coordinator import ExecutionCoordinator
 from dadbot.core.hypothesis_engine import MultiHypothesisEngine
 from dadbot.core.memory_hierarchy_manager import MemoryHierarchyManager
 from dadbot.core.semantic_memory_graph import SemanticMemoryGraph
-from dadbot.core.semantic_primitives import hash as semantic_hash
 from dadbot.core.semantic_safety_engine import SemanticSafetyEngine
 from dadbot.core.session_planning_optimizer import SessionPlanningOptimizer
-from dadbot.core.session_store import SessionStore
 from dadbot.core.tool_routing_engine import ToolRoutingEngine
 from dadbot.core.tool_self_model import ToolSelfModel
 from dadbot.core.adaptation_engine import AdaptationEngine
@@ -95,7 +86,6 @@ from dadbot.core.topology_runtime import TopologyRuntime, TopologyValidationResu
 from dadbot.core._control_plane_reconciliation import ReconciliationMixin
 from dadbot.core._control_plane_compaction import CompactionMixin
 from dadbot.core.planning_utils import (
-    build_semantic_memory_candidates as _build_semantic_memory_candidates,
     mutate_runtime_plan as _mutate_runtime_plan,
     normalize_tool_runtime_contract as _normalize_tool_runtime_contract,
     runtime_plan_intent as _runtime_plan_intent,
@@ -126,9 +116,9 @@ from dadbot.core.control_plane_lifecycle import (
 from dadbot.core.control_plane_submit_phase import (
     _append_submit_turn_phase,
     _assert_submit_turn_phase_boundary,
-    _assert_submit_turn_phase_trace_complete,
-    _validate_submit_turn_phase_progress,
-    submit_turn_phase_order,
+    _assert_submit_turn_phase_trace_complete as _assert_submit_turn_phase_trace_complete,
+    _validate_submit_turn_phase_progress as _validate_submit_turn_phase_progress,
+    submit_turn_phase_order as submit_turn_phase_order,
 )
 from dadbot.core.control_plane_submission import (
     _initialize_submit_scope_impl,

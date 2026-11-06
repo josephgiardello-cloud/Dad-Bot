@@ -22,7 +22,6 @@ from dadbot.core.external_tool_runtime import (
 from dadbot.core.tool_execution_contract import (
     FailureClass,
     ToolExecutionContract,
-    taxonomy_entry_for,
 )
 from dadbot.core.tool_memory_causal_contract import (
     CausalWritePolicy,

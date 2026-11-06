@@ -1024,7 +1024,7 @@ def launch_api_service(args, *, dadbot_cls=None):
                         raise RuntimeError(str(status.get("error") or "Worker execution failed"))
                     time.sleep(0.05)
                 raise TimeoutError("Timed out waiting for runtime bot response")
-            except Exception as exc:
+            except Exception:
                 logger.warning("ServiceRuntimeBotAdapter fell back to deterministic reply", exc_info=True)
                 fallback = user_text or "I'm here with you."
                 return f"I'm here with you. I heard: {fallback}", False

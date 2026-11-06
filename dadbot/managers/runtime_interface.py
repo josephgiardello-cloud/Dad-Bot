@@ -87,7 +87,7 @@ class SovereignMonitor(threading.Thread):
         for raw in list(stream or []):
             try:
                 event = SovereignEvent.model_validate(raw)
-            except Exception as exc:  # noqa: BLE001
+            except Exception:  # noqa: BLE001
                 return False, valid_count, last_hash, turn_id, veto_seen
 
             if turn_id and event.turn_id != turn_id:

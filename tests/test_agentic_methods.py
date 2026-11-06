@@ -1,4 +1,3 @@
-import pytest
 
 def test_plan_and_act_basic(make_test_dadbot):
     bot = make_test_dadbot()

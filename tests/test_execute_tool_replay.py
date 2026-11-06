@@ -1,7 +1,7 @@
 """Unit tests for replay mode execution in tool_executor."""
 
 import pytest
-from unittest.mock import Mock, MagicMock, patch
+from unittest.mock import Mock
 
 from dadbot.core.tool_executor import execute_tool
 from dadbot.core.runtime_errors import ReplayInvariantViolation

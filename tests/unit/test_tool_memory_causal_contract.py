@@ -12,12 +12,11 @@ Tests cover:
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
-import pytest
 
 from dadbot.core.external_tool_runtime import ToolExecutionResult, ToolExecutionStatus
-from dadbot.core.tool_execution_contract import DEFAULT_GENERIC_TOOL_CONTRACT as DEFAULT_GENERIC_CONTRACT, ToolExecutionContract
+from dadbot.core.tool_execution_contract import DEFAULT_GENERIC_TOOL_CONTRACT as DEFAULT_GENERIC_CONTRACT
 from dadbot.core.tool_execution_contract_binding import (
     CausalWritePolicy,
     ContractAwareToolRuntime,

@@ -1,4 +1,3 @@
-import re
 
 filename = "tests/test_phase4a.py"
 

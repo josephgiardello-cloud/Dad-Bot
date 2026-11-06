@@ -35,9 +35,6 @@ class EventBusStub:
     def emit(self, *a, **k): pass
     def peek(self, *a, **k): return []
     def consume(self, *a, **k): return []
-import subprocess
-import sys
-import json
 
 # Stubs and helpers for test context
 def _stub_llm(llm):
@@ -983,7 +980,6 @@ class TestPhase4AScaleAndPruning:
     @pytest.mark.asyncio
     @pytest.mark.timeout(120)
     async def test_pruning_enforced_after_hundred_turns(self, phase4a_db_path, make_test_dadbot):
-        from dadbot.core.persistence import SQLiteCheckpointer
 
         # Wire checkpointer with prune_every=1 so pruning fires on every save.
         result = _make_orchestrator_with_checkpointer(phase4a_db_path, make_test_dadbot=make_test_dadbot)
@@ -1016,7 +1012,6 @@ class TestPhase4AScaleAndPruning:
         turns_per_session = 5
 
         try:
-            from dadbot.core.dadbot import DadBot
             from dadbot.core.orchestrator import DadBotOrchestrator
         except Exception as exc:
             pytest.skip(f"Orchestrator unavailable: {exc}")

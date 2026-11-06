@@ -4,7 +4,7 @@ import time
 from datetime import datetime
 from typing import Any
 
-from dadbot.contracts import AttachmentList, FinalizedTurnResult
+from dadbot.contracts import AttachmentList
 from dadbot.core.contracts.lifecycle_events import Submitted
 from dadbot.core.core_state import CoreState
 from dadbot.core.execution_context import open_core_state_scope, push_core_state_event

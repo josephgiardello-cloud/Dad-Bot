@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import inspect
 import logging
 import warnings
@@ -18,18 +17,7 @@ from dadbot.core.execution_context import ensure_execution_trace_root
 from dadbot.core.execution_contract import (
     SovereignContext,
     TurnDelivery,
-    TurnResponse,
     live_turn_request,
-)
-from dadbot.core.execution_result_unified import get_unified_execution_result
-from dadbot.core.memory_set_invariants import (
-    assert_memory_set_invariants,
-    record_causal_step_locked,
-    MemorySetInvariantViolation,
-)
-from dadbot.core.system_state_algebra import (
-    evaluate_system_state_algebra,
-    persist_system_state_algebra,
 )
 from dadbot.core.graph import (
     LedgerMutationOp,
@@ -37,24 +25,14 @@ from dadbot.core.graph import (
     MutationKind,
     TurnContext,
 )
-from dadbot.core.tool_executor import execute_tool
 from dadbot.core.turn_coherence import mark_turn_coherence, reset_turn_coherence
 from dadbot.managers.reply_generation import ReplyGenerationManager
-from dadbot.models import AgenticToolPlan
 from dadbot.services.memory_service import MemoryService
 from dadbot.services.llm_call_adapter import LLMCallAdapter
 from dadbot.services.turn_state_mutator import TurnStateMutator
 from dadbot.services._tool_pipeline_mixin import (
     ToolPipelineMixin,
-    _DEFER_TOOL_BIASES,
-    _PlannerDecision,
-    _REMINDER_TOOL_NAMES,
-    _ReflectionDecision,
     _SET_REMINDER_TOOL,
-    _TOOL_NAME_ALIASES,
-    _TOOL_VISIBILITY_SETTINGS,
-    _WEB_SEARCH_TOOL,
-    _is_event_loop_closed_error,
 )
 
 # Keep the historic logger name so existing tests and log pipelines remain stable

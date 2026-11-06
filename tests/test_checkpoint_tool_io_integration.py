@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from dadbot.core.execution_checkpoint import ExecutionCheckpoint, NodeExecutionSnapshot, NodeState
+from dadbot.core.execution_checkpoint import ExecutionCheckpoint
 from dadbot.core.tool_recording import ToolIOLedger, ToolIORecord
 
 pytestmark = pytest.mark.unit

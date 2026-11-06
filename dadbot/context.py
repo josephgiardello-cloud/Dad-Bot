@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from dadbot.contracts import DadBotContext, SupportsContextRuntime
+from dadbot.contracts import DadBotContext
 
 
 class ContextBuilder:

@@ -10,8 +10,8 @@ Core validations:
 import asyncio
 import pytest
 from types import SimpleNamespace
-from unittest.mock import Mock, patch, MagicMock
-from dadbot.core.response_engine import ResponseEngine, ResponseCandidate
+from unittest.mock import Mock, patch
+from dadbot.core.response_engine import ResponseEngine
 from dadbot.runtime.model.model_call_port import ModelPort
 
 

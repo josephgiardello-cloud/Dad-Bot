@@ -1,7 +1,5 @@
 """Tests for centralized persistence schema config resolution."""
 
-import os
-import pytest
 
 from dadbot.core.persistence_schema_config import is_strict_persistence_schema_mode
 

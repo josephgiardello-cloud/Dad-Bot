@@ -20,7 +20,7 @@ writers that must be hunted down before Phase 2.3 enforcement.
 
 import pytest
 
-from dadbot.core.write_plane import MutationRecord, WritePlane, get_write_plane, reset_write_plane
+from dadbot.core.write_plane import MutationRecord, reset_write_plane
 
 
 pytestmark = pytest.mark.dev
@@ -329,7 +329,6 @@ class TestMutationLogCompleteness:
 
 import difflib as _difflib
 from pathlib import Path as _Path
-from tempfile import TemporaryDirectory as _TempDir
 
 import pytest
 

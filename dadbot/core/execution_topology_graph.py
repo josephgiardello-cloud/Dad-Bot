@@ -33,7 +33,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 from enum import StrEnum
-from typing import Any, Protocol
+from typing import Any
 
 logger = logging.getLogger(__name__)
 

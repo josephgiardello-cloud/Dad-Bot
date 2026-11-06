@@ -9,7 +9,6 @@ import pytest
 from dadbot.runtime.structured_output import (
     AgentPlan,
     SchemaValidationError,
-    ToolCall,
     build_llm_reflection_hook,
     build_reflection_prompt,
     parse_agent_plan,

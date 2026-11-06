@@ -24,7 +24,6 @@ from unittest.mock import patch
 
 import pytest
 
-from Dad import DadBot
 
 pytestmark = pytest.mark.unit
 

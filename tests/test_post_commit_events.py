@@ -6,8 +6,8 @@ import pytest
 
 from dadbot.core.execution_ledger import IntegrityBreachError
 from dadbot.core.post_commit_events import POST_COMMIT_READY, PostCommitEvent
-from dadbot.core.runtime_errors import InvariantViolation, PersistenceFailure, RuntimeErrorBase
-from dadbot.services.persistence import PersistenceService, StateDivergenceError
+from dadbot.core.runtime_errors import InvariantViolation, PersistenceFailure
+from dadbot.services.persistence import PersistenceService
 from dadbot.services.post_commit_worker import PostCommitWorker
 from dadbot_system.events import InMemoryEventBus
 

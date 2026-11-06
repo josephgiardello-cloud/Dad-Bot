@@ -1,6 +1,5 @@
 """Tests for failure policy engine: decision brain validation."""
 
-import pytest
 
 from dadbot.core.failure_policy_engine import (
     FailurePolicyContext,

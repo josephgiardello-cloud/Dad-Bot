@@ -19,7 +19,6 @@ class ToolRegistry:
     def __init__(self): self._tools = {}
     def register(self, name, tool): self._tools[name] = tool
     def get(self, name): return self._tools.get(name)
-from dadbot.core.logging_config import configure_logging
 from dadbot.core.metrics import metrics
 from dadbot.speech.asr import ASR
 from dadbot.speech.tts import TTS

@@ -26,6 +26,26 @@ from dadbot.ui.chat_stream import draft_chunk_callback, run_with_chat_drafts
 from dadbot_system.contracts import DEFAULT_MODEL, ServiceConfig
 
 
+def test_streamlit_launcher_imports_entrypoint(monkeypatch):
+    import builtins
+    import runpy
+
+    original_import = builtins.__import__
+    calls = []
+
+    def import_module(name, *args, **kwargs):
+        if name == "dotenv":
+            return SimpleNamespace(load_dotenv=lambda **_kwargs: None)
+        if name == "dad_streamlit":
+            calls.append(name)
+            return SimpleNamespace()
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_module)
+    runpy.run_path(str(Path(__file__).resolve().parents[2] / "launch_streamlit.py"))
+    assert calls == ["dad_streamlit"]
+
+
 def test_model_defaults_and_explicit_overrides(monkeypatch):
     monkeypatch.delenv("DADBOT_LLM_MODEL", raising=False)
     assert DadBotConfig().active_model == DEFAULT_MODEL

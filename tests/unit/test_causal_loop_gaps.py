@@ -9,7 +9,6 @@ Covers:
 
 from __future__ import annotations
 
-import time
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -28,9 +27,7 @@ from dadbot.core.memory_context_injector import (
 
 # ── Gap 2 ──────────────────────────────────────────────────────────────────
 from dadbot.core.memory_coherence_engine import (
-    ConflictRecord,
     ConflictResolutionStrategy,
-    CoherentMemoryView,
     DecayRule,
     MemoryCoherenceEngine,
 )
@@ -38,8 +35,6 @@ from dadbot.core.memory_coherence_engine import (
 # ── Gap 3 ──────────────────────────────────────────────────────────────────
 from dadbot.core.causal_dependency_graph import (
     CausalDepGraph,
-    CausalEdge,
-    CausalNode,
     build_temporal_graph,
 )
 
@@ -51,7 +46,6 @@ from dadbot.core.failure_policy_engine import (
 )
 from dadbot.core.memory_feedback_policy import (
     MemoryAwarePolicyContext,
-    MemoryPolicyAdjustment,
     ToolMemoryProfile,
     ToolSelectionAdvisor,
     compute_scheduling_priority,

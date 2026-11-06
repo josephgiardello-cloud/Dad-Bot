@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 
 from dadbot.contracts import DadBotContext, SupportsDadBotAccess
 from dadbot.models import (

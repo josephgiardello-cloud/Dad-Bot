@@ -1,10 +1,10 @@
 """Unit tests for replay mode detection and checkpoint restoration."""
 
 import pytest
-from unittest.mock import Mock, MagicMock, patch
+from unittest.mock import Mock
 
 from dadbot.core.replay_mode_mixin import ReplayModeMixin
-from dadbot.core.tool_recording import ToolIOLedger, ToolIORecord
+from dadbot.core.tool_recording import ToolIOLedger
 
 
 class _ReplayModeTestHelper(ReplayModeMixin):

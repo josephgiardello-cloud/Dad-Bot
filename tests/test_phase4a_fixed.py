@@ -184,7 +184,6 @@ class TestPhase4AOrchestratorIntegration:
     def orchestrator(self, make_test_dadbot):
         """Fixture: Get pre-initialized orchestrator if available."""
         try:
-            from dadbot.core.dadbot import DadBot
 
             bot = make_test_dadbot()
             orchestrator = getattr(bot, "turn_orchestrator", None)
@@ -224,7 +223,7 @@ class TestPhase4AOrchestratorIntegration:
                 ),
             ):
                 yield orchestrator
-        except Exception as e:
+        except Exception:
             pytest.skip("Orchestrator unavailable: {e}")
 
     def test_orchestrator_available(self, orchestrator):
@@ -994,7 +993,7 @@ asyncio.run(main())
             pytest.ail("Process 2 produced no output; stderr: {result2.stderr[-400:]}")
         try:
             data = json.loads(lines[-1])
-        except Exception as exc:
+        except Exception:
             pytest.ail("Process 2 last line was not valid JSON: {lines[-1]!r} / {exc}")
 
         assert data["count"] >= 2, "Expected ≥2 checkpoints across processes, got {data['count']}"
@@ -1172,7 +1171,7 @@ class TestPhase4AScaleAndPruning:
             )
             orchestrator = DadBotOrchestrator(bot=bot, strict=False, checkpointer=checkpointer)
             llm = orchestrator.registry.get("llm")
-        except Exception as exc:
+        except Exception:
             pytest.skip("Orchestrator unavailable: {exc}")
 
         n_turns = 110
@@ -1201,9 +1200,8 @@ class TestPhase4AScaleAndPruning:
         turns_per_session = 5
 
         try:
-            from dadbot.core.dadbot import DadBot
             from dadbot.core.orchestrator import DadBotOrchestrator
-        except Exception as exc:
+        except Exception:
             pytest.skip("Orchestrator unavailable: {exc}")
 
         async def run_session(session_id: str) -> int:
@@ -1233,7 +1231,7 @@ class TestPhase4AScaleAndPruning:
 
         try:
             orchestrator, checkpointer, llm = _make_orchestrator_with_checkpointer(phase4a_db_path, make_test_dadbot=make_test_dadbot)
-        except Exception as exc:
+        except Exception:
             pytest.skip("Orchestrator unavailable: {exc}")
 
         n_turns = 20

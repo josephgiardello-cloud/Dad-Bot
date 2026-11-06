@@ -2,7 +2,6 @@
 Structured metrics collection for DadBot.
 Provides counters, timers, and gauges for reliability and performance monitoring.
 """
-import time
 from collections import defaultdict
 
 class Metrics:

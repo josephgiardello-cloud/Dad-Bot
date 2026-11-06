@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 from types import SimpleNamespace
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, patch
 
 from dadbot.core.response_engine import ResponseEngine, ResponseCandidate
 from dadbot.core.control_plane import ExecutionControlPlane

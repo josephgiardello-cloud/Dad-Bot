@@ -53,7 +53,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Sequence
 
 from dadbot.core.system_state_model import SystemHealthStatus
 

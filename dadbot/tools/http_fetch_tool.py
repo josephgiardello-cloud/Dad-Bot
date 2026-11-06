@@ -31,7 +31,6 @@ from dadbot.core.external_tool_runtime import (
     HttpResponse,
     HttpTransport,
     IsolationProfile,
-    NetworkFailureKind,
     NoAuth,
     ResourceLimits,
     RetryPolicy,
@@ -194,7 +193,7 @@ def build_http_fetch_tool(
             )
 
         if params:
-            from urllib.parse import urlencode, urlparse, urlunparse, parse_qs
+            from urllib.parse import urlparse, urlunparse, parse_qs
             parsed = urlparse(url)
             existing = parse_qs(parsed.query)
             existing.update({k: [str(v)] for k, v in params.items()})

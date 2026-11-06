@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import pytest
 
 from dadbot.core.safety_critic import DadSafetyCritic
 

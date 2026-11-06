@@ -17,7 +17,7 @@ from ci.import_graph_check import run_checks as run_import_graph_checks
 from ci.kernel_boundary_check import run_kernel_boundary_checks
 from ci.mutation_tracking_check import check_no_cross_layer_shared_mutation
 from dadbot.core.execution_boundary import CANONICAL_EXECUTION_KERNEL
-from dadbot.core.execution_topology_graph import get_execution_topology_graph, NodeType
+from dadbot.core.execution_topology_graph import get_execution_topology_graph
 
 REPORT_PATH = ROOT / "artifacts" / "system_audit_matrix_report.json"
 

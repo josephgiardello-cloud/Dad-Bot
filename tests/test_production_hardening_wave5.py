@@ -635,12 +635,10 @@ class TestQueueSaturation:
                     Scheduler,
                     SessionRegistry,
                 )
-                from dadbot.core.contracts.lifecycle_events import Submitted
                 from dadbot.core.execution_ledger import ExecutionLedger
                 from dadbot.core.ledger_reader import LedgerReader
                 from dadbot.core.ledger_writer import LedgerWriter
                 from dadbot.core.execution_resource_budget import BackpressureSignal
-                from datetime import datetime
 
                 registry = SessionRegistry()
                 ledger = ExecutionLedger()

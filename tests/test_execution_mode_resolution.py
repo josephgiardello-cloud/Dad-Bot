@@ -7,9 +7,7 @@ Validates that:
 4. Mode resolution is idempotent (resolve same job twice → same result)
 """
 
-import pytest
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
 
 from dadbot.core.execution_mode import (
     ExecutionMode,

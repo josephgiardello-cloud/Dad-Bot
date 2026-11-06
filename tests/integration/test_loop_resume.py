@@ -17,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from dadbot.runtime.agent_driver_loop import AgentDriverLoop, DriverLoopPolicy, LoopTurnRecord
+from dadbot.runtime.agent_driver_loop import AgentDriverLoop, DriverLoopPolicy
 from dadbot.runtime.loop_snapshot import LoopSessionSnapshot, LoopSnapshotManager
 
 pytestmark = pytest.mark.integration

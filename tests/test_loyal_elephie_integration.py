@@ -2,7 +2,7 @@
 
 import pytest
 from dadbot.memory.hybrid_retriever import HybridRetriever
-from dadbot.streamlit_helpers import save_important_memory, load_important_memories, get_relationship_health_stats
+from dadbot.streamlit_helpers import save_important_memory, get_relationship_health_stats
 from dadbot.core.memory_ranking import rank_memory_hybrid
 
 

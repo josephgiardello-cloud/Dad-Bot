@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import pytest
 
 from dadbot.core.control_plane import ExecutionControlPlane, SessionRegistry
 

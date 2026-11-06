@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from typing import Any, Callable, Mapping
+from typing import Any, Callable
 
 from dadbot.contracts import AttachmentList, FinalizedTurnResult
 from dadbot.core.behavior_contract_lock import get_behavior_contract_lock

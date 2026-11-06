@@ -2,7 +2,6 @@
 
 from typing import Any, Protocol
 
-from dadbot.contracts import AttachmentList
 
 
 class TurnOrchestratorProvider(Protocol):

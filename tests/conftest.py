@@ -35,7 +35,6 @@ def _test_build_graph_store_backend(self):
     return SQLiteGraphStore(self._bot, db_path)
 gm_mod.MemoryGraphManager._build_graph_store_backend = _test_build_graph_store_backend
 
-import types
 import os
 from unittest.mock import MagicMock
 from datetime import date

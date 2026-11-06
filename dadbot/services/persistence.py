@@ -34,7 +34,6 @@ from dadbot.core.persistence_record_schema import (
     assert_valid_replay_record,
     checkpoint_record_errors,
     normalize_checkpoint_record,
-    assert_valid_trace_event,
     normalize_trace_event,
     replay_record_errors,
     trace_event_errors,
@@ -47,7 +46,6 @@ from dadbot.core.runtime_errors import (
 )
 from dadbot.managers.conversation_persistence import ConversationPersistenceManager
 from dadbot.services._persistence_mixins import (
-    POLICY_TRACE_EVENT_TYPE,
     StateDivergenceError,
     _AuthorityStateMixin,
     _BehavioralLedgerMixin,

@@ -37,7 +37,7 @@ Usage
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Sequence
 
 from dadbot.core.tool_memory_causal_contract import CausalMemoryEntry
