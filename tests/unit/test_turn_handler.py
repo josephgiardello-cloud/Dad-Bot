@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from dadbot.core.policy_store import DadPolicy
-from dadbot.core.turn_handler import TurnContext, TurnHandler, thin_turn_handler_enabled
+from dadbot.core.turn_handler import TurnContext, TurnHandler
 
 
 pytestmark = pytest.mark.dev
@@ -34,19 +34,11 @@ async def test_turn_handler_process_turn_delegates_with_enforce_confluence() -> 
     call = calls[0]
     assert call["user_input"] == "hello"
     assert call["session_id"] == "s1"
-    assert call["confluence_key"] == "turn:key"
+    assert call["timeout_seconds"] == 3.0
     metadata = dict(call["metadata"] or {})
     assert metadata["confluence_mode"] == "enforce"
     assert metadata["confluence_key"] == "turn:key"
     assert metadata["x"] == 1
-
-
-def test_thin_turn_handler_enabled_is_always_true(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("DADBOT_USE_THIN_TURN_HANDLER", "1")
-    assert thin_turn_handler_enabled() is True
-
-    monkeypatch.setenv("DADBOT_USE_THIN_TURN_HANDLER", "off")
-    assert thin_turn_handler_enabled() is True
 
 
 @pytest.mark.asyncio

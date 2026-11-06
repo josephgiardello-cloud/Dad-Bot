@@ -591,7 +591,6 @@ class TurnGraph:
     def _pipeline_items(self) -> list[tuple[str, Any]]:
         return self._topology.pipeline_items()
 
-    # (Deleted: _emit_turn_health_state, _mark_structural_degradation, _mark_stage_enter — no longer used)
 
     def add_node(self, name: str, node: Any) -> None:
         # Construction-time validation is advisory; runtime stage validation is authoritative.
@@ -625,7 +624,6 @@ class TurnGraph:
     ) -> None:
         self._execution_witness_emitter = emitter
 
-    # (Deleted: _emit_execution_witness — no longer used)
 
     async def _run_parallel_subnodes(self, node: Any, turn_context: TurnContext) -> TurnContext:
         return await self._traverser.run_parallel_subnodes(node, turn_context)
@@ -715,21 +713,17 @@ class TurnGraph:
             turn_context=turn_context,
         )
 
-    # (Deleted: _emit_checkpoint, _phase_for_stage, _sync_stage_phase — phase tracking removed)
 
-    # (Deleted: _emit_capability_audit_report — audit reporting removed)
 
     # ------------------------------------------------------------------
     # Dispatcher authority: structural fidelity validator
     # ------------------------------------------------------------------
 
-    # (Deleted: _check_structural_fidelity — fidelity checking removed)
 
     # ------------------------------------------------------------------
     # Node-level stage boundary contract enforcement
     # ------------------------------------------------------------------
 
-    # (Deleted: _enforce_node_stage_contract — contract enforcement removed)
 
     # ------------------------------------------------------------------
     # Dispatcher authority: per-stage execution worker
@@ -1349,7 +1343,28 @@ class TurnGraph:
         self._capture_memory_before(turn_context, stage_key)
 
         try:
+            required_inputs, required_outputs = _NODE_STAGE_CONTRACTS.get(stage_key, ((), ()))
+            prerequisite = _NODE_INPUT_PREREQUISITES.get(stage_key)
+            preceding_stages = {name for name, _ in pipeline_items[:idx]}
+            rejections = turn_context.state.get("kernel_rejection_contract", [])
+            rejection_count = len(rejections)
+            skipped_stages = {
+                item["stage"] for item in rejections if item.get("action") == "skip_stage"
+            }
+            if prerequisite is None or (prerequisite in preceding_stages and prerequisite not in skipped_stages):
+                missing = [key for key in required_inputs if key not in turn_context.state]
+                if missing:
+                    raise NodeContractViolationError(f"{stage_key} missing required inputs: {missing}")
             turn_context = await self._execute_node(node, turn_context)
+            stage_skipped = any(
+                item.get("stage") == stage_key and item.get("action") == "skip_stage"
+                for item in turn_context.state.get("kernel_rejection_contract", [])[rejection_count:]
+            )
+            terminal = turn_context.short_circuit and turn_context.short_circuit_result is not None
+            if not terminal and not stage_skipped:
+                missing = [key for key in required_outputs if key not in turn_context.state]
+                if missing:
+                    raise NodeContractViolationError(f"{stage_key} missing required outputs: {missing}")
             self._enforce_identity_tuple_immutable(turn_context, boundary=f"stage_exit:{stage_key}")
             self._record_stage_success(
                 turn_context,

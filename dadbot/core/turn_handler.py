@@ -9,12 +9,6 @@ from typing import Any
 from dadbot.contracts import AttachmentList, FinalizedTurnResult
 
 
-def thin_turn_handler_enabled() -> bool:
-    # Thin spine is canonical and always enabled.
-    # Keep this helper for compatibility with legacy call sites/tests.
-    return True
-
-
 @dataclass(frozen=True)
 class TurnContext:
     user_input: str
