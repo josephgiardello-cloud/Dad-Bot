@@ -202,6 +202,11 @@
   <div class="layout">
     <div class="header">
       <div class="title">DadBot Live Avatar</div>
+      <details>
+        <summary>API authentication</summary>
+        <label>Bearer token <input id="apiToken" type="password" autocomplete="off" /></label>
+        <label>X-DADBOT-KEY <input id="apiKey" type="password" autocomplete="off" /></label>
+      </details>
       <div id="status" class="status">Disconnected</div>
     </div>
 
@@ -966,9 +971,43 @@
       }
     }
 
-    function connect() {
+    async function connect() {
       try {
-        socket = new WebSocket(wsUrl);
+        const destination = new URL(wsUrl);
+        for (const name of ["access_token", "dadbot_key", "x_dadbot_key", "ticket"]) {
+          if (destination.searchParams.has(name)) {
+            throw new Error("Do not put credentials in the relay URL; use API authentication.");
+          }
+        }
+        if (params.get("dadbot_dev_no_auth") !== "1") {
+          if (!destination.pathname.endsWith("/spatial/ws")) {
+            throw new Error("The relay URL must end with /spatial/ws.");
+          }
+          const exchange = new URL(destination);
+          exchange.protocol = destination.protocol === "wss:" ? "https:" : "http:";
+          exchange.pathname = exchange.pathname.replace(/\/spatial\/ws$/, "/websocket/ticket");
+          exchange.search = "";
+          const headers = { "Content-Type": "application/json" };
+          const token = document.getElementById("apiToken").value.trim();
+          const key = document.getElementById("apiKey").value.trim();
+          if (token) headers.Authorization = "Bearer " + token;
+          if (key) headers["X-DADBOT-KEY"] = key;
+          const response = await fetch(exchange, {
+            method: "POST",
+            headers,
+            cache: "no-store",
+            body: JSON.stringify({ channel: "spatial", tenant_id: destination.searchParams.get("tenant_id") || "" })
+          });
+          if (!response.ok) {
+            throw new Error("Handshake HTTP " + response.status + "; check API authentication and Redis.");
+          }
+          const payload = await response.json();
+          if (typeof payload.ticket !== "string" || !payload.ticket) {
+            throw new Error("The API did not return a handshake ticket.");
+          }
+          destination.searchParams.set("ticket", payload.ticket);
+        }
+        socket = new WebSocket(destination);
       } catch (err) {
         setStatus("Disconnected", false);
         setLog("WebSocket init failed: " + err);

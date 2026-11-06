@@ -226,12 +226,24 @@ def test_service_client_build_local_command_includes_production_persistence_flag
     assert "--otel" in command
 
 
-def test_service_client_builds_websocket_event_stream_url():
+def test_service_client_builds_websocket_event_stream_url(monkeypatch):
     client = DadServiceClient(ServiceClientConfig(base_url="https://dad.example/app", tenant_id="family-a"))
+    calls = []
+
+    def request(method, path, payload=None):
+        calls.append((method, path, payload))
+        return {"ticket": "single-use-ticket"}
+
+    monkeypatch.setattr(client, "_request", request)
 
     url = client.session_event_stream_url("session-123")
 
-    assert url == "wss://dad.example/app/sessions/session-123/events/stream?tenant_id=family-a"
+    assert (
+        url == "wss://dad.example/app/v1/sessions/session-123/events/stream?tenant_id=family-a&ticket=single-use-ticket"
+    )
+    assert calls == [
+        ("POST", "/websocket/ticket", {"channel": "events", "session_id": "session-123", "tenant_id": "family-a"})
+    ]
 
 
 def test_service_client_turn_returns_completed_response_payload():

@@ -66,7 +66,7 @@ Dad-Bot can embed a live avatar frontend (for example a fork of josepeon/spatial
 Set in .env:
 
 ```bash
-DADBOT_SPATIAL_AVATAR_URL=http://localhost:8080/index.html
+DADBOT_SPATIAL_AVATAR_URL=http://localhost:8080/index.html?dadbot_dev_no_auth=1
 DADBOT_SPATIAL_RELAY_WS_URL=ws://127.0.0.1:8787/v1/spatial/ws
 # Local dev convenience: disable API auth for direct browser websocket testing
 DADBOT_API_AUTH_REQUIRED=0
@@ -89,7 +89,7 @@ python -m http.server 8080
 
 # Terminal 4: run Dad-Bot UI with embed + relay URLs
 cd C:\Users\josep\OneDrive\Desktop\Dad-Bot
-$env:DADBOT_SPATIAL_AVATAR_URL = "http://localhost:8080/index.html"
+$env:DADBOT_SPATIAL_AVATAR_URL = "http://localhost:8080/index.html?dadbot_dev_no_auth=1"
 $env:DADBOT_SPATIAL_RELAY_WS_URL = "ws://127.0.0.1:8787/v1/spatial/ws"
 .\.venv\Scripts\python.exe -m streamlit run dad_streamlit.py --server.port 8501
 ```
@@ -103,6 +103,21 @@ VS Code tasks are also available:
 Local live mock avatar client:
 - A websocket-enabled demo avatar is included at `static/spatial_live_mock/index.html`.
 - It reads the relay URL from `dadbot_ws`/`dadbotWs` query parameters, sends text turns, and plays returned base64 WAV audio.
+- For authenticated use, omit `dadbot_dev_no_auth=1`, configure `DADBOT_REDIS_URL`, add the frontend origin to `DADBOT_API_CORS_ORIGINS` (for example `http://localhost:8080`), and enter credentials in the avatar's **API authentication** fields. Credentials remain in the page's memory, not URLs or browser storage.
+
+### WebSocket handshake authentication
+
+Browser clients must exchange HTTP credentials for an opaque ticket before each WebSocket connection or reconnect:
+
+1. `POST /v1/websocket/ticket` with normal `Authorization: Bearer ...` (or `X-Dadbot-Token`) and, if enabled, `X-DADBOT-KEY` headers.
+2. Send JSON `{"channel":"pulse","session_id":"your-session","tenant_id":"your-tenant"}`. Channels are `events`, `pulse` and `spatial`; `spatial` does not need a session ID and requires write scope. Session streams require read scope.
+3. Use the returned ticket as `?ticket=...` on the matching WebSocket endpoint. A supplied `tenant_id` must match the authenticated tenant.
+
+Tickets last **at most 60 seconds**, never outlive their original principal, and work exactly once. Redis 6.2+ provides atomic `GETDEL` consumption across API processes; configure `DADBOT_REDIS_URL` for ticket issuance. Missing/unavailable Redis fails closed (HTTP 503 or WebSocket close 1013); it never falls back to process-local ticket storage. The production Compose Redis 7 service supports this.
+
+Long-lived `access_token`, `dadbot_key` and `x_dadbot_key` query parameters are rejected on all three WebSocket endpoints. Non-browser clients may continue authenticating with headers. The Python service client's stream URL helper performs the HTTP exchange and returns a fresh, versioned ticket URL; request another URL after reconnecting.
+
+Use HTTPS/WSS outside loopback and redact WebSocket query strings in proxy/access logs, even though tickets are short-lived and single-use. `dadbot_dev_no_auth=1` is an explicit demo-only bypass of the exchange, usable only when the server itself has authentication disabled and no secret-key requirement; it does not bypass server authentication.
 
 Notes:
 - The Dad-Bot chat stack stays in Dad-Bot; the avatar panel embeds the external frontend.

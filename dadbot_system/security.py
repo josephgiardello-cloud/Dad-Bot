@@ -4,6 +4,8 @@ import base64
 import hashlib
 import hmac
 import json
+import math
+import secrets
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -30,6 +32,10 @@ class AuthorizationError(ServiceSecurityError):
 
 
 class EncryptionUnavailableError(ServiceSecurityError):
+    pass
+
+
+class TicketStoreUnavailableError(ServiceSecurityError):
     pass
 
 
@@ -174,6 +180,70 @@ class SlidingWindowRateLimiter:
                 return max(1.0, self.window_seconds - (now - bucket[0]))
             bucket.append(now)
         return 0.0
+
+
+class RedisWebSocketTicketStore:
+    TTL_SECONDS = 60
+
+    def __init__(self, redis_url: str, *, namespace: str) -> None:
+        try:
+            import redis
+        except ImportError as exc:
+            raise RuntimeError("WebSocket tickets require the 'service' dependencies (redis)") from exc
+
+        self._client = redis.from_url(redis_url, decode_responses=True, socket_timeout=3.0, socket_connect_timeout=3.0)
+        self._redis_error = redis.exceptions.RedisError
+        self._prefix = f"dadbot:ws-ticket:{namespace}:"
+
+    def _key(self, ticket: str) -> str:
+        return self._prefix + hashlib.sha256(ticket.encode("utf-8")).hexdigest()
+
+    def issue(self, principal: ServicePrincipal, *, path: str) -> tuple[str, float]:
+        now = time.time()
+        expires_at = min(now + self.TTL_SECONDS, principal.expires_at or now + self.TTL_SECONDS)
+        if expires_at <= now:
+            raise AuthenticationError("Principal has expired")
+        ticket = secrets.token_urlsafe(32)
+        payload = _stable_json({"path": path, "expires_at": expires_at, "principal": principal.to_metadata()}).decode(
+            "utf-8"
+        )
+        try:
+            stored = self._client.set(self._key(ticket), payload, ex=math.ceil(expires_at - now), nx=True)
+        except self._redis_error as exc:
+            raise TicketStoreUnavailableError("WebSocket ticket store is unavailable") from exc
+        if not stored:
+            raise TicketStoreUnavailableError("Unable to allocate WebSocket ticket")
+        return ticket, expires_at
+
+    def consume(self, ticket: str, *, path: str) -> ServicePrincipal:
+        if not ticket or len(ticket) > 128:
+            raise AuthenticationError("Invalid WebSocket ticket")
+        try:
+            # GETDEL is atomic across API workers; a mismatched attempt also burns the ticket.
+            raw = self._client.getdel(self._key(ticket))
+        except self._redis_error as exc:
+            raise TicketStoreUnavailableError("WebSocket ticket store is unavailable") from exc
+        if not isinstance(raw, (str, bytes)):
+            raise AuthenticationError("Expired or already used WebSocket ticket")
+        try:
+            payload = json.loads(raw)
+            if payload["path"] != path or float(payload["expires_at"]) <= time.time():
+                raise AuthenticationError("Expired or mismatched WebSocket ticket")
+            metadata = payload["principal"]
+            return ServicePrincipal(
+                subject=metadata["subject"],
+                tenant_id=metadata["tenant_id"],
+                scopes=frozenset(metadata["scopes"]),
+                allowed_tools=frozenset(metadata["allowed_tools"]),
+                issuer=metadata["issuer"],
+                expires_at=float(metadata["expires_at"]),
+                token_id=metadata["token_id"],
+            )
+        except (ValueError, KeyError, TypeError) as exc:
+            raise AuthenticationError("Invalid WebSocket ticket data") from exc
+
+    def close(self) -> None:
+        self._client.close()
 
 
 class EncryptedJsonCodec:

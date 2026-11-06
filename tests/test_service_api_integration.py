@@ -240,7 +240,7 @@ class SpatialRuntimeBot(FakeRuntimeBot):
         self.tts_manager = type(
             "TTSManagerStub",
             (),
-            {"get_tts_audio": lambda _self, _text: (b"RIFFTEST", "")},
+            {"get_tts_audio": lambda _self, _text: (b"RIFFTEST", "", "audio/wav")},
         )()
 
     def process_user_message(self, user_input: str, attachments=None):
@@ -325,13 +325,7 @@ def test_api_event_stream_websocket_replays_and_streams_tenant_events():
     app = create_api_app(orchestrator, config=service_config())
 
     with TestClient(app) as client:
-        websocket_token = ServiceTokenManager(SERVICE_TOKEN_SECRET, issuer="dadbot").issue(
-            subject="integration-client",
-            tenant_id="family-a",
-            scopes={"read", "write"},
-            ttl_seconds=3600.0,
-        )
-        with client.websocket_connect(f"/v1/sessions/socket-session/events/stream?access_token={websocket_token}") as websocket:
+        with client.websocket_connect("/v1/sessions/socket-session/events/stream", headers=auth_headers()) as websocket:
             response = client.post(
                 "/v1/sessions/socket-session/chat",
                 json={"user_input": "hello from websocket", "tenant_id": "family-a"},
@@ -362,13 +356,7 @@ def test_api_pulse_websocket_streams_vitals_and_thinking_state():
     app = create_api_app(orchestrator, config=service_config())
 
     with TestClient(app) as client:
-        websocket_token = ServiceTokenManager(SERVICE_TOKEN_SECRET, issuer="dadbot").issue(
-            subject="integration-client",
-            tenant_id="family-a",
-            scopes={"read", "write"},
-            ttl_seconds=3600.0,
-        )
-        with client.websocket_connect(f"/v1/sessions/pulse-session/pulse/stream?access_token={websocket_token}") as websocket:
+        with client.websocket_connect("/v1/sessions/pulse-session/pulse/stream", headers=auth_headers()) as websocket:
             initial = websocket.receive_json()
             response = client.post(
                 "/v1/sessions/pulse-session/chat",
@@ -397,13 +385,7 @@ def test_api_spatial_websocket_relays_text_and_audio_payload():
     app = create_api_app(orchestrator, config=service_config(), runtime_bot=runtime_bot)
 
     with TestClient(app) as client:
-        websocket_token = ServiceTokenManager(SERVICE_TOKEN_SECRET, issuer="dadbot").issue(
-            subject="integration-client",
-            tenant_id="family-a",
-            scopes={"read", "write"},
-            ttl_seconds=3600.0,
-        )
-        with client.websocket_connect(f"/v1/spatial/ws?access_token={websocket_token}") as websocket:
+        with client.websocket_connect("/v1/spatial/ws", headers=auth_headers()) as websocket:
             websocket.send_json({"text": "hey dad"})
             response = websocket.receive_json()
 
@@ -505,8 +487,7 @@ def test_api_turn_endpoint_veto_proxy_blocks_mandatory_halt_response_and_records
     assert payload["response"]["metadata"]["service_veto_proxy"]["blocked"] is True
     assert payload["response"]["metadata"]["service_intervention"]["reason"] == "goal_alignment_mandatory_halt"
     assert any(
-        event["event_type"] == "hard_stop.intervention"
-        for event in payload["task"]["session_state"]["event_log"]
+        event["event_type"] == "hard_stop.intervention" for event in payload["task"]["session_state"]["event_log"]
     )
     assert replay.status_code == 200
     assert replay_payload["event_count"] == 1
@@ -697,7 +678,9 @@ def test_api_automation_endpoints_expose_heartbeat_learning_and_browser_controls
             json={"force": True, "background": False},
             headers=admin_headers,
         )
-        browser_start_response = client.post("/v1/automation/browser/start", json={"restart": True}, headers=admin_headers)
+        browser_start_response = client.post(
+            "/v1/automation/browser/start", json={"restart": True}, headers=admin_headers
+        )
         browser_status_response = client.get("/v1/automation/browser/status", headers=admin_headers)
         browser_stop_response = client.post("/v1/automation/browser/stop", headers=admin_headers)
 
@@ -771,19 +754,14 @@ def test_api_pulse_websocket_requires_secret_handshake_when_enabled(monkeypatch)
     app = create_api_app(orchestrator, config=service_config())
 
     with TestClient(app) as client:
-        websocket_token = ServiceTokenManager(SERVICE_TOKEN_SECRET, issuer="dadbot").issue(
-            subject="integration-client",
-            tenant_id="family-a",
-            scopes={"read", "write"},
-            ttl_seconds=3600.0,
-        )
+        from starlette.websockets import WebSocketDisconnect
 
-        with pytest.raises(Exception):
-            with client.websocket_connect(f"/v1/sessions/secret-pulse/pulse/stream?access_token={websocket_token}"):
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect("/v1/sessions/secret-pulse/pulse/stream", headers=auth_headers()):
                 pass
 
         with client.websocket_connect(
-            f"/v1/sessions/secret-pulse/pulse/stream?access_token={websocket_token}&dadbot_key=super-secret"
+            "/v1/sessions/secret-pulse/pulse/stream", headers=auth_headers(dadbot_key="super-secret")
         ) as websocket:
             payload = websocket.receive_json()
 

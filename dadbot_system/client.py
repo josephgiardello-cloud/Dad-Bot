@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode, urlparse
+from urllib.parse import quote, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 from .contracts import DEFAULT_TENANT_ID, normalize_tenant_id
@@ -53,9 +53,12 @@ class ServiceClientConfig:
         default_factory=lambda: normalize_tenant_id(os.environ.get("DADBOT_TENANT_ID") or DEFAULT_TENANT_ID)
     )
     auth_token: str = field(default_factory=lambda: str(os.environ.get("DADBOT_API_AUTH_TOKEN") or "").strip())
+    secret_key: str = field(default_factory=lambda: str(os.environ.get("DADBOT_SECRET_KEY") or "").strip())
     token_secret: str = field(default_factory=lambda: str(os.environ.get("DADBOT_API_TOKEN_SECRET") or "").strip())
     token_issuer: str = field(default_factory=lambda: str(os.environ.get("DADBOT_API_TOKEN_ISSUER") or "dadbot"))
-    token_subject: str = field(default_factory=lambda: str(os.environ.get("DADBOT_API_TOKEN_SUBJECT") or "dadbot-client"))
+    token_subject: str = field(
+        default_factory=lambda: str(os.environ.get("DADBOT_API_TOKEN_SUBJECT") or "dadbot-client")
+    )
     token_ttl_seconds: int = field(default_factory=lambda: env_int("DADBOT_API_TOKEN_TTL_SECONDS", 3600))
     otel_enabled: bool = field(default_factory=lambda: env_flag("DADBOT_OTEL_ENABLED", False))
     python_executable: str = field(default_factory=lambda: sys.executable)
@@ -112,11 +115,20 @@ class DadServiceClient:
 
     def session_event_stream_url(self, session_id: str, *, tenant_id: str = "") -> str:
         resolved_tenant_id = normalize_tenant_id(tenant_id or self.config.tenant_id)
+        payload = self._request(
+            "POST",
+            "/websocket/ticket",
+            payload={"channel": "events", "session_id": session_id, "tenant_id": resolved_tenant_id},
+        )
+        ticket = payload.get("ticket")
+        if not isinstance(ticket, str) or not ticket:
+            raise RuntimeError("Dad Bot API did not return a WebSocket ticket")
         parsed = urlparse(self.base_url)
         scheme = "wss" if parsed.scheme == "https" else "ws"
         base_path = parsed.path.rstrip("/")
-        query = urlencode({"tenant_id": resolved_tenant_id})
-        return f"{scheme}://{parsed.netloc}{base_path}/sessions/{session_id}/events/stream?{query}"
+        path = self._api_path(f"/sessions/{quote(session_id, safe='')}/events/stream")
+        query = urlencode({"tenant_id": resolved_tenant_id, "ticket": ticket})
+        return f"{scheme}://{parsed.netloc}{base_path}{path}?{query}"
 
     def stream_url(self, session_id: str, *, tenant_id: str = "") -> str:
         return self.session_event_stream_url(session_id, tenant_id=tenant_id)
@@ -131,6 +143,8 @@ class DadServiceClient:
     ) -> dict[str, Any]:
         body = None
         headers = {"Accept": "application/json"}
+        if self.config.secret_key:
+            headers["X-DADBOT-KEY"] = self.config.secret_key
         resolved_tenant_id = normalize_tenant_id(
             str(tenant_id or (payload or {}).get("tenant_id") or self.config.tenant_id or DEFAULT_TENANT_ID)
         )
@@ -429,7 +443,9 @@ class DadServiceClient:
             del history[0 : len(history) - 256]
 
     @staticmethod
-    def _build_graph_indexes(graph_payload: dict[str, Any]) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[dict[str, Any]]], set[str]]:
+    def _build_graph_indexes(
+        graph_payload: dict[str, Any],
+    ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[dict[str, Any]]], set[str]]:
         edges = [edge for edge in list(graph_payload.get("edges") or []) if isinstance(edge, dict)]
         out_index: dict[str, list[dict[str, Any]]] = {}
         in_index: dict[str, list[dict[str, Any]]] = {}
@@ -688,7 +704,9 @@ class DadServiceClient:
             trend = "flat"
 
         if points:
-            stable_points = sum(1 for point in points if point["risk_level"] in {"low", "moderate"} and not point["mandatory_halt"])
+            stable_points = sum(
+                1 for point in points if point["risk_level"] in {"low", "moderate"} and not point["mandatory_halt"]
+            )
             stabilization_ratio = stable_points / float(len(points))
         else:
             stabilization_ratio = 0.0

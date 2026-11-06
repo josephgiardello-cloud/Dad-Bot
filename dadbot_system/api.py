@@ -3,10 +3,13 @@ from __future__ import annotations
 # ruff: noqa: B008, C901, PLR0913, PLR0915
 import asyncio
 import base64
+import hashlib
 import hmac
 import json
+import logging
 import os
 import re
+import time
 from contextlib import asynccontextmanager
 from typing import Any, cast
 
@@ -28,11 +31,15 @@ from .kernel import ControlPlane, build_control_plane
 from .security import (
     AuthenticationError,
     AuthorizationError,
+    RedisWebSocketTicketStore,
     ServicePrincipal,
     ServiceTokenManager,
     SlidingWindowRateLimiter,
+    TicketStoreUnavailableError,
 )
 from .state import NamespacedStateStore
+
+logger = logging.getLogger(__name__)
 
 try:
     from fastapi import (  # type: ignore[reportMissingImports]
@@ -139,6 +146,14 @@ def create_api_app(
         else None
     )
     rate_limiter = SlidingWindowRateLimiter(window_seconds=60.0)
+    ticket_namespace = hashlib.sha256(
+        json.dumps([security_config.token_issuer, security_config.token_secret, dadbot_secret_key]).encode("utf-8")
+    ).hexdigest()
+    websocket_tickets = (
+        RedisWebSocketTicketStore(service_config.persistence.redis_url, namespace=ticket_namespace)
+        if service_config.persistence.redis_url
+        else None
+    )
 
     def _version_prefix() -> str:
         normalized = "/" + str(service_config.api.version_prefix or "").strip("/")
@@ -205,6 +220,33 @@ def create_api_app(
             return False
         return hmac.compare_digest(candidate, dadbot_secret_key)
 
+    async def _websocket_principal(
+        websocket: WebSocket, *, path: str, scope: str, tenant_id: str = ""
+    ) -> tuple[ServicePrincipal, str]:
+        if {"access_token", "dadbot_key", "x_dadbot_key"}.intersection(websocket.query_params):
+            raise HTTPException(status_code=401, detail="Use a WebSocket ticket, not query credentials")
+        if "ticket" in websocket.query_params:
+            if websocket_tickets is None:
+                raise HTTPException(status_code=503, detail="WebSocket tickets require DADBOT_REDIS_URL")
+            try:
+                principal = await asyncio.to_thread(
+                    websocket_tickets.consume, websocket.query_params["ticket"], path=path
+                )
+            except AuthenticationError as exc:
+                raise HTTPException(status_code=401, detail=str(exc)) from exc
+            except TicketStoreUnavailableError as exc:
+                logger.error("WebSocket ticket store unavailable during handshake")
+                raise HTTPException(status_code=503, detail="WebSocket ticket store unavailable") from exc
+        else:
+            if not _is_valid_secret_key(websocket.headers.get("x-dadbot-key", "")):
+                raise HTTPException(status_code=401, detail="Invalid or missing X-DADBOT-KEY")
+            principal = _resolve_principal(
+                _extract_bearer_token(websocket.headers.get("authorization"), websocket.headers.get("x-dadbot-token"))
+            )
+        _enforce_scope(principal, scope)
+        _enforce_rate_limit(principal, scope)
+        return principal, _resolve_tenant(principal, tenant_id)
+
     def _apply_request_identity(request_payload: dict, principal: ServicePrincipal, *, tenant_id: str) -> dict:
         resolved_payload = dict(request_payload or {})
         resolved_payload["tenant_id"] = tenant_id
@@ -256,6 +298,8 @@ def create_api_app(
                 worker_manager.shutdown()
             if runtime_bot is not None and callable(getattr(runtime_bot, "shutdown", None)):
                 runtime_bot.shutdown()
+            if websocket_tickets is not None:
+                await asyncio.to_thread(websocket_tickets.close)
 
     app = FastAPI(title=service_config.api.title, lifespan=lifespan)
     app.add_middleware(
@@ -268,7 +312,12 @@ def create_api_app(
 
     @app.middleware("http")
     async def _security_headers(request: Any, call_next):
-        if dadbot_secret_key:
+        is_preflight = (
+            request.method == "OPTIONS"
+            and "origin" in request.headers
+            and "access-control-request-method" in request.headers
+        )
+        if dadbot_secret_key and not is_preflight:
             provided_secret = request.headers.get("x-dadbot-key")
             if not _is_valid_secret_key(str(provided_secret or "")):
                 return JSONResponse(status_code=401, content={"detail": "Invalid or missing X-DADBOT-KEY"})
@@ -606,7 +655,9 @@ def create_api_app(
 
     def _session_state_snapshot(session_id: str) -> dict[str, Any]:
         registry = getattr(orchestrator, "session_registry", None) or getattr(_control_plane, "registry", None)
-        session = registry.get(session_id) if registry is not None and callable(getattr(registry, "get", None)) else None
+        session = (
+            registry.get(session_id) if registry is not None and callable(getattr(registry, "get", None)) else None
+        )
         if not isinstance(session, dict):
             return {}
         state = session.get("state")
@@ -678,7 +729,9 @@ def create_api_app(
         anomalies = list(monitor.get("anomalies") or [])
         dominant_signal = _dominant_signal(influence_share)
         last_turn = {
-            "confidence": float(selected.get("decision_confidence", report.get("decision_confidence", confidence_avg)) or confidence_avg),
+            "confidence": float(
+                selected.get("decision_confidence", report.get("decision_confidence", confidence_avg)) or confidence_avg
+            ),
             "dominant_signal": dominant_signal,
         }
         return {
@@ -718,7 +771,9 @@ def create_api_app(
             "integrity_failure_diagnostics": dict(last_integrity_status.get("diagnostics") or {}),
         }
 
-    def _attach_turn_contract(payload: dict[str, Any], *, session_id: str, tenant_id: str, request_id: str) -> dict[str, Any]:
+    def _attach_turn_contract(
+        payload: dict[str, Any], *, session_id: str, tenant_id: str, request_id: str
+    ) -> dict[str, Any]:
         task_payload = dict(payload.get("task") or {})
         response_payload = dict(payload.get("response") or {})
         session_state = dict(task_payload.get("session_state") or {})
@@ -746,6 +801,35 @@ def create_api_app(
         return pulse_envelope.model_dump(mode="json")
 
     router = APIRouter()
+
+    @router.post("/websocket/ticket")
+    async def issue_websocket_ticket(payload: dict, principal: ServicePrincipal = Depends(_http_principal)):
+        channel = payload.get("channel")
+        if channel not in ("events", "pulse", "spatial"):
+            raise HTTPException(status_code=422, detail="channel must be events, pulse or spatial")
+        _enforce_scope(principal, "write" if channel == "spatial" else "read")
+        _enforce_rate_limit(principal, "write" if channel == "spatial" else "read")
+        _resolve_tenant(principal, payload.get("tenant_id"))
+        path = "/spatial/ws"
+        if channel != "spatial":
+            session_id = payload.get("session_id")
+            if (
+                not isinstance(session_id, str)
+                or not session_id.strip()
+                or any(character in session_id for character in "/?#")
+            ):
+                raise HTTPException(status_code=422, detail="A valid session_id is required")
+            path = f"/sessions/{session_id}/{channel}/stream"
+        if websocket_tickets is None:
+            raise HTTPException(status_code=503, detail="WebSocket tickets require DADBOT_REDIS_URL")
+        try:
+            ticket, expires_at = await asyncio.to_thread(websocket_tickets.issue, principal, path=path)
+        except AuthenticationError as exc:
+            raise HTTPException(status_code=401, detail=str(exc)) from exc
+        except TicketStoreUnavailableError as exc:
+            logger.error("WebSocket ticket store unavailable during issuance")
+            raise HTTPException(status_code=503, detail="WebSocket ticket store unavailable") from exc
+        return {"ticket": ticket, "expires_at": expires_at, "expires_in": max(0.0, expires_at - time.time())}
 
     @router.get("/health")
     async def health_check(principal: ServicePrincipal = Depends(_http_principal)):
@@ -843,10 +927,10 @@ def create_api_app(
             if matched_term:
                 return _attach_turn_contract(
                     _build_sb243_safe_mode_turn_payload(
-                    session_id=session_id,
-                    tenant_id=tenant_id,
-                    request_id=check_request.request_id,
-                    matched_term=matched_term,
+                        session_id=session_id,
+                        tenant_id=tenant_id,
+                        request_id=check_request.request_id,
+                        matched_term=matched_term,
                     ),
                     session_id=session_id,
                     tenant_id=tenant_id,
@@ -1074,25 +1158,11 @@ def create_api_app(
     @router.websocket("/sessions/{session_id}/events/stream")
     async def stream_session_events(websocket: WebSocket, session_id: str, tenant_id: str = ""):
         try:
-            provided_secret = str(
-                websocket.query_params.get("dadbot_key")
-                or websocket.query_params.get("x_dadbot_key")
-                or websocket.headers.get("x-dadbot-key")
-                or ""
+            _, effective_tenant_id = await _websocket_principal(
+                websocket, path=f"/sessions/{session_id}/events/stream", scope="read", tenant_id=tenant_id
             )
-            if not _is_valid_secret_key(provided_secret):
-                raise HTTPException(status_code=401, detail="Invalid or missing X-DADBOT-KEY")
-            principal = _resolve_principal(
-                _extract_bearer_token(
-                    websocket.headers.get("authorization"),
-                    websocket.query_params.get("access_token"),
-                )
-            )
-            _enforce_scope(principal, "read")
-            _enforce_rate_limit(principal, "read")
-            effective_tenant_id = _resolve_tenant(principal, tenant_id)
-        except HTTPException:
-            await websocket.close(code=4401)
+        except HTTPException as exc:
+            await websocket.close(code=1013 if exc.status_code == 503 else 4401)
             return
 
         await websocket.accept()
@@ -1124,25 +1194,11 @@ def create_api_app(
     @router.websocket("/sessions/{session_id}/pulse/stream")
     async def stream_session_pulse(websocket: WebSocket, session_id: str, tenant_id: str = ""):
         try:
-            provided_secret = str(
-                websocket.query_params.get("dadbot_key")
-                or websocket.query_params.get("x_dadbot_key")
-                or websocket.headers.get("x-dadbot-key")
-                or ""
+            _, effective_tenant_id = await _websocket_principal(
+                websocket, path=f"/sessions/{session_id}/pulse/stream", scope="read", tenant_id=tenant_id
             )
-            if not _is_valid_secret_key(provided_secret):
-                raise HTTPException(status_code=401, detail="Invalid or missing X-DADBOT-KEY")
-            principal = _resolve_principal(
-                _extract_bearer_token(
-                    websocket.headers.get("authorization"),
-                    websocket.query_params.get("access_token"),
-                )
-            )
-            _enforce_scope(principal, "read")
-            _enforce_rate_limit(principal, "read")
-            effective_tenant_id = _resolve_tenant(principal, tenant_id)
-        except HTTPException:
-            await websocket.close(code=4401)
+        except HTTPException as exc:
+            await websocket.close(code=1013 if exc.status_code == 503 else 4401)
             return
 
         await websocket.accept()
@@ -1168,27 +1224,11 @@ def create_api_app(
             return
 
     @router.websocket("/spatial/ws")
-    async def spatial_avatar_bridge(websocket: WebSocket):
+    async def spatial_avatar_bridge(websocket: WebSocket, tenant_id: str = ""):
         try:
-            provided_secret = str(
-                websocket.query_params.get("dadbot_key")
-                or websocket.query_params.get("x_dadbot_key")
-                or websocket.headers.get("x-dadbot-key")
-                or ""
-            )
-            if dadbot_secret_key and not _is_valid_secret_key(provided_secret):
-                raise HTTPException(status_code=401, detail="Invalid or missing X-DADBOT-KEY")
-            if security_config.auth_required:
-                principal = _resolve_principal(
-                    _extract_bearer_token(
-                        websocket.headers.get("authorization"),
-                        websocket.query_params.get("access_token"),
-                    )
-                )
-                _enforce_scope(principal, "write")
-                _enforce_rate_limit(principal, "write")
-        except HTTPException:
-            await websocket.close(code=4401)
+            await _websocket_principal(websocket, path="/spatial/ws", scope="write", tenant_id=tenant_id)
+        except HTTPException as exc:
+            await websocket.close(code=1013 if exc.status_code == 503 else 4401)
             return
 
         await websocket.accept()
