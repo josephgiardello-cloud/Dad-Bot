@@ -7,14 +7,13 @@ from dadbot.core.runtime_errors import ReplayInvariantViolation
 pytestmark = pytest.mark.unit
 
 
-def test_deprecated_alias_invocation_raises_in_replay_mode() -> None:
-    bot = DadBot()
-    alias_name = next(iter(bot.__class__._DEPRECATED_FACADE_ALIASES))
+def test_retired_alias_is_unavailable_in_replay_mode(bot) -> None:
+    assert bot.__class__._DEPRECATED_FACADE_ALIAS_MAP == {}
     bot._replay_mode = True
     bot._alias_layer_enabled = False
 
-    with pytest.raises(ReplayInvariantViolation, match="Alias path invoked during replay"):
-        _ = getattr(bot, alias_name)
+    with pytest.raises(AttributeError):
+        _ = bot.agentic_handler
 
 
 def test_relationship_apply_feedback_records_boundary_trace() -> None:

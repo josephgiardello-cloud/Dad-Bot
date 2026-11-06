@@ -197,6 +197,10 @@ class TestFaithfulnessEval(unittest.TestCase):
 
 
 class TestConsistencyEval(unittest.TestCase):
+    @pytest.fixture(autouse=True)
+    def setup_bot(self, _make_bot):
+        self.bot = _make_bot
+
     def test_same_canonical_mood_scores_1(self):
         self.assertEqual(score_consistency("happy", "excited"), 1.0)
         self.assertEqual(score_consistency("stressed", "anxious"), 1.0)
@@ -208,11 +212,7 @@ class TestConsistencyEval(unittest.TestCase):
 
     def test_mood_detection_is_stable_across_calls(self):
         """Detect mood for an identical input twice — result must be the same category."""
-        temp_dir = TemporaryDirectory()
-        self.addCleanup(temp_dir.cleanup)
-        bot = _make_bot(Path(temp_dir.name))
-        self.addCleanup(bot.shutdown)
-        self.addCleanup(bot.wait_for_semantic_index_idle, 5)
+        bot = self.bot
 
         fake_mood_response = '{"mood": "stressed"}'
         with patch.object(bot, "call_ollama_chat", side_effect=_fake_chat_factory(fake_mood_response)):
@@ -225,6 +225,10 @@ class TestConsistencyEval(unittest.TestCase):
 
 
 class TestEmotionalAlignmentEval(unittest.TestCase):
+    @pytest.fixture(autouse=True)
+    def setup_bot(self, _make_bot):
+        self.bot = _make_bot
+
     def test_calm_reply_to_sad_scores_1(self):
         reply = "I hear you, buddy. That sounds really hard."
         score, issues = score_emotional_alignment("I feel so down today.", reply, "sad")
@@ -251,11 +255,7 @@ class TestEmotionalAlignmentEval(unittest.TestCase):
 
     def test_end_to_end_alignment_with_patched_model(self):
         """Full path: distressed input → patched model reply → alignment score."""
-        temp_dir = TemporaryDirectory()
-        self.addCleanup(temp_dir.cleanup)
-        bot = _make_bot(Path(temp_dir.name))
-        self.addCleanup(bot.shutdown)
-        self.addCleanup(bot.wait_for_semantic_index_idle, 5)
+        bot = self.bot
 
         distress_reply = "Hey, I hear you. That sounds really rough — want to talk it through?"
 

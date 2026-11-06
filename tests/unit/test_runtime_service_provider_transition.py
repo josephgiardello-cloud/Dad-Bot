@@ -91,8 +91,7 @@ def test_dadbot_prefers_explicit_runtime_services_constructor_injection(monkeypa
 
 def test_resolve_dependency_prefers_explicit_service_overrides_over_registry():
     bot = object.__new__(DadBot)
-    bot._explicit_dependencies = {"runtime_interface": "explicit"}
-    bot._dependency_registry = {"runtime_interface": "registry"}
+    bot._dependency_overrides = {"runtime_interface": "explicit"}
 
     resolved = DadBot._resolve_dependency(bot, "runtime_interface", lambda: "factory")
 

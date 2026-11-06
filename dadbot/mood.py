@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -10,6 +11,32 @@ class MoodManager:
 
     def __init__(self, bot):
         self.bot = bot
+
+    @staticmethod
+    def needs_model_detection(user_input, recent_history=None):
+        emotional_markers = re.compile(
+            r"\b(feel\w*|felt|sad|angry|happy|stressed|stressful|anxious|worried|"
+            r"overwhelm\w*|proud|excited|lonely|grief|grieving|hurt\w*|afraid|scared|"
+            r"frustrat\w*|tired|exhausted|drained|upset|disappoint\w*|love|hate|"
+            r"hopeless|panic\w*|struggling|cope|coping|miss|missing|relieved|"
+            r"hard day|rough day|bad day|tough day|too much|burned out|burnt out|"
+            r"not okay|not ok|nothing matters|give up|here again|barely think|"
+            r"can.t keep up|cannot keep up|piling up|piling on)\b",
+            re.IGNORECASE,
+        )
+        text = str(user_input or "")
+        if emotional_markers.search(text):
+            return True
+        if not re.search(
+            r"\b(still|same|again|that|it|yes|no|okay|ok|sure|guess|maybe|exactly|worse|better)\b",
+            text, re.IGNORECASE,
+        ):
+            return False
+        return any(
+            emotional_markers.search(str(message.get("content") or ""))
+            for message in list(recent_history or [])[-5:]
+            if isinstance(message, dict) and message.get("role") == "user"
+        )
 
     def get_cached_mood_detection(self, user_input, recent_history=None):
         cache_key = self.bot.normalize_mood_detection_key(user_input, recent_history)
@@ -130,6 +157,10 @@ Reason: The main emotion is still emotional hurt, with relief as a secondary not
         if cached_mood is not None:
             return cached_mood
 
+        if not self.needs_model_detection(user_input, recent_history):
+            logger.info("Mood detection skipped: no emotional markers in current/recent user turns")
+            return self.remember_mood_detection(cache_key, "neutral")
+
         mood_prompt = self.build_detection_prompt(user_input, recent_history)
 
         try:
@@ -175,6 +206,10 @@ Reason: The main emotion is still emotional hurt, with relief as a secondary not
         )
         if cached_mood is not None:
             return cached_mood
+
+        if not self.needs_model_detection(user_input, recent_history):
+            logger.info("Mood detection skipped: no emotional markers in current/recent user turns")
+            return self.remember_mood_detection(cache_key, "neutral")
 
         mood_prompt = self.build_detection_prompt(user_input, recent_history)
 

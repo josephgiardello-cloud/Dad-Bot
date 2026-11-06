@@ -66,9 +66,12 @@ def test_context_service_passes_query_embedding_to_semantic_index():
 
 
 def test_proactive_heartbeat_queues_daily_checkin_once(bot, monkeypatch):
-    bot.MEMORY_STORE["pending_proactive_messages"] = []
-    bot.MEMORY_STORE["last_mood_updated_at"] = (date.today() - timedelta(days=1)).isoformat()
-    bot.MEMORY_STORE["last_daily_checkin_at"] = None
+    bot.MEMORY_STORE = {
+        **bot.MEMORY_STORE,
+        "pending_proactive_messages": [],
+        "last_mood_updated_at": (date.today() - timedelta(days=1)).isoformat(),
+        "last_daily_checkin_at": None,
+    }
 
     monkeypatch.setattr(
         bot,

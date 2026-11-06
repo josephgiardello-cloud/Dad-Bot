@@ -99,20 +99,24 @@ class _StatePromptBudgetMixin:
                 trimmed = tokenizer.decode(encoded[:token_budget]).rstrip()
                 if trimmed and trimmed != normalized:
                     trimmed = trimmed.rstrip(" ,.;:") + "..."
-                return trimmed
-            except Exception:  # noqa: BLE001
-                tokenizer = None
+                if self.bot.estimate_token_count(trimmed) <= token_budget:
+                    return trimmed
+                normalized = trimmed
+            except (AttributeError, TypeError, ValueError, LookupError, UnicodeError):
+                pass
 
         estimated_tokens = self.bot.estimate_token_count(normalized)
         if estimated_tokens <= token_budget:
             return normalized
 
-        ratio = token_budget / max(1, estimated_tokens)
-        cutoff = max(1, min(len(normalized), int(len(normalized) * ratio)))
-        trimmed = normalized[:cutoff].rstrip()
-        if trimmed and trimmed != normalized:
-            trimmed = trimmed.rstrip(" ,.;:") + "..."
-        return trimmed
+        low, high = 0, len(normalized)
+        while low < high:
+            midpoint = (low + high + 1) // 2
+            if self.bot.estimate_token_count(normalized[:midpoint]) <= token_budget:
+                low = midpoint
+            else:
+                high = midpoint - 1
+        return normalized[:low].rstrip()
 
     def trim_message_to_token_budget(self, message, token_budget):
         role = str(message.get("role", ""))

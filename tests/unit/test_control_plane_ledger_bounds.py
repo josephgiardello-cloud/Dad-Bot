@@ -100,13 +100,15 @@ async def test_submit_turn_raises_when_commit_boundary_invariant_fails(monkeypat
 
     plane = ExecutionControlPlane(registry=SessionRegistry(), kernel_executor=_executor)
 
-    def _fake_counts(_trace_events: list[dict[str, object]]) -> tuple[int, bool]:
-        return (2, True)
-
-    monkeypatch.setattr(type(plane), "_trace_event_invariant_counts", staticmethod(_fake_counts))
-
+    monkeypatch.setattr(type(plane), "_job_trace_events", lambda self, job: [
+        {"event_type": "node_complete", "stage": "save"},
+        {"event_type": "node_complete", "stage": "save"},
+    ])
     with pytest.raises(InvariantViolation):
-        await plane.submit_turn(session_id="s-commit-boundary", user_input="hello")
+        await plane.submit_turn(
+            session_id="s-commit-boundary", user_input="hello",
+            metadata={"strict_trace_invariant": True},
+        )
 
 
 @pytest.mark.asyncio

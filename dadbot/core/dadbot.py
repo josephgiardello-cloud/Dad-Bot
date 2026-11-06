@@ -207,8 +207,7 @@ class DadBot(
         )
 
     def active_persona_trait_entries(self, limit=None):
-        # Stub for profile_runtime compatibility
-        return []
+        return self.long_term_signals.active_persona_trait_entries(limit=limit)
 
 
     @property
@@ -416,6 +415,30 @@ class DadBot(
         self._memory_path_override = Path(value)
 
     @property
+    def SEMANTIC_MEMORY_DB_PATH(self) -> Path:  # noqa: N802
+        return self.config.semantic_memory_db_path
+
+    @SEMANTIC_MEMORY_DB_PATH.setter
+    def SEMANTIC_MEMORY_DB_PATH(self, value: str | Path) -> None:  # noqa: N802
+        self.config.semantic_memory_db_path = Path(value)
+
+    @property
+    def GRAPH_STORE_DB_PATH(self) -> Path:  # noqa: N802
+        return self.config.graph_store_db_path
+
+    @GRAPH_STORE_DB_PATH.setter
+    def GRAPH_STORE_DB_PATH(self, value: str | Path) -> None:  # noqa: N802
+        self.config.graph_store_db_path = Path(value)
+
+    @property
+    def SESSION_LOG_DIR(self) -> Path:  # noqa: N802
+        return self.config.session_log_dir
+
+    @SESSION_LOG_DIR.setter
+    def SESSION_LOG_DIR(self, value: str | Path) -> None:  # noqa: N802
+        self.config.session_log_dir = Path(value)
+
+    @property
     def TENANT_ID(self) -> str:  # noqa: N802
         return self.config.tenant_id
 
@@ -474,28 +497,52 @@ class DadBot(
 
     @property
     def last_relationship_reflection_turn(self) -> Any:
-        return self._relationship_manager.last_relationship_reflection_turn if hasattr(self._relationship_manager, 'last_relationship_reflection_turn') else None
+        return self.runtime_state_manager.last_relationship_reflection_turn
+
+    @last_relationship_reflection_turn.setter
+    def last_relationship_reflection_turn(self, value):
+        self.runtime_state_manager.last_relationship_reflection_turn = value
 
 
     @property
     def pending_daily_checkin_context(self) -> Any:
-        return self._mood_manager.pending_daily_checkin_context if hasattr(self._mood_manager, 'pending_daily_checkin_context') else None
+        return self.runtime_state_manager.pending_daily_checkin_context
+
+    @pending_daily_checkin_context.setter
+    def pending_daily_checkin_context(self, value):
+        self.runtime_state_manager.pending_daily_checkin_context = value
 
     @property
     def active_tool_observation_context(self) -> Any:
-        return self._memory_manager.active_tool_observation_context if hasattr(self._memory_manager, 'active_tool_observation_context') else None
+        return self.runtime_state_manager.active_tool_observation_context
+
+    @active_tool_observation_context.setter
+    def active_tool_observation_context(self, value):
+        self.runtime_state_manager.active_tool_observation_context = value
 
     @property
     def planner_debug(self) -> Any:
-        return self._memory_manager.planner_debug if hasattr(self._memory_manager, 'planner_debug') else None
+        return self.runtime_state_manager.planner_debug
+
+    @planner_debug.setter
+    def planner_debug(self, value):
+        self.runtime_state_manager.planner_debug = value
 
     @property
     def chat_threads(self) -> Any:
-        return self._memory_manager.chat_threads if hasattr(self._memory_manager, 'chat_threads') else None
+        return self.runtime_state_manager.chat_threads
+
+    @chat_threads.setter
+    def chat_threads(self, value):
+        self.runtime_state_manager.chat_threads = value
 
     @property
     def active_thread_id(self) -> Any:
-        return self._memory_manager.active_thread_id if hasattr(self._memory_manager, 'active_thread_id') else None
+        return self.runtime_state_manager.active_thread_id
+
+    @active_thread_id.setter
+    def active_thread_id(self, value):
+        self.runtime_state_manager.active_thread_id = value
 
     # thread_snapshots is always a direct attribute, never a property
 
@@ -506,7 +553,6 @@ class DadBot(
     # ------------------------------------------------------------------
 
 
-    @property
     def prompt_guard_stats(self) -> Any:
         return self._internal_runtime.prompt_guard_stats
 
@@ -917,18 +963,28 @@ class DadBot(
         }
         if isinstance(metadata, dict) and metadata:
             event["metadata"] = dict(metadata)
-        self._event_bus.emit(event)
+        if self._event_bus is not None:
+            self._event_bus.emit(event)
+        else:
+            self.shadow_decision_bus.append(event)
         return event
 
 
 
     def peek_shadow_decisions(self, limit: int = 64) -> list[dict[str, Any]]:
-        return self._event_bus.peek(limit)
+        if self._event_bus is not None:
+            return self._event_bus.peek(limit)
+        return list(self.shadow_decision_bus[-max(0, int(limit)):]) if limit > 0 else []
 
 
 
     def consume_shadow_decisions(self, limit: int = 128) -> list[dict[str, Any]]:
-        return self._event_bus.consume(limit)
+        if self._event_bus is not None:
+            return self._event_bus.consume(limit)
+        count = max(0, int(limit))
+        events = list(self.shadow_decision_bus[:count])
+        del self.shadow_decision_bus[:count]
+        return events
 
     def record_shadow_decision_report(self, report: dict[str, Any]) -> dict[str, Any]:
         payload = dict(report or {})

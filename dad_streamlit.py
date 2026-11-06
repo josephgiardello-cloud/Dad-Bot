@@ -903,7 +903,7 @@ def _build_bot() -> DadBot:
     return bot
 
 
-_STREAMLIT_RUNTIME_BUILD = "2026-11-05-canonical-chat-v15"
+_STREAMLIT_RUNTIME_BUILD = "2026-11-06-canonical-chat-v16"
 
 st.set_page_config(
     page_title="DadBot",
@@ -1068,6 +1068,9 @@ if page == "Chat":
 
             assistant_audio_b64 = ""
             assistant_audio_mime = ""
+            reply_thread_id = _active_thread_id()
+            _append_chat_message("assistant", reply, stamp=now, thread_id=reply_thread_id)
+            reply_message_index = len(_thread_messages(reply_thread_id)) - 1
             with assistant_message:
                 assistant_output.markdown(reply)
                 with suppress(Exception):
@@ -1080,13 +1083,11 @@ if page == "Chat":
                             st.audio(audio_bytes, format=assistant_audio_mime, autoplay=True)
                         else:
                             _speak_reply_client_side(reply)
-            _append_chat_message(
-                "assistant",
-                reply,
-                stamp=now,
-                audio_base64=assistant_audio_b64,
-                audio_mime=assistant_audio_mime,
-            )
+            if assistant_audio_b64:
+                messages = _thread_messages(reply_thread_id)
+                messages[reply_message_index]["audio_base64"] = assistant_audio_b64
+                messages[reply_message_index]["audio_mime"] = assistant_audio_mime
+                _set_thread_messages(messages, reply_thread_id)
     st.markdown('</div>', unsafe_allow_html=True)
 
 elif page == "Smart Home":

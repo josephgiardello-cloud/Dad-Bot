@@ -12,6 +12,23 @@ after 180 seconds. Cancellation cannot forcibly stop a synchronous worker;
 the transport timeout still bounds network inactivity. A five-second health
 probe may time out during a normal cold model load.
 
+Factual turns such as `2+2` skip model-based mood detection when neither the
+message nor a relevant emotional follow-up contains emotional signals. They also skip
+tool planning without tool intent. Emotional messages, attachments, tool-name
+keywords, and contextual tool follow-ups remain eligible. The same planning
+gate applies to a configured Home Assistant MCP service; it never bypasses
+approval for an actual action. Answer generation remains on the canonical graph.
+
+Enable INFO logging for `dadbot.managers.runtime_client` to see per-purpose
+Ollama durations measured with `time.perf_counter()`, prompt/generation token
+counts, and completion reasons without logging prompts or reasoning text.
+
+Tests construct isolated real managers and mock only inference/embedding
+boundaries. Retired command-dispatcher and natural-language reminder-splitter
+contracts have narrow, strict xfails with explicit reasons; the canonical
+`generate_candidate` contract remains tested, not xfailed. A supplied
+`DadBotConfig` is preserved through boot, including its tenant and storage paths.
+
 ---
 
 ## Why Dad-Bot?

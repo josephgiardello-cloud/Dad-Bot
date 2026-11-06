@@ -1354,6 +1354,7 @@ class TurnGraph:
                 if missing:
                     raise NodeContractViolationError(f"{stage_key} missing required inputs: {missing}")
             turn_context = await self._execute_node(node, turn_context)
+            self._enforce_identity_tuple_immutable(turn_context, boundary=f"stage_exit:{stage_key}")
             stage_skipped = any(
                 item.get("stage") == stage_key and item.get("action") == "skip_stage"
                 for item in turn_context.state.get("kernel_rejection_contract", [])[rejection_count:]
@@ -1363,7 +1364,6 @@ class TurnGraph:
                 missing = [key for key in required_outputs if key not in turn_context.state]
                 if missing:
                     raise NodeContractViolationError(f"{stage_key} missing required outputs: {missing}")
-            self._enforce_identity_tuple_immutable(turn_context, boundary=f"stage_exit:{stage_key}")
             self._record_stage_success(
                 turn_context,
                 stage_key=stage_key,

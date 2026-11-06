@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -48,6 +49,10 @@ class _StubService:
 
     def __init__(self) -> None:
         self.control_plane = self._ControlPlane(self)
+        self.bot = SimpleNamespace(
+            turn_orchestrator=SimpleNamespace(control_plane=self.control_plane),
+            reply_finalization=SimpleNamespace(finalize=lambda reply, mood, user_input=None: reply),
+        )
 
     class _ControlPlane:
         def __init__(self, owner: "_StubService") -> None:
@@ -64,6 +69,9 @@ class _StubService:
 
     async def run_agent(self, ctx, rich_context):
         return ctx.state.get("candidate", "stub reply")
+
+    async def generate_candidate(self, ctx, rich_context):
+        return await self.run_agent(ctx, rich_context)
 
     def enforce_policies(self, ctx, candidate):
         return candidate
@@ -545,7 +553,7 @@ class TestMemoryPersonalityBoundary:
                 return reply
 
         mgr = ReplyFinalizationManager(_MinimalBot())
-        finalized = mgr.finalize("You've got this", "neutral", "thanks")
+        finalized = mgr.finalize("You've got this", "sad", "I'm having a hard day")
         assert finalized.endswith("- Dad")
         assert mgr.bot.conversation_surface.recorded
         assert mgr.bot.conversation_surface.recorded[-1] == finalized

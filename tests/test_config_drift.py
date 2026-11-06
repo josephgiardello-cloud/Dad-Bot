@@ -40,8 +40,16 @@ class TestDadBotConfigAttrMapConsistency:
 
         return DadBot._CONFIG_ATTR_MAP
 
-    def test_attr_map_is_non_empty(self, attr_map):
-        assert len(attr_map) > 10, "Expected at least 10 entries in _CONFIG_ATTR_MAP"
+    def test_legacy_attr_map_is_retired_and_explicit_config_properties_resolve(self, attr_map, bot):
+        assert attr_map == {}
+        for public_name, config_name in {
+            "ACTIVE_MODEL": "active_model",
+            "APPEND_SIGNOFF": "append_signoff",
+            "LIGHT_MODE": "light_mode",
+            "RESERVED_RESPONSE_TOKENS": "reserved_response_tokens",
+        }.items():
+            assert isinstance(getattr(type(bot), public_name), property)
+            assert getattr(bot, public_name) == getattr(bot.config, config_name)
 
     def test_all_map_values_are_non_empty_strings(self, attr_map):
         for key, value in attr_map.items():

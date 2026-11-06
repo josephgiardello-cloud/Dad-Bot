@@ -4,6 +4,7 @@ import logging
 import os
 from typing import Any
 
+from dadbot.services._tool_pipeline_mixin import needs_tool_planning
 from dadbot.runtime.mcp.tool_client import (
     MCPApprovalRequest,
     MCPToolClient,
@@ -140,6 +141,16 @@ class MCPApprovalService:
             return None
         rich_context = dict(rich_context or {})
         attachments = self._collect_attachments(context, rich_context)
+        allowed_tools = configured_ha_mcp_tools()
+        history = rich_context.get("messages") or self.bot.prompt_history()
+        if not needs_tool_planning(
+            getattr(context, "user_input", ""),
+            [{"function": {"name": name}} for name in allowed_tools],
+            attachments,
+            recent_history=history,
+        ):
+            logger.info("MCP tool planning skipped: no tool intent")
+            return None
         messages = self._build_messages(context, rich_context, attachments)
         client = MCPToolClient(
             mcp_url,
@@ -148,7 +159,7 @@ class MCPApprovalService:
         result = await run_mcp_with_fallback(
             messages,
             client,
-            configured_ha_mcp_tools(),
+            allowed_tools,
             model_call=lambda candidate_messages: self._model_call(
                 candidate_messages,
                 purpose="mcp_tool_plan",

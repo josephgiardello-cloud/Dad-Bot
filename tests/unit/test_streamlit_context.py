@@ -2,6 +2,8 @@ import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from dadbot.ui.streamlit_context import (
     SQLiteStreamlitThreadStore,
     StreamlitContextService,
@@ -10,6 +12,8 @@ from dadbot.ui.streamlit_context import (
     serialize_thread_messages,
     set_runtime_thread_id,
 )
+
+pytestmark = pytest.mark.unit
 
 
 def test_thread_serializer_keeps_displayed_history_and_appends_current_input():
@@ -100,12 +104,10 @@ def test_context_service_falls_back_to_canonical_conversation_history():
     assert context["messages"] == [{"role": "user", "content": "CLI prior turn"}]
 
 
-def test_runtime_thread_id_updates_memory_manager_session_key():
-    bot = SimpleNamespace(_memory_manager=SimpleNamespace())
-
+def test_runtime_thread_id_updates_canonical_session_key(bot):
     set_runtime_thread_id(bot, "thread-42")
 
-    assert bot._memory_manager.active_thread_id == "thread-42"
+    assert bot.runtime_state_manager.active_thread_id == bot.active_thread_id == "thread-42"
 
 
 def test_sqlite_thread_store_survives_reopen_and_omits_audio_payload():

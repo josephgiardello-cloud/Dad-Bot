@@ -19,7 +19,7 @@ class GraphPromptCompressor:
         if not raw_text:
             return ""
 
-        if self.bot.estimate_token_count(raw_text) <= budget:
+        if self.bot.estimate_tokens(raw_text) <= budget:
             return raw_text
 
         prompt = f"""
@@ -44,7 +44,7 @@ Compressed summary:
             )
             compressed = str(response["message"]["content"] or "").strip()
             if compressed:
-                if self.bot.estimate_token_count(compressed) <= budget:
+                if self.bot.estimate_tokens(compressed) <= budget:
                     return compressed
                 return self._truncate_to_budget(compressed, budget)
         except Exception:
@@ -210,7 +210,11 @@ Compressed summary:
     def _truncate_to_budget(self, text, token_budget):
         if not text:
             return ""
-        target_chars = max(1, int(token_budget) * max(1, int(getattr(self.bot, "APPROX_CHARS_PER_TOKEN", 4))))
-        if len(text) <= target_chars:
-            return text
-        return text[: max(0, target_chars - 3)].rstrip() + "..."
+        low, high = 0, len(text)
+        while low < high:
+            midpoint = (low + high + 1) // 2
+            if self.bot.estimate_tokens(text[:midpoint]) <= token_budget:
+                low = midpoint
+            else:
+                high = midpoint - 1
+        return text[:low].rstrip()

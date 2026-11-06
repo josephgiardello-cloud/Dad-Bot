@@ -599,7 +599,7 @@ def test_clean_memory_entries_normalizes_filters_and_deduplicates(bot):
 def test_relevant_memories_for_input_prefers_fresher_entries(bot):
     old_date = (date.today() - timedelta(days=180)).isoformat()
     fresh_date = date.today().isoformat()
-    bot.MEMORY_STORE["memories"] = [
+    bot.MEMORY_STORE = {**bot.MEMORY_STORE, "memories": [
         {
             "summary": "Tony has been stressed about work deadlines on the marketing rollout.",
             "category": "work",
@@ -614,7 +614,7 @@ def test_relevant_memories_for_input_prefers_fresher_entries(bot):
             "created_at": fresh_date,
             "updated_at": fresh_date,
         },
-    ]
+    ]}
 
     memories = bot.relevant_memories_for_input("work deadlines", limit=1)
 
@@ -664,7 +664,7 @@ def test_semantic_memory_matches_caps_stale_low_impact_memories(bot):
 
 def test_relevant_memories_for_input_applies_diversity_cap(bot):
     today = date.today().isoformat()
-    bot.MEMORY_STORE["memories"] = [
+    bot.MEMORY_STORE = {**bot.MEMORY_STORE, "memories": [
         {
             "summary": "Tony has been stressed about work deadlines on the payroll launch.",
             "category": "work",
@@ -693,7 +693,7 @@ def test_relevant_memories_for_input_applies_diversity_cap(bot):
             "created_at": today,
             "updated_at": today,
         },
-    ]
+    ]}
     bot.semantic_memory_matches = lambda *_args, **_kwargs: []
     bot.memory_context_limit_for_input = lambda *_args, **_kwargs: 4
 
@@ -706,7 +706,7 @@ def test_relevant_memories_for_input_applies_diversity_cap(bot):
 
 def test_relevant_memories_for_input_uses_prompt_budget_to_cap_limit(bot):
     today = date.today().isoformat()
-    bot.MEMORY_STORE["memories"] = [
+    bot.MEMORY_STORE = {**bot.MEMORY_STORE, "memories": [
         {
             "summary": f"Tony has been stressed about work deadline {index}.",
             "category": "work",
@@ -715,7 +715,7 @@ def test_relevant_memories_for_input_uses_prompt_budget_to_cap_limit(bot):
             "updated_at": today,
         }
         for index in range(4)
-    ]
+    ]}
     bot.semantic_memory_matches = lambda *_args, **_kwargs: []
     bot.CONTEXT_TOKEN_BUDGET = 140
     bot.RESERVED_RESPONSE_TOKENS = 20
@@ -729,7 +729,7 @@ def test_relevant_memories_for_input_uses_prompt_budget_to_cap_limit(bot):
 @pytest.mark.slow
 def test_build_memory_context_places_recent_archive_notes_before_older_memories(bot):
     today = date.today().isoformat()
-    bot.MEMORY_STORE["session_archive"] = [
+    bot.MEMORY_STORE = {**bot.MEMORY_STORE, "session_archive": [
         {
             "summary": "Work deadlines were heavy again this week.",
             "topics": ["work"],
@@ -738,8 +738,8 @@ def test_build_memory_context_places_recent_archive_notes_before_older_memories(
             "created_at": today + "T10:00:00",
             "id": "a",
         }
-    ]
-    bot.MEMORY_STORE["memories"] = [
+    ]}
+    bot.MEMORY_STORE = {**bot.MEMORY_STORE, "memories": [
         {
             "summary": "Tony has been stressed about work deadlines on the old reorg.",
             "category": "work",
@@ -747,7 +747,7 @@ def test_build_memory_context_places_recent_archive_notes_before_older_memories(
             "created_at": (date.today() - timedelta(days=90)).isoformat(),
             "updated_at": (date.today() - timedelta(days=90)).isoformat(),
         }
-    ]
+    ]}
     bot.semantic_memory_matches = lambda *_args, **_kwargs: []
     bot.CONTEXT_TOKEN_BUDGET = 1200
 
@@ -761,6 +761,7 @@ def test_build_memory_context_places_recent_archive_notes_before_older_memories(
 
 
 def test_load_memory_store_recovers_from_backup_when_primary_is_corrupted(bot):
+    bot._tenant_document_store = None
     first_snapshot = {
         "summary": "Tony has been saving money for an emergency fund.",
         "category": "finance",
@@ -775,9 +776,9 @@ def test_load_memory_store_recovers_from_backup_when_primary_is_corrupted(bot):
         "created_at": date.today().isoformat(),
         "updated_at": date.today().isoformat(),
     }
-    bot.MEMORY_STORE["memories"] = [first_snapshot]
+    bot.MEMORY_STORE = {**bot.MEMORY_STORE, "memories": [first_snapshot]}
     bot.save_memory_store()
-    bot.MEMORY_STORE["memories"] = [second_snapshot]
+    bot.MEMORY_STORE = {**bot.MEMORY_STORE, "memories": [second_snapshot]}
     bot.save_memory_store()
 
     backup_path = bot.json_backup_path(bot.MEMORY_PATH)
@@ -795,7 +796,7 @@ def test_load_memory_store_recovers_from_backup_when_primary_is_corrupted(bot):
 @pytest.mark.slow
 def test_sync_graph_store_extracts_consolidated_archive_traits_and_patterns(bot):
     today = date.today().isoformat()
-    bot.MEMORY_STORE["consolidated_memories"] = [
+    bot.MEMORY_STORE = {**bot.MEMORY_STORE, "consolidated_memories": [
         {
             "summary": "Tony has been saving money for an emergency fund.",
             "category": "finance",
@@ -805,8 +806,8 @@ def test_sync_graph_store_extracts_consolidated_archive_traits_and_patterns(bot)
             "contradictions": ["Spent impulsively once after payday"],
             "updated_at": today,
         }
-    ]
-    bot.MEMORY_STORE["session_archive"] = [
+    ]}
+    bot.MEMORY_STORE = {**bot.MEMORY_STORE, "session_archive": [
         {
             "summary": "Work deadlines felt especially heavy this week.",
             "topics": ["work"],
@@ -815,8 +816,8 @@ def test_sync_graph_store_extracts_consolidated_archive_traits_and_patterns(bot)
             "created_at": today + "T09:00:00",
             "id": "archive-1",
         }
-    ]
-    bot.MEMORY_STORE["persona_evolution"] = [
+    ]}
+    bot.MEMORY_STORE = {**bot.MEMORY_STORE, "persona_evolution": [
         {
             "trait": "coach-like",
             "reason": "Tony responds well to direct next-step support.",
@@ -829,8 +830,8 @@ def test_sync_graph_store_extracts_consolidated_archive_traits_and_patterns(bot)
             "critique_score": 8,
             "critique_feedback": "specific and useful",
         }
-    ]
-    bot.MEMORY_STORE["life_patterns"] = [
+    ]}
+    bot.MEMORY_STORE = {**bot.MEMORY_STORE, "life_patterns": [
         {
             "summary": "Tony often carries work stress on Mondays.",
             "topic": "work",
@@ -840,7 +841,7 @@ def test_sync_graph_store_extracts_consolidated_archive_traits_and_patterns(bot)
             "last_seen_at": today + "T10:00:00",
             "proactive_message": "",
         }
-    ]
+    ]}
 
     snapshot = bot.sync_graph_store()
 
@@ -861,7 +862,7 @@ def test_sync_graph_store_extracts_consolidated_archive_traits_and_patterns(bot)
 @pytest.mark.slow
 def test_graph_retrieval_for_input_ranks_consolidated_over_weaker_archive(bot):
     today = date.today().isoformat()
-    bot.MEMORY_STORE["consolidated_memories"] = [
+    bot.MEMORY_STORE = {**bot.MEMORY_STORE, "consolidated_memories": [
         {
             "summary": "Tony has been saving money for an emergency fund.",
             "category": "finance",
@@ -871,8 +872,8 @@ def test_graph_retrieval_for_input_ranks_consolidated_over_weaker_archive(bot):
             "contradictions": [],
             "updated_at": today,
         }
-    ]
-    bot.MEMORY_STORE["session_archive"] = [
+    ]}
+    bot.MEMORY_STORE = {**bot.MEMORY_STORE, "session_archive": [
         {
             "summary": "Tony mentioned money once after a rough week.",
             "topics": ["finance"],
@@ -881,7 +882,7 @@ def test_graph_retrieval_for_input_ranks_consolidated_over_weaker_archive(bot):
             "created_at": (date.today() - timedelta(days=30)).isoformat() + "T09:00:00",
             "id": "archive-2",
         }
-    ]
+    ]}
 
     bot.sync_graph_store()
     result = bot.graph_retrieval_for_input("budget and emergency fund", limit=2)
@@ -895,7 +896,7 @@ def test_graph_retrieval_for_input_ranks_consolidated_over_weaker_archive(bot):
 @pytest.mark.slow
 def test_graph_retrieval_surfaces_contradictions_in_supporting_evidence(bot):
     today = date.today().isoformat()
-    bot.MEMORY_STORE["consolidated_memories"] = [
+    bot.MEMORY_STORE = {**bot.MEMORY_STORE, "consolidated_memories": [
         {
             "summary": "Tony has been saving money for an emergency fund.",
             "category": "finance",
@@ -905,7 +906,7 @@ def test_graph_retrieval_surfaces_contradictions_in_supporting_evidence(bot):
             "contradictions": ["Spent impulsively after payday"],
             "updated_at": today,
         }
-    ]
+    ]}
 
     bot.sync_graph_store()
     result = bot.graph_retrieval_for_input("saving money", limit=1)
@@ -918,7 +919,7 @@ def test_graph_retrieval_surfaces_contradictions_in_supporting_evidence(bot):
 @pytest.mark.slow
 def test_build_memory_context_uses_graph_first_and_semantic_second(bot):
     today = date.today().isoformat()
-    bot.MEMORY_STORE["consolidated_memories"] = [
+    bot.MEMORY_STORE = {**bot.MEMORY_STORE, "consolidated_memories": [
         {
             "summary": "Tony has been saving money for an emergency fund.",
             "category": "finance",
@@ -928,8 +929,8 @@ def test_build_memory_context_uses_graph_first_and_semantic_second(bot):
             "contradictions": [],
             "updated_at": today,
         }
-    ]
-    bot.MEMORY_STORE["memories"] = [
+    ]}
+    bot.MEMORY_STORE = {**bot.MEMORY_STORE, "memories": [
         {
             "summary": "Tony has been using a weekly budget spreadsheet.",
             "category": "finance",
@@ -937,7 +938,7 @@ def test_build_memory_context_uses_graph_first_and_semantic_second(bot):
             "created_at": today,
             "updated_at": today,
         }
-    ]
+    ]}
     bot.semantic_memory_matches = lambda *_args, **_kwargs: []
     bot.sync_graph_store()
 
@@ -951,7 +952,7 @@ def test_build_memory_context_uses_graph_first_and_semantic_second(bot):
 @pytest.mark.slow
 def test_build_memory_context_includes_active_consolidated_context(bot):
     today = date.today().isoformat()
-    bot.MEMORY_STORE["consolidated_memories"] = [
+    bot.MEMORY_STORE = {**bot.MEMORY_STORE, "consolidated_memories": [
         {
             "summary": "Tony has been saving money for an emergency fund.",
             "category": "finance",
@@ -960,7 +961,7 @@ def test_build_memory_context_includes_active_consolidated_context(bot):
             "updated_at": today,
             "contradictions": ["Spent impulsively after payday"],
         }
-    ]
+    ]}
     bot.graph_retrieval_for_input = lambda *_args, **_kwargs: None
     bot.relevant_archive_entries_for_input = lambda *_args, **_kwargs: []
     bot.relevant_memories_for_input = lambda *_args, **_kwargs: []
@@ -976,7 +977,7 @@ def test_build_memory_context_includes_active_consolidated_context(bot):
 @pytest.mark.slow
 def test_build_memory_context_includes_deep_pattern_context(bot):
     today = date.today().isoformat()
-    bot.MEMORY_STORE["life_patterns"] = [
+    bot.MEMORY_STORE = {**bot.MEMORY_STORE, "life_patterns": [
         {
             "summary": "Tony often carries work stress on Sundays.",
             "topic": "work",
@@ -986,7 +987,7 @@ def test_build_memory_context_includes_deep_pattern_context(bot):
             "last_seen_at": today + "T09:00:00",
             "proactive_message": "Sundays seem to carry extra work weight for you lately.",
         }
-    ]
+    ]}
     bot.graph_retrieval_for_input = lambda *_args, **_kwargs: None
     bot.relevant_archive_entries_for_input = lambda *_args, **_kwargs: []
     bot.relevant_memories_for_input = lambda *_args, **_kwargs: []
@@ -1002,7 +1003,7 @@ def test_build_memory_context_includes_deep_pattern_context(bot):
 
 def test_graph_retrieval_compresses_to_token_budget(bot):
     today = date.today().isoformat()
-    bot.MEMORY_STORE["consolidated_memories"] = [
+    bot.MEMORY_STORE = {**bot.MEMORY_STORE, "consolidated_memories": [
         {
             "summary": "Tony has been saving money for an emergency fund and keeping a detailed budget spreadsheet while also talking through work stress and next steps every week.",
             "category": "finance",
@@ -1015,7 +1016,7 @@ def test_graph_retrieval_compresses_to_token_budget(bot):
             "contradictions": [],
             "updated_at": today,
         }
-    ]
+    ]}
     bot.sync_graph_store()
     bot.runtime_config.graph_context_token_budget = 18
     bot.memory_manager._graph_prompt_compressor.max_tokens = 18
@@ -1026,13 +1027,13 @@ def test_graph_retrieval_compresses_to_token_budget(bot):
     result = bot.graph_retrieval_for_input("budget and emergency fund", limit=1)
 
     assert result is not None
-    assert result["compressed_summary"] == "- compressed graph summary about saving for an emergency fund"
+    assert result["compressed_summary"].startswith("- compressed graph summary")
     assert bot.estimate_tokens(result["compressed_summary"]) <= 18
 
 
 def test_relevant_memories_for_input_uses_graph_signal_when_scoring(bot):
     today = date.today().isoformat()
-    bot.MEMORY_STORE["consolidated_memories"] = [
+    bot.MEMORY_STORE = {**bot.MEMORY_STORE, "consolidated_memories": [
         {
             "summary": "Tony has been saving money for an emergency fund.",
             "category": "finance",
@@ -1042,8 +1043,8 @@ def test_relevant_memories_for_input_uses_graph_signal_when_scoring(bot):
             "contradictions": [],
             "updated_at": today,
         }
-    ]
-    bot.MEMORY_STORE["memories"] = [
+    ]}
+    bot.MEMORY_STORE = {**bot.MEMORY_STORE, "memories": [
         {
             "summary": "Tony has been using a weekly budget spreadsheet.",
             "category": "finance",
@@ -1058,7 +1059,7 @@ def test_relevant_memories_for_input_uses_graph_signal_when_scoring(bot):
             "created_at": today,
             "updated_at": today,
         },
-    ]
+    ]}
     bot.semantic_memory_matches = lambda *_args, **_kwargs: []
     bot.sync_graph_store()
 
@@ -1070,7 +1071,7 @@ def test_relevant_memories_for_input_uses_graph_signal_when_scoring(bot):
 
 def test_relevant_memories_for_input_caps_top_k_to_seven(bot):
     today = date.today().isoformat()
-    bot.MEMORY_STORE["memories"] = [
+    bot.MEMORY_STORE = {**bot.MEMORY_STORE, "memories": [
         {
             "summary": f"Tony has been planning budget step {index} for his emergency fund.",
             "category": "finance",
@@ -1079,7 +1080,7 @@ def test_relevant_memories_for_input_caps_top_k_to_seven(bot):
             "updated_at": today,
         }
         for index in range(20)
-    ]
+    ]}
     bot.semantic_memory_matches = lambda *_args, **_kwargs: []
 
     memories = bot.relevant_memories_for_input("budget and emergency fund planning", limit=20)
@@ -1103,7 +1104,7 @@ def test_relevant_memories_for_input_excludes_irrelevant_low_signal_memories(bot
         "created_at": today,
         "updated_at": today,
     }
-    bot.MEMORY_STORE["memories"] = [relevant_memory, irrelevant_memory]
+    bot.MEMORY_STORE = {**bot.MEMORY_STORE, "memories": [relevant_memory, irrelevant_memory]}
     bot.semantic_memory_matches = lambda *_args, **_kwargs: []
 
     memories = bot.relevant_memories_for_input("help me with my emergency fund budget", limit=5)

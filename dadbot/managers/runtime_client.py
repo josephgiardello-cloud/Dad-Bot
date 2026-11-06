@@ -97,7 +97,7 @@ class RuntimeClientManager:
         logger.info(
             "Ollama purpose=%s model=%s seconds=%.3f load_ms=%.1f prompt_tokens=%s "
             "prompt_ms=%.1f generated_tokens=%s generation_ms=%.1f done_reason=%s",
-            purpose, model, time.monotonic() - started,
+            purpose, model, time.perf_counter() - started,
             float(payload.get("load_duration") or 0) / 1e6,
             payload.get("prompt_eval_count"), float(payload.get("prompt_eval_duration") or 0) / 1e6,
             payload.get("eval_count"), float(payload.get("eval_duration") or 0) / 1e6,
@@ -466,7 +466,7 @@ class RuntimeClientManager:
                 }
                 if response_format is not None:
                     kwargs["format"] = response_format
-                started = time.monotonic()
+                started = time.perf_counter()
                 response = self._call_ollama_sync(**kwargs)
                 self._record_ollama_response(response, model=candidate, purpose=purpose, started=started)
                 self.bot.ACTIVE_MODEL = candidate
@@ -517,7 +517,7 @@ class RuntimeClientManager:
                 }
                 if response_format is not None:
                     kwargs["format"] = response_format
-                started = time.monotonic()
+                started = time.perf_counter()
                 client = self.ollama_async_client()
                 if client is None:
                     response = await asyncio.to_thread(self._call_ollama_sync, **kwargs)
@@ -566,7 +566,7 @@ class RuntimeClientManager:
         if response_format is not None:
             kwargs["format"] = response_format
         try:
-            started = time.monotonic()
+            started = time.perf_counter()
             response = self._call_ollama_sync(**kwargs)
             self._record_ollama_response(response, model=model_name, purpose=purpose, started=started)
             return response
@@ -664,7 +664,7 @@ class RuntimeClientManager:
         total_chars = 0
         truncated = False
         deadline = time.monotonic() + max(1, int(self.bot.STREAM_TIMEOUT_SECONDS or 1))
-        started = time.monotonic()
+        started = time.perf_counter()
 
         try:
             for response in stream_iter:
@@ -724,7 +724,7 @@ class RuntimeClientManager:
         total_chars = 0
         truncated = False
         deadline = time.monotonic() + max(1, int(self.bot.STREAM_TIMEOUT_SECONDS or 1))
-        started = time.monotonic()
+        started = time.perf_counter()
 
         try:
             async for response in stream_iter:

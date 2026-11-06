@@ -29,9 +29,9 @@ class _AgentServiceStub:
             self._owner = owner
 
         async def execute_from_graph_context(self, turn_context, rich_context):
-            return await self._owner.run_agent(turn_context, rich_context)
+            return await self._owner.generate_candidate(turn_context, rich_context)
 
-    async def run_agent(self, _turn_context, _rich_context):
+    async def generate_candidate(self, _turn_context, _rich_context):
         self.calls += 1
         return ("agent-output", False)
 

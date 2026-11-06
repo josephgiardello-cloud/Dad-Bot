@@ -54,6 +54,7 @@ class _StubService:
     def tick(self, ctx): return {"ok": True}
     def build_context(self, ctx): return {"rich_context": "stub"}
     async def run_agent(self, ctx, rich_context): return "stub_reply"
+    async def generate_candidate(self, ctx, rich_context): return await self.run_agent(ctx, rich_context)
     def enforce_policies(self, ctx, candidate): return candidate
     def save_turn(self, ctx, result): pass
     def finalize_turn(self, ctx, result): return result

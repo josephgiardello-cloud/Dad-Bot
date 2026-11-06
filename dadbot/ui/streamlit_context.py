@@ -76,9 +76,21 @@ def classify_profile_question(user_input: str) -> str:
 
 
 def set_runtime_thread_id(bot: Any, thread_id: str) -> None:
-    memory_manager = getattr(bot, "_memory_manager", None)
-    if memory_manager is not None:
-        setattr(memory_manager, "active_thread_id", str(thread_id or "default"))
+    if bot is None:
+        return
+    thread_id = str(thread_id or "default")
+    manager = bot.runtime_state_manager
+    with bot._session_lock:
+        manager.ensure_chat_thread_state(preserve_active_runtime=True)
+        if manager.active_thread_id == thread_id:
+            return
+        if thread_id not in manager.thread_snapshots:
+            manager.thread_snapshots = {
+                **manager.thread_snapshots,
+                thread_id: manager.initial_thread_snapshot(),
+            }
+            manager.chat_threads = [*manager.chat_threads, {"thread_id": thread_id}]
+        manager.switch_chat_thread(thread_id)
 
 
 def serialize_thread_messages(

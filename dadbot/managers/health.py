@@ -71,7 +71,7 @@ class RuntimeHealthManager:
     # â”€â”€ Stats accessors â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     def prompt_guard_stats(self):
-        stats = getattr(self.bot, "_prompt_guard_stats", None)
+        stats = self.bot.prompt_guard_stats()
         if not isinstance(stats, dict):
             return {
                 "trim_count": 0,

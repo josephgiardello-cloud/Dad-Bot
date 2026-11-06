@@ -31,7 +31,7 @@ def test_extract_mood_label_handles_formats_and_aliases(bot, response_text, expe
 def test_detect_mood_uses_mocked_ollama_reply(bot, mocker, model_reply, expected):
     mocker.patch.object(bot, "call_ollama_chat", return_value={"message": {"content": model_reply}})
 
-    mood = bot.mood_manager.detect("test input")
+    mood = bot.mood_manager.detect("I felt unsure about how today went")
 
     assert mood == expected
 
@@ -39,7 +39,7 @@ def test_detect_mood_uses_mocked_ollama_reply(bot, mocker, model_reply, expected
 def test_detect_mood_defaults_to_neutral_on_invalid_response(bot, mocker):
     mocker.patch.object(bot, "call_ollama_chat", return_value={"message": {"content": "I cannot tell."}})
 
-    assert bot.mood_manager.detect("ambiguous") == "neutral"
+    assert bot.mood_manager.detect("I felt unsure") == "neutral"
 
 
 def test_detect_mood_defaults_to_neutral_on_runtime_error(bot, mocker):

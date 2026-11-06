@@ -25,6 +25,8 @@ from dadbot.runtime.mcp.tool_client import (
 from dadbot.ui.chat_stream import draft_chunk_callback, run_with_chat_drafts
 from dadbot_system.contracts import DEFAULT_MODEL, ServiceConfig
 
+pytestmark = pytest.mark.unit
+
 
 def test_streamlit_launcher_imports_entrypoint(monkeypatch):
     import builtins
@@ -252,6 +254,61 @@ def test_persona_preserves_profile_rules_and_tool_honesty():
     assert "confirming tool result" in prompt
 
 
+def test_streamlit_persists_reply_before_audio_can_trigger_rerun(bot, monkeypatch):
+    import streamlit as st
+    from streamlit.testing.v1 import AppTest
+
+    from dadbot.managers.tts import TTSManager
+
+    entrypoint = Path(__file__).resolve().parents[2] / "dad_streamlit.py"
+    tree = ast.parse(entrypoint.read_text(encoding="utf-8"))
+    build = next(
+        ast.literal_eval(node.value)
+        for node in tree.body if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "_STREAMLIT_RUNTIME_BUILD" for target in node.targets)
+    )
+    observed = []
+
+    def interrupt_audio(_manager, _reply):
+        observed.append(list(st.session_state.chat_history))
+        st.rerun()
+
+    monkeypatch.setattr(TTSManager, "get_tts_audio", interrupt_audio)
+    monkeypatch.setattr(bot, "process_user_message", lambda *_args, **_kwargs: ("4", False))
+    app = AppTest.from_file(str(entrypoint), default_timeout=20)
+    app.session_state["bot"] = bot
+    app.session_state["_streamlit_runtime_build"] = build
+    app.run()
+    app.chat_input[0].set_value("2+2").run()
+    assert not app.exception
+    assert observed
+    assert observed[0][-1]["role"] == "assistant"
+    assert observed[0][-1]["text"] == "4"
+    assert app.session_state["chat_history"][-1]["text"] == "4"
+
+
+def test_streamlit_thread_binding_switches_canonical_history(bot):
+    from dadbot.ui.streamlit_context import set_runtime_thread_id
+
+    set_runtime_thread_id(bot, "ui-first")
+    bot.history.append({"role": "user", "content": "The project is Cedar"})
+    set_runtime_thread_id(bot, "ui-second")
+    assert bot.active_thread_id == "ui-second"
+    assert bot.conversation_history() == []
+    bot.history.append({"role": "user", "content": "A separate conversation"})
+    set_runtime_thread_id(bot, "ui-first")
+    assert bot.conversation_history() == [{"role": "user", "content": "The project is Cedar"}]
+
+
+def test_hard_day_gets_signoff_even_with_neutral_mood(bot):
+    reply = bot.reply_finalization.append_signoff(
+        "You don't have to carry it all by yourself.",
+        user_input="I'm having a hard day.", current_mood="neutral",
+    )
+    assert reply.endswith(bot.PROFILE["style"]["signoff"])
+    assert bot.reply_finalization.append_signoff("4", user_input="2+2", current_mood="neutral") == "4"
+
+
 @pytest.mark.parametrize("asynchronous", [False, True])
 @pytest.mark.parametrize("stream", [False, True])
 def test_runtime_preserves_selected_model_and_reasoning_defaults(monkeypatch, asynchronous, stream):
@@ -435,7 +492,7 @@ def test_cloud_stream_fallback_preserves_local_model_selection(monkeypatch, asyn
 
 
 @pytest.mark.parametrize("failed_turn", [False, True])
-def test_chat_ui_only_saves_and_speaks_canonical_reply(monkeypatch, failed_turn):
+def test_chat_ui_only_saves_and_speaks_canonical_reply(bot, monkeypatch, failed_turn):
     from streamlit.testing.v1 import AppTest
 
     path = Path(__file__).resolve().parents[2] / "dad_streamlit.py"
@@ -461,10 +518,8 @@ def test_chat_ui_only_saves_and_speaks_canonical_reply(monkeypatch, failed_turn)
     monkeypatch.delenv("DADBOT_SPATIAL_AVATAR_URL", raising=False)
     monkeypatch.setattr("dadbot.managers.tts.TTSManager.get_tts_audio", get_audio)
     app = AppTest.from_file(str(path))
-    test_bot = SimpleNamespace(PROFILE={}, process_user_message=process_message)
-    from dadbot.managers.reply_finalization import ReplyFinalizationManager
-
-    test_bot.reply_finalization = ReplyFinalizationManager(test_bot)
+    test_bot = bot
+    monkeypatch.setattr(test_bot, "process_user_message", process_message)
     app.session_state["bot"] = test_bot
     app.session_state["_streamlit_runtime_build"] = build
     app.run(timeout=20)
@@ -492,7 +547,7 @@ def test_chat_ui_only_saves_and_speaks_canonical_reply(monkeypatch, failed_turn)
 
 
 @pytest.mark.parametrize("approved", [False, True])
-def test_chat_approval_blocks_input_and_validates_result(monkeypatch, approved):
+def test_chat_approval_blocks_input_and_validates_result(bot, monkeypatch, approved):
     from streamlit.testing.v1 import AppTest
 
     from dadbot.managers.reply_finalization import ReplyFinalizationManager
@@ -521,15 +576,13 @@ def test_chat_approval_blocks_input_and_validates_result(monkeypatch, approved):
         normalized.append(reply)
         return ReplyFinalizationManager.normalize_reply(reply)
 
-    registry = ServiceRegistry()
+    registry = bot.services.registry
     registry.register("mcp_tool_service", SimpleNamespace(
         get_pending_mcp_approval=lambda _thread_id: pending,
         resolve_mcp_approval=resolve,
     ))
-    test_bot = SimpleNamespace(
-        PROFILE={}, services=SimpleNamespace(registry=registry),
-        reply_finalization=SimpleNamespace(normalize_reply=normalize),
-    )
+    test_bot = bot
+    monkeypatch.setattr(test_bot.reply_finalization, "normalize_reply", normalize)
     monkeypatch.delenv("DADBOT_SPATIAL_AVATAR_URL", raising=False)
     app = AppTest.from_file(str(path))
     app.session_state["bot"] = test_bot

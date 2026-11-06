@@ -470,7 +470,6 @@ class PromptAssemblyManager:
             prompt_guard_stats["trimmed_tokens_total"] = int(
                 prompt_guard_stats.get("trimmed_tokens_total", 0) or 0,
             ) + max(0, int(original_tokens) - int(final_tokens))
-        self.bot._prompt_guard_stats = prompt_guard_stats
         if trimmed_flag:
             _logger.info(
                 "Prompt guard trimmed %s request from %s to %s tokens for %s",

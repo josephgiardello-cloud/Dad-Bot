@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import string
 from typing import Any
 
@@ -68,6 +69,40 @@ class PlannerExecutionError(RuntimeError):
 
 def _is_event_loop_closed_error(exc: BaseException) -> bool:
     return isinstance(exc, RuntimeError) and str(exc).find(_EVENT_LOOP_CLOSED_ERROR) != -1
+
+
+def needs_tool_planning(user_input, tools, attachments=None, recent_history=None):
+    if attachments:
+        return True
+    intent = re.compile(
+        r"\b(remind\w*|schedul\w*|calendar|email|mail|send|draft|add|create|"
+        r"delete|remove|update|save|remember|forget|search|browse|lookup|"
+        r"look up|find|weather|forecast|news|latest|current|today|tomorrow|"
+        r"turn on|turn off|switch on|switch off|lights?|mqtt|tool|mcp)\b",
+        re.IGNORECASE,
+    )
+    tool_keywords = {
+        word.lower()
+        for tool in tools
+        for word in re.split(r"[_\W]+", str(tool.get("function", {}).get("name") or ""))
+        if len(word) > 2 and word.lower() not in {
+            "get", "set", "list", "read", "the", "all", "for", "with", "and",
+        }
+    }
+
+    def matches(text):
+        return bool(intent.search(text) or tool_keywords.intersection(re.findall(r"\w+", text.lower())))
+
+    text = str(user_input or "")
+    if matches(text):
+        return True
+    if re.search(r"\b(yes|okay|ok|sure|please|that|it|again|instead|same)\b", text, re.IGNORECASE):
+        return any(
+            matches(str(message.get("content") or ""))
+            for message in list(recent_history or [])[-6:]
+            if isinstance(message, dict) and message.get("role") == "user"
+        )
+    return False
 
 
 class ToolPipelineMixin:
@@ -171,6 +206,23 @@ class ToolPipelineMixin:
                 continue
             tools.append(tool)
         return tools
+
+    def _needs_tool_planning(self, stripped_input, tools, attachments=None):
+        return needs_tool_planning(
+            stripped_input, tools, attachments, recent_history=self.bot.prompt_history(),
+        )
+
+    def _skip_unneeded_planning(self, stripped_input, tools, attachments, turn_context):
+        if self._needs_tool_planning(stripped_input, tools, attachments):
+            return False
+        self._record_tool_decision_outcome(turn_context=turn_context, decision_outcome="no_tool_needed")
+        self.bot.update_planner_debug(
+            planner_status="skipped",
+            planner_reason="No tool intent in this turn or relevant follow-up context.",
+            final_path="model_reply",
+        )
+        logger.info("Agentic tool planning skipped: no tool intent")
+        return True
 
     def _record_tool_decision_outcome(
         self,
@@ -509,7 +561,8 @@ class ToolPipelineMixin:
             limit = max(96, int(len(candidate_observation) * 0.75))
             candidate_observation = candidate_observation[: limit - 3].rstrip() + "..."
             message = {"role": "user", "content": _render_prompt(candidate_observation)}
-        return str(message["content"])
+        guarded = self.bot.guard_chat_request_messages([message], purpose="agentic reflection")
+        return str(guarded[0]["content"])
 
     @staticmethod
     def _reminder_confirmation_reply(reminder: Any) -> str:
@@ -1597,6 +1650,9 @@ Return ONLY valid JSON (no extra text):
                     turn_context=turn_context,
                 )
 
+            if self._skip_unneeded_planning(stripped_input, tools, attachments, turn_context):
+                return None, None
+
             shared_context = self.bot.prompt_assembly.build_request_system_prompt(
                 stripped_input,
                 current_mood,
@@ -1787,6 +1843,9 @@ Return ONLY valid JSON (no extra text):
                     plan_reason=memory_reason,
                     turn_context=turn_context,
                 )
+
+            if self._skip_unneeded_planning(stripped_input, tools, attachments, turn_context):
+                return None, None
 
             shared_context = self.bot.prompt_assembly.build_request_system_prompt(
                 stripped_input,

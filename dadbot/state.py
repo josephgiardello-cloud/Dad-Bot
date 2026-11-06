@@ -656,32 +656,7 @@ class RuntimeStateManager(_StateThreadMixin, _StatePromptBudgetMixin):
         )
 
     def trim_text_to_token_budget(self, text, token_budget):
-        normalized = str(text or "")
-        if token_budget <= 0:
-            return ""
-        tokenizer = self.bot.current_tokenizer(model_name=self.bot.ACTIVE_MODEL)
-        if tokenizer is not None:
-            try:
-                encoded = tokenizer.encode(normalized)
-                if len(encoded) <= token_budget:
-                    return normalized
-                trimmed = tokenizer.decode(encoded[:token_budget]).rstrip()
-                if trimmed and trimmed != normalized:
-                    trimmed = trimmed.rstrip(" ,.;:") + "..."
-                return trimmed
-            except (AttributeError, TypeError, ValueError, LookupError, UnicodeError):
-                pass
-
-        estimated_tokens = self.bot.estimate_token_count(normalized)
-        if estimated_tokens <= token_budget:
-            return normalized
-
-        ratio = token_budget / max(1, estimated_tokens)
-        cutoff = max(1, min(len(normalized), int(len(normalized) * ratio)))
-        trimmed = normalized[:cutoff].rstrip()
-        if trimmed and trimmed != normalized:
-            trimmed = trimmed.rstrip(" ,.;:") + "..."
-        return trimmed
+        return super().trim_text_to_token_budget(text, token_budget)
 
     def trim_message_to_token_budget(self, message, token_budget):
         role = str(message.get("role", ""))

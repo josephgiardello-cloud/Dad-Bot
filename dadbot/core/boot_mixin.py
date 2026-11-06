@@ -201,13 +201,14 @@ class DadBotBootMixin:
     ) -> None:
         from dadbot.config import DadBotConfig
 
-        self.config = DadBotConfig(
-            model_name=model_name,
-            fallback_models=fallback_models,
-            append_signoff=append_signoff,
-            light_mode=light_mode,
-            tenant_id=tenant_id,
-        )
+        if self.__dict__.get("config") is None:
+            self.config = DadBotConfig(
+                model_name=model_name,
+                fallback_models=fallback_models,
+                append_signoff=append_signoff,
+                light_mode=light_mode,
+                tenant_id=tenant_id,
+            )
         self._service_config = self.config.service_config
         self.runtime_config = self.config.runtime_config
         self._lifecycle_state = DadBotLifecycleState.CONFIG

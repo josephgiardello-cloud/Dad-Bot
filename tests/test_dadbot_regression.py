@@ -8,17 +8,35 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import ollama
 import pytest
-from dadbot.core.execution_ledger import IntegrityBreachError
 from dadbot.core.execution_trace_context import ExecutionTraceRecorder, bind_execution_trace
 from dadbot.core.graph import LedgerMutationOp, TurnContext
+from dadbot.core.dadbot import DadBot
+from dadbot.managers.runtime_client import RuntimeClientManager
 from dadbot_system.state import InMemoryStateStore
 
 
 pytestmark = pytest.mark.integration
+
+
+@contextlib.contextmanager
+def model_transport_reply(content, calls=None):
+    def sync_reply(**kwargs):
+        if calls is not None:
+            calls.append(kwargs)
+        return {"message": {"content": content}}
+
+    async def async_reply(_client, **kwargs):
+        return sync_reply(**kwargs)
+
+    with (
+        patch.object(RuntimeClientManager, "_call_ollama_sync", staticmethod(sync_reply)),
+        patch.object(ollama.AsyncClient, "chat", async_reply),
+    ):
+        yield
 
 # Fixture to setup DadBot for all tests in this class
 @pytest.fixture(autouse=True)
@@ -36,6 +54,7 @@ def setup_bot(request, make_test_dadbot, tmp_path):
     }
     bot = make_test_dadbot(**overrides)
     request.cls.bot = bot
+    request.cls.make_bot = staticmethod(make_test_dadbot)
     # Force in-memory state store to avoid Postgres connection
     bot.MEMORY_STORE = bot.default_memory_store()
     bot.save_memory_store()
@@ -87,6 +106,7 @@ class TestDadBotRegression(unittest.TestCase):
         finally:
             self.bot._graph_commit_active = previous_commit_active
 
+    @pytest.mark.xfail(strict=True, raises=AssertionError, reason="Legacy natural-language reminder splitter retired; canonical tools take structured title/due_text.")
     def test_split_reminder_details_parses_relative_datetime(self):
         title, due_text = self.bot.split_reminder_details("call the dentist tomorrow at 3pm")
 
@@ -100,6 +120,7 @@ class TestDadBotRegression(unittest.TestCase):
         self.assertEqual(title, "call the dentist sometime")
         self.assertEqual(due_text, "")
 
+    @pytest.mark.xfail(strict=True, raises=AssertionError, reason="Legacy natural-language reminder splitter retired; canonical tools take structured title/due_text.")
     def test_split_reminder_details_parses_next_week(self):
         title, due_text = self.bot.split_reminder_details("submit the form next week")
 
@@ -239,7 +260,7 @@ class TestDadBotRegression(unittest.TestCase):
         self.assertEqual(reply, "You're doing okay, buddy. How's your day shaping up so far?")
 
     def test_create_chat_thread_keeps_conversation_state_isolated(self):
-        original_thread_id = self.bot.active_thread_id
+        original_thread_id = self.bot.runtime_state_manager.ensure_chat_thread_state(preserve_active_runtime=True)
         self.bot.history.append({"role": "user", "content": "Thread one is about work."})
         self.bot.history.append({"role": "assistant", "content": "Dad heard the work update."})
         self.bot.sync_active_thread_snapshot()
@@ -259,7 +280,7 @@ class TestDadBotRegression(unittest.TestCase):
         self.assertEqual(restored_history[-1]["content"], "Dad heard the work update.")
 
     def test_snapshot_session_state_roundtrip_preserves_chat_threads(self):
-        first_thread_id = self.bot.active_thread_id
+        first_thread_id = self.bot.runtime_state_manager.ensure_chat_thread_state(preserve_active_runtime=True)
         self.bot.history.append({"role": "user", "content": "Keep this in thread one."})
         self.bot.sync_active_thread_snapshot()
 
@@ -398,6 +419,7 @@ class TestDadBotRegression(unittest.TestCase):
         self.assertEqual(updated["auto_web_lookup"], True)
         self.assertEqual(self.bot.agentic_tool_settings()["auto_reminders"], False)
 
+    @pytest.mark.xfail(strict=True, raises=AttributeError, reason="Legacy autonomous facade removed; tool execution belongs to the graph/MCP path.")
     def test_autonomous_tool_result_can_set_reminder(self):
         self.bot.update_agentic_tool_profile(
             {"enabled": True, "auto_reminders": True, "auto_web_lookup": False}, save=False
@@ -415,6 +437,7 @@ class TestDadBotRegression(unittest.TestCase):
         self.assertEqual(len(reminders), 1)
         self.assertIn("call the bank", reminders[0]["title"])
 
+    @pytest.mark.xfail(strict=True, raises=AttributeError, reason="Legacy autonomous facade removed; tool execution belongs to the graph/MCP path.")
     def test_autonomous_tool_result_can_add_web_observation(self):
         self.bot.update_agentic_tool_profile(
             {"enabled": True, "auto_reminders": False, "auto_web_lookup": True}, save=False
@@ -615,7 +638,7 @@ class TestDadBotRegression(unittest.TestCase):
         self.assertIsNotNone(reminder["last_notified_at"])
 
     def test_run_scheduled_proactive_jobs_queues_matching_day_pattern_once(self):
-        self.bot.MEMORY_STORE["life_patterns"] = [
+        self.bot.MEMORY_STORE = {**self.bot.MEMORY_STORE, "life_patterns": [
             {
                 "summary": "Tony often carries work stress on Mondays.",
                 "topic": "work",
@@ -625,7 +648,7 @@ class TestDadBotRegression(unittest.TestCase):
                 "last_seen_at": "2026-04-18T20:00:00",
                 "proactive_message": "Mondays seem to carry extra work weight for you lately.",
             }
-        ]
+        ]}
 
         result = self.bot.run_scheduled_proactive_jobs(reference_time=datetime(2026, 4, 20, 9, 0))
 
@@ -728,7 +751,7 @@ class TestDadBotRegression(unittest.TestCase):
         self.assertEqual(normalized["last_mood"], "positive")
 
     def test_long_term_signals_manager_summarize_memory_graph_handles_empty_graph(self):
-        self.bot.MEMORY_STORE["memory_graph"] = {"nodes": [], "edges": [], "updated_at": None}
+        self.bot.MEMORY_STORE = {**self.bot.MEMORY_STORE, "memory_graph": {"nodes": [], "edges": [], "updated_at": None}}
 
         summary = self.bot.long_term_signals.summarize_memory_graph()
 
@@ -752,7 +775,7 @@ class TestDadBotRegression(unittest.TestCase):
 
     def test_long_term_signals_manager_wisdom_generation_can_trigger_from_topic_overlap(self):
         self.bot.CADENCE = {"wisdom_min_archived_sessions": 2, "wisdom_turn_interval": 9}
-        self.bot.MEMORY_STORE["session_archive"] = [
+        self.bot.MEMORY_STORE = {**self.bot.MEMORY_STORE, "session_archive": [
             {
                 "summary": "A",
                 "topics": ["work"],
@@ -769,12 +792,12 @@ class TestDadBotRegression(unittest.TestCase):
                 "created_at": "2026-04-02T20:00:00",
                 "id": "b",
             },
-        ]
-        self.bot.MEMORY_STORE["memory_graph"] = {
+        ]}
+        self.bot.MEMORY_STORE = {**self.bot.MEMORY_STORE, "memory_graph": {
             "nodes": [{"id": "category:work", "label": "work", "type": "category", "weight": 3}],
             "edges": [{"source": "work", "target": "stressed", "weight": 3}],
             "updated_at": date.today().isoformat(),
-        }
+        }}
         self.bot.session_turn_count = lambda: 2
         self.bot.relationship.top_topics = lambda *_args, **_kwargs: ["work"]
 
@@ -783,7 +806,7 @@ class TestDadBotRegression(unittest.TestCase):
         self.assertTrue(should_generate)
 
     def test_long_term_signals_manager_detect_life_patterns_skips_existing_summary(self):
-        self.bot.MEMORY_STORE["life_patterns"] = [
+        self.bot.MEMORY_STORE = {**self.bot.MEMORY_STORE, "life_patterns": [
             {
                 "summary": "Tony often carries work stressed on Saturdays.",
                 "topic": "work",
@@ -793,8 +816,8 @@ class TestDadBotRegression(unittest.TestCase):
                 "last_seen_at": "2026-04-11T20:00:00",
                 "proactive_message": "Saturdays seem heavy for work lately.",
             }
-        ]
-        self.bot.MEMORY_STORE["session_archive"] = [
+        ]}
+        self.bot.MEMORY_STORE = {**self.bot.MEMORY_STORE, "session_archive": [
             {
                 "summary": "Work felt heavy again.",
                 "topics": ["work"],
@@ -827,7 +850,7 @@ class TestDadBotRegression(unittest.TestCase):
                 "created_at": "2026-04-25T20:00:00",
                 "id": "d",
             },
-        ]
+        ]}
 
         detected = self.bot.long_term_signals.detect_life_patterns(force=True)
 
@@ -958,7 +981,7 @@ class TestDadBotRegression(unittest.TestCase):
         self.assertEqual(len(contradictions), 1)
 
     def test_living_dad_snapshot_surfaces_latest_long_term_signals(self):
-        self.bot.MEMORY_STORE["persona_evolution"] = [
+        self.bot.MEMORY_STORE = {**self.bot.MEMORY_STORE, "persona_evolution": [
             {
                 "trait": "more coach-like",
                 "reason": "Tony responds well to structure",
@@ -966,16 +989,16 @@ class TestDadBotRegression(unittest.TestCase):
                 "session_count": 10,
                 "applied_at": "2026-04-10T20:00:00",
             }
-        ]
-        self.bot.MEMORY_STORE["wisdom_insights"] = [
+        ]}
+        self.bot.MEMORY_STORE = {**self.bot.MEMORY_STORE, "wisdom_insights": [
             {
                 "summary": "Slow the moment down before work runs you.",
                 "topic": "work",
                 "trigger": "Work is getting to me.",
                 "created_at": "2026-04-11T20:00:00",
             }
-        ]
-        self.bot.MEMORY_STORE["life_patterns"] = [
+        ]}
+        self.bot.MEMORY_STORE = {**self.bot.MEMORY_STORE, "life_patterns": [
             {
                 "summary": "Tony often carries work stress on Sundays.",
                 "topic": "work",
@@ -985,14 +1008,14 @@ class TestDadBotRegression(unittest.TestCase):
                 "last_seen_at": "2026-04-12T20:00:00",
                 "proactive_message": "Sundays seem heavy for work lately.",
             }
-        ]
-        self.bot.MEMORY_STORE["pending_proactive_messages"] = [
+        ]}
+        self.bot.MEMORY_STORE = {**self.bot.MEMORY_STORE, "pending_proactive_messages": [
             {
                 "message": "I've noticed Sundays seem heavy for work lately.",
                 "source": "life-pattern",
                 "created_at": "2026-04-13T20:00:00",
             }
-        ]
+        ]}
 
         snapshot = self.bot.profile_runtime.living_dad_snapshot(limit=3)
 
@@ -1040,7 +1063,7 @@ class TestDadBotRegression(unittest.TestCase):
 
     def test_cadence_settings_can_delay_persona_evolution(self):
         self.bot.CADENCE = {"persona_evolution_min_sessions": 12, "persona_evolution_session_gap": 12}
-        self.bot.MEMORY_STORE["session_archive"] = [
+        self.bot.MEMORY_STORE = {**self.bot.MEMORY_STORE, "session_archive": [
             {
                 "summary": f"Session {index}",
                 "topics": ["work"],
@@ -1050,13 +1073,13 @@ class TestDadBotRegression(unittest.TestCase):
                 "id": str(index),
             }
             for index in range(10)
-        ]
+        ]}
 
         self.assertFalse(self.bot.should_evolve_persona())
 
     def test_should_evolve_persona_when_cadence_gap_is_met(self):
         self.bot.CADENCE = {"persona_evolution_min_sessions": 10, "persona_evolution_session_gap": 3}
-        self.bot.MEMORY_STORE["session_archive"] = [
+        self.bot.MEMORY_STORE = {**self.bot.MEMORY_STORE, "session_archive": [
             {
                 "summary": f"Session {index}",
                 "topics": ["work"],
@@ -1066,8 +1089,8 @@ class TestDadBotRegression(unittest.TestCase):
                 "id": str(index),
             }
             for index in range(12)
-        ]
-        self.bot.MEMORY_STORE["persona_evolution"] = [
+        ]}
+        self.bot.MEMORY_STORE = {**self.bot.MEMORY_STORE, "persona_evolution": [
             {
                 "trait": "more reflective",
                 "reason": "Tony has been opening up more.",
@@ -1075,13 +1098,13 @@ class TestDadBotRegression(unittest.TestCase):
                 "session_count": 9,
                 "applied_at": "2026-04-09T20:00:00",
             }
-        ]
+        ]}
 
         self.assertTrue(self.bot.should_evolve_persona())
 
     def test_generate_wisdom_insight_stores_special_wisdom_entry(self):
         today_stamp = date.today().isoformat()
-        self.bot.MEMORY_STORE["consolidated_memories"] = [
+        self.bot.MEMORY_STORE = {**self.bot.MEMORY_STORE, "consolidated_memories": [
             {
                 "summary": "Tony has recurring stress around work deadlines.",
                 "category": "work",
@@ -1091,12 +1114,12 @@ class TestDadBotRegression(unittest.TestCase):
                 "contradictions": [],
                 "updated_at": today_stamp,
             }
-        ]
-        self.bot.MEMORY_STORE["memory_graph"] = {
+        ]}
+        self.bot.MEMORY_STORE = {**self.bot.MEMORY_STORE, "memory_graph": {
             "nodes": [{"id": "category:work", "label": "work", "type": "category", "weight": 3}],
             "edges": [{"source": "work", "target": "stressed", "weight": 3}],
             "updated_at": today_stamp,
-        }
+        }}
         self.bot.call_ollama_chat = lambda *args, **kwargs: {
             "message": {
                 "content": json.dumps(
@@ -1116,7 +1139,7 @@ class TestDadBotRegression(unittest.TestCase):
 
     def test_cadence_settings_can_delay_wisdom_generation(self):
         self.bot.CADENCE = {"wisdom_min_archived_sessions": 2, "wisdom_turn_interval": 5}
-        self.bot.MEMORY_STORE["session_archive"] = [
+        self.bot.MEMORY_STORE = {**self.bot.MEMORY_STORE, "session_archive": [
             {
                 "summary": "A",
                 "topics": ["work"],
@@ -1133,19 +1156,19 @@ class TestDadBotRegression(unittest.TestCase):
                 "created_at": "2026-04-02T20:00:00",
                 "id": "b",
             },
-        ]
-        self.bot.MEMORY_STORE["memory_graph"] = {
+        ]}
+        self.bot.MEMORY_STORE = {**self.bot.MEMORY_STORE, "memory_graph": {
             "nodes": [{"id": "category:work", "label": "work", "type": "category", "weight": 3}],
             "edges": [{"source": "work", "target": "stressed", "weight": 3}],
             "updated_at": date.today().isoformat(),
-        }
+        }}
         self.bot.session_turn_count = lambda: 3
         self.bot.relationship.top_topics = lambda *_args, **_kwargs: []
 
         self.assertFalse(self.bot.should_generate_wisdom_insight("Just checking in."))
 
     def test_detect_life_patterns_queues_proactive_message(self):
-        self.bot.MEMORY_STORE["session_archive"] = [
+        self.bot.MEMORY_STORE = {**self.bot.MEMORY_STORE, "session_archive": [
             {
                 "summary": "Work felt heavy again.",
                 "topics": ["work"],
@@ -1178,7 +1201,7 @@ class TestDadBotRegression(unittest.TestCase):
                 "created_at": "2026-04-26T20:00:00",
                 "id": "d",
             },
-        ]
+        ]}
 
         patterns = self.bot.detect_life_patterns(force=True)
 
@@ -1194,7 +1217,7 @@ class TestDadBotRegression(unittest.TestCase):
             "life_pattern_confidence_threshold": 80,
             "life_pattern_queue_limit": 2,
         }
-        self.bot.MEMORY_STORE["session_archive"] = [
+        self.bot.MEMORY_STORE = {**self.bot.MEMORY_STORE, "session_archive": [
             {
                 "summary": "Work felt heavy again.",
                 "topics": ["work"],
@@ -1227,12 +1250,12 @@ class TestDadBotRegression(unittest.TestCase):
                 "created_at": "2026-04-26T20:00:00",
                 "id": "d",
             },
-        ]
+        ]}
 
         self.assertEqual(self.bot.detect_life_patterns(force=True), [])
 
     def test_opening_message_consumes_queued_proactive_message(self):
-        self.bot.MEMORY_STORE["last_mood_updated_at"] = (date.today() - timedelta(days=1)).isoformat()
+        self.bot.MEMORY_STORE = {**self.bot.MEMORY_STORE, "last_mood_updated_at": (date.today() - timedelta(days=1)).isoformat()}
         self.bot.queue_proactive_message("I've noticed Sundays weigh on you lately.", source="life-pattern")
 
         opening = self.bot.opening_message("Fallback")
@@ -1244,7 +1267,7 @@ class TestDadBotRegression(unittest.TestCase):
     def test_opening_message_uses_profile_opening_messages_when_idle(self):
         self.bot.PROFILE["opening_messages"] = ["Hey buddy, good to see you."]
         self.bot.refresh_profile_runtime()
-        self.bot.MEMORY_STORE["last_mood_updated_at"] = date.today().isoformat()
+        self.bot.MEMORY_STORE = {**self.bot.MEMORY_STORE, "last_mood_updated_at": date.today().isoformat()}
 
         opening = self.bot.opening_message("Fallback")
 
@@ -1277,7 +1300,7 @@ class TestDadBotRegression(unittest.TestCase):
     def test_refresh_memory_graph_records_issue_and_preserves_previous_snapshot_on_failure(self):
         self.bot.GRAPH_REFRESH_DEBOUNCE_SECONDS = 0
         self.bot._memory_graph_dirty = True
-        self.bot.MEMORY_STORE["memory_graph"] = {"nodes": [{"label": "existing"}], "edges": [], "updated_at": "before"}
+        self.bot.MEMORY_STORE = {**self.bot.MEMORY_STORE, "memory_graph": {"nodes": [{"label": "existing"}], "edges": [], "updated_at": "before"}}
         self.bot.sync_graph_store = lambda: (_ for _ in ()).throw(RuntimeError("graph backend unavailable"))
 
         graph = self.bot.refresh_memory_graph()
@@ -1322,6 +1345,7 @@ class TestDadBotRegression(unittest.TestCase):
 
     def test_process_user_message_applies_top_level_prompt_guard_before_runtime_client(self):
         self.bot.effective_context_token_budget = lambda _model_name=None: 320
+        self.bot.model_runtime.effective_context_token_budget = lambda _model_name=None: 320
         self.bot.RESERVED_RESPONSE_TOKENS = 120
         self.bot.mood_manager.detect = lambda *_args, **_kwargs: "neutral"
         self.bot.critique_reply = lambda *_args, **_kwargs: "I am right here with you, buddy."
@@ -1342,56 +1366,58 @@ class TestDadBotRegression(unittest.TestCase):
                 }
             )
 
-        captured = {}
-
-        def fake_runtime_chat(model_name, messages, options=None, response_format=None, purpose="chat"):
-            if purpose == "chat response":
-                captured["messages"] = messages
-                captured["purpose"] = purpose
-            return {"message": {"content": "I am right here with you, buddy."}}
-
-        with patch.object(self.bot.runtime_client, "call_ollama_chat_with_model", side_effect=fake_runtime_chat):
+        self.bot.mood_manager.detect_async = AsyncMock(return_value="neutral")
+        captured = []
+        with model_transport_reply("I am right here with you, buddy.", captured):
             reply, should_end = self.bot.process_user_message("I'm still stressed about work and bills.")
 
         self.assertFalse(should_end)
-        # Compatibility note:
-        # - Legacy/runtime-client path captures "chat response" and returns the patched buddy line.
-        # - Thin-spine/response-engine path may bypass this mock and emit deterministic fallback text.
-        if "messages" in captured:
-            self.assertIn("buddy", reply.lower())
-            self.assertEqual(captured["purpose"], "chat response")
-            sent_tokens = sum(self.bot.message_token_cost(message) for message in captured["messages"])
+        self.assertIn("buddy", reply.lower())
+        self.assertTrue(captured)
+        for request in captured:
+            sent_tokens = sum(self.bot.message_token_cost(message) for message in request["messages"])
             self.assertLessEqual(sent_tokens, 200)
 
-        # Fixture to setup DadBot for all tests in this class
-        @pytest.fixture(autouse=True)
-        def setup_bot(request, make_test_dadbot, tmp_path):
-            temp_dir = TemporaryDirectory()
-            request.cls.temp_dir = temp_dir
-            request.cls.cleanup_temp_dir = lambda self: temp_dir.cleanup()
-            bot = make_test_dadbot()
-            request.cls.bot = bot
-            bot.MEMORY_PATH = tmp_path / "dad_memory.json"
-            bot.SEMANTIC_MEMORY_DB_PATH = tmp_path / "dad_memory_semantic.sqlite3"
-            bot.SESSION_LOG_DIR = tmp_path / "session_logs"
-            bot.MEMORY_STORE = bot.default_memory_store()
-            bot.save_memory_store()
-            bot.embed_texts = request.cls.fake_embed_texts
-            yield
-            bot.shutdown()
-            bot.wait_for_semantic_index_idle(5)
+    def test_factual_graph_turn_makes_only_one_model_request(self):
+        self.bot.MEMORY_STORE = {
+            **self.bot.MEMORY_STORE,
+            "last_mood_updated_at": date.today().isoformat(),
+        }
+        calls = []
+        with model_transport_reply("4", calls):
+            reply, should_end = self.bot.process_user_message("What is 2+2? Reply with only the number.")
+        self.assertEqual(reply, "4")
+        self.assertFalse(should_end)
+        self.assertEqual(len(calls), 1)
 
-        # Removed stray dedented code at module level
+    def test_shadow_decisions_use_default_runtime_buffer(self):
+        event = self.bot.record_shadow_decision(source="test", type="suggestion", reason="coverage")
+        self.assertEqual(self.bot.peek_shadow_decisions(), [event])
+        self.assertEqual(self.bot.consume_shadow_decisions(), [event])
+        self.assertEqual(self.bot.peek_shadow_decisions(), [])
+
+    def test_supplied_config_and_runtime_projections_remain_authoritative(self):
+        from dadbot.config import DadBotConfig
+
+        config = DadBotConfig(tenant_id="config-tenant")
+        bot = self.make_bot(config=config)
+        self.assertIs(bot.config, config)
+        self.assertEqual(bot.TENANT_ID, "config-tenant")
+        bot.pending_daily_checkin_context = True
+        self.assertTrue(bot.runtime_state_manager.pending_daily_checkin_context)
+        bot.planner_debug = {"planner_status": "skipped"}
+        self.assertEqual(bot.runtime_state_manager.planner_debug["planner_status"], "skipped")
 
     def test_process_user_message_combines_memory_pruning_and_prompt_guard_under_pressure(self):
         self.bot.effective_context_token_budget = lambda _model_name=None: 360
+        self.bot.model_runtime.effective_context_token_budget = lambda _model_name=None: 360
         self.bot.RESERVED_RESPONSE_TOKENS = 160
         self.bot.mood_manager.detect = lambda *_args, **_kwargs: "stressed"
         self.bot.critique_reply = lambda *_args, **_kwargs: "I hear you, buddy. Let us take one calm step."
         self.bot.schedule_post_turn_maintenance = lambda *_args, **_kwargs: {}
 
         today = date.today().isoformat()
-        self.bot.MEMORY_STORE["memories"] = [
+        self.bot.MEMORY_STORE = {**self.bot.MEMORY_STORE, "memories": [
             {
                 "summary": f"Tony shared long work and budget pressure thread {index}: " + ("work money stress " * 35),
                 "category": "work",
@@ -1400,7 +1426,7 @@ class TestDadBotRegression(unittest.TestCase):
                 "updated_at": today,
             }
             for index in range(18)
-        ]
+        ]}
 
         baseline_messages = self.bot.build_chat_request_messages(
             "Work and bills have both been heavy this week.",
@@ -1413,22 +1439,16 @@ class TestDadBotRegression(unittest.TestCase):
         )
         baseline_tokens = sum(self.bot.message_token_cost(message) for message in baseline_messages)
 
-        captured = {}
-
-        def fake_runtime_chat(model_name, messages, options=None, response_format=None, purpose="chat"):
-            if purpose == "chat response":
-                captured["messages"] = messages
-            return {"message": {"content": "I hear you, buddy. Let us take one calm step."}}
-
-        with patch.object(self.bot.runtime_client, "call_ollama_chat_with_model", side_effect=fake_runtime_chat):
-            with self.assertRaises(IntegrityBreachError) as caught:
-                self.bot.process_user_message("Work and bills have both been heavy this week.")
-
-        self.assertIn("integrity breach", str(caught.exception).lower())
-        self.assertNotIn("kernel boundary violation", str(caught.exception).lower())
+        self.bot.mood_manager.detect_async = AsyncMock(return_value="stressed")
+        captured = []
+        with model_transport_reply("I hear you, buddy. Let us take one calm step.", captured):
+            reply, should_end = self.bot.process_user_message("Work and bills have both been heavy this week.")
+        self.assertFalse(should_end)
+        self.assertIn("buddy", reply.lower())
         self.assertGreater(baseline_tokens, prompt_budget)
-        if "messages" in captured:
-            sent_tokens = sum(self.bot.message_token_cost(message) for message in captured["messages"])
+        self.assertTrue(captured)
+        for request in captured:
+            sent_tokens = sum(self.bot.message_token_cost(message) for message in request["messages"])
             self.assertLessEqual(sent_tokens, prompt_budget)
 
     def test_reflection_retry_loop_stays_within_prompt_guard_budget(self):
@@ -1647,14 +1667,14 @@ class TestDadBotRegression(unittest.TestCase):
         self.assertIn('"summary"', prompt)
 
     def test_build_cross_session_context_includes_consolidated_memories(self):
-        self.bot.MEMORY_STORE["consolidated_memories"] = [
+        self.bot.MEMORY_STORE = {**self.bot.MEMORY_STORE, "consolidated_memories": [
             {
                 "summary": "Tony has been working steadily on saving money goals.",
                 "category": "finance",
                 "source_count": 2,
                 "updated_at": date.today().isoformat(),
             }
-        ]
+        ]}
 
         context = self.bot.build_cross_session_context()
 
@@ -1664,7 +1684,7 @@ class TestDadBotRegression(unittest.TestCase):
 
     def test_select_active_consolidated_memories_uses_model_selected_indices(self):
         today = date.today().isoformat()
-        self.bot.MEMORY_STORE["consolidated_memories"] = [
+        self.bot.MEMORY_STORE = {**self.bot.MEMORY_STORE, "consolidated_memories": [
             {
                 "summary": "Tony has been carrying steady work stress lately.",
                 "category": "work",
@@ -1686,7 +1706,7 @@ class TestDadBotRegression(unittest.TestCase):
                 "source_count": 2,
                 "updated_at": today,
             },
-        ]
+        ]}
         self.bot.call_ollama_chat = lambda *args, **kwargs: {"message": {"content": "[2, 1]"}}
 
         selected = self.bot.select_active_consolidated_memories("I am stressed about money right now.", max_items=2)
@@ -1697,7 +1717,7 @@ class TestDadBotRegression(unittest.TestCase):
 
     def test_select_active_consolidated_memories_reuses_cached_selection(self):
         today = date.today().isoformat()
-        self.bot.MEMORY_STORE["consolidated_memories"] = [
+        self.bot.MEMORY_STORE = {**self.bot.MEMORY_STORE, "consolidated_memories": [
             {
                 "summary": "Tony has been carrying steady work stress lately.",
                 "category": "work",
@@ -1712,7 +1732,7 @@ class TestDadBotRegression(unittest.TestCase):
                 "source_count": 3,
                 "updated_at": today,
             },
-        ]
+        ]}
         calls = []
         self.bot.call_ollama_chat = lambda *args, **kwargs: (
             calls.append(kwargs.get("purpose")) or {"message": {"content": "[2]"}}
@@ -1726,7 +1746,7 @@ class TestDadBotRegression(unittest.TestCase):
 
     def test_build_cross_session_context_prioritizes_positive_traits_and_recent_notes(self):
         today = date.today().isoformat()
-        self.bot.MEMORY_STORE["persona_evolution"] = [
+        self.bot.MEMORY_STORE = {**self.bot.MEMORY_STORE, "persona_evolution": [
             {
                 "trait": "more intense when you stall",
                 "reason": "",
@@ -1747,8 +1767,8 @@ class TestDadBotRegression(unittest.TestCase):
                 "strength": 1.2,
                 "impact_score": 2.4,
             },
-        ]
-        self.bot.MEMORY_STORE["session_archive"] = [
+        ]}
+        self.bot.MEMORY_STORE = {**self.bot.MEMORY_STORE, "session_archive": [
             {
                 "summary": "Work was heavy but Tony kept showing up.",
                 "topics": ["work"],
@@ -1757,15 +1777,15 @@ class TestDadBotRegression(unittest.TestCase):
                 "created_at": today + "T10:00:00",
                 "id": "a",
             }
-        ]
-        self.bot.MEMORY_STORE["consolidated_memories"] = [
+        ]}
+        self.bot.MEMORY_STORE = {**self.bot.MEMORY_STORE, "consolidated_memories": [
             {
                 "summary": "Tony has been carrying steady work stress lately.",
                 "category": "work",
                 "source_count": 2,
                 "updated_at": today,
             }
-        ]
+        ]}
 
         context = self.bot.build_cross_session_context()
 
@@ -1777,7 +1797,7 @@ class TestDadBotRegression(unittest.TestCase):
 
     def test_consolidate_memories_stores_merged_insights(self):
         today_stamp = date.today().isoformat()
-        self.bot.MEMORY_STORE["memories"] = [
+        self.bot.MEMORY_STORE = {**self.bot.MEMORY_STORE, "memories": [
             {
                 "summary": "Tony is saving money for a car.",
                 "category": "finance",
@@ -1799,7 +1819,7 @@ class TestDadBotRegression(unittest.TestCase):
                 "created_at": today_stamp,
                 "updated_at": today_stamp,
             },
-        ]
+        ]}
         self.bot.call_ollama_chat = lambda *args, **kwargs: {
             "message": {
                 "content": json.dumps(
@@ -1856,7 +1876,7 @@ class TestDadBotRegression(unittest.TestCase):
         self.assertIn("opposing states", contradictions[0]["reason"])
 
     def test_merge_consolidated_memories_marks_superseded_conflicts(self):
-        self.bot.MEMORY_STORE["consolidated_memories"] = [
+        self.bot.MEMORY_STORE = {**self.bot.MEMORY_STORE, "consolidated_memories": [
             {
                 "summary": "Tony is single right now.",
                 "category": "relationships",
@@ -1864,7 +1884,7 @@ class TestDadBotRegression(unittest.TestCase):
                 "confidence": 0.82,
                 "updated_at": "2024-01-01",
             }
-        ]
+        ]}
         with self._save_commit_context() as turn_context:
             consolidated = self.bot.merge_consolidated_memories(
                 [
@@ -1890,7 +1910,7 @@ class TestDadBotRegression(unittest.TestCase):
 
     def test_retrieve_context_returns_hybrid_bundle(self):
         today_stamp = date.today().isoformat()
-        self.bot.MEMORY_STORE["memories"] = [
+        self.bot.MEMORY_STORE = {**self.bot.MEMORY_STORE, "memories": [
             {
                 "summary": "Tony is preparing for a hard deadline at work.",
                 "category": "work",
@@ -1899,8 +1919,8 @@ class TestDadBotRegression(unittest.TestCase):
                 "updated_at": today_stamp,
                 "impact_score": 2.0,
             }
-        ]
-        self.bot.MEMORY_STORE["consolidated_memories"] = [
+        ]}
+        self.bot.MEMORY_STORE = {**self.bot.MEMORY_STORE, "consolidated_memories": [
             {
                 "summary": "Tony has recurring stress around work deadlines.",
                 "category": "work",
@@ -1909,7 +1929,7 @@ class TestDadBotRegression(unittest.TestCase):
                 "importance_score": 0.7,
                 "updated_at": today_stamp,
             }
-        ]
+        ]}
 
         payload = self.bot.retrieve_context("Can you help me with this work deadline?", strategy="hybrid", limit=3)
 
@@ -1942,8 +1962,9 @@ class TestDadBotRegression(unittest.TestCase):
         self.assertIn("988", dad_reply)
         self.assertIn("real person", dad_reply.lower())
 
+    @pytest.mark.xfail(strict=True, raises=AttributeError, reason="Legacy command dispatcher removed; status is provided by runtime snapshots.")
     def test_handle_tool_command_status_snapshot_reports_core_runtime(self):
-        self.bot.MEMORY_STORE["memories"] = [
+        self.bot.MEMORY_STORE = {**self.bot.MEMORY_STORE, "memories": [
             {
                 "summary": "Tony is saving money.",
                 "category": "finance",
@@ -1951,14 +1972,14 @@ class TestDadBotRegression(unittest.TestCase):
                 "created_at": date.today().isoformat(),
                 "updated_at": date.today().isoformat(),
             }
-        ]
-        self.bot.MEMORY_STORE["pending_proactive_messages"] = [
+        ]}
+        self.bot.MEMORY_STORE = {**self.bot.MEMORY_STORE, "pending_proactive_messages": [
             {
                 "message": "I've noticed Sundays weigh on you lately.",
                 "source": "life-pattern",
                 "created_at": "2026-04-13T20:00:00",
             }
-        ]
+        ]}
 
         reply = self.bot.handle_tool_command("/status")
 
@@ -1967,7 +1988,7 @@ class TestDadBotRegression(unittest.TestCase):
         self.assertIn("pending proactive=1", reply)
 
     def test_dashboard_status_snapshot_reports_operational_details(self):
-        self.bot.MEMORY_STORE["memories"] = [
+        self.bot.MEMORY_STORE = {**self.bot.MEMORY_STORE, "memories": [
             {
                 "summary": "Tony is saving money.",
                 "category": "finance",
@@ -1975,7 +1996,7 @@ class TestDadBotRegression(unittest.TestCase):
                 "created_at": date.today().isoformat(),
                 "updated_at": date.today().isoformat(),
             }
-        ]
+        ]}
         self.bot.begin_planner_debug("Can you help me with work stress?", "stressed")
         self.bot.update_planner_debug(planner_status="used", planner_tool="web_lookup", final_path="tool")
         self.bot._last_reply_supervisor = {
@@ -2026,7 +2047,7 @@ class TestDadBotRegression(unittest.TestCase):
             pruned=True,
             user_input="long stress check-in",
         )
-        self.bot._prompt_guard_stats["trim_count"] = 9
+        self.bot.prompt_guard_stats()["trim_count"] = 9
         self.bot.record_runtime_issue("prompt guard", "trimmed prompt context", RuntimeError("context window exceeded"))
 
         snapshot = self.bot.runtime_health_snapshot(log_warnings=False)
@@ -2051,7 +2072,7 @@ class TestDadBotRegression(unittest.TestCase):
             pruned=True,
             user_input="high pressure check",
         )
-        self.bot._prompt_guard_stats["trim_count"] = 24
+        self.bot.prompt_guard_stats()["trim_count"] = 24
 
         snapshot = self.bot.runtime_health_snapshot(log_warnings=False, persist=False)
 
@@ -2079,10 +2100,11 @@ class TestDadBotRegression(unittest.TestCase):
     def test_process_user_message_refreshes_health_snapshot_at_turn_end(self):
         self.bot.mood_manager.detect = lambda *_args, **_kwargs: "neutral"
 
-        with patch.object(
-            self.bot, "current_runtime_health_snapshot", wraps=self.bot.current_runtime_health_snapshot
-        ) as health_mock:
-            dad_reply, should_end = self.bot.process_user_message("remember I need to call the dentist tomorrow")
+        with (
+            model_transport_reply("I am right here with you, buddy."),
+            patch.object(self.bot, "current_runtime_health_snapshot", wraps=self.bot.current_runtime_health_snapshot) as health_mock,
+        ):
+            dad_reply, should_end = self.bot.process_user_message("What is 2+2?")
 
         self.assertFalse(should_end)
         self.assertIsInstance(dad_reply, str)
@@ -2191,6 +2213,7 @@ class TestDadBotRegression(unittest.TestCase):
         self.assertIn("memory_contradictions", snapshot)
         self.assertGreaterEqual(len(snapshot["memory_contradictions"]), 1)
 
+    @pytest.mark.xfail(strict=True, raises=AttributeError, reason="Legacy command dispatcher removed; quiet mode is controlled by the UI/profile service.")
     def test_handle_tool_command_quiet_mode_toggle(self):
         on_reply = self.bot.handle_tool_command("/quiet on")
         status_reply = self.bot.handle_tool_command("/quiet status")
@@ -2232,6 +2255,7 @@ class TestDadBotRegression(unittest.TestCase):
         self.assertEqual(snapshot["failed"], 0)
 
     def test_load_memory_store_restores_from_backup_when_primary_corrupt(self):
+        self.bot._tenant_document_store = None
         primary_path = self.bot.MEMORY_PATH
         backup_path = self.bot.json_backup_path(primary_path)
         backup_payload = self.bot.default_memory_store()
@@ -2354,14 +2378,14 @@ class TestDadBotRegression(unittest.TestCase):
                 clear=False,
             ),
         ):
-            tenant_a = make_test_dadbot()
-            tenant_b = make_test_dadbot()
+            tenant_a = self.make_bot(document_store=shared_store, tenant_id="tenant-a")
+            tenant_b = self.make_bot(document_store=shared_store, tenant_id="tenant-b")
             self.addCleanup(tenant_a.shutdown)
             self.addCleanup(tenant_b.shutdown)
 
             tenant_a.PROFILE["style"]["listener_name"] = "Ava"
             tenant_a.save_profile()
-            tenant_a.MEMORY_STORE["memories"] = [
+            tenant_a.MEMORY_STORE = {**tenant_a.MEMORY_STORE, "memories": [
                 {
                     "summary": "Ava loves soccer.",
                     "category": "family",
@@ -2369,12 +2393,12 @@ class TestDadBotRegression(unittest.TestCase):
                     "created_at": date.today().isoformat(),
                     "updated_at": date.today().isoformat(),
                 }
-            ]
+            ]}
             tenant_a.save_memory_store()
 
             tenant_b.PROFILE["style"]["listener_name"] = "Ben"
             tenant_b.save_profile()
-            tenant_b.MEMORY_STORE["memories"] = [
+            tenant_b.MEMORY_STORE = {**tenant_b.MEMORY_STORE, "memories": [
                 {
                     "summary": "Ben loves robotics.",
                     "category": "family",
@@ -2382,11 +2406,13 @@ class TestDadBotRegression(unittest.TestCase):
                     "created_at": date.today().isoformat(),
                     "updated_at": date.today().isoformat(),
                 }
-            ]
+            ]}
             tenant_b.save_memory_store()
 
-            reloaded_a = make_test_dadbot()
-            reloaded_b = make_test_dadbot()
+            reloaded_a = self.make_bot(document_store=shared_store, tenant_id="tenant-a")
+            reloaded_b = self.make_bot(document_store=shared_store, tenant_id="tenant-b")
+            reloaded_a._load_memory_store()
+            reloaded_b._load_memory_store()
             self.addCleanup(reloaded_a.shutdown)
             self.addCleanup(reloaded_b.shutdown)
 
@@ -2418,9 +2444,9 @@ class TestDadBotRegression(unittest.TestCase):
                 clear=False,
             ),
         ):
-            bot = make_test_dadbot()
+            bot = self.make_bot(document_store=shared_store, memory_path=Path(temp_dir) / "dad_memory.json")
             self.addCleanup(bot.shutdown)
-            bot.MEMORY_STORE["memories"] = [
+            bot.MEMORY_STORE = {**bot.MEMORY_STORE, "memories": [
                 {
                     "summary": "Ava loves soccer.",
                     "category": "family",
@@ -2428,7 +2454,7 @@ class TestDadBotRegression(unittest.TestCase):
                     "created_at": date.today().isoformat(),
                     "updated_at": date.today().isoformat(),
                 }
-            ]
+            ]}
 
             bot.save_memory_store()
 
@@ -2479,7 +2505,7 @@ class TestDadBotRegression(unittest.TestCase):
             pruned=True,
             user_input="quick check",
         )
-        self.bot._prompt_guard_stats = {
+        self.bot.prompt_guard_stats().update({
             "trim_count": 4,
             "trimmed_tokens_total": 900,
             "last_purpose": "chat response",
@@ -2487,7 +2513,7 @@ class TestDadBotRegression(unittest.TestCase):
             "last_final_tokens": 780,
             "last_trimmed": True,
             "last_updated": datetime.now().isoformat(timespec="seconds"),
-        }
+        })
 
         snapshot = self.bot.dashboard_status_snapshot()
 
@@ -2509,7 +2535,7 @@ class TestDadBotRegression(unittest.TestCase):
             pruned=True,
             user_input="high pressure check-in",
         )
-        self.bot._prompt_guard_stats["trim_count"] = 10
+        self.bot.prompt_guard_stats()["trim_count"] = 10
         self.bot.record_runtime_issue("prompt guard", "trimmed prompt context", RuntimeError("context window exceeded"))
 
         shell = self.bot.ui_shell_snapshot()
@@ -2520,7 +2546,7 @@ class TestDadBotRegression(unittest.TestCase):
         self.assertLess(shell["circuit_breaker"]["reasoning_confidence"], 0.6)
 
     def test_memory_compactor_runs_once_per_day_and_persists_summary(self):
-        self.bot.MEMORY_STORE["consolidated_memories"] = [
+        self.bot.MEMORY_STORE = {**self.bot.MEMORY_STORE, "consolidated_memories": [
             {
                 "summary": "Tony keeps pushing through work stress and wants steadier routines.",
                 "category": "work",
@@ -2531,7 +2557,7 @@ class TestDadBotRegression(unittest.TestCase):
                 "contradictions": [],
                 "updated_at": datetime.now().isoformat(timespec="seconds"),
             }
-        ]
+        ]}
         self.bot.refresh_memory_graph()
 
         result = self.bot.maintenance_scheduler.run_memory_compaction(
@@ -2611,7 +2637,7 @@ class TestDadBotRegression(unittest.TestCase):
         self.assertEqual(self.bot.conversation_history()[-1]["content"], "Checkpoint this turn.")
 
     def test_memory_compactor_creates_narrative_memories(self):
-        self.bot.MEMORY_STORE["session_archive"] = [
+        self.bot.MEMORY_STORE = {**self.bot.MEMORY_STORE, "session_archive": [
             {
                 "created_at": "2026-03-02T09:00:00",
                 "summary": "Tony struggled to stay patient with math homework.",
@@ -2642,7 +2668,7 @@ class TestDadBotRegression(unittest.TestCase):
                 "topics": ["school"],
                 "dominant_mood": "focused",
             },
-        ]
+        ]}
 
         result = self.bot.maintenance_scheduler.run_memory_compaction(
             force=True, reference_time=datetime(2026, 4, 22, 12, 0, 0)
@@ -2661,8 +2687,9 @@ class TestDadBotRegression(unittest.TestCase):
         self.assertTrue(self.bot.narrative_memories())
         self.assertIn("math", self.bot.narrative_memories()[0]["summary"].lower())
 
+    @pytest.mark.xfail(strict=True, raises=AttributeError, reason="Legacy command dispatcher removed; living state is available through snapshots.")
     def test_handle_tool_command_dad_snapshot_surfaces_living_dad_state(self):
-        self.bot.MEMORY_STORE["persona_evolution"] = [
+        self.bot.MEMORY_STORE = {**self.bot.MEMORY_STORE, "persona_evolution": [
             {
                 "trait": "more coach-like",
                 "reason": "",
@@ -2673,15 +2700,15 @@ class TestDadBotRegression(unittest.TestCase):
                 "strength": 1.8,
                 "impact_score": 2.5,
             }
-        ]
-        self.bot.MEMORY_STORE["wisdom_insights"] = [
+        ]}
+        self.bot.MEMORY_STORE = {**self.bot.MEMORY_STORE, "wisdom_insights": [
             {
                 "summary": "Slow the moment down before work runs you.",
                 "topic": "work",
                 "trigger": "",
                 "created_at": "2026-04-11T20:00:00",
             }
-        ]
+        ]}
 
         reply = self.bot.handle_tool_command("/dad")
 
@@ -2689,14 +2716,15 @@ class TestDadBotRegression(unittest.TestCase):
         self.assertIn("more coach-like (strength=1.80, impact=2.50)", reply)
         self.assertIn("wisdom notes=1", reply)
 
+    @pytest.mark.xfail(strict=True, raises=AttributeError, reason="Legacy command dispatcher removed; proactive state is provided by its service.")
     def test_handle_tool_command_proactive_snapshot_lists_queued_messages(self):
-        self.bot.MEMORY_STORE["pending_proactive_messages"] = [
+        self.bot.MEMORY_STORE = {**self.bot.MEMORY_STORE, "pending_proactive_messages": [
             {
                 "message": "I've noticed Sundays weigh on you lately.",
                 "source": "life-pattern",
                 "created_at": "2026-04-13T20:00:00",
             }
-        ]
+        ]}
 
         reply = self.bot.handle_tool_command("/proactive")
 
@@ -2704,6 +2732,7 @@ class TestDadBotRegression(unittest.TestCase):
         self.assertIn("life pattern", reply)
         self.assertIn("Sundays weigh on you", reply)
 
+    @pytest.mark.xfail(strict=True, raises=AttributeError, reason="Legacy command dispatcher removed; persona evolution is owned by its manager.")
     def test_handle_tool_command_evolve_uses_forced_persona_evolution(self):
         self.bot.evolve_persona = lambda force=False: (
             {
@@ -2719,8 +2748,9 @@ class TestDadBotRegression(unittest.TestCase):
         self.assertIn("small dad evolution", reply)
         self.assertIn("more coach-like", reply)
 
+    @pytest.mark.xfail(strict=True, raises=AttributeError, reason="Legacy command dispatcher removed; persona changes are owned by its manager.")
     def test_handle_tool_command_reject_trait_removes_latest_persona_shift(self):
-        self.bot.MEMORY_STORE["persona_evolution"] = [
+        self.bot.MEMORY_STORE = {**self.bot.MEMORY_STORE, "persona_evolution": [
             {
                 "trait": "more reflective",
                 "reason": "",
@@ -2735,7 +2765,7 @@ class TestDadBotRegression(unittest.TestCase):
                 "session_count": 6,
                 "applied_at": "2026-04-09T10:00:00",
             },
-        ]
+        ]}
 
         reply = self.bot.handle_tool_command("/reject trait")
 
@@ -2851,15 +2881,14 @@ class TestDadBotRegression(unittest.TestCase):
                 yield FakeChunk("Hello")
                 raise ollama.ResponseError("stream interrupted")
 
-        original_chat = ollama.chat
-        try:
-            ollama.chat = lambda **_kwargs: FakeStream()
+            def close(self):
+                pass
+
+        with patch.object(RuntimeClientManager, "_call_ollama_sync", staticmethod(lambda **_kwargs: FakeStream())):
             reply = self.bot.call_ollama_chat_stream(
                 [{"role": "user", "content": "Hi"}],
                 purpose="chat response",
             )
-        finally:
-            ollama.chat = original_chat
 
         self.assertEqual(reply, "Hello...")
 
@@ -2922,7 +2951,7 @@ class TestDadBotRegression(unittest.TestCase):
         self.assertEqual(self.bot.history[-1]["content"], dad_reply)
 
     def test_merge_consolidated_memories_prefers_higher_confidence(self):
-        self.bot.MEMORY_STORE["consolidated_memories"] = [
+        self.bot.MEMORY_STORE = {**self.bot.MEMORY_STORE, "consolidated_memories": [
             {
                 "summary": "Tony is building stronger saving habits.",
                 "category": "finance",
@@ -2932,7 +2961,7 @@ class TestDadBotRegression(unittest.TestCase):
                 "contradictions": [],
                 "updated_at": date.today().isoformat(),
             }
-        ]
+        ]}
 
         with self._save_commit_context() as turn_context:
             merged = self.bot.merge_consolidated_memories(
@@ -2957,7 +2986,7 @@ class TestDadBotRegression(unittest.TestCase):
 
     def test_prepare_user_turn_sets_daily_checkin_context_once(self):
         self.bot.mood_manager.detect = lambda *_args, **_kwargs: "neutral"
-        self.bot.MEMORY_STORE["last_mood_updated_at"] = (date.today() - timedelta(days=1)).isoformat()
+        self.bot.MEMORY_STORE = {**self.bot.MEMORY_STORE, "last_mood_updated_at": (date.today() - timedelta(days=1)).isoformat()}
 
         turn_context = TurnContext(user_input="Just checking in.")
         current_mood, dad_reply, should_end, _turn_text, _attachments = self.bot.prepare_user_turn(
@@ -3010,7 +3039,7 @@ class TestDadBotRegression(unittest.TestCase):
 
     def test_prepare_user_turn_blends_daily_checkin_into_direct_reply(self):
         self.bot.mood_manager.detect = lambda *_args, **_kwargs: "neutral"
-        self.bot.MEMORY_STORE["last_mood_updated_at"] = (date.today() - timedelta(days=1)).isoformat()
+        self.bot.MEMORY_STORE = {**self.bot.MEMORY_STORE, "last_mood_updated_at": (date.today() - timedelta(days=1)).isoformat()}
         self.bot.handle_memory_command = lambda *_args, **_kwargs: None
         self.bot.handle_tool_command = lambda *_args, **_kwargs: None
         self.bot.get_memory_reply = lambda *_args, **_kwargs: None
@@ -3024,11 +3053,12 @@ class TestDadBotRegression(unittest.TestCase):
 
     def test_process_user_message_blends_daily_checkin_into_generated_reply(self):
         self.bot.mood_manager.detect = lambda *_args, **_kwargs: "neutral"
-        self.bot.MEMORY_STORE["last_mood_updated_at"] = (date.today() - timedelta(days=1)).isoformat()
+        self.bot.MEMORY_STORE = {**self.bot.MEMORY_STORE, "last_mood_updated_at": (date.today() - timedelta(days=1)).isoformat()}
         self.bot.call_ollama_chat = lambda *args, **kwargs: {"message": {"content": "You're doing okay, buddy."}}
         self.bot.critique_reply = lambda *_args, **_kwargs: "You're doing okay, buddy."
 
-        dad_reply, should_end = self.bot.process_user_message("Just wanted to say hi.")
+        with model_transport_reply("You're doing okay, buddy."):
+            dad_reply, should_end = self.bot.process_user_message("Just wanted to say hi.")
 
         self.assertFalse(should_end)
         self.assertIn("How's your day shaping up so far?", dad_reply)
@@ -3052,7 +3082,7 @@ class TestDadBotRegression(unittest.TestCase):
         self.assertTrue(any(step["name"] == "finalize_turn" for step in pipeline["steps"]))
 
     def test_reply_alignment_judge_prompt_includes_relationship_and_persona_context(self):
-        self.bot.MEMORY_STORE["relationship_state"] = {
+        self.bot.MEMORY_STORE = {**self.bot.MEMORY_STORE, "relationship_state": {
             "trust_level": 68,
             "openness_level": 61,
             "emotional_momentum": "heavy",
@@ -3076,8 +3106,8 @@ class TestDadBotRegression(unittest.TestCase):
             "recent_checkins": [],
             "last_reflection": "Tony sounds worn down but still trusting.",
             "last_updated": date.today().isoformat(),
-        }
-        self.bot.MEMORY_STORE["persona_evolution"] = [
+        }}
+        self.bot.MEMORY_STORE = {**self.bot.MEMORY_STORE, "persona_evolution": [
             {
                 "trait": "more patient with my mistakes",
                 "reason": "Tony keeps opening up when Dad slows down and listens first.",
@@ -3090,7 +3120,7 @@ class TestDadBotRegression(unittest.TestCase):
                 "critique_score": 8,
                 "critique_feedback": "Solid and specific.",
             }
-        ]
+        ]}
 
         prompt = self.bot.build_reply_alignment_judge_prompt(
             "Work still feels heavy.",
