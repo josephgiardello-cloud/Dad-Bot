@@ -17,42 +17,6 @@ from dadbot.core.runtime_errors import InvariantViolation
 from dadbot.core.tool_ir import ToolContractResult, ToolStatus, deterministic_tool_id
 
 from dadbot.core.tool_executor import execute_tool
-# ToolRegistration must be defined before register_tool.
-@dataclass(frozen=True)
-class ToolRegistration:
-    handler: Any
-    required_args: frozenset[str] = frozenset()
-    allowed_intents: frozenset[str] | None = None
-    require_expected_output: bool = True
-    output_validator: Any | None = None
-    retryable_exceptions: tuple[type[Exception], ...] = ()
-
-_TOOL_REGISTRY: dict[str, ToolRegistration] = {}
-
-def register_tool(
-    name: str,
-    *,
-    handler: Any,
-    required_args: set[str] | frozenset[str] | None = None,
-    allowed_intents: set[str] | frozenset[str] | None = None,
-    require_expected_output: bool = True,
-    output_validator: Any | None = None,
-    retryable_exceptions: tuple[type[Exception], ...] = (),
-) -> None:
-    tool_name = str(name or "").strip().lower()
-    if not tool_name:
-        raise ValueError("Tool name must be non-empty")
-    if not callable(handler):
-        raise ValueError(f"Tool handler for {tool_name!r} must be callable")
-    _TOOL_REGISTRY[tool_name] = ToolRegistration(
-        handler=handler,
-        required_args=frozenset(required_args or ()),
-        allowed_intents=frozenset(allowed_intents) if allowed_intents is not None else None,
-        require_expected_output=bool(require_expected_output),
-        output_validator=output_validator,
-        retryable_exceptions=tuple(retryable_exceptions or ()),
-    )
-
 _MAX_DELEGATION_DEPTH: int = 2
 _MAX_DELEGATION_SUBTASKS: int = 8
 _ALLOWED_MEMORY_INTENTS = frozenset({"goal_lookup", "session_memory_fetch"})

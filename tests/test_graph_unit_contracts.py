@@ -52,6 +52,35 @@ def _memory_intent(**kw) -> MutationIntent:
     return MutationIntent(type="memory", payload=payload)
 
 
+def test_tool_registration_preserves_normalization_guards_and_contract_fields(monkeypatch):
+    from dadbot.core import nodes
+
+    monkeypatch.setattr(nodes, "_TOOL_REGISTRY", {})
+
+    def handler():
+        return "ok"
+
+    def validator(output):
+        return output == "ok"
+
+    nodes.register_tool(
+        " Example ", handler=handler, required_args={"query"}, allowed_intents={"lookup"},
+        require_expected_output=False, output_validator=validator, retryable_exceptions=(ConnectionError,),
+    )
+    registration = nodes.get_registered_tool("EXAMPLE")
+    assert isinstance(registration, nodes.ToolRegistration)
+    assert registration.handler is handler
+    assert registration.required_args == frozenset({"query"})
+    assert registration.allowed_intents == frozenset({"lookup"})
+    assert registration.require_expected_output is False
+    assert registration.output_validator is validator
+    assert registration.retryable_exceptions == (ConnectionError,)
+    with pytest.raises(ValueError, match="non-empty"):
+        nodes.register_tool(" ", handler=handler)
+    with pytest.raises(ValueError, match="callable"):
+        nodes.register_tool("invalid", handler=None)
+
+
 # ---------------------------------------------------------------------------
 # VirtualClock
 # ---------------------------------------------------------------------------
