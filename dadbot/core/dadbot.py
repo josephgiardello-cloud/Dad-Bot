@@ -364,51 +364,51 @@ class DadBot(
         return self.config.llm_model
 
     @property
-    def ACTIVE_MODEL(self) -> str:
+    def ACTIVE_MODEL(self) -> str:  # noqa: N802
         return self.config.active_model
 
     @ACTIVE_MODEL.setter
-    def ACTIVE_MODEL(self, value: str) -> None:
+    def ACTIVE_MODEL(self, value: str) -> None:  # noqa: N802
         self.config.active_model = value
 
     @property
-    def LLM_PROVIDER(self) -> str:
+    def LLM_PROVIDER(self) -> str:  # noqa: N802
         return self.config.llm_provider
 
     @LLM_PROVIDER.setter
-    def LLM_PROVIDER(self, value: str) -> None:
+    def LLM_PROVIDER(self, value: str) -> None:  # noqa: N802
         self.config.llm_provider = value
 
     @property
-    def LLM_MODEL(self) -> str:
+    def LLM_MODEL(self) -> str:  # noqa: N802
         return self.config.llm_model
 
     @LLM_MODEL.setter
-    def LLM_MODEL(self, value: str) -> None:
+    def LLM_MODEL(self, value: str) -> None:  # noqa: N802
         self.config.llm_model = value
 
     @property
-    def ACTIVE_EMBEDDING_MODEL(self) -> str | None:
+    def ACTIVE_EMBEDDING_MODEL(self) -> str | None:  # noqa: N802
         return self.config.active_embedding_model
 
     @ACTIVE_EMBEDDING_MODEL.setter
-    def ACTIVE_EMBEDDING_MODEL(self, value: str | None) -> None:
+    def ACTIVE_EMBEDDING_MODEL(self, value: str | None) -> None:  # noqa: N802
         self.config.active_embedding_model = value
 
     @property
-    def APPEND_SIGNOFF(self) -> bool:
+    def APPEND_SIGNOFF(self) -> bool:  # noqa: N802
         return self.config.append_signoff
 
     @APPEND_SIGNOFF.setter
-    def APPEND_SIGNOFF(self, value: bool) -> None:
+    def APPEND_SIGNOFF(self, value: bool) -> None:  # noqa: N802
         self.config.append_signoff = value
 
     @property
-    def LIGHT_MODE(self) -> bool:
+    def LIGHT_MODE(self) -> bool:  # noqa: N802
         return self.config.light_mode
 
     @LIGHT_MODE.setter
-    def LIGHT_MODE(self, value: bool) -> None:
+    def LIGHT_MODE(self, value: bool) -> None:  # noqa: N802
         self.config.light_mode = value
 
     @property
