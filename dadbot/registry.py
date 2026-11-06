@@ -227,8 +227,9 @@ class ServiceRegistry:
         config_path: str = "config.yaml",
         *,
         bot: Any | None = None,
+        registry: ServiceRegistry | None = None,
     ) -> ServiceRegistry:
-        registry = cls()
+        registry = registry if registry is not None else cls()
         config = _resolve_attr("dadbot.config_schema:ConfigSchema").from_file(
             config_path,
         )
@@ -430,6 +431,9 @@ def wire_bootstrap_managers(bot: Any) -> None:
         ),
     )
     _wire_dependency_graph(bot, graph)
+    initialize_memory = getattr(bot.memory_manager, "initialize", None)
+    if callable(initialize_memory):
+        initialize_memory()
 
 
 def wire_runtime_managers(bot: Any) -> None:
@@ -807,7 +811,18 @@ class DadBotServiceContainer:
             orchestrator_cls = _resolve_attr(
                 "dadbot.core.orchestrator:DadBotOrchestrator",
             )
+            registry = self.registry
+            if registry.get("persistence_service", optional=True) is None:
+                registry = ServiceRegistry.boot(
+                    config_path=self.bot.config.turn_graph_config_path,
+                    bot=self.bot,
+                    registry=registry,
+                )
+                self.registry = registry
+                for name, instance in registry._services.items():
+                    setattr(self, name, instance)
             self._turn_orchestrator = orchestrator_cls(
+                registry=registry,
                 config_path=self.bot.config.turn_graph_config_path,
                 bot=self.bot,
                 strict=bool(getattr(self.bot.config, "strict_graph_mode", True)),

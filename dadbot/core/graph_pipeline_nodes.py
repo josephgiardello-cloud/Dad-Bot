@@ -273,6 +273,28 @@ class ValidationGateNode(_NodeContractMixin):
         turn_context.state["tool_ir"] = tool_ir
 
 
+class MCPToolNode(_NodeContractMixin):
+    name = "mcp_tools"
+
+    async def execute(self, registry: Any, turn_context: TurnContext) -> None:
+        service = _registry_get_optional(registry, "mcp_tool_service")
+        if service is None or not bool(getattr(service, "is_enabled", False)):
+            return
+        generate_candidate = getattr(service, "generate_candidate", None)
+        if not callable(generate_candidate):
+            raise RuntimeError("Configured MCP tool service must expose generate_candidate")
+        rich_context = turn_context.state.get("rich_context")
+        result = generate_candidate(
+            turn_context,
+            rich_context if isinstance(rich_context, dict) else {},
+        )
+        candidate = await result if inspect.isawaitable(result) else result
+        if candidate is None or not InferenceNode._candidate_text(candidate).strip():
+            raise RuntimeError("Configured MCP tool service produced an empty candidate")
+        turn_context.state["candidate"] = candidate
+        turn_context.state["mcp_tool_candidate_ready"] = True
+
+
 class InferenceNode(_NodeContractMixin):
     name = "inference"
     _GOAL_ALIGNMENT_OVERLAP_THRESHOLD = 0.12
@@ -480,17 +502,6 @@ class InferenceNode(_NodeContractMixin):
         return blend(str(candidate or ""), current_mood)
 
     @staticmethod
-    def _resolve_control_plane(service: Any) -> Any | None:
-        control_plane = getattr(service, "control_plane", None)
-        if control_plane is not None:
-            return control_plane
-        bot = getattr(service, "bot", None)
-        orchestrator = getattr(bot, "turn_orchestrator", None)
-        if orchestrator is None:
-            return None
-        return getattr(orchestrator, "control_plane", None)
-
-    @staticmethod
     def _stable_sha256(payload: Any) -> str:
         return hashlib.sha256(
             json.dumps(payload, sort_keys=True, ensure_ascii=True, default=str).encode("utf-8"),
@@ -548,19 +559,17 @@ class InferenceNode(_NodeContractMixin):
         context: TurnContext,
         rich_context: dict[str, Any],
     ) -> Any:
-        control_plane = self._resolve_control_plane(service)
-        execute_from_graph_context = getattr(control_plane, "execute_from_graph_context", None)
-        if not callable(execute_from_graph_context):
+        generate_candidate = getattr(service, "generate_candidate", None)
+        if not callable(generate_candidate):
             raise RuntimeError(
-                "Graph inference requires control_plane.execute_from_graph_context; "
-                "legacy agent_service.run_agent fallback is disabled",
+                "Graph inference requires agent_service.generate_candidate",
             )
 
-        authoritative_result = execute_from_graph_context(context, rich_context)
+        candidate_result = generate_candidate(context, rich_context)
         candidate = (
-            await authoritative_result
-            if inspect.isawaitable(authoritative_result)
-            else authoritative_result
+            await candidate_result
+            if inspect.isawaitable(candidate_result)
+            else candidate_result
         )
         return candidate
 
@@ -827,14 +836,17 @@ class InferenceNode(_NodeContractMixin):
         return f"I delegated {len(results)} sub-tasks. Results: " + "; ".join(str(item) for item in results)
 
     async def execute(self, registry: Any, turn_context: TurnContext) -> None:
-        service = _registry_get_optional(registry, "agent_service")
-        if service is None:
-            fallback_reply = f"I hear you: {str(turn_context.user_input or '').strip()}"
-            candidate = (fallback_reply, False)
+        if bool(turn_context.state.pop("mcp_tool_candidate_ready", False)):
+            candidate = turn_context.state.get("candidate")
+            if candidate is None or not self._candidate_text(candidate).strip():
+                raise RuntimeError("MCP tool candidate was missing before inference")
             self._run_critique_check(turn_context, candidate, 0)
             turn_context.state.pop("_critique_revision_context", None)
-            turn_context.state["candidate"] = candidate
             return
+
+        service = _registry_get_optional(registry, "agent_service")
+        if service is None:
+            raise RuntimeError("Graph inference requires a registered agent_service")
         rich_context = turn_context.state.get("rich_context", {})
         plan = dict(turn_context.state.get("turn_plan") or {})
         resynthesis_reply = self._goal_resynthesis_reply(turn_context)
@@ -900,6 +912,52 @@ class InferenceNode(_NodeContractMixin):
         self._run_critique_check(turn_context, candidate, 0)
         turn_context.state.pop("_critique_revision_context", None)
         turn_context.state["candidate"] = candidate
+
+
+class ControlPlaneNode(_NodeContractMixin):
+    name = "control_plane"
+
+    async def execute(self, registry: Any, turn_context: TurnContext) -> None:
+        service = _registry_get_optional(registry, "agent_service")
+        bot = getattr(service, "bot", None)
+        orchestrator = getattr(bot, "turn_orchestrator", None)
+        control_plane = getattr(orchestrator, "control_plane", None)
+        execute = getattr(control_plane, "execute_from_graph_context", None)
+        if not callable(execute):
+            raise RuntimeError(
+                "Control-plane node requires the orchestrator's execute_from_graph_context entrypoint",
+            )
+
+        rich_context = turn_context.state.get("rich_context")
+        result = execute(
+            turn_context,
+            rich_context if isinstance(rich_context, dict) else {},
+        )
+        candidate = await result if inspect.isawaitable(result) else result
+        if candidate is None:
+            raise RuntimeError("Control plane produced no response candidate")
+        if InferenceNode._candidate_should_end(candidate):
+            turn_context.state["candidate"] = candidate
+            turn_context.state["response_authority"] = "turn_service"
+            return
+        if not InferenceNode._candidate_text(candidate).strip():
+            raise RuntimeError("Control plane produced an empty response candidate")
+        finalize = getattr(getattr(bot, "reply_finalization", None), "finalize", None)
+        if not callable(finalize):
+            raise RuntimeError("Control-plane node requires reply_finalization.finalize")
+        finalized_reply = finalize(
+            InferenceNode._candidate_text(candidate),
+            str(turn_context.state.get("mood") or "neutral"),
+            user_input=turn_context.user_input,
+        )
+        candidate = (
+            str(finalized_reply or ""),
+            InferenceNode._candidate_should_end(candidate),
+        )
+        if not candidate[0].strip():
+            raise RuntimeError("Reply finalization produced an empty response candidate")
+        turn_context.state["candidate"] = candidate
+        turn_context.state["response_authority"] = "response_engine"
 
 
 class SafetyNode(_NodeContractMixin):

@@ -18,14 +18,13 @@ import uuid
 from collections import deque
 from pathlib import Path
 from threading import RLock
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 try:
     import ollama
 except ImportError:  # pragma: no cover
     ollama = None  # type: ignore[assignment]
 
-from dadbot.core.facade_compat import DadBotFacadeCompat
 from dadbot.core.runtime_service_provider import DefaultCoreRuntimeServices
 from dadbot.defaults import default_planner_debug_state as _default_planner_debug_state
 from dadbot.utils import env_truthy, json_dump, json_load
@@ -73,7 +72,7 @@ class DadBotBootMixin:
         },
         "llm": {
             "provider": "ollama",
-            "model": "llama3.2",
+            "model": "qwen3.5:9b",
         },
         "preferences": {
             "append_signoff": True,
@@ -295,10 +294,11 @@ class DadBotBootMixin:
         self.profile_runtime.refresh_profile_runtime()
         self.services.wire_runtime()
         self.service_registry = self.services.registry
+        self.MEMORY_STORE = self._memory_manager.memory_store
 
         # Wire the deterministic model-interaction port now that runtime is ready.
         config = ModelConfig(
-            active_model=str(self.config.active_model or "llama3.2"),
+            active_model=str(self.config.active_model or "qwen3.5:9b"),
             temperature=None,
             request_timeout_seconds=30.0,
         )
@@ -321,6 +321,7 @@ class DadBotBootMixin:
 
         self._model_metadata_cache: dict = {}
         self._tokenizer_cache: dict = {}
+        self._last_reply_supervisor: dict = {}
         self._tokenizer = self.initialize_tokenizer(self.config.active_model)
         self._ollama_async_client = None
         self._io_lock = RLock()
@@ -388,7 +389,7 @@ class DadBotBootMixin:
 
     def __init__(
         self,
-        model_name: str = "llama3.2",
+        model_name: str = "qwen3.5:9b",
         fallback_models: tuple[str, ...] = (
             "llama3.1:8b",
             "phi4:mini",
@@ -422,6 +423,8 @@ class DadBotBootMixin:
         if runtime_services is not None:
             explicit_dependencies["core_runtime_services"] = runtime_services
         self._explicit_dependencies = explicit_dependencies
+        self._dependency_overrides = dict(dependency_registry or {})
+        self._dependency_overrides.update(explicit_dependencies)
         # Facade alias compatibility removed in elite refactor
         self._facade_compat = None
         self._lifecycle_state = DadBotLifecycleState.UNINITIALIZED
@@ -441,9 +444,13 @@ class DadBotBootMixin:
         self._ensure_runtime_paths()
         self._initialize_document_store(document_store)
         self._initialize_services()
-        # self._hydrate_profile_and_memory()  # Removed: now must be called explicitly after initialization
+        self._hydrate_profile_and_memory()
         self._initialize_runtime_caches()
         self._initialize_turn_orchestration()
+        orchestrator = self.services.turn_orchestrator
+        if orchestrator.control_plane is None:
+            raise RuntimeError("Boot boundary contract violation: execution control plane was not wired")
+        self._turn_orchestrator = orchestrator
         if not skip_manager_validation:
             self._validate_managers(
                 smoke=env_truthy("DADBOT_VALIDATE_MANAGERS_SMOKE", default=False),

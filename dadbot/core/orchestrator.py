@@ -355,12 +355,7 @@ class DadBotOrchestrator:
         self._job_builder = JobBuilder()
         self._trace_binder = TraceBinder()
         self.graph = self._build_turn_graph()
-        self.control_plane = ExecutionControlPlane(
-            registry=SessionRegistry(),
-            kernel_executor=self._execute_job,
-            graph=self.graph,
-            enable_observability=self._enable_observability,
-        )
+        self.control_plane = self._build_control_plane()
         self._execution_spine_token = str(getattr(self.control_plane, "execution_token", "") or "")
         self._execution_surface_fingerprint: dict[str, str] = {
             "control_plane_submit_turn": self._callable_identity(getattr(self.control_plane, "submit_turn", None)),
@@ -372,6 +367,22 @@ class DadBotOrchestrator:
         self._reflection_engine = DriftReflectionEngine()  # Lazy initialization; ledger path set per-session
         self._friction_engine = CompositeFrictionEngine()
         self._goal_recalibration_engine = GoalRecalibrationEngine()
+
+    def _build_control_plane(self) -> ExecutionControlPlane:
+        kernel_executor = self._execute_job
+        if not callable(kernel_executor):
+            raise RuntimeError("Orchestrator boot requires a callable kernel executor")
+        control_plane = ExecutionControlPlane(
+            registry=SessionRegistry(),
+            kernel_executor=kernel_executor,
+            graph=self.graph,
+            enable_observability=self._enable_observability,
+        )
+        if control_plane.graph is not self.graph or control_plane.kernel_executor != kernel_executor:
+            raise RuntimeError("Orchestrator boot produced an unbound execution control plane")
+        if not callable(getattr(control_plane, "submit_turn", None)):
+            raise RuntimeError("Orchestrator boot produced a control plane without submit_turn")
+        return control_plane
 
     def _assert_execution_surface_intact(self) -> None:
         if not bool(getattr(self, "_strict", False)):

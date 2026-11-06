@@ -32,7 +32,7 @@ def validate_dadbot_facade(bot, *, smoke: bool = False) -> None:
         "status_reporting": ("dashboard_status_snapshot",),
         "maintenance_scheduler": ("run_post_turn_maintenance",),
         "runtime_interface": ("chat_loop",),
-        "tool_registry": ("parse_tool_command",),
+        "tool_registry": ("get_available_tools",),
         # "agentic_handler": ("handle_tool_command",),
         "memory_coordinator": ("update_memory_store",),
         "model_runtime": ("initialize_tokenizer",),

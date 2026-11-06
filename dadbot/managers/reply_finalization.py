@@ -38,6 +38,14 @@ class ReplyFinalizationManager:
             raise TypeError(f"Reply must be a string, got {type(reply).__name__}")
         return reply.strip()
 
+    @classmethod
+    def normalize_reply(cls, reply: Any) -> str:
+        """Validate and normalize a canonical reply before it reaches a UI surface."""
+        normalized = cls._reply_text(reply)
+        if not normalized:
+            raise ValueError("Assistant returned an empty reply")
+        return normalized
+
     @staticmethod
     def _signoff_is_appropriate(
         reply: str,
@@ -156,6 +164,11 @@ class ReplyFinalizationManager:
             "i do not have preferences or feelings",
             "i don't have personal preferences",
             "i do not have personal preferences",
+            "i don't have a physical existence",
+            "i do not have a physical existence",
+            "i'm not your dad",
+            "released to the public in",
+            "released in 2023",
             "i don't have personal experiences",
             "i do not have personal experiences",
             "i'm an ai designed",
@@ -166,6 +179,158 @@ class ReplyFinalizationManager:
             "i do not participate in physical activities",
         )
         return any(marker in text for marker in markers)
+
+    @staticmethod
+    def _profile_question_kind(user_input: Any) -> str:
+        text = str(user_input or "").strip().lower()
+        if not text:
+            return ""
+        if any(
+            marker in text
+            for marker in (
+                "in this code", "in the code", "in this repo", "in the repo",
+                "in this project", "in the project", "in this file", "in the file",
+                "in this app", "in this system", "in this model", "in this example",
+                "in the example", "in this scenario", "in the scenario", "in this story",
+                "in the story", "in this conversation",
+            )
+        ):
+            return ""
+        if any(
+            marker in text
+            for marker in (
+                "who are you", "what's your story", "whats your story",
+                "tell me your story", "your story", "about yourself", "tell me about yourself",
+            )
+        ):
+            return "identity"
+        if any(
+            marker in text
+            for marker in (
+                "how old are you", "your age", "dad age", "what year were you born",
+                "when were you born", "your birthday",
+            )
+        ):
+            return "age"
+        if any(
+            marker in text
+            for marker in (
+                "baseball", "football", "soccer", "basketball", "sports team",
+                "favorite team", "favourite team", "which team do you like",
+                "what team do you like",
+            )
+        ):
+            return "preferences"
+        return ""
+
+    def _profile_fact_reply(self, user_input: Any) -> str:
+        kind = self._profile_question_kind(user_input)
+        if not kind:
+            return ""
+        get_fact_reply = getattr(self.bot, "get_fact_reply", None)
+        if callable(get_fact_reply):
+            try:
+                fact_reply = str(get_fact_reply(user_input) or "").strip()
+            except Exception:
+                logger.warning("Failed to resolve profile fact reply", exc_info=True)
+            else:
+                if fact_reply:
+                    return fact_reply
+
+        style = getattr(getattr(self.bot, "profile_runtime", None), "style", {}) or {}
+        listener_name = str(style.get("listener_name") or "buddy")
+        if kind == "identity":
+            user_text = str(user_input or "").strip().lower()
+            profile = getattr(self.bot, "PROFILE", {})
+            family = getattr(self.bot, "FAMILY", {})
+            education = getattr(self.bot, "EDUCATION", {})
+            profile = profile if isinstance(profile, dict) else {}
+            family = family if isinstance(family, dict) else {}
+            education = education if isinstance(education, dict) else {}
+            dad = family.get("dad", {})
+            dad = dad if isinstance(dad, dict) else {}
+            details = []
+            birthplace = str(dad.get("birthplace") or "").strip()
+            moved_to = str(dad.get("moved_to") or "").strip()
+            move_age = dad.get("move_age")
+            boarding_school = str(education.get("boarding_school") or "").strip()
+            university = str(education.get("university") or "").strip()
+            degree = str(education.get("degree") or "").strip()
+            if birthplace:
+                details.append(f"I was born in {birthplace}")
+            if moved_to:
+                age_fragment = f" when I was {move_age}" if move_age is not None else ""
+                details.append(f"we moved to {moved_to}{age_fragment}")
+            if boarding_school:
+                details.append(f"I went to {boarding_school}")
+            if university:
+                degree_fragment = f" for {degree}" if degree else ""
+                details.append(f"I studied at {university}{degree_fragment}")
+            story = (
+                f"Here's the short version, {listener_name}: " + ". ".join(details) + "."
+                if details
+                else f"I'm here with you, {listener_name}. What would you like to know?"
+            )
+            long_story = any(
+                marker in user_text
+                for marker in (
+                    "full life story", "full story", "detailed", "detail",
+                    "long version", "more about you",
+                )
+            )
+            if long_story:
+                childhood = str(dad.get("childhood") or "").strip()
+                other_subjects = education.get("other_subjects", [])
+                if isinstance(other_subjects, list) and other_subjects:
+                    story += " I also studied " + ", ".join(
+                        str(item) for item in other_subjects if str(item).strip()
+                    ) + "."
+                if childhood:
+                    story += f" {childhood}"
+                sports = profile.get("sports_preferences", {})
+                if isinstance(sports, dict):
+                    sports_items = sorted(
+                        (str(key).replace("_", " "), str(value).strip())
+                        for key, value in sports.items()
+                        if str(value).strip()
+                    )
+                    if sports_items:
+                        story += " My sports preferences are " + "; ".join(
+                            f"{key}: {value}" for key, value in sports_items
+                        ) + "."
+                return f"Full version, {listener_name}: {story}"
+            return story
+
+        if kind == "age":
+            age_on_date = getattr(self.bot, "age_on_date", None)
+            birthdate = getattr(self.bot, "DAD_BIRTHDATE", None)
+            if callable(age_on_date) and birthdate is not None:
+                try:
+                    age_text = str(age_on_date(birthdate) or "").strip()
+                    age = int(age_text) if age_text else None
+                except Exception:
+                    logger.warning("Failed to resolve profile age", exc_info=True)
+                else:
+                    if age is not None:
+                        return f"I'm {age} years old, {listener_name}."
+            return f"I don't have a birth date in my profile, {listener_name}."
+
+        profile = getattr(self.bot, "PROFILE", {})
+        sports = profile.get("sports_preferences", {}) if isinstance(profile, dict) else {}
+        if not isinstance(sports, dict) or not sports:
+            return f"I don't have a sports preference saved in my profile yet, {listener_name}."
+        prompt = str(user_input or "").strip().lower()
+        preferences = [
+            f"{str(key).replace('_', ' ')}: {value}"
+            for key, value in sports.items()
+            if str(key).split("_")[0] in prompt
+        ]
+        if not preferences:
+            preferences = [
+                f"{str(key).replace('_', ' ')}: {value}"
+                for key, value in sorted(sports.items())
+            ]
+        return f"Here's what my profile says, {listener_name}: " + "; ".join(preferences) + "."
 
     def _dad_bio_reply(self) -> str:
         get_fact_reply = getattr(self.bot, "get_fact_reply", None)

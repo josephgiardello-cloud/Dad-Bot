@@ -93,6 +93,17 @@ class TestUIRuntimeAPISendUserMessage:
 class TestStreamlitRuntimeSendUserMessage:
     """Tests on the StreamlitRuntime wrapper (delegates to UIRuntimeAPI)."""
 
+    def test_build_creates_runtime_with_session_lock(self):
+        from dadbot.runtime_core.streamlit_runtime import StreamlitRuntime
+
+        runtime = StreamlitRuntime.build()
+        try:
+            assert runtime.api._bot is runtime.bot
+            with runtime.bot._session_lock:
+                pass
+        finally:
+            runtime.bot.shutdown()
+
     def _runtime(self, reply: str = "Hey Tony!"):
         from dadbot.runtime_core.streamlit_runtime import StreamlitRuntime
         rt = object.__new__(StreamlitRuntime)

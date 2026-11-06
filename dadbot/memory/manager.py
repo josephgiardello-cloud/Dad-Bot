@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import date
+from uuid import uuid4
 
 from dadbot.base.memory_base import (
     GraphManagerProtocol,
@@ -26,6 +27,32 @@ logger = logging.getLogger(__name__)
 
 class MemoryManager(MemoryLifecycleMixin, MemorySearchMixin, MemoryIntegrationMixin):
     """Owns memory normalization, catalog access, and semantic-memory persistence."""
+
+    def add_reminder(self, title: str, due_text: str = "") -> dict | None:
+        normalized_title = str(title or "").strip()
+        if not normalized_title:
+            return None
+
+        timestamp = self.bot.runtime_timestamp()
+        reminder = {
+            "id": uuid4().hex[:12],
+            "title": normalized_title,
+            "due_text": str(due_text or "").strip(),
+            "status": "open",
+            "created_at": timestamp,
+            "updated_at": timestamp,
+        }
+        reminders = self.reminder_catalog(include_done=True)
+        reminders.append(reminder)
+        updated_store = self.mutate_memory_store(reminders=reminders)
+        return next(
+            (
+                dict(item)
+                for item in list(updated_store.get("reminders") or [])
+                if str(item.get("id") or "") == reminder["id"]
+            ),
+            None,
+        )
 
     def store(self, key: str, value: object) -> None:
         """Store a value in the memory store under the given key."""
@@ -56,9 +83,6 @@ class MemoryManager(MemoryLifecycleMixin, MemorySearchMixin, MemoryIntegrationMi
     def initialize(self):
         from dadbot.memory.graph_manager import MemoryGraphManager
         from dadbot.memory.semantic_manager import SemanticIndexManager
-        from dadbot.memory.normalizers import MemoryNormalizer
-        from dadbot.memory.storage import MemoryStorageBackend
-        from dadbot.memory.lifecycle import MemoryLifecycleManager
         from dadbot.contracts import DadBotContext
 
         self.context = DadBotContext.from_runtime(self.bot)

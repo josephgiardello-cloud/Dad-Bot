@@ -68,7 +68,8 @@ def test_dadbot_composes_split_services(bot):
     assert bot.maintenance_scheduler is not None
     assert bot.runtime_state_manager is not None
     assert bot.tool_registry is not None
-    assert bot.agentic_handler is not None
+    # Legacy agentic_handler was removed during the tool-pipeline migration.
+    # Tool discovery and execution are now owned by tool_registry and TurnService.
 
 
 def test_shared_dadbot_context_is_live_and_used_by_extracted_managers(bot):
@@ -106,6 +107,7 @@ def test_config_backed_runtime_fields_remain_mutable_via_facade(bot):
     bot.ACTIVE_EMBEDDING_MODEL = "embed-small"
     bot.APPEND_SIGNOFF = False
     bot.LIGHT_MODE = True
+    bot.RESERVED_RESPONSE_TOKENS = 128
 
     assert bot.config.active_model == "config-model"
     assert bot.config.llm_provider == "openai"
@@ -113,6 +115,7 @@ def test_config_backed_runtime_fields_remain_mutable_via_facade(bot):
     assert bot.config.active_embedding_model == "embed-small"
     assert bot.config.append_signoff is False
     assert bot.config.light_mode is True
+    assert bot.config.reserved_response_tokens == 128
 
 
 def test_profile_and_memory_store_are_manager_backed(bot):
@@ -905,10 +908,28 @@ def test_multimodal_methods_delegate_to_manager(bot, monkeypatch):
 
 
 def test_runtime_client_methods_delegate_to_manager(bot, monkeypatch):
-    async def fake_async_chat(messages, caller=None, options=None, response_format=None, purpose="chat"):
+    async def fake_async_chat(
+        messages,
+        caller=None,
+        model=None,
+        temperature=None,
+        options=None,
+        response_format=None,
+        purpose="chat",
+        **_kwargs,
+    ):
         return {"message": {"content": f"{purpose}-async"}}
 
-    async def fake_stream_async(messages, caller=None, options=None, purpose="chat", chunk_callback=None):
+    async def fake_stream_async(
+        messages,
+        caller=None,
+        model=None,
+        temperature=None,
+        options=None,
+        purpose="chat",
+        chunk_callback=None,
+        **_kwargs,
+    ):
         return {"message": {"content": f"{purpose}-stream-async"}}
 
     monkeypatch.setattr(bot.runtime_client, "ollama_async_client", lambda: "async-client")
@@ -930,7 +951,7 @@ def test_runtime_client_methods_delegate_to_manager(bot, monkeypatch):
     monkeypatch.setattr(
         bot.runtime_client,
         "call_ollama_chat_stream",
-        lambda messages, caller=None, options=None, purpose="chat", chunk_callback=None: {
+        lambda messages, caller=None, model=None, temperature=None, options=None, purpose="chat", chunk_callback=None, **_kwargs: {
             "message": {"content": f"{purpose}-stream"}
         },
     )
@@ -958,7 +979,7 @@ def test_runtime_client_methods_delegate_to_manager(bot, monkeypatch):
 
     assert bot.ollama_async_client() == "async-client"
     assert isinstance(sync_response, dict)
-    assert "llama" in str(sync_response.get("message", {}).get("content", "")).lower()
+    assert "qwen3.5:9b" in str(sync_response.get("message", {}).get("content", "")).lower()
     assert isinstance(async_response, dict)
     assert "async" in str(async_response.get("message", {}).get("content", "")).lower()
     assert isinstance(model_response, dict)
@@ -1478,13 +1499,11 @@ def test_tool_methods_delegate_to_agentic_services(bot, monkeypatch):
     monkeypatch.setattr(
         bot.tool_registry, "get_available_tools", lambda: [{"type": "function", "function": {"name": "stub"}}]
     )
-    monkeypatch.setattr(bot.agentic_handler, "handle_tool_command", lambda user_input: f"tool::{user_input}")
 
     tools = bot.get_available_tools()
-    result = bot.handle_tool_command("/status")
 
     assert tools == [{"type": "function", "function": {"name": "stub"}}]
-    assert result == "tool::/status"
+    assert not hasattr(bot, "agentic_handler")
 
 
 def test_memory_pipeline_methods_delegate_to_memory_coordinator(bot, monkeypatch):
@@ -1563,7 +1582,7 @@ def test_runtime_client_tries_fallback_models_sync(bot, monkeypatch):
             raise ConnectionError("primary unavailable")
         return {"message": {"content": "ok"}}
 
-    monkeypatch.setattr(runtime_client_module.ollama, "chat", fake_chat)
+    monkeypatch.setattr(runtime_client_module.RuntimeClientManager, "_call_ollama_sync", staticmethod(fake_chat))
     bot.ACTIVE_MODEL = "primary"
     monkeypatch.setattr(bot, "model_candidates", lambda: ["primary", "fallback"])
 
@@ -1590,7 +1609,7 @@ def test_runtime_client_tries_fallback_models_async(bot, monkeypatch):
             raise ConnectionError("primary unavailable")
         return {"message": {"content": "ok"}}
 
-    monkeypatch.setattr(runtime_client_module.ollama, "chat", fake_chat)
+    monkeypatch.setattr(runtime_client_module.RuntimeClientManager, "_call_ollama_sync", staticmethod(fake_chat))
     monkeypatch.setattr(bot.runtime_client, "ollama_async_client", lambda: None)
     bot.ACTIVE_MODEL = "primary"
     monkeypatch.setattr(bot, "model_candidates", lambda: ["primary", "fallback"])

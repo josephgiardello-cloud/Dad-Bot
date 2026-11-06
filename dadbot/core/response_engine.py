@@ -112,6 +112,21 @@ class ResponseEngine:
         """
         candidates: list[ResponseCandidate] = []
         user_input = str(getattr(context, "user_input", "") or "")
+        initial_response = str(getattr(context, "initial_response", "") or "").strip()
+        if initial_response:
+            return [
+                ResponseCandidate(
+                    text=initial_response,
+                    source="execution_response",
+                    confidence=1.0,
+                    tone="neutral",
+                    intensity=0.35,
+                    stance="balanced",
+                    response_goal="inform",
+                    risk_level=0.25,
+                )
+            ]
+
         intent = self._infer_intent(user_input)
 
         # Strategy 1: Direct response (base approach)
@@ -376,9 +391,12 @@ class ResponseEngine:
         return [
             candidate
             for candidate in candidates
-            if self.is_coherent(candidate)
-            and self.is_relevant(candidate, context)
-            and self._satisfies_persona_constraints(candidate, context)
+            if candidate.source == "execution_response"
+            or (
+                self.is_coherent(candidate)
+                and self.is_relevant(candidate, context)
+                and self._satisfies_persona_constraints(candidate, context)
+            )
         ]
 
     def is_coherent(self, candidate: ResponseCandidate) -> bool:

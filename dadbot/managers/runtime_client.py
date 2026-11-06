@@ -16,6 +16,7 @@ from dadbot.core.execution_boundary import ModelGatewayScope, enforce_model_gate
 
 logger = logging.getLogger(__name__)
 litellm = importlib.import_module("litellm") if importlib.util.find_spec("litellm") else None
+OLLAMA_REQUEST_TIMEOUT_SECONDS = 120.0
 
 
 def _close_ollama_module_http_client() -> None:
@@ -211,6 +212,7 @@ class RuntimeClientManager:
                     self.call_ollama_chat_stream,
                     guarded_messages,
                     caller="ModelPort",
+                    model=selected_model,
                     options=ollama_options,
                     purpose=purpose,
                     chunk_callback=chunk_callback,
@@ -269,8 +271,7 @@ class RuntimeClientManager:
                     chunk_callback=chunk_callback,
                 )
             return self._invoke_ollama_sync(
-                self.call_ollama_chat_with_model,
-                selected_model,
+                self.call_ollama_chat,
                 guarded_messages,
                 caller="ModelPort",
                 options=ollama_options,
@@ -311,6 +312,7 @@ class RuntimeClientManager:
                     self.call_ollama_chat_stream_async,
                     guarded_messages,
                     caller="ModelPort",
+                    model=selected_model,
                     options=ollama_options,
                     purpose=purpose,
                     chunk_callback=chunk_callback,
@@ -318,6 +320,7 @@ class RuntimeClientManager:
             return await self.call_ollama_chat_async(
                 guarded_messages,
                 caller="ModelPort",
+                model=selected_model,
                 options=ollama_options,
                 response_format=response_format,
                 purpose=purpose,
@@ -377,8 +380,20 @@ class RuntimeClientManager:
     def ollama_async_client(self):
         self._ensure_event_loop_context()
         if hasattr(ollama, "AsyncClient"):
-            return ollama.AsyncClient()
+            return ollama.AsyncClient(timeout=OLLAMA_REQUEST_TIMEOUT_SECONDS)
         return None
+
+    @staticmethod
+    def _call_ollama_sync(**kwargs):
+        client = ollama.Client(timeout=OLLAMA_REQUEST_TIMEOUT_SECONDS)
+        if kwargs.get("stream"):
+            def bounded_stream():
+                with client._client:
+                    yield from client.chat(**kwargs)
+
+            return bounded_stream()
+        with client._client:
+            return client.chat(**kwargs)
 
     def call_ollama_chat(
         self,
@@ -414,7 +429,7 @@ class RuntimeClientManager:
                     kwargs["options"] = options
                 if response_format is not None:
                     kwargs["format"] = response_format
-                response = ollama.chat(**kwargs)
+                response = self._call_ollama_sync(**kwargs)
                 self.bot.ACTIVE_MODEL = candidate
                 return response
             except self.bot.ollama_retryable_errors() as exc:
@@ -432,6 +447,7 @@ class RuntimeClientManager:
         options=None,
         response_format=None,
         purpose="chat",
+        model=None,
     ):
         normalized_caller = str(caller or "").strip()
         if normalized_caller == "ModelPort" and ModelGatewayScope.current() != "ModelPort":
@@ -442,14 +458,16 @@ class RuntimeClientManager:
                     options=options,
                     response_format=response_format,
                     purpose=purpose,
+                    model=model,
                 )
         enforce_model_gateway(caller=normalized_caller)
         last_error = None
         self._ensure_event_loop_context()
 
+        selected_model = str(model or self.bot.ACTIVE_MODEL or "").strip()
         for candidate in [
-            self.bot.ACTIVE_MODEL,
-            *[model for model in self.bot.model_candidates() if model != self.bot.ACTIVE_MODEL],
+            selected_model,
+            *[name for name in self.bot.model_candidates() if name != selected_model],
         ]:
             try:
                 kwargs = {
@@ -462,7 +480,7 @@ class RuntimeClientManager:
                     kwargs["format"] = response_format
                 client = self.ollama_async_client()
                 if client is None:
-                    response = await asyncio.to_thread(ollama.chat, **kwargs)
+                    response = await asyncio.to_thread(self._call_ollama_sync, **kwargs)
                 else:
                     try:
                         response = await client.chat(**kwargs)
@@ -470,7 +488,7 @@ class RuntimeClientManager:
                         if not self._is_event_loop_closed_error(exc):
                             raise
                         logger.info("Falling back to sync Ollama call after closed event loop")
-                        response = await asyncio.to_thread(ollama.chat, **kwargs)
+                        response = await asyncio.to_thread(self._call_ollama_sync, **kwargs)
                     finally:
                         await self._close_ollama_async_client_instance(client)
                 self.bot.ACTIVE_MODEL = candidate
@@ -507,7 +525,7 @@ class RuntimeClientManager:
         if response_format is not None:
             kwargs["format"] = response_format
         try:
-            return ollama.chat(**kwargs)
+            return self._call_ollama_sync(**kwargs)
         except self.bot.ollama_retryable_errors() as exc:
             error_summary = self.bot.ollama_error_summary(exc)
             raise RuntimeError(
@@ -521,21 +539,26 @@ class RuntimeClientManager:
         options=None,
         purpose="chat",
         chunk_callback=None,
+        model=None,
     ):
         enforce_model_gateway(caller=str(caller or ""))
         last_error = None
 
+        selected_model = str(model or self.bot.ACTIVE_MODEL or "").strip()
         for candidate in [
-            self.bot.ACTIVE_MODEL,
-            *[model for model in self.bot.model_candidates() if model != self.bot.ACTIVE_MODEL],
+            selected_model,
+            *[name for name in self.bot.model_candidates() if name != selected_model],
         ]:
             chunks: list[str] = []
             try:
                 kwargs = {"model": candidate, "messages": messages, "stream": True}
                 if options is not None:
                     kwargs["options"] = options
-                stream = ollama.chat(**kwargs)
-                chunks, truncated = self._collect_stream_chunks(stream, purpose=purpose, chunk_callback=chunk_callback)
+                stream = self._call_ollama_sync(**kwargs)
+                try:
+                    chunks, truncated = self._collect_stream_chunks(stream, purpose=purpose, chunk_callback=chunk_callback)
+                finally:
+                    stream.close()
                 final_reply = "".join(chunks).strip()
                 if final_reply and truncated:
                     final_reply = final_reply.rstrip(" ,.;:") + "..."
@@ -694,6 +717,7 @@ class RuntimeClientManager:
         options=None,
         purpose="chat",
         chunk_callback=None,
+        model=None,
     ):
         enforce_model_gateway(caller=str(caller or ""))
         last_error = None
@@ -707,12 +731,14 @@ class RuntimeClientManager:
                 options,
                 purpose,
                 chunk_callback,
+                model,
             )
 
         try:
+            selected_model = str(model or self.bot.ACTIVE_MODEL or "").strip()
             for candidate in [
-                self.bot.ACTIVE_MODEL,
-                *[model for model in self.bot.model_candidates() if model != self.bot.ACTIVE_MODEL],
+                selected_model,
+                *[name for name in self.bot.model_candidates() if name != selected_model],
             ]:
                 chunks: list[str] = []
                 try:

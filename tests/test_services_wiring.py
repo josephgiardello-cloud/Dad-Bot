@@ -1,28 +1,11 @@
-"""
-Test DadBot service wiring and integration of new core modules.
-"""
-import pytest
-from dadbot.core.dadbot import DadBot
-from dadbot.testing import make_test_dadbot
+"""Verify that the current service registry exposes the runtime services."""
 
-def test_tool_registry_wired():
-    bot = make_test_dadbot()
-    assert hasattr(bot, 'tool_registry')
-    assert bot.tool_registry is not None
 
-def test_metrics_wired():
-    bot = make_test_dadbot()
-    assert hasattr(bot, 'metrics')
-    assert bot.metrics is not None
+def test_core_services_are_registered_and_delegated(bot):
+    registry = bot.service_registry
+    assert registry is bot.services.registry
 
-def test_smart_home_wired():
-    bot = make_test_dadbot()
-    assert hasattr(bot, 'smart_home')
-    assert bot.smart_home is not None
-
-def test_asr_tts_wired():
-    bot = make_test_dadbot()
-    assert hasattr(bot, 'asr')
-    assert hasattr(bot, 'tts')
-    assert bot.asr is not None
-    assert bot.tts is not None
+    for service_name in ("tool_registry", "mood_manager", "health_manager", "tts_manager"):
+        service = registry.get(service_name, optional=True)
+        assert service is not None, f"{service_name} is not registered"
+        assert getattr(bot, service_name) is service

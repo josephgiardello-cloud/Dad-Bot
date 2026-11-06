@@ -25,12 +25,10 @@ The remaining body of this class is pure delegation plumbing:
 from __future__ import annotations
 
 import logging
-import os
 import time
-import warnings
 from typing import Any, cast
 from pathlib import Path
-from dadbot.typing import MemoryManager, RelationshipManager, MoodManager, ProfileRuntime, EventBus
+from dadbot.typing import MemoryManager, RelationshipManager, MoodManager, ProfileRuntime
 
 try:
     import ollama
@@ -43,11 +41,9 @@ from dadbot.core.boot_mixin import DadBotBootMixin
 from dadbot.core.compat_mixin import DadBotCompatMixin
 from dadbot.core.health_mixin import DadBotHealthMixin
 from dadbot.core.llm_mixin import DadBotLlmMixin
-from dadbot.core.services import build_services
 from dadbot.core.mcp_mixin import DadBotMcpMixin
 from dadbot.core.turn_mixin import DadBotTurnMixin
 from dadbot.core.execution_contract import ExecutionEntry
-from dadbot.core.runtime_errors import ReplayInvariantViolation
 from dadbot.core.ux_projection_gateway import TurnUxProjectionGateway
 from dadbot.runtime.model import ModelPort
 
@@ -93,10 +89,20 @@ class DadBot(
 
     # Compatibility shims for test expectations
     _CONFIG_ATTR_MAP = {}
-    _UNIFIED_ROUTING = {}
     _DEPRECATED_FACADE_ALIAS_MAP = {}
 
     def __getattr__(self, name):
+        try:
+            services = object.__getattribute__(self, "services")
+        except AttributeError:
+            services = None
+        registry = getattr(services, "registry", None)
+        get_provider = getattr(registry, "get_provider", None)
+        if callable(get_provider):
+            provider = get_provider(name)
+            if provider is not None:
+                return getattr(provider, name)
+
         required = [
             'memory_manager', 'profile_runtime', 'relationship_manager', 'mood_manager',
             'event_bus', 'model_runtime', 'runtime_state_manager', 'services',
@@ -132,49 +138,22 @@ class DadBot(
             return mm.save_memory_store(*args, **kwargs)
         return None
 
+    def conversation_history(self):
+        return self.runtime_state_manager.conversation_history()
+
+    def add_reminder(self, title: str, due_text: str = "") -> dict[str, Any] | None:
+        return self.memory_manager.add_reminder(title, due_text)
+
     # Removed duplicate current_avatar_exists method
     def ical_feed_url(self):
         """No-op stub for calendar sync compatibility."""
         return None
 
     def refresh_memory_graph(self, force=False):
-        """No-op placeholder for boot background task compatibility."""
-        pass
+        return self.long_term_signals.refresh_memory_graph(force=force)
+
     def ui_shell_snapshot(self):
-        # Expanded structure for Streamlit UI compatibility
-        # Defensive: always provide all expected fields with safe defaults
-        profile = getattr(self, "profile_runtime", None)
-        if profile is not None and hasattr(profile, "profile"):
-            profile = profile.profile
-        thread_snapshots = getattr(self, "thread_snapshots", {})
-        active_thread_id = getattr(self, "active_thread_id", "default")
-        # Try to get last mood from mood manager or fallback
-        last_mood = None
-        mood_manager = getattr(self, "_mood_manager", None)
-        if mood_manager and hasattr(mood_manager, "last_mood"):
-            try:
-                last_mood = mood_manager.last_mood()
-            except Exception:
-                last_mood = None
-        if not last_mood:
-            last_mood = "neutral"
-        # Try to get ollama status if available
-        ollama_status = {}
-        if hasattr(self, "model_runtime") and hasattr(self.model_runtime, "ollama_status"):
-            try:
-                ollama_status = self.model_runtime.ollama_status()
-            except Exception:
-                ollama_status = {}
-        return {
-            "user": getattr(self, "user", "dadbot"),
-            "active_thread_id": active_thread_id,
-            "threads": list(thread_snapshots.keys()),
-            "status": "ok",
-            "profile": profile,
-            "last_mood": last_mood,
-            "ollama": ollama_status,
-        }
-    STYLE = {"name": "DadBot"}
+        return self.status_reporting.ui_shell_snapshot()
     CONTEXT_TOKEN_BUDGET = 6000  # Default context token budget; used by boot mixin and runtime caches
 
     @property
@@ -195,26 +174,12 @@ class DadBot(
         config: Any = None,
         runtime_config: Any = None,
         runtime_state_manager: Any = None,
-        model_name: str = "llama3.2",
+        model_name: str = "qwen3.5:9b",
         append_signoff: bool = True,
         light_mode: bool = False,
         tenant_id: str = "",
-        services: Any = None,
-        validate_managers: bool = False,
         **kwargs: Any,
     ):
-        # Enforce all required managers must be provided, no mocks allowed
-        if validate_managers:
-            required = [
-                ('memory_manager', memory_manager),
-                ('relationship_manager', relationship_manager),
-                ('mood_manager', mood_manager),
-                ('profile_runtime', profile_runtime),
-                ('event_bus', event_bus),
-            ]
-            for name, value in required:
-                if value is None:
-                    raise ValueError(f"DadBot requires a real '{name}' instance, got None")
         self._memory_manager = memory_manager
         self._relationship_manager = relationship_manager
         self._mood_manager = mood_manager
@@ -222,25 +187,6 @@ class DadBot(
         self._event_bus = event_bus
         self.model_runtime = model_runtime
 
-        # --- Model port wiring: use OllamaModelAdapter if ollama is available ---
-        self._model_port = None
-        try:
-            from dadbot.runtime.model import OllamaModelAdapter, ModelConfig
-            # Only wire if ollama package is available and runtime_client/model_runtime are set
-            if ollama is not None and hasattr(self, 'runtime_client') and self.runtime_client is not None and self.model_runtime is not None:
-                # Use config if available, else minimal default
-                model_config = getattr(self, 'config', None)
-                if model_config is None:
-                    model_config = ModelConfig(active_model=getattr(self, 'model_name', 'llama3.2'))
-                self._model_port = OllamaModelAdapter(
-                    runtime_client=self.runtime_client,
-                    model_runtime=self.model_runtime,
-                    config=model_config,
-                )
-        except Exception as e:
-            # Fallback: leave self._model_port as None, will raise if accessed
-            import logging
-            logging.getLogger(__name__).warning(f"OllamaModelAdapter wiring failed: {e}")
         self.runtime_state_manager = runtime_state_manager
         self.prompt_assembly = prompt_assembly
         self._recent_mood_detections = {}
@@ -250,34 +196,15 @@ class DadBot(
         if runtime_config is not None:
             self.runtime_config = runtime_config
 
-        # --- Boot mixin init (sets up services, model port, etc.) ---
-        # Only validate managers if requested (default True)
-        print(f"[DadBot] validate_managers={validate_managers}")
-        # Force skip_manager_validation True to guarantee no validation ever runs in this mode
         DadBotBootMixin.__init__(
             self,
             model_name=model_name,
             append_signoff=append_signoff,
             light_mode=light_mode,
             tenant_id=tenant_id,
-            skip_manager_validation=True,
+            skip_manager_validation=False,
             **kwargs
         )
-
-        # --- Service wiring ---
-        if services is not None:
-            self.services = services
-        else:
-            from dadbot.core.services import build_services
-            self.services = build_services()
-
-        # --- Internal runtime for UI compatibility ---
-        if not hasattr(self, '_internal_runtime'):
-            try:
-                from dadbot.core.internal_runtime import DadBotInternalRuntime
-                self._internal_runtime = DadBotInternalRuntime(context_token_budget=self.CONTEXT_TOKEN_BUDGET)
-            except Exception:
-                raise RuntimeError("DadBot failed to initialize internal runtime and no fallback is allowed.")
 
     def active_persona_trait_entries(self, limit=None):
         # Stub for profile_runtime compatibility
@@ -296,69 +223,6 @@ class DadBot(
         if hasattr(self, "runtime_state_manager") and self.runtime_state_manager is not None:
             return self.runtime_state_manager.ensure_chat_thread_state(preserve_active_runtime=preserve_active_runtime)
         raise AttributeError("DadBot has no runtime_state_manager to delegate ensure_chat_thread_state")
-
-        # Set manager attributes BEFORE calling boot mixin
-        if 'services' in kwargs and kwargs['services'] is not None:
-            self.services = kwargs.pop('services')
-        else:
-            self.services = build_services()
-
-        # Wire all required managers using registry helpers
-        try:
-            from dadbot.registry import wire_bootstrap_managers, wire_runtime_managers
-            wire_bootstrap_managers(self)
-            wire_runtime_managers(self)
-        except Exception as e:
-            import logging
-            logging.getLogger(__name__).error(f"Manager wiring failed: {e}")
-        self._memory_manager = memory_manager
-        self._relationship_manager = relationship_manager
-        self._mood_manager = mood_manager
-        self._profile_runtime = profile_runtime
-        self._event_bus = event_bus
-        if model_runtime is not None:
-            self.model_runtime = model_runtime
-        else:
-            try:
-                from dadbot.runtime_core.dummy_model_runtime import DummyModelRuntime
-                self.model_runtime = DummyModelRuntime()
-            except ImportError:
-                def __init__(
-                    self,
-                    *,
-                    memory_manager: Any,
-                    relationship_manager: Any,
-                    mood_manager: Any,
-                    profile_runtime: Any,
-                    event_bus: Any,
-                    model_runtime: Any,
-                    prompt_assembly: Any,
-                    services: Any = None,
-                    model_name: str = "llama3.2",
-                    append_signoff: bool = True,
-                    light_mode: bool = False,
-                    tenant_id: str = "",
-                    **kwargs: Any,
-                ):
-                    # Store all managers/services as attributes
-                    self._memory_manager = memory_manager
-                    self._relationship_manager = relationship_manager
-                    self._mood_manager = mood_manager
-                    self._profile_runtime = profile_runtime
-                    self._event_bus = event_bus
-                    self.model_runtime = model_runtime
-                    self.prompt_assembly = prompt_assembly
-                    if services is not None:
-                        self.services = services
-                    # Now safe to call boot mixin directly (MRO: must call explicitly for contract validation)
-                    DadBotBootMixin.__init__(
-                        self,
-                        model_name=model_name,
-                        append_signoff=append_signoff,
-                        light_mode=light_mode,
-                        tenant_id=tenant_id,
-                        **kwargs
-                    )
     @property
     def llm_model(self) -> str:
         return self.config.llm_model
@@ -370,6 +234,30 @@ class DadBot(
     @ACTIVE_MODEL.setter
     def ACTIVE_MODEL(self, value: str) -> None:  # noqa: N802
         self.config.active_model = value
+
+    @property
+    def MODEL_NAME(self) -> str:  # noqa: N802
+        return self.config.model_name
+
+    @MODEL_NAME.setter
+    def MODEL_NAME(self, value: str) -> None:  # noqa: N802
+        self.config.model_name = value
+
+    @property
+    def FALLBACK_MODELS(self) -> tuple[str, ...]:  # noqa: N802
+        return self.config.fallback_models
+
+    @FALLBACK_MODELS.setter
+    def FALLBACK_MODELS(self, value: tuple[str, ...]) -> None:  # noqa: N802
+        self.config.fallback_models = tuple(value or ())
+
+    @property
+    def PREFERRED_EMBEDDING_MODELS(self) -> tuple[str, ...]:  # noqa: N802
+        return self.config.preferred_embedding_models
+
+    @PREFERRED_EMBEDDING_MODELS.setter
+    def PREFERRED_EMBEDDING_MODELS(self, value: tuple[str, ...]) -> None:  # noqa: N802
+        self.config.preferred_embedding_models = tuple(value or ())
 
     @property
     def LLM_PROVIDER(self) -> str:  # noqa: N802
@@ -468,6 +356,14 @@ class DadBot(
         return self.config.reserved_response_tokens
 
     @property
+    def RESERVED_RESPONSE_TOKENS(self) -> int:  # noqa: N802
+        return self.config.reserved_response_tokens
+
+    @RESERVED_RESPONSE_TOKENS.setter
+    def RESERVED_RESPONSE_TOKENS(self, value: int) -> None:  # noqa: N802
+        self.config.reserved_response_tokens = value
+
+    @property
     def approx_chars_per_token(self) -> float:
         return self.config.approx_chars_per_token
 
@@ -475,6 +371,13 @@ class DadBot(
     def mood_detection_temperature(self) -> float:
         return self.config.mood_detection_temperature
 
+    @property
+    def MOOD_DETECTION_TEMPERATURE(self) -> float:  # noqa: N802
+        return self.config.mood_detection_temperature
+
+    @MOOD_DETECTION_TEMPERATURE.setter
+    def MOOD_DETECTION_TEMPERATURE(self, value: float) -> None:  # noqa: N802
+        self.config.mood_detection_temperature = value
 
     @property
     def stream_timeout_seconds(self) -> float:
@@ -504,6 +407,18 @@ class DadBot(
     def session_log_dir(self) -> str:
         return str(self.config.session_log_dir)
 
+    @property
+    def MEMORY_PATH(self) -> Path:  # noqa: N802
+        return getattr(self, "_memory_path_override", self.config.memory_path)
+
+    @MEMORY_PATH.setter
+    def MEMORY_PATH(self, value: str | Path) -> None:  # noqa: N802
+        self._memory_path_override = Path(value)
+
+    @property
+    def TENANT_ID(self) -> str:  # noqa: N802
+        return self.config.tenant_id
+
     # ------------------------------------------------------------------
     # Explicit properties for runtime state attributes
     # ------------------------------------------------------------------
@@ -515,39 +430,47 @@ class DadBot(
 
     @property
     def history(self) -> Any:
-        if hasattr(self, '_memory_manager') and hasattr(self._memory_manager, 'history'):
-            return self._memory_manager.history
-        from unittest.mock import MagicMock
-        return MagicMock()
+        return self.runtime_state_manager.history
 
     @history.setter
     def history(self, value):
-        if hasattr(self, '_memory_manager') and hasattr(self._memory_manager, 'history'):
-            self._memory_manager.history = value
+        self.runtime_state_manager.history = value
+
+    @property
+    def MEMORY_STORE(self) -> dict[str, Any]:
+        return self.memory_manager.memory_store
+
+    @MEMORY_STORE.setter
+    def MEMORY_STORE(self, value: dict[str, Any]) -> None:
+        self.memory_manager._storage.replace_projection_via_canonical_event(value)
 
     @property
     def session_moods(self) -> Any:
-        return self._mood_manager.session_moods if hasattr(self._mood_manager, 'session_moods') else None
+        return self.runtime_state_manager.session_moods
 
     @property
     def session_summary(self) -> Any:
-        if hasattr(self, '_memory_manager') and hasattr(self._memory_manager, 'session_summary'):
-            return self._memory_manager.session_summary
-        from unittest.mock import MagicMock
-        return MagicMock()
+        return self.runtime_state_manager.session_summary
 
     @session_summary.setter
     def session_summary(self, value):
-        if hasattr(self, '_memory_manager') and hasattr(self._memory_manager, 'session_summary'):
-            self._memory_manager.session_summary = value
+        self.runtime_state_manager.session_summary = value
 
     @property
     def session_summary_updated_at(self) -> Any:
-        return self._memory_manager.session_summary_updated_at if hasattr(self._memory_manager, 'session_summary_updated_at') else None
+        return self.runtime_state_manager.session_summary_updated_at
+
+    @session_summary_updated_at.setter
+    def session_summary_updated_at(self, value):
+        self.runtime_state_manager.session_summary_updated_at = value
 
     @property
     def session_summary_covered_messages(self) -> Any:
-        return self._memory_manager.session_summary_covered_messages if hasattr(self._memory_manager, 'session_summary_covered_messages') else None
+        return self.runtime_state_manager.session_summary_covered_messages
+
+    @session_summary_covered_messages.setter
+    def session_summary_covered_messages(self, value):
+        self.runtime_state_manager.session_summary_covered_messages = value
 
     @property
     def last_relationship_reflection_turn(self) -> Any:
@@ -712,6 +635,30 @@ class DadBot(
     # Core manager properties
     # ------------------------------------------------------------------
 
+    @property
+    def memory_manager(self) -> MemoryManager:
+        return self._memory_manager
+
+    @memory_manager.setter
+    def memory_manager(self, value: MemoryManager) -> None:
+        self._memory_manager = value
+
+    @property
+    def relationship_manager(self) -> RelationshipManager:
+        return self._relationship_manager
+
+    @relationship_manager.setter
+    def relationship_manager(self, value: RelationshipManager) -> None:
+        self._relationship_manager = value
+
+    @property
+    def mood_manager(self) -> MoodManager:
+        return self._mood_manager
+
+    @mood_manager.setter
+    def mood_manager(self, value: MoodManager) -> None:
+        self._mood_manager = value
+
 
     @property
     def memory(self) -> MemoryManager:
@@ -738,14 +685,7 @@ class DadBot(
 
     @property
     def turn_orchestrator(self) -> Any:
-        orchestrator = getattr(self, "_turn_orchestrator", None)
-        if orchestrator is not None:
-            return orchestrator
-        services_orchestrator = getattr(self.services, "turn_orchestrator", None)
-        if services_orchestrator is not None:
-            self._turn_orchestrator = services_orchestrator
-            return services_orchestrator
-        return self._get_turn_orchestrator()
+        return self.services.turn_orchestrator
 
     @property
     def assistant(self) -> AssistantRuntime:
@@ -801,6 +741,20 @@ class DadBot(
     def PROFILE(self, value: Any) -> None:
         self._profile_runtime.profile = value
 
+    @property
+    def STYLE(self) -> dict[str, Any]:
+        profile_runtime = getattr(self, "_profile_runtime", None)
+        if profile_runtime is not None:
+            return profile_runtime.style
+        return getattr(self, "_STYLE", {"name": "DadBot"})
+
+    @STYLE.setter
+    def STYLE(self, value: dict[str, Any]) -> None:
+        profile_runtime = getattr(self, "_profile_runtime", None)
+        if profile_runtime is not None:
+            profile_runtime.style = value
+        else:
+            self._STYLE = value if isinstance(value, dict) else {}
 
 
     @property
@@ -991,16 +945,13 @@ class DadBot(
 
 
     def sync_active_thread_snapshot(self):
-        """No-op stub for dashboard/runtime compatibility."""
-        pass
+        return self.runtime_state_manager.sync_active_thread_snapshot()
 
     def last_saved_mood(self):
-        """Stub for dashboard/runtime compatibility. Returns None or 'neutral'."""
-        return None
+        return self.memory.last_saved_mood()
 
     def streamlit_security_settings(self):
-        """Stub for dashboard/runtime compatibility. Returns None or minimal security config."""
-        return None
+        return self.profile_runtime.streamlit_security_settings()
 
 if __name__ == "__main__":
     from dadbot.app_runtime import (

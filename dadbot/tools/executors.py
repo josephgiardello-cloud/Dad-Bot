@@ -23,18 +23,60 @@ class WebSearchExecutor:
 class ToolRegistry:
     def __init__(self):
         self._tools: Dict[str, Any] = {}
+
     def register(self, name: str, executor: Any):
         self._tools[name] = executor
+
     def get(self, name: str) -> Any:
         return self._tools.get(name)
+
+    def get_available_tools(self) -> list[dict[str, Any]]:
+        definitions = {
+            "reminder": {
+                "type": "function",
+                "function": {
+                    "name": "set_reminder",
+                    "description": "Create a reminder for the user.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "title": {"type": "string", "description": "What to remember."},
+                            "due_text": {"type": "string", "description": "When the reminder is due."},
+                        },
+                        "required": ["title"],
+                    },
+                },
+            },
+            "web_search": {
+                "type": "function",
+                "function": {
+                    "name": "web_search",
+                    "description": "Search the web for current information.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "The search query."},
+                        },
+                        "required": ["query"],
+                    },
+                },
+            },
+        }
+        return [definitions[name] for name in ("reminder", "web_search") if name in self._tools]
+
     def describe_all(self) -> str:
         return ', '.join(self._tools.keys())
 
-# Canonical Phase B tool registry instance
-tool_registry = ToolRegistry()
-tool_registry.register('reminder', ReminderExecutor())
-tool_registry.register('calendar', CalendarExecutor())
-tool_registry.register('web_search', WebSearchExecutor())
+
+def build_default_tool_registry() -> ToolRegistry:
+    registry = ToolRegistry()
+    registry.register('reminder', ReminderExecutor())
+    registry.register('calendar', CalendarExecutor())
+    registry.register('web_search', WebSearchExecutor())
+    return registry
+
+
+tool_registry = build_default_tool_registry()
 
 def execute_tool(tool_name: str, action: str, **kwargs: Any) -> Any:
     executor = tool_registry.get(tool_name)

@@ -4,57 +4,16 @@ import logging
 import math
 from typing import Any
 
-logger = logging.getLogger(__name__)
+from dadbot.runtime.model.model_call_port import ModelPort
 
-AGENT_SERVICE_DEPRECATED = True
+logger = logging.getLogger(__name__)
 
 
 class AgentService:
-    """Service wrapper for primary LLM/tool turn execution.
-
-    Legacy compatibility surface for inference-era call sites.
-    AgentService no longer has output authority: control-plane + ResponseEngine
-    decide final output. This service records telemetry only.
-
-    Calling ``bot.process_user_message*`` here would re-enter the graph and cause
-    infinite recursion. Legacy callers are preserved, but they receive a
-    non-authoritative empty candidate and metadata for observability.
-    """
+    """Generate non-authoritative model candidates for the turn graph."""
 
     def __init__(self, bot: Any):
         self.bot = bot
-
-    def _record_deprecated_usage(self, turn_context: Any, *, reason: str) -> None:
-        if not AGENT_SERVICE_DEPRECATED:
-            return
-        logger.warning("AgentService is a deprecated execution surface")
-        recorder = getattr(self.bot, "record_shadow_decision", None)
-        if callable(recorder):
-            try:
-                recorder(
-                    source="agent_service",
-                    type="suggestion",
-                    content_preview="",
-                    reason=reason,
-                    would_replace=False,
-                    priority=0.05,
-                    metadata={"path": "agent_service.run_agent", "deprecated": True},
-                    turn_context=turn_context,
-                )
-            except Exception:
-                logger.debug("AgentService deprecation telemetry failed", exc_info=True)
-
-    def _emit_telemetry_only(self, turn_context: Any, *, stage: str, reason: str) -> tuple[str, bool]:
-        self._record_deprecated_usage(turn_context, reason=reason)
-        try:
-            turn_context.state["agent_service_deprecated"] = {
-                "stage": stage,
-                "reason": reason,
-                "deprecated": True,
-            }
-        except Exception:
-            pass
-        return "", False
 
     @staticmethod
     def _policy_for_hypothesis(hypothesis_name: str) -> dict[str, str]:
@@ -203,7 +162,7 @@ class AgentService:
                 turn_context=turn_context,
             )
         except Exception as exc:
-            logger.error("AgentService: prepare_user_turn_async failed: %s", exc)
+            logger.error("AgentService: prepare_user_turn_async failed: %s", exc, exc_info=True)
             return None
 
     @staticmethod
@@ -255,30 +214,20 @@ class AgentService:
             turn_context.state.setdefault("tony_score", 50)
             turn_context.state.setdefault("tony_level", "steady")
 
-    @staticmethod
-    def _llm_reply_with_boundary(
-        *,
-        bot: Any,
-        turn_context: Any,
-        stripped: str,
-        turn_text: str,
-        mood: Any,
-        norm_attachments: Any,
-    ) -> str:
-        raise RuntimeError("Deprecated: use ResponseEngine via control_plane")
-
     async def run_agent(
         self,
         turn_context: Any,
         rich_context: dict[str, Any] | None = None,
-    ):
-        bot = self.bot
-        _user_input, attachments, stripped = self._normalize_turn_input(turn_context)
+    ) -> tuple[str, bool]:
+        return await self.generate_candidate(turn_context, rich_context)
 
-        self._record_deprecated_usage(
-            turn_context,
-            reason="AgentService.run_agent is deprecated; control_plane must own final response authority.",
-        )
+    async def generate_candidate(
+        self,
+        turn_context: Any,
+        _rich_context: dict[str, Any] | None = None,
+    ) -> tuple[str, bool]:
+        bot = self.bot
+        _, attachments, stripped = self._normalize_turn_input(turn_context)
 
         if not stripped and not attachments:
             turn_context.state["already_finalized"] = True
@@ -291,7 +240,7 @@ class AgentService:
             turn_context,
         )
         if prepared is None:
-            return ("", False)
+            raise RuntimeError("AgentService could not prepare the user turn")
         mood, early_reply, should_end, turn_text, norm_attachments = prepared
 
         self._record_turn_preinference_state(
@@ -316,20 +265,58 @@ class AgentService:
             turn_context.state["tool_execution_envelope"] = self._tool_execution_envelope(
                 bot,
                 turn_context,
-                reply_source="agent_service_deprecated",
+                reply_source="agent_service",
             )
-            return ("", True)
+            final_reply = (
+                early_reply[0]
+                if isinstance(early_reply, tuple) and early_reply
+                else early_reply
+            )
+            return str(final_reply or ""), True
 
         turn_context.state["tool_execution_envelope"] = self._tool_execution_envelope(
             bot,
             turn_context,
-            reply_source="agent_service_deprecated",
+            reply_source="agent_service",
         )
         if early_reply is not None:
-            turn_context.state["agent_service_legacy_reply_candidate"] = str(early_reply or "")
-        self._emit_telemetry_only(
-            turn_context,
-            stage="run_agent",
-            reason="AgentService returns telemetry only; control_plane owns final output.",
+            if isinstance(early_reply, tuple) and len(early_reply) >= 2:
+                return str(early_reply[0] or ""), bool(early_reply[1])
+            return str(early_reply or ""), False
+
+        prompt_assembly = getattr(bot, "prompt_assembly", None)
+        build_messages = getattr(prompt_assembly, "build_chat_request_messages", None)
+        if not callable(build_messages):
+            raise RuntimeError("AgentService requires prompt_assembly.build_chat_request_messages")
+        messages_value = build_messages(
+            turn_text or stripped,
+            str(mood or "neutral"),
+            norm_attachments,
         )
-        return ("", False)
+        if not isinstance(messages_value, list):
+            raise RuntimeError("Prompt assembly returned an invalid chat message list")
+        messages: list[dict[str, Any]] = []
+        for message in messages_value:
+            if not isinstance(message, dict):
+                raise RuntimeError("Prompt assembly returned a non-dictionary chat message")
+            normalized_message: dict[str, Any] = {}
+            for key, value in message.items():
+                if not isinstance(key, str):
+                    raise RuntimeError("Prompt assembly returned a non-string chat message key")
+                normalized_message[key] = value
+            messages.append(normalized_message)
+        model_port = getattr(bot, "model_port", None)
+        if not isinstance(model_port, ModelPort):
+            raise RuntimeError("AgentService requires a wired asynchronous model port")
+        active_model = str(getattr(bot, "ACTIVE_MODEL", "") or "").strip()
+        if not active_model:
+            raise RuntimeError("AgentService requires a configured active model")
+        response = await model_port.generate_async(
+            messages,
+            model=active_model,
+            purpose="chat",
+        )
+        reply = str(response or "").strip()
+        if not reply:
+            raise RuntimeError("AgentService received an empty model response")
+        return reply, False

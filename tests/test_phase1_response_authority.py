@@ -12,6 +12,7 @@ import pytest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch, MagicMock
 from dadbot.core.response_engine import ResponseEngine, ResponseCandidate
+from dadbot.runtime.model.model_call_port import ModelPort
 
 
 class TestPhase1ResponseAuthority:
@@ -243,7 +244,7 @@ class TestPhase1ResponseAuthority:
                 stream=False,
             )
 
-        # AgentService remains non-authoritative and returns telemetry-only sentinel output.
+        # AgentService supplies a candidate without invoking final response authority.
         class _TurnServiceStub:
             async def prepare_user_turn_async(self, *_args, **_kwargs):
                 return ("neutral", None, False, "hello", [])
@@ -255,15 +256,41 @@ class TestPhase1ResponseAuthority:
             def build_hypothesis_posteriors(self, _state, _turn_text, _mood):
                 return [{"name": "supportive_baseline", "probability": 1.0}]
 
+        class _ModelPortStub(ModelPort):
+            def generate(self, _messages, **_kwargs):
+                return "model candidate"
+
+            async def generate_async(self, _messages, **_kwargs):
+                return "model candidate"
+
+            def embed(self, _texts, **_kwargs):
+                return []
+
+            def estimate_token_count(self, text, **_kwargs):
+                return len(text)
+
+            def initialize_tokenizer(self, _model_name=None):
+                return None
+
+            def get_tokenizer(self, _model_name=None):
+                return None
+
         service_bot = SimpleNamespace(
             turn_service=_TurnServiceStub(),
             relationship_manager=_RelationshipStub(),
             planner_debug_snapshot=lambda: {"planner_status": "idle", "final_path": "model_reply"},
+            prompt_assembly=SimpleNamespace(
+                build_chat_request_messages=lambda *_args, **_kwargs: [
+                    {"role": "user", "content": "hello"},
+                ],
+            ),
+            model_port=_ModelPortStub(),
+            ACTIVE_MODEL="test-model",
         )
         service = AgentService(service_bot)
         turn_context = SimpleNamespace(user_input="hello", attachments=None, state={}, metadata={})
         result = asyncio.run(service.run_agent(turn_context, rich_context={}))
-        assert result == ("", False)
+        assert result == ("model candidate", False)
     
     def test_safety_crisis_path_is_signal_only(self):
         """Assert: safety.py crisis intervention is observer-only."""

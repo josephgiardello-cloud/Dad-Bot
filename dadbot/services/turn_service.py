@@ -359,12 +359,14 @@ class TurnService(ToolPipelineMixin):
             )
             return str(crisis_reply or "")
 
-        for direct_reply in (
+        handle_tool_command = getattr(self.bot, "handle_tool_command", None)
+        direct_replies = (
             self.bot.handle_memory_command(stripped_input),
-            self.bot.handle_tool_command(stripped_input),
+            handle_tool_command(stripped_input) if callable(handle_tool_command) else None,
             self.bot.get_memory_reply(stripped_input),
             self.bot.get_fact_reply(stripped_input),
-        ):
+        )
+        for direct_reply in direct_replies:
             if direct_reply is not None:
                 recorder = getattr(self.bot, "record_shadow_decision", None)
                 event = (

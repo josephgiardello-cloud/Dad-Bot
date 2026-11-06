@@ -19,14 +19,16 @@ def _prepare_submit_runtime_planning_impl(
         limit=5,
     )
     session_state = dict(control_plane.registry.get_or_create(session_key).get("state") or {})
-    for spec in control_plane._discover_tool_specs():
-        control_plane._tool_ecosystem_hub.register_connector(
-            state=session_state,
-            name=str(spec.name or ""),
-            capabilities=[str(item) for item in list(spec.capabilities or [])],
-            endpoint="",
-            health=1.0,
-        )
+    register_connector = getattr(control_plane._tool_ecosystem_hub, "register_connector", None)
+    if callable(register_connector):
+        for spec in control_plane._discover_tool_specs():
+            register_connector(
+                state=session_state,
+                name=str(spec.name or ""),
+                capabilities=[str(item) for item in list(spec.capabilities or [])],
+                endpoint="",
+                health=1.0,
+            )
     runtime_plan = dict(metadata.get("runtime_plan") or {})
     if runtime_plan:
         intent_type = str(runtime_plan.get("intent_type") or "statement")
@@ -81,45 +83,62 @@ def _prepare_submit_runtime_planning_impl(
                 strategy=desired_strategy,
                 note=str(pending_steering.get("note") or ""),
             )
-            control_plane._interactive_cognition_ui.apply_plan_edit(
-                state=session_state,
-                trace_id=str(metadata.get("trace_id") or ""),
-                edits={"strategy": desired_strategy, "status": "active"},
-                actor="steering",
-            )
+            apply_plan_edit = getattr(control_plane._interactive_cognition_ui, "apply_plan_edit", None)
+            if callable(apply_plan_edit):
+                apply_plan_edit(
+                    state=session_state,
+                    trace_id=str(metadata.get("trace_id") or ""),
+                    edits={"strategy": desired_strategy, "status": "active"},
+                    actor="steering",
+                )
         metadata["applied_steering"] = dict(pending_steering)
 
     runtime_plan = dict(metadata.get("runtime_plan") or {})
-    control_plane._interactive_cognition_ui.register_plan(
-        state=session_state,
-        trace_id=str(metadata.get("trace_id") or ""),
-        runtime_plan=runtime_plan,
-        source="submit_turn",
-    )
-    control_plane._interactive_cognition_ui.emit_thought(
-        state=session_state,
-        trace_id=str(metadata.get("trace_id") or ""),
-        content=f"Planning strategy: {str(runtime_plan.get('strategy') or 'direct_answer')}",
-        confidence=1.0 - float(dict(runtime_plan.get("uncertainty") or {}).get("score") or 0.0),
-        category="plan",
-    )
+    interactive_ui = control_plane._interactive_cognition_ui
+    register_plan = getattr(interactive_ui, "register_plan", None)
+    if callable(register_plan):
+        register_plan(
+            state=session_state,
+            trace_id=str(metadata.get("trace_id") or ""),
+            runtime_plan=runtime_plan,
+            source="submit_turn",
+        )
+    emit_thought = getattr(interactive_ui, "emit_thought", None)
+    if callable(emit_thought):
+        emit_thought(
+            state=session_state,
+            trace_id=str(metadata.get("trace_id") or ""),
+            content=f"Planning strategy: {str(runtime_plan.get('strategy') or 'direct_answer')}",
+            confidence=1.0 - float(dict(runtime_plan.get("uncertainty") or {}).get("score") or 0.0),
+            category="plan",
+        )
     needed_capabilities = [
         str(item.get("capability") or "")
         for item in list(dict(metadata.get("tool_routing_plan") or {}).get("alternatives") or [])
         if isinstance(item, dict)
     ]
-    metadata["external_tool_candidates"] = control_plane._tool_ecosystem_hub.rank_connectors(
-        state=session_state,
-        needed_capabilities=[item for item in needed_capabilities if item],
-        limit=5,
+    rank_connectors = getattr(control_plane._tool_ecosystem_hub, "rank_connectors", None)
+    metadata["external_tool_candidates"] = (
+        rank_connectors(
+            state=session_state,
+            needed_capabilities=[item for item in needed_capabilities if item],
+            limit=5,
+        )
+        if callable(rank_connectors)
+        else []
     )
-    metadata["swarm_plan"] = control_plane._multi_agent_swarm.build_plan(
-        state=session_state,
-        trace_id=str(metadata.get("trace_id") or ""),
-        user_input=str(user_input or ""),
-        runtime_plan=runtime_plan,
-        compositional_tool_plan=dict(metadata.get("compositional_tool_plan") or {}),
-        max_agents=4,
+    build_swarm_plan = getattr(control_plane._multi_agent_swarm, "build_plan", None)
+    metadata["swarm_plan"] = (
+        build_swarm_plan(
+            state=session_state,
+            trace_id=str(metadata.get("trace_id") or ""),
+            user_input=str(user_input or ""),
+            runtime_plan=runtime_plan,
+            compositional_tool_plan=dict(metadata.get("compositional_tool_plan") or {}),
+            max_agents=4,
+        )
+        if callable(build_swarm_plan)
+        else {"available": False, "reason": "multi_agent_swarm_unavailable"}
     )
 
     control_plane._hypothesis_engine.persist(

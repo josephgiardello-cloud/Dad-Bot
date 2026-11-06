@@ -54,7 +54,7 @@ class OllamaModelAdapter(ModelPort):
 
     def generate(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         *,
         model: str | None = None,
         temperature: float | None = None,
@@ -169,7 +169,7 @@ class OllamaModelAdapter(ModelPort):
 
     async def generate_async(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         *,
         model: str | None = None,
         temperature: float | None = None,
@@ -304,7 +304,7 @@ class OllamaModelAdapter(ModelPort):
         return str(raw_output or "")
 
     @staticmethod
-    def _messages_hash(messages: list[dict[str, str]]) -> str:
+    def _messages_hash(messages: list[dict[str, Any]]) -> str:
         normalized = [
             {
                 "role": str(item.get("role") or ""),

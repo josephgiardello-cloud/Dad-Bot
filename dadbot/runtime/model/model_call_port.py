@@ -53,7 +53,7 @@ class ModelPort(ABC):
     @abstractmethod
     def generate(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         *,
         model: str | None = None,
         temperature: float | None = None,
@@ -90,7 +90,7 @@ class ModelPort(ABC):
     @abstractmethod
     async def generate_async(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         *,
         model: str | None = None,
         temperature: float | None = None,

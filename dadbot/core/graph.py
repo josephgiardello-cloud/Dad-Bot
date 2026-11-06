@@ -44,9 +44,11 @@ from dadbot.core.graph_context import (  # re-export turn-scoped state
 from dadbot.core.graph_mutation import MutationGuard, MutationIntent, MutationQueue
 from dadbot.core.graph_pipeline_nodes import (  # re-export pipeline node stubs
     ContextBuilderNode,
+    ControlPlaneNode,
     GraphNode,
     HealthNode,
     InferenceNode,
+    MCPToolNode,
     RecoveryNode,
     ReflectionNode,
     SafetyNode,
@@ -106,6 +108,10 @@ _NODE_STAGE_CONTRACTS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
         ("rich_context",),
         ("candidate",),
     ),
+    "control_plane": (
+        ("candidate",),
+        ("candidate",),
+    ),
     "safety": (
         ("candidate",),
         ("safe_result",),
@@ -133,7 +139,8 @@ _NODE_STAGE_CONTRACTS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
 # from the pipeline (e.g. a partial test graph), the input contract is skipped.
 _NODE_INPUT_PREREQUISITES: dict[str, str] = {
     "inference": "context_builder",
-    "safety": "inference",
+    "control_plane": "inference",
+    "safety": "control_plane",
     "recovery": "safety",
     "save": "safety",
 }
@@ -181,7 +188,9 @@ class TurnGraph:
             HealthNode(),
             ContextBuilderNode(),
             ValidationGateNode(),
+            MCPToolNode(),
             InferenceNode(),
+            ControlPlaneNode(),
             SafetyNode(),
             RecoveryNode(),
             ReflectionNode(),

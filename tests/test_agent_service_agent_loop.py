@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from dadbot.runtime.model.model_call_port import ModelPort
 from dadbot.services.agent_service import AgentService
 
 pytestmark = pytest.mark.integration
@@ -27,6 +28,26 @@ class _RelationshipStub:
         ]
 
 
+class _ModelPortStub(ModelPort):
+    def generate(self, _messages, **_kwargs):
+        return "model reply"
+
+    async def generate_async(self, _messages, **_kwargs):
+        return "model reply"
+
+    def embed(self, _texts, **_kwargs):
+        return []
+
+    def estimate_token_count(self, text, **_kwargs):
+        return len(text)
+
+    def initialize_tokenizer(self, _model_name=None):
+        return None
+
+    def get_tokenizer(self, _model_name=None):
+        return None
+
+
 def test_agent_service_requires_bayesian_step_before_returning_direct_reply():
     bot = SimpleNamespace(
         turn_service=_TurnServiceStub(mood="stressed", early_reply="tool handled", should_end=False),
@@ -49,13 +70,12 @@ def test_agent_service_requires_bayesian_step_before_returning_direct_reply():
 
     result = asyncio.run(service.run_agent(turn_context, rich_context={}))
 
-    assert result == ("", False)
+    assert result == ("tool handled", False)
     assert turn_context.state["bayesian_state"]["required"] is True
     assert turn_context.state["bayesian_state"]["applied"] is True
     assert turn_context.state["bayesian_state"]["policy"] == "supportive_problem_solving"
     assert turn_context.state["tool_execution_envelope"]["selected_tool"] == "web_search"
     assert turn_context.state["tool_execution_envelope"]["deterministic"] is True
-    assert turn_context.state["agent_service_deprecated"]["deprecated"] is True
 
 
 def test_agent_service_attaches_tool_envelope_on_model_generation_path():
@@ -70,6 +90,11 @@ def test_agent_service_attaches_tool_envelope_on_model_generation_path():
             "final_path": "model_reply",
         },
         reply_generation=SimpleNamespace(generate_validated_reply=lambda *_args, **_kwargs: "model reply"),
+        prompt_assembly=SimpleNamespace(
+            build_chat_request_messages=lambda *_args, **_kwargs: [{"role": "user", "content": "say hi"}],
+        ),
+        model_port=_ModelPortStub(),
+        ACTIVE_MODEL="test-model",
     )
     service = AgentService(bot)
     turn_context = SimpleNamespace(
@@ -81,7 +106,6 @@ def test_agent_service_attaches_tool_envelope_on_model_generation_path():
 
     result = asyncio.run(service.run_agent(turn_context, rich_context={}))
 
-    assert result == ("", False)
+    assert result == ("model reply", False)
     assert turn_context.state["tool_execution_envelope"]["final_path"] == "model_reply"
     assert turn_context.state["tool_execution_envelope"]["selected_tool"] is None
-    assert turn_context.state["agent_service_deprecated"]["deprecated"] is True

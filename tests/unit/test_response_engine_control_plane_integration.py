@@ -255,6 +255,7 @@ class TestResponseEngineControlPlaneIntegration:
                 )
 
         cp._post_execution_pre_commit_contract_gate = Mock()
+        cp._assert_complete_run_contract = Mock()
         cp._validate_trace_invariant = Mock()
         cp._apply_turn_committed_core_state = Mock()
         cp._maybe_compact_ledger = Mock()
@@ -313,6 +314,7 @@ class TestResponseEngineControlPlaneIntegration:
                 )
 
         cp._post_execution_pre_commit_contract_gate = Mock()
+        cp._assert_complete_run_contract = Mock()
         cp._validate_trace_invariant = Mock()
         cp._apply_turn_committed_core_state = Mock()
         cp._maybe_compact_ledger = Mock()
@@ -530,6 +532,7 @@ class TestResponseEngineControlPlaneIntegration:
                 )
 
         cp._post_execution_pre_commit_contract_gate = Mock()
+        cp._assert_complete_run_contract = Mock()
         cp._validate_trace_invariant = Mock()
         cp._apply_turn_committed_core_state = Mock()
         cp._maybe_compact_ledger = Mock()
@@ -601,6 +604,7 @@ class TestResponseEngineControlPlaneIntegration:
                 )
 
         cp._post_execution_pre_commit_contract_gate = Mock()
+        cp._assert_complete_run_contract = Mock()
         cp._validate_trace_invariant = Mock()
         cp._apply_turn_committed_core_state = Mock()
         cp._maybe_compact_ledger = Mock()
@@ -726,6 +730,7 @@ class TestResponseEngineControlPlaneIntegration:
                 )
 
         cp._post_execution_pre_commit_contract_gate = Mock()
+        cp._assert_complete_run_contract = Mock()
         cp._validate_trace_invariant = Mock()
         cp._apply_turn_committed_core_state = Mock()
         cp._maybe_compact_ledger = Mock()

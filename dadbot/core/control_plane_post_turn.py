@@ -114,13 +114,15 @@ def _apply_submit_success_postprocessing_impl(
     }
     session_state["learning_signal_telemetry"] = learning_telemetry
     job.metadata["learning_signal_telemetry"] = dict(learning_telemetry)
-    control_plane._interactive_cognition_ui.emit_thought(
-        state=session_state,
-        trace_id=str(trace_token or ""),
-        content="Turn completed successfully",
-        confidence=0.95,
-        category="outcome",
-    )
+    emit_thought = getattr(control_plane._interactive_cognition_ui, "emit_thought", None)
+    if callable(emit_thought):
+        emit_thought(
+            state=session_state,
+            trace_id=str(trace_token or ""),
+            content="Turn completed successfully",
+            confidence=0.95,
+            category="outcome",
+        )
     control_plane._merge_session_state(session_id=session_key, state_patch=session_state)
     control_plane._emit_runtime_stream_event(
         event_type="partial.output",

@@ -22,7 +22,6 @@ def _test_build_semantic_index_backend(self):
     db_path = getattr(self._bot, "SEMANTIC_INDEX_DB_PATH", tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False).name)
     return SQLiteSemanticIndex(self._bot, db_path)
 sm_mod.SemanticIndexManager._build_semantic_index_backend = _test_build_semantic_index_backend
-import tempfile
 from dadbot.memory import graph_manager as gm_mod
 from dadbot_system.graph_store import SQLiteGraphStore
 
@@ -40,7 +39,6 @@ import types
 import os
 from unittest.mock import MagicMock
 from datetime import date
-from pathlib import Path
 from tempfile import TemporaryDirectory
 import pytest
 
@@ -97,6 +95,17 @@ def make_test_dadbot():
             def apply_reply_supervisor_decision(self, *args, **kwargs):
                 return "I am with you, buddy. Let us take it one steady step at a time."
         class StubMemoryManager:
+            def __init__(self):
+                self.memory_store = {"reminders": []}
+                self._storage = self
+
+            def replace_projection_via_canonical_event(self, store):
+                self.memory_store = dict(store or {})
+                return self.memory_store
+
+            def add_reminder(self, title, due_text=""):
+                return scheduler.add_reminder(title, due_text)
+
             def handle_tool_command(self, *args, **kwargs):
                 import os
                 from pathlib import Path

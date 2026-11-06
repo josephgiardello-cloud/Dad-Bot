@@ -112,13 +112,15 @@ def _record_submit_exception_impl(
     }
     session_state["learning_signal_telemetry"] = failure_learning_telemetry
     job.metadata["learning_signal_telemetry"] = dict(failure_learning_telemetry)
-    control_plane._interactive_cognition_ui.emit_thought(
-        state=session_state,
-        trace_id=str(trace_token or ""),
-        content=f"Turn failed: {type(exc).__name__}",
-        confidence=0.9,
-        category="outcome",
-    )
+    emit_thought = getattr(control_plane._interactive_cognition_ui, "emit_thought", None)
+    if callable(emit_thought):
+        emit_thought(
+            state=session_state,
+            trace_id=str(trace_token or ""),
+            content=f"Turn failed: {type(exc).__name__}",
+            confidence=0.9,
+            category="outcome",
+        )
     control_plane._merge_session_state(session_id=session_key, state_patch=session_state)
 
 

@@ -25,7 +25,6 @@ from dadbot.core.contracts.lifecycle_events import (
     Released,
 )
 from dadbot.core.compaction import ArchiveTier, CompactionPolicy, EventCompactor
-from dadbot.core.autonomous_goal_daemon import AutonomousGoalDaemon
 from dadbot.core.belief_state_engine import BeliefStateEngine
 from dadbot.core.compositional_tool_planner import CompositionalToolPlanner
 from dadbot.core.behavior_alignment_trainer import BehaviorAlignmentTrainer
@@ -82,15 +81,12 @@ from dadbot.core.runtime_types import ToolSpec
 from dadbot.core.execution_coordinator import ExecutionCoordinator
 from dadbot.core.hypothesis_engine import MultiHypothesisEngine
 from dadbot.core.memory_hierarchy_manager import MemoryHierarchyManager
-from dadbot.core.multi_agent_swarm import MultiAgentSwarm
 from dadbot.core.semantic_memory_graph import SemanticMemoryGraph
 from dadbot.core.semantic_primitives import hash as semantic_hash
 from dadbot.core.semantic_safety_engine import SemanticSafetyEngine
 from dadbot.core.session_planning_optimizer import SessionPlanningOptimizer
 from dadbot.core.session_store import SessionStore
-from dadbot.core.interactive_cognition_ui import InteractiveCognitionUI
 from dadbot.core.tool_routing_engine import ToolRoutingEngine
-from dadbot.core.tool_ecosystem_hub import ToolEcosystemHub
 from dadbot.core.tool_self_model import ToolSelfModel
 from dadbot.core.adaptation_engine import AdaptationEngine
 from dadbot.core.phase_closure_runtime import PhaseClosureRuntime
@@ -1482,11 +1478,11 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         self._tool_self_model = ToolSelfModel()
         self._compositional_tool_planner = CompositionalToolPlanner()
         self._planning_optimizer = SessionPlanningOptimizer()
-        self._autonomous_goal_daemon = AutonomousGoalDaemon()
-        self._interactive_cognition_ui = InteractiveCognitionUI()
         self._alignment_trainer = BehaviorAlignmentTrainer()
-        self._tool_ecosystem_hub = ToolEcosystemHub()
-        self._multi_agent_swarm = MultiAgentSwarm()
+        self._autonomous_goal_daemon = self._get_optional_service("autonomous_goal_daemon")
+        self._interactive_cognition_ui = self._get_optional_service("interactive_cognition_ui")
+        self._tool_ecosystem_hub = self._get_optional_service("tool_ecosystem_hub")
+        self._multi_agent_swarm = self._get_optional_service("multi_agent_swarm")
         self._response_engine = ResponseEngine()
         self._topology_runtime = TopologyRuntime(strict_mode=True)
         self._last_topology_validation: TopologyValidationResult | None = None
@@ -1496,6 +1492,16 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         self._sync_distributed_authority(role=NodeRole.LEADER, state_hash=self.execution_token)
         self.kernel_gateway = KernelGateway(self)
         self.bootstrap()
+
+    def _get_optional_service(self, name: str) -> Any | None:
+        service_registry = getattr(self.graph, "registry", None)
+        get_service = getattr(service_registry, "get", None)
+        if not callable(get_service):
+            return None
+        try:
+            return get_service(name, optional=True)
+        except KeyError:
+            return None
 
     def _topology_begin_turn(self, *, trace_id: str, session_id: str) -> None:
         self._topology_runtime.begin_turn(
@@ -1694,12 +1700,15 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         )
 
     def set_turn_steering(self, *, session_id: str, steering: dict[str, Any]) -> dict[str, Any]:
+        apply_live_control = getattr(self._interactive_cognition_ui, "apply_live_control", None)
+        if not callable(apply_live_control):
+            return {"applied": False, "reason": "interactive_cognition_service_unavailable"}
         session = self.registry.get_or_create(str(session_id or "default"))
         state = session.setdefault("state", {}) if isinstance(session, dict) else {}
         if not isinstance(state, dict):
             return {"applied": False, "reason": "no_state"}
         state["pending_turn_steering"] = dict(steering or {})
-        self._interactive_cognition_ui.apply_live_control(
+        apply_live_control(
             state=state,
             control=dict(steering or {}),
             source="set_turn_steering",
@@ -1720,11 +1729,14 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         edits: dict[str, Any],
         actor: str = "operator",
     ) -> dict[str, Any]:
+        apply_plan_edit = getattr(self._interactive_cognition_ui, "apply_plan_edit", None)
+        if not callable(apply_plan_edit):
+            return {"updated": False, "reason": "interactive_cognition_service_unavailable"}
         session = self.registry.get_or_create(str(session_id or "default"))
         state = session.setdefault("state", {}) if isinstance(session, dict) else {}
         if not isinstance(state, dict):
             return {"updated": False, "reason": "no_state"}
-        updated_plan = self._interactive_cognition_ui.apply_plan_edit(
+        updated_plan = apply_plan_edit(
             state=state,
             trace_id=str(trace_id or ""),
             edits=dict(edits or {}),
@@ -1745,7 +1757,10 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         state = session.setdefault("state", {}) if isinstance(session, dict) else {}
         if not isinstance(state, dict):
             return {"registered": False, "reason": "no_state"}
-        connector = self._tool_ecosystem_hub.register_connector(
+        register_connector = getattr(self._tool_ecosystem_hub, "register_connector", None)
+        if not callable(register_connector):
+            return {"registered": False, "reason": "tool_ecosystem_service_unavailable"}
+        connector = register_connector(
             state=state,
             name=str(name or ""),
             capabilities=[str(item) for item in list(capabilities or [])],
@@ -1759,7 +1774,10 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         state = session.setdefault("state", {}) if isinstance(session, dict) else {}
         if not isinstance(state, dict):
             return {"available": False, "reason": "no_state"}
-        return self._multi_agent_swarm.health_snapshot(state=state)
+        health_snapshot = getattr(self._multi_agent_swarm, "health_snapshot", None)
+        if not callable(health_snapshot):
+            return {"available": False, "reason": "multi_agent_swarm_unavailable"}
+        return health_snapshot(state=state)
 
     def _consume_pending_turn_steering(self, *, session_id: str) -> dict[str, Any]:
         session = self.registry.get_or_create(str(session_id or "default"))
@@ -1772,6 +1790,11 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         return pending
 
     async def start_autonomous_goal_loop(self, *, interval_seconds: float = 60.0) -> dict[str, Any]:
+        if not all(
+            callable(getattr(self._autonomous_goal_daemon, name, None))
+            for name in ("next_actions", "persist_cycle")
+        ):
+            return {"started": False, "reason": "autonomous_goal_service_unavailable"}
         interval = max(1.0, float(interval_seconds or 60.0))
         if self._autonomous_goal_task is not None and not self._autonomous_goal_task.done():
             return {"started": False, "reason": "already_running", "interval_seconds": interval}
@@ -1807,8 +1830,12 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         state = session.setdefault("state", {}) if isinstance(session, dict) else {}
         if not isinstance(state, dict):
             return {"ran": False, "reason": "no_state"}
-        actions = self._autonomous_goal_daemon.next_actions(state=state, max_items=4)
-        self._autonomous_goal_daemon.persist_cycle(state=state, actions=actions, source=source)
+        next_actions = getattr(self._autonomous_goal_daemon, "next_actions", None)
+        persist_cycle = getattr(self._autonomous_goal_daemon, "persist_cycle", None)
+        if not callable(next_actions) or not callable(persist_cycle):
+            return {"ran": False, "reason": "autonomous_goal_service_unavailable"}
+        actions = next_actions(state=state, max_items=4)
+        persist_cycle(state=state, actions=actions, source=source)
         self._emit_runtime_stream_event(
             event_type="autonomous.goal.cycle",
             session_id=str(session_id or "default"),
@@ -3714,6 +3741,9 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
             if str(event.get("event_type") or "") in {"plan.updated", "plan.created"}:
                 last_plan = dict((event.get("payload") or {}).get("runtime_plan") or {})
                 break
+        interactive_snapshot = getattr(self._interactive_cognition_ui, "snapshot", None)
+        ecosystem_summary = getattr(self._tool_ecosystem_hub, "summary", None)
+        swarm_health = getattr(self._multi_agent_swarm, "health_snapshot", None)
         explanation = {
             "available": bool(timeline),
             "timeline_events": int(len(timeline)),
@@ -3725,10 +3755,22 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
             "active_hypothesis": dict(dict(state.get("hypothesis_store") or {}).get("last_active") or {}),
             "belief_calibration": dict(dict(state.get("belief_state") or {}).get("calibration") or {}),
             "tool_self_model": dict(dict(state.get("tool_self_model") or {}).get("tools") or {}),
-            "interactive_cognition_ui": self._interactive_cognition_ui.snapshot(state=state, limit=12),
+            "interactive_cognition_ui": (
+                interactive_snapshot(state=state, limit=12)
+                if callable(interactive_snapshot)
+                else {"available": False, "reason": "optional_service_unavailable"}
+            ),
             "alignment_policy": dict(dict(state.get("alignment_trainer") or {}).get("policy") or {}),
-            "tool_ecosystem": self._tool_ecosystem_hub.summary(state=state),
-            "swarm_health": self._multi_agent_swarm.health_snapshot(state=state),
+            "tool_ecosystem": (
+                ecosystem_summary(state=state)
+                if callable(ecosystem_summary)
+                else {"available": False, "reason": "optional_service_unavailable"}
+            ),
+            "swarm_health": (
+                swarm_health(state=state)
+                if callable(swarm_health)
+                else {"available": False, "reason": "optional_service_unavailable"}
+            ),
         }
         return dict(validate_decision_explanation_contract(explanation))
 
