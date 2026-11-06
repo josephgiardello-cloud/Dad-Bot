@@ -2,7 +2,6 @@ import pytest
 
 from dadbot.core.dadbot import DadBot
 from dadbot.core.execution_context import active_execution_trace, ensure_execution_trace_root
-from dadbot.core.runtime_errors import ReplayInvariantViolation
 
 pytestmark = pytest.mark.unit
 

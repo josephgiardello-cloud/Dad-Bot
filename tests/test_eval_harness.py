@@ -18,8 +18,6 @@ from __future__ import annotations
 
 import re
 import unittest
-from pathlib import Path
-from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import pytest
@@ -76,7 +74,6 @@ def score_faithfulness(reply: str, profile: dict) -> tuple[float, list[str]]:
     More checks can be added as the profile grows.
     """
     violations: list[str] = []
-    lowered = reply.lower()
 
     user_name = str(profile.get("name") or profile.get("user_name") or "").strip().lower()
     if user_name:
