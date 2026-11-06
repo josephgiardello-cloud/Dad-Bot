@@ -37,7 +37,7 @@ def setup_bot(request, make_test_dadbot, tmp_path):
     bot = make_test_dadbot(**overrides)
     request.cls.bot = bot
     # Force in-memory state store to avoid Postgres connection
-    bot.MEMORY_STORE = InMemoryStateStore()
+    bot.MEMORY_STORE = bot.default_memory_store()
     bot.save_memory_store()
     bot.embed_texts = request.cls.fake_embed_texts
     yield
@@ -2104,8 +2104,9 @@ class TestDadBotRegression(unittest.TestCase):
         self.assertEqual(len(self.bot.relationship_history(limit=200)), before)
 
     def test_apply_consolidated_feedback_adjusts_entry_scores(self):
-        self.bot.mutate_memory_store(
-            consolidated_memories=[
+        self.bot.MEMORY_STORE = {
+            **self.bot.MEMORY_STORE,
+            "consolidated_memories": [
                 {
                     "summary": "Tony has been consistent with his budget.",
                     "category": "finance",
@@ -2114,8 +2115,8 @@ class TestDadBotRegression(unittest.TestCase):
                     "importance_score": 0.5,
                     "updated_at": date.today().isoformat(),
                 }
-            ]
-        )
+            ],
+        }
 
         with self._save_commit_context() as turn_context:
             updated = self.bot.apply_consolidated_feedback(

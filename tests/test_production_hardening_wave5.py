@@ -171,12 +171,32 @@ class TestTracingPropagation:
 
         asyncio.run(_run())
 
-    def test_orchestrator_execute_job_resolves_recovery_mode_from_checkpoint(self, monkeypatch):
+    @pytest.mark.parametrize("expired_lease", [False, True])
+    def test_orchestrator_execute_job_resolves_recovery_mode_from_checkpoint(self, monkeypatch, expired_lease):
+        from datetime import datetime, timedelta, timezone
+
+        from dadbot.core.contracts.lifecycle_events import Claimed, LeaseExpired, Submitted
         from dadbot.core.control_plane import ExecutionJob
         from dadbot.core.orchestrator import DadBotOrchestrator
 
         orchestrator = DadBotOrchestrator()
         captured: dict[str, object] = {}
+        job = ExecutionJob(
+            session_id="trace-test",
+            user_input="hello",
+            metadata={"execution_state": {"lifecycle_state": "recovery_pending", "redelivery_count": 1}},
+        )
+        now = datetime.now(timezone.utc)
+        projection = orchestrator.control_plane.lifecycle_projection
+        projection.apply(Submitted(execution_id=job.job_id, occurred_at=now))
+        if expired_lease:
+            projection.apply(Claimed(
+                execution_id=job.job_id, occurred_at=now, worker_id="prior-worker",
+                lease_expiry=now + timedelta(seconds=1),
+            ))
+            projection.apply(LeaseExpired(
+                execution_id=job.job_id, occurred_at=now + timedelta(seconds=2), worker_id="prior-worker",
+            ))
 
         checkpoint = {
             "checkpoint_hash": "chk-123",
@@ -207,26 +227,17 @@ class TestTracingPropagation:
         async def _run() -> None:
             result = await orchestrator._execute_job(
                 {"state": {}},
-                ExecutionJob(
-                    session_id="trace-test",
-                    user_input="hello",
-                    metadata={
-                        "execution_state": {
-                            "lifecycle_state": "recovery_pending",
-                            "redelivery_count": 1,
-                        },
-                    },
-                ),
+                job,
             )
             assert result == ("ok", False)
 
         asyncio.run(_run())
 
-        assert captured["execution_mode"] == "recovery"
-        assert captured["restored"] is True
-        assert captured["restored_meta"] is True
+        assert captured["execution_mode"] == ("recovery" if expired_lease else "live")
+        assert captured["restored"] is (True if expired_lease else None)
+        assert captured["restored_meta"] is (True if expired_lease else None)
         assert captured["checkpoint_hash"] == "chk-123"
-        assert captured["event_sequence"] == 7
+        assert captured["event_sequence"] == (7 if expired_lease else 0)
 
     def test_orchestrator_strict_param_in_signature(self):
         from dadbot.core.orchestrator import DadBotOrchestrator

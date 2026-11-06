@@ -42,7 +42,24 @@ from tempfile import TemporaryDirectory
 import pytest
 
 @pytest.fixture
-def make_test_dadbot():
+def offline_model_transport(monkeypatch):
+    """Make accidental live inference fail immediately in mocked bot fixtures."""
+    monkeypatch.setenv("DADBOT_GRAPH_ENABLE_LLM_EXTRACTION", "0")
+    from dadbot.managers.runtime_client import RuntimeClientManager
+    import ollama
+
+    def unexpected_sync_model_call(**_kwargs):
+        raise AssertionError("Unexpected live Ollama call in make_test_dadbot; mock the model port or transport")
+
+    async def unexpected_async_model_call(*_args, **_kwargs):
+        raise AssertionError("Unexpected live Ollama call in make_test_dadbot; mock the model port or transport")
+
+    monkeypatch.setattr(RuntimeClientManager, "_call_ollama_sync", staticmethod(unexpected_sync_model_call))
+    monkeypatch.setattr(ollama.AsyncClient, "chat", unexpected_async_model_call)
+
+
+@pytest.fixture
+def make_test_dadbot(offline_model_transport):
     """Factory for DadBot with all required dependencies mocked."""
     from dadbot.core.dadbot import DadBot
     from dadbot.core.dadbot import DadBot as DadBotClass
@@ -219,7 +236,7 @@ except ModuleNotFoundError:
 
 
 @pytest.fixture
-def bot():
+def bot(offline_model_transport):
     if _DadBot is None:
         pytest.skip("Dad module not importable in this environment")
     DadBot = _DadBot
