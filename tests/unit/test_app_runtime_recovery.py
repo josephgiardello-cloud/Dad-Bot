@@ -28,6 +28,7 @@ class _FakeSocket:
 def test_launch_streamlit_app_self_heals_preflight_before_launch(tmp_path: Path) -> None:
     script_path = tmp_path / "Dad.py"
     script_path.write_text("print('dad')\n", encoding="utf-8")
+    (tmp_path / "dad_streamlit.py").write_text("print('app')\n", encoding="utf-8")
 
     mock_supervisor = MagicMock()
     mock_supervisor.preflight_check.side_effect = [
@@ -65,6 +66,7 @@ def test_launch_streamlit_app_self_heals_preflight_before_launch(tmp_path: Path)
 def test_launch_streamlit_app_retries_once_after_early_boot_failure(tmp_path: Path) -> None:
     script_path = tmp_path / "Dad.py"
     script_path.write_text("print('dad')\n", encoding="utf-8")
+    (tmp_path / "dad_streamlit.py").write_text("print('app')\n", encoding="utf-8")
 
     mock_supervisor = MagicMock()
     mock_supervisor.preflight_check.return_value = (True, [])

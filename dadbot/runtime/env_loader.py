@@ -6,6 +6,20 @@ from pathlib import Path
 from dadbot.utils import env_truthy
 
 
+def runtime_environment() -> str:
+    """Return the configured runtime environment and reject unknown modes."""
+    environment = str(os.environ.get("DADBOT_ENVIRONMENT", "development") or "").strip().lower()
+    if environment not in {"development", "test", "production"}:
+        raise ValueError(
+            "DADBOT_ENVIRONMENT must be one of: development, test, production.",
+        )
+    return environment
+
+
+def is_production_environment() -> bool:
+    return runtime_environment() == "production"
+
+
 def _parse_env_line(line: str) -> tuple[str, str] | None:
     raw = str(line or "").strip()
     if not raw or raw.startswith("#"):
@@ -83,6 +97,10 @@ def bootstrap_environment() -> dict[str, str]:
 def validate_startup_environment(*, serve_api: bool) -> list[str]:
     """Return startup validation errors for security-critical configuration."""
     errors: list[str] = []
+    try:
+        runtime_environment()
+    except ValueError as exc:
+        errors.append(str(exc))
 
     auth_required = env_truthy("DADBOT_API_AUTH_REQUIRED", default=True)
     token_secret = str(os.environ.get("DADBOT_API_TOKEN_SECRET") or "").strip()

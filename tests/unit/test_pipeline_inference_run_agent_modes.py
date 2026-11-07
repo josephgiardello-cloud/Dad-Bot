@@ -3,6 +3,13 @@ from types import SimpleNamespace
 
 import pytest
 
+from dadbot.core.core_state import CoreState
+from dadbot.core.execution_context import (
+    close_core_state_scope,
+    get_active_core_state,
+    open_core_state_scope,
+    push_core_state_event,
+)
 from dadbot.core.graph import TurnContext, TurnGraph
 from dadbot.core.graph_pipeline_nodes import ControlPlaneNode, InferenceNode, MCPToolNode
 
@@ -116,6 +123,37 @@ def test_control_plane_node_selects_candidate_before_safety() -> None:
     assert context.state["response_authority"] == "response_engine"
     assert control_plane.calls == 1
     assert finalized == [("control-plane output", "select the response")]
+
+
+def test_control_plane_node_propagates_worker_core_state_to_parent_context() -> None:
+    reminder = {"id": "reminder-1", "title": "Keep the durable write"}
+
+    def execute(_turn_context, _rich_context):
+        push_core_state_event("MemoryUpdated", {"key": "reminders", "value": [reminder]})
+        return ("control-plane output", False)
+
+    control_plane = SimpleNamespace(execute_from_graph_context=execute)
+    service = SimpleNamespace(
+        bot=SimpleNamespace(
+            turn_orchestrator=SimpleNamespace(control_plane=control_plane),
+            reply_finalization=SimpleNamespace(finalize=lambda reply, _mood, *, user_input: reply),
+        ),
+    )
+    registry = _Registry(service)
+    context = TurnContext(user_input="create a reminder")
+
+    async def run() -> CoreState | None:
+        token = open_core_state_scope(CoreState())
+        try:
+            await ControlPlaneNode().execute(registry, context)
+            return get_active_core_state()
+        finally:
+            close_core_state_scope(token)
+
+    active = asyncio.run(run())
+
+    assert active is not None
+    assert active.memory_kv["reminders"] == [reminder]
 
 
 def test_default_turn_graph_places_control_plane_before_safety() -> None:

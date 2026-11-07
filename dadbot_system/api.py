@@ -264,6 +264,14 @@ def create_api_app(
         authorization: str | None = Header(default=None),
         x_dadbot_token: str | None = Header(default=None),
     ) -> ServicePrincipal:
+        if request.url.path.rstrip("/") in {"/health", f"{_version_prefix()}/health"}:
+            principal = ServicePrincipal(
+                subject="health-check",
+                tenant_id=DEFAULT_TENANT_ID,
+                scopes=frozenset({"read"}),
+            )
+            request.state.service_principal = principal
+            return principal
         principal = _resolve_principal(_extract_bearer_token(authorization, x_dadbot_token))
         request.state.service_principal = principal
         return principal
@@ -274,6 +282,10 @@ def create_api_app(
             from .telemetry import configure_tracing
 
             configure_tracing(service_config.telemetry)
+
+        recovered_tasks = orchestrator.recover_pending_tasks()
+        if recovered_tasks:
+            logger.warning("Requeued %d incomplete tasks from durable storage", recovered_tasks)
 
         async def _kernel_execute(session_entry: dict, payload: dict) -> dict:
             _ = session_entry
@@ -321,12 +333,13 @@ def create_api_app(
 
     @app.middleware("http")
     async def _security_headers(request: Any, call_next):
+        is_health_check = request.url.path.rstrip("/") in {"/health", f"{_version_prefix()}/health"}
         is_preflight = (
             request.method == "OPTIONS"
             and "origin" in request.headers
             and "access-control-request-method" in request.headers
         )
-        if dadbot_secret_key and not is_preflight:
+        if dadbot_secret_key and not is_preflight and not is_health_check:
             provided_secret = request.headers.get("x-dadbot-key")
             if not _is_valid_secret_key(str(provided_secret or "")):
                 return JSONResponse(status_code=401, content={"detail": "Invalid or missing X-DADBOT-KEY"})

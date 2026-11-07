@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import inspect
+import json
 import logging
 from collections.abc import Mapping
 from typing import Any, Protocol
@@ -20,6 +20,7 @@ from typing import Any, Protocol
 from dadbot.contracts import PolicyVetoPayload, SovereignEvent, SovereignEventType, VetoReason
 from dadbot.core.cognition_event import CognitionEnvelope, emit_cognition
 from dadbot.core.critic import CritiqueEngine
+from dadbot.core.execution_context import get_active_core_state, replace_active_core_state
 from dadbot.core.execution_result_unified import (
     get_unified_execution_result,
     set_unified_execution_eval_hash,
@@ -957,11 +958,19 @@ class ControlPlaneNode(_NodeContractMixin):
             )
 
         rich_context = turn_context.state.get("rich_context")
-        result = await asyncio.to_thread(
-            execute,
-            turn_context,
-            rich_context if isinstance(rich_context, dict) else {},
-        )
+        parent_core_state = get_active_core_state()
+
+        def execute_with_core_state():
+            result = execute(
+                turn_context,
+                rich_context if isinstance(rich_context, dict) else {},
+            )
+            return result, get_active_core_state()
+
+        result, worker_core_state = await asyncio.to_thread(execute_with_core_state)
+        if parent_core_state is not None and worker_core_state is not None:
+            # ContextVar changes made in asyncio.to_thread do not flow back to the caller.
+            replace_active_core_state(worker_core_state)
         candidate = await result if inspect.isawaitable(result) else result
         if candidate is None:
             raise RuntimeError("Control plane produced no response candidate")

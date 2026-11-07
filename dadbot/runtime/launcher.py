@@ -107,11 +107,7 @@ def launch_streamlit_app(
     base_path = Path(script_path) if script_path is not None else Path.cwd() / "Dad.py"
     workspace_path = base_path.resolve().parent
     streamlit_app_path = workspace_path / "dadbot" / "ui" / "entrypoint.py"
-    stub_created = ensure_streamlit_app_file(streamlit_app_path)
-    if stub_created:
-        print(
-            f"The packaged Streamlit entrypoint was missing, so a minimal stub was created at {streamlit_app_path}.",
-        )
+    ensure_streamlit_app_file(streamlit_app_path)
     chosen_port = required_streamlit_port()
     local_url = f"http://localhost:{chosen_port}"
     command_env = os.environ.copy()

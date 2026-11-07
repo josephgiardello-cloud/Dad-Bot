@@ -10,6 +10,28 @@ from dadbot.notifications import send_local_notification
 logger = logging.getLogger(__name__)
 
 
+def _merge_maintenance_reminder_updates(runtime, updates):
+    current_reminders = runtime.memory_manager.memory_projection().get("reminders") or []
+    reminders = [
+        dict(reminder)
+        for reminder in current_reminders
+        if isinstance(reminder, dict)
+    ]
+    reminders_by_id = {
+        str(reminder.get("id") or ""): reminder
+        for reminder in reminders
+        if reminder.get("id")
+    }
+    for update in updates:
+        if not isinstance(update, dict):
+            continue
+        reminder = reminders_by_id.get(str(update.get("id") or ""))
+        fields = update.get("fields")
+        if reminder is not None and isinstance(fields, dict):
+            reminder.update(fields)
+    return reminders
+
+
 class MaintenanceScheduler:
     """Owns post-turn background maintenance and periodic durable synthesis cadence."""
 
@@ -25,9 +47,17 @@ class MaintenanceScheduler:
 
     def _queue_or_apply_memory_store_patch(self, **patch) -> str:
         normalized_patch = dict(patch or {})
+        reminder_updates = normalized_patch.pop("_reminder_updates", None)
         if bool(getattr(self.bot, "_graph_commit_active", False)):
+            if reminder_updates:
+                normalized_patch["reminders"] = _merge_maintenance_reminder_updates(
+                    self.bot,
+                    reminder_updates,
+                )
             self.bot.mutate_memory_store(**normalized_patch)
             return "applied"
+        if reminder_updates is not None:
+            normalized_patch["_reminder_updates"] = reminder_updates
         queue = self._background_memory_store_patch_queue()
         queue.append(normalized_patch)
         if len(queue) > 128:
@@ -684,6 +714,11 @@ class MaintenanceScheduler:
         )
 
         reminders = [dict(item) for item in self.bot.reminder_catalog(include_done=True)]
+        original_reminders = {
+            str(item.get("id") or ""): dict(item)
+            for item in reminders
+            if item.get("id")
+        }
         patterns = [dict(item) for item in self.bot.life_patterns()]
         cue_history = [
             dict(item)
@@ -716,9 +751,27 @@ class MaintenanceScheduler:
         )
         queued_shadow_repairs, audits = self._queue_shadow_repair_prompt(now)
         notifications_sent = notif_reminders + notif_patterns + notif_env
+        reminder_updates = []
+        for reminder in reminders:
+            reminder_id = str(reminder.get("id") or "")
+            original = original_reminders.get(reminder_id)
+            if original is None:
+                continue
+            changed_fields = {
+                key: value
+                for key, value in reminder.items()
+                if original.get(key) != value
+            }
+            if changed_fields:
+                reminder_updates.append(
+                    {
+                        "id": reminder_id,
+                        "fields": changed_fields,
+                    },
+                )
 
         self._queue_or_apply_memory_store_patch(
-            reminders=reminders,
+            _reminder_updates=reminder_updates,
             life_patterns=patterns,
             advice_audits=audits,
             environmental_cues_history=cue_history[-240:],

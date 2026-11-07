@@ -41,6 +41,7 @@ services:
       - dadbot_dev_logs:/var/log/dadbot
       - ./static:/app/static
     environment:
+      - DADBOT_ENVIRONMENT=development
       - DADBOT_MODE=streamlit
       - DADBOT_TENANT_ID=local
       - OLLAMA_HOST=http://ollama:11434
@@ -70,8 +71,12 @@ services:
     env_file:
       - .env.production
     environment:
+      - OLLAMA_HOST=${OLLAMA_HOST:-http://host.docker.internal:11434}
+      - DADBOT_ENVIRONMENT=production
       - DADBOT_GLOBAL_CONFLUENCE_MODE=enforce
       - DADBOT_ALLOW_LEGACY_CONFLUENCE_KEY=0
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "127.0.0.1:8010:8010"
     depends_on:

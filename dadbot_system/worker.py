@@ -7,6 +7,7 @@ import multiprocessing as mp
 import queue
 import time
 from dataclasses import dataclass
+from typing import Any
 
 from dadbot.core.execution_contract import SovereignContext, TurnDelivery, live_turn_request
 
@@ -22,6 +23,7 @@ from .contracts import (
     normalize_tenant_id,
 )
 from .runtime_signals import configure_logging, configure_tracing, start_span
+from .state import StateStore
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +99,8 @@ class DadBotTaskProcessor:
     def __init__(self, config: ServiceConfig, bot_factory=None):
         self.config = config
         self._bot_factory = bot_factory
-        self._bots: dict[tuple[str, str], object] = {}
+        self._bots: dict[tuple[str, str, str], object] = {}
+        self._runtime_state_store: StateStore | None = None
         self._circuit = CircuitBreaker(
             config.workers.circuit_breaker_failures,
             config.workers.circuit_breaker_reset_seconds,
@@ -117,7 +120,25 @@ class DadBotTaskProcessor:
             else:
                 from Dad import DadBot
 
-                bot = DadBot(model_name=model_name, tenant_id=normalized_tenant_id)
+                bot_kwargs: dict[str, Any] = {
+                    "model_name": model_name,
+                    "tenant_id": normalized_tenant_id,
+                }
+                from dadbot.runtime.env_loader import is_production_environment
+
+                if is_production_environment():
+                    from dadbot.app_runtime import build_runtime_state_bundle, build_service_state_store
+
+                    if self._runtime_state_store is None:
+                        self._runtime_state_store = build_service_state_store(self.config)
+                    bot_kwargs["dependency_registry"] = {
+                        "runtime_state_bundle": build_runtime_state_bundle(
+                            self._runtime_state_store,
+                            tenant_id=normalized_tenant_id,
+                            planner_debug_factory=DadBot.default_planner_debug_state,
+                        ),
+                    }
+                bot = DadBot(**bot_kwargs)
             if hasattr(bot, "ensure_ollama_ready"):
                 try:
                     ready = bool(bot.ensure_ollama_ready())
@@ -212,7 +233,10 @@ class DadBotTaskProcessor:
                 try:
                     bot = self._get_bot(task.session_id, task.request.requested_model, tenant_id=task.tenant_id)
                     if task.session_state:
-                        bot.load_session_state_snapshot(task.session_state)
+                        session_snapshot = dict(task.session_state)
+                        # Memory is tenant-scoped and durable; the session copy may predate the task's side effects.
+                        session_snapshot.pop("memory_store", None)
+                        bot.load_session_state_snapshot(session_snapshot)
 
                     reply, should_end = asyncio.run(
                         asyncio.wait_for(

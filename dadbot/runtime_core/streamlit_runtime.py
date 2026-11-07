@@ -437,14 +437,12 @@ class StreamlitRuntime:
         from dadbot.core.dadbot import DadBot
         from dadbot.config import DadBotConfig, DadRuntimeConfig
         from dadbot.state import RuntimeStateManager
-        from dadbot.runtime_core.dummy_model_runtime import DummyModelRuntime
 
         runtime_config = DadRuntimeConfig()
         config = DadBotConfig(runtime_config=runtime_config)
         bot = DadBot(
             config=config,
             runtime_config=runtime_config,
-            model_runtime=DummyModelRuntime(),
         )
 
         state = SimpleNamespace(

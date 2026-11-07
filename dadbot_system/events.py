@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import deque
 from queue import Empty, Full, Queue
 from threading import Lock
-from typing import Protocol
+from typing import Any, Protocol
 
 from .contracts import EventEnvelope
 
@@ -28,6 +28,9 @@ class InMemoryEventBus:
             except Full:
                 continue
 
+    def publish_ephemeral(self, event: Any) -> None:
+        self.publish(event)
+
     def events(self) -> list[EventEnvelope]:
         return list(self._events)
 
@@ -40,6 +43,24 @@ class InMemoryEventBus:
     def unsubscribe(self, subscriber) -> None:
         with self._lock:
             self._subscribers = [candidate for candidate in self._subscribers if candidate is not subscriber]
+
+
+class DurableEventBus(InMemoryEventBus):
+    """Persist events to a state store before notifying process-local subscribers."""
+
+    persists_events = True
+
+    def __init__(self, state_store, max_events: int = 500):
+        super().__init__(max_events=max_events)
+        self._state_store = state_store
+
+    def publish(self, event: EventEnvelope) -> None:
+        self._state_store.append_event(event.session_id, event.to_dict())
+        super().publish(event)
+
+    def publish_ephemeral(self, event: Any) -> None:
+        """Deliver transient process-local payloads without durable serialization."""
+        super().publish(event)
 
 
 class QueueEventBus:

@@ -34,7 +34,7 @@ _EXPORT_GROUPS: dict[str, list[str]] = {
         "WorkerResult",
         "normalize_tenant_id",
     ],
-    ".events": ["InMemoryEventBus", "QueueEventBus"],
+    ".events": ["DurableEventBus", "InMemoryEventBus", "QueueEventBus"],
     ".orchestration": ["DadBotOrchestrator", "ToolRegistry"],
     ".state": [
         "AppStateContainer",

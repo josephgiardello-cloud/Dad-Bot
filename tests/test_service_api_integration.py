@@ -311,6 +311,29 @@ def test_live_api_chat_roundtrip_over_http():
         thread.join(timeout=5)
 
 
+def test_health_endpoint_is_exempt_from_auth_but_api_routes_are_not(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("DADBOT_SECRET_KEY", "integration-shared-key")
+    orchestrator = DadBotOrchestrator(
+        ImmediateResultBroker(),
+        state_store=InMemoryStateStore(),
+        planner_debug_factory=planner_debug_factory,
+    )
+    app = create_api_app(orchestrator, config=service_config())
+
+    with TestClient(app) as client:
+        health = client.get("/v1/health")
+        protected = client.get(
+            "/v1/gateway/channels",
+            headers={"X-DADBOT-KEY": "integration-shared-key"},
+        )
+
+    assert health.status_code == 200
+    assert health.json()["status"] == "ok"
+    assert protected.status_code == 401
+
+
 def test_api_event_stream_websocket_replays_and_streams_tenant_events():
     from fastapi.testclient import TestClient
 

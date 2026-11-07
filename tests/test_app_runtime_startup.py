@@ -197,6 +197,24 @@ def test_production_runtime_state_bundle_rejects_in_memory_default(monkeypatch):
         DadBotBootMixin._build_runtime_state_bundle(None)
 
 
+def test_runtime_state_bundle_persists_state_and_events_with_tenant_namespace():
+    store = app_runtime.InMemoryStateStore()
+    bundle = app_runtime.build_runtime_state_bundle(
+        store,
+        tenant_id="family-a",
+        planner_debug_factory=lambda: {},
+    )
+    subscriber = bundle["event_bus"].subscribe()
+
+    bundle["container"].update(lambda state: setattr(state, "session_summary", "Persisted"), reason="test")
+
+    assert store.load_session_state("tenant:family-a:dadbot-runtime")["session_summary"] == "Persisted"
+    events = store.list_events("tenant:family-a:dadbot-runtime")
+    assert len(events) == 1
+    assert events[0]["event_type"] == "state.updated"
+    assert subscriber.get_nowait().event_id == events[0]["event_id"]
+
+
 def test_check_dependencies_skips_non_runtime_actions(monkeypatch, tmp_path):
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     calls = []

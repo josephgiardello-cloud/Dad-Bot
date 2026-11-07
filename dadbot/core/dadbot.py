@@ -65,25 +65,8 @@ class DadBot(
     DadBotCompatMixin,
     AssistantRuntime,
 ):
-    def parse_tool_command(self, user_input: str):
-        """Minimal implementation for test compatibility."""
-        s = user_input.lower()
-        if "calendar" in s:
-            return {
-                "action": "create_calendar_event",
-                "title": "project sync" if "project sync" in s else "dentist appointment",
-            }
-        if "email" in s:
-            return {
-                "action": "draft_email",
-                "recipient": "alex@example.com" if "alex@example.com" in s else "coach@example.com",
-                "subject": "sprint update" if "sprint update" in s else "game plan",
-            }
-        return None
-
     def current_avatar_exists(self):
-        """Stub: Always returns False unless implemented by subclass or manager."""
-        return False
+        return self.avatar_manager.current_avatar_exists()
 
     # Remove all test compatibility manager defaults. All must be real and present.
 
@@ -132,22 +115,26 @@ class DadBot(
     """
 
     def save_memory_store(self, *args, **kwargs):
-        """Stub for test compatibility: delegates to memory_manager if available, else no-op."""
-        mm = getattr(self, '_memory_manager', None)
-        if mm and hasattr(mm, 'save_memory_store'):
-            return mm.save_memory_store(*args, **kwargs)
-        return None
+        manager = getattr(self, "_memory_manager", None)
+        save = getattr(manager, "save_memory_store", None)
+        if not callable(save):
+            raise RuntimeError("Memory persistence manager is unavailable.")
+        return save(*args, **kwargs)
 
     def conversation_history(self):
         return self.runtime_state_manager.conversation_history()
 
-    def add_reminder(self, title: str, due_text: str = "") -> dict[str, Any] | None:
-        return self.memory_manager.add_reminder(title, due_text)
+    def add_reminder(
+        self,
+        title: str,
+        due_text: str = "",
+        *,
+        idempotency_key: str = "",
+    ) -> dict[str, Any] | None:
+        return self.memory_manager.add_reminder(title, due_text, idempotency_key=idempotency_key)
 
-    # Removed duplicate current_avatar_exists method
     def ical_feed_url(self):
-        """No-op stub for calendar sync compatibility."""
-        return None
+        return self.calendar_manager.ical_feed_url()
 
     def refresh_memory_graph(self, force=False):
         return self.long_term_signals.refresh_memory_graph(force=force)

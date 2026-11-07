@@ -140,6 +140,13 @@ class DadBotBootMixin:
     # ------------------------------------------------------------------
 
     def _build_runtime_state_bundle(self) -> dict:
+        from dadbot.runtime.env_loader import is_production_environment
+
+        if is_production_environment():
+            raise RuntimeError(
+                "Production requires an injected durable runtime_state_bundle; "
+                "the in-memory event bus and state store are development-only.",
+            )
         from dadbot_system import InMemoryEventBus, InMemoryStateStore
         from dadbot_system.state import AppStateContainer
 

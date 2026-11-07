@@ -814,6 +814,7 @@ dependencies = [
     { name = "orjson" },
     { name = "pydantic" },
     { name = "python-dateutil" },
+    { name = "pyyaml" },
     { name = "streamlit" },
 ]
 
@@ -885,6 +886,7 @@ requires-dist = [
     { name = "pytest-xdist", marker = "extra == 'dev'", specifier = ">=3.6" },
     { name = "python-dateutil", specifier = ">=2.9,<3" },
     { name = "pyttsx3", marker = "extra == 'voice'", specifier = ">=2.98" },
+    { name = "pyyaml", specifier = ">=6,<7" },
     { name = "redis", marker = "extra == 'service'", specifier = ">=6.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8" },
     { name = "streamlit", specifier = ">=1.45,<2" },

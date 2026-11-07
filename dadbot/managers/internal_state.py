@@ -34,6 +34,7 @@ class InternalStateManager:
             "last_reflection_at": None,
             "recent_reflections": [],
             "target_history": [],
+            "tool_idempotency": {},
             "turn_count": 0,
             "updated_at": None,
         }
@@ -102,6 +103,16 @@ class InternalStateManager:
             except Exception:
                 continue
         normalized["target_history"] = history
+        tool_idempotency = raw.get("tool_idempotency")
+        normalized["tool_idempotency"] = (
+            {
+                str(key): str(value)
+                for key, value in tool_idempotency.items()
+                if str(key).strip() and str(value).strip()
+            }
+            if isinstance(tool_idempotency, dict)
+            else {}
+        )
         try:
             normalized["turn_count"] = max(0, int(raw.get("turn_count", 0) or 0))
         except (TypeError, ValueError):
@@ -253,6 +264,7 @@ class InternalStateManager:
         recent = list(state.get("recent_reflections") or [])
         recent.append(summary)
         payload = {
+            **state,
             "belief_vector": beliefs,
             "goal_vector": goals,
             "tone_targets": tone,

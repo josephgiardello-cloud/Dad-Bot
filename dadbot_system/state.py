@@ -85,7 +85,11 @@ class StateStore(Protocol):
 
     def save_task(self, task_id: str, payload: dict[str, Any]) -> None: ...
 
+    def save_task_result(self, task_id: str, payload: dict[str, Any], response: dict[str, Any]) -> None: ...
+
     def load_task(self, task_id: str) -> dict[str, Any] | None: ...
+
+    def list_incomplete_tasks(self, limit: int = 1000) -> list[dict[str, Any]]: ...
 
     def save_response(self, task_id: str, response: dict[str, Any]) -> None: ...
 
@@ -121,6 +125,20 @@ class InMemoryStateStore:
         with self._lock:
             payload = self._tasks.get(task_id)
             return json.loads(json.dumps(payload)) if payload is not None else None
+
+    def save_task_result(self, task_id: str, payload: dict[str, Any], response: dict[str, Any]) -> None:
+        with self._lock:
+            self._tasks[task_id] = json.loads(json.dumps(payload))
+            self._responses[task_id] = json.loads(json.dumps(response))
+
+    def list_incomplete_tasks(self, limit: int = 1000) -> list[dict[str, Any]]:
+        with self._lock:
+            tasks = [
+                payload
+                for payload in self._tasks.values()
+                if str(payload.get("status") or "").lower() in {"queued", "running"}
+            ]
+            return json.loads(json.dumps(tasks[: max(1, int(limit))]))
 
     def save_response(self, task_id: str, response: dict[str, Any]) -> None:
         with self._lock:
@@ -197,6 +215,17 @@ class CompositeStateStore:
                 return payload
         return None
 
+    def save_task_result(self, task_id: str, payload: dict[str, Any], response: dict[str, Any]) -> None:
+        for store in (self.fast_store, self.durable_store):
+            if store is not None:
+                store.save_task_result(task_id, payload, response)
+
+    def list_incomplete_tasks(self, limit: int = 1000) -> list[dict[str, Any]]:
+        authoritative_store = self.durable_store or self.fast_store
+        if authoritative_store is None:
+            return []
+        return authoritative_store.list_incomplete_tasks(limit=limit)
+
     def save_response(self, task_id: str, response: dict[str, Any]) -> None:
         for store in (self.fast_store, self.durable_store):
             if store is not None:
@@ -246,6 +275,12 @@ class NamespacedStateStore:
     def load_task(self, task_id: str) -> dict[str, Any] | None:
         return self.store.load_task(task_id)
 
+    def save_task_result(self, task_id: str, payload: dict[str, Any], response: dict[str, Any]) -> None:
+        self.store.save_task_result(task_id, payload, response)
+
+    def list_incomplete_tasks(self, limit: int = 1000) -> list[dict[str, Any]]:
+        return self.store.list_incomplete_tasks(limit=limit)
+
     def save_response(self, task_id: str, response: dict[str, Any]) -> None:
         self.store.save_response(task_id, response)
 
@@ -290,6 +325,27 @@ class RedisStateStore:
         if not isinstance(payload, str):
             raise TypeError(f"Expected str from redis, got {type(payload)}")
         return json.loads(payload)
+
+    def save_task_result(self, task_id: str, payload: dict[str, Any], response: dict[str, Any]) -> None:
+        with self._client.pipeline(transaction=True) as pipeline:
+            pipeline.set(self._key(f"task:{task_id}"), json.dumps(payload))
+            pipeline.set(self._key(f"response:{task_id}"), json.dumps(response))
+            pipeline.execute()
+
+    def list_incomplete_tasks(self, limit: int = 1000) -> list[dict[str, Any]]:
+        incomplete: list[dict[str, Any]] = []
+        for key in self._client.scan_iter(match=self._key("task:*")):
+            payload = self._client.get(key)
+            if payload is None:
+                continue
+            if not isinstance(payload, str):
+                raise TypeError(f"Expected str from redis get, got {type(payload)}")
+            task = json.loads(payload)
+            if str(task.get("status") or "").lower() in {"queued", "running"}:
+                incomplete.append(task)
+                if len(incomplete) >= max(1, int(limit)):
+                    break
+        return incomplete
 
     def save_response(self, task_id: str, response: dict[str, Any]) -> None:
         self._client.set(self._key(f"response:{task_id}"), json.dumps(response))
@@ -381,6 +437,34 @@ class PostgresStateStore:
             )
             row = cursor.fetchone()
             return row[0] if row else None
+
+    def list_incomplete_tasks(self, limit: int = 1000) -> list[dict[str, Any]]:
+        from psycopg import sql
+
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                sql.SQL(
+                    "SELECT payload FROM {} "
+                    "WHERE payload->>'status' IN ('queued', 'running') "
+                    "ORDER BY payload->>'accepted_at' NULLS FIRST LIMIT %s"
+                ).format(sql.Identifier(self._task_table)),
+                (max(1, int(limit)),),
+            )
+            return [row[0] for row in cursor.fetchall()]
+
+    def save_task_result(self, task_id: str, payload: dict[str, Any], response: dict[str, Any]) -> None:
+        from psycopg import sql
+
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                sql.SQL("UPDATE {} SET payload = %s, response = %s WHERE task_id = %s").format(
+                    sql.Identifier(self._task_table)
+                ),
+                (json.dumps(payload), json.dumps(response), task_id),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError(f"Cannot persist result for unknown task_id={task_id}")
+            connection.commit()
 
     def save_response(self, task_id: str, response: dict[str, Any]) -> None:
         from psycopg import sql
@@ -495,7 +579,7 @@ class AppStateContainer:
         self.record_state_event(reason, payload)
 
     def _publish(self, event: EventEnvelope) -> None:
-        if self.store is not None:
+        if self.store is not None and not getattr(self.event_bus, "persists_events", False):
             self.store.append_event(self.session_id, event.to_dict())
         if self.event_bus is not None:
             self.event_bus.publish(event)

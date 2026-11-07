@@ -16,6 +16,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from dadbot.runtime.env_loader import is_production_environment
+
 logger = logging.getLogger(__name__)
 
 
@@ -123,6 +125,13 @@ class FallbackRegistry:
             version=declaration.version if declaration else "",
         )
         self._events.append(event)
+
+        if is_production_environment():
+            msg = (
+                f"Fallback '{name}' requested by '{source}' is disabled in production: {reason}."
+            )
+            logger.error(msg)
+            raise ContractViolationError(msg)
 
         if not declared:
             msg = (

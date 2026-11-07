@@ -6,6 +6,7 @@ the public API identical. TurnService inherits from this class.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -38,6 +39,15 @@ _TOOL_VISIBILITY_SETTINGS = {
     _SET_REMINDER_TOOL: "auto_reminders",
     _WEB_SEARCH_TOOL: "auto_web_lookup",
 }
+
+
+def _reminder_idempotency_key(turn_context: Any | None, title: str) -> str:
+    trace_id = str(getattr(turn_context, "trace_id", "") or "").strip()
+    if not trace_id:
+        return ""
+    return hashlib.sha256(f"{trace_id}\0{title.strip()}".encode("utf-8")).hexdigest()
+
+
 _TOOL_NAME_ALIASES = {
     "web_lookup": _WEB_SEARCH_TOOL,
     "websearch": _WEB_SEARCH_TOOL,
@@ -1036,6 +1046,7 @@ Return ONLY valid JSON (no extra text):
     ) -> tuple[str | None, str | None]:
         title = str(params.get("title") or stripped_input[:100]).strip()
         due_text = str(params.get("due_text") or "").strip()
+        idempotency_key = _reminder_idempotency_key(turn_context, title)
 
         # _result_holder lets the compensating action reference the execution
         # result without capturing a ToolSandbox instance directly.  It is
@@ -1045,6 +1056,8 @@ Return ONLY valid JSON (no extra text):
         _result_holder: list = []
 
         def _executor():
+            if idempotency_key:
+                return self.bot.add_reminder(title, due_text, idempotency_key=idempotency_key)
             return self.bot.add_reminder(title, due_text)
 
         def _compensate():
@@ -1144,8 +1157,11 @@ Return ONLY valid JSON (no extra text):
     ) -> tuple[str | None, str | None]:
         title = str(params.get("title") or stripped_input[:100]).strip()
         due_text = str(params.get("due_text") or "").strip()
+        idempotency_key = _reminder_idempotency_key(turn_context, title)
 
         def _executor():
+            if idempotency_key:
+                return self.bot.add_reminder(title, due_text, idempotency_key=idempotency_key)
             return self.bot.add_reminder(title, due_text)
 
         record = execute_tool(

@@ -1,7 +1,7 @@
 import pytest
 
-from dadbot.core.execution_contract import TurnResponse
 from dadbot.core.dadbot import DadBot
+from dadbot.core.execution_contract import TurnResponse
 from dadbot_system.contracts import ChatRequest, ChatResponse, ServiceConfig, WorkerResult, WorkerTask
 from dadbot_system.orchestration import DadBotOrchestrator
 from dadbot_system.state import InMemoryStateStore
@@ -282,6 +282,38 @@ def test_orchestrator_isolates_session_events_by_tenant():
     assert all(event["tenant_id"] == "family-b" for event in tenant_b_events)
 
 
+def test_orchestrator_recovers_persisted_queued_task_with_same_identity():
+    state_store = InMemoryStateStore()
+    initial_broker = FakeBroker()
+    initial_orchestrator = DadBotOrchestrator(
+        initial_broker,
+        state_store=state_store,
+        planner_debug_factory=planner_debug_factory,
+    )
+    request = ChatRequest(
+        session_id="recoverable-session",
+        tenant_id="family-a",
+        user_input="continue after restart",
+    )
+    original_task = initial_orchestrator.submit_chat(request)
+
+    restarted_broker = FakeBroker()
+    restarted_orchestrator = DadBotOrchestrator(
+        restarted_broker,
+        state_store=state_store,
+        planner_debug_factory=planner_debug_factory,
+    )
+
+    assert restarted_orchestrator.recover_pending_tasks() == 1
+    recovered_task = restarted_broker.enqueued[0]
+    assert recovered_task.task_id == original_task.task_id
+    assert recovered_task.request.request_id == request.request_id
+    assert recovered_task.tenant_id == "family-a"
+    assert recovered_task.attempt == original_task.attempt + 1
+    assert restarted_orchestrator.recover_pending_tasks() == 0
+    assert len(restarted_broker.enqueued) == 1
+
+
 def test_worker_processor_retries_and_returns_response_with_fake_bot():
     fake_bot = FakeBot()
     processor = DadBotTaskProcessor(ServiceConfig(), bot_factory=lambda model_name: fake_bot)
@@ -300,6 +332,25 @@ def test_worker_processor_retries_and_returns_response_with_fake_bot():
     assert fake_bot.async_calls == 2
     assert fake_bot.sync_calls == 1
     assert fake_bot.loaded_snapshot["history"][0]["role"] == "system"
+
+
+def test_worker_does_not_restore_stale_session_memory_store():
+    fake_bot = FakeBot()
+    processor = DadBotTaskProcessor(ServiceConfig(), bot_factory=lambda model_name: fake_bot)
+    request = ChatRequest(session_id="session-memory", user_input="continue after restart")
+    task = WorkerTask(
+        session_id=request.session_id,
+        request=request,
+        session_state={
+            "history": [{"role": "system", "content": "Dad system prompt"}],
+            "memory_store": {"reminders": [{"id": "stale", "title": "stale session copy"}]},
+        },
+    )
+
+    result = processor.process(task)
+
+    assert result.status == "completed"
+    assert "memory_store" not in fake_bot.loaded_snapshot
 
 
 def test_worker_processor_requires_execute_turn_entrypoint():

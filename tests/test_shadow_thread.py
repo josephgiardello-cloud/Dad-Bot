@@ -2,6 +2,8 @@ from datetime import datetime
 
 import pytest
 
+from dadbot.services.persistence import PersistenceService
+
 pytestmark = pytest.mark.unit
 
 
@@ -52,12 +54,7 @@ def test_maintenance_queues_environmental_and_shadow_repair(bot, mocker):
     assert "shadow-thread" in sources
 
     # Phase 4: background patches are queued; flush to verify the audit timestamp.
-    bg_queue = getattr(bot, "_background_memory_store_patch_queue", None)
-    if isinstance(bg_queue, list):
-        for patch in list(bg_queue):
-            if isinstance(patch, dict):
-                bot.mutate_memory_store(**patch)
-        bg_queue.clear()
+    PersistenceService._flush_background_memory_store_patch_queue(bot)
 
     audits = bot.MEMORY_STORE.get("advice_audits") or []
     assert audits and str(audits[-1].get("repair_sent_at") or "").strip()

@@ -13,6 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ffmpeg \
     espeak-ng \
+    gosu \
     && rm -rf /var/lib/apt/lists/*
 
 FROM base AS builder
@@ -50,7 +51,8 @@ COPY evaluation/ ./evaluation/
 COPY static/ ./static/
 COPY docker/entrypoint.sh /usr/local/bin/dadbot-entrypoint
 
-RUN chmod +x /usr/local/bin/dadbot-entrypoint && \
+RUN sed -i 's/\r$//' /usr/local/bin/dadbot-entrypoint && \
+    chmod +x /usr/local/bin/dadbot-entrypoint && \
     mkdir -p /var/lib/dadbot /var/log/dadbot/session_logs /app/static && \
     chown -R dadbot:dadbot /app /var/lib/dadbot /var/log/dadbot
 
@@ -72,7 +74,7 @@ ENV DADBOT_HOME=/var/lib/dadbot \
 
 EXPOSE 8010 8501
 
-USER dadbot
+USER root
 
 ENTRYPOINT ["dadbot-entrypoint"]
 CMD ["api"]

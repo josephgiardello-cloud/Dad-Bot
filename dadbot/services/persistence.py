@@ -341,17 +341,20 @@ class PersistenceService(
 
         metadata = getattr(turn_context, "metadata", None)
         control_plane = dict(metadata.get("control_plane") or {}) if isinstance(metadata, dict) else {}
-        publish(
-            PostCommitEvent(
-                session_id=str(control_plane.get("session_id") or "default"),
-                trace_id=str(getattr(turn_context, "trace_id", "") or ""),
-                tenant_id=str(
-                    getattr(getattr(runtime, "config", None), "tenant_id", "default")
-                    or "default"
-                ),
-                payload={"turn_context": turn_context},
-            )
+        event = PostCommitEvent(
+            session_id=str(control_plane.get("session_id") or "default"),
+            trace_id=str(getattr(turn_context, "trace_id", "") or ""),
+            tenant_id=str(
+                getattr(getattr(runtime, "config", None), "tenant_id", "default")
+                or "default"
+            ),
+            payload={"turn_context": turn_context},
         )
+        publish_ephemeral = getattr(event_bus, "publish_ephemeral", None)
+        if callable(publish_ephemeral):
+            publish_ephemeral(event)
+        else:
+            publish(event)
 
     def _commit_post_finalize_side_effects(self, turn_context: Any) -> None:
         """Run strict SaveNode mutation sequence before final ledger commit."""

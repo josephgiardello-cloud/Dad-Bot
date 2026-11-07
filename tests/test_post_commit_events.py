@@ -9,7 +9,7 @@ from dadbot.core.post_commit_events import POST_COMMIT_READY, PostCommitEvent
 from dadbot.core.runtime_errors import InvariantViolation, PersistenceFailure
 from dadbot.services.persistence import PersistenceService
 from dadbot.services.post_commit_worker import PostCommitWorker
-from dadbot_system.events import InMemoryEventBus
+from dadbot_system.events import DurableEventBus, InMemoryEventBus
 
 pytestmark = pytest.mark.unit
 
@@ -178,6 +178,25 @@ def test_finalize_turn_emits_post_commit_event_once_on_success():
     assert event.payload["turn_context"] is turn_context
     assert relationship_manager.calls == [turn_context]
     assert graph_manager.calls == [turn_context]
+
+
+def test_finalize_turn_publishes_ephemeral_event_with_durable_event_bus():
+    persisted_events = []
+    event_bus = DurableEventBus(
+        SimpleNamespace(
+            append_event=lambda session_id, event: persisted_events.append((session_id, event)),
+        )
+    )
+    runtime, _event_bus, _memory_coordinator, _relationship_manager, _graph_manager, _memory_runtime = _make_runtime()
+    runtime._runtime_event_bus = event_bus
+    service = PersistenceService(_PersistenceManagerStub(), turn_service=_TurnServiceStub(runtime))
+
+    result = service.finalize_turn(_make_turn_context(), ("done", False))
+
+    assert result == ("done", False)
+    assert len(event_bus.events()) == 1
+    assert isinstance(event_bus.events()[0], PostCommitEvent)
+    assert persisted_events == []
 
 
 def test_finalize_turn_hard_aborts_on_integrity_failure_marker():

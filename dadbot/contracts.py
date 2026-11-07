@@ -376,7 +376,13 @@ class SupportsTurnProcessingRuntime(Protocol):
 
     def parse_model_json_content(self, content: str) -> dict[str, Any]: ...
 
-    def add_reminder(self, title: str, due_text: str = "") -> dict[str, Any] | None: ...
+    def add_reminder(
+        self,
+        title: str,
+        due_text: str = "",
+        *,
+        idempotency_key: str = "",
+    ) -> dict[str, Any] | None: ...
 
     @property
     def reply_finalization(self) -> Any: ...

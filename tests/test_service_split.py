@@ -716,6 +716,26 @@ def test_internal_state_reflection_and_soft_reset(bot):
     assert len(list(post_reset.get("target_history") or [])) >= 1
 
 
+def test_internal_state_reflection_preserves_tool_idempotency(bot):
+    key = "recovered-turn:reminder-1"
+    first = bot.add_reminder("recovery idempotency", idempotency_key=key)
+
+    bot.internal_state_manager.reflect_after_turn(
+        "Remember a recovery reminder",
+        "neutral",
+        "I saved the reminder.",
+    )
+    second = bot.add_reminder("recovery idempotency", idempotency_key=key)
+
+    assert first is not None
+    assert second is not None
+    assert second["id"] == first["id"]
+    assert sum(
+        item["title"] == "recovery idempotency"
+        for item in bot.reminder_catalog(include_done=True)
+    ) == 1
+
+
 def test_shutdown_flushes_memory_store_after_background_tasks(bot, monkeypatch):
     calls = []
 

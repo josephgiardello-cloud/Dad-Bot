@@ -251,8 +251,13 @@ class MemoryStorageBackend:
             )
 
     def _resolve_transition_base_state(self) -> CoreState:
+        current_state = getattr(self._manager, "_current_memory_core_state", None)
+        if callable(current_state):
+            state = current_state()
+            if isinstance(state, CoreState):
+                return state
         active = get_active_core_state()
-        if active is not None:
+        if isinstance(active, CoreState):
             return active
         cached = getattr(self._manager, "memory_core_state", None)
         if callable(cached):

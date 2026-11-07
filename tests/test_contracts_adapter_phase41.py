@@ -84,6 +84,23 @@ def test_fallback_registry_undeclared_strict_raises():
         reg.use("unknown_method", source="s", reason="r", strict=True)
 
 
+def test_fallback_registry_disables_declared_fallbacks_in_production(monkeypatch):
+    reg = FallbackRegistry()
+    reg.register(
+        FallbackRegistration(
+            name="test_stub",
+            version="1.0.0",
+            fallback_callable=lambda: "stub",
+            contract_description="test fallback",
+            substituted_signature="test_stub() -> str",
+        )
+    )
+    monkeypatch.setenv("DADBOT_ENVIRONMENT", "production")
+
+    with pytest.raises(ContractViolationError, match="disabled in production"):
+        reg.use("test_stub", source="test", reason="missing")
+
+
 def test_fallback_registry_declared_names():
     reg = FallbackRegistry()
     reg.register(
@@ -129,6 +146,16 @@ def test_ensure_context_builder_methods_injects_missing():
     ]:
         assert hasattr(stub, name), f"Expected '{name}' to be injected"
     assert len(events) == 7
+
+
+def test_ensure_context_builder_methods_does_not_inject_fallbacks_in_production(monkeypatch):
+    adapter = ContextSchemaAdapter(bot=None)
+    stub = SimpleNamespace()
+    monkeypatch.setenv("DADBOT_ENVIRONMENT", "production")
+
+    with pytest.raises(ContractViolationError, match="disabled in production"):
+        adapter.ensure_context_builder_methods(stub)
+    assert not hasattr(stub, "build_core_persona_prompt")
 
 
 def test_ensure_context_builder_methods_skips_present():

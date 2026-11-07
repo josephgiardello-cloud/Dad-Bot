@@ -1,30 +1,38 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
 import importlib
 import json
 import logging
 import os
 import subprocess
 import sys
-import textwrap
 import time
 import webbrowser
+from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 from socket import AF_INET, SO_REUSEADDR, SOCK_STREAM, SOL_SOCKET, socket
+from typing import Any
 from urllib.request import urlopen
 
 from dadbot.runtime.supervisor import get_runtime_supervisor
-from dadbot.runtime.env_loader import bootstrap_environment, validate_startup_environment
+from dadbot.runtime.env_loader import (
+    bootstrap_environment,
+    is_production_environment,
+    validate_startup_environment,
+)
 from dadbot.runtime_adapter import runtime_contract_errors
 from dadbot_system import (
+    AppStateContainer,
     CompositeStateStore,
     DadBotOrchestrator,
     DadServiceClient,
+    DurableEventBus,
     InMemoryEventBus,
     InMemoryStateStore,
     LocalMultiprocessBroker,
+    NamespacedStateStore,
     PostgresStateStore,
     RedisStateStore,
     ServiceConfig,
@@ -547,55 +555,12 @@ def _run_operator_command(args, *, dadbot_cls, script_path: Path) -> int | None:
     return 2
 
 
-def minimal_streamlit_stub_source():
-    return (
-        textwrap.dedent(
-            """
-		import streamlit as st
-
-		from Dad import DadBot
-        from dadbot.core.execution_contract import TurnDelivery, live_turn_request
-
-		st.set_page_config(page_title="Dad Bot", page_icon="ðŸ§”", layout="centered")
-
-		bot = DadBot()
-
-		if "messages" not in st.session_state:
-			st.session_state.messages = [
-				{"role": "assistant", "content": bot.opening_message("Hey buddy, I'm right here.")}
-			]
-
-		st.title("Dad Bot")
-		st.caption("Auto-generated minimal Streamlit chat because dad_streamlit.py was missing.")
-
-		for message in st.session_state.messages:
-			with st.chat_message(message["role"]):
-				st.markdown(message["content"])
-
-		if prompt := st.chat_input("Talk to Dad..."):
-			st.session_state.messages.append({"role": "user", "content": prompt})
-			with st.chat_message("user"):
-				st.markdown(prompt)
-			with st.chat_message("assistant"):
-                response = bot.execute_turn(live_turn_request(prompt, delivery=TurnDelivery.SYNC))
-                reply, _should_end = response.as_result()
-				reply = reply or bot.reply_finalization.append_signoff("I'm here, buddy.")
-				st.markdown(reply)
-			st.session_state.messages.append({"role": "assistant", "content": reply})
-			bot.persist_conversation_async()
-			st.rerun()
-		""",
-        ).strip()
-        + "\n"
-    )
-
-
-def ensure_streamlit_app_file(streamlit_app_path):
-    if streamlit_app_path.exists():
-        return False
-
-    streamlit_app_path.write_text(minimal_streamlit_stub_source(), encoding="utf-8")
-    return True
+def ensure_streamlit_app_file(streamlit_app_path: str | Path) -> bool:
+    """Require the real Streamlit entrypoint instead of generating a placeholder."""
+    app_path = Path(streamlit_app_path)
+    if not app_path.is_file():
+        raise FileNotFoundError(f"Required Streamlit app entrypoint is missing: {app_path}")
+    return False
 
 
 def launch_streamlit_app(
@@ -646,11 +611,7 @@ def launch_streamlit_app(
 
     base_path = Path(script_path) if script_path is not None else Path.cwd() / "Dad.py"
     streamlit_app_path = base_path.with_name("dad_streamlit.py")
-    stub_created = ensure_streamlit_app_file(streamlit_app_path)
-    if stub_created:
-        print(
-            f"dad_streamlit.py was missing, so a minimal stub was created at {streamlit_app_path}.",
-        )
+    ensure_streamlit_app_file(streamlit_app_path)
 
     preflight_ok, preflight_issues = supervisor.preflight_check()
     if not preflight_ok:
@@ -901,6 +862,10 @@ def build_service_state_store(config):
             print(f"[DadBot] Postgres unavailable or misconfigured: {e}. Falling back to in-memory store.")
             durable_store = None
 
+    if is_production_environment() and durable_store is None:
+        raise RuntimeError(
+            "Production requires a reachable Postgres state store; configure DADBOT_POSTGRES_DSN.",
+        )
     if fast_store is None and durable_store is None:
         return InMemoryStateStore()
 
@@ -930,6 +895,10 @@ def build_customer_document_store(config):
             print(f"[DadBot] Postgres unavailable or misconfigured: {e}. Falling back to in-memory store.")
             durable_store = None
 
+    if is_production_environment() and durable_store is None:
+        raise RuntimeError(
+            "Production requires a reachable Postgres document store; configure DADBOT_POSTGRES_DSN.",
+        )
     if durable_store is None and fast_store is None:
         print("[DadBot] No durable store available, using in-memory state store.")
         return InMemoryStateStore()
@@ -938,6 +907,28 @@ def build_customer_document_store(config):
     if fast_store is None:
         return durable_store
     return CompositeStateStore(fast_store=fast_store, durable_store=durable_store)
+
+
+def build_runtime_state_bundle(state_store, *, tenant_id: str, planner_debug_factory):
+    """Build the DadBot runtime state with tenant-scoped durable storage."""
+    normalized_tenant_id = normalize_tenant_id(tenant_id)
+    namespaced_store = NamespacedStateStore(
+        state_store,
+        DadBotOrchestrator.tenant_namespace(normalized_tenant_id),
+    )
+    event_bus = DurableEventBus(namespaced_store)
+    container = AppStateContainer(
+        "dadbot-runtime",
+        planner_debug_factory,
+        tenant_id=normalized_tenant_id,
+        store=namespaced_store,
+        event_bus=event_bus,
+    )
+    return {
+        "store": namespaced_store,
+        "event_bus": event_bus,
+        "container": container,
+    }
 
 
 def launch_api_service(args, *, dadbot_cls=None):
@@ -977,6 +968,11 @@ def launch_api_service(args, *, dadbot_cls=None):
     broker = LocalMultiprocessBroker(max_queue_size=config.queue.max_queue_size)
     event_bus = InMemoryEventBus()
     state_store = build_service_state_store(config)
+    runtime_state_bundle = build_runtime_state_bundle(
+        state_store,
+        tenant_id=args.tenant_id,
+        planner_debug_factory=resolved_dadbot_cls.default_planner_debug_state,
+    )
     orchestrator = DadBotOrchestrator(
         broker,
         state_store=state_store,
@@ -1032,8 +1028,11 @@ def launch_api_service(args, *, dadbot_cls=None):
             append_signoff=not args.no_signoff,
             light_mode=args.light,
             tenant_id=args.tenant_id,
+            dependency_registry={"runtime_state_bundle": runtime_state_bundle},
         )
     except Exception as exc:
+        if is_production_environment():
+            raise
         logger.warning("DadBot bootstrap failed in API mode, using orchestrator adapter fallback", exc_info=True)
         print(f"[DadBot] API runtime fallback enabled due to DadBot bootstrap error: {exc}")
         runtime_bot = ServiceRuntimeBotAdapter(
@@ -1174,7 +1173,6 @@ __all__ = [
     "launch_api_service",
     "launch_streamlit_app",
     "main",
-    "minimal_streamlit_stub_source",
     "parse_args",
     "stop_streamlit_app",
 ]

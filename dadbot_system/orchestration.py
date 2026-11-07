@@ -44,6 +44,7 @@ class DadBotOrchestrator:
         self._planner_debug_factory = planner_debug_factory or (lambda: {})
         self._sessions: dict[str, AppStateContainer] = {}
         self._tool_registry = ToolRegistry()
+        self._recovered_task_ids: set[str] = set()
 
     @staticmethod
     def tenant_namespace(tenant_id: str) -> str:
@@ -123,7 +124,11 @@ class DadBotOrchestrator:
                     "tenant_id": request.tenant_id,
                     "status": "queued",
                     "request": request.to_dict(),
+                    "session_state": task.session_state,
                     "execution_graph": graph.to_dict(),
+                    "accepted_at": task.accepted_at,
+                    "task_kind": task.task_kind,
+                    "attempt": task.attempt,
                 },
             )
             self._publish(
@@ -153,6 +158,43 @@ class DadBotOrchestrator:
                 },
             )
             return task
+
+    def recover_pending_tasks(self, *, limit: int = 1000) -> int:
+        recovered = 0
+        for payload in self.state_store.list_incomplete_tasks(limit=limit):
+            task_id = str(payload.get("task_id") or "").strip()
+            if task_id in self._recovered_task_ids:
+                continue
+            accepted_at = str(payload.get("accepted_at") or "").strip()
+            if not accepted_at:
+                logger.warning("Leaving an incomplete legacy task queued because it lacks accepted_at metadata")
+                continue
+            session_id = str(payload.get("session_id") or "").strip()
+            request_payload = payload.get("request")
+            if not task_id or not session_id or not isinstance(request_payload, dict):
+                raise RuntimeError("Cannot recover persisted task with incomplete request metadata")
+
+            tenant_id = normalize_tenant_id(payload.get("tenant_id"))
+            request = ChatRequest.from_dict(request_payload, session_id=session_id)
+            request.tenant_id = tenant_id
+            session_state = payload.get("session_state")
+            if not isinstance(session_state, dict):
+                session_state = self.session(session_id, tenant_id).snapshot()
+            task = WorkerTask(
+                session_id=session_id,
+                request=request,
+                tenant_id=tenant_id,
+                session_state=session_state,
+                execution_graph=self.build_execution_graph(request),
+                accepted_at=accepted_at,
+                task_id=task_id,
+                task_kind=str(payload.get("task_kind") or "chat"),
+                attempt=max(1, int(payload.get("attempt") or 1) + 1),
+            )
+            self.broker.enqueue(task)
+            self._recovered_task_ids.add(task_id)
+            recovered += 1
+        return recovered
 
     def drain_results(self, limit: int = 100) -> list[WorkerResult]:
         drained: list[WorkerResult] = []
@@ -190,12 +232,16 @@ class DadBotOrchestrator:
             task_payload,
             lambda state, evt: {**state, **dict(evt.payload.get("updates") or {})},
         )
-        self.state_store.save_task(result.task_id, task_payload)
-
         if result.response is not None:
+            self.state_store.save_task_result(
+                result.task_id,
+                task_payload,
+                dict(result.response.to_dict()),
+            )
             container.record_response(result.task_id, result.response)
             return result.response
 
+        self.state_store.save_task(result.task_id, task_payload)
         self._publish(
             EventEnvelope(
                 session_id=result.session_id,

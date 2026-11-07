@@ -535,6 +535,18 @@ class _MutationDispatchMixin:
         for patch in pending:
             if not isinstance(patch, dict):
                 continue
+            reminder_updates = patch.pop("_reminder_updates", None)
+            if reminder_updates:
+                from dadbot.managers.maintenance import (
+                    _merge_maintenance_reminder_updates,
+                )
+
+                patch["reminders"] = _merge_maintenance_reminder_updates(
+                    runtime,
+                    reminder_updates,
+                )
+            if not patch:
+                continue
             runtime.mutate_memory_store(**patch)
             applied += 1
         return applied

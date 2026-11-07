@@ -13,7 +13,7 @@ from dadbot.base.memory_base import (
 from dadbot.contracts import DadBotContext, SupportsDadBotAccess
 from dadbot.core.execution_boundary import MemoryWriteOwnerScope
 from dadbot.core.execution_context import ensure_execution_trace_root
-from dadbot.core.execution_context import get_active_core_state
+from dadbot.core.execution_context import get_active_core_state, replace_active_core_state
 from dadbot.core.core_state import CoreState
 from dadbot.core.core_state import memory_projection
 from dadbot.memory.lifecycle import MemoryLifecycleManager
@@ -28,10 +28,34 @@ logger = logging.getLogger(__name__)
 class MemoryManager(MemoryLifecycleMixin, MemorySearchMixin, MemoryIntegrationMixin):
     """Owns memory normalization, catalog access, and semantic-memory persistence."""
 
-    def add_reminder(self, title: str, due_text: str = "") -> dict | None:
+    def add_reminder(
+        self,
+        title: str,
+        due_text: str = "",
+        *,
+        idempotency_key: str = "",
+    ) -> dict | None:
         normalized_title = str(title or "").strip()
         if not normalized_title:
             return None
+
+        normalized_idempotency_key = str(idempotency_key or "").strip()
+        memory_store = getattr(self.bot, "MEMORY_STORE", {})
+        internal_state = dict(memory_store.get("internal_state") or {}) if isinstance(memory_store, dict) else {}
+        idempotency_records = dict(internal_state.get("tool_idempotency") or {})
+        if normalized_idempotency_key:
+            existing_id = str(idempotency_records.get(normalized_idempotency_key) or "")
+            existing = next(
+                (
+                    dict(item)
+                    for item in self.reminder_catalog(include_done=True)
+                    if str(item.get("id") or "") == existing_id
+                ),
+                None,
+            )
+            if existing is not None:
+                return existing
+            idempotency_records.pop(normalized_idempotency_key, None)
 
         timestamp = self.bot.runtime_timestamp()
         reminder = {
@@ -44,7 +68,15 @@ class MemoryManager(MemoryLifecycleMixin, MemorySearchMixin, MemoryIntegrationMi
         }
         reminders = self.reminder_catalog(include_done=True)
         reminders.append(reminder)
-        updated_store = self.mutate_memory_store(reminders=reminders)
+        if normalized_idempotency_key:
+            idempotency_records[normalized_idempotency_key] = reminder["id"]
+            if len(idempotency_records) > 256:
+                for stale_key in list(idempotency_records)[: len(idempotency_records) - 256]:
+                    idempotency_records.pop(stale_key, None)
+            internal_state["tool_idempotency"] = idempotency_records
+            updated_store = self.mutate_memory_store(reminders=reminders, internal_state=internal_state)
+        else:
+            updated_store = self.mutate_memory_store(reminders=reminders)
         return next(
             (
                 dict(item)
@@ -97,17 +129,12 @@ class MemoryManager(MemoryLifecycleMixin, MemorySearchMixin, MemoryIntegrationMi
             self._lifecycle = MemoryLifecycleManager(self.bot, self)
 
     def memory_projection(self) -> dict:
-        active = get_active_core_state()
-        if isinstance(active, CoreState):
-            state = active
-        else:
-            state = self._memory_core_state_cache
+        state = self._current_memory_core_state()
 
         if isinstance(state, CoreState):
             version = int(getattr(state, "version", 0) or 0)
             if self._memory_projection_version == version and self._memory_projection_cache:
                 return dict(self._memory_projection_cache or {})
-
             projected = memory_projection(
                 state,
                 defaults=self.bot.default_memory_store(),
@@ -119,6 +146,16 @@ class MemoryManager(MemoryLifecycleMixin, MemorySearchMixin, MemoryIntegrationMi
             return dict(self._memory_projection_cache or {})
 
         return dict(self._memory_projection_cache or {})
+
+    def _current_memory_core_state(self) -> CoreState:
+        active = get_active_core_state()
+        cached = self._memory_core_state_cache
+        if isinstance(active, CoreState):
+            if isinstance(cached, CoreState) and cached.version > active.version:
+                replace_active_core_state(cached)
+                return cached
+            return active
+        return cached
 
     @property
     def memory_store(self) -> dict:

@@ -16,6 +16,7 @@ from dadbot.core.execution_trace_context import ExecutionTraceRecorder, bind_exe
 from dadbot.core.graph import LedgerMutationOp, TurnContext
 from dadbot.core.dadbot import DadBot
 from dadbot.managers.runtime_client import RuntimeClientManager
+from dadbot.services.persistence import PersistenceService
 from dadbot_system.state import InMemoryStateStore
 
 
@@ -620,6 +621,27 @@ class TestDadBotRegression(unittest.TestCase):
         self.assertEqual(reminder["due_text"], "2026-04-20 03:00 PM")
         self.assertTrue(reminder["due_at"].startswith("2026-04-20T15:00"))
 
+    def test_add_reminder_is_idempotent_for_recovered_tool_call(self):
+        first = self.bot.add_reminder(
+            "recovered reminder",
+            "2099-01-02 09:00 AM",
+            idempotency_key="request-1:reminder-1",
+        )
+        second = self.bot.add_reminder(
+            "recovered reminder",
+            "2099-01-02 09:00 AM",
+            idempotency_key="request-1:reminder-1",
+        )
+
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        self.assertEqual(first["id"], second["id"])
+        self.assertEqual(sum(item["title"] == "recovered reminder" for item in self.bot.reminder_catalog(True)), 1)
+        self.assertIn(
+            "request-1:reminder-1",
+            self.bot.MEMORY_STORE["internal_state"]["tool_idempotency"],
+        )
+
     def test_run_scheduled_proactive_jobs_queues_due_reminder_message(self):
         reference_time = datetime(2026, 4, 20, 14, 40)
         self.bot.add_reminder("call the bank", "2026-04-20 03:00 PM")
@@ -627,12 +649,7 @@ class TestDadBotRegression(unittest.TestCase):
         result = self.bot.run_scheduled_proactive_jobs(reference_time=reference_time)
 
         # Phase 4: background patches are queued; flush before reading MEMORY_STORE state.
-        bg_queue = getattr(self.bot, "_background_memory_store_patch_queue", None)
-        if isinstance(bg_queue, list):
-            for patch in list(bg_queue):
-                if isinstance(patch, dict):
-                    self.bot.mutate_memory_store(**patch)
-            bg_queue.clear()
+        PersistenceService._flush_background_memory_store_patch_queue(self.bot)
 
         self.assertEqual(result["queued_reminders"], 1)
         queued = self.bot.pending_proactive_messages()
@@ -640,6 +657,36 @@ class TestDadBotRegression(unittest.TestCase):
         reminder = self.bot.reminder_catalog()[0]
         self.assertEqual(reminder["notification_count"], 1)
         self.assertIsNotNone(reminder["last_notified_at"])
+
+    def test_queued_proactive_patch_preserves_reminder_added_after_snapshot(self):
+        self.bot.run_scheduled_proactive_jobs(
+            reference_time=datetime(2026, 4, 20, 14, 40),
+        )
+        reminder = self.bot.add_reminder(
+            "added after maintenance snapshot",
+            "2099-01-02 09:00 AM",
+        )
+
+        self.assertIsNotNone(reminder)
+        PersistenceService._flush_background_memory_store_patch_queue(self.bot)
+
+        reminders = self.bot.reminder_catalog(include_done=True)
+        self.assertEqual(
+            sum(item["id"] == reminder["id"] for item in reminders),
+            1,
+        )
+
+    def test_queued_reminder_update_does_not_restore_deleted_reminder(self):
+        reminder = self.bot.add_reminder("due reminder", "2026-04-20 03:00 PM")
+        self.bot.run_scheduled_proactive_jobs(
+            reference_time=datetime(2026, 4, 20, 14, 40),
+        )
+        self.bot.mutate_memory_store(reminders=[])
+
+        PersistenceService._flush_background_memory_store_patch_queue(self.bot)
+
+        self.assertEqual(self.bot.reminder_catalog(include_done=True), [])
+        self.assertIsNotNone(reminder)
 
     def test_run_scheduled_proactive_jobs_queues_matching_day_pattern_once(self):
         self.bot.MEMORY_STORE = {**self.bot.MEMORY_STORE, "life_patterns": [
@@ -657,12 +704,7 @@ class TestDadBotRegression(unittest.TestCase):
         result = self.bot.run_scheduled_proactive_jobs(reference_time=datetime(2026, 4, 20, 9, 0))
 
         # Phase 4: background patches are queued; flush before reading MEMORY_STORE state.
-        bg_queue = getattr(self.bot, "_background_memory_store_patch_queue", None)
-        if isinstance(bg_queue, list):
-            for patch in list(bg_queue):
-                if isinstance(patch, dict):
-                    self.bot.mutate_memory_store(**patch)
-            bg_queue.clear()
+        PersistenceService._flush_background_memory_store_patch_queue(self.bot)
 
         self.assertEqual(result["queued_patterns"], 1)
         self.assertTrue(any(item["source"] == "scheduled-pattern" for item in self.bot.pending_proactive_messages()))
@@ -2605,12 +2647,7 @@ class TestDadBotRegression(unittest.TestCase):
         )
 
         # Phase 4: background patches are queued; flush before reading MEMORY_STORE state.
-        bg_queue = getattr(self.bot, "_background_memory_store_patch_queue", None)
-        if isinstance(bg_queue, list):
-            for patch_kwargs in list(bg_queue):
-                if isinstance(patch_kwargs, dict):
-                    self.bot.mutate_memory_store(**patch_kwargs)
-            bg_queue.clear()
+        PersistenceService._flush_background_memory_store_patch_queue(self.bot)
 
         maintenance = self.bot.maintenance_snapshot()
 
@@ -2715,12 +2752,7 @@ class TestDadBotRegression(unittest.TestCase):
         )
 
         # Phase 4: background patches are queued; flush before reading MEMORY_STORE state.
-        bg_queue = getattr(self.bot, "_background_memory_store_patch_queue", None)
-        if isinstance(bg_queue, list):
-            for patch_kwargs in list(bg_queue):
-                if isinstance(patch_kwargs, dict):
-                    self.bot.mutate_memory_store(**patch_kwargs)
-            bg_queue.clear()
+        PersistenceService._flush_background_memory_store_patch_queue(self.bot)
 
         self.assertTrue(result["ran"])
         self.assertGreaterEqual(result["narrative_count"], 1)

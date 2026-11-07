@@ -44,16 +44,21 @@ def _prepare_streamlit_sandbox(repo_root: Path, sandbox_root: Path) -> None:
     )
 
 
-def test_ensure_streamlit_app_file_creates_minimal_stub(tmp_path):
+def test_ensure_streamlit_app_file_rejects_missing_entrypoint(tmp_path):
     target = tmp_path / "dad_streamlit.py"
 
-    created = ensure_streamlit_app_file(target)
+    with pytest.raises(FileNotFoundError, match="Required Streamlit app entrypoint is missing"):
+        ensure_streamlit_app_file(target)
 
-    assert created is True
-    assert target.exists()
-    content = target.read_text(encoding="utf-8")
-    assert "Auto-generated minimal Streamlit chat" in content
-    assert "DadBot" in content
+    assert not target.exists()
+
+
+def test_ensure_streamlit_app_file_preserves_existing_entrypoint(tmp_path):
+    target = tmp_path / "dad_streamlit.py"
+    target.write_text("real application", encoding="utf-8")
+
+    assert ensure_streamlit_app_file(target) is False
+    assert target.read_text(encoding="utf-8") == "real application"
 
 
 def test_dad_streamlit_app_starts_without_streamlit_exceptions(tmp_path):

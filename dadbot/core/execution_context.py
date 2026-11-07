@@ -453,6 +453,13 @@ def get_active_core_state() -> Any:
     return _ACTIVE_CORE_STATE.get()
 
 
+def replace_active_core_state(state: Any) -> None:
+    """Adopt a CoreState returned from a worker context in the current turn."""
+    if state is None:
+        raise ValueError("Cannot adopt an empty CoreState")
+    _ACTIVE_CORE_STATE.set(state)
+
+
 def core_state_strict_mutation_mode_enabled() -> bool:
     """Return whether unbound mutation attempts must hard-fail.
 

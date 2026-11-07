@@ -4,6 +4,8 @@ from datetime import date, timedelta
 from types import SimpleNamespace
 
 import pytest
+from dadbot.core.core_state import CoreState
+from dadbot.core.execution_context import close_core_state_scope, open_core_state_scope, replace_active_core_state
 from dadbot.core.state_lineage import canonical_state_hash
 
 pytestmark = pytest.mark.unit
@@ -161,6 +163,26 @@ def test_mutate_memory_store_persists_valid_json_under_concurrent_writes(bot):
     assert all(entry["mood"] in {"positive", "stressed"} for entry in persisted["recent_moods"])
     assert persisted["last_mood"] in {"positive", "stressed"}
     assert bot.normalize_memory_store(persisted)["recent_moods"] == persisted["recent_moods"]
+
+
+def test_stale_active_core_state_cannot_rollback_newer_memory_projection(bot):
+    stale_state = CoreState()
+    token = open_core_state_scope(stale_state)
+    try:
+        reminder = bot.add_reminder("Keep the durable reminder")
+        assert reminder is not None
+
+        current_state = bot.memory_manager.memory_core_state()
+        assert current_state.version > stale_state.version
+
+        replace_active_core_state(stale_state)
+        bot.mutate_memory_store(internal_state={"last_reflection": "completed"})
+    finally:
+        close_core_state_scope(token)
+
+    persisted = json.loads(bot.MEMORY_PATH.read_text(encoding="utf-8"))
+    assert any(item.get("id") == reminder["id"] for item in persisted["reminders"])
+    assert persisted["internal_state"]["last_reflection"] == "completed"
 
 
 def test_mutate_memory_store_triggers_semantic_and_graph_sync_without_stale_projection(bot, monkeypatch):
