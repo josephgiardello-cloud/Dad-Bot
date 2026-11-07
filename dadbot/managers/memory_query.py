@@ -116,9 +116,7 @@ class MemoryQueryManager:
         )
 
         weight = 1.0
-        if query_category != "general" and category != query_category and not topical_overlap:
-            weight *= 0.55 if impact < 2.0 else 0.75
-        elif recent_topics and category not in recent_topics and query_category == "general" and not topical_overlap:
+        if recent_topics and category not in recent_topics and query_category == "general" and not topical_overlap:
             weight *= 0.75 if impact < 2.0 else 0.9
 
         if memory_mood != "neutral":

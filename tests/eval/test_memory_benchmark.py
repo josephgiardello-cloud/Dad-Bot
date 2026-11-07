@@ -58,6 +58,14 @@ def install_fusion_capture(bot, monkeypatch):
             "candidate_present": key in semantic_candidates,
             "semantic": context["semantic_scores"].get(key, 0.0),
             "positive_cosine": cosine_scores.get(key, 0.0),
+            "alignment": bot.memory_alignment_weight(
+                memory,
+                query_tokens=candidate_filter.get("query_tokens"),
+                query_category=candidate_filter.get("query_category", "general"),
+                query_mood=candidate_filter.get("query_mood", "neutral"),
+                recent_topics=bot.recent_memory_topics(limit=4),
+                mood_trend=bot.current_memory_mood_trend(),
+            ),
             "bm25": context["lexical_scores"].get(key, 0.0),
             "dense": dense,
             "fused": fused,
@@ -79,6 +87,7 @@ def install_fusion_capture(bot, monkeypatch):
                 dense,
                 context["lexical_scores"].get(key, 0.0),
                 memory,
+                cosine_scores.get(key, 0.0),
             )
         )
         return fused
@@ -196,12 +205,21 @@ def measure_sparse_dense_balance(bot, cases):
     # Hold out whole topics, not paraphrases of training questions.
     topic_indices = {fact.summary: index for index, fact in enumerate(MEMORY_BENCHMARK_FACTS)}
     results = {}
-    for alpha in (0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.75, 0.8, 0.9, 1.0):
+    settings = [(alpha, alpha, None) for alpha in (0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.75, 0.8, 0.9, 1.0)]
+    settings.extend((f"adaptive raw_cosine>0.85 dense_weight={alpha}", alpha, 0.85) for alpha in (0.85, 0.9))
+    for label, alpha, threshold in settings:
         counts = {"train": [0, 0, 0], "held_out": [0, 0, 0]}
+        gated = 0
         for case, rows in cases:
             split = "held_out" if topic_indices[case.expected_summary] % 5 == 0 else "train"
+            confidence = max((cosine for _, _, _, cosine in rows), default=0.0)
+            effective_alpha = alpha if threshold is None or confidence > threshold else MEMORY_DENSE_WEIGHT
+            gated += threshold is not None and confidence > threshold
             ranked = sorted(
-                ((alpha * dense + (1 - alpha) * sparse, memory) for dense, sparse, memory in rows),
+                (
+                    (effective_alpha * dense + (1 - effective_alpha) * sparse, memory)
+                    for dense, sparse, memory, _ in rows
+                ),
                 key=lambda item: (item[0], item[1].get("updated_at", ""), item[1].get("summary", "")),
                 reverse=True,
             )
@@ -213,10 +231,11 @@ def measure_sparse_dense_balance(bot, cases):
             counts[split][1] += any(expected in summary for summary in summaries)
             counts[split][2] += 1
         print(
-            f"Fusion dense_weight={alpha:.2f} train/top1,top3,total={counts['train']} "
-            f"held_out/top1,top3,total={counts['held_out']}"
+            f"Fusion setting={label} train/top1,top3,total={counts['train']} "
+            f"held_out/top1,top3,total={counts['held_out']} gated={gated}"
         )
-        results[alpha] = counts
+        if threshold is None:
+            results[alpha] = counts
     # Select only on training data; ties prefer the current default.
     selected = max(
         results,
@@ -299,8 +318,8 @@ def test_memory_retrieval_with_real_ollama_embeddings(bot, monkeypatch, question
     else:
         # Enforce the measured baseline without pretending recall is perfect.
         assert total == 50
-        assert hits_at_1 >= 41, f"top-1 regression: {misses_at_1}"
-        assert hits_at_3 >= 47, f"top-3 regression: {misses_at_3}"
+        assert hits_at_1 >= 43, f"top-1 regression: {misses_at_1}"
+        assert hits_at_3 >= 49, f"top-3 regression: {misses_at_3}"
         report_original_paraphrases(cases[:25], rankings[:25])
     if backend == "pgvector":
         verify_sqlite_ranking_parity(bot, monkeypatch, cases, rankings)

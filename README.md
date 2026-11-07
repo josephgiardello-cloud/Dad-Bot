@@ -228,6 +228,34 @@ remain disabled. A future reranker must see undiversified top-five candidates
 before display diversification; it must not reuse display order to compute
 its ambiguity margin.
 
+### Inferred-category penalty removal
+
+The inferred-category mismatch multiplier is removed; tags no longer
+subtract from semantic relevance merely because the query classifier chose
+another domain. Before removal, wake-up and vacation received alignment
+0.55 (a 45% reduction), while season received 1.0. The existing recent-topic
+and mood alignment behavior is unchanged; no same-domain boost is introduced.
+
+At unchanged alpha 0.75, real Nomic now measures **43/50 top-1, 49/50 top-3**,
+with **22/25 top-1, 24/25 top-3** on the original subset. Templates retain
+200/200 on both metrics. These improved floors are enforced by the opt-in
+benchmark. Three focused broad-query fixtures retain their topical first
+result, but use controlled embeddings; they are not a labeled real-model
+broad-query evaluation or a general guarantee of no broad-query regressions.
+Real paraphrase ranking fingerprints match across two hash seeds and across
+SQLite/live Postgres, with full per-question parity asserted.
+
+Season is the sole complete miss: raw cosine 0.658126, cosine rank 1, fused
+rank 4. The opt-in sweep also evaluates alpha 0.85/0.90 only when the **raw**
+maximum cosine exceeds 0.85. That gate fires for 0/50 paraphrases and 0/200
+templates, yielding no improvement. Normalized dense rank scores near 1.0
+are not raw cosine confidence. The ineffective gate is not enabled; alpha
+remains 0.75 rather than lowering a threshold to fit one known question.
+Seven top-1 misses remain (six already in top-3); an undiversified-top-five
+reranker experiment is the next supported model-ranking investigation,
+not a claimed or enabled precision improvement. Semantic caching remains
+deferred.
+
 Source mode keeps a bounded, in-memory LRU cache of 64 exact normalized queries
 per service, scoped by tenant. Hits become most recently used; capacity
 evicts the least recently used answer. Each lookup reads current approved
