@@ -520,6 +520,10 @@ class DadBotBootMixin:
             if background_tasks is not None:
                 background_tasks.shutdown(wait=True)
         finally:
+            memory_query = getattr(self, "memory_query", None)
+            close_memory_query = getattr(memory_query, "close", None)
+            if callable(close_memory_query):
+                close_memory_query()
             save_memory_store = getattr(self, "save_memory_store", None)
             if callable(save_memory_store):
                 try:

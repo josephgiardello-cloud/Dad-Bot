@@ -624,6 +624,10 @@ def test_memory_score_uses_short_query_terms_to_distinguish_related_preferences(
     context = {
         "user_message": "Can you recall my tea preference?",
         "semantic_scores": {bot.semantic_memory_key(tea): 0.9, bot.semantic_memory_key(dessert): 0.9},
+        "lexical_scores": bot.memory_query._lexical_index.scores(
+            [(bot.semantic_memory_key(item), item["summary"]) for item in (tea, dessert)],
+            bot.memory_query.lexical_query_tokens("Can you recall my tea preference?"),
+        ),
     }
 
     assert bot.memory_query.score(tea, context) > bot.memory_query.score(dessert, context)

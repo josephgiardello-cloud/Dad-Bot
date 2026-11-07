@@ -73,6 +73,28 @@ personality/history labels; recent turns remain available to contextual
 scoring. This prevents metadata tokens from displacing query terms in the
 bounded candidate filter.
 
+General-memory retrieval now uses SQLite FTS5 BM25 for its lexical arm.
+FTS5 is required in the Python SQLite build; initialization/query errors
+propagate rather than silently reverting to word overlap. A private in-memory
+index backfills the current normalized tenant catalog on first use, rebuilds
+when its keys/text change, and closes at shutdown. No embedding job or saved
+lexical database is needed, including when semantic storage uses Postgres.
+There is no source-citation approval filtering on this conversational path;
+source mode remains a separate, approved-evidence-only retrieval contract.
+
+BM25's negative ranks are converted to positive scores and divided by the
+query's maximum match score. The convex blend retains a 0.75 weight on the
+existing contextual dense score (semantic relevance, graph signal, importance,
+and recency) and 0.25 on BM25. The old token-overlap fallback is removed.
+Set `DADBOT_MEASURE_FUSION=1` alongside the real-embedding benchmark flag
+to sweep weights and report 160 training / 40 held-out questions, split by
+whole fact topic. Real Nomic measured 200/200 top-1 and top-3 for all sampled
+dense weights from 0.0 through 0.9, including the existing 0.75; dense-only
+measured 191/200 top-1 and 192/200 top-3. BM25-only also passed every question.
+This plateau does not identify a unique optimal weight: the templated
+questions favor lexical matching. Richer paraphrase labels are needed before
+claiming fusion tuning improves general retrieval.
+
 Source mode keeps a bounded, in-memory LRU cache of 64 exact normalized queries
 per service, scoped by tenant. Hits become most recently used; capacity
 evicts the least recently used answer. Each lookup reads current approved

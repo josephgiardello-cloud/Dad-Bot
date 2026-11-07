@@ -3,11 +3,13 @@ from __future__ import annotations
 from datetime import date
 
 from dadbot.contracts import DadBotContext, SupportsDadBotAccess
+from dadbot.memory.lexical_index import LexicalMemoryIndex
 from dadbot.utils import SIGNIFICANT_TOKEN_STOPWORDS, tokenize_text
 
 _RETRIEVAL_QUERY_WORDS = frozenset(
     {"about", "can", "earlier", "mentioned", "please", "recall", "remember", "remind", "tell", "what", "you"}
 )
+MEMORY_DENSE_WEIGHT = 0.75
 
 
 class MemoryQueryManager:
@@ -16,6 +18,17 @@ class MemoryQueryManager:
     def __init__(self, bot: DadBotContext | SupportsDadBotAccess):
         self.context = DadBotContext.from_runtime(bot)
         self.bot = self.context.bot
+        self._lexical_index = LexicalMemoryIndex()
+
+    @staticmethod
+    def lexical_query_tokens(user_input: str) -> set[str]:
+        return {
+            token for token in tokenize_text(user_input)
+            if len(token) >= 3 and token not in SIGNIFICANT_TOKEN_STOPWORDS and token not in _RETRIEVAL_QUERY_WORDS
+        }
+
+    def close(self) -> None:
+        self._lexical_index.close()
 
     def memory_freshness_weight(self, value):
         elapsed_days = self.bot.days_since_iso_date(value)
@@ -240,16 +253,10 @@ class MemoryQueryManager:
         """Score one memory for current turn relevance.
 
         Blend the existing semantic, importance, and recency score with
-        query-term coverage when the user supplied meaningful terms.
+        normalized FTS5 BM25 when the user supplied meaningful terms.
         """
         memory_key = self.bot.semantic_memory_key(memory)
         semantic_similarity = float((query_context.get("semantic_scores") or {}).get(memory_key, 0.0) or 0.0)
-        if semantic_similarity <= 0.0:
-            query_tokens = set(query_context.get("query_tokens") or [])
-            memory_tokens = self.bot.significant_tokens(str(memory.get("summary") or ""))
-            if query_tokens and memory_tokens:
-                overlap = len(query_tokens & memory_tokens)
-                semantic_similarity = max(semantic_similarity, min(1.0, overlap / max(1, len(query_tokens))))
         graph_boost_tokens = set(query_context.get("graph_boost_tokens") or [])
         if graph_boost_tokens and graph_boost_tokens & self.bot.significant_tokens(str(memory.get("summary") or "")):
             semantic_similarity = min(1.0, semantic_similarity + 0.15)
@@ -259,14 +266,10 @@ class MemoryQueryManager:
         recency = self.semantic_memory_freshness_weight(memory)
 
         base_score = (0.6 * semantic_similarity) + (0.25 * importance) + (0.15 * recency)
-        query_words = {
-            token for token in tokenize_text(str(query_context.get("user_message") or ""))
-            if len(token) >= 3 and token not in SIGNIFICANT_TOKEN_STOPWORDS and token not in _RETRIEVAL_QUERY_WORDS
-        }
-        memory_words = tokenize_text(str(memory.get("summary") or ""))
-        lexical_overlap = len(query_words & memory_words) / len(query_words) if query_words else 0.0
+        query_words = self.lexical_query_tokens(str(query_context.get("user_message") or ""))
+        lexical_overlap = float((query_context.get("lexical_scores") or {}).get(memory_key, 0.0))
         if query_words:
-            base_score = 0.75 * base_score + 0.25 * lexical_overlap
+            base_score = MEMORY_DENSE_WEIGHT * base_score + (1.0 - MEMORY_DENSE_WEIGHT) * lexical_overlap
         return round(base_score, 6)
 
     @staticmethod
@@ -348,6 +351,7 @@ class MemoryQueryManager:
             effective_limit = max(3, effective_limit)
         memories = self.bot.memory_catalog()
         if not memories:
+            self._lexical_index.scores([], set())
             self.bot._last_memory_retrieval_diagnostics = {
                 "retrieved_count": 0,
                 "top_score_gap": 0.0,
@@ -405,6 +409,10 @@ class MemoryQueryManager:
             "semantic_scores": semantic_scores,
             "query_tokens": self.bot.significant_tokens(f"{user_input or ''!s} {recent_turns}"),
             "graph_boost_tokens": graph_boost_tokens,
+            "lexical_scores": self._lexical_index.scores(
+                [(self.bot.semantic_memory_key(memory), str(memory.get("summary") or "")) for memory in memories],
+                self.lexical_query_tokens(str(user_input or "")),
+            ),
         }
 
         ranked = sorted(

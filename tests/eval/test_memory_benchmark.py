@@ -54,13 +54,33 @@ def run_seeded_benchmark(bot, monkeypatch):
     misses_at_1: list[tuple[str, str, list[str]]] = []
     misses_at_3: list[tuple[str, str, list[str]]] = []
     ranked_summaries = []
+    measure_fusion = os.environ.get("DADBOT_MEASURE_FUSION") == "1"
+    fusion_rows = []
+    original_score = bot.memory_query.score
+
+    def capture_score(memory, context):
+        if measure_fusion:
+            key = bot.semantic_memory_key(memory)
+            fusion_rows.append((
+                original_score(memory, {**context, "user_message": ""}),
+                context["lexical_scores"].get(key, 0.0),
+                memory,
+            ))
+        return original_score(memory, context)
+
+    if measure_fusion:
+        monkeypatch.setattr(bot.memory_query, "score", capture_score)
+    fusion_cases = []
     for case in cases:
+        fusion_rows.clear()
         retrieved = bot.memory_query.relevant_memories_for_input(
             case.question,
             limit=3,
         )
         summaries = [str(memory.get("summary") or "") for memory in retrieved]
         ranked_summaries.append(summaries)
+        if measure_fusion:
+            fusion_cases.append((case, list(fusion_rows)))
         expected = case.expected_summary.casefold()
         top_3_hit = any(expected in summary.casefold() for summary in summaries[:3])
         top_1_hit = bool(summaries and expected in summaries[0].casefold())
@@ -74,7 +94,31 @@ def run_seeded_benchmark(bot, monkeypatch):
     print(f"Seeded benchmark: top-1 {hits_at_1}/{len(cases)}, top-3 {hits_at_3}/{len(cases)}")
     fingerprint = hashlib.sha256(json.dumps(ranked_summaries, ensure_ascii=True).encode("ascii")).hexdigest()
     print(f"Ranking fingerprint: {fingerprint}")
+    if measure_fusion:
+        measure_sparse_dense_balance(bot, fusion_cases)
     return len(cases), hits_at_1, hits_at_3, misses_at_1, misses_at_3
+
+
+def measure_sparse_dense_balance(bot, cases):
+    # Hold out whole topics, not paraphrases of training questions.
+    for alpha in (0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.75, 0.8, 0.9, 1.0):
+        counts = {"train": [0, 0, 0], "held_out": [0, 0, 0]}
+        for index, (case, rows) in enumerate(cases):
+            split = "held_out" if (index // 4) % 5 == 0 else "train"
+            ranked = sorted(
+                ((alpha * dense + (1 - alpha) * sparse, memory) for dense, sparse, memory in rows),
+                key=lambda item: (item[0], item[1].get("updated_at", ""), item[1].get("summary", "")),
+                reverse=True,
+            )
+            filtered = [item for item in ranked if item[0] >= 0.18] or ranked[:1]
+            selected = bot.memory_query.select_diverse_ranked_memories(filtered, 3)
+            summaries = [memory["summary"].casefold() for _, memory in selected]
+            expected = case.expected_summary.casefold()
+            counts[split][0] += bool(summaries and expected in summaries[0])
+            counts[split][1] += any(expected in summary for summary in summaries)
+            counts[split][2] += 1
+        print(f"Fusion dense_weight={alpha:.2f} train/top1,top3,total={counts['train']} "
+              f"held_out/top1,top3,total={counts['held_out']}")
 
 
 def test_memory_retrieval_benchmark_meets_recall_threshold(bot, monkeypatch):
