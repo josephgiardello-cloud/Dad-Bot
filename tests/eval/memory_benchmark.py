@@ -94,3 +94,38 @@ def memory_benchmark_cases() -> tuple[MemoryBenchmarkCase, ...]:
         for fact in MEMORY_BENCHMARK_FACTS
         for question_form in _QUESTION_FORMS
     )
+
+
+# Engineering-authored paraphrases of synthetic facts, not family/user history.
+_PARAPHRASE_TOPICS = (
+    ("What do we call our dog?", "my dog's name"),
+    ("What kind of dog do I have?", "my dog's breed"),
+    ("What's the kitty called?", "my cat's name"),
+    ("Where does the cat like to snooze?", "my cat's nap spot"),
+    ("Which shade would I pick?", "my favorite color"),
+    ("What do I like nibbling between meals?", "my favorite snack"),
+    ("What should the barista make for me?", "my coffee order"),
+    ("Which tea would I choose?", "my tea preference"),
+    ("Which time of year do I enjoy most?", "my preferred season"),
+    ("What kind of tunes am I into?", "my favorite music genre"),
+    ("What sort of novels do I enjoy?", "my favorite book genre"),
+    ("How do I spend my free weekends?", "my weekend hobby"),
+    ("How do I stay physically active?", "my exercise routine"),
+    ("When do I get out of bed on workdays?", "my weekday wake-up time"),
+    ("What do I do before going to sleep?", "my bedtime routine"),
+    ("When do we sit down to eat as a family?", "my family dinner day"),
+    ("What's my little girl's name?", "my daughter's name"),
+    ("Which sport does my boy like best?", "my son's favorite sport"),
+    ("What sweet treat does my partner love?", "my spouse's favorite dessert"),
+    ("Where did I grow up?", "my hometown"),
+    ("What am I renovating at home?", "my home project"),
+    ("How do I get to the office?", "my commute method"),
+    ("Which group am I part of at my job?", "my work team"),
+    ("What am I trying to achieve professionally?", "my career goal"),
+    ("Where am I planning to go on holiday?", "my vacation destination"),
+)
+
+
+def memory_paraphrase_cases() -> tuple[MemoryBenchmarkCase, ...]:
+    facts = {fact.topic: fact for fact in MEMORY_BENCHMARK_FACTS}
+    return tuple(MemoryBenchmarkCase(question, facts[topic].summary) for question, topic in _PARAPHRASE_TOPICS)

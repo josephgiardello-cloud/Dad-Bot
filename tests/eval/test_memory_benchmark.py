@@ -7,7 +7,8 @@ from datetime import date
 
 import pytest
 
-from tests.eval.memory_benchmark import MEMORY_BENCHMARK_FACTS, memory_benchmark_cases
+from dadbot.managers.memory_query import MEMORY_DENSE_WEIGHT
+from tests.eval.memory_benchmark import MEMORY_BENCHMARK_FACTS, memory_benchmark_cases, memory_paraphrase_cases
 
 pytestmark = pytest.mark.unit
 
@@ -15,9 +16,44 @@ pytestmark = pytest.mark.unit
 RECALL_AT_3_THRESHOLD = 0.98
 
 
-def run_seeded_benchmark(bot, monkeypatch):
-    cases = memory_benchmark_cases()
-    assert len(cases) >= 200
+def install_fusion_capture(bot, monkeypatch):
+    fusion_rows = []
+    components = {}
+    semantic_candidates = set()
+    semantic_manager = bot.memory_manager._semantic_manager
+    original_candidates = semantic_manager.semantic_candidate_rows
+    original_score = bot.memory_query.score
+
+    def capture_candidates(*args, **kwargs):
+        rows = original_candidates(*args, **kwargs)
+        semantic_candidates.clear()
+        semantic_candidates.update(row["summary_key"] for row in rows)
+        return rows
+
+    def capture_score(memory, context):
+        key = bot.semantic_memory_key(memory)
+        components[memory["summary"]] = {
+            "candidate_present": key in semantic_candidates,
+            "semantic": context["semantic_scores"].get(key, 0.0),
+            "bm25": context["lexical_scores"].get(key, 0.0),
+        }
+        fusion_rows.append(
+            (
+                original_score(memory, {**context, "user_message": ""}),
+                context["lexical_scores"].get(key, 0.0),
+                memory,
+            )
+        )
+        return original_score(memory, context)
+
+    monkeypatch.setattr(bot.memory_query, "score", capture_score)
+    monkeypatch.setattr(semantic_manager, "semantic_candidate_rows", capture_candidates)
+    return fusion_rows, components
+
+
+def run_seeded_benchmark(bot, monkeypatch, cases=None):
+    cases = memory_benchmark_cases() if cases is None else cases
+    assert len(cases) >= 25
     assert len({case.question for case in cases}) == len(cases)
 
     today = date.today().isoformat()
@@ -56,23 +92,13 @@ def run_seeded_benchmark(bot, monkeypatch):
     ranked_summaries = []
     measure_fusion = os.environ.get("DADBOT_MEASURE_FUSION") == "1"
     fusion_rows = []
-    original_score = bot.memory_query.score
-
-    def capture_score(memory, context):
-        if measure_fusion:
-            key = bot.semantic_memory_key(memory)
-            fusion_rows.append((
-                original_score(memory, {**context, "user_message": ""}),
-                context["lexical_scores"].get(key, 0.0),
-                memory,
-            ))
-        return original_score(memory, context)
-
+    expected_components = {}
     if measure_fusion:
-        monkeypatch.setattr(bot.memory_query, "score", capture_score)
+        fusion_rows, expected_components = install_fusion_capture(bot, monkeypatch)
     fusion_cases = []
     for case in cases:
         fusion_rows.clear()
+        expected_components.clear()
         retrieved = bot.memory_query.relevant_memories_for_input(
             case.question,
             limit=3,
@@ -90,21 +116,30 @@ def run_seeded_benchmark(bot, monkeypatch):
             misses_at_1.append((case.question, case.expected_summary, summaries))
         if not top_3_hit:
             misses_at_3.append((case.question, case.expected_summary, summaries))
+            if measure_fusion:
+                components = [
+                    values for summary, values in expected_components.items() if expected in summary.casefold()
+                ]
+                print(f"Miss components for {case.question!r}: {components}")
 
     print(f"Seeded benchmark: top-1 {hits_at_1}/{len(cases)}, top-3 {hits_at_3}/{len(cases)}")
     fingerprint = hashlib.sha256(json.dumps(ranked_summaries, ensure_ascii=True).encode("ascii")).hexdigest()
     print(f"Ranking fingerprint: {fingerprint}")
     if measure_fusion:
-        measure_sparse_dense_balance(bot, fusion_cases)
+        measured = measure_sparse_dense_balance(bot, fusion_cases)[MEMORY_DENSE_WEIGHT]
+        assert measured["train"][0] + measured["held_out"][0] == hits_at_1
+        assert measured["train"][1] + measured["held_out"][1] == hits_at_3
     return len(cases), hits_at_1, hits_at_3, misses_at_1, misses_at_3
 
 
 def measure_sparse_dense_balance(bot, cases):
     # Hold out whole topics, not paraphrases of training questions.
+    topic_indices = {fact.summary: index for index, fact in enumerate(MEMORY_BENCHMARK_FACTS)}
+    results = {}
     for alpha in (0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.75, 0.8, 0.9, 1.0):
         counts = {"train": [0, 0, 0], "held_out": [0, 0, 0]}
-        for index, (case, rows) in enumerate(cases):
-            split = "held_out" if (index // 4) % 5 == 0 else "train"
+        for case, rows in cases:
+            split = "held_out" if topic_indices[case.expected_summary] % 5 == 0 else "train"
             ranked = sorted(
                 ((alpha * dense + (1 - alpha) * sparse, memory) for dense, sparse, memory in rows),
                 key=lambda item: (item[0], item[1].get("updated_at", ""), item[1].get("summary", "")),
@@ -117,21 +152,45 @@ def measure_sparse_dense_balance(bot, cases):
             counts[split][0] += bool(summaries and expected in summaries[0])
             counts[split][1] += any(expected in summary for summary in summaries)
             counts[split][2] += 1
-        print(f"Fusion dense_weight={alpha:.2f} train/top1,top3,total={counts['train']} "
-              f"held_out/top1,top3,total={counts['held_out']}")
+        print(
+            f"Fusion dense_weight={alpha:.2f} train/top1,top3,total={counts['train']} "
+            f"held_out/top1,top3,total={counts['held_out']}"
+        )
+        results[alpha] = counts
+    # Select only on training data; ties prefer the current default.
+    selected = max(
+        results,
+        key=lambda alpha: (
+            results[alpha]["train"][0],
+            results[alpha]["train"][1],
+            -abs(alpha - MEMORY_DENSE_WEIGHT),
+        ),
+    )
+    print(f"Training-selected dense_weight={selected:.2f}; held_out={results[selected]['held_out']}")
+    return results
 
 
 def test_memory_retrieval_benchmark_meets_recall_threshold(bot, monkeypatch):
+    assert len(memory_benchmark_cases()) >= 200
     total, hits_at_1, hits_at_3, misses_at_1, misses_at_3 = run_seeded_benchmark(bot, monkeypatch)
     assert hits_at_1 / total >= 0.90, f"top-1 misses: {misses_at_1}"
     assert hits_at_3 / total >= RECALL_AT_3_THRESHOLD, f"top-3 misses: {misses_at_3}"
+
+
+def test_paraphrase_questions_have_distinct_seeded_targets():
+    cases = memory_paraphrase_cases()
+    assert len(cases) == 25
+    assert len({case.question for case in cases}) == 25
+    assert len({case.expected_summary for case in cases}) == 25
+    assert {case.expected_summary for case in cases} <= {fact.summary for fact in MEMORY_BENCHMARK_FACTS}
 
 
 @pytest.mark.skipif(
     os.environ.get("DADBOT_RUN_REAL_EMBEDDING_BENCHMARK") != "1",
     reason="requires local Ollama and nomic-embed-text",
 )
-def test_memory_retrieval_with_real_ollama_embeddings(bot, monkeypatch):
+@pytest.mark.parametrize("question_set", ["templated", "paraphrase"])
+def test_memory_retrieval_with_real_ollama_embeddings(bot, monkeypatch, question_set):
     del bot.embed_texts
     bot.PREFERRED_EMBEDDING_MODELS = ("nomic-embed-text",)
     bot.ACTIVE_EMBEDDING_MODEL = "nomic-embed-text"
@@ -153,10 +212,16 @@ def test_memory_retrieval_with_real_ollama_embeddings(bot, monkeypatch):
         return vectors
 
     monkeypatch.setattr(semantic_manager, "embed_texts", checked_embed)
-    total, hits_at_1, hits_at_3, misses_at_1, misses_at_3 = run_seeded_benchmark(bot, monkeypatch)
+    cases = memory_paraphrase_cases() if question_set == "paraphrase" else memory_benchmark_cases()
+    total, hits_at_1, hits_at_3, misses_at_1, misses_at_3 = run_seeded_benchmark(bot, monkeypatch, cases)
     assert embedding_calls.count("semantic memory search") == total
     assert "semantic memory indexing" in embedding_calls
     print(f"Top-1 misses: {misses_at_1}")
     print(f"Top-3 misses: {misses_at_3}")
-    assert hits_at_1 / total >= 0.90, f"top-1 misses: {misses_at_1}"
-    assert hits_at_3 / total >= RECALL_AT_3_THRESHOLD, f"top-3 misses: {misses_at_3}"
+    if question_set == "templated":
+        assert total >= 200
+        assert hits_at_1 / total >= 0.90, f"top-1 misses: {misses_at_1}"
+        assert hits_at_3 / total >= RECALL_AT_3_THRESHOLD, f"top-3 misses: {misses_at_3}"
+    else:
+        # Diagnostic set: report weaknesses, not an invented passing baseline.
+        assert total == 25

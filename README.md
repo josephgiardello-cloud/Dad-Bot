@@ -65,8 +65,11 @@ and requires at least 98% top-3 recall. The default test uses mocked embeddings;
 to also test real local `nomic-embed-text` embeddings, start Ollama, pull that
 model, set `DADBOT_RUN_REAL_EMBEDDING_BENCHMARK=1`, and run
 `python -m pytest tests\eval\test_memory_benchmark.py -s`. The questions are
-templated and repeat the fact topics; results do not measure production-vault,
-paraphrase, or source-mode citation quality.
+templated and repeat the fact topics; results do not measure production-vault
+or source-mode citation quality. The same opt-in run also includes a separate
+25-question engineering-authored paraphrase diagnostic against the synthetic
+facts. That diagnostic reports misses without pretending it meets the
+200-question regression gate.
 
 Semantic candidate search uses the current user query without synthetic
 personality/history labels; recent turns remain available to contextual
@@ -92,8 +95,31 @@ whole fact topic. Real Nomic measured 200/200 top-1 and top-3 for all sampled
 dense weights from 0.0 through 0.9, including the existing 0.75; dense-only
 measured 191/200 top-1 and 192/200 top-3. BM25-only also passed every question.
 This plateau does not identify a unique optimal weight: the templated
-questions favor lexical matching. Richer paraphrase labels are needed before
-claiming fusion tuning improves general retrieval.
+questions favor lexical matching.
+
+The 25 natural paraphrases measured 19/25 top-1 and top-3 with real Nomic,
+with identical ranking fingerprints across two Python hash seeds. Their
+topic-held-out split is 20 training / 5 held-out questions. Training top-1
+and top-3 tie for sampled dense weights 0.2 through 1.0 at 16/20; the
+existing 0.75 is retained by the training-only tie rule, not established
+as uniquely optimal. At 0.75 the held-out result is 3/5 top-1 and top-3.
+BM25-only scores 5/25 top-1 and 8/25 top-3; contextual-dense-only scores
+19/25 on both. This is a small diagnostic set, not a production-quality
+estimate. The sweep checks that replay at the current weight reproduces
+the actual retrieval counts.
+
+Four of the six missed targets never reached semantic cosine scoring;
+one reached it but had no positive semantic score, and one had high semantic
+relevance but lost in final ranking/diversification. All six had zero BM25
+score. This supports fixing semantic candidate coverage before changing
+alpha or adding a reranker. SQLite currently applies heuristic lexical/
+category/mood filters and a row limit before exact cosine scoring.
+Optional pgvector has a different filtered vector path; source mode does not
+use either vector path. Exact catalog-scoped conversational retrieval would
+address candidate exclusion, not replace an existing approved-source ANN
+search. The local configuration requests pgvector with no ANN index or fixed
+dimensions; a live index inventory was unavailable because its connection
+timed out, so existing server indexes remain unverified.
 
 Source mode keeps a bounded, in-memory LRU cache of 64 exact normalized queries
 per service, scoped by tenant. Hits become most recently used; capacity
