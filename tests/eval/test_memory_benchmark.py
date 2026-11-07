@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 from datetime import date
 
@@ -51,12 +53,14 @@ def run_seeded_benchmark(bot, monkeypatch):
     hits_at_3 = 0
     misses_at_1: list[tuple[str, str, list[str]]] = []
     misses_at_3: list[tuple[str, str, list[str]]] = []
+    ranked_summaries = []
     for case in cases:
         retrieved = bot.memory_query.relevant_memories_for_input(
             case.question,
             limit=3,
         )
         summaries = [str(memory.get("summary") or "") for memory in retrieved]
+        ranked_summaries.append(summaries)
         expected = case.expected_summary.casefold()
         top_3_hit = any(expected in summary.casefold() for summary in summaries[:3])
         top_1_hit = bool(summaries and expected in summaries[0].casefold())
@@ -68,6 +72,8 @@ def run_seeded_benchmark(bot, monkeypatch):
             misses_at_3.append((case.question, case.expected_summary, summaries))
 
     print(f"Seeded benchmark: top-1 {hits_at_1}/{len(cases)}, top-3 {hits_at_3}/{len(cases)}")
+    fingerprint = hashlib.sha256(json.dumps(ranked_summaries, ensure_ascii=True).encode("ascii")).hexdigest()
+    print(f"Ranking fingerprint: {fingerprint}")
     return len(cases), hits_at_1, hits_at_3, misses_at_1, misses_at_3
 
 

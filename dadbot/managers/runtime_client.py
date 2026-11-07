@@ -81,7 +81,11 @@ class RuntimeClientManager:
             context_budget = min(context_budget, model_limit)
         if context_budget < 256:
             raise ValueError("Ollama num_ctx must allow at least 256 tokens")
-        request_options["num_ctx"] = context_budget
+        # Bucket allocation, not prompt capacity: the guard retains the requested budget.
+        allocation = max(512, 1 << (context_budget - 1).bit_length())
+        if isinstance(model_limit, int) and model_limit > 0:
+            allocation = min(allocation, model_limit)
+        request_options["num_ctx"] = allocation
         reserved = max(64, int(self.bot.RESERVED_RESPONSE_TOKENS))
         capabilities = runtime.ollama_show_payload(model).get("capabilities") or []
         if "thinking" in capabilities:
@@ -482,6 +486,7 @@ class RuntimeClientManager:
                     "model": candidate,
                     "messages": guarded,
                     "options": request_options,
+                    "keep_alive": self.bot.runtime_config.ollama_keep_alive_seconds,
                 }
                 if response_format is not None:
                     kwargs["format"] = response_format
@@ -537,6 +542,7 @@ class RuntimeClientManager:
                     "model": candidate,
                     "messages": guarded,
                     "options": request_options,
+                    "keep_alive": self.bot.runtime_config.ollama_keep_alive_seconds,
                 }
                 if response_format is not None:
                     kwargs["format"] = response_format
@@ -591,6 +597,7 @@ class RuntimeClientManager:
             "model": model_name,
             "messages": guarded,
             "options": request_options,
+            "keep_alive": self.bot.runtime_config.ollama_keep_alive_seconds,
         }
         if response_format is not None:
             kwargs["format"] = response_format
@@ -628,7 +635,10 @@ class RuntimeClientManager:
             chunks: list[str] = []
             try:
                 guarded, request_options = self._prepare_ollama_request(candidate, messages, options, purpose)
-                kwargs = {"model": candidate, "messages": guarded, "stream": True, "options": request_options}
+                kwargs = {
+                    "model": candidate, "messages": guarded, "stream": True, "options": request_options,
+                    "keep_alive": self.bot.runtime_config.ollama_keep_alive_seconds,
+                }
                 if think is not None:
                     kwargs["think"] = think
                 stream = self._call_ollama_sync(**kwargs)
@@ -840,7 +850,10 @@ class RuntimeClientManager:
                 chunks: list[str] = []
                 try:
                     guarded, request_options = self._prepare_ollama_request(candidate, messages, options, purpose)
-                    kwargs = {"model": candidate, "messages": guarded, "stream": True, "options": request_options}
+                    kwargs = {
+                        "model": candidate, "messages": guarded, "stream": True, "options": request_options,
+                        "keep_alive": self.bot.runtime_config.ollama_keep_alive_seconds,
+                    }
                     if think is not None:
                         kwargs["think"] = think
                     with start_span(

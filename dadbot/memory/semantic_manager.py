@@ -675,7 +675,7 @@ class SemanticIndexManager:
             return None
         return {
             "query_embedding": query_embeddings[0],
-            "query_tokens": list(self._bot.significant_tokens(query))[
+            "query_tokens": sorted(self._bot.significant_tokens(query))[
                 : self._bot.runtime_config.window("semantic_query_tokens", 6)
             ],
             "query_category": self._bot.infer_memory_category(query),
@@ -718,7 +718,7 @@ class SemanticIndexManager:
                 SELECT summary_key, summary, category, mood, updated_at, embedding_json
                 FROM semantic_memories
                 WHERE {" OR ".join(where_clauses)}
-                ORDER BY updated_at DESC
+                ORDER BY updated_at DESC, summary_key ASC
                 LIMIT ?
                 """,
                 [*params, candidate_limit],

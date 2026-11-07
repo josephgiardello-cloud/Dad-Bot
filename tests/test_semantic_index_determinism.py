@@ -11,6 +11,18 @@ from dadbot_system.semantic_index import SQLiteSemanticIndex
 pytestmark = pytest.mark.unit
 
 
+def test_semantic_query_tokens_are_sorted_before_candidate_window(bot, monkeypatch):
+    tokens = ["work", "tea", "project", "preference", "learning", "goal", "earlier", "about"]
+    manager = bot.memory_manager._semantic_manager
+    monkeypatch.setattr(manager, "embed_texts", lambda *_args, **_kwargs: [[1.0] * 12])
+    monkeypatch.setattr(bot, "significant_tokens", lambda _query: tokens)
+    first = manager.semantic_query_context("query", 3)
+    tokens.reverse()
+    second = manager.semantic_query_context("query", 3)
+
+    assert first["query_tokens"] == second["query_tokens"] == sorted(tokens)[:6]
+
+
 def _index(tmp_path: Path) -> SQLiteSemanticIndex:
     bot = SimpleNamespace(_io_lock=None)
     return SQLiteSemanticIndex(bot=bot, db_path=tmp_path / "semantic_test.db")

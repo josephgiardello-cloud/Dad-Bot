@@ -250,8 +250,13 @@ The install script will guide you through the rest.
 
 ### Local Model Context and Timing
 
-Ollama requests explicitly set `num_ctx` from DadBot's configured
-`CONTEXT_TOKEN_BUDGET` (default 6000), capped by the model's context capacity.
+Ollama requests allocate `num_ctx` in power-of-two buckets starting at 512
+(512, 1024, 2048, 4096, 8192, and larger when requested), capped by the
+model's context capacity. The prompt guard still uses DadBot's configured
+`CONTEXT_TOKEN_BUDGET` (default 6000) or the request's explicit budget, capped
+by the model's capacity; bucketing does not expand the allowed prompt.
+Thus a 6000-token budget allocates an 8192-token context when supported,
+using more KV-cache memory than an unbucketed allocation.
 A Modelfile's default `num_ctx` is not treated as the architectural capacity.
 Before transport, the prompt guard drops older history and trims oversized
 messages, preserving the latest task where possible. Thinking-capable models
@@ -265,6 +270,15 @@ within available memory when necessary. INFO-level Ollama timing logs include
 request purpose, token counts, load/generation durations, and completion reason,
 but not prompt, answer, or hidden-reasoning text. Mood detection, tool planning,
 and chat can each incur a separate generation.
+
+Chat requests use `keep_alive=-1` by default. Set
+`DADBOT_OLLAMA_KEEP_ALIVE_SECONDS=300` before startup to restore a five-minute
+idle timeout, or `0` to unload after each request. Residency is subject to
+Ollama's memory availability; multiple models can compete for RAM/VRAM.
+This setting does not change the embedding model's idle timeout.
+Automatic `num_keep`, Flash Attention, and KV quantization are not enabled
+by DadBot. Existing explicit `num_keep` options are preserved. No latency
+reduction is claimed without measuring actual request timing.
 
 ### Story Mode (Password Protected)
 

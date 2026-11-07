@@ -133,6 +133,9 @@ class DadRuntimeConfig:
     mood_detection_temperature: float = 0.0
     stream_timeout_seconds: int = 60
     stream_max_chars: int = 12000
+    ollama_keep_alive_seconds: int = field(
+        default_factory=lambda: int(os.environ.get("DADBOT_OLLAMA_KEEP_ALIVE_SECONDS", "-1"))
+    )
     preferred_embedding_models: tuple[str, ...] = (
         "bge-m3",
         "nomic-embed-text",
