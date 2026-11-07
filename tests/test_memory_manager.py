@@ -651,6 +651,30 @@ def test_memory_score_preserves_base_when_query_has_no_meaningful_terms(bot):
     )
 
 
+def test_relevant_memories_queries_semantic_index_without_metadata_labels(bot, monkeypatch):
+    today = date.today().isoformat()
+    bot.MEMORY_STORE = {
+        **bot.default_memory_store(),
+        "memories": [{
+            "summary": "My weekday wake-up time is 6:30 AM.",
+            "category": "routines", "created_at": today, "updated_at": today,
+        }],
+    }
+    queries = []
+
+    def capture_query(query, memories, limit=3):
+        queries.append(query)
+        return [(1.0, memories[0])]
+
+    monkeypatch.setattr(bot, "semantic_memory_matches", capture_query)
+    monkeypatch.setattr(bot.memory_query, "_recent_turn_context", lambda **_kwargs: "Tony: earlier context")
+    question = "What did I tell you about my weekday wake-up time?"
+    result = bot.relevant_memories_for_input(question, limit=3)
+
+    assert queries == [question]
+    assert "wake-up" in result[0]["summary"]
+
+
 def test_relevant_memories_for_input_prefers_fresher_entries(bot):
     old_date = (date.today() - timedelta(days=180)).isoformat()
     fresh_date = date.today().isoformat()

@@ -377,11 +377,9 @@ class MemoryQueryManager:
 
         recent_turns = self._recent_turn_context(max_turns=3)
         personality_state = str(self.bot.last_saved_mood() or "neutral").strip().lower() or "neutral"
-        semantic_query = (
-            f"{str(user_input or '').strip()}\n\n"
-            f"Recent turns:\n{recent_turns}\n\n"
-            f"Personality state: {personality_state}"
-        ).strip()
+        # Metadata labels must not displace user terms in the candidate filter.
+        # Recent turns remain available to contextual scoring below.
+        semantic_query = str(user_input or "").strip()
 
         semantic_matches = list(
             self.bot.semantic_memory_matches(

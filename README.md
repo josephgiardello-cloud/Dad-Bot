@@ -68,6 +68,11 @@ model, set `DADBOT_RUN_REAL_EMBEDDING_BENCHMARK=1`, and run
 templated and repeat the fact topics; results do not measure production-vault,
 paraphrase, or source-mode citation quality.
 
+Semantic candidate search uses the current user query without synthetic
+personality/history labels; recent turns remain available to contextual
+scoring. This prevents metadata tokens from displacing query terms in the
+bounded candidate filter.
+
 Reviewed oral histories save transcript evidence with a unique ID, UTC review
 time, and SHA-256 content hash alongside the memory; the transcript is stored
 both as memory text and as its evidence. Source-mode citation approval is separate.
