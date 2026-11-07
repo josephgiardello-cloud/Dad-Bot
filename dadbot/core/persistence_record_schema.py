@@ -129,7 +129,7 @@ def _base_checkpoint_record(payload: dict[str, Any]) -> dict[str, Any]:
         "checkpoint_hash": str(payload.get("checkpoint_hash") or "").strip(),
         "prev_checkpoint_hash": str(payload.get("prev_checkpoint_hash") or "").strip(),
         "event_sequence_id": _as_int(payload.get("event_sequence_id"), default=0),
-        "occurred_at": str(payload.get("occurred_at") or "").strip(),
+        "occurred_at": str(payload.get("occurred_at") or payload.get("updated_at") or "").strip(),
         "execution_mode": str(payload.get("execution_mode") or "live").strip().lower() or "live",
     }
 
@@ -163,6 +163,17 @@ def normalize_checkpoint_record(record: dict[str, Any] | None) -> dict[str, Any]
     payload = dict(record or {})
     lock = dict(payload.get("determinism_lock") or {})
     execution_state = dict(payload.get("execution_state") or {})
+    if not execution_state and any(
+        key in payload
+        for key in ("state", "metadata", "phase_history", "stage_traces", "event_sequence")
+    ):
+        execution_state = {
+            "state": payload.get("state", {}),
+            "metadata": payload.get("metadata", {}),
+            "phase_history": payload.get("phase_history", []),
+            "stage_traces": payload.get("stage_traces", []),
+            "event_sequence": payload.get("event_sequence", 0),
+        }
     continuity = dict(payload.get("continuity") or {})
     out = _base_checkpoint_record(payload)
     if lock:

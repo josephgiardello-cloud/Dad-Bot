@@ -133,6 +133,70 @@ def test_check_dependencies_skips_when_pytest_env_set(monkeypatch, tmp_path):
     app_runtime.check_dependencies(args, base_script_path=tmp_path / "Dad.py", runtime_cls=None)
 
 
+def test_production_state_stores_require_postgres(monkeypatch):
+    persistence = SimpleNamespace(
+        redis_url="",
+        postgres_dsn="",
+        session_table="sessions",
+        task_table="tasks",
+        event_table="events",
+    )
+    config = SimpleNamespace(persistence=persistence)
+    monkeypatch.setenv("DADBOT_ENVIRONMENT", "production")
+
+    with pytest.raises(RuntimeError, match="requires a reachable Postgres"):
+        app_runtime.build_service_state_store(config)
+    with pytest.raises(RuntimeError, match="requires a reachable Postgres"):
+        app_runtime.build_customer_document_store(config)
+
+
+def test_development_state_store_keeps_in_memory_fallback(monkeypatch):
+    persistence = SimpleNamespace(
+        redis_url="",
+        postgres_dsn="",
+        session_table="sessions",
+        task_table="tasks",
+        event_table="events",
+    )
+    config = SimpleNamespace(persistence=persistence)
+    monkeypatch.setenv("DADBOT_ENVIRONMENT", "development")
+
+    assert isinstance(app_runtime.build_service_state_store(config), app_runtime.InMemoryStateStore)
+    assert isinstance(app_runtime.build_customer_document_store(config), app_runtime.InMemoryStateStore)
+
+
+def test_production_vector_memory_does_not_use_noop_fallback(monkeypatch):
+    from dadbot.services import vector_memory
+
+    monkeypatch.setattr(vector_memory, "chromadb", None)
+    monkeypatch.setenv("DADBOT_ENVIRONMENT", "production")
+
+    with pytest.raises(RuntimeError, match="requires ChromaDB-backed memory"):
+        vector_memory.build_sovereign_memory()
+
+
+def test_production_registry_does_not_suppress_vector_memory_import_failure(monkeypatch):
+    from dadbot import registry
+
+    def fail_import(*_args, **_kwargs):
+        raise ImportError("vector backend dependency is broken")
+
+    monkeypatch.setattr(registry, "_instantiate", fail_import)
+    monkeypatch.setenv("DADBOT_ENVIRONMENT", "production")
+
+    with pytest.raises(RuntimeError, match="requires ChromaDB-backed memory"):
+        registry._build_sovereign_memory_safe()
+
+
+def test_production_runtime_state_bundle_rejects_in_memory_default(monkeypatch):
+    from dadbot.core.boot_mixin import DadBotBootMixin
+
+    monkeypatch.setenv("DADBOT_ENVIRONMENT", "production")
+
+    with pytest.raises(RuntimeError, match="requires an injected durable runtime_state_bundle"):
+        DadBotBootMixin._build_runtime_state_bundle(None)
+
+
 def test_check_dependencies_skips_non_runtime_actions(monkeypatch, tmp_path):
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     calls = []

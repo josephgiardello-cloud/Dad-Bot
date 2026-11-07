@@ -11,8 +11,6 @@ from datetime import datetime, timedelta, timezone
 from importlib import metadata as importlib_metadata
 from typing import Any, cast
 
-from dadbot.utils.async_bridge import run_coro_in_thread
-
 from dadbot.contracts import (
     AttachmentList,
     FinalizedTurnResult,
@@ -32,8 +30,8 @@ from dadbot.core.control_plane import (
 )
 from dadbot.core.control_plane_lifecycle import _apply_projection_execution_state
 from dadbot.core.execution_binder import TraceBinder
-from dadbot.core.execution_mode import ExecutionModeResolver
 from dadbot.core.execution_boundary import ControlPlaneExecutionBoundary
+from dadbot.core.execution_mode import ExecutionModeResolver
 from dadbot.core.execution_resource_budget import BackpressureSignal
 from dadbot.core.execution_result_unified import ensure_unified_execution_result
 from dadbot.core.execution_terminal_state import build_execution_terminal_state
@@ -59,6 +57,8 @@ from dadbot.core.runtime_errors import (
 )
 from dadbot.core.tool_recording import ToolIOLedger
 from dadbot.registry import ServiceRegistry, boot_registry
+from dadbot.runtime.env_loader import is_production_environment
+from dadbot.utils.async_bridge import run_coro_in_thread
 
 logger = logging.getLogger(__name__)
 
@@ -343,8 +343,13 @@ class DadBotOrchestrator:
         bot = kwargs.pop("bot", None)
         checkpointer = kwargs.pop("checkpointer", None)
         self.bot = bot
-        self.registry = registry or boot_registry(config_path=config_path, bot=bot)
         self._strict = bool(strict)
+        if is_production_environment() and not self._strict:
+            raise RuntimeError("Production composition requires strict mode")
+        self.registry = registry or boot_registry(config_path=config_path, bot=bot)
+        persistence_service = self.registry.get("persistence_service", optional=True)
+        if persistence_service is not None and hasattr(persistence_service, "strict_mode"):
+            persistence_service.strict_mode = self._strict
         self._enable_observability = bool(enable_observability)
         self._last_turn_context: TurnContext | None = None
         self._checkpointer = checkpointer
@@ -368,6 +373,10 @@ class DadBotOrchestrator:
         self._reflection_engine = DriftReflectionEngine()  # Lazy initialization; ledger path set per-session
         self._friction_engine = CompositeFrictionEngine()
         self._goal_recalibration_engine = GoalRecalibrationEngine()
+
+    @property
+    def strict(self) -> bool:
+        return self._strict
 
     def _build_control_plane(self) -> ExecutionControlPlane:
         kernel_executor = self._execute_job

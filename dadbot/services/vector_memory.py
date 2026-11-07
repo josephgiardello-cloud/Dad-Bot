@@ -7,7 +7,7 @@ relevant historical events from months ago using semantic search.
 
 Architecture:
   - Vector Store: ChromaDB with persistent disk backend (./memory/vector_store)
-  - Embeddings: nomic-embed-text (local, offline)
+  - Embeddings: ChromaDB's local all-MiniLM-L6-v2 default embedding function
   - Collection: sovereign_cognitive_baseline (automatically created)
   - Metadata: Indexed by turn_id, event_type, timestamp for filtered search
 
@@ -50,10 +50,14 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
+from dadbot.runtime.env_loader import is_production_environment
+
 try:
     import chromadb
     from chromadb.config import Settings
-except ImportError:
+except ModuleNotFoundError as exc:
+    if exc.name != "chromadb":
+        raise
     chromadb = None
     Settings = None
 
@@ -138,11 +142,12 @@ class SovereignMemory:
             )
 
             # Get or create collection
-            # ChromaDB uses cosine similarity by default, which is good for embeddings
+            # ChromaDB uses its local default embedding function and L2 distance.
             self._collection = self._client.get_or_create_collection(
                 name=self.collection_name,
                 metadata={"description": "Sovereign Event Cognitive Baseline"},
             )
+            self._backfill_timestamp_metadata()
 
             self._initialized = True
             logger.info(
@@ -204,7 +209,7 @@ class SovereignMemory:
                 indexed_metadata.update(metadata)
 
             # Add to collection
-            # ChromaDB handles embedding via nomic-embed-text automatically
+            # ChromaDB embeds documents with the collection's configured function.
             self._collection.add(
                 documents=[document],
                 metadatas=[indexed_metadata],
@@ -217,6 +222,48 @@ class SovereignMemory:
         except Exception as e:
             logger.error(f"Failed to commit event to long-term memory: {e}")
             raise
+
+    def _backfill_timestamp_metadata(self, *, batch_size: int = 500) -> None:
+        """Add numeric timestamps to existing records for Chroma range filters."""
+        if self._collection is None:
+            return
+
+        count = int(self._collection.count())
+        offset = 0
+        while offset < count:
+            result = self._collection.get(
+                limit=min(batch_size, count - offset),
+                offset=offset,
+                include=["metadatas"],
+            )
+            ids = list(result.get("ids") or [])
+            metadatas = list(result.get("metadatas") or [])
+            if not ids:
+                break
+
+            update_ids: list[str] = []
+            update_metadatas: list[dict[str, Any]] = []
+            for record_id, raw_metadata in zip(ids, metadatas):
+                metadata = dict(raw_metadata or {})
+                if "timestamp_epoch" in metadata:
+                    continue
+                timestamp = str(metadata.get("timestamp") or "").strip()
+                if not timestamp:
+                    continue
+                try:
+                    parsed_timestamp = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                except ValueError:
+                    logger.warning("Skipping invalid memory timestamp during metadata migration: %s", record_id)
+                    continue
+                if parsed_timestamp.tzinfo is None:
+                    parsed_timestamp = parsed_timestamp.replace(tzinfo=UTC)
+                metadata["timestamp_epoch"] = parsed_timestamp.timestamp()
+                update_ids.append(str(record_id))
+                update_metadatas.append(metadata)
+
+            if update_ids:
+                self._collection.update(ids=update_ids, metadatas=update_metadatas)
+            offset += len(ids)
 
     def retrieve_context(
         self,
@@ -243,37 +290,43 @@ class SovereignMemory:
             List of MemoryFragment objects ranked by similarity
         """
         if not self._initialized or self._collection is None:
+            if is_production_environment():
+                raise RuntimeError("Production vector memory is not initialized.")
             logger.warning("SovereignMemory not initialized, returning empty results")
             return []
 
+        result_limit = int(limit)
+        if result_limit < 1:
+            raise ValueError("limit must be greater than zero")
+        if distance_threshold < 0:
+            raise ValueError("distance_threshold must not be negative")
+        window_days = None
+        if time_window_days is not None:
+            window_days = int(time_window_days)
+            if window_days < 0:
+                raise ValueError("time_window_days must not be negative")
+        if not str(query or "").strip():
+            raise ValueError("query must not be empty")
+
         try:
-            # Build where filter if needed
-            where_filter: Optional[dict[str, Any]] = None
-            if time_window_days is not None or event_type_filter is not None:
-                where_filter = {}
+            filters: list[dict[str, Any]] = []
+            if window_days is not None:
+                cutoff_timestamp = (datetime.now(UTC) - timedelta(days=window_days)).timestamp()
+                filters.append({"timestamp_epoch": {"$gte": cutoff_timestamp}})
 
-                if time_window_days is not None:
-                    cutoff_date = (
-                        datetime.now(UTC) - timedelta(days=time_window_days)
-                    ).isoformat()
-                    where_filter = {
-                        "$and": [
-                            where_filter,
-                            {"timestamp": {"$gte": cutoff_date}},
-                        ]
-                    }
+            if event_type_filter is not None:
+                filters.append({"event_type": {"$eq": event_type_filter}})
 
-                if event_type_filter is not None:
-                    type_filter = {"event_type": {"$eq": event_type_filter}}
-                    if where_filter:
-                        where_filter = {"$and": [where_filter, type_filter]}
-                    else:
-                        where_filter = type_filter
+            where_filter = None
+            if len(filters) == 1:
+                where_filter = filters[0]
+            elif filters:
+                where_filter = {"$and": filters}
 
             # Perform semantic search
             results = self._collection.query(
                 query_texts=[query],
-                n_results=limit,
+                n_results=result_limit,
                 where=where_filter,
                 include=["documents", "metadatas", "distances"],
             )
@@ -313,6 +366,8 @@ class SovereignMemory:
 
         except Exception as e:
             logger.error(f"Failed to retrieve context: {e}")
+            if is_production_environment():
+                raise
             return []
 
     def delete_old_events(self, before_days: int = 365) -> int:
@@ -326,22 +381,26 @@ class SovereignMemory:
             Number of events deleted
         """
         if not self._initialized or self._collection is None:
+            if is_production_environment():
+                raise RuntimeError("Production vector memory is not initialized.")
             return 0
+
+        retention_days = int(before_days)
+        if retention_days < 0:
+            raise ValueError("before_days must not be negative")
 
         try:
-            cutoff_date = (datetime.now(UTC) - timedelta(days=before_days)).isoformat()
-
-            # ChromaDB doesn't have built-in delete by query, so we retrieve and delete
-            # For now, log a warning that this would need custom implementation
-            logger.warning(
-                f"delete_old_events called for events before {cutoff_date}. "
-                "Full implementation requires custom indexing strategy."
-            )
-
-            return 0
+            cutoff_timestamp = (datetime.now(UTC) - timedelta(days=retention_days)).timestamp()
+            result = self._collection.get(where={"timestamp_epoch": {"$lt": cutoff_timestamp}})
+            ids = list(result.get("ids") or [])
+            if ids:
+                self._collection.delete(ids=ids)
+            return len(ids)
 
         except Exception as e:
             logger.error(f"Failed to delete old events: {e}")
+            if is_production_environment():
+                raise
             return 0
 
     def get_collection_stats(self) -> dict[str, Any]:
@@ -465,6 +524,10 @@ def build_sovereign_memory(
     not.  The system will boot and operate normally in either case.
     """
     if chromadb is None:
+        if is_production_environment():
+            raise RuntimeError(
+                "Production requires ChromaDB-backed memory; install the chromadb dependency.",
+            )
         logger.warning(
             "chromadb is not installed – SovereignMemory running in no-op mode. "
             "Install with: pip install chromadb to enable vector memory."

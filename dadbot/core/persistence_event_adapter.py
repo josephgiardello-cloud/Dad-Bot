@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import asdict, is_dataclass
 from typing import Any
+from uuid import uuid4
 
 
 class GraphPersistenceEventAdapter:
@@ -47,6 +48,7 @@ class GraphPersistenceEventAdapter:
         turn_context.event_sequence += 1
         save_event(
             {
+                "event_id": uuid4().hex,
                 "event_type": "graph_checkpoint",
                 "trace_id": turn_context.trace_id,
                 "sequence": turn_context.event_sequence,
@@ -77,6 +79,7 @@ class GraphPersistenceEventAdapter:
         turn_context.event_sequence += 1
         save_event(
             {
+                "event_id": uuid4().hex,
                 "event_type": "phase_transition",
                 "trace_id": turn_context.trace_id,
                 "sequence": turn_context.event_sequence,
@@ -104,6 +107,7 @@ class GraphPersistenceEventAdapter:
         turn_context.event_sequence += 1
         save_event(
             {
+                "event_id": uuid4().hex,
                 "event_type": "kernel_rejection",
                 "trace_id": turn_context.trace_id,
                 "sequence": turn_context.event_sequence,
@@ -135,6 +139,7 @@ class GraphPersistenceEventAdapter:
         identity_dict = identity.to_dict() if hasattr(identity, "to_dict") else dict(identity or {})
         save_event(
             {
+                "event_id": uuid4().hex,
                 "event_type": "execution_identity",
                 "trace_id": turn_context.trace_id,
                 "sequence": turn_context.event_sequence,

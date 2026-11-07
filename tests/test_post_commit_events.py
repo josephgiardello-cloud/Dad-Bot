@@ -283,10 +283,10 @@ def test_finalize_turn_allows_commit_when_memory_authority_matches():
 
     assert result == ("done", False)
     check = dict(turn_context.state.get("memory_authority_check") or {})
-    assert check.get("consistent") is False
-    assert check.get("soft_failure") is True
+    assert check.get("consistent") is True
     assert str(check.get("projected_hash") or "")
     assert str(check.get("event_sourced_hash") or "")
+    assert check["projected_hash"] == check["event_sourced_hash"]
     assert len(event_bus.events()) == 1
 
 

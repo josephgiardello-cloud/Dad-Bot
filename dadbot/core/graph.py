@@ -1,15 +1,16 @@
 from __future__ import annotations
 
-import os
-
 import contextlib
 import hashlib
 import json
 import logging
+import os
 import time
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
+from uuid import uuid4
 
 from dadbot.contracts import FinalizedTurnResult
 from dadbot.core.capability_registry import (
@@ -53,15 +54,17 @@ from dadbot.core.graph_pipeline_nodes import (  # re-export pipeline node stubs
     SaveNode,
     TemporalNode,
     ValidationGateNode,
+)
+from dadbot.core.graph_pipeline_nodes import (
     _invoke_node_run_compat as _invoke_node_run_compat,
 )
 from dadbot.core.graph_side_effects import GraphSideEffectsOrchestrator
-from dadbot.core.graph_topology import TurnGraphTopology
 from dadbot.core.graph_temporal import (  # re-export temporal types
     TurnPhase,
     TurnTemporalAxis,
     VirtualClock,
 )
+from dadbot.core.graph_topology import TurnGraphTopology
 from dadbot.core.graph_traverser import TurnGraphTraverser
 from dadbot.core.graph_types import (  # re-export trace/op types
     LedgerMutationOp,
@@ -786,9 +789,13 @@ class TurnGraph:
                 return
         turn_context.event_sequence = int(turn_context.event_sequence or 0) + 1
         event = {
+            "event_id": uuid4().hex,
             "event_type": str(event_type or ""),
             "trace_id": str(turn_context.trace_id or ""),
-            "occurred_at": str(getattr(getattr(turn_context, "temporal", None), "wall_time", "") or ""),
+            "occurred_at": str(
+                getattr(getattr(turn_context, "temporal", None), "wall_time", "")
+                or datetime.now(UTC).isoformat(timespec="seconds"),
+            ),
             "sequence": int(turn_context.event_sequence),
         }
         event.update(dict(payload or {}))
@@ -814,6 +821,10 @@ class TurnGraph:
             "trace_id": str(turn_context.trace_id or ""),
             "stage": str(stage_name or "unknown"),
             "status": str(status or "after"),
+            "occurred_at": str(
+                getattr(getattr(turn_context, "temporal", None), "wall_time", "")
+                or datetime.now(UTC).isoformat(timespec="seconds"),
+            ),
             "state": _json_safe(dict(turn_context.state or {})),
             "metadata": _json_safe(dict(turn_context.metadata or {})),
         }
@@ -842,6 +853,8 @@ class TurnGraph:
             try:
                 save_graph_checkpoint(checkpoint_payload)
             except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
+                if bool(getattr(persistence_service, "strict_mode", False)):
+                    raise
                 logger.warning(
                     "TurnGraph lightweight checkpoint persistence failed at stage=%s status=%s: %s",
                     stage_name,

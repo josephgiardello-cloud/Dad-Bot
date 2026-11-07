@@ -8,6 +8,7 @@ from typing import Any
 
 from dadbot.kernel_boundary import KernelBoundary
 from dadbot.models import BoundaryComplianceDeclaration
+from dadbot.runtime.env_loader import is_production_environment
 
 # Import the ToolRegistry builder for Phase B wiring
 from dadbot.tool_registry_builder import _build_and_register_tool_registry
@@ -136,6 +137,10 @@ def _build_sovereign_memory_safe() -> Any:
     try:
         return _instantiate("dadbot.services.vector_memory:build_sovereign_memory")
     except ImportError as exc:
+        if is_production_environment():
+            raise RuntimeError(
+                "Production requires ChromaDB-backed memory; fix the vector-memory dependency import.",
+            ) from exc
         _registry_logger.warning(
             "SovereignMemory unavailable during boot; continuing without it: %s",
             exc,

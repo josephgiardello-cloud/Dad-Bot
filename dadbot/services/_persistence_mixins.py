@@ -16,6 +16,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
+from uuid import uuid4
 
 from dadbot.core.capability_audit_runner import (
     CAPABILITY_AUDIT_EVENT_TYPE,
@@ -31,6 +32,7 @@ from dadbot.core.graph import (
 )
 from dadbot.core.kernel_locks import KernelEventTotalityLock
 from dadbot.core.merkle_anchor import append_leaf_and_anchor
+from dadbot.core.persistence_record_schema import normalize_checkpoint_record
 from dadbot.core.runtime_errors import (
     NON_FATAL_RUNTIME_EXCEPTIONS,
     PersistenceFailure,
@@ -254,6 +256,7 @@ class _LedgerOpsMixin:
                     sequence = 0
 
                 turn_event_payload = {
+                    "event_id": uuid4().hex,
                     "event_type": POLICY_TRACE_EVENT_TYPE,
                     "trace_id": trace_id,
                     "sequence": sequence,
@@ -279,6 +282,8 @@ class _LedgerOpsMixin:
                         committed=False,
                     )
         except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
+            if bool(getattr(self, "strict_mode", False)):
+                raise
             logger.warning(
                 "PersistenceService policy trace persistence failed (non-fatal): %s",
                 exc,
@@ -325,6 +330,7 @@ class _LedgerOpsMixin:
 
             self.save_turn_event(
                 {
+                    "event_id": uuid4().hex,
                     "event_type": CAPABILITY_AUDIT_EVENT_TYPE,
                     "trace_id": trace_id,
                     "sequence": sequence,
@@ -357,6 +363,8 @@ class _LedgerOpsMixin:
                     committed=False,
                 )
         except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
+            if bool(getattr(self, "strict_mode", False)):
+                raise
             logger.warning(
                 "PersistenceService capability audit persistence failed (non-fatal): %s",
                 exc,
@@ -588,6 +596,8 @@ class _MutationDispatchMixin:
 
         self.save_turn_event(
             {
+                "event_id": uuid4().hex,
+                "sequence": self._advance_event_sequence(turn_context),
                 "event_type": "hierarchical_memory_commit",
                 "trace_id": trace_id,
                 "occurred_at": occurred_at,
@@ -601,6 +611,12 @@ class _MutationDispatchMixin:
                 },
             },
         )
+
+    @staticmethod
+    def _advance_event_sequence(turn_context: Any) -> int:
+        sequence = int(getattr(turn_context, "event_sequence", 0) or 0) + 1
+        setattr(turn_context, "event_sequence", sequence)
+        return sequence
 
 
 # ---------------------------------------------------------------------------
@@ -753,6 +769,26 @@ class _IntegrityVerifyMixin:
             metadata={"source": "PersistenceService._load_event_sourced_checkpoint"},
             required=True,
         ):
+            ledger_resolver = getattr(self.persistence_manager, "_execution_ledger", None)
+            if callable(ledger_resolver):
+                ledger = ledger_resolver()
+                read = getattr(ledger, "read", None)
+                if callable(read):
+                    raw_events = read()
+                    if isinstance(raw_events, list):
+                        for event in reversed(raw_events):
+                            if str(event.get("type") or "") != "GRAPH_CHECKPOINT":
+                                continue
+                            payload = dict(event.get("payload") or {})
+                            if trace_key and str(payload.get("trace_id") or "").strip() != trace_key:
+                                continue
+                            checkpoint = dict(payload.get("checkpoint") or {})
+                            if checkpoint:
+                                session_state = payload.get("session_state")
+                                if isinstance(session_state, dict):
+                                    checkpoint["session_state"] = session_state
+                                return checkpoint
+
             loader = getattr(self.persistence_manager, "load_latest_graph_checkpoint", None)
             if callable(loader):
                 try:
@@ -761,28 +797,6 @@ class _IntegrityVerifyMixin:
                     loaded = loader(trace_id=trace_key)
                 if isinstance(loaded, dict):
                     return dict(loaded)
-
-            ledger_resolver = getattr(self.persistence_manager, "_execution_ledger", None)
-            if not callable(ledger_resolver):
-                return {}
-            ledger = ledger_resolver()
-            read = getattr(ledger, "read", None)
-            if not callable(read):
-                return {}
-
-            raw_events = read()
-            if not isinstance(raw_events, list):
-                return {}
-
-            for event in reversed(raw_events):
-                if str(event.get("type") or "") != "GRAPH_CHECKPOINT":
-                    continue
-                payload = dict(event.get("payload") or {})
-                if trace_key and str(payload.get("trace_id") or "").strip() != trace_key:
-                    continue
-                checkpoint = dict(payload.get("checkpoint") or {})
-                if checkpoint:
-                    return checkpoint
             return {}
 
     def _enforce_memory_authority(
@@ -818,15 +832,25 @@ class _IntegrityVerifyMixin:
                 },
             )
 
-        projected_checkpoint = dict(checkpoint)
+        projected_checkpoint = normalize_checkpoint_record(checkpoint)
         projected_session_state = self._normalize_authority_snapshot(
             runtime.snapshot_session_state(),
         )
 
         event_checkpoint_copy = dict(event_checkpoint)
-        event_session_state = self._normalize_authority_snapshot(
-            event_checkpoint_copy.pop("session_state", {}),
-        )
+        raw_event_session_state = event_checkpoint_copy.pop("session_state", None)
+        if bool(getattr(self, "strict_mode", False)) and not isinstance(raw_event_session_state, dict):
+            raise StateDivergenceError(
+                "Memory authority divergence: missing event-sourced session-state snapshot",
+                report={
+                    "trace_id": trace_id,
+                    "reason": "missing_event_sourced_session_state",
+                    "repair_hint": "Persist the runtime session-state snapshot with the graph checkpoint event.",
+                },
+            )
+        event_session_state = self._normalize_authority_snapshot(raw_event_session_state or {})
+        event_checkpoint_copy.pop("continuity", None)
+        event_checkpoint_copy = normalize_checkpoint_record(event_checkpoint_copy)
 
         projected = {
             "checkpoint": self._normalize_authority_snapshot(projected_checkpoint),
@@ -924,6 +948,8 @@ class _IntegrityVerifyMixin:
             turn_context.state = state_snapshot
         self.save_turn_event(
             {
+                "event_id": uuid4().hex,
+                "sequence": self._advance_event_sequence(turn_context),
                 "event_type": "merkle_anchor_commit",
                 "trace_id": trace_id,
                 "occurred_at": occurred_at,

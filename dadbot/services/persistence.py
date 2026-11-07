@@ -12,22 +12,20 @@ from copy import deepcopy
 from datetime import datetime
 from typing import Any
 
+from dadbot.core.contract_evaluator import validate_sovereign_ledger_transition
 from dadbot.core.execution_context import (
     RuntimeTraceViolation,
     ensure_execution_trace_root,
     require_bound_core_state_for_mutation,
 )
 from dadbot.core.execution_ledger import IntegrityBreachError
-from dadbot.core.kernel_mutation_gate import apply_event, emit_event
-from dadbot.core.mutation_entry_invariants import enforce_mutation_entry_invariants
-from dadbot.core.contract_evaluator import validate_sovereign_ledger_transition
 from dadbot.core.global_transition_invariants import (
     TransitionBoundaryView,
     enforce_global_transition_invariants,
 )
+from dadbot.core.kernel_mutation_gate import apply_event, emit_event
+from dadbot.core.mutation_entry_invariants import enforce_mutation_entry_invariants
 from dadbot.core.persistence import AbstractCheckpointer
-from dadbot.core.post_commit_events import PostCommitEvent
-from dadbot.core.persistence_schema_config import is_strict_persistence_schema_mode
 from dadbot.core.persistence_record_schema import (
     PersistenceSchemaError,
     assert_valid_checkpoint_record,
@@ -38,6 +36,8 @@ from dadbot.core.persistence_record_schema import (
     replay_record_errors,
     trace_event_errors,
 )
+from dadbot.core.persistence_schema_config import is_strict_persistence_schema_mode
+from dadbot.core.post_commit_events import PostCommitEvent
 from dadbot.core.runtime_errors import (
     NON_FATAL_RUNTIME_EXCEPTIONS,
     ExecutionStageError,
@@ -1100,6 +1100,8 @@ class PersistenceService(
         except RuntimeTraceViolation:
             trace_id = str((checkpoint or {}).get("trace_id") or "").strip()
             if not trace_id:
+                if self._strict_schema_reject_enabled():
+                    raise
                 logger.warning(
                     "PersistenceService.save_graph_checkpoint skipped due to null trace_id fallback",
                 )
@@ -1118,6 +1120,14 @@ class PersistenceService(
                 raise
             logger.error("PersistenceService.save_graph_checkpoint rejected checkpoint in non-strict mode")
         except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
+            if self._strict_schema_reject_enabled():
+                raise PersistenceFailure(
+                    "PersistenceService.save_graph_checkpoint failed",
+                    context={
+                        "trace_id": str((checkpoint or {}).get("trace_id") or ""),
+                        "error": str(exc),
+                    },
+                ) from exc
             logger.error("PersistenceService.save_graph_checkpoint failed: %s", exc)
 
     def load_latest_graph_checkpoint(self, trace_token: str = "", **legacy_kwargs: Any) -> dict[str, Any] | None:
@@ -1337,6 +1347,8 @@ class PersistenceService(
         except RuntimeTraceViolation:
             trace_id = str((event or {}).get("trace_id") or "").strip()
             if not trace_id:
+                if self._strict_schema_reject_enabled():
+                    raise
                 logger.warning(
                     "PersistenceService.save_turn_event skipped due to null trace_id fallback",
                 )
@@ -1347,6 +1359,14 @@ class PersistenceService(
                 raise
             logger.error("PersistenceService.save_turn_event rejected event in non-strict mode")
         except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
+            if self._strict_schema_reject_enabled():
+                raise PersistenceFailure(
+                    "PersistenceService.save_turn_event failed",
+                    context={
+                        "trace_id": str((event or {}).get("trace_id") or ""),
+                        "error": str(exc),
+                    },
+                ) from exc
             logger.error("PersistenceService.save_turn_event failed: %s", exc)
 
     def list_turn_events(self, trace_token: str, limit: int = 0) -> list[dict[str, Any]]:

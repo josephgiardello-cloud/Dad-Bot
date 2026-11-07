@@ -7,10 +7,10 @@ import pytest
 from dadbot.core.persistence_record_schema import (
     CHECKPOINT_RECORD_SCHEMA_VERSION,
     IO_CAPTURE_SCHEMA_VERSION,
-    PersistenceSchemaError,
     REPLAY_RECORD_SCHEMA_VERSION,
     STATE_SNAPSHOT_SCHEMA_VERSION,
     TRACE_EVENT_SCHEMA_VERSION,
+    PersistenceSchemaError,
     assert_valid_checkpoint_record,
     assert_valid_replay_record,
     normalize_checkpoint_record,
@@ -215,6 +215,43 @@ def test_normalize_checkpoint_record_canonical_shape() -> None:
     assert checkpoint["execution_state"]["metadata"] == {"a": 1}
     assert checkpoint["continuity"]["execution_fingerprint"] == "fp-1"
     assert checkpoint["continuity"]["event_count"] == 7
+
+
+def test_normalize_checkpoint_record_accepts_snapshot_updated_at() -> None:
+    checkpoint = assert_valid_checkpoint_record(
+        {
+            "trace_id": "trace-snapshot",
+            "stage": "inference",
+            "status": "after",
+            "updated_at": "2026-01-01T00:00:00",
+        },
+    )
+
+    assert checkpoint["occurred_at"] == "2026-01-01T00:00:00"
+
+
+def test_normalize_checkpoint_record_preserves_flat_execution_state() -> None:
+    checkpoint = normalize_checkpoint_record(
+        {
+            "trace_id": "trace-flat-state",
+            "stage": "save",
+            "status": "atomic_finalize",
+            "updated_at": "2026-01-01T00:00:00",
+            "state": {"memory": ["persisted"]},
+            "metadata": {"session_id": "session-1"},
+            "phase_history": [{"phase": "SAVE"}],
+            "stage_traces": [{"stage": "save"}],
+            "event_sequence": 7,
+        },
+    )
+
+    assert checkpoint["execution_state"] == {
+        "state": {"memory": ["persisted"]},
+        "metadata": {"session_id": "session-1"},
+        "phase_history": [{"phase": "SAVE"}],
+        "stage_traces": [{"stage": "save"}],
+        "event_sequence": 7,
+    }
 
 
 def test_checkpoint_record_strict_validation_rejects_missing_occurred_at() -> None:

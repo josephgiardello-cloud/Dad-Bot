@@ -15,12 +15,6 @@ from pathlib import Path
 from typing import Any
 
 from dadbot.contracts import DadBotContext, SupportsDadBotAccess
-from dadbot.core.execution_context import (
-    RuntimeTraceViolation,
-    active_execution_trace,
-    ensure_execution_trace_root,
-    record_execution_step,
-)
 from dadbot.core.contracts.lifecycle_events import (
     Claimed,
     LeaseExpired,
@@ -31,13 +25,18 @@ from dadbot.core.contracts.lifecycle_events import (
 )
 from dadbot.core.control_plane_projection import ExecutionProjection
 from dadbot.core.control_plane_reducer import ExecutionState, ExecutionStatus, lease_expired
-from dadbot.core.ledger_writer import LedgerWriter
+from dadbot.core.execution_context import (
+    RuntimeTraceViolation,
+    active_execution_trace,
+    ensure_execution_trace_root,
+    record_execution_step,
+)
 from dadbot.core.execution_replay_engine import verify_terminal_state_replay_equivalence
 from dadbot.core.kernel_locks import KernelReplaySequenceLock
-from dadbot.core.persistence_schema_config import is_strict_persistence_schema_mode
+from dadbot.core.ledger_writer import LedgerWriter
 from dadbot.core.persistence_record_schema import (
-    PersistenceSchemaError,
     PERSISTENCE_SCHEMA_VERSION,
+    PersistenceSchemaError,
     assert_valid_checkpoint_record,
     assert_valid_replay_record,
     checkpoint_record_errors,
@@ -47,6 +46,7 @@ from dadbot.core.persistence_record_schema import (
     normalize_trace_event,
     trace_event_errors,
 )
+from dadbot.core.persistence_schema_config import is_strict_persistence_schema_mode
 
 POLICY_TRACE_EVENT_TYPE = "PolicyTraceEvent"
 _WRITE_P95_SLO_MS = 15.0
@@ -226,7 +226,7 @@ class ConversationPersistenceManager:
 
         # Checkpoint is the canonical execution-state representation.
         # Persist deterministic execution state in-checkpoint, not as side payloads.
-        execution_state = {
+        execution_state = dict(source.get("execution_state") or {}) or {
             "state": copy.deepcopy(dict(source.get("state") or {})),
             "metadata": copy.deepcopy(metadata),
             "phase_history": copy.deepcopy(list(source.get("phase_history") or [])),
@@ -704,15 +704,22 @@ class ConversationPersistenceManager:
         self._assert_checkpoint_runtime_transition(payload)
         payload = self._build_checkpoint_continuity(payload, trace_token=trace_id)
         self._assert_snapshot_invariants(payload, label="graph_checkpoint")
+        checkpoint_event_payload = {
+            "trace_id": trace_id,
+            "stage": stage,
+            "status": status,
+            "checkpoint": payload,
+        }
+        snapshot_session_state = getattr(self.bot, "snapshot_session_state", None)
+        if callable(snapshot_session_state):
+            session_state = snapshot_session_state()
+            if not isinstance(session_state, dict):
+                raise TypeError("snapshot_session_state must return a dict")
+            checkpoint_event_payload["session_state"] = copy.deepcopy(session_state)
         self._append_ledger_event(
             event_type="GRAPH_CHECKPOINT",
             trace_token=trace_id,
-            payload={
-                "trace_id": trace_id,
-                "stage": stage,
-                "status": status,
-                "checkpoint": payload,
-            },
+            payload=checkpoint_event_payload,
             step_key="persist_graph_checkpoint",
             session_id=str(payload.get("session_id") or "default"),
         )
@@ -1599,4 +1606,3 @@ class ConversationPersistenceManager:
 
 
 __all__ = ["ConversationPersistenceManager"]
-

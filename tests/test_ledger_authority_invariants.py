@@ -7,11 +7,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from dadbot.core.control_plane_projection import ExecutionProjection
 from dadbot.core.execution_context import ExecutionTraceRecorder, bind_execution_trace
 from dadbot.core.execution_ledger import ExecutionLedger
-from dadbot.core.control_plane_projection import ExecutionProjection
 from dadbot.core.ledger_writer import LedgerWriter
-from dadbot.core.persistence_record_schema import PersistenceSchemaError
+from dadbot.core.persistence_record_schema import PersistenceSchemaError, normalize_checkpoint_record
 from dadbot.core.replay_verifier import ReplayVerifier
 from dadbot.core.session_store import SessionStore
 from dadbot.managers.conversation_persistence import ConversationPersistenceManager
@@ -105,6 +105,29 @@ def test_persistence_events_are_ledger_authoritative(tmp_path: Path):
     assert any(str(event.get("event_type") or "") == "phase_transition" for event in events)
 
 
+def test_graph_checkpoint_ledger_event_carries_session_state_snapshot(tmp_path: Path):
+    ledger = ExecutionLedger()
+    bot = _FakeBot(ledger, tmp_path)
+    bot.snapshot_session_state = lambda: {"memory": {"favorite_color": "blue"}}
+    manager = ConversationPersistenceManager(bot)
+
+    recorder = ExecutionTraceRecorder(trace_id="inv-session-state", prompt="invariants")
+    with bind_execution_trace(recorder, required=True):
+        manager.persist_graph_checkpoint(
+            {
+                "trace_id": "inv-session-state",
+                "stage": "save",
+                "status": "after",
+                "state": {"safe_result": "ok"},
+            },
+        )
+
+    event = next(item for item in ledger.read() if str(item.get("type") or "") == "GRAPH_CHECKPOINT")
+    assert dict(event.get("payload") or {}).get("session_state") == {
+        "memory": {"favorite_color": "blue"},
+    }
+
+
 def test_graph_checkpoint_snapshot_is_canonical_execution_state(tmp_path: Path):
     ledger = ExecutionLedger()
     manager = ConversationPersistenceManager(_FakeBot(ledger, tmp_path))
@@ -137,6 +160,31 @@ def test_graph_checkpoint_snapshot_is_canonical_execution_state(tmp_path: Path):
     assert str(continuity.get("strict_sequence_hash") or "")
     assert replay["determinism"]["consistent"] is True
     assert replay["determinism"]["lock_hash"] == "lock-c"
+
+
+def test_normalized_checkpoint_retains_execution_state_in_ledger(tmp_path: Path):
+    ledger = ExecutionLedger()
+    manager = ConversationPersistenceManager(_FakeBot(ledger, tmp_path))
+    checkpoint = normalize_checkpoint_record(
+        {
+            "trace_id": "inv-normalized-checkpoint",
+            "stage": "save",
+            "status": "after",
+            "state": {"safe_result": "ok"},
+            "metadata": {"session_id": "session-1"},
+            "phase_history": [{"phase": "SAVE"}],
+            "stage_traces": [{"stage": "save"}],
+            "event_sequence": 7,
+        },
+    )
+
+    recorder = ExecutionTraceRecorder(trace_id="inv-normalized-checkpoint", prompt="invariants")
+    with bind_execution_trace(recorder, required=True):
+        manager.persist_graph_checkpoint(checkpoint)
+        persisted = manager.load_latest_graph_checkpoint(trace_id="inv-normalized-checkpoint")
+
+    assert persisted is not None
+    assert persisted["execution_state"] == checkpoint["execution_state"]
 
 
 def test_graph_checkpoint_snapshot_is_canonical_and_thin(tmp_path: Path):

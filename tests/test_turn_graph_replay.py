@@ -66,6 +66,8 @@ def test_turn_graph_records_deterministic_phase_transitions():
     phase_events = [evt for evt in events if evt.get("event_type") == "phase_transition"]
     assert [evt["transition"]["to"] for evt in phase_events] == ["ACT", "OBSERVE", "RESPOND"]
     assert all(int(evt.get("sequence") or 0) > 0 for evt in events)
+    missing_event_ids = [evt for evt in events if not str(evt.get("event_id") or "").strip()]
+    assert not missing_event_ids, missing_event_ids
     checkpoint_events = [evt for evt in events if evt.get("event_type") == "graph_checkpoint"]
     assert checkpoint_events
     assert checkpoint_events[0].get("determinism_lock", {}).get("lock_hash") == "abc123"
