@@ -67,7 +67,7 @@ model, set `DADBOT_RUN_REAL_EMBEDDING_BENCHMARK=1`, and run
 `python -m pytest tests\eval\test_memory_benchmark.py -s`. The questions are
 templated and repeat the fact topics; results do not measure production-vault
 or source-mode citation quality. The same opt-in run also includes a separate
-25-question engineering-authored paraphrase diagnostic against the synthetic
+50-question engineering-authored paraphrase diagnostic against the synthetic
 facts. That diagnostic reports misses without pretending it meets the
 200-question regression gate.
 
@@ -121,7 +121,8 @@ applies after scoring. The hybrid caller also retains the entire semantic
 result set until BM25 fusion, avoiding a second, lossy intermediate top-k.
 
 After both eligibility fixes, real Nomic measured 200/200 top-1 and top-3 on
-templates and 20/25 top-1, 22/25 top-3 on paraphrases at unchanged weight 0.75.
+templates and 20/25 top-1, 22/25 top-3 on the original paraphrases at unchanged
+weight 0.75.
 All four previously excluded targets reach cosine scoring. Three remaining
 top-3 misses (season, bedtime routine, commute) have positive cosine and
 semantic scores but zero BM25, so these are now final-ranking cases, not
@@ -135,8 +136,11 @@ that replay at the current weight reproduces actual retrieval counts.
 The catalog-key fetch does not use vector ordering and cannot use HNSW for
 nearest-neighbor selection, even if an ANN index already exists on Postgres.
 The local configuration requests pgvector with no ANN index or fixed
-dimensions; live existing server indexes remain unverified because the
-inventory connection timed out. No separate ANN replacement is needed for
+dimensions. Read-only inspection of the running Docker Postgres subsequently
+confirmed pgvector 0.8.2 and no HNSW/IVFFlat index on `semantic_memories`.
+Its database port is internal to Docker, not published on Windows; the host
+DSN's localhost:5432 timed out. This distinguishes the host configuration from
+the deployed Docker backend. No separate ANN replacement is needed for
 this conversational path. Other backend candidate APIs retain their existing
 filter semantics. Source mode remains separate and already scores every
 currently eligible approved source without query prefilters. Tests verify
@@ -144,6 +148,53 @@ currently eligible approved source without query prefilters. Tests verify
 pgvector key-only SQL under all ANN configurations, facade scoring coverage,
 and scoring eligibility of 120 approved sources while excluding unapproved
 evidence. These are synthetic scoping checks, not a production-vault audit.
+
+The paraphrase diagnostic is now expanded to 50 questions, retaining the
+original 25 and adding one natural question for each remaining fact. Every
+synthetic fact has exactly one target question. The unchanged topic-held-out
+rule gives 40 training / 10 held-out questions; labels are not changed to
+hide retrieval failures. Real Nomic measured **41/50 top-1, 46/50 top-3**
+at weight 0.75, with identical rankings across Python hash seeds 0 and 1.
+Training measured 35/40 top-1 and 38/40 top-3; held-out measured 6/10 and
+8/10. Training-only selection chose weight 0.80, but held-out performance
+did not improve, so the production default remains 0.75.
+
+Per-stage diagnostic evidence distinguishes content absence from ranking:
+
+| Complete miss | Raw cosine rank | Fused rank before diversity | Cause |
+| --- | --- | --- | --- |
+| Preferred season | 1 | 4 | BM25 matches generic `time` in unrelated memories; expected memory has no sparse match |
+| Bedtime routine | 2 | 2 | Category diversification selects a different routines memory first |
+| Commute method | 3 | 2 | Category diversification selects a different work memory first |
+| Work project (new question) | 2 | 2 | Category diversification selects a different work memory first |
+
+All four expected facts exist in the normalized catalog and reach cosine
+scoring. None is a missing-content case; even the complete misses have
+their correct target in raw cosine top-3. They are fusion/selection failures.
+The one-per-category-first policy can exclude these same-category alternatives
+even with ten diversified candidates. All four targets are instead in the
+undiversified fused top-five pool.
+
+The 3+ consistent-ranking-miss criterion is met for a controlled margin-gated
+reranker experiment, not an established precision or latency improvement.
+Any experiment must use the **pre-diversification** candidate pool; reranking
+the final three sources cannot recover discarded evidence. Correcting the
+relevance-blind selection policy is also supported directly by these results
+and should be considered before paying for an extra model call. No reranker,
+automatic alpha change, or semantic cache is enabled by this diagnostic slice.
+
+Live backend parity was verified using an isolated container from the same
+pgvector 0.8.2 image as the running database, not the production vault.
+Both SQLite and Postgres independently index/search with real 768-dimensional
+Nomic vectors and return 41/50 top-1, 46/50 top-3 with identical full top-three
+ranking fingerprints across two hash seeds. The Postgres test additionally
+mirrors stored vectors into SQLite and asserts identical rankings for every
+question. To repeat it, provide a dedicated `DADBOT_TEST_POSTGRES_DSN` alongside
+the real-embedding and fusion-measurement flags. It creates/drops a unique
+synthetic benchmark table and fails on backend errors rather than falling back
+to SQLite. Install the declared `[service]` dependencies, including `pgvector`,
+for this path. This verifies current repository retrieval code on live
+Postgres, not a restart or upgrade of the running API image.
 
 Source mode keeps a bounded, in-memory LRU cache of 64 exact normalized queries
 per service, scoped by tenant. Hits become most recently used; capacity

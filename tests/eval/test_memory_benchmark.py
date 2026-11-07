@@ -4,10 +4,13 @@ import hashlib
 import json
 import os
 from datetime import date
+from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
 from dadbot.managers.memory_query import MEMORY_DENSE_WEIGHT
+from dadbot_system.semantic_index import PGVectorSemanticIndex, SQLiteSemanticIndex
 from tests.eval.memory_benchmark import MEMORY_BENCHMARK_FACTS, memory_benchmark_cases, memory_paraphrase_cases
 
 pytestmark = pytest.mark.unit
@@ -40,6 +43,7 @@ def install_fusion_capture(bot, monkeypatch):
         return context
 
     def capture_candidates(current_keys):
+        current_keys = set(current_keys)
         rows = original_candidates(current_keys)
         assert {row["summary_key"] for row in rows} == set(current_keys)
         semantic_candidates.clear()
@@ -48,11 +52,16 @@ def install_fusion_capture(bot, monkeypatch):
 
     def capture_score(memory, context):
         key = bot.semantic_memory_key(memory)
+        dense = original_score(memory, {**context, "user_message": ""})
+        fused = original_score(memory, context)
         components[memory["summary"]] = {
             "candidate_present": key in semantic_candidates,
             "semantic": context["semantic_scores"].get(key, 0.0),
             "positive_cosine": cosine_scores.get(key, 0.0),
             "bm25": context["lexical_scores"].get(key, 0.0),
+            "dense": dense,
+            "fused": fused,
+            "category": memory.get("category"),
             "legacy_filter": {
                 "tokens": candidate_filter.get("query_tokens"),
                 "category": candidate_filter.get("query_category"),
@@ -67,12 +76,12 @@ def install_fusion_capture(bot, monkeypatch):
         }
         fusion_rows.append(
             (
-                original_score(memory, {**context, "user_message": ""}),
+                dense,
                 context["lexical_scores"].get(key, 0.0),
                 memory,
             )
         )
-        return original_score(memory, context)
+        return fused
 
     monkeypatch.setattr(bot.memory_query, "score", capture_score)
     monkeypatch.setattr(semantic_manager, "catalog_semantic_rows", capture_candidates)
@@ -81,7 +90,31 @@ def install_fusion_capture(bot, monkeypatch):
     return fusion_rows, components
 
 
-def run_seeded_benchmark(bot, monkeypatch, cases=None):
+def report_ranking_miss(bot, case, components):
+    expected = case.expected_summary.casefold()
+    summary = next(summary for summary in components if expected in summary.casefold())
+    metrics = components[summary]
+    print(f"Miss components for {case.question!r}: {metrics}")
+    for label, key in (("cosine", "positive_cosine"), ("contextual_dense", "dense"), ("fusion", "fused")):
+        ranked = sorted(components, key=lambda text: (components[text][key], text), reverse=True)
+        print(
+            f"Expected {label} rank: {ranked.index(summary) + 1}; "
+            f"top-3: {[(text, components[text][key]) for text in ranked[:3]]}"
+        )
+    ranked = sorted(
+        ((values["fused"], {"summary": text, "category": values["category"]}) for text, values in components.items()),
+        key=lambda item: (item[0], item[1]["summary"]),
+        reverse=True,
+    )
+    eligible = [item for item in ranked if item[0] >= 0.18] or ranked[:1]
+    print(f"Pre-diversification fused top-1/top-2 gap: {ranked[0][0] - ranked[1][0]:.6f}")
+    for count in (3, 5, 10):
+        selected = bot.memory_query.select_diverse_ranked_memories(eligible, count)
+        rank = next((index + 1 for index, (_, memory) in enumerate(selected) if memory["summary"] == summary), None)
+        print(f"Expected diversified candidate rank at k={count}: {rank}")
+
+
+def run_seeded_benchmark(bot, monkeypatch, cases=None, *, rankings=None):
     cases = memory_benchmark_cases() if cases is None else cases
     assert len(cases) >= 25
     assert len({case.question for case in cases}) == len(cases)
@@ -119,7 +152,7 @@ def run_seeded_benchmark(bot, monkeypatch, cases=None):
     hits_at_3 = 0
     misses_at_1: list[tuple[str, str, list[str]]] = []
     misses_at_3: list[tuple[str, str, list[str]]] = []
-    ranked_summaries = []
+    ranked_summaries = [] if rankings is None else rankings
     measure_fusion = os.environ.get("DADBOT_MEASURE_FUSION") == "1"
     fusion_rows = []
     expected_components = {}
@@ -147,10 +180,7 @@ def run_seeded_benchmark(bot, monkeypatch, cases=None):
         if not top_3_hit:
             misses_at_3.append((case.question, case.expected_summary, summaries))
             if measure_fusion:
-                components = [
-                    values for summary, values in expected_components.items() if expected in summary.casefold()
-                ]
-                print(f"Miss components for {case.question!r}: {components}")
+                report_ranking_miss(bot, case, expected_components)
 
     print(f"Seeded benchmark: top-1 {hits_at_1}/{len(cases)}, top-3 {hits_at_3}/{len(cases)}")
     fingerprint = hashlib.sha256(json.dumps(ranked_summaries, ensure_ascii=True).encode("ascii")).hexdigest()
@@ -209,25 +239,33 @@ def test_memory_retrieval_benchmark_meets_recall_threshold(bot, monkeypatch):
 
 def test_paraphrase_questions_have_distinct_seeded_targets():
     cases = memory_paraphrase_cases()
-    assert len(cases) == 25
-    assert len({case.question for case in cases}) == 25
-    assert len({case.expected_summary for case in cases}) == 25
-    assert {case.expected_summary for case in cases} <= {fact.summary for fact in MEMORY_BENCHMARK_FACTS}
+    assert len(cases) == 50
+    assert len({case.question for case in cases}) == 50
+    assert {case.expected_summary for case in cases} == {fact.summary for fact in MEMORY_BENCHMARK_FACTS}
 
 
 @pytest.mark.skipif(
     os.environ.get("DADBOT_RUN_REAL_EMBEDDING_BENCHMARK") != "1",
     reason="requires local Ollama and nomic-embed-text",
 )
-@pytest.mark.parametrize("question_set", ["templated", "paraphrase"])
-def test_memory_retrieval_with_real_ollama_embeddings(bot, monkeypatch, question_set):
+@pytest.mark.parametrize(
+    "question_set,backend",
+    [
+        ("templated", "sqlite"),
+        ("paraphrase", "sqlite"),
+        ("paraphrase", "pgvector"),
+    ],
+)
+@pytest.mark.usefixtures("real_semantic_backend")
+def test_memory_retrieval_with_real_ollama_embeddings(bot, monkeypatch, question_set, backend):
+    semantic_manager = bot.memory_manager._semantic_manager
+    assert semantic_manager._semantic_index_backend.name == backend
     del bot.embed_texts
     bot.PREFERRED_EMBEDDING_MODELS = ("nomic-embed-text",)
     bot.ACTIVE_EMBEDDING_MODEL = "nomic-embed-text"
     vectors = bot.embed_texts(["isolated benchmark embedding probe"])
     assert len(vectors) == 1 and len(vectors[0]) == 768, "Ollama Nomic embedding unavailable"
     assert bot.ACTIVE_EMBEDDING_MODEL == "nomic-embed-text"
-    semantic_manager = bot.memory_manager._semantic_manager
     original_embed = semantic_manager.embed_texts
     embedding_calls = []
 
@@ -243,7 +281,13 @@ def test_memory_retrieval_with_real_ollama_embeddings(bot, monkeypatch, question
 
     monkeypatch.setattr(semantic_manager, "embed_texts", checked_embed)
     cases = memory_paraphrase_cases() if question_set == "paraphrase" else memory_benchmark_cases()
-    total, hits_at_1, hits_at_3, misses_at_1, misses_at_3 = run_seeded_benchmark(bot, monkeypatch, cases)
+    rankings = []
+    total, hits_at_1, hits_at_3, misses_at_1, misses_at_3 = run_seeded_benchmark(
+        bot,
+        monkeypatch,
+        cases,
+        rankings=rankings,
+    )
     assert embedding_calls.count("semantic memory search") == total
     assert "semantic memory indexing" in embedding_calls
     print(f"Top-1 misses: {misses_at_1}")
@@ -254,4 +298,49 @@ def test_memory_retrieval_with_real_ollama_embeddings(bot, monkeypatch, question
         assert hits_at_3 / total >= RECALL_AT_3_THRESHOLD, f"top-3 misses: {misses_at_3}"
     else:
         # Diagnostic set: report weaknesses, not an invented passing baseline.
-        assert total == 25
+        assert total == 50
+    if backend == "pgvector":
+        verify_sqlite_ranking_parity(bot, monkeypatch, cases, rankings)
+        assert embedding_calls.count("semantic memory search") == total * 2
+
+
+def verify_sqlite_ranking_parity(bot, monkeypatch, cases, expected_rankings):
+    manager = bot.memory_manager._semantic_manager
+    catalog = bot.memory_catalog()
+    rows = manager.catalog_semantic_rows(bot.semantic_memory_key(memory) for memory in catalog)
+    mirror = SQLiteSemanticIndex(bot, Path(bot.semantic_memory_db_path).with_name("paraphrase_parity.sqlite3"))
+    mirror.upsert_rows([{**row, "content_hash": row["summary_key"]} for row in rows])
+    with monkeypatch.context() as patch:
+        patch.setattr(manager, "_semantic_index_backend", mirror)
+        actual = [
+            [memory["summary"] for memory in bot.memory_query.relevant_memories_for_input(case.question, limit=3)]
+            for case in cases
+        ]
+    assert actual == expected_rankings, "Postgres and SQLite must return identical full top-3 rankings."
+    print(f"Verified live pgvector/SQLite full-ranking parity on {len(cases)} questions.")
+
+
+@pytest.fixture
+def real_semantic_backend(bot, monkeypatch, backend):
+    if backend == "sqlite":
+        yield
+        return
+    dsn = os.environ.get("DADBOT_TEST_POSTGRES_DSN")
+    if not dsn:
+        pytest.skip("Requires dedicated DADBOT_TEST_POSTGRES_DSN; never uses the production table.")
+    import psycopg
+
+    table = f"semantic_paraphrase_{uuid4().hex}"
+    manager = bot.memory_manager._semantic_manager
+    assert bot.wait_for_semantic_index_idle(timeout=30)
+    index = PGVectorSemanticIndex(dsn, table=table)
+    with psycopg.connect(dsn, connect_timeout=5, autocommit=True) as connection:
+        try:
+            index.ensure_storage()
+            monkeypatch.setattr(manager, "_semantic_index_backend", index)
+            yield
+        finally:
+            try:
+                assert bot.wait_for_semantic_index_idle(timeout=30)
+            finally:
+                connection.execute(psycopg.sql.SQL("DROP TABLE IF EXISTS {}").format(psycopg.sql.Identifier(table)))
