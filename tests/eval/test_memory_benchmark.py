@@ -297,11 +297,25 @@ def test_memory_retrieval_with_real_ollama_embeddings(bot, monkeypatch, question
         assert hits_at_1 / total >= 0.90, f"top-1 misses: {misses_at_1}"
         assert hits_at_3 / total >= RECALL_AT_3_THRESHOLD, f"top-3 misses: {misses_at_3}"
     else:
-        # Diagnostic set: report weaknesses, not an invented passing baseline.
+        # Enforce the measured baseline without pretending recall is perfect.
         assert total == 50
+        assert hits_at_1 >= 41, f"top-1 regression: {misses_at_1}"
+        assert hits_at_3 >= 47, f"top-3 regression: {misses_at_3}"
+        report_original_paraphrases(cases[:25], rankings[:25])
     if backend == "pgvector":
         verify_sqlite_ranking_parity(bot, monkeypatch, cases, rankings)
         assert embedding_calls.count("semantic memory search") == total * 2
+
+
+def report_original_paraphrases(cases, rankings):
+    matches = [
+        [case.expected_summary.casefold() in text.casefold() for text in rows]
+        for case, rows in zip(cases, rankings, strict=True)
+    ]
+    print(
+        f"Original 25 paraphrases: top-1 {sum(row[0] for row in matches)}/25, "
+        f"top-3 {sum(any(row) for row in matches)}/25"
+    )
 
 
 def verify_sqlite_ranking_parity(bot, monkeypatch, cases, expected_rankings):

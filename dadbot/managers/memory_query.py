@@ -144,41 +144,27 @@ class MemoryQueryManager:
         desired = max(1, int(limit or 1))
         selected = []
         seen_keys = set()
-        category_counts = {}
-
-        def category_name(memory):
-            return str(memory.get("category", "general")).strip().lower() or "general"
-
-        def try_add(item, max_per_category):
-            memory = item[memory_index]
-            diversity_key = self.memory_diversity_key(memory)
-            category = category_name(memory)
-            if diversity_key in seen_keys or category_counts.get(category, 0) >= max_per_category:
-                return False
-            selected.append(item)
-            seen_keys.add(diversity_key)
-            category_counts[category] = category_counts.get(category, 0) + 1
-            return True
-
         for item in ranked_items:
-            if try_add(item, 1) and len(selected) >= desired:
-                return selected
-
-        for item in ranked_items:
-            if try_add(item, 2) and len(selected) >= desired:
-                return selected
-
-        for item in ranked_items:
-            memory = item[memory_index]
-            diversity_key = self.memory_diversity_key(memory)
-            if diversity_key in seen_keys:
+            key = self.memory_diversity_key(item[memory_index])
+            if key in seen_keys:
                 continue
             selected.append(item)
-            seen_keys.add(diversity_key)
+            seen_keys.add(key)
             if len(selected) >= desired:
                 break
 
-        return selected
+        # Diversify display order only after the strongest distinct set is fixed.
+        first_in_category = []
+        repeated_categories = []
+        seen_categories = set()
+        for item in selected:
+            category = str(item[memory_index].get("category", "general")).strip().lower() or "general"
+            if category in seen_categories:
+                repeated_categories.append(item)
+            else:
+                first_in_category.append(item)
+                seen_categories.add(category)
+        return first_in_category + repeated_categories
 
     def memory_context_limit_for_input(self, user_input):
         current_mood = self.bot.last_saved_mood()
@@ -431,7 +417,7 @@ class MemoryQueryManager:
             filtered_ranked = ranked[:1]
 
         selected = self.select_diverse_ranked_memories(filtered_ranked, effective_limit)
-        selected_scores = [float(score) for score, _ in selected]
+        selected_scores = sorted((float(score) for score, _ in selected), reverse=True)
         top_score = selected_scores[0] if selected_scores else 0.0
         second_score = selected_scores[1] if len(selected_scores) > 1 else 0.0
         self.bot._last_memory_retrieval_diagnostics = {

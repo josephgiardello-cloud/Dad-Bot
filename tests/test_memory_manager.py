@@ -745,7 +745,7 @@ def test_semantic_memory_matches_caps_stale_low_impact_memories(bot):
     assert "platform migration" in matches[0][1]["summary"].lower()
 
 
-def test_relevant_memories_for_input_applies_diversity_cap(bot):
+def test_relevant_memories_for_input_preserves_relevant_same_category_entries(bot):
     today = date.today().isoformat()
     bot.MEMORY_STORE = {**bot.MEMORY_STORE, "memories": [
         {
@@ -783,7 +783,9 @@ def test_relevant_memories_for_input_applies_diversity_cap(bot):
     memories = bot.relevant_memories_for_input("work deadlines and budget", limit=4)
 
     work_stress_memories = [memory for memory in memories if memory.get("category") == "work"]
-    assert len(work_stress_memories) <= 2
+    assert len(work_stress_memories) == sum(
+        memory.get("category") == "work" for memory in bot.memory_catalog()
+    )
     assert any(memory.get("category") == "finance" for memory in memories)
 
 

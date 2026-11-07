@@ -196,6 +196,38 @@ to SQLite. Install the declared `[service]` dependencies, including `pgvector`,
 for this path. This verifies current repository retrieval code on live
 Postgres, not a restart or upgrade of the running API image.
 
+### Membership-preserving diversification
+
+Category diversification now fixes the strongest distinct top-k set first,
+then places the first memory from each represented category ahead of repeated
+categories **within that set**. It never replaces a stronger memory with a
+weaker category merely to increase domain coverage. Deduplication still runs
+before selection, the highest-ranked distinct memory remains first, and no
+query-intent classifier is introduced. Retrieval confidence gaps use the
+two highest scores, not the reordered display's first two items. The same
+selector is shared by semantic retrieval and hybrid fusion.
+
+With unchanged alpha 0.75, real Nomic measures **41/50 top-1 and 47/50 top-3**,
+up from 41/50 and 46/50. Templates retain 200/200 on both metrics. These
+measured paraphrase floors are now enforced in the opt-in real tests, along
+with exact live Postgres/SQLite ranking parity. Rankings remain identical
+across two hash seeds. The original 25-question subset remains 20/25 top-1,
+22/25 top-3: recovering bedtime and commute also exposes wake-up and vacation
+targets that the former diversity filter had promoted over higher scores.
+The new work-project question is recovered, accounting for the net top-3 gain.
+
+The remaining complete misses are season, wake-up time, and vacation.
+Their raw-cosine targets are all rank 1. Season falls to fused rank 4 because
+BM25 rewards generic `time` matches elsewhere; wake-up falls to contextual
+dense/fused rank 4 and vacation to rank 5 because inferred `work`/`goals`
+categories penalize their routines/travel entries. Thus only one complete
+miss in the expanded 50 is BM25-driven, insufficient evidence to change
+global alpha or enable a confidence-based sparse cap. Inferred-category
+weighting is the next selected investigation. Reranking and semantic caching
+remain disabled. A future reranker must see undiversified top-five candidates
+before display diversification; it must not reuse display order to compute
+its ambiguity margin.
+
 Source mode keeps a bounded, in-memory LRU cache of 64 exact normalized queries
 per service, scoped by tenant. Hits become most recently used; capacity
 evicts the least recently used answer. Each lookup reads current approved
