@@ -3,6 +3,11 @@ from __future__ import annotations
 from datetime import date
 
 from dadbot.contracts import DadBotContext, SupportsDadBotAccess
+from dadbot.utils import SIGNIFICANT_TOKEN_STOPWORDS, tokenize_text
+
+_RETRIEVAL_QUERY_WORDS = frozenset(
+    {"about", "can", "earlier", "mentioned", "please", "recall", "remember", "remind", "tell", "what", "you"}
+)
 
 
 class MemoryQueryManager:
@@ -234,10 +239,8 @@ class MemoryQueryManager:
     def score(self, memory, query_context):
         """Score one memory for current turn relevance.
 
-        score =
-          (0.6 * semantic_similarity)
-        + (0.25 * importance)
-        + (0.15 * recency)
+        Blend the existing semantic, importance, and recency score with
+        query-term coverage when the user supplied meaningful terms.
         """
         memory_key = self.bot.semantic_memory_key(memory)
         semantic_similarity = float((query_context.get("semantic_scores") or {}).get(memory_key, 0.0) or 0.0)
@@ -255,10 +258,16 @@ class MemoryQueryManager:
         importance = self._importance_signal(memory)
         recency = self.semantic_memory_freshness_weight(memory)
 
-        return round(
-            (0.6 * semantic_similarity) + (0.25 * importance) + (0.15 * recency),
-            6,
-        )
+        base_score = (0.6 * semantic_similarity) + (0.25 * importance) + (0.15 * recency)
+        query_words = {
+            token for token in tokenize_text(str(query_context.get("user_message") or ""))
+            if len(token) >= 3 and token not in SIGNIFICANT_TOKEN_STOPWORDS and token not in _RETRIEVAL_QUERY_WORDS
+        }
+        memory_words = tokenize_text(str(memory.get("summary") or ""))
+        lexical_overlap = len(query_words & memory_words) / len(query_words) if query_words else 0.0
+        if query_words:
+            base_score = 0.75 * base_score + 0.25 * lexical_overlap
+        return round(base_score, 6)
 
     @staticmethod
     def _confidence_bucket(score):

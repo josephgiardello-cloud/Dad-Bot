@@ -618,6 +618,39 @@ def test_clean_memory_entries_normalizes_filters_and_deduplicates(bot):
     assert len(cleaned) == 2
 
 
+def test_memory_score_uses_short_query_terms_to_distinguish_related_preferences(bot):
+    tea = {"summary": "My tea preference is mint tea.", "category": "preferences"}
+    dessert = {"summary": "My dessert preference is lemon pie.", "category": "preferences"}
+    context = {
+        "user_message": "Can you recall my tea preference?",
+        "semantic_scores": {bot.semantic_memory_key(tea): 0.9, bot.semantic_memory_key(dessert): 0.9},
+    }
+
+    assert bot.memory_query.score(tea, context) > bot.memory_query.score(dessert, context)
+
+
+def test_memory_score_preserves_semantic_and_graph_signals_without_word_overlap(bot):
+    semantic = {"summary": "Tony enjoys cycling.", "category": "hobbies"}
+    distractor = {"summary": "Tony bought a bicycle helmet.", "category": "hobbies"}
+    context = {
+        "user_message": "Tell me about my bicycle exercise",
+        "semantic_scores": {bot.semantic_memory_key(semantic): 0.8, bot.semantic_memory_key(distractor): 0.1},
+    }
+
+    assert bot.memory_query.score(semantic, context) > bot.memory_query.score(distractor, context)
+    graph_context = {**context, "graph_boost_tokens": {"cycling"}}
+    assert bot.memory_query.score(semantic, graph_context) > bot.memory_query.score(semantic, context)
+
+
+def test_memory_score_preserves_base_when_query_has_no_meaningful_terms(bot):
+    memory = {"summary": "Tony enjoys cycling.", "category": "hobbies"}
+    context = {"semantic_scores": {bot.semantic_memory_key(memory): 0.8}}
+
+    assert bot.memory_query.score(memory, context) == bot.memory_query.score(
+        memory, {**context, "user_message": "Can you tell me?"}
+    )
+
+
 def test_relevant_memories_for_input_prefers_fresher_entries(bot):
     old_date = (date.today() - timedelta(days=180)).isoformat()
     fresh_date = date.today().isoformat()

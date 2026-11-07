@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import date
 
 import pytest
@@ -8,13 +9,11 @@ from tests.eval.memory_benchmark import MEMORY_BENCHMARK_FACTS, memory_benchmark
 
 pytestmark = pytest.mark.unit
 
-# Temporary baseline for the isolated 50-fact fixture with mocked embeddings:
-# 192/200 measured on a clean vault. Restore the 0.98 target when retrieval
-# resolves the tea-preference and work-project misses; this is not live-model recall.
-RECALL_AT_3_BASELINE = 0.96
+# The fixed, isolated 50-fact vault must meet this target with both embedding modes.
+RECALL_AT_3_THRESHOLD = 0.98
 
 
-def test_memory_retrieval_benchmark_meets_recall_threshold(bot, monkeypatch):
+def run_seeded_benchmark(bot, monkeypatch):
     cases = memory_benchmark_cases()
     assert len(cases) >= 200
     assert len({case.question for case in cases}) == len(cases)
@@ -50,7 +49,8 @@ def test_memory_retrieval_benchmark_meets_recall_threshold(bot, monkeypatch):
 
     hits_at_1 = 0
     hits_at_3 = 0
-    misses: list[tuple[str, str, list[str]]] = []
+    misses_at_1: list[tuple[str, str, list[str]]] = []
+    misses_at_3: list[tuple[str, str, list[str]]] = []
     for case in cases:
         retrieved = bot.memory_query.relevant_memories_for_input(
             case.question,
@@ -59,11 +59,54 @@ def test_memory_retrieval_benchmark_meets_recall_threshold(bot, monkeypatch):
         summaries = [str(memory.get("summary") or "") for memory in retrieved]
         expected = case.expected_summary.casefold()
         top_3_hit = any(expected in summary.casefold() for summary in summaries[:3])
-        hits_at_1 += bool(summaries and expected in summaries[0].casefold())
+        top_1_hit = bool(summaries and expected in summaries[0].casefold())
+        hits_at_1 += top_1_hit
         hits_at_3 += top_3_hit
-        if not top_3_hit and len(misses) < 5:
-            misses.append((case.question, case.expected_summary, summaries))
+        if not top_1_hit:
+            misses_at_1.append((case.question, case.expected_summary, summaries))
+        if not top_3_hit:
+            misses_at_3.append((case.question, case.expected_summary, summaries))
 
     print(f"Seeded benchmark: top-1 {hits_at_1}/{len(cases)}, top-3 {hits_at_3}/{len(cases)}")
-    assert hits_at_1 / len(cases) >= 0.90, f"top-1 misses: {misses}"
-    assert hits_at_3 / len(cases) >= RECALL_AT_3_BASELINE, f"top-3 misses: {misses}"
+    return len(cases), hits_at_1, hits_at_3, misses_at_1, misses_at_3
+
+
+def test_memory_retrieval_benchmark_meets_recall_threshold(bot, monkeypatch):
+    total, hits_at_1, hits_at_3, misses_at_1, misses_at_3 = run_seeded_benchmark(bot, monkeypatch)
+    assert hits_at_1 / total >= 0.90, f"top-1 misses: {misses_at_1}"
+    assert hits_at_3 / total >= RECALL_AT_3_THRESHOLD, f"top-3 misses: {misses_at_3}"
+
+
+@pytest.mark.skipif(
+    os.environ.get("DADBOT_RUN_REAL_EMBEDDING_BENCHMARK") != "1",
+    reason="requires local Ollama and nomic-embed-text",
+)
+def test_memory_retrieval_with_real_ollama_embeddings(bot, monkeypatch):
+    del bot.embed_texts
+    bot.PREFERRED_EMBEDDING_MODELS = ("nomic-embed-text",)
+    bot.ACTIVE_EMBEDDING_MODEL = "nomic-embed-text"
+    vectors = bot.embed_texts(["isolated benchmark embedding probe"])
+    assert len(vectors) == 1 and len(vectors[0]) == 768, "Ollama Nomic embedding unavailable"
+    assert bot.ACTIVE_EMBEDDING_MODEL == "nomic-embed-text"
+    semantic_manager = bot.memory_manager._semantic_manager
+    original_embed = semantic_manager.embed_texts
+    embedding_calls = []
+
+    def checked_embed(texts, purpose="semantic retrieval"):
+        vectors = original_embed(texts, purpose=purpose)
+        expected_count = 1 if isinstance(texts, str) else len(texts)
+        assert len(vectors) == expected_count and all(len(vector) == 768 for vector in vectors), (
+            f"Nomic embeddings unavailable during {purpose}"
+        )
+        assert bot.ACTIVE_EMBEDDING_MODEL == "nomic-embed-text"
+        embedding_calls.append(purpose)
+        return vectors
+
+    monkeypatch.setattr(semantic_manager, "embed_texts", checked_embed)
+    total, hits_at_1, hits_at_3, misses_at_1, misses_at_3 = run_seeded_benchmark(bot, monkeypatch)
+    assert embedding_calls.count("semantic memory search") == total
+    assert "semantic memory indexing" in embedding_calls
+    print(f"Top-1 misses: {misses_at_1}")
+    print(f"Top-3 misses: {misses_at_3}")
+    assert hits_at_1 / total >= 0.90, f"top-1 misses: {misses_at_1}"
+    assert hits_at_3 / total >= RECALL_AT_3_THRESHOLD, f"top-3 misses: {misses_at_3}"

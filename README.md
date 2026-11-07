@@ -60,10 +60,13 @@ contracts have narrow, strict xfails with explicit reasons; the canonical
 - 📱 **Mobile-Friendly** — PWA works on phone browsers
 - 🔒 **Local modes available** — Auto voice may use cloud services; select a local backend for on-device speech
 
-The 200-question memory regression test uses an isolated 50-fact vault and mocked
-embeddings. Its temporary top-3 baseline is 96% (192/200), below the 98% target;
-tea-preference and work-project questions remain known misses. This is not a
-measurement of live embedding-model or production-vault retrieval quality.
+The 200-question memory regression test uses an isolated, seeded 50-fact vault
+and requires at least 98% top-3 recall. The default test uses mocked embeddings;
+to also test real local `nomic-embed-text` embeddings, start Ollama, pull that
+model, set `DADBOT_RUN_REAL_EMBEDDING_BENCHMARK=1`, and run
+`python -m pytest tests\eval\test_memory_benchmark.py -s`. The questions are
+templated and repeat the fact topics; results do not measure production-vault,
+paraphrase, or source-mode citation quality.
 
 Reviewed oral histories save transcript evidence with a unique ID, UTC review
 time, and SHA-256 content hash alongside the memory; the transcript is stored
