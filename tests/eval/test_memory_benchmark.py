@@ -20,12 +20,28 @@ def install_fusion_capture(bot, monkeypatch):
     fusion_rows = []
     components = {}
     semantic_candidates = set()
+    candidate_filter = {}
+    cosine_scores = {}
     semantic_manager = bot.memory_manager._semantic_manager
-    original_candidates = semantic_manager.semantic_candidate_rows
+    original_candidates = semantic_manager.catalog_semantic_rows
+    original_context = semantic_manager.semantic_query_context
     original_score = bot.memory_query.score
+    original_cosine = semantic_manager.score_semantic_rows
 
-    def capture_candidates(*args, **kwargs):
-        rows = original_candidates(*args, **kwargs)
+    def capture_cosine(rows, current_memories, query_embedding):
+        scored = original_cosine(rows, current_memories, query_embedding)
+        cosine_scores.clear()
+        cosine_scores.update((bot.semantic_memory_key(memory), score) for score, memory in scored)
+        return scored
+
+    def capture_context(query, limit):
+        context = original_context(query, limit)
+        candidate_filter.update(context)
+        return context
+
+    def capture_candidates(current_keys):
+        rows = original_candidates(current_keys)
+        assert {row["summary_key"] for row in rows} == set(current_keys)
         semantic_candidates.clear()
         semantic_candidates.update(row["summary_key"] for row in rows)
         return rows
@@ -35,7 +51,19 @@ def install_fusion_capture(bot, monkeypatch):
         components[memory["summary"]] = {
             "candidate_present": key in semantic_candidates,
             "semantic": context["semantic_scores"].get(key, 0.0),
+            "positive_cosine": cosine_scores.get(key, 0.0),
             "bm25": context["lexical_scores"].get(key, 0.0),
+            "legacy_filter": {
+                "tokens": candidate_filter.get("query_tokens"),
+                "category": candidate_filter.get("query_category"),
+                "mood": candidate_filter.get("query_mood"),
+                "limit": candidate_filter.get("candidate_limit"),
+                "token_match": any(
+                    token.lower() in memory["summary"].lower() for token in candidate_filter.get("query_tokens", [])
+                ),
+                "category_match": memory.get("category") == candidate_filter.get("query_category"),
+                "mood_match": memory.get("mood") == candidate_filter.get("query_mood"),
+            },
         }
         fusion_rows.append(
             (
@@ -47,7 +75,9 @@ def install_fusion_capture(bot, monkeypatch):
         return original_score(memory, context)
 
     monkeypatch.setattr(bot.memory_query, "score", capture_score)
-    monkeypatch.setattr(semantic_manager, "semantic_candidate_rows", capture_candidates)
+    monkeypatch.setattr(semantic_manager, "catalog_semantic_rows", capture_candidates)
+    monkeypatch.setattr(semantic_manager, "semantic_query_context", capture_context)
+    monkeypatch.setattr(semantic_manager, "score_semantic_rows", capture_cosine)
     return fusion_rows, components
 
 

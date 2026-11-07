@@ -758,6 +758,21 @@ class SemanticIndexManager:
             candidate_limit,
         )
 
+    def catalog_semantic_rows(self, current_keys):
+        # Scope is mandatory before scoring; relevance heuristics are not.
+        keys = set(current_keys)
+        rows = self._semantic_index_backend.fetch_by_keys(keys)
+        missing = keys - {row["summary_key"] for row in rows}
+        if missing:
+            logger.warning(
+                "Semantic scoring coverage incomplete: %d of %d current catalog entries "
+                "have no indexed embedding; backend=%s",
+                len(missing),
+                len(keys),
+                self._semantic_index_backend.name,
+            )
+        return rows
+
     def score_semantic_rows(self, rows, current_memories, query_embedding):
         scored = []
         for row in rows:
@@ -789,22 +804,8 @@ class SemanticIndexManager:
             return []
 
         current_memories = self.semantic_memory_lookup(memories)
-        where_clauses, params = self.semantic_memory_filters(
-            query_context["query_tokens"],
-            query_context["query_category"],
-            query_context["query_mood"],
-        )
-
         try:
-            rows = self.semantic_candidate_rows(
-                where_clauses,
-                params,
-                query_context["candidate_limit"],
-                query_embedding=query_context["query_embedding"],
-                query_tokens=query_context["query_tokens"],
-                query_category=query_context["query_category"],
-                query_mood=query_context["query_mood"],
-            )
+            rows = self.catalog_semantic_rows(current_memories.keys())
         except Exception as exc:
             logger.warning("Semantic memory lookup failed for query %r: %s", query, exc)
             return []

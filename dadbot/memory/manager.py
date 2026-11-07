@@ -254,6 +254,9 @@ class MemoryManager(MemoryLifecycleMixin, MemorySearchMixin, MemoryIntegrationMi
             query_mood=query_mood,
         )
 
+    def catalog_semantic_rows(self, current_keys):
+        return self._semantic_manager.catalog_semantic_rows(current_keys)
+
     def graph_retrieval_for_input(self, query, limit=3):
         return self._graph_manager.graph_retrieval_for_input(query, limit)
 

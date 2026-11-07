@@ -389,7 +389,8 @@ class MemoryQueryManager:
             self.bot.semantic_memory_matches(
                 semantic_query,
                 memories,
-                limit=max(effective_limit * 3, 9),
+                # Do not discard dense evidence before BM25 fusion can rank it.
+                limit=len(memories),
             )
             or []
         )

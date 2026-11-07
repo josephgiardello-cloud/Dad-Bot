@@ -98,6 +98,29 @@ def test_approval_is_tenant_scoped(grounding):
     assert other.approved_digests() == {}
 
 
+def test_every_approved_source_reaches_scoring_without_query_prefilter(grounding, monkeypatch):
+    service, records = grounding
+    records[:] = [
+        {"summary": f"Synthetic routine {number}", "category": "routines", "id": str(number)}
+        for number in range(120)
+    ]
+    sources = service.memory_sources()
+    for source in sources:
+        service.set_memory_approval(source, approved=True)
+    records.append({"summary": "Unapproved synthetic routine", "category": "work", "id": "unapproved"})
+    scored = []
+    original = service._tokens
+
+    def capture(text):
+        scored.append(text)
+        return original(text)
+
+    monkeypatch.setattr(service, "_tokens", capture)
+    service.answer("office deadlines")
+    assert all(any(source.text in text for text in scored) for source in sources)
+    assert not any("Unapproved synthetic routine" in text for text in scored)
+
+
 def test_exact_answer_cache_skips_ranking_but_validation_reads_fresh_sources(grounding, monkeypatch):
     service, records = grounding
     service.set_memory_approval(service.memory_sources()[0], approved=True)

@@ -126,22 +126,8 @@ class MemorySearchMixin:
             return []
 
         current_memories = self.semantic_memory_lookup(memories)
-        where_clauses, params = self.semantic_memory_filters(
-            query_context["query_tokens"],
-            query_context["query_category"],
-            query_context["query_mood"],
-        )
-
         try:
-            rows = self.semantic_candidate_rows(
-                where_clauses,
-                params,
-                query_context["candidate_limit"],
-                query_embedding=query_context["query_embedding"],
-                query_tokens=query_context["query_tokens"],
-                query_category=query_context["query_category"],
-                query_mood=query_context["query_mood"],
-            )
+            rows = self.catalog_semantic_rows(current_memories.keys())
         except Exception as exc:
             logger.warning("Semantic memory lookup failed for query %r: %s", query, exc)
             return []

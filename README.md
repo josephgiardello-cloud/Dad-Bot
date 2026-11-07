@@ -97,29 +97,53 @@ measured 191/200 top-1 and 192/200 top-3. BM25-only also passed every question.
 This plateau does not identify a unique optimal weight: the templated
 questions favor lexical matching.
 
-The 25 natural paraphrases measured 19/25 top-1 and top-3 with real Nomic,
-with identical ranking fingerprints across two Python hash seeds. Their
-topic-held-out split is 20 training / 5 held-out questions. Training top-1
-and top-3 tie for sampled dense weights 0.2 through 1.0 at 16/20; the
-existing 0.75 is retained by the training-only tie rule, not established
-as uniquely optimal. At 0.75 the held-out result is 3/5 top-1 and top-3.
-BM25-only scores 5/25 top-1 and 8/25 top-3; contextual-dense-only scores
-19/25 on both. This is a small diagnostic set, not a production-quality
-estimate. The sweep checks that replay at the current weight reproduces
-the actual retrieval counts.
+The 25 natural paraphrases initially measured 19/25 top-1 and top-3.
+Diagnostic logging identified these pre-cosine exclusions in the SQLite path:
 
-Four of the six missed targets never reached semantic cosine scoring;
-one reached it but had no positive semantic score, and one had high semantic
-relevance but lost in final ranking/diversification. All six had zero BM25
-score. This supports fixing semantic candidate coverage before changing
-alpha or adding a reranker. SQLite currently applies heuristic lexical/
-category/mood filters and a row limit before exact cosine scoring.
-Optional pgvector has a different filtered vector path; source mode does not
-use either vector path. Exact catalog-scoped conversational retrieval would
-address candidate exclusion, not replace an existing approved-source ANN
-search. The local configuration requests pgvector with no ANN index or fixed
-dimensions; a live index inventory was unavailable because its connection
-timed out, so existing server indexes remain unverified.
+| Target | Query example | Exclusion |
+| --- | --- | --- |
+| Favorite color | Which shade would I pick? | No selected token substring matched |
+| Preferred season | Which time of year do I enjoy most? | No selected token substring matched |
+| Wake-up time | When do I get out of bed on workdays? | Neither tokens nor inferred `work` category matched the routines entry |
+| Vacation destination | Where am I planning to go on holiday? | Neither tokens nor inferred `goals` category matched the travel entry |
+
+The query's neutral mood and general category were not active filters.
+The 108-row candidate limit did not cause these four exclusions in the
+50-fact vault, but could exclude older entries in larger catalogs.
+
+Conversational semantic search now fetches every indexed key in the supplied
+current catalog before exact cosine scoring, in both SQLite and pgvector.
+Only catalog membership gates this fetch: token, inferred category, mood,
+vector distance, and row-limit predicates do not. Missing indexed keys emit
+a coverage warning, rather than silently masquerading as relevance misses.
+Alignment/freshness and relevance remain scoring decisions; the output limit
+applies after scoring. The hybrid caller also retains the entire semantic
+result set until BM25 fusion, avoiding a second, lossy intermediate top-k.
+
+After both eligibility fixes, real Nomic measured 200/200 top-1 and top-3 on
+templates and 20/25 top-1, 22/25 top-3 on paraphrases at unchanged weight 0.75.
+All four previously excluded targets reach cosine scoring. Three remaining
+top-3 misses (season, bedtime routine, commute) have positive cosine and
+semantic scores but zero BM25, so these are now final-ranking cases, not
+pre-cosine exclusions. The small paraphrase split remains 20 training / 5
+held-out questions. At 0.75 it measures 17/20 training top-1, 19/20 top-3 and
+3/5 on both held-out metrics. Training alone selects dense-only in the latest
+sweep; that does not establish a safe replacement for the existing blend,
+which continues to pass the separate 200-question gate. The sweep verifies
+that replay at the current weight reproduces actual retrieval counts.
+
+The catalog-key fetch does not use vector ordering and cannot use HNSW for
+nearest-neighbor selection, even if an ANN index already exists on Postgres.
+The local configuration requests pgvector with no ANN index or fixed
+dimensions; live existing server indexes remain unverified because the
+inventory connection timed out. No separate ANN replacement is needed for
+this conversational path. Other backend candidate APIs retain their existing
+filter semantics. Source mode remains separate and already scores every
+currently eligible approved source without query prefilters. Tests verify
+1,100 catalog keys across SQLite batches, catalog exclusion of unrelated rows,
+pgvector key-only SQL under all ANN configurations, facade scoring coverage,
+and scoring eligibility of 120 approved sources while excluding unapproved
+evidence. These are synthetic scoping checks, not a production-vault audit.
 
 Source mode keeps a bounded, in-memory LRU cache of 64 exact normalized queries
 per service, scoped by tenant. Hits become most recently used; capacity

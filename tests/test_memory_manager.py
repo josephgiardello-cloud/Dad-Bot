@@ -733,7 +733,7 @@ def test_semantic_memory_matches_caps_stale_low_impact_memories(bot):
         "query_mood": "stressed",
         "candidate_limit": 4,
     }
-    bot.memory_manager.semantic_candidate_rows = lambda *args, **kwargs: [
+    bot.memory_manager.catalog_semantic_rows = lambda *args, **kwargs: [
         {"summary_key": "old"},
         {"summary_key": "fresh"},
     ]

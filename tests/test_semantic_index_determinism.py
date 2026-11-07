@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from dadbot_system.semantic_index import SQLiteSemanticIndex
+from dadbot_system.semantic_index import PGVectorSemanticIndex, SQLiteSemanticIndex
 
 pytestmark = pytest.mark.unit
 
@@ -126,3 +127,116 @@ def test_filters_use_and_semantics(tmp_path: Path):
 
     rows = index.fetch_candidates(None, ["school"], "family", "neutral", 10)
     assert [row["summary_key"] for row in rows] == ["match"]
+
+
+def test_catalog_fetch_has_no_relevance_or_candidate_limit(tmp_path):
+    index = _index(tmp_path)
+    keys = [f"key-{number:04d}" for number in range(1100)]
+    index.upsert_rows(
+        [
+            {
+                "summary_key": key,
+                "summary": "No lexical match",
+                "category": "routines",
+                "mood": "calm",
+                "updated_at": "2020-01-01",
+                "content_hash": key,
+                "embedding_json": "[1.0, 0.0]",
+            }
+            for key in [*keys, "other-tenant"]
+        ]
+    )
+    rows = index.fetch_by_keys(reversed(keys))
+    assert [row["summary_key"] for row in rows] == keys
+    assert index.fetch_by_keys([]) == []
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Which shade would I pick?",
+        "Which time of year do I enjoy most?",
+        "When do I get out of bed on workdays?",
+        "Where am I planning to go on holiday?",
+    ],
+)
+def test_facade_scores_entire_current_catalog_before_limit(bot, monkeypatch, query):
+    manager = bot.memory_manager._semantic_manager
+    memories = [{"summary": f"Routine number {number}", "category": "routines", "mood": "calm"} for number in range(40)]
+    current = bot.semantic_memory_lookup(memories)
+    manager._semantic_index_backend.upsert_rows(
+        [
+            {
+                "summary_key": key,
+                "summary": memory["summary"],
+                "category": memory["category"],
+                "mood": memory["mood"],
+                "updated_at": "2020-01-01",
+                "content_hash": key,
+                "embedding_json": "[1.0, 0.0]",
+            }
+            for key, memory in current.items()
+        ]
+    )
+    monkeypatch.setattr(manager, "embed_texts", lambda *_args, **_kwargs: [[1.0, 0.0]])
+    scored_keys = []
+    original = manager.score_semantic_rows
+
+    def capture(rows, catalog, embedding):
+        scored_keys.extend(row["summary_key"] for row in rows)
+        return original(rows, catalog, embedding)
+
+    monkeypatch.setattr(manager, "score_semantic_rows", capture)
+    bot.semantic_memory_matches(query, memories, limit=1)
+    assert set(scored_keys) == set(current)
+    assert len(scored_keys) == 40
+
+
+def test_missing_index_entries_are_reported(bot, caplog):
+    manager = bot.memory_manager._semantic_manager
+    rows = manager.catalog_semantic_rows({"missing"})
+    assert rows == []
+    assert "1 of 1 current catalog entries have no indexed embedding" in caplog.text
+
+
+def test_fusion_does_not_request_intermediate_dense_top_k(bot, monkeypatch):
+    bot.MEMORY_STORE = {
+        **bot.default_memory_store(),
+        "memories": [
+            {"summary": f"My synthetic project number {number} needs paint.", "category": "home"}
+            for number in range(40)
+        ],
+    }
+    requests = []
+
+    def matches(_query, memories, limit):
+        requests.append((limit, len(memories)))
+        return [(0.5, memory) for memory in memories]
+
+    monkeypatch.setattr(bot, "semantic_memory_matches", matches)
+    monkeypatch.setattr(bot.memory_query, "_record_memory_access_signals", lambda *_args: None)
+    bot.memory_query.relevant_memories_for_input("synthetic project", limit=3)
+    assert len(requests) == 1
+    assert requests[0][0] == requests[0][1]
+    assert requests[0][0] > 9
+
+
+@pytest.mark.parametrize("ann", [None, "hnsw", "ivfflat"])
+def test_pgvector_catalog_fetch_does_not_use_ann_or_relevance_filters(monkeypatch, ann):
+    backend = PGVectorSemanticIndex("unused", ann_index=ann, vector_dimensions=768)
+    calls = []
+    cursor = SimpleNamespace(
+        execute=lambda sql, params: calls.append((sql, params)),
+        fetchall=lambda: [("a", "Synthetic memory", "routines", "calm", "2020-01-01", "[1.0, 0.0]")],
+    )
+    connection = SimpleNamespace(cursor=lambda: nullcontext(cursor))
+    monkeypatch.setattr(backend, "ensure_storage", lambda: None)
+    monkeypatch.setattr(backend, "with_connection", lambda operation: operation(connection))
+    assert [row["summary_key"] for row in backend.fetch_by_keys(["a"])] == ["a"]
+    sql, params = calls[0]
+    assert "WHERE summary_key = ANY(%s)" in sql
+    assert params == (["a"],)
+    assert "LIMIT" not in sql
+    assert "<=>" not in sql
+    assert "vector_dims" not in sql
+    assert "LIKE" not in sql

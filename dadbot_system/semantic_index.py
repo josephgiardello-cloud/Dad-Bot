@@ -46,6 +46,10 @@ class SemanticIndexBackend(ABC):
         ...
 
     @abstractmethod
+    def fetch_by_keys(self, keys):
+        ...
+
+    @abstractmethod
     def fetch_candidates(self, query_embedding, query_tokens, query_category, query_mood, limit):
         ...
 
@@ -235,6 +239,27 @@ class SQLiteSemanticIndex(SemanticIndexBackend):
             ).fetchall()
         )
         return self._row_dicts(rows)
+
+    def fetch_by_keys(self, keys):
+        ordered_keys = sorted(set(keys))
+        if not ordered_keys or not self.db_path.exists():
+            return []
+
+        def operation(connection):
+            rows = []
+            for offset in range(0, len(ordered_keys), 500):
+                batch = ordered_keys[offset:offset + 500]
+                rows.extend(
+                    connection.execute(
+                        "SELECT summary_key, summary, category, mood, updated_at, embedding_json "
+                        f"FROM semantic_memories WHERE summary_key IN ({','.join('?' for _ in batch)}) "
+                        "ORDER BY summary_key ASC",
+                        batch,
+                    ).fetchall()
+                )
+            return self._row_dicts(rows)
+
+        return self.with_connection(operation)
 
     def _filtered_rows(self, query_tokens, query_category, query_mood, limit):
         where_clauses = []
@@ -603,6 +628,23 @@ class PGVectorSemanticIndex(SemanticIndexBackend):
                     LIMIT %s
                     """,
                     (limit,),
+                )
+                return self._row_dicts(cursor.fetchall())
+
+        return self.with_connection(operation)
+
+    def fetch_by_keys(self, keys):
+        ordered_keys = sorted(set(keys))
+        if not ordered_keys:
+            return []
+        self.ensure_storage()
+
+        def operation(connection):
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"SELECT summary_key, summary, category, mood, updated_at, embedding_json "
+                    f"FROM {self.table} WHERE summary_key = ANY(%s) ORDER BY summary_key ASC",
+                    (ordered_keys,),
                 )
                 return self._row_dicts(cursor.fetchall())
 
