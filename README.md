@@ -285,6 +285,24 @@ Automatic `num_keep`, Flash Attention, and KV quantization are not enabled
 by DadBot. Existing explicit `num_keep` options are preserved. No latency
 reduction is claimed without measuring actual request timing.
 
+`num_keep` is not an automatic prefix-cache accelerator: Ollama's published
+runner implementation uses it when shifting/truncating context; prefix-cache
+reuse matches existing input tokens. DadBot's system prompt also includes
+turn-specific context. An opt-in synthetic probe compares warm prefill with
+`num_keep=0` and `128` without allowing prompt trimming:
+set `DADBOT_RUN_REAL_OLLAMA_PREFIX_CACHE=1` and run
+`python -m pytest tests\unit\test_ollama_prefix_cache.py -s`.
+On the tested local `llama3.2` model both settings had a 10.8 ms median
+warm prefill time. This small probe is not a TTFT measurement or a guarantee
+for other models, overflow scenarios, or the full companion prompt.
+
+Canonical graph turns already batch emotional classification and the answer
+in one structured model response when emotional markers are present. The
+result supplies the final mood and natural-language reply; malformed
+structured results fail validation. No separate mood-model call is made on
+that path. This does not guarantee that tools, maintenance, or other turn
+paths make only one model call.
+
 ### Story Mode (Password Protected)
 
 Story Mode enables deeper personalization learning. Set a password before launch:
