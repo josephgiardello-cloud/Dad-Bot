@@ -174,6 +174,7 @@ class MemoryStorageBackend:
             )
 
     def _write_memory_store_unlocked(self, store_projection: dict):
+        self._manager.cache_invalidation_revision += 1
         if getattr(self.bot, "_tenant_document_store", None) is not None:
             try:
                 self.bot._tenant_document_store.save_session_state(
@@ -274,6 +275,7 @@ class MemoryStorageBackend:
         return CoreState.from_dict(dict(session_state.get("core_state") or {}))
 
     def _emit_memory_event(self, event_type: str, payload: dict) -> CoreState:
+        self._manager.cache_invalidation_revision += 1
         active = get_active_core_state()
         if active is not None:
             next_state = push_core_state_event(event_type, payload)

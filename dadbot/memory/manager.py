@@ -105,6 +105,7 @@ class MemoryManager(MemoryLifecycleMixin, MemorySearchMixin, MemoryIntegrationMi
         self._memory_projection_cache: dict = {}
         self._memory_core_state_cache: CoreState = CoreState()
         self._memory_projection_version: int | None = None
+        self.cache_invalidation_revision = 0
         self._graph_manager: GraphManagerProtocol = None
         self._semantic_manager = None
         self._normalizer = None

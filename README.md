@@ -73,6 +73,19 @@ personality/history labels; recent turns remain available to contextual
 scoring. This prevents metadata tokens from displacing query terms in the
 bounded candidate filter.
 
+Source mode keeps a bounded, in-memory LRU cache of 64 exact normalized queries
+per service, scoped by tenant. Hits become most recently used; capacity
+evicts the least recently used answer. Each lookup reads current approved
+evidence and the full vault projection. Any canonical vault mutation or
+save attempt (even unchanged content), projection-content change, or approval
+revision invalidates all cached replies. This deliberately coarse policy
+also covers unrelated/unapproved memories, edits, deletion, and provenance
+changes, trading hit rate for conservative invalidation. Final citation
+validation bypasses the cache and recomputes the answer from current sources.
+The cache does not survive restart, persist transcripts separately, reuse
+semantically similar queries, or skip safety/approval validation. It avoids
+repeat ranking/formatting, not evidence reads; no end-to-end speedup is claimed.
+
 Reviewed oral histories save transcript evidence with a unique ID, UTC review
 time, and SHA-256 content hash alongside the memory; the transcript is stored
 both as memory text and as its evidence. Source-mode citation approval is separate.
@@ -302,6 +315,16 @@ result supplies the final mood and natural-language reply; malformed
 structured results fail validation. No separate mood-model call is made on
 that path. This does not guarantee that tools, maintenance, or other turn
 paths make only one model call.
+
+Optional Ollama server tuning is global, separate from DadBot request options:
+`OLLAMA_FLASH_ATTENTION=1`, `OLLAMA_KV_CACHE_TYPE=q8_0`, and
+`OLLAMA_KEEP_ALIVE=-1`. On Windows, set these user environment variables and
+restart the Ollama app. Verify `/api/version`, real inference, and server logs
+for the effective cache/attention settings. Official Ollama guidance describes
+`q8_0` as approximately half the KV memory of `f16`, with a small precision
+loss that depends on model/task; it is not a risk-free performance setting.
+Restore `OLLAMA_KV_CACHE_TYPE=f16` and restart to disable KV quantization.
+Global keep-alive remains overridden by an explicit request `keep_alive`.
 
 ### Story Mode (Password Protected)
 

@@ -3,9 +3,11 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from collections import OrderedDict
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
+from threading import RLock
 from typing import Any
 
 from dadbot.memory.oral_history_evidence import verified_reviewed_evidence
@@ -119,6 +121,9 @@ class SourceGroundingService:
             memory_path.with_name(f"{memory_path.stem}.citation-approvals.sqlite3"),
             tenant_id=str(getattr(getattr(bot, "config", None), "tenant_id", "default")),
         )
+        self._answer_cache: OrderedDict[tuple[str, str], str] = OrderedDict()
+        self._answer_cache_fingerprint = ""
+        self._answer_cache_lock = RLock()
 
     @staticmethod
     def _profile_leaves(value: Any, path: str) -> list[EvidenceSource]:
@@ -219,9 +224,36 @@ class SourceGroundingService:
         tokens = self._tokens(query)
         if attachments or not tokens or not any(token.isalpha() for token in tokens):
             return SOURCE_REFUSAL
+        # Always read current eligible evidence before consulting cached answers.
+        sources = self.approved_sources()
+        fingerprint = hashlib.sha256(
+            json.dumps({
+                "sources": sorted(source.digest for source in sources),
+                "vault": self.bot.memory_manager.memory_projection(),
+                "write_revision": getattr(self.bot.memory_manager, "cache_invalidation_revision", 0),
+                "approval_revision": self.approvals.revision(),
+            }, sort_keys=True, ensure_ascii=True).encode("ascii")
+        ).hexdigest()
+        query_hash = hashlib.sha256(" ".join(query.casefold().split()).encode("utf-8")).hexdigest()
+        key = (self.approvals.tenant_id, query_hash)
+        with self._answer_cache_lock:
+            if fingerprint != self._answer_cache_fingerprint:
+                self._answer_cache.clear()
+                self._answer_cache_fingerprint = fingerprint
+            cached = self._answer_cache.get(key)
+            if cached is not None:
+                self._answer_cache.move_to_end(key)
+                return cached
+            reply = self._render_answer(tokens, sources)
+            self._answer_cache[key] = reply
+            if len(self._answer_cache) > 64:
+                self._answer_cache.popitem(last=False)
+            return reply
+
+    def _render_answer(self, tokens: frozenset[str], sources: list[EvidenceSource]) -> str:
         scored = [
             (len(tokens & self._tokens(f"{source.label} {source.text}")) / len(tokens), source)
-            for source in self.approved_sources()
+            for source in sources
         ]
         best = max((score for score, _ in scored), default=0.0)
         if best < 0.5:
@@ -248,5 +280,9 @@ class SourceGroundingService:
     def validate_reply(self, query: str, reply: str, *, attachments: Any = None) -> None:
         if reply == SOURCE_SAFETY_REFUSAL:
             return
-        if reply != self.answer(query, attachments=attachments):
+        tokens = self._tokens(query)
+        expected = SOURCE_REFUSAL
+        if not attachments and tokens and any(token.isalpha() for token in tokens):
+            expected = self._render_answer(tokens, self.approved_sources())
+        if reply != expected:
             raise GroundingViolation("Source reply does not match the current approved quotations.")

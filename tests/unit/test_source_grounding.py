@@ -98,6 +98,114 @@ def test_approval_is_tenant_scoped(grounding):
     assert other.approved_digests() == {}
 
 
+def test_exact_answer_cache_skips_ranking_but_validation_reads_fresh_sources(grounding, monkeypatch):
+    service, records = grounding
+    service.set_memory_approval(service.memory_sources()[0], approved=True)
+    original_render = service._render_answer
+    calls = []
+
+    def render(tokens, sources):
+        calls.append(tokens)
+        return original_render(tokens, sources)
+
+    monkeypatch.setattr(service, "_render_answer", render)
+    reply = service.answer("telescope")
+    assert service.answer("  TELESCOPE  ") == reply
+    assert len(calls) == 1
+    service.validate_reply("telescope", reply)
+    assert len(calls) == 2
+    records.clear()
+    with pytest.raises(GroundingViolation):
+        service.validate_reply("telescope", reply)
+    assert service.answer("telescope") == SOURCE_REFUSAL
+
+
+def test_answer_cache_is_bounded_and_does_not_cross_tenants(grounding):
+    service, _ = grounding
+    service.set_memory_approval(service.memory_sources()[0], approved=True)
+    assert "blue cupboard" in service.answer("telescope")
+    for index in range(70):
+        service.answer(f"telescope {index}")
+    assert len(service._answer_cache) == 64
+    other_runtime = SimpleNamespace(**vars(service.bot))
+    other_runtime.config = SimpleNamespace(tenant_id="other")
+    other = SourceGroundingService(other_runtime)
+    assert other.answer("telescope") == SOURCE_REFUSAL
+    assert other._answer_cache is not service._answer_cache
+
+
+def test_cached_answer_cannot_bypass_attachments_or_revocation(grounding):
+    service, _ = grounding
+    source = service.memory_sources()[0]
+    service.set_memory_approval(source, approved=True)
+    reply = service.answer("telescope")
+    assert "blue cupboard" in reply
+    assert service.answer("telescope", attachments=[{"name": "image"}]) == SOURCE_REFUSAL
+    service.set_memory_approval(source, approved=False)
+    assert service.answer("telescope") == SOURCE_REFUSAL
+    with pytest.raises(GroundingViolation):
+        service.validate_reply("telescope", reply)
+
+
+def test_cached_answer_is_refused_after_edit_until_reapproved(grounding):
+    service, records = grounding
+    service.set_memory_approval(service.memory_sources()[0], approved=True)
+    old_reply = service.answer("telescope")
+    assert "blue cupboard" in old_reply
+    records[0]["summary"] = "The telescope is now in the red cupboard."
+    assert service.answer("telescope") == SOURCE_REFUSAL
+    with pytest.raises(GroundingViolation):
+        service.validate_reply("telescope", old_reply)
+    service.set_memory_approval(service.memory_sources()[0], approved=True)
+    new_reply = service.answer("telescope")
+    assert "red cupboard" in new_reply
+    assert "blue cupboard" not in new_reply
+    service.validate_reply("telescope", new_reply)
+
+
+def test_cache_invalidates_on_unrelated_mutation_and_unchanged_save(bot, monkeypatch):
+    service = bot.service_registry.get("source_grounding_service")
+    original_render = service._render_answer
+    renders = []
+
+    def render(tokens, sources):
+        renders.append(tokens)
+        return original_render(tokens, sources)
+
+    monkeypatch.setattr(service, "_render_answer", render)
+    service.answer("unicorn")
+    service.answer("unicorn")
+    assert len(renders) == 1
+    bot.mutate_memory_store(unreviewed_note="An unrelated vault write.")
+    service.answer("unicorn")
+    assert len(renders) == 2
+    bot.save_memory_store()
+    service.answer("unicorn")
+    assert len(renders) == 3
+
+
+def test_answer_cache_evicts_least_recently_used_entry(grounding, monkeypatch):
+    service, _ = grounding
+    original_render = service._render_answer
+    renders = []
+
+    def render(tokens, sources):
+        renders.append(tokens)
+        return original_render(tokens, sources)
+
+    monkeypatch.setattr(service, "_render_answer", render)
+    for index in range(64):
+        service.answer(f"telescope {index}")
+    service.answer("telescope 0")
+    service.answer("telescope 64")
+    assert len(renders) == 65
+    service.answer("telescope 0")
+    service.answer("telescope 64")
+    assert len(renders) == 65
+    service.answer("telescope 1")
+    assert len(renders) == 66
+
+
 def test_reviewed_oral_history_evidence_survives_restart_and_deletion(bot):
     from dadbot.core.dadbot import DadBot
     from dadbot.ui.oral_history import save_reviewed_transcript
