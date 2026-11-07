@@ -3,9 +3,9 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
-from Dad import DadBot
 from dadbot.core.orchestrator import DadBotOrchestrator
 from dadbot.registry import boot_registry
 from tests.eval.harness import run_with_trace
@@ -64,9 +64,28 @@ def test_e2e_orchestrator_degraded_lane_non_certifying():
     assert isinstance(trace.final_output, str)
 
 
-def test_e2e_orchestrator_full_runtime_lane_certifying_expected_tool_execution():
+def test_e2e_orchestrator_full_runtime_lane_certifying_expected_tool_execution(make_test_dadbot):
     """Certifying full-runtime lane with hard planner/execution coherence checks."""
-    bot = DadBot()
+    bot = make_test_dadbot()
+    bot.update_agentic_tool_profile(
+        {"enabled": True, "auto_reminders": True, "auto_web_lookup": False},
+        save=False,
+    )
+    bot.call_ollama_chat = lambda *_args, **_kwargs: {
+        "message": {
+            "content": json.dumps(
+                {
+                    "needs_tool": True,
+                    "tool": "set_reminder",
+                    "parameters": {
+                        "title": "certification trace reminder",
+                        "due_text": "tomorrow at 9:00 AM",
+                    },
+                    "reason": "The user explicitly asked to set a reminder.",
+                },
+            ),
+        },
+    }
     orchestrator = DadBotOrchestrator(bot=bot, strict=False)
     registry = orchestrator.registry
 
@@ -78,9 +97,10 @@ def test_e2e_orchestrator_full_runtime_lane_certifying_expected_tool_execution()
     assert _tool_registry_size(tool_registry) > 0
     assert maintenance_service is not None
 
-    trace = run_with_trace("Remind me to call mom in 10 minutes", orchestrator, tool_registry)
+    trace = run_with_trace("Remind me to verify the certification trace tomorrow at 9 AM", orchestrator, tool_registry)
 
     # Level-2 cert gate: expected-tool prompts must execute a tool coherently.
+    assert trace.control_plane_invocations > 0
     assert trace.decision_outcome == "executed_tool"
     assert len(trace.tool_calls) > 0
     assert str(trace.planner_status or "").strip().lower() in {"tool_selected", "used_tool"}
@@ -89,6 +109,9 @@ def test_e2e_orchestrator_full_runtime_lane_certifying_expected_tool_execution()
     executed_tool = str(trace.tool_calls[0].name or "").strip()
     assert planner_tool
     assert planner_tool == executed_tool
+    assert planner_tool == "set_reminder"
+    reminders = bot.reminder_catalog(include_done=True)
+    assert len(reminders) == 1
 
     # Level-3 cert gate: execution truth contract must be present and coherent
     # with the observed tool execution.

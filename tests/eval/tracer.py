@@ -32,6 +32,7 @@ class Trace:
     planner_tool: str = ""
     robustness_reason: Optional[str] = None
     execution_truth_contract: Optional[dict] = None
+    control_plane_invocations: int = 0
 
 
 @dataclass
@@ -39,6 +40,7 @@ class TraceCollector:
     input_text: str
     tool_calls: list[ToolCall] = field(default_factory=list)
     steps: int = 0
+    control_plane_invocations: int = 0
 
     def record_tool_call(self, *, name: str, tool_input: Any, tool_output: Any) -> None:
         self.tool_calls.append(ToolCall(name=name, input=tool_input, output=tool_output))
@@ -58,6 +60,7 @@ class TraceCollector:
         planner_tool: str = "",
         robustness_reason: Optional[str] = None,
         execution_truth_contract: Optional[dict] = None,
+        control_plane_invocations: int = 0,
     ) -> Trace:
         return Trace(
             input=self.input_text,
@@ -72,4 +75,5 @@ class TraceCollector:
             planner_tool=str(planner_tool or ""),
             robustness_reason=(str(robustness_reason) if robustness_reason else None),
             execution_truth_contract=execution_truth_contract,
+            control_plane_invocations=int(control_plane_invocations),
         )

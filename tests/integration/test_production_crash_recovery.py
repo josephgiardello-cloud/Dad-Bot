@@ -375,3 +375,55 @@ def test_sigkill_during_real_tool_turn_recovers_once():
                     _remove_probe_reminders(marker)
                 finally:
                     _cleanup_test_tenant(tenant_id)
+
+
+@pytest.mark.integration
+@pytest.mark.durability
+@pytest.mark.timeout(180)
+def test_real_set_reminder_execution_is_confirmed_by_postgres():
+    if os.environ.get("DADBOT_RUN_PRODUCTION_TOOL_CERTIFICATION") != "1":
+        pytest.skip(
+            "Set DADBOT_RUN_PRODUCTION_TOOL_CERTIFICATION=1 to run against production Compose.",
+        )
+
+    tenant_id, token, api_secret = _production_credentials()
+    marker = f"tool-certification-{uuid4().hex}"
+    session_id = f"certification-{uuid4().hex[:12]}"
+
+    try:
+        before_count = _reminder_count(marker, tenant_id)
+        assert before_count == 0
+
+        accepted = _request(
+            "POST",
+            f"sessions/{session_id}/chat",
+            token,
+            {
+                "tenant_id": tenant_id,
+                "user_input": f"Remind me to verify the real tool execution {marker}",
+                "requested_model": os.environ.get("DADBOT_DEFAULT_MODEL", "qwen3.5:9b"),
+            },
+            api_secret=api_secret,
+        )
+        task_id = str(accepted["task_id"])
+
+        deadline = time.monotonic() + _TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            result = _request("GET", f"tasks/{task_id}", token, api_secret=api_secret)
+            task = result.get("task") or {}
+            status = str(task.get("status") or "").lower()
+            if status == "failed":
+                raise AssertionError(f"Production worker failed: {task.get('error')}")
+            if status == "completed":
+                assert result.get("response") is not None, "Completed task has no persisted response"
+                break
+            time.sleep(1)
+        else:
+            raise AssertionError("Production tool-execution task did not complete")
+
+        assert _reminder_count(marker, tenant_id) == before_count + 1, (
+            "The real set_reminder execution did not create exactly one durable Postgres reminder",
+        )
+    finally:
+        _remove_probe_reminders(marker)
+        _cleanup_test_tenant(tenant_id)

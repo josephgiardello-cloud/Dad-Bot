@@ -8,8 +8,7 @@ from contextlib import ExitStack
 from typing import Any
 
 import dadbot.core.tool_executor as tool_executor_module
-import dadbot.services.turn_service as turn_service_module
-
+import dadbot.services._tool_pipeline_mixin as tool_pipeline_module
 from tests.eval.tracer import Trace, TraceCollector
 
 
@@ -100,6 +99,28 @@ def _safe_registry_get(registry: Any, name: str) -> Any | None:
             return None
 
 
+def _patch_control_plane(stack: ExitStack, collector: TraceCollector, runtime: Any) -> None:
+    bot = getattr(runtime, "bot", None)
+    orchestrator = getattr(bot, "turn_orchestrator", None)
+    control_plane = getattr(orchestrator, "control_plane", None)
+    if control_plane is None:
+        control_plane = getattr(runtime, "control_plane", None)
+    original = getattr(control_plane, "execute_from_graph_context", None)
+    if not callable(original):
+        return
+
+    def wrapped(*args: Any, **kwargs: Any):
+        collector.control_plane_invocations += 1
+        return original(*args, **kwargs)
+
+    control_plane.execute_from_graph_context = wrapped
+
+    def restore() -> None:
+        control_plane.execute_from_graph_context = original
+
+    stack.callback(restore)
+
+
 def _patch_tool_method(
     stack: ExitStack,
     *,
@@ -134,6 +155,7 @@ def _patch_registry_tools(
     tool_registry: Any | None,
 ) -> ExitStack:
     stack = ExitStack()
+    _patch_control_plane(stack, collector, runtime)
 
     # Explicit test-supplied registry first.
     if tool_registry is not None:
@@ -157,8 +179,9 @@ def _patch_registry_tools(
                 collector=collector,
             )
 
-    # TurnService imports execute_tool directly, so patch both module symbols.
+    # ToolPipelineMixin binds execute_tool at import time, so patch its alias too.
     original_execute_tool = tool_executor_module.execute_tool
+    original_pipeline_execute_tool = tool_pipeline_module.execute_tool
 
     def wrapped_execute_tool(*args: Any, **kwargs: Any):
         name = _extract_tool_name(args, kwargs)
@@ -174,11 +197,11 @@ def _patch_registry_tools(
         return out
 
     tool_executor_module.execute_tool = wrapped_execute_tool
-    turn_service_module.execute_tool = wrapped_execute_tool
+    tool_pipeline_module.execute_tool = wrapped_execute_tool
 
     def _restore_execute_tool() -> None:
         tool_executor_module.execute_tool = original_execute_tool
-        turn_service_module.execute_tool = original_execute_tool
+        tool_pipeline_module.execute_tool = original_pipeline_execute_tool
 
     stack.callback(_restore_execute_tool)
     return stack
@@ -246,62 +269,12 @@ async def arun_with_trace(input: str, runtime: Any, tool_registry: Any | None = 
             collector.bump_step()
 
     execution_truth_contract = _extract_execution_truth_contract(runtime)
-    if not collector.tool_calls and isinstance(execution_truth_contract, dict):
-        if str(execution_truth_contract.get("decision_outcome") or "").strip().lower() == "executed_tool":
-            fallback_tool = str(execution_truth_contract.get("planner_tool") or "").strip()
-            if fallback_tool:
-                collector.record_tool_call(
-                    name=fallback_tool,
-                    tool_input={"source": "execution_truth_contract"},
-                    tool_output={"status": "observed_via_contract"},
-                )
-                collector.bump_step()
-
-    if not collector.tool_calls:
-        lowered_input = str(input or "").strip().lower()
-        if lowered_input.startswith("remind me") or lowered_input.startswith("set a reminder"):
-            collector.record_tool_call(
-                name="set_reminder",
-                tool_input={"source": "deterministic_eval_fallback", "input": input},
-                tool_output={"status": "heuristic_observed"},
-            )
-            collector.bump_step()
-            bot = getattr(runtime, "bot", None)
-            update_debug = getattr(bot, "update_planner_debug", None)
-            if callable(update_debug):
-                try:
-                    update_debug(
-                        planner_status="tool_selected",
-                        planner_tool="set_reminder",
-                        planner_reason="Deterministic reminder fallback in eval harness.",
-                    )
-                except Exception:
-                    pass
-            if execution_truth_contract is not None:
-                execution_truth_contract["decision_outcome"] = "executed_tool"
-                execution_truth_contract["planner_tool"] = "set_reminder"
-                executed_tools = list(execution_truth_contract.get("executed_tools") or [])
-                if "set_reminder" not in executed_tools:
-                    executed_tools.append("set_reminder")
-                execution_truth_contract["executed_tools"] = executed_tools
-                execution_truth_contract["executed_tool_count"] = len(executed_tools)
 
     latency_ms = int((time.perf_counter() - start) * 1000)
     robustness_suppressed, decision_outcome, planner_status, planner_tool, robustness_reason = _derive_decision_outcome(
         runtime=runtime,
         tool_call_count=len(collector.tool_calls),
     )
-    if isinstance(execution_truth_contract, dict) and decision_outcome == "executed_tool":
-        normalized_planner_tool = str(planner_tool or "").strip()
-        if normalized_planner_tool:
-            if not str(execution_truth_contract.get("planner_tool") or "").strip():
-                execution_truth_contract["planner_tool"] = normalized_planner_tool
-            executed_tools = list(execution_truth_contract.get("executed_tools") or [])
-            if normalized_planner_tool not in executed_tools:
-                executed_tools.append(normalized_planner_tool)
-            execution_truth_contract["executed_tools"] = executed_tools
-            execution_truth_contract["executed_tool_count"] = len(executed_tools)
-            execution_truth_contract["decision_outcome"] = "executed_tool"
     return collector.finalize(
         final_output=final_output,
         error=error,
@@ -312,6 +285,7 @@ async def arun_with_trace(input: str, runtime: Any, tool_registry: Any | None = 
         planner_tool=planner_tool,
         robustness_reason=robustness_reason,
         execution_truth_contract=execution_truth_contract,
+        control_plane_invocations=collector.control_plane_invocations,
     )
 
 

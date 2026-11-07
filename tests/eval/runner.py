@@ -109,6 +109,7 @@ def _trace_from_json(input_text: str, payload: dict[str, Any]) -> Trace:
         planner_status=str(payload.get("planner_status") or ""),
         planner_tool=str(payload.get("planner_tool") or ""),
         robustness_reason=(str(payload.get("robustness_reason")) if payload.get("robustness_reason") else None),
+        control_plane_invocations=int(payload.get("control_plane_invocations") or 0),
     )
 
 
@@ -131,6 +132,7 @@ def _run_case_isolated_with_timeout(*, input_text: str, timeout_seconds: float) 
         "'planner_status': trace.planner_status,"
         "'planner_tool': trace.planner_tool,"
         "'robustness_reason': trace.robustness_reason,"
+        "'control_plane_invocations': trace.control_plane_invocations,"
         "};"
         "sys.stdout.write('TRACE_JSON::' + json.dumps(payload, ensure_ascii=True, default=str) + '\\n');"
         "sys.stdout.flush();"

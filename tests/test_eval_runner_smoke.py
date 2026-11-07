@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from tests.eval.datasets import EvalCase
+from tests.eval.harness import run_with_trace
 from tests.eval.runner import RunnerConfig, run_eval_suite
 
 
@@ -65,3 +66,38 @@ def test_eval_suite_strict_mode_passes_with_tool_execution_path():
     summary = run_eval_suite(cases, _FakeToolRuntime(), config=RunnerConfig(mode="evaluation-strict"))
     assert summary["avg_tool_calls"] > 0.0
     assert summary.get("strict_failures") == []
+
+
+def test_eval_trace_does_not_infer_tool_execution_from_prompt_or_contract():
+    class _ClaimingRuntime:
+        bot = type(
+            "Bot",
+            (),
+            {
+                "planner_debug_snapshot": lambda _self: {
+                    "planner_status": "tool_selected",
+                    "planner_tool": "set_reminder",
+                },
+            },
+        )()
+
+        def handle_turn(self, user_input: str):
+            self._last_turn_context = type(
+                "Context",
+                (),
+                {
+                    "state": {
+                        "execution_truth_contract": {
+                            "decision_outcome": "executed_tool",
+                            "planner_tool": "set_reminder",
+                        },
+                    },
+                },
+            )()
+            return (f"echo:{user_input}", False)
+
+    trace = run_with_trace("Remind me to call mom in 10 minutes", _ClaimingRuntime())
+
+    assert trace.tool_calls == []
+    assert trace.decision_outcome == "no_tool_needed"
+    assert trace.execution_truth_contract["decision_outcome"] == "executed_tool"
