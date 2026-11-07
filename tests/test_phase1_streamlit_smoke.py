@@ -65,6 +65,10 @@ def test_canonical_streamlit_boot_and_turn(tmp_path):
         rendered_copy = "\\n".join(str(item.value) for item in app.markdown)
         assert "Home Assistant MCP controls with an explicit tool allowlist." in rendered_copy
         assert "MQTT controls" not in rendered_copy
+        navigation = next(radio for radio in app.radio if radio.label == "Navigation")
+        navigation.set_value("Voice").run(timeout=45)
+        assert not app.exception, list(app.exception)
+        assert any(item.label == "Save an oral history" for item in app.expander)
         bot.shutdown()
         """
     )

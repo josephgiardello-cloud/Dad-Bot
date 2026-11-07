@@ -640,6 +640,8 @@ class MemoryQueryManager:
             memory = normalized_lookup[key]
             memory["updated_at"] = today_stamp
             memory["category"] = normalized["category"]
+            if normalized["category"] == "oral_history":
+                memory["summary"] = normalized["summary"]
             if normalized.get("mood"):
                 memory["mood"] = normalized["mood"]
             self.bot.mutate_memory_store(memories=existing)

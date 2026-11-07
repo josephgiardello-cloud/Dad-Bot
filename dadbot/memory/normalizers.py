@@ -840,11 +840,17 @@ class MemoryNormalizer:
                 "low": max(0, int(raw.get("low", 0) or 0)),
             }
 
+    def _normalize_memory_summary(self, memory):
+        summary = memory.get("summary", "")
+        if str(memory.get("category") or "").strip().lower() == "oral_history":
+            return str(summary or "").strip()
+        return self.bot.naturalize_memory_summary(summary)
+
     def normalize_memory_entry(self, memory):
         if not isinstance(memory, dict):
             return None
 
-        summary = self.bot.naturalize_memory_summary(memory.get("summary", ""))
+        summary = self._normalize_memory_summary(memory)
         if not summary:
             return None
 
@@ -886,7 +892,7 @@ class MemoryNormalizer:
         if not isinstance(memory, dict):
             return None
 
-        summary = self.bot.naturalize_memory_summary(memory.get("summary", ""))
+        summary = self._normalize_memory_summary(memory)
         if not summary:
             return None
 
@@ -1044,6 +1050,8 @@ class MemoryNormalizer:
         category = str(memory.get("category", "")).strip().lower()
         if not summary:
             return False
+        if category == "oral_history":
+            return True
         if category in {"summary", "category"}:
             return False
 
@@ -1071,6 +1079,8 @@ class MemoryNormalizer:
         )
         summary = re.sub(r"\s+", " ", summary).strip(" .")
         category = str(memory.get("category", "general")).strip().lower()
+        if category == "oral_history":
+            return (category, self.bot.normalize_memory_text(memory.get("summary", "")))
         if "saving" in summary or "budget" in summary or "money" in summary:
             return ("finance", "money-goals")
         if "work" in summary and any(term in summary for term in ["stress", "stressed", "overwhelmed", "anxious"]):

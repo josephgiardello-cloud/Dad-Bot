@@ -8,14 +8,16 @@ import uuid
 
 import streamlit as st
 
+from dadbot.managers.tts import TTSManager
 from dadbot.ui.helpers import (
+    MAX_UPLOAD_BYTES,
     local_stt_backend_status,
     local_tts_backend_status,
     render_voice_dependency_help,
 )
+from dadbot.ui.oral_history import save_reviewed_transcript
 from dadbot.ui.prefs_state import voice_preferences
 from dadbot.ui.voice_control_plane import VoiceSessionController
-from dadbot.managers.tts import TTSManager
 
 from . import stt, uploads, webrtc
 
@@ -118,7 +120,86 @@ class MediaService:
     def synthesize_reply(self, bot, reply_text: str) -> None:
         self.render_reply_tts(bot, reply_text)
 
+    def render_oral_history_capture(self, bot) -> None:
+        with st.expander("Save an oral history", expanded=False):
+            st.caption(
+                "Record or upload a family story, transcribe it locally, review the words, "
+                "then explicitly save the transcript as a memory.",
+            )
+            st.info("Only the confirmed transcript is saved. The audio recording is not retained.")
+            recorded = st.audio_input("Record a family story", key="oral-history-recording")
+            uploaded = st.file_uploader(
+                "Or upload an audio recording",
+                type=["wav", "mp3", "m4a", "ogg", "flac", "webm"],
+                key="oral-history-upload",
+            )
+            audio = recorded or uploaded
+            if audio is None:
+                st.caption("Choose a recording or record a clip to begin.")
+                return
+
+            audio_bytes = audio.getvalue()
+            if not audio_bytes:
+                st.warning("The selected recording is empty.")
+                return
+            if len(audio_bytes) > MAX_UPLOAD_BYTES:
+                st.error(f"Recording exceeds the {MAX_UPLOAD_BYTES // (1024 * 1024)} MB upload limit.")
+                return
+
+            clip_id = hashlib.sha256(audio_bytes).hexdigest()
+            transcript_widget_key = f"oral-history-transcript:{clip_id}"
+            reviewed_key = f"oral-history-reviewed:{clip_id}"
+            saved_key = f"oral-history-saved:{clip_id}"
+            voice = voice_preferences()
+            stt_ready, backend, message = local_stt_backend_status(voice)
+            if not stt_ready:
+                st.warning(f"Local transcription is unavailable: {message} You can type the transcript below.")
+            elif st.button("Transcribe locally", key=f"oral-history-transcribe:{clip_id}"):
+                with st.spinner("Transcribing locally..."):
+                    transcript, error = stt.transcribe_audio_bytes(
+                        audio_bytes,
+                        backend=backend,
+                        model_name=str(voice.get("stt_model") or "base"),
+                        language=str(voice.get("stt_language") or "en"),
+                    )
+                if error:
+                    st.error(error)
+                elif transcript.strip():
+                    st.session_state[transcript_widget_key] = transcript.strip()
+                    st.session_state[reviewed_key] = False
+                else:
+                    st.warning("No speech was recognized. You can type the transcript below.")
+
+            def reset_review() -> None:
+                st.session_state[reviewed_key] = False
+
+            transcript = st.text_area(
+                "Review and correct the transcript",
+                key=transcript_widget_key,
+                height=180,
+                on_change=reset_review,
+            )
+            reviewed = st.checkbox(
+                "I reviewed and corrected this transcript",
+                key=reviewed_key,
+            )
+            if st.button(
+                "Save transcript as memory",
+                key=f"oral-history-save:{clip_id}",
+                type="primary",
+                disabled=not reviewed or not str(transcript or "").strip() or bool(st.session_state.get(saved_key)),
+            ):
+                memory = save_reviewed_transcript(bot, transcript)
+                if memory is None:
+                    st.error("The transcript could not be saved as a memory.")
+                else:
+                    st.session_state[saved_key] = True
+                    st.success("Reviewed oral history saved to Dad's memory.")
+            if st.session_state.get(saved_key):
+                st.caption("This recording's transcript has already been saved.")
+
     def render_voice_controls(self, bot):
+        self.render_oral_history_capture(bot)
         controller = get_voice_session_controller(bot)
         voice = controller.voice_config
         snapshot = controller.snapshot()

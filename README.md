@@ -53,11 +53,17 @@ contracts have narrow, strict xfails with explicit reasons; the canonical
 - 🧠 **Deep Long-Term Memory** — Remembers conversations, goals, relationships, and emotional context
 - 💭 **Relationship Modeling** — Understands trust, emotional momentum, and personal history
 - 🎤 **Voice Pipeline (Experimental)** — Local STT/TTS integration hooks are present; full turnkey setup is still maturing
+- 📜 **Oral History Capture** — Record or upload audio, review and correct the local transcript, then explicitly save it as an `oral_history` memory. The original audio is not retained.
 - 📅 **Calendar & Proactive Flows (Partial)** — Core reminder/check-in plumbing exists; full calendar-sync automation remains in progress
 - 📬 **Proactive Flows** — Daily check-in is fully supported; calendar sync and advanced scheduling are in development.
 - 🎨 **Avatar Support (Partial)** — Avatar rendering exists with fallback paths; generation workflows vary by environment
 - 📱 **Mobile-Friendly** — PWA works on phone browsers
 - 🔒 **Local modes available** — Auto voice may use cloud services; select a local backend for on-device speech
+
+The 200-question memory regression test uses an isolated 50-fact vault and mocked
+embeddings. Its temporary top-3 baseline is 96% (192/200), below the 98% target;
+tea-preference and work-project questions remain known misses. This is not a
+measurement of live embedding-model or production-vault retrieval quality.
 
 ### Spatial Agent Live Avatar Integration
 
