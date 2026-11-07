@@ -45,6 +45,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -62,6 +63,28 @@ except ModuleNotFoundError as exc:
     Settings = None
 
 logger = logging.getLogger(__name__)
+
+_QUERY_TOKEN_PATTERN = re.compile(r"\b[a-zA-Z0-9]+\b")
+_QUERY_STOP_WORDS = frozenset(
+    {
+        "a", "an", "and", "are", "as", "at", "be", "can", "did", "do", "does",
+        "earlier", "for", "from", "i", "in", "is", "it", "me", "my", "of",
+        "on", "please", "remind", "the", "this", "to", "was", "what", "when",
+        "where", "which", "who", "why", "you",
+    },
+)
+
+
+def _query_term_weights(query: str) -> dict[str, float]:
+    """Weight topic words above capitalized entity names during reranking."""
+    weights: dict[str, float] = {}
+    for match in _QUERY_TOKEN_PATTERN.finditer(query):
+        token = match.group(0).lower()
+        if token in _QUERY_STOP_WORDS or len(token) < 2:
+            continue
+        weight = 0.25 if match.group(0)[0].isupper() else 1.0
+        weights[token] = max(weights.get(token, 0.0), weight)
+    return weights
 
 
 @dataclass
@@ -84,6 +107,68 @@ class MemoryFragment:
             "similarity_score": self.similarity_score,
             "metadata": self.metadata,
         }
+
+
+def _rank_memory_fragments(
+    results: dict[str, Any],
+    query: str,
+    limit: int,
+    distance_threshold: float,
+) -> list[MemoryFragment]:
+    query_terms = _query_term_weights(query)
+    query_weight_total = sum(query_terms.values())
+    ranked_fragments: list[tuple[float, float, int, MemoryFragment]] = []
+
+    if results and results["documents"]:
+        for idx, (doc, metadata, distance) in enumerate(
+            zip(
+                results["documents"][0],
+                results["metadatas"][0],
+                results["distances"][0],
+                strict=True,
+            ),
+        ):
+            similarity_score = 1.0 / (1.0 + distance) if distance >= 0 else 0.0
+            if distance > distance_threshold:
+                continue
+
+            try:
+                payload = json.loads(doc)
+            except (TypeError, ValueError):
+                payload = {}
+            summary = payload.get("summary") if isinstance(payload, dict) else None
+            content_terms = {
+                match.group(0).lower()
+                for match in _QUERY_TOKEN_PATTERN.finditer(str(summary or doc))
+            }
+            lexical_coverage = (
+                sum(weight for token, weight in query_terms.items() if token in content_terms)
+                / query_weight_total
+                if query_weight_total
+                else 0.0
+            )
+            relevance_score = similarity_score + (0.15 * lexical_coverage)
+            fragment = MemoryFragment(
+                event_id=metadata.get("event_id", "?"),
+                event_type=metadata.get("event_type", "UNKNOWN"),
+                timestamp=metadata.get("timestamp", ""),
+                content=doc,
+                similarity_score=similarity_score,
+                metadata={
+                    key: value
+                    for key, value in metadata.items()
+                    if key not in {"event_id", "event_type", "timestamp"}
+                },
+            )
+            ranked_fragments.append(
+                (relevance_score, similarity_score, idx, fragment),
+            )
+
+    ranked_fragments.sort(
+        key=lambda item: (item[0], item[1], -item[2]),
+        reverse=True,
+    )
+    return [item[3] for item in ranked_fragments[:limit]]
 
 
 class SovereignMemory:
@@ -271,7 +356,7 @@ class SovereignMemory:
         limit: int = 5,
         time_window_days: Optional[int] = None,
         event_type_filter: Optional[str] = None,
-        distance_threshold: float = 1.5,  # ChromaDB uses L2 distance by default
+        distance_threshold: float = 2.0,  # ChromaDB uses L2 distance by default
     ) -> list[MemoryFragment]:
         """
         Retrieve relevant memory fragments via semantic search.
@@ -323,40 +408,21 @@ class SovereignMemory:
             elif filters:
                 where_filter = {"$and": filters}
 
-            # Perform semantic search
+            # Fetch a wider candidate set so lexical reranking can correct close semantic misses.
+            candidate_limit = max(result_limit, min(result_limit * 5, 25))
             results = self._collection.query(
                 query_texts=[query],
-                n_results=result_limit,
+                n_results=candidate_limit,
                 where=where_filter,
                 include=["documents", "metadatas", "distances"],
             )
 
-            # Convert results to MemoryFragment objects
-            fragments = []
-            if results and results["documents"]:
-                for idx, (doc, metadata, distance) in enumerate(
-                    zip(
-                        results["documents"][0],
-                        results["metadatas"][0],
-                        results["distances"][0],
-                    )
-                ):
-                    # ChromaDB returns L2 distance; convert to similarity (lower distance = higher similarity)
-                    # For cosine-like similarity: similarity = 1 / (1 + distance)
-                    similarity_score = 1.0 / (1.0 + distance) if distance >= 0 else 0.0
-
-                    # Only include if above threshold
-                    if distance <= distance_threshold:
-                        fragment = MemoryFragment(
-                            event_id=metadata.get("event_id", "?"),
-                            event_type=metadata.get("event_type", "UNKNOWN"),
-                            timestamp=metadata.get("timestamp", ""),
-                            content=doc,
-                            similarity_score=similarity_score,
-                            metadata={k: v for k, v in metadata.items()
-                                     if k not in ["event_id", "event_type", "timestamp"]},
-                        )
-                        fragments.append(fragment)
+            fragments = _rank_memory_fragments(
+                results,
+                query,
+                result_limit,
+                distance_threshold,
+            )
 
             logger.debug(
                 f"Retrieved {len(fragments)} fragments for query: {query[:50]}... "
@@ -496,7 +562,7 @@ class NullSovereignMemory:
         limit: int = 5,
         time_window_days: Optional[int] = None,
         event_type_filter: Optional[str] = None,
-        distance_threshold: float = 1.5,
+        distance_threshold: float = 2.0,
     ) -> list[MemoryFragment]:
         return []
 

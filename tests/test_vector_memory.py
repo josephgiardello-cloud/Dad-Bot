@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -15,11 +16,14 @@ class _CollectionStub:
         self.get_kwargs: dict[str, Any] = {}
         self.deleted_ids: list[str] = []
         self.query_error: Exception | None = None
+        self.query_result: dict[str, Any] | None = None
 
     def query(self, **kwargs: Any) -> dict[str, Any]:
         self.query_kwargs = dict(kwargs)
         if self.query_error is not None:
             raise self.query_error
+        if self.query_result is not None:
+            return self.query_result
         return {
             "documents": [["The dog's name is Juniper."]],
             "metadatas": [[
@@ -64,6 +68,41 @@ def test_retrieve_context_builds_valid_combined_metadata_filter():
     assert where["$and"][1] == {"event_type": {"$eq": "FACT"}}
     assert results[0].event_id == "fact-pet"
     assert "Juniper" in results[0].content
+
+
+def test_retrieve_context_reranks_by_fact_topic_over_entity_name():
+    collection = _CollectionStub()
+    collection.query_result = {
+        "documents": [[
+            json.dumps({"summary": "My dog's name is Juniper."}),
+            json.dumps({"summary": "My dog's breed is a beagle."}),
+        ]],
+        "metadatas": [[
+            {"event_id": "fact-name", "event_type": "FACT", "timestamp": ""},
+            {"event_id": "fact-breed", "event_type": "FACT", "timestamp": ""},
+        ]],
+        "distances": [[1.3582, 1.7288]],
+    }
+    memory = _memory_with_collection(collection)
+
+    results = memory.retrieve_context("What breed is Juniper?", limit=1)
+
+    assert results[0].event_id == "fact-breed"
+    assert collection.query_kwargs["n_results"] > 1
+
+
+def test_retrieve_context_includes_relevant_results_above_old_distance_cutoff():
+    collection = _CollectionStub()
+    collection.query_result = {
+        "documents": [[json.dumps({"summary": "My cat's favorite nap spot is the sunny window."})]],
+        "metadatas": [[{"event_id": "fact-nap", "event_type": "FACT", "timestamp": ""}]],
+        "distances": [[1.5537]],
+    }
+    memory = _memory_with_collection(collection)
+
+    results = memory.retrieve_context("Where does Luna like to nap?", limit=1)
+
+    assert results[0].event_id == "fact-nap"
 
 
 def test_retrieve_context_builds_time_only_filter_without_empty_clause():
