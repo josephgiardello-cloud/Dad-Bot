@@ -469,13 +469,15 @@ class MemoryStorageBackend:
 
     # ------------------------------------------------------------------ load
 
-    def load_memory_store(self):
+    def load_memory_store(self, *, allow_tenant_mirror_fallback=True):
         """Load from disk / document store, normalize, and return the dict."""
         tenant_document_store = getattr(self.bot, "_tenant_document_store", None)
         if tenant_document_store is not None:
             try:
                 persisted = tenant_document_store.load_session_state("memory")
             except OSError as exc:
+                if not allow_tenant_mirror_fallback:
+                    raise
                 persisted = None
                 self.bot.record_runtime_issue(
                     "memory store load",
@@ -496,6 +498,12 @@ class MemoryStorageBackend:
                 initialized = self._emit_memory_event(
                     "MemoryInitialized",
                     {"store": normalized},
+                )
+                return self._project_memory_store(initialized)
+            if not allow_tenant_mirror_fallback:
+                initialized = self._emit_memory_event(
+                    "MemoryInitialized",
+                    {"store": self.bot.default_memory_store()},
                 )
                 return self._project_memory_store(initialized)
 

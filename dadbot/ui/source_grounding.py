@@ -24,7 +24,7 @@ def render_source_mode(st: Any, bot: Any, thread_id: str) -> bool:
     st.sidebar.caption(
         "Extractive quotes only. Match percentages are retrieval overlap, not truth confidence. "
         "Attachments and conversation history are not sources. Auto-speech is disabled. "
-        "Crisis safety responses take precedence."
+        "Crisis safety responses take precedence. Oral histories need matching reviewed transcript evidence."
     )
     with st.sidebar.expander("Review memory citation approvals"):
         service: SourceGroundingService = bot.service_registry.get("source_grounding_service")
@@ -35,6 +35,8 @@ def render_source_mode(st: Any, bot: Any, thread_id: str) -> bool:
                 st.caption("No memory records to review.")
             for source in sources:
                 st.code(source.text, language=None)
+                if source.provenance:
+                    st.caption(source.provenance)
                 is_approved = approved.get(source.source_id) == source.digest
                 st.caption(f"{source.source_id}: {'Approved' if is_approved else 'Not approved'}")
                 if st.button(

@@ -65,6 +65,16 @@ embeddings. Its temporary top-3 baseline is 96% (192/200), below the 98% target;
 tea-preference and work-project questions remain known misses. This is not a
 measurement of live embedding-model or production-vault retrieval quality.
 
+Reviewed oral histories save transcript evidence with a unique ID, UTC review
+time, and SHA-256 content hash alongside the memory; the transcript is stored
+both as memory text and as its evidence. Source-mode citation approval is separate.
+Missing or mismatched evidence disables citation, including for older oral-history
+memories saved before evidence was recorded; review and save those again to cite
+them. Deleting the memory deletes its attached evidence. A hash checks consistency,
+not the identity of the speaker, the truth of the account, or protection against tampering.
+Existing backups and other historical snapshots may still contain deleted evidence;
+this is not a secure-erasure guarantee.
+
 ### Spatial Agent Live Avatar Integration
 
 Dad-Bot can embed a live avatar frontend (for example a fork of josepeon/spatial-agent) directly in the chat presence stage.

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
@@ -9,10 +10,10 @@ import pytest
 from dadbot.core.graph_context import TurnContext
 from dadbot.core.graph_pipeline_nodes import ContextBuilderNode, InferenceNode, MCPToolNode
 from dadbot.services.source_grounding import (
-    GroundingViolation,
-    MemoryCitationApprovals,
     SOURCE_REFUSAL,
     SOURCE_SAFETY_REFUSAL,
+    GroundingViolation,
+    MemoryCitationApprovals,
     SourceGroundingService,
 )
 
@@ -95,6 +96,112 @@ def test_approval_is_tenant_scoped(grounding):
     service.set_memory_approval(source, approved=True)
     other = MemoryCitationApprovals(service.approvals.path, tenant_id="other")
     assert other.approved_digests() == {}
+
+
+def test_reviewed_oral_history_evidence_survives_restart_and_deletion(bot):
+    from dadbot.core.dadbot import DadBot
+    from dadbot.ui.oral_history import save_reviewed_transcript
+
+    text = "Grandma baked marzipan cookies for the winter festival."
+    memory = save_reviewed_transcript(bot, text)
+    assert memory is not None
+    evidence = memory["oral_history_evidence"]
+    service = bot.service_registry.get("source_grounding_service")
+    source = next(item for item in service.memory_sources() if item.text == text)
+    service.set_memory_approval(source, approved=True)
+    reply = service.answer("marzipan")
+    assert text in reply
+    assert evidence["id"] in reply
+    assert evidence["reviewed_at"] in reply
+    assert evidence["sha256"] in reply
+    assert "Original audio not retained" in reply
+    bot.shutdown()
+
+    restarted = DadBot(config=bot.config)
+    try:
+        restored = next(item for item in restarted.memory_catalog() if item["summary"] == text)
+        assert restored["oral_history_evidence"] == evidence
+        grounding = restarted.service_registry.get("source_grounding_service")
+        assert grounding.answer("marzipan") == reply
+        records = restarted.memory_catalog()
+        for record in records:
+            if record["summary"] == text:
+                del record["oral_history_evidence"]
+        restarted.mutate_memory_store(memories=records)
+        assert any(record["summary"] == text for record in restarted.memory_catalog())
+        assert grounding.answer("marzipan") == SOURCE_REFUSAL
+        with pytest.raises(GroundingViolation):
+            grounding.validate_reply("marzipan", reply)
+        with pytest.raises(GroundingViolation):
+            grounding.set_memory_approval(source, approved=True)
+    finally:
+        restarted.shutdown()
+
+    restarted_again = DadBot(config=bot.config)
+    try:
+        assert restarted_again.service_registry.get("source_grounding_service").answer("marzipan") == SOURCE_REFUSAL
+    finally:
+        restarted_again.shutdown()
+
+
+def test_missing_changed_or_legacy_oral_history_evidence_cannot_be_cited(bot):
+    from dadbot.ui.oral_history import save_reviewed_transcript
+
+    text = "Grandma told us about the blue lighthouse."
+    save_reviewed_transcript(bot, text)
+    grounding = bot.service_registry.get("source_grounding_service")
+    source = next(item for item in grounding.memory_sources() if item.text == text)
+    grounding.set_memory_approval(source, approved=True)
+    assert text in grounding.answer("lighthouse")
+
+    records = bot.memory_catalog()
+    record = next(item for item in records if item["summary"] == text)
+    record["oral_history_evidence"]["text"] = "A different transcript."
+    bot.mutate_memory_store(memories=records)
+    assert grounding.answer("lighthouse") == SOURCE_REFUSAL
+
+    record["oral_history_evidence"] = "corrupt"
+    bot.mutate_memory_store(memories=records)
+    assert any(item["summary"] == text for item in bot.memory_catalog())
+    assert grounding.answer("lighthouse") == SOURCE_REFUSAL
+
+    bot.mutate_memory_store(memories=[{"summary": text, "category": "oral_history"}])
+    assert grounding.answer("lighthouse") == SOURCE_REFUSAL
+    assert not any(item.text == text for item in grounding.memory_sources())
+    save_reviewed_transcript(bot, text)
+    assert grounding.answer("lighthouse") == SOURCE_REFUSAL
+    rereviewed = next(item for item in grounding.memory_sources() if item.text == text)
+    grounding.set_memory_approval(rereviewed, approved=True)
+    assert text in grounding.answer("lighthouse")
+    bot.delete_memory_entry(text)
+    assert grounding.answer("lighthouse") == SOURCE_REFUSAL
+
+
+def test_fresh_tenant_does_not_load_another_tenants_memory_mirror(make_test_dadbot):
+    from dadbot.core.dadbot import DadBot
+    from dadbot.ui.oral_history import save_reviewed_transcript
+    from dadbot_system.state import InMemoryStateStore
+
+    documents = InMemoryStateStore()
+    first = make_test_dadbot(document_store=documents, tenant_id="family-a")
+    text = "Grandma baked marzipan cookies for the winter festival."
+    assert save_reviewed_transcript(first, text) is not None
+    first.shutdown()
+
+    second_config = deepcopy(first.config)
+    second_config.tenant_id = "family-b"
+    second = DadBot(config=second_config, document_store=documents)
+    try:
+        assert not any(item["summary"] == text for item in second.memory_catalog())
+        assert second.service_registry.get("source_grounding_service").answer("marzipan") == SOURCE_REFUSAL
+    finally:
+        second.shutdown()
+
+    first_again = DadBot(config=first.config, document_store=documents)
+    try:
+        assert any(item["summary"] == text for item in first_again.memory_catalog())
+    finally:
+        first_again.shutdown()
 
 
 def test_superseded_records_never_become_sources(grounding):

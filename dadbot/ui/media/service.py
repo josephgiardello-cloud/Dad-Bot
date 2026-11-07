@@ -126,7 +126,9 @@ class MediaService:
                 "Record or upload a family story, transcribe it locally, review the words, "
                 "then explicitly save the transcript as a memory.",
             )
-            st.info("Only the confirmed transcript is saved. The audio recording is not retained.")
+            st.info(
+                "The confirmed transcript and review evidence are saved. The audio recording is not retained.",
+            )
             recorded = st.audio_input("Record a family story", key="oral-history-recording")
             uploaded = st.file_uploader(
                 "Or upload an audio recording",
@@ -189,7 +191,12 @@ class MediaService:
                 type="primary",
                 disabled=not reviewed or not str(transcript or "").strip() or bool(st.session_state.get(saved_key)),
             ):
-                memory = save_reviewed_transcript(bot, transcript)
+                try:
+                    memory = save_reviewed_transcript(bot, transcript)
+                except (OSError, RuntimeError):
+                    logger.exception("Could not save reviewed oral-history transcript")
+                    st.error("The transcript could not be confirmed in durable storage. Please retry.")
+                    return
                 if memory is None:
                     st.error("The transcript could not be saved as a memory.")
                 else:

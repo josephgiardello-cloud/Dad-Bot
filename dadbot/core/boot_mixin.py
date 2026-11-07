@@ -230,10 +230,13 @@ class DadBotBootMixin:
 
     def _initialize_document_store(self, document_store: Any) -> None:
         from dadbot.app_runtime import build_customer_document_store
-        from dadbot_system import NamespacedStateStore
+        from dadbot_system import InMemoryStateStore, NamespacedStateStore
 
         self._customer_state_store = (
             document_store if document_store is not None else build_customer_document_store(self._service_config)
+        )
+        self._local_ephemeral_document_store = (
+            document_store is None and isinstance(self._customer_state_store, InMemoryStateStore)
         )
         self._tenant_document_store = None
         if self._customer_state_store is not None:
@@ -298,11 +301,12 @@ class DadBotBootMixin:
                 str(profile_llm.get("provider", "")).strip().lower(),
                 str(profile_llm.get("model", "")).strip(),
             )
-        # Memory loading is now explicit; do not call here
         self.profile_runtime.refresh_profile_runtime()
         self.services.wire_runtime()
         self.service_registry = self.services.registry
-        self.MEMORY_STORE = self._memory_manager.memory_store
+        self._memory_manager.load_memory_store(
+            allow_tenant_mirror_fallback=self._local_ephemeral_document_store,
+        )
 
         # Wire the deterministic model-interaction port now that runtime is ready.
         config = ModelConfig(

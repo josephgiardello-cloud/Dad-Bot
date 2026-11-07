@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from contextlib import nullcontext
 from io import BytesIO
@@ -22,15 +23,18 @@ def test_reviewed_transcript_is_saved_through_memory_catalog(bot):
     assert saved is not None
     assert saved["summary"] == transcript
     assert saved["category"] == "oral_history"
+    evidence = saved["oral_history_evidence"]
+    assert evidence["text"] == transcript
+    assert evidence["kind"] == "reviewed_transcript"
+    assert evidence["sha256"] == hashlib.sha256(transcript.encode("utf-8")).hexdigest()
     assert any(
         memory["summary"] == transcript and memory["category"] == "oral_history"
         for memory in bot.memory_catalog()
     )
     persisted = json.loads(Path(bot.memory_path).read_text(encoding="utf-8"))
-    assert any(
-        memory["summary"] == transcript and memory["category"] == "oral_history"
-        for memory in persisted["memories"]
-    )
+    saved_record = next(memory for memory in persisted["memories"] if memory["summary"] == transcript)
+    assert saved_record["category"] == "oral_history"
+    assert saved_record["oral_history_evidence"] == evidence
 
 
 def test_empty_reviewed_transcript_does_not_create_memory(bot):
@@ -40,6 +44,12 @@ def test_empty_reviewed_transcript_does_not_create_memory(bot):
 
     assert saved is None
     assert bot.memory_catalog() == before
+
+
+def test_storage_failure_is_not_reported_as_a_saved_story(bot, monkeypatch):
+    monkeypatch.setattr(bot.memory_manager._storage, "_write_json_memory_store_unlocked", lambda _store: None)
+    with pytest.raises(RuntimeError, match="durable storage"):
+        oral_history.save_reviewed_transcript(bot, "A story that could not be saved.")
 
 
 def test_distinct_short_and_financial_stories_survive_catalog_cleanup(bot):
@@ -126,8 +136,6 @@ def test_transcription_updates_existing_draft_and_requires_new_review(monkeypatc
         def checkbox(self, _label, *, key):
             return self.session_state.get(key, False)
 
-    import hashlib
-
     clip_id = hashlib.sha256(b"recording").hexdigest()
     draft_key = f"oral-history-transcript:{clip_id}"
     reviewed_key = f"oral-history-reviewed:{clip_id}"
@@ -145,3 +153,48 @@ def test_transcription_updates_existing_draft_and_requires_new_review(monkeypatc
     fake.session_state[reviewed_key] = True
     fake.changed()
     assert fake.session_state[reviewed_key] is False
+
+
+def test_voice_page_saves_reviewed_transcript_with_evidence(bot, monkeypatch):
+    class FakeStreamlit:
+        def __init__(self):
+            self.session_state = {}
+            self.messages = []
+
+        def expander(self, *_args, **_kwargs):
+            return nullcontext()
+
+        def caption(self, *_args, **_kwargs):
+            pass
+
+        def info(self, *_args, **_kwargs):
+            pass
+
+        def audio_input(self, *_args, **_kwargs):
+            return BytesIO(b"recording")
+
+        def file_uploader(self, *_args, **_kwargs):
+            return None
+
+        def button(self, label, **kwargs):
+            return label == "Save transcript as memory" and not kwargs.get("disabled", False)
+
+        def text_area(self, *_args, **_kwargs):
+            return "The family gathered for supper."
+
+        def checkbox(self, *_args, **_kwargs):
+            return True
+
+        def success(self, message):
+            self.messages.append(message)
+
+    fake = FakeStreamlit()
+    monkeypatch.setattr(service, "st", fake)
+    monkeypatch.setattr(service, "voice_preferences", lambda: {})
+    monkeypatch.setattr(service, "local_stt_backend_status", lambda _voice: (True, "faster_whisper", "ready"))
+
+    service.MediaService().render_oral_history_capture(bot)
+
+    saved = next(memory for memory in bot.memory_catalog() if memory["summary"] == "The family gathered for supper.")
+    assert saved["oral_history_evidence"]["text"] == saved["summary"]
+    assert fake.messages == ["Reviewed oral history saved to Dad's memory."]

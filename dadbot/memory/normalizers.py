@@ -761,6 +761,9 @@ class MemoryNormalizer:
         return {
             "summary": summary,
             "category": category,
+            "oral_history_evidence": (
+                memory["oral_history_evidence"] if isinstance(memory.get("oral_history_evidence"), dict) else None
+            ),
             "mood": self.bot.normalize_mood(memory.get("mood")) if "mood" in memory else "neutral",
             "confidence": self._coerce_memory_confidence(memory.get("confidence")),
             "impact_score": self._coerce_impact_score(memory.get("impact_score")),
@@ -790,6 +793,8 @@ class MemoryNormalizer:
             "summary": dumped["summary"],
             "category": dumped["category"],
         }
+        if dumped["oral_history_evidence"] is not None:
+            normalized["oral_history_evidence"] = dumped["oral_history_evidence"]
         if "mood" in memory:
             normalized["mood"] = dumped["mood"]
         if "created_at" in memory:
@@ -911,6 +916,9 @@ class MemoryNormalizer:
         payload = {
             "summary": summary,
             "category": category,
+            "oral_history_evidence": (
+                memory["oral_history_evidence"] if isinstance(memory.get("oral_history_evidence"), dict) else None
+            ),
             "mood": self.bot.normalize_mood(memory.get("mood")),
             "confidence": self._coerce_memory_confidence(memory.get("confidence")),
             "impact_score": self._coerce_impact_score(memory.get("impact_score")),
@@ -953,6 +961,8 @@ class MemoryNormalizer:
             "updated_at": updated_at,
             "contradictions": dumped["contradictions"],
         }
+        if dumped["oral_history_evidence"] is not None:
+            normalized["oral_history_evidence"] = dumped["oral_history_evidence"]
         try:
             normalized["access_count"] = max(0, int(memory.get("access_count", 0) or 0))
         except (TypeError, ValueError):

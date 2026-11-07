@@ -618,12 +618,13 @@ class MemoryQueryManager:
         matches.sort(key=lambda item: item[0], reverse=True)
         return [memory for _, memory in matches]
 
-    def add_memory(self, summary, category=None):
+    def add_memory(self, summary, category=None, *, oral_history_evidence=None):
         today_stamp = date.today().isoformat()
         normalized = self.bot.normalize_memory_entry(
             {
                 "summary": summary,
                 "category": category,
+                "oral_history_evidence": oral_history_evidence,
                 "mood": self.bot.last_saved_mood(),
                 "created_at": today_stamp,
                 "updated_at": today_stamp,
@@ -642,6 +643,10 @@ class MemoryQueryManager:
             memory["category"] = normalized["category"]
             if normalized["category"] == "oral_history":
                 memory["summary"] = normalized["summary"]
+            if "oral_history_evidence" in normalized:
+                memory["oral_history_evidence"] = normalized["oral_history_evidence"]
+            else:
+                memory.pop("oral_history_evidence", None)
             if normalized.get("mood"):
                 memory["mood"] = normalized["mood"]
             self.bot.mutate_memory_store(memories=existing)

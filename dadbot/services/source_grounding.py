@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from dadbot.memory.oral_history_evidence import verified_reviewed_evidence
 from dadbot.utils import SIGNIFICANT_TOKEN_STOPWORDS, tokenize_text
 
 SOURCE_REFUSAL = (
@@ -35,13 +36,17 @@ class EvidenceSource:
     label: str
     text: str
     digest: str
+    provenance: str = ""
 
     @classmethod
-    def create(cls, kind: str, identity: str, text: str) -> EvidenceSource:
+    def create(cls, kind: str, identity: str, text: str, *, provenance: str = "") -> EvidenceSource:
+        content = [kind, identity, text]
+        if provenance:
+            content.append(provenance)
         digest = hashlib.sha256(
-            json.dumps([kind, identity, text], ensure_ascii=True).encode("utf-8")
+            json.dumps(content, ensure_ascii=True).encode("utf-8")
         ).hexdigest()
-        return cls(f"{kind}-{digest[:16]}", identity, text, digest)
+        return cls(f"{kind}-{digest[:16]}", identity, text, digest, provenance)
 
 
 class MemoryCitationApprovals:
@@ -161,13 +166,23 @@ class SourceGroundingService:
                 text = record.get("summary")
                 if not isinstance(text, str) or not text.strip():
                     continue
+                provenance = ""
+                if str(record.get("category") or "").strip().lower() == "oral_history":
+                    evidence = verified_reviewed_evidence(record)
+                    if evidence is None:
+                        continue
+                    provenance = (
+                        f"Reviewed oral-history transcript; evidence ID: {evidence['id']}; "
+                        f"reviewed at: {evidence['reviewed_at']}; SHA-256: {evidence['sha256']}. "
+                        "Original audio not retained."
+                    )
                 identity = json.dumps(
                     {key: record.get(key) for key in ("id", "category", "created_at", "version")},
                     sort_keys=True,
                     ensure_ascii=True,
                     default=str,
                 )
-                sources.append(EvidenceSource.create(section, f"{section}:{identity}", text))
+                sources.append(EvidenceSource.create(section, f"{section}:{identity}", text, provenance=provenance))
         return list({source.source_id: source for source in sources}.values())
 
     def set_memory_approval(self, source: EvidenceSource, *, approved: bool) -> None:
@@ -219,6 +234,8 @@ class SourceGroundingService:
         for score, source in matches:
             label = "partial match" if score < 1.0 else "full token match"
             excerpt = f"Source: {source.label}\nQuote:\n{source.text}"
+            if source.provenance:
+                excerpt += f"\nProvenance: {source.provenance}"
             blocks.append(
                 f"[{source.source_id}] - Retrieval match strength: {score:.0%} ({label})\n\n"
                 + "\n".join(f"    {line}" for line in excerpt.splitlines())

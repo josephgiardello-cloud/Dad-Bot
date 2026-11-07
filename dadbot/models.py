@@ -41,6 +41,7 @@ class BoundaryComplianceDeclaration(DadBotModel):
 class MemoryEntry(DadBotModel):
     summary: str
     category: str = "general"
+    oral_history_evidence: dict[str, Any] | None = None
     mood: str = "neutral"
     confidence: float = Field(0.5, ge=0.0, le=1.0)
     impact_score: float = 1.0
