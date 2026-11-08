@@ -337,6 +337,8 @@ score. The original one-dimensional experiment remains reproducible with
 Source mode uses the same local model only to reorder up to five **already
 approved, lexically eligible** excerpts. It keeps the 50% token-overlap
 refusal threshold, literal quotations, provenance, and fresh approval checks.
+API requests select it with `metadata: {"source_mode": true}`; workers
+preserve that explicit boolean at the turn boundary.
 Its scores are not comparable to fused conversational scores, so the fused
 confidence gate is not applied there. Final validation independently reranks
 current evidence rather than trusting the answer cache; gated source turns

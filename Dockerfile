@@ -25,6 +25,8 @@ ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
 RUN python -m venv "$VIRTUAL_ENV"
 
 COPY pyproject.toml uv.lock ./
+RUN uv sync --locked --no-dev --no-install-project --extra voice --extra service --extra mcp --extra reranker
+
 COPY launch.py ./
 COPY Dad.py ./
 COPY dad_streamlit.py ./

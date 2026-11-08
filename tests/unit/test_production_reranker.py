@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
@@ -7,10 +8,29 @@ from types import SimpleNamespace
 import pytest
 
 from dadbot.config import DadRuntimeConfig
+from dadbot.core.execution_contract import TurnResponse
 from dadbot.memory.reranker import get_local_reranker, select_candidates
 from dadbot.services.source_grounding import SOURCE_REFUSAL, GroundingViolation, SourceGroundingService
+from dadbot_system.contracts import ChatRequest, ServiceConfig
+from dadbot_system.worker import DadBotTaskProcessor
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.mark.parametrize("source_mode,expected", [(True, {"source_mode": True}), (False, {}), ("true", {})])
+def test_api_worker_preserves_explicit_source_mode(source_mode, expected):
+    received = []
+
+    async def execute(request):
+        received.append(request)
+        return TurnResponse(reply="quoted source")
+
+    bot = SimpleNamespace(execute_turn=execute)
+    request = ChatRequest(session_id="source-api", user_input="source query", metadata={"source_mode": source_mode})
+    processor = DadBotTaskProcessor(ServiceConfig())
+    reply, _ = asyncio.run(processor._execute_request_async(bot, request))
+    assert reply == "quoted source"
+    assert received[0].metadata == expected
 
 
 def test_model_is_loaded_once_across_concurrent_services(tmp_path, monkeypatch):

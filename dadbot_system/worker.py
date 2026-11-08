@@ -191,6 +191,7 @@ class DadBotTaskProcessor:
                 request.user_input,
                 attachments=attachments,
                 delivery=TurnDelivery.ASYNC,
+                metadata={"source_mode": True} if request.metadata.get("source_mode") is True else {},
                 context=SovereignContext(
                     session_id=str(request.session_id or "default"),
                     tenant_id=str(request.tenant_id or DEFAULT_TENANT_ID),
