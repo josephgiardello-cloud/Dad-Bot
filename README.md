@@ -71,6 +71,11 @@ or source-mode citation quality. The same opt-in run also includes a separate
 facts. That diagnostic reports misses without pretending it meets the
 200-question regression gate.
 
+**Current real-model synthetic result:** 96% top-1 (48/50), 100% top-3
+(50/50) on the natural paraphrases with local Qwen reranking. The separate
+200 templated questions remain 200/200 on both metrics. These are not
+production-vault or approved-source accuracy claims.
+
 Semantic candidate search uses the current user query without synthetic
 personality/history labels; recent turns remain available to contextual
 scoring. This prevents metadata tokens from displacing query terms in the
@@ -255,6 +260,103 @@ Seven top-1 misses remain (six already in top-3); an undiversified-top-five
 reranker experiment is the next supported model-ranking investigation,
 not a claimed or enabled precision improvement. Semantic caching remains
 deferred.
+
+### Local Qwen reranker
+
+The fixed experiment uses **Qwen/Qwen3-Reranker-0.6B**, revision
+`e61197ed45024b0ed8a2d74b80b4d909f1255473`, with the published yes/no relevance
+protocol. It scores the five highest fused, distinct candidates **before**
+category reordering, only when the top-two fused-score gap is **less than
+0.15**. Skipped queries keep their baseline answer and do not call the model.
+Scores are not probabilities of truth. Conversational retrieval can enable
+this policy with `DADBOT_MEMORY_RERANKER_ENABLED=1` and
+`DADBOT_QWEN_RERANKER_PATH` pointing to the downloaded directory. Disabled
+deployments keep the existing retrieval behavior and never load the model.
+The model is shared across tenants/services within each process, with
+serialized inference and no query/evidence cache; candidates remain scoped
+by their calling service. It stays resident until process exit. CPU inference
+sets PyTorch's process-wide thread count to four.
+
+| Metric, 50 synthetic paraphrases | Baseline | Fixed gated reranker |
+| --- | --- | --- |
+| Top-1 | 43/50 | **48/50** |
+| Top-3 | 49/50 | **50/50** |
+| Train top-1 / top-3 | 37/40 / 39/40 | 39/40 / 40/40 |
+| Held-out top-1 / top-3 | 6/10 / 10/10 | 9/10 / 10/10 |
+| Gate fires | None | 39/50 (78%) |
+
+Rankings are identical across hash seeds 0 and 1. Six first-result errors
+are corrected, one previously correct first result regresses. The gate skips
+22% of questions, not most questions on this corpus. Measured on an
+Intel i9-14900K, CPU-only PyTorch 2.15.0, Transformers 4.57.6, float32,
+four threads and five-pair batches: gated median added time is about
+0.81 seconds, gated p95 about 0.86 seconds; mean added time over all queries
+is about 0.63 seconds, including skipped queries at zero. Model loading takes
+about 0.65 seconds and separate warm-up about 0.71-0.75 seconds in repeated
+runs. These exclude package imports/download and baseline embedding/retrieval
+time; they are not end-to-end conversation latency or GPU measurements.
+
+The 45/50 stop threshold is met; no further thresholds, prompts, or ranking
+weights were tuned. The remaining errors are **not demonstrated content
+gaps**: the synthetic weekend-hobby fact is in the candidate set but Qwen
+prefers a weekend chore, while the musical-instrument question is skipped
+because its fused margin is 0.219699. Both correct facts exist and remain
+in top-three. Real interview capture may clarify ambiguous questions, but
+this synthetic benchmark does not justify claiming missing personal facts.
+
+To reproduce, install the optional `[reranker]` dependencies. Download
+the public model at the fixed revision explicitly into a local directory
+using `huggingface_hub.snapshot_download`, requesting `config.json`,
+`model.safetensors`, `tokenizer.json`, `tokenizer_config.json`, `vocab.json`,
+and `merges.txt`. A regular-file `local_dir` avoids Windows symlink privilege
+requirements. Then set `DADBOT_QWEN_RERANKER_PATH` to that directory,
+`DADBOT_RUN_QWEN_RERANKER=1`, `DADBOT_RUN_REAL_EMBEDDING_BENCHMARK=1`,
+`HF_HUB_OFFLINE=1`, and run:
+
+```powershell
+python -m pytest tests\eval\test_memory_benchmark.py -k "real and paraphrase and sqlite" -s
+```
+
+The scorer loads local safetensors only, disables remote model code, refuses
+silent truncation above its 2048-token experiment limit, and reports model
+revision, gate rate, per-question candidates, recall changes, ranking
+fingerprint, and load/warm/additional latency separately. The experiment
+raises explicit errors if enabled without the model/dependencies; disabled
+tests and deployments do not load Qwen. No synthetic embedding fallback
+is permitted in the real benchmark.
+
+The conversational two-dimensional gate additionally skips when the fused
+top score is at least **1.0**. A measured threshold sweep found 0.8/0.85
+reduced top-1 to 45/50 and top-3 to 49/50; 0.9/0.95 produced 46/50 and 49/50.
+Only 1.0 preserved 48/50 and 50/50, saving one of 39 model calls (38/50 fire).
+This is a small latency optimization, not a calibrated truth-confidence
+score. The original one-dimensional experiment remains reproducible with
+`DADBOT_MEMORY_RERANKER_ENABLED=0`; enabled benchmark runs enforce the
+48/50 and 50/50 floors through the actual production retrieval route.
+
+Source mode uses the same local model only to reorder up to five **already
+approved, lexically eligible** excerpts. It keeps the 50% token-overlap
+refusal threshold, literal quotations, provenance, and fresh approval checks.
+Its scores are not comparable to fused conversational scores, so the fused
+confidence gate is not applied there. Final validation independently reranks
+current evidence rather than trusting the answer cache; gated source turns
+therefore pay for scoring again during validation. The conversational
+96%/100% result does not measure this distinct source policy.
+
+For the Windows UI, persist the two enable/path variables in your local
+environment and restart Streamlit. For the Docker API, the image includes
+the optional reranker dependencies; explicitly enable its read-only model
+mount with:
+
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.reranker.yml --profile production up -d --build --no-deps dadbot-api
+```
+
+The override requires an existing `DADBOT_QWEN_RERANKER_PATH` directory.
+No automatic model download, remote model code, or silent scoring fallback
+is enabled. To disable the model for the UI, set the enable flag to `0`;
+for the API, recreate it using the base compose configuration only.
+Retrieval tuning stops here; semantic caching remains deferred.
 
 Source mode keeps a bounded, in-memory LRU cache of 64 exact normalized queries
 per service, scoped by tenant. Hits become most recently used; capacity

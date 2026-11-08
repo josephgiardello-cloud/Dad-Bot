@@ -1,0 +1,12 @@
+services:
+  dadbot-api:
+    environment:
+      DADBOT_MEMORY_RERANKER_ENABLED: "1"
+      DADBOT_QWEN_RERANKER_PATH: /opt/models/qwen3-reranker
+    volumes:
+      - type: bind
+        source: ${DADBOT_QWEN_RERANKER_PATH:?Set DADBOT_QWEN_RERANKER_PATH to the downloaded model directory}
+        target: /opt/models/qwen3-reranker
+        read_only: true
+        bind:
+          create_host_path: false

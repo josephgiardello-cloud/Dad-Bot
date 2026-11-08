@@ -60,6 +60,10 @@ heritage = [
 mcp = [
     "mcp>=2.3,<3",
 ]
+reranker = [
+    "torch>=2.6,<3",
+    "transformers>=4.57,<5",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]

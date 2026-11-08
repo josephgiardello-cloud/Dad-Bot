@@ -1,5 +1,6 @@
 .git
 .pytest_cache
+.tmp
 .venv
 .env
 .env.*

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from datetime import date
+from time import perf_counter
 
 from dadbot.contracts import DadBotContext, SupportsDadBotAccess
 from dadbot.memory.lexical_index import LexicalMemoryIndex
+from dadbot.memory.reranker import get_local_reranker, reranked_candidates, select_candidates
 from dadbot.utils import SIGNIFICANT_TOKEN_STOPWORDS, tokenize_text
 
 _RETRIEVAL_QUERY_WORDS = frozenset(
@@ -29,6 +31,29 @@ class MemoryQueryManager:
 
     def close(self) -> None:
         self._lexical_index.close()
+
+    def rerank_memories(self, query, ranked, limit):
+        if not self.bot.runtime_config.memory_reranker_enabled:
+            return self.select_diverse_ranked_memories(ranked, limit), {}
+        fired, gap, candidates = select_candidates(
+            ranked, self.memory_diversity_key,
+            top_score_threshold=self.bot.runtime_config.memory_reranker_top_score_threshold,
+        )
+        elapsed = 0.0
+        if fired:
+            start = perf_counter()
+            model = get_local_reranker(self.bot.runtime_config.memory_reranker_path)
+            scores = model.score(query, [memory["summary"] for _, memory in candidates])
+            candidates = reranked_candidates(candidates, scores)
+            elapsed = perf_counter() - start
+            selected = self.select_diverse_ranked_memories([*candidates, *ranked], limit)
+        else:
+            selected = self.select_diverse_ranked_memories(ranked, limit)
+        return selected, {
+            "reranker_fired": fired, "reranker_seconds": round(elapsed, 6),
+            "fused_margin": gap if len(candidates) > 1 else None,
+            "fused_top_score": ranked[0][0] if ranked else 0.0,
+        }
 
     def memory_freshness_weight(self, value):
         elapsed_days = self.bot.days_since_iso_date(value)
@@ -414,7 +439,9 @@ class MemoryQueryManager:
         if not filtered_ranked and ranked:
             filtered_ranked = ranked[:1]
 
-        selected = self.select_diverse_ranked_memories(filtered_ranked, effective_limit)
+        selected, reranker_diagnostics = self.rerank_memories(
+            str(user_input or ""), filtered_ranked, effective_limit,
+        )
         selected_scores = sorted((float(score) for score, _ in selected), reverse=True)
         top_score = selected_scores[0] if selected_scores else 0.0
         second_score = selected_scores[1] if len(selected_scores) > 1 else 0.0
@@ -423,6 +450,7 @@ class MemoryQueryManager:
             "top_score_gap": round(max(0.0, top_score - second_score), 4),
             "has_high_confidence": bool(top_score >= 0.7),
             "top_score": round(top_score, 4),
+            **reranker_diagnostics,
         }
         self._record_memory_access_signals(selected, memories)
         return [memory for _score, memory in selected]

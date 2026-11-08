@@ -136,6 +136,11 @@ class DadRuntimeConfig:
     ollama_keep_alive_seconds: int = field(
         default_factory=lambda: int(os.environ.get("DADBOT_OLLAMA_KEEP_ALIVE_SECONDS", "-1"))
     )
+    memory_reranker_enabled: bool = field(
+        default_factory=lambda: os.environ.get("DADBOT_MEMORY_RERANKER_ENABLED", "0") == "1"
+    )
+    memory_reranker_path: str = field(default_factory=lambda: os.environ.get("DADBOT_QWEN_RERANKER_PATH", ""))
+    memory_reranker_top_score_threshold: float = 1.0
     preferred_embedding_models: tuple[str, ...] = (
         "bge-m3",
         "nomic-embed-text",

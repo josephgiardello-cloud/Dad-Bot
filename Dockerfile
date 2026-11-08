@@ -34,7 +34,7 @@ COPY dadbot_system/ ./dadbot_system/
 COPY evaluation/ ./evaluation/
 COPY static/ ./static/
 
-RUN uv sync --locked --no-dev --no-editable --extra voice --extra service --extra mcp
+RUN uv sync --locked --no-dev --no-editable --extra voice --extra service --extra mcp --extra reranker
 
 FROM base AS runtime
 

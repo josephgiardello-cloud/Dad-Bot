@@ -162,7 +162,7 @@ def run_seeded_benchmark(bot, monkeypatch, cases=None, *, rankings=None):
     misses_at_1: list[tuple[str, str, list[str]]] = []
     misses_at_3: list[tuple[str, str, list[str]]] = []
     ranked_summaries = [] if rankings is None else rankings
-    measure_fusion = os.environ.get("DADBOT_MEASURE_FUSION") == "1"
+    measure_fusion = os.environ.get("DADBOT_MEASURE_FUSION") == "1" or os.environ.get("DADBOT_RUN_QWEN_RERANKER") == "1"
     fusion_rows = []
     expected_components = {}
     if measure_fusion:
@@ -195,10 +195,20 @@ def run_seeded_benchmark(bot, monkeypatch, cases=None, *, rankings=None):
     fingerprint = hashlib.sha256(json.dumps(ranked_summaries, ensure_ascii=True).encode("ascii")).hexdigest()
     print(f"Ranking fingerprint: {fingerprint}")
     if measure_fusion:
-        measured = measure_sparse_dense_balance(bot, fusion_cases)[MEMORY_DENSE_WEIGHT]
-        assert measured["train"][0] + measured["held_out"][0] == hits_at_1
-        assert measured["train"][1] + measured["held_out"][1] == hits_at_3
+        measure_retrieval_experiments(bot, fusion_cases, ranked_summaries, (hits_at_1, hits_at_3))
     return len(cases), hits_at_1, hits_at_3, misses_at_1, misses_at_3
+
+
+def measure_retrieval_experiments(bot, fusion_cases, ranked_summaries, hits):
+    measured = measure_sparse_dense_balance(bot, fusion_cases)[MEMORY_DENSE_WEIGHT]
+    if not bot.runtime_config.memory_reranker_enabled:
+        assert measured["train"][0] + measured["held_out"][0] == hits[0]
+        assert measured["train"][1] + measured["held_out"][1] == hits[1]
+    if os.environ.get("DADBOT_RUN_QWEN_RERANKER") == "1" and len(fusion_cases) == 50:
+        from tests.eval.reranker_experiment import run_reranker_experiment
+
+        assert not bot.runtime_config.memory_reranker_enabled, "Experiment requires an explicit unreranked baseline."
+        run_reranker_experiment(bot, fusion_cases, ranked_summaries)
 
 
 def measure_sparse_dense_balance(bot, cases):
@@ -318,8 +328,10 @@ def test_memory_retrieval_with_real_ollama_embeddings(bot, monkeypatch, question
     else:
         # Enforce the measured baseline without pretending recall is perfect.
         assert total == 50
-        assert hits_at_1 >= 43, f"top-1 regression: {misses_at_1}"
-        assert hits_at_3 >= 49, f"top-3 regression: {misses_at_3}"
+        top1_floor = 48 if bot.runtime_config.memory_reranker_enabled else 43
+        top3_floor = 50 if bot.runtime_config.memory_reranker_enabled else 49
+        assert hits_at_1 >= top1_floor, f"top-1 regression: {misses_at_1}"
+        assert hits_at_3 >= top3_floor, f"top-3 regression: {misses_at_3}"
         report_original_paraphrases(cases[:25], rankings[:25])
     if backend == "pgvector":
         verify_sqlite_ranking_parity(bot, monkeypatch, cases, rankings)

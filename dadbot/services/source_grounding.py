@@ -11,6 +11,7 @@ from threading import RLock
 from typing import Any
 
 from dadbot.memory.oral_history_evidence import verified_reviewed_evidence
+from dadbot.memory.reranker import get_local_reranker, select_candidates
 from dadbot.utils import SIGNIFICANT_TOKEN_STOPWORDS, tokenize_text
 
 SOURCE_REFUSAL = (
@@ -112,7 +113,7 @@ class MemoryCitationApprovals:
 
 
 class SourceGroundingService:
-    """Deterministic, extractive retrieval; never calls a model or a tool."""
+    """Approved extractive retrieval with optional local relevance reranking."""
 
     def __init__(self, bot: Any) -> None:
         self.bot = bot
@@ -232,6 +233,10 @@ class SourceGroundingService:
                 "vault": self.bot.memory_manager.memory_projection(),
                 "write_revision": getattr(self.bot.memory_manager, "cache_invalidation_revision", 0),
                 "approval_revision": self.approvals.revision(),
+                "reranker_enabled": getattr(
+                    getattr(self.bot, "runtime_config", None), "memory_reranker_enabled", False,
+                ),
+                "reranker_path": getattr(getattr(self.bot, "runtime_config", None), "memory_reranker_path", ""),
             }, sort_keys=True, ensure_ascii=True).encode("ascii")
         ).hexdigest()
         query_hash = hashlib.sha256(" ".join(query.casefold().split()).encode("utf-8")).hexdigest()
@@ -244,11 +249,35 @@ class SourceGroundingService:
             if cached is not None:
                 self._answer_cache.move_to_end(key)
                 return cached
-            reply = self._render_answer(tokens, sources)
+            reply = self._render_query_answer(query, tokens, sources)
             self._answer_cache[key] = reply
             if len(self._answer_cache) > 64:
                 self._answer_cache.popitem(last=False)
             return reply
+
+    def _render_query_answer(self, query: str, tokens: frozenset[str], sources: list[EvidenceSource]) -> str:
+        config = getattr(self.bot, "runtime_config", None)
+        if not getattr(config, "memory_reranker_enabled", False):
+            return self._render_answer(tokens, sources)
+        query = " ".join(query.casefold().split())
+        scored = sorted(
+            ((len(tokens & self._tokens(f"{source.label} {source.text}")) / len(tokens), source)
+             for source in sources),
+            key=lambda item: (-item[0], item[1].source_id),
+        )
+        eligible = [item for item in scored if item[0] >= 0.5]
+        if not eligible:
+            return SOURCE_REFUSAL
+        fired, _, candidates = select_candidates(eligible, lambda source: source.source_id)
+        if not fired:
+            return self._render_answer(tokens, sources)
+        model = get_local_reranker(config.memory_reranker_path)
+        probabilities = model.score(query, [source.text for _, source in candidates])
+        ranked = sorted(
+            zip(probabilities, candidates, strict=True),
+            key=lambda item: (-item[0], -item[1][0], item[1][1].source_id),
+        )
+        return self._format_matches([item for _, item in ranked[:3]])
 
     def _render_answer(self, tokens: frozenset[str], sources: list[EvidenceSource]) -> str:
         scored = [
@@ -262,6 +291,10 @@ class SourceGroundingService:
             ((score, source) for score, source in scored if score == best),
             key=lambda item: item[1].source_id,
         )[:3]
+        return self._format_matches(matches)
+
+    @staticmethod
+    def _format_matches(matches: list[tuple[float, EvidenceSource]]) -> str:
         blocks = []
         for score, source in matches:
             label = "partial match" if score < 1.0 else "full token match"
@@ -283,6 +316,6 @@ class SourceGroundingService:
         tokens = self._tokens(query)
         expected = SOURCE_REFUSAL
         if not attachments and tokens and any(token.isalpha() for token in tokens):
-            expected = self._render_answer(tokens, self.approved_sources())
+            expected = self._render_query_answer(query, tokens, self.approved_sources())
         if reply != expected:
             raise GroundingViolation("Source reply does not match the current approved quotations.")
