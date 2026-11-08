@@ -78,6 +78,11 @@ class ConflictDetector:
         memories: list,
         existing_insights: list | None = None,
     ) -> list:
+        reviewed_entries = {
+            self._entry_identity(item): item
+            for item in existing_insights or []
+            if isinstance(item, dict)
+        }
         candidate_entries: list[dict] = []
         for item in memories[-18:]:
             summary = self.bot.naturalize_memory_summary(item.get("summary", ""))
@@ -121,6 +126,12 @@ class ConflictDetector:
             for right in candidate_entries[index + 1 :]:
                 if left["category"] != right["category"]:
                     continue
+                reviewed_left = reviewed_entries.get(self._entry_identity(left))
+                reviewed_right = reviewed_entries.get(self._entry_identity(right))
+                if reviewed_left is not None and reviewed_right is not None and self.conflict_reviewed(
+                    reviewed_left, reviewed_right,
+                ):
+                    continue
                 reason = self.contradiction_signal_reason(
                     left["summary"],
                     right["summary"],
@@ -159,6 +170,8 @@ class ConflictDetector:
                 if str(left.get("category") or "general") != str(
                     right.get("category") or "general",
                 ):
+                    continue
+                if self.conflict_reviewed(left, right):
                     continue
                 reason = self.contradiction_signal_reason(
                     left.get("summary", ""),
@@ -232,8 +245,32 @@ class ConflictDetector:
             return None
 
         keep_value = str(keep or "auto").strip().lower()
-        if keep_value not in {"auto", "left", "right"}:
-            keep_value = "auto"
+        if keep_value not in {"auto", "left", "right", "both", "none"}:
+            raise ValueError("keep must be 'auto', 'left', 'right', 'both', or 'none'")
+
+        if keep_value in {"both", "none"}:
+            for entry, other in ((left_entry, right_entry), (right_entry, left_entry)):
+                prefix = f"Possible conflict: {other.get('summary', '')} ("
+                entry["contradictions"] = [
+                    item for item in entry.get("contradictions", [])
+                    if not str(item).startswith(prefix)
+                ]
+                if keep_value == "both":
+                    reviewed = list(entry.get("reviewed_conflicts") or [])
+                    other_id = self._entry_identity(other)
+                    if other_id not in reviewed:
+                        reviewed.append(other_id)
+                    entry["reviewed_conflicts"] = reviewed
+                else:
+                    entry.update({
+                        "superseded": True,
+                        "superseded_by": "",
+                        "superseded_reason": str(reason or "user_review").strip() or "user_review",
+                        "superseded_at": now_stamp,
+                    })
+            self.bot.mutate_memory_store(consolidated_memories=entries)
+            self.bot.mark_memory_graph_dirty()
+            return {"resolution": keep_value, "entries": [left_entry, right_entry], "resolved_at": now_stamp}
 
         if keep_value == "left":
             winner, loser = left_entry, right_entry
@@ -243,6 +280,13 @@ class ConflictDetector:
             left_rank = self.scorer.consolidated_resolution_rank(left_entry)
             right_rank = self.scorer.consolidated_resolution_rank(right_entry)
             winner, loser = (left_entry, right_entry) if left_rank >= right_rank else (right_entry, left_entry)
+
+        for entry, other in ((winner, loser), (loser, winner)):
+            prefix = f"Possible conflict: {other.get('summary', '')} ("
+            entry["contradictions"] = [
+                item for item in entry.get("contradictions", [])
+                if not str(item).startswith(prefix)
+            ]
 
         winner["version"] = max(
             int(winner.get("version", 1) or 1),
@@ -277,6 +321,13 @@ class ConflictDetector:
         summary = str(entry.get("summary") or "").strip()
         category = str(entry.get("category") or "general").strip().lower() or "general"
         return hashlib.sha1(f"{category}|{summary}".encode()).hexdigest()[:12]
+
+    @classmethod
+    def conflict_reviewed(cls, left: dict, right: dict) -> bool:
+        return (
+            cls._entry_identity(right) in (left.get("reviewed_conflicts") or [])
+            and cls._entry_identity(left) in (right.get("reviewed_conflicts") or [])
+        )
 
 
 __all__ = ["ConflictDetector"]

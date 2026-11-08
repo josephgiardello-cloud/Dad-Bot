@@ -30,6 +30,14 @@ def test_diversification_deduplicates_before_top_k_selection(bot):
     assert len(selected) == 3
 
 
+def test_diversification_keeps_distinct_memories_in_same_topic(bot):
+    ranked = [
+        (0.99, {"summary": "Saving money for a house", "category": "finance"}),
+        (0.98, {"summary": "Saving money for a vacation", "category": "finance"}),
+    ]
+    assert bot.memory_query.select_diverse_ranked_memories(ranked, 2) == ranked
+
+
 @pytest.mark.parametrize("limit", [1, 2, 3, 8])
 def test_diversification_same_category_preserves_score_order(bot, limit):
     ranked = [(1 - number * 0.1, {"summary": f"Memory {number}", "category": "work"}) for number in range(5)]

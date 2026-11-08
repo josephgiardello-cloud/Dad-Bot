@@ -41,3 +41,10 @@ jobs:
         env:
           DADBOT_TEST_POSTGRES_DSN: postgresql://dadbot:${{ secrets.POSTGRES_PASSWORD != '' && secrets.POSTGRES_PASSWORD || 'dadbot_ci_ephemeral' }}@127.0.0.1:5432/dadbot
         run: python -m pytest -q tests/test_semantic_pgvector_integration.py
+
+      - name: Run deterministic memory quality checks
+        run: >-
+          python -m pytest -q
+          tests/eval/test_memory_benchmark.py
+          tests/eval/test_memory_long_horizon.py
+          tests/eval/test_memory_no_answer.py

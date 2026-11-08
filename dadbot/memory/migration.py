@@ -74,9 +74,8 @@ class MemoryMigrationRegistry:
     def migrate(store: dict) -> dict:
         """Apply all pending migrations to *store* and stamp schema_version.
 
-        Always returns the (possibly mutated) store dict.  Never raises — any
-        migration error is logged and the store is returned as-is at the
-        pre-error version so normalization can still proceed.
+        Returns the migrated store. Unsupported future versions and failed
+        migrations raise rather than risk persisting a partial downgrade.
         """
         if not isinstance(store, dict):
             return store
@@ -87,14 +86,10 @@ class MemoryMigrationRegistry:
             return store
 
         if current > CURRENT_SCHEMA_VERSION:
-            # Store is from a newer code version — leave it alone.
-            logger.warning(
-                "Memory store schema_version=%d is ahead of CURRENT_SCHEMA_VERSION=%d; "
-                "skipping migration to avoid downgrade corruption.",
-                current,
-                CURRENT_SCHEMA_VERSION,
+            raise RuntimeError(
+                f"Memory store schema version {current} is newer than supported version "
+                f"{CURRENT_SCHEMA_VERSION}; refusing to downgrade",
             )
-            return store
 
         while current < CURRENT_SCHEMA_VERSION:
             migration_fn = _MIGRATIONS.get(current)
@@ -119,15 +114,9 @@ class MemoryMigrationRegistry:
                     migration_fn.__name__,
                 )
             except Exception as exc:
-                logger.error(
-                    "Memory store migration v%d→v%d failed (%s); "
-                    "leaving store at v%d and continuing with normalization.",
-                    current,
-                    current + 1,
-                    exc,
-                    current,
-                )
-                break
+                raise RuntimeError(
+                    f"Memory store migration v{current} to v{current + 1} failed",
+                ) from exc
 
         return store
 

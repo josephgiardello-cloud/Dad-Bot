@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import inspect
+import logging
 import re
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
 from dadbot.contracts import AttachmentList, FinalizedTurnResult
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -250,7 +253,7 @@ class TurnHandler:
             if inspect.isawaitable(write_result):
                 await write_result
         except (RuntimeError, ValueError, TypeError):
-            return
+            logger.exception("Failed to append finalized turn to the memory ledger")
 
     async def _inject_relationship_projection(self, metadata: dict[str, Any]) -> None:
         if metadata.get("relationship_projection"):

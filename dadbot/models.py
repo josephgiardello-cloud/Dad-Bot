@@ -49,6 +49,7 @@ class MemoryEntry(DadBotModel):
     emotional_intensity: float = Field(0.25, ge=0.0, le=1.0)
     relationship_impact: float = Field(0.5, ge=0.0, le=1.0)
     pinned: bool = False
+    event_time: date | datetime | None = None
     created_at: date | datetime
     updated_at: date | datetime
     contradictions: list[str] = Field(default_factory=list)
@@ -56,6 +57,13 @@ class MemoryEntry(DadBotModel):
     high_confidence_hits: int | None = Field(default=None, ge=0)
     confidence_history: dict[str, int] | None = None
     last_accessed_at: str | None = None
+
+
+class ArchivedMemory(DadBotModel):
+    archive_id: str = Field(min_length=1)
+    archived_at: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+    memory: dict[str, Any]
 
 
 class ConsolidatedMemory(DadBotModel):
@@ -72,6 +80,7 @@ class ConsolidatedMemory(DadBotModel):
     last_reinforced_at: date | datetime | None = None
     supporting_summaries: list[str] = Field(default_factory=list)
     contradictions: list[str] = Field(default_factory=list)
+    reviewed_conflicts: list[str] = Field(default_factory=list)
     updated_at: date | datetime
 
 
@@ -548,6 +557,7 @@ class MemoryGraph(DadBotModel):
 class MemoryStore(DadBotModel):
     schema_version: int = Field(1, ge=1)
     memories: list[MemoryEntry] = Field(default_factory=list)
+    archived_memories: list[ArchivedMemory] = Field(default_factory=list)
     consolidated_memories: list[ConsolidatedMemory] = Field(default_factory=list)
     persona_evolution: list[PersonaTrait] = Field(default_factory=list)
     wisdom_insights: list[WisdomInsight] = Field(default_factory=list)

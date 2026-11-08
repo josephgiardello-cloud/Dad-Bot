@@ -91,16 +91,22 @@ There is no source-citation approval filtering on this conversational path;
 source mode remains a separate, approved-evidence-only retrieval contract.
 
 BM25's negative ranks are converted to positive scores and divided by the
-query's maximum match score. The convex blend retains a 0.75 weight on the
-existing contextual dense score (semantic relevance, graph signal, importance,
-and recency) and 0.25 on BM25. The old token-overlap fallback is removed.
+query's maximum match score. The lexical score averages that normalized BM25
+score with the fraction of meaningful query tokens present in the memory.
+The convex blend retains a 0.75 weight on the existing contextual dense score
+(semantic relevance, graph signal, importance, and recency) and 0.25 on the
+lexical score. This coverage component prevents a rare query term in one
+memory from suppressing other memories that match multiple common terms.
 Set `DADBOT_MEASURE_FUSION=1` alongside the real-embedding benchmark flag
 to sweep weights and report 160 training / 40 held-out questions, split by
-whole fact topic. Real Nomic measured 200/200 top-1 and top-3 for all sampled
-dense weights from 0.0 through 0.9, including the existing 0.75; dense-only
-measured 191/200 top-1 and 192/200 top-3. BM25-only also passed every question.
+whole fact topic. With the coverage component and a corrected dense-component
+capture, real Nomic measured 200/200 top-1 and top-3 for all sampled dense
+weights from 0.0 through 0.9; dense-only measured 191/200 top-1 and 200/200
+top-3. Lexical-only also passed every question.
 This plateau does not identify a unique optimal weight: the templated
-questions favor lexical matching.
+questions favor lexical matching. Historical fusion sweeps below were recorded
+before the dense-component capture was corrected and are not comparable to
+the current sweep.
 
 The 25 natural paraphrases initially measured 19/25 top-1 and top-3.
 Diagnostic logging identified these pre-cosine exclusions in the SQLite path:
@@ -561,6 +567,19 @@ pending/degraded status, and reranker timing in
 memory summaries or the user's query. Access counters are persisted with memory
 state without rebuilding the semantic and graph indexes for access-only updates.
 
+For explicitly scoped retrieval, `bot.memory_query.relevant_memories_for_input`
+accepts inclusive `from_date` and `to_date` keyword arguments in `YYYY-MM-DD`
+form. The range uses an explicit `event_time` date when supplied, otherwise
+the recorded creation date; entries with neither are excluded. Date portions
+of timestamps use their recorded local calendar date. Unscoped retrieval
+retains its existing behavior.
+
+When there is no positive semantic score, lexical match, or graph evidence
+matching the eligible catalog, retrieval returns no memories rather than
+selecting on importance alone. This
+does not guarantee no-answer accuracy when an embedding produces a misleading
+similarity score; evaluate with representative queries.
+
 The default retrieval mode scores the complete catalog. For a PostgreSQL
 pgvector deployment, `DADBOT_MEMORY_CANDIDATE_LIMIT` may be set to a positive
 integer to opt into bounded semantic, lexical, and graph candidate selection; `0`
@@ -576,6 +595,76 @@ lower values skip reranking more often and can reduce recall. The isolated
 `tests/eval/test_memory_benchmark.py` benchmark reports recall, retrieval p50/p95
 and reranker firing rate. Set `DADBOT_RUN_REAL_EMBEDDING_BENCHMARK=1` to run
 its real local Ollama embedding cases; those cases need `nomic-embed-text`.
+
+The turn-summary memory ledger uses an atomic SQLite transaction to append an
+entry and update its chain head. `MemoryLedger.verify_chain()` detects malformed
+entries and mismatched or missing tails; it does not authenticate timestamps or
+protect against an attacker who can rewrite the entire ledger and head. This
+ledger records finalized turns, not every memory mutation, and is not the
+authority for replaying the memory store. Custom persistence adapters that only
+implement the legacy get/set/list interface do not get atomic append semantics.
+For a configured tenant document store, a failed tenant write fails the memory
+mutation rather than accepting a local mirror that could later be overwritten
+by stale tenant data. The local ephemeral document store also requires a
+successful JSON write because its contents do not survive restart. This is
+fail-closed behavior, not offline write reconciliation.
+When both Redis and Postgres are configured, memory reads and writes go
+directly to Postgres rather than relying on a potentially stale Redis copy.
+An explicitly configured customer store that cannot initialize fails startup
+instead of silently switching to an empty in-memory store.
+Graph-store write errors are reported to the memory transaction coordinator,
+which attempts to roll back the mutation; rollback itself can fail and is
+reported as incomplete. This is not a crash-atomic transaction across stores.
+
+Local snapshot loading tries the previous backup when the primary is malformed
+or fails memory-store validation. If neither snapshot is valid, loading fails
+instead of silently starting with an empty store. A snapshot with a newer,
+unsupported schema also fails without rewriting it; use a compatible version
+or restore a valid backup. Editing a memory preserves its temporal and
+reinforcement metadata, but changing a reviewed transcript removes its old
+review evidence rather than treating edited text as reviewed.
+
+`tests\eval\test_memory_long_horizon.py` is a small deterministic six-question
+check over memories dated across six months. It exercises time-scoped lexical
+retrieval, one no-answer case, access updates, and persistence; its five
+answerable cases require perfect recall and precision at one. It uses mocked
+semantic retrieval and does not simulate conversations or measure real-model
+quality. This check, the no-answer cases, and the mocked 200-question
+benchmark run on pushes and pull requests in the Semantic PGVector workflow;
+the real-model cases remain opt-in.
+
+Consolidation flags heuristic contradictions for review instead of automatically
+superseding a memory: text overlap alone cannot establish that two statements
+refer to the same person and time. A user can still explicitly choose which
+consolidated memory to keep in the conflict review UI. Review can also mark
+both statements as compatible or dismiss both. Compatibility decisions persist
+with the pair and suppress the same heuristic conflict during later
+consolidation; dismissing both marks them superseded rather than deleting them.
+
+Controlled forgetting writes a uniquely named full-store snapshot under
+`artifacts/backups` before modifying the active catalog, and no longer drops
+retained entries solely to satisfy a fixed 50-item limit. These snapshots may
+contain sensitive data and must be included in deletion and retention policies.
+They are backups, not a fully replayable mutation ledger.
+The memory-management screen can also run forgetting manually using the
+current UTC time; this is a separate operation and does not fabricate a
+committed conversation turn.
+
+Newly forgotten memories are also stored in `archived_memories` in the same
+memory store, with an archive ID, time, reason, and the original memory
+record. The memory-management screen can restore or delete an archived record;
+restoration and removal from the archive use one coordinated store mutation.
+Archives are excluded from normal retrieval. Deleting an archive entry does not
+erase older snapshots, conversation logs, or other copies; follow the full
+deletion instructions below when erasure is required. Old backups made before
+this archive feature are not automatically imported.
+
+Reading the memory catalog no longer runs heuristic deduplication or rewrites
+the store. Saving a catalog no longer drops entries after a fixed count or
+merges different memories merely because they share a broad topic. Working
+memory remains a bounded recent-turn window; episodic promotion no longer
+silently discards old episodes at 256 entries. These retained projections and
+the reversible archive can grow; there is no automatic archive retention limit.
 
 ### Local Model Context and Timing
 

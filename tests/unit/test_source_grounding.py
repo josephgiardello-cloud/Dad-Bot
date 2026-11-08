@@ -537,9 +537,16 @@ def test_memory_handoff_refreshes_live_records_but_preserves_replay(refresh):
     from dadbot.core.core_state import CoreState
     from dadbot.core.execution_context import close_core_state_scope, get_active_core_state
 
-    persisted = CoreState.from_dict({"memory": [{"summary": "Old source text"}]})
+    persisted = CoreState.from_dict({
+        "memory": [{"summary": "Old source text"}],
+        "memory_kv": {"last_mood": "sad", "reminders": [{"title": "Old reminder"}]},
+    })
     session = {"state": {"core_state": persisted.to_dict()}}
-    manager = SimpleNamespace(memory_projection=lambda: {"memories": [{"summary": "Edited source text"}]})
+    manager = SimpleNamespace(memory_projection=lambda: {
+        "memories": [{"summary": "Edited source text"}],
+        "last_mood": "positive",
+        "reminders": [{"title": "New reminder"}],
+    })
     control_plane = SimpleNamespace(
         registry=SimpleNamespace(get_or_create=lambda _: session),
         _stable_hash=lambda _: "before",
@@ -553,6 +560,8 @@ def test_memory_handoff_refreshes_live_records_but_preserves_replay(refresh):
         active = get_active_core_state()
         assert isinstance(active, CoreState)
         assert active.memory.entries[0].summary == ("Edited source text" if refresh else "Old source text")
+        assert active.memory_kv["last_mood"] == ("positive" if refresh else "sad")
+        assert active.memory_kv["reminders"][0]["title"] == ("New reminder" if refresh else "Old reminder")
         assert session["state"]["core_state"] == persisted.to_dict()
     finally:
         close_core_state_scope(token)

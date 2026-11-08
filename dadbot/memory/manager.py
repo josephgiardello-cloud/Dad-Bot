@@ -264,11 +264,41 @@ class MemoryManager(MemoryLifecycleMixin, MemorySearchMixin, MemoryIntegrationMi
         return self._graph_manager.build_graph_summary_context(limit)
 
     def save_memory_catalog(self, memories):
-        cleaned = self.clean_memory_entries(memories[-50:])
+        cleaned = []
+        for memory in memories:
+            normalized = self._normalizer.normalize_persisted_memory_entry(memory)
+            if normalized is None:
+                raise ValueError("Cannot save an invalid memory entry")
+            cleaned.append(normalized)
         self.mutate_memory_store(memories=cleaned)
         self.queue_semantic_memory_index(cleaned)
         self.bot.mark_memory_graph_dirty()
         return cleaned
+
+    def restore_archived_memory(self, archive_id: str) -> dict:
+        restored = []
+
+        def restore(store):
+            entries = list(store.get("archived_memories") or [])
+            matches = [entry for entry in entries if entry.get("archive_id") == archive_id]
+            if len(matches) != 1:
+                raise ValueError("Archived memory not found or archive ID is ambiguous")
+            restored.append(dict(matches[0]["memory"]))
+            store["archived_memories"] = [entry for entry in entries if entry.get("archive_id") != archive_id]
+            store["memories"] = [*store.get("memories", []), restored[0]]
+
+        self.mutate_memory_store(mutator=restore)
+        return restored[0]
+
+    def delete_archived_memory(self, archive_id: str) -> None:
+        def delete(store):
+            entries = list(store.get("archived_memories") or [])
+            matches = [entry for entry in entries if entry.get("archive_id") == archive_id]
+            if len(matches) != 1:
+                raise ValueError("Archived memory not found or archive ID is ambiguous")
+            store["archived_memories"] = [entry for entry in entries if entry.get("archive_id") != archive_id]
+
+        self.mutate_memory_store(mutator=delete)
 
     def mutate_memory_store(self, mutator=None, normalize=True, save=True, **changes):
         with (

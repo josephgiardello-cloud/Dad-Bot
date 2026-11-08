@@ -4,8 +4,9 @@ import hashlib
 import json
 import logging
 import re
+import uuid
 from collections import Counter
-from datetime import date
+from datetime import date, datetime, timezone
 
 from dadbot.memory.conflict_detector import ConflictDetector
 from dadbot.memory.scoring import MemoryScorer
@@ -506,8 +507,8 @@ Rules:
 
         return updated
 
-    def _controlled_forgetting_context(self, *, force=False, turn_context=None):
-        if turn_context is None:
+    def _controlled_forgetting_context(self, *, force=False, turn_context=None, manual_time=None):
+        if turn_context is None and manual_time is None:
             payload = self._temporal_debug_payload(
                 turn_context,
                 path="MemoryCoordinator.apply_controlled_forgetting:missing_turn_context",
@@ -521,9 +522,6 @@ Rules:
                 payload["path"],
             )
             return None
-        # Previously gated by _assert_save_commit_boundary. The gate is now
-        # structural: this method is only callable from PostCommitWorker
-        # after PersistenceService publishes a post-commit-ready event.
         memories = list(self.bot.memory_catalog())
         if not memories:
             return {
@@ -532,8 +530,12 @@ Rules:
                 "empty": True,
             }
 
-        wall_time = self._turn_wall_time(turn_context)
-        turn_wall_date = self._turn_wall_date(turn_context)
+        if manual_time is not None:
+            wall_time = manual_time.isoformat(timespec="seconds")
+            turn_wall_date = manual_time.date().isoformat()
+        else:
+            wall_time = self._turn_wall_time(turn_context)
+            turn_wall_date = self._turn_wall_date(turn_context)
         try:
             turn_date = date.fromisoformat(str(turn_wall_date)[:10])
         except ValueError as exc:
@@ -613,6 +615,7 @@ Rules:
 
     def _score_forgetting_candidate(self, memory, *, context):
         scored_memory = dict(memory)
+        scored_memory["_forgetting_original"] = dict(memory)
         importance = max(0.0, min(1.0, float(scored_memory.get("importance_score", 0.0) or 0.0)))
         if importance <= 0.0:
             scored_memory.update(self.scorer.score_memory_entry(scored_memory))
@@ -758,13 +761,22 @@ Rules:
         backup_stamp = str(context["backup_stamp"])
         decay_threshold = float(context["decay_threshold"])
 
-        backup_name = f"memory_forgetting_backup_{backup_stamp}.json"
+        backup_name = f"memory_forgetting_backup_{backup_stamp}_{uuid.uuid4().hex}.json"
         _backup_root = self.bot.script_path.parent / "artifacts" / "backups"
         _backup_root.mkdir(parents=True, exist_ok=True)
         backup_path = str(_backup_root / backup_name)
         self.bot.memory.export_memory_store(backup_path)
 
-        archive_entries = list(self.bot.session_archive())
+        archive_entries = []
+        memory_archive = [
+            {
+                "archive_id": uuid.uuid4().hex,
+                "archived_at": wall_time,
+                "reason": "controlled_forgetting",
+                "memory": dict(memory.get("_forgetting_original") or memory),
+            }
+            for memory in archived
+        ]
         for memory in archived:
             archive_entry = self.bot.normalize_session_archive_entry(
                 {
@@ -778,19 +790,22 @@ Rules:
             if archive_entry is not None:
                 archive_entries.append(archive_entry)
 
-        cleaned_kept = self.bot.clean_memory_entries(kept[-50:])
         # Single store mutation keeps archive and active-memory views consistent
         # inside one deterministic commit boundary.
-        self.bot.mutate_memory_store(
-            memories=cleaned_kept,
-            session_archive=archive_entries[-24:],
-        )
-        self.bot.queue_semantic_memory_index(cleaned_kept)
+        def apply_archive(store):
+            if "memories" in context and store["memories"] != context["memories"]:
+                raise RuntimeError("Memory catalog changed during controlled forgetting; retry required")
+            store["memories"] = kept
+            store["archived_memories"] = [*store.get("archived_memories", []), *memory_archive]
+            store["session_archive"] = [*store.get("session_archive", []), *archive_entries][-24:]
+
+        self.bot.mutate_memory_store(mutator=apply_archive)
+        self.bot.queue_semantic_memory_index(kept)
         self.bot.mark_memory_graph_dirty()
         return {
             "removed": len(archived),
             "archived": len(archived),
-            "retained": len(cleaned_kept),
+            "retained": len(kept),
             "threshold": decay_threshold,
             "backup_path": backup_path,
             "ran": True,
@@ -798,6 +813,13 @@ Rules:
 
     def apply_controlled_forgetting(self, force=False, turn_context=None):
         context = self._controlled_forgetting_context(force=force, turn_context=turn_context)
+        return self._run_controlled_forgetting(context)
+
+    def apply_manual_controlled_forgetting(self):
+        context = self._controlled_forgetting_context(force=True, manual_time=datetime.now(timezone.utc))
+        return self._run_controlled_forgetting(context)
+
+    def _run_controlled_forgetting(self, context):
         if context is None:
             return {"removed": 0, "backup_path": "", "ran": False, "skipped": "missing_turn_context"}
         if bool(context.get("empty", False)):
@@ -1204,6 +1226,10 @@ Rules:
                 list(incoming.get("contradictions", [])),
                 limit=4,
             ),
+            "reviewed_conflicts": list(dict.fromkeys([
+                *existing.get("reviewed_conflicts", []),
+                *incoming.get("reviewed_conflicts", []),
+            ])),
         }
 
     def _cluster_memories(self, normalized_entries: list[dict]) -> dict[str, dict]:
@@ -1254,6 +1280,14 @@ Rules:
                     right.get("category") or "general",
                 ):
                     continue
+                if self.conflicts.conflict_reviewed(left, right):
+                    for entry, other in ((left, right), (right, left)):
+                        prefix = f"Possible conflict: {other.get('summary', '')} ("
+                        entry["contradictions"] = [
+                            item for item in entry.get("contradictions", [])
+                            if not str(item).startswith(prefix)
+                        ]
+                    continue
 
                 reason = self.contradiction_signal_reason(
                     left.get("summary", ""),
@@ -1262,31 +1296,14 @@ Rules:
                 if not reason:
                     continue
 
-                winner, loser = self._resolve_merge_winner(left, right)
-                updated_winner = {
-                    **winner,
-                    "version": max(
-                        int(winner.get("version", 1) or 1),
-                        int(loser.get("version", 1) or 1) + 1,
-                    ),
-                }
-                updated_loser = {
-                    **loser,
-                    "superseded": True,
-                    "superseded_by": ConflictDetector._entry_identity(updated_winner),
-                    "superseded_reason": reason,
-                    "superseded_at": now_stamp,
-                }
-
-                if winner is left:
-                    resolved[left_index] = updated_winner
-                    resolved[right_index] = updated_loser
-                    left = updated_winner
-                else:
-                    resolved[right_index] = updated_winner
-                    resolved[left_index] = updated_loser
-                    left = updated_loser
-                superseded_losers.append(updated_loser)
+                # Text-overlap heuristics cannot prove that two statements
+                # describe the same subject and time; preserve both for review.
+                for entry, other in ((left, right), (right, left)):
+                    marker = f"Possible conflict: {other.get('summary', '')} ({reason})"
+                    contradictions = list(entry.get("contradictions") or [])
+                    if marker not in contradictions:
+                        contradictions.insert(0, marker)
+                    entry["contradictions"] = contradictions
 
         return resolved, superseded_losers
 

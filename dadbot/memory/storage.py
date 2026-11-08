@@ -179,7 +179,7 @@ class MemoryStorageBackend:
 
     # ------------------------------------------------------------------ private write helpers
 
-    def _write_json_memory_store_unlocked(self, store_projection: dict):
+    def _write_json_memory_store_unlocked(self, store_projection: dict, *, required: bool = True):
         try:
             self.bot.write_json_atomically(
                 self.bot.MEMORY_PATH,
@@ -189,29 +189,34 @@ class MemoryStorageBackend:
         except OSError as exc:
             self.bot.record_runtime_issue(
                 "memory store save",
-                "keeping in-memory state because the JSON mirror write failed",
+                "the JSON memory store write failed",
                 exc,
                 level=logging.INFO,
             )
+            if required:
+                raise
 
     def _write_memory_store_unlocked(self, store_projection: dict):
         self._manager.cache_invalidation_revision += 1
-        if getattr(self.bot, "_tenant_document_store", None) is not None:
+        tenant_store = getattr(self.bot, "_tenant_document_store", None)
+        if tenant_store is not None:
             try:
-                self.bot._tenant_document_store.save_session_state(
+                save = getattr(tenant_store, "save_memory_state", tenant_store.save_session_state)
+                save(
                     "memory",
                     store_projection,
                 )
             except OSError as exc:
                 self.bot.record_runtime_issue(
                     "memory store save",
-                    "document-store write failed, so Dad Bot fell back to the local JSON mirror",
+                    "document-store write failed; memory changes require recovery if rollback fails",
                     exc,
-                    level=logging.INFO,
                 )
-                self._write_json_memory_store_unlocked(store_projection)
-                return
-            self._write_json_memory_store_unlocked(store_projection)
+                raise
+            self._write_json_memory_store_unlocked(
+                store_projection,
+                required=bool(getattr(self.bot, "_local_ephemeral_document_store", False)),
+            )
             return
         self._write_json_memory_store_unlocked(store_projection)
 
@@ -272,7 +277,7 @@ class MemoryStorageBackend:
         report = coordinator.execute()
         if not report.ok:
             raise RuntimeError(
-                f"Cross-store transaction failed and was rolled back: {report.error or 'unknown error'}",
+                f"Cross-store transaction failed; rollback was attempted: {report.error or 'unknown error'}",
             )
 
     def _resolve_transition_base_state(self) -> CoreState:
@@ -321,9 +326,6 @@ class MemoryStorageBackend:
             if str_key == "memories":
                 before_memories = list(before_store.get("memories") or [])
                 after_memories = list(value or []) if isinstance(value, list) else []
-                if not after_memories and before_memories:
-                    state = self._emit_memory_event("MemoryCleared", {})
-                    continue
                 if len(after_memories) == len(before_memories) + 1:
                     prefix_match = before_memories == after_memories[: len(before_memories)]
                     if prefix_match:
@@ -499,8 +501,10 @@ class MemoryStorageBackend:
         """Load from disk / document store, normalize, and return the dict."""
         tenant_document_store = getattr(self.bot, "_tenant_document_store", None)
         if tenant_document_store is not None:
+            load = getattr(tenant_document_store, "load_memory_state", tenant_document_store.load_session_state)
+            save = getattr(tenant_document_store, "save_memory_state", tenant_document_store.save_session_state)
             try:
-                persisted = tenant_document_store.load_session_state("memory")
+                persisted = load("memory")
             except OSError as exc:
                 if not allow_tenant_mirror_fallback:
                     raise
@@ -515,7 +519,7 @@ class MemoryStorageBackend:
                 migrated = MemoryMigrationRegistry.migrate(persisted)
                 normalized = self._manager.normalize_memory_store(migrated)
                 if normalized != persisted:
-                    tenant_document_store.save_session_state("memory", normalized)
+                    save("memory", normalized)
                     self.bot.write_json_atomically(
                         self.bot.MEMORY_PATH,
                         normalized,
@@ -526,6 +530,8 @@ class MemoryStorageBackend:
                     {"store": normalized},
                 )
                 return self._project_memory_store(initialized)
+            if persisted is not None:
+                raise ValueError("Invalid tenant memory snapshot: expected an object")
             if not allow_tenant_mirror_fallback:
                 initialized = self._emit_memory_event(
                     "MemoryInitialized",
@@ -546,14 +552,16 @@ class MemoryStorageBackend:
 
                 with path.open("r", encoding="utf-8") as memory_file:
                     loaded = json_load(memory_file)
-            except (OSError, json.JSONDecodeError) as exc:
+                if not isinstance(loaded, dict):
+                    raise ValueError("Memory snapshot must be an object")
+                migrated = MemoryMigrationRegistry.migrate(loaded)
+                normalized = self._manager.normalize_memory_store(migrated)
+            except (OSError, json.JSONDecodeError, ValueError, TypeError) as exc:
                 last_error = exc
                 if label == "primary":
                     self.bot.capture_corrupt_json_snapshot(path)
                 continue
 
-            migrated = MemoryMigrationRegistry.migrate(loaded)
-            normalized = self._manager.normalize_memory_store(migrated)
             should_restore_primary = label == "backup" or normalized != loaded
             if should_restore_primary:
                 self.bot.write_json_atomically(primary_path, normalized, backup=False)
@@ -565,7 +573,7 @@ class MemoryStorageBackend:
                         level=logging.INFO,
                     )
             if tenant_document_store is not None:
-                tenant_document_store.save_session_state("memory", normalized)
+                save("memory", normalized)
             initialized = self._emit_memory_event(
                 "MemoryInitialized",
                 {"store": normalized},
@@ -575,12 +583,13 @@ class MemoryStorageBackend:
         if last_error is not None:
             self.bot.record_runtime_issue(
                 "memory store load",
-                "using a fresh default memory store because no readable snapshot remained",
+                "no valid memory snapshot remained; refusing to initialize an empty store",
                 last_error,
             )
+            raise RuntimeError("Cannot load memory store: no valid snapshot remains") from last_error
         store = self.bot.default_memory_store()
         if tenant_document_store is not None:
-            tenant_document_store.save_session_state("memory", store)
+            save("memory", store)
         initialized = self._emit_memory_event(
             "MemoryInitialized",
             {"store": store},
@@ -611,9 +620,14 @@ class MemoryStorageBackend:
             changed_keys=["*"],
         )
         with self.bot._io_lock:
+            before_store = deepcopy(self._manager.memory_projection())
             cleared_state = self._emit_memory_event("MemoryCleared", {})
             after_store = self._project_memory_store(cleared_state)
-            self._write_memory_store_unlocked(after_store)
+            try:
+                self._write_memory_store_unlocked(after_store)
+            except Exception:
+                self.replace_projection_via_canonical_event(before_store)
+                raise
         self._manager.clear_semantic_memory_index()
         self._manager.clear_graph_store()
         return after_store

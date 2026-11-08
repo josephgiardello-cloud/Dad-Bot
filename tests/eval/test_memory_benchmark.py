@@ -53,7 +53,7 @@ def install_fusion_capture(bot, monkeypatch):
 
     def capture_score(memory, context):
         key = bot.semantic_memory_key(memory)
-        dense = original_score(memory, {**context, "user_message": ""})
+        dense = original_score(memory, {**context, "user_message": "", "lexical_query_tokens": set()})
         fused = original_score(memory, context)
         components[memory["summary"]] = {
             "candidate_present": key in semantic_candidates,

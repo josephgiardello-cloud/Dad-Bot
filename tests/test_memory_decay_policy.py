@@ -91,6 +91,11 @@ class TestParseEpoch:
         epoch = _parse_epoch("2026-01-01")
         assert epoch is not None
 
+    def test_timezone_aware_iso_values_resolve_to_the_same_instant(self):
+        assert _parse_epoch("2026-01-01T00:00:00Z") == pytest.approx(_EPOCH_2026)
+        assert _parse_epoch("2026-01-01T05:30:00+05:30") == pytest.approx(_EPOCH_2026)
+        assert _parse_epoch("2025-12-31T19:00:00-05:00") == pytest.approx(_EPOCH_2026)
+
     def test_none_returns_none(self):
         assert _parse_epoch(None) is None
 
@@ -165,6 +170,10 @@ class TestScoreEntry:
         s1 = _score_entry(e, _EPOCH_2026)
         s2 = _score_entry(e, _EPOCH_2026)
         assert s1 == s2
+
+    def test_zero_confidence_is_not_treated_as_missing(self):
+        e = _entry(updated_at="2020-01-01", source_count=1, confidence=0.0, importance_score=0.0)
+        assert _score_entry(e, _EPOCH_2026) == 0.0
 
 
 # ---------------------------------------------------------------------------

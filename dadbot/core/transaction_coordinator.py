@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Protocol
+
+
+logger = logging.getLogger(__name__)
 
 
 class TransactionParticipant(Protocol):
@@ -77,13 +81,14 @@ class TransactionCoordinator:
             )
         except Exception as exc:  # noqa: BLE001
             rolled_back = 0
+            rollback_errors: list[str] = []
             for participant in reversed(committed):
                 try:
                     participant.rollback()
                     rolled_back += 1
-                except Exception:  # noqa: BLE001
-                    # Best-effort rollback: continue to restore remaining participants.
-                    pass
+                except Exception as rollback_exc:  # noqa: BLE001
+                    logger.exception("Transaction rollback failed for %s", type(participant).__name__)
+                    rollback_errors.append(f"{type(participant).__name__}: {rollback_exc}")
 
             # Rollback non-committed participants too if they can restore staged state.
             for participant in reversed(prepared):
@@ -92,14 +97,18 @@ class TransactionCoordinator:
                 try:
                     participant.rollback()
                     rolled_back += 1
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as rollback_exc:  # noqa: BLE001
+                    logger.exception("Transaction rollback failed for %s", type(participant).__name__)
+                    rollback_errors.append(f"{type(participant).__name__}: {rollback_exc}")
 
+            error = str(exc)
+            if rollback_errors:
+                error += "; rollback incomplete: " + "; ".join(rollback_errors)
             return TransactionReport(
                 ok=False,
                 committed_participants=len(committed),
                 rolled_back_participants=rolled_back,
-                error=str(exc),
+                error=error,
             )
 
 

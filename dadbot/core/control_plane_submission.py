@@ -98,16 +98,15 @@ def _initialize_submit_scope_impl(
     if memory_store is not None:
         # MemoryManager owns global records; session execution state must not roll
         # back records loaded or edited since this session's previous turn.
-        prior_records = {
+        prior_memory = {
+            **initial_core_state.memory_kv,
             "memories": initial_core_state.memory.to_dict_list(),
-            "consolidated_memories": initial_core_state.memory_kv.get("consolidated_memories", []),
         }
-        for key, previous in prior_records.items():
-            current = list(memory_store.get(key) or [])
-            if current != previous:
-                initial_core_state = transition(
-                    initial_core_state, InputEvent("MemoryUpdated", {"key": key, "value": current}),
-                )
+        refreshed_memory = {**prior_memory, **memory_store}
+        if refreshed_memory != prior_memory:
+            initial_core_state = transition(
+                initial_core_state, InputEvent("MemoryInitialized", {"store": refreshed_memory}),
+            )
     cs_token = open_core_state_scope(initial_core_state)
     push_core_state_event(
         "job_submitted",

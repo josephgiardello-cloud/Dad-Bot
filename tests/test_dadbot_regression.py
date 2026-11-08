@@ -1957,7 +1957,7 @@ class TestDadBotRegression(unittest.TestCase):
         self.assertEqual(len(contradictions), 1)
         self.assertIn("opposing states", contradictions[0]["reason"])
 
-    def test_merge_consolidated_memories_marks_superseded_conflicts(self):
+    def test_merge_consolidated_memories_flags_ambiguous_conflicts(self):
         self.bot.MEMORY_STORE = {**self.bot.MEMORY_STORE, "consolidated_memories": [
             {
                 "summary": "Tony is single right now.",
@@ -1985,8 +1985,9 @@ class TestDadBotRegression(unittest.TestCase):
         superseded = [entry for entry in consolidated if entry.get("superseded")]
 
         self.assertGreaterEqual(len(active), 1)
-        self.assertGreaterEqual(len(superseded), 1)
-        self.assertTrue(any(entry.get("superseded_reason") for entry in superseded))
+        self.assertEqual(len(superseded), 0)
+        self.assertEqual(len(active), 2)
+        self.assertTrue(all(entry.get("contradictions") for entry in active))
         self.assertTrue(all("importance_score" in entry for entry in consolidated))
         self.assertTrue(all("version" in entry for entry in consolidated))
 
@@ -2243,6 +2244,7 @@ class TestDadBotRegression(unittest.TestCase):
                     "confidence": 0.7,
                     "importance_score": 0.6,
                     "updated_at": "2026-04-15",
+                    "contradictions": ["Possible conflict: Tony is married. (contains opposing states)"],
                 },
                 {
                     "summary": "Tony is married.",
@@ -2251,6 +2253,10 @@ class TestDadBotRegression(unittest.TestCase):
                     "confidence": 0.72,
                     "importance_score": 0.62,
                     "updated_at": "2026-04-20",
+                    "contradictions": [
+                        "Possible conflict: Tony is single. (contains opposing states)",
+                        "A separate uncertainty",
+                    ],
                 },
             ]
         )
@@ -2267,6 +2273,8 @@ class TestDadBotRegression(unittest.TestCase):
 
         self.assertTrue(single.get("superseded"))
         self.assertFalse(married.get("superseded"))
+        self.assertEqual(married["contradictions"], ["A separate uncertainty"])
+        self.assertEqual(single["contradictions"], [])
 
     def test_dashboard_status_snapshot_includes_memory_contradictions(self):
         self.bot.mutate_memory_store(

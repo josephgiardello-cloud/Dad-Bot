@@ -1,7 +1,9 @@
 import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
+from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 from dadbot.core.core_state import CoreState
@@ -361,16 +363,22 @@ def test_is_high_quality_memory_rejects_low_signal_patterns(bot):
 
 
 def _turn_context_for_forgetting():
+    today = date.today().isoformat()
     return SimpleNamespace(
         temporal=SimpleNamespace(
-            wall_time="2026-05-01T00:00:00",
-            wall_date="2026-05-01",
+            wall_time=f"{today}T00:00:00",
+            wall_date=today,
         ),
     )
 
 
+@pytest.fixture
+def isolated_forgetting_backups(bot, tmp_path, monkeypatch):
+    monkeypatch.setattr(type(bot), "script_path", property(lambda _self: tmp_path / "dadbot.py"))
+
+
 @pytest.mark.slow
-def test_controlled_forgetting_archives_old_low_signal_noise(bot):
+def test_controlled_forgetting_archives_old_low_signal_noise(bot, isolated_forgetting_backups):
     stale_date = (date.today() - timedelta(days=500)).isoformat()
     bot.save_memory_catalog(
         [
@@ -394,7 +402,381 @@ def test_controlled_forgetting_archives_old_low_signal_noise(bot):
     assert any("passing thought" in str(entry.get("summary", "")).lower() for entry in bot.session_archive())
 
 
-def test_controlled_forgetting_retains_repeated_preference_with_high_confidence_hits(bot):
+def test_forgetting_uses_distinct_backups_for_same_turn_and_preserves_retained_memories(bot, tmp_path, monkeypatch):
+    monkeypatch.setattr(type(bot), "script_path", property(lambda _self: tmp_path / "dadbot.py"))
+    memories = [
+        {
+            "summary": f"I have retained meaningful item number {index}.",
+            "category": "general",
+            "created_at": "2024-01-01",
+            "updated_at": "2024-01-01",
+            "pinned": True,
+        }
+        for index in range(55)
+    ]
+    bot.mutate_memory_store(memories=memories)
+    kept = bot.memory_catalog()
+    context = {"wall_time": "2026-01-01T12:00:00", "backup_stamp": "20260101_120000", "decay_threshold": 0.16}
+
+    first = bot.memory_coordinator._finalize_forgetting_updates(
+        kept=kept, archived=[{"summary": "First old memory", "category": "general"}], context=context,
+    )
+    second = bot.memory_coordinator._finalize_forgetting_updates(
+        kept=kept, archived=[{"summary": "Second old memory", "category": "general"}], context=context,
+    )
+
+    assert first["backup_path"] != second["backup_path"]
+    assert len(bot.memory_catalog()) == 55
+    for path in (first["backup_path"], second["backup_path"]):
+        assert len(json.loads(Path(path).read_text(encoding="utf-8"))["memories"]) == 55
+
+
+def test_forgotten_memory_is_restorable_after_store_reload(bot, tmp_path, monkeypatch):
+    monkeypatch.setattr(type(bot), "script_path", property(lambda _self: tmp_path / "dadbot.py"))
+    bot.save_memory_catalog([{
+        "summary": "Tony mentioned random small talk about a passing thought.",
+        "category": "general",
+        "created_at": (date.today() - timedelta(days=500)).isoformat(),
+        "updated_at": (date.today() - timedelta(days=500)).isoformat(),
+    }])
+    original = bot.memory_catalog()[0]
+    result = bot.memory_coordinator.apply_controlled_forgetting(turn_context=_turn_context_for_forgetting())
+    assert result["archived"] == 1
+    assert bot.memory_catalog() == []
+    bot.memory_manager.load_memory_store()
+    archive = bot.memory_manager.memory_projection()["archived_memories"]
+    assert len(archive) == 1
+    assert archive[0]["memory"] == original
+    restored = bot.memory_manager.restore_archived_memory(archive[0]["archive_id"])
+    assert "passing thought" in restored["summary"]
+    assert len(bot.memory_catalog()) == 1
+    bot.memory_manager.load_memory_store()
+    assert len(bot.memory_catalog()) == 1
+    assert bot.memory_manager.memory_projection()["archived_memories"] == []
+
+
+def test_manual_forgetting_archives_and_restores_without_turn_context(bot, tmp_path, monkeypatch):
+    monkeypatch.setattr(type(bot), "script_path", property(lambda _self: tmp_path / "dadbot.py"))
+    old_date = (date.today() - timedelta(days=500)).isoformat()
+    bot.save_memory_catalog([{
+        "summary": "Tony mentioned random small talk about a passing thought.",
+        "category": "general",
+        "created_at": old_date,
+        "updated_at": old_date,
+    }])
+    original = bot.memory_catalog()[0]
+    result = bot.memory_coordinator.apply_manual_controlled_forgetting()
+    assert result["ran"] is True
+    assert result["archived"] == 1
+    bot.memory_manager.load_memory_store()
+    archive = bot.memory_manager.memory_projection()["archived_memories"]
+    assert archive[0]["memory"] == original
+    bot.memory_manager.restore_archived_memory(archive[0]["archive_id"])
+    assert bot.memory_catalog() == [original]
+
+
+def test_archived_memory_can_be_deleted_without_changing_active_memory(bot, tmp_path, monkeypatch):
+    monkeypatch.setattr(type(bot), "script_path", property(lambda _self: tmp_path / "dadbot.py"))
+    bot.mutate_memory_store(memories=[{"summary": "My preferred fruit is an apple.", "category": "preferences"}])
+    kept = bot.memory_catalog()
+    bot.memory_coordinator._finalize_forgetting_updates(
+        kept=kept, archived=[{"summary": "A specific old memory.", "category": "general"}],
+        context={"wall_time": "2026-01-01T12:00:00", "backup_stamp": "20260101_120000", "decay_threshold": 0.16},
+    )
+    archive_id = bot.memory_manager.memory_projection()["archived_memories"][0]["archive_id"]
+    bot.memory_manager.delete_archived_memory(archive_id)
+    assert bot.memory_catalog() == kept
+    bot.memory_manager.load_memory_store()
+    assert bot.memory_manager.memory_projection()["archived_memories"] == []
+    with pytest.raises(ValueError, match="not found"):
+        bot.memory_manager.restore_archived_memory(archive_id)
+
+
+def test_invalid_archive_cannot_replace_existing_store(bot):
+    bot.mutate_memory_store(memories=[{"summary": "My preferred fruit is an apple.", "category": "preferences"}])
+    before = bot.memory_manager.memory_projection()
+    entry = {
+        "archive_id": "duplicate",
+        "archived_at": "2026-01-01",
+        "reason": "controlled_forgetting",
+        "memory": before["memories"][0],
+    }
+    with pytest.raises(ValueError, match="unique"):
+        bot.mutate_memory_store(archived_memories=[entry, entry])
+    assert bot.memory_manager.memory_projection() == before
+
+
+def test_forgetting_rejects_stale_catalog_without_losing_new_memory(bot, tmp_path, monkeypatch):
+    monkeypatch.setattr(type(bot), "script_path", property(lambda _self: tmp_path / "dadbot.py"))
+    bot.mutate_memory_store(memories=[{"summary": "My preferred fruit is an apple.", "category": "preferences"}])
+    old_catalog = bot.memory_catalog()
+    bot.mutate_memory_store(memories=[*old_catalog, {"summary": "My hobby is pottery.", "category": "hobbies"}])
+    with pytest.raises(RuntimeError, match="catalog changed"):
+        bot.memory_coordinator._finalize_forgetting_updates(
+            kept=[], archived=old_catalog,
+            context={
+                "memories": old_catalog, "wall_time": "2026-01-01T12:00:00",
+                "backup_stamp": "20260101_120000", "decay_threshold": 0.16,
+            },
+        )
+    assert len(bot.memory_catalog()) == 2
+    assert bot.memory_manager.memory_projection()["archived_memories"] == []
+
+
+def test_forgetting_preserves_concurrent_session_archive_update(bot, tmp_path, monkeypatch):
+    monkeypatch.setattr(type(bot), "script_path", property(lambda _self: tmp_path / "dadbot.py"))
+    bot.mutate_memory_store(memories=[{"summary": "My preferred fruit is an apple.", "category": "preferences"}])
+    catalog = bot.memory_catalog()
+    mutate = bot.mutate_memory_store
+
+    def update_session_then_archive(*args, **kwargs):
+        mutate(session_archive=[{
+            "summary": "A concurrent session update",
+            "topics": ["general"],
+            "dominant_mood": "neutral",
+            "turn_count": 1,
+            "created_at": "2026-01-01",
+        }])
+        return mutate(*args, **kwargs)
+
+    monkeypatch.setattr(bot, "mutate_memory_store", update_session_then_archive)
+    bot.memory_coordinator._finalize_forgetting_updates(
+        kept=[], archived=catalog,
+        context={
+            "memories": catalog, "wall_time": "2026-01-02", "backup_stamp": "test",
+            "decay_threshold": 0.1,
+        },
+    )
+    assert any(entry["summary"] == "A concurrent session update" for entry in bot.session_archive())
+    assert len(bot.memory_manager.memory_projection()["archived_memories"]) == 1
+
+
+def test_archived_memory_restore_failure_preserves_archive(bot, tmp_path, monkeypatch):
+    monkeypatch.setattr(type(bot), "script_path", property(lambda _self: tmp_path / "dadbot.py"))
+    bot.memory_coordinator._finalize_forgetting_updates(
+        kept=[], archived=[{"summary": "A specific old memory.", "category": "general"}],
+        context={"wall_time": "2026-01-01T12:00:00", "backup_stamp": "20260101_120000", "decay_threshold": 0.16},
+    )
+    archive_id = bot.memory_manager.memory_projection()["archived_memories"][0]["archive_id"]
+    bot._tenant_document_store = None
+    monkeypatch.setattr(bot, "write_json_atomically", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk unavailable")))
+    with pytest.raises(RuntimeError, match="disk unavailable"):
+        bot.memory_manager.restore_archived_memory(archive_id)
+    assert bot.memory_catalog() == []
+    assert bot.memory_manager.memory_projection()["archived_memories"][0]["archive_id"] == archive_id
+
+
+def test_forgetting_preserves_distinct_kept_memories_with_same_dedup_key(bot, tmp_path, monkeypatch):
+    monkeypatch.setattr(type(bot), "script_path", property(lambda _self: tmp_path / "dadbot.py"))
+    bot.mutate_memory_store(memories=[
+        {"summary": "I am saving money for a house.", "category": "finance", "pinned": True},
+        {"summary": "I am saving money for a vacation.", "category": "finance", "pinned": True},
+    ])
+    kept = bot.memory_catalog()
+    result = bot.memory_coordinator._finalize_forgetting_updates(
+        kept=kept,
+        archived=[{"summary": "An unrelated old memory", "category": "general"}],
+        context={"wall_time": "2026-01-01T12:00:00", "backup_stamp": "20260101_120000", "decay_threshold": 0.16},
+    )
+    assert result["retained"] == 2
+    assert len(bot.memory_catalog()) == 2
+    assert {item["summary"] for item in bot.memory_catalog()} == {item["summary"] for item in kept}
+
+
+def test_save_memory_catalog_does_not_discard_older_items_at_fifty(bot):
+    memories = [
+        {"summary": f"I have retained meaningful item number {index}.", "category": "general"}
+        for index in range(55)
+    ]
+    saved = bot.save_memory_catalog(memories)
+    assert len(saved) == 55
+    assert len(bot.memory_catalog()) == 55
+    persisted = json.loads(bot.MEMORY_PATH.read_text(encoding="utf-8"))
+    assert len(persisted["memories"]) == 55
+
+
+def test_memory_catalog_read_preserves_distinct_entries_and_is_detached(bot):
+    bot.mutate_memory_store(memories=[
+        {"summary": "I am saving money for a house.", "category": "finance", "access_count": 1},
+        {"summary": "I am saving money for a vacation.", "category": "finance", "access_count": 2},
+    ])
+    before = bot.MEMORY_PATH.read_bytes()
+    catalog = bot.memory_catalog()
+    assert len(catalog) == 2
+    catalog[0]["summary"] = "changed"
+    assert all(item["summary"] != "changed" for item in bot.memory_catalog())
+    assert bot.MEMORY_PATH.read_bytes() == before
+
+
+def test_empty_memory_catalog_preserves_other_sections(bot):
+    bot.mutate_memory_store(
+        memories=[{"summary": "My preferred fruit is an apple.", "category": "preferences"}],
+        last_mood="positive",
+    )
+    bot.save_memory_catalog([])
+    assert bot.memory_catalog() == []
+    assert bot.memory_manager.memory_projection()["last_mood"] == "positive"
+    persisted = json.loads(bot.MEMORY_PATH.read_text(encoding="utf-8"))
+    assert persisted["last_mood"] == "positive"
+
+
+@pytest.mark.parametrize("decision", ["both", "none"])
+def test_conflict_review_preserves_or_dismisses_both_entries(bot, decision):
+    bot.mutate_memory_store(consolidated_memories=[
+        {"summary": "Tony is single.", "category": "relationships", "updated_at": "2025-01-01"},
+        {"summary": "Tony is married.", "category": "relationships", "updated_at": "2025-06-01"},
+    ])
+    assert bot.consolidated_contradictions()
+    result = bot.resolve_consolidated_contradiction("Tony is single.", "Tony is married.", keep=decision)
+    assert result["resolution"] == decision
+    entries = bot.consolidated_memories()
+    assert len(entries) == 2
+    assert all(entry["superseded"] == (decision == "none") for entry in entries)
+    assert bot.consolidated_contradictions() == []
+    saved = json.loads(bot.MEMORY_PATH.read_text(encoding="utf-8"))["consolidated_memories"]
+    if decision == "both":
+        assert all(len(entry["reviewed_conflicts"]) == 1 for entry in saved)
+        entries[0]["contradictions"] = [
+            f"Possible conflict: {entries[1]['summary']} (old heuristic finding)",
+        ]
+        resolved, _ = bot.memory_coordinator._resolve_conflicts(entries, now_stamp="2026-01-01")
+        assert all(not entry["contradictions"] for entry in resolved)
+        assert bot.memory_coordinator.detect_memory_contradictions(entries, entries) == []
+        merged = bot.memory_coordinator._merge_consolidated_pair(
+            entries[0], {**entries[0], "reviewed_conflicts": []},
+        )
+        assert merged["reviewed_conflicts"] == entries[0]["reviewed_conflicts"]
+    else:
+        assert all(entry["superseded"] for entry in saved)
+
+
+def test_invalid_conflict_resolution_does_not_supersede_entries(bot):
+    bot.mutate_memory_store(consolidated_memories=[
+        {"summary": "Tony is single.", "category": "relationships", "updated_at": "2025-01-01"},
+        {"summary": "Tony is married.", "category": "relationships", "updated_at": "2025-06-01"},
+    ])
+    with pytest.raises(ValueError, match="keep must"):
+        bot.resolve_consolidated_contradiction("Tony is single.", "Tony is married.", keep="typo")
+    assert all(not entry["superseded"] for entry in bot.consolidated_memories())
+
+
+def test_memory_commit_fails_if_only_durable_store_cannot_be_written(bot, monkeypatch):
+    bot._tenant_document_store = None
+    before = bot.memory_catalog()
+
+    def fail_write(*_args, **_kwargs):
+        raise OSError("disk unavailable")
+
+    monkeypatch.setattr(bot, "write_json_atomically", fail_write)
+    with pytest.raises(RuntimeError, match="disk unavailable"):
+        bot.mutate_memory_store(memories=[{"summary": "A durable memory entry", "category": "general"}])
+    assert bot.memory_catalog() == before
+
+
+def test_composite_tenant_memory_reads_and_writes_durable_store(bot, monkeypatch):
+    from dadbot_system.state import CompositeStateStore, InMemoryStateStore, NamespacedStateStore
+
+    fast = InMemoryStateStore()
+    durable = InMemoryStateStore()
+    key = "tenant-doc:test:memory"
+    fast.save_session_state(key, {"memories": [{"summary": "stale cache"}]})
+    durable.save_session_state(key, bot.default_memory_store())
+    store = NamespacedStateStore(CompositeStateStore(fast, durable), "tenant-doc:test")
+    monkeypatch.setattr(bot, "_tenant_document_store", store)
+    monkeypatch.setattr(bot, "_local_ephemeral_document_store", False)
+
+    bot.memory_manager.load_memory_store(allow_tenant_mirror_fallback=False)
+    assert bot.memory_catalog() == []
+    bot.mutate_memory_store(memories=[{"summary": "Tony enjoys pottery.", "category": "general"}])
+    assert durable.load_session_state(key)["memories"] == bot.memory_catalog()
+    assert fast.load_session_state(key)["memories"][0]["summary"] == "stale cache"
+    bot.memory_manager.load_memory_store(allow_tenant_mirror_fallback=False)
+    assert durable.load_session_state(key)["memories"] == bot.memory_catalog()
+
+
+def test_composite_tenant_memory_does_not_read_stale_cache_when_durable_unavailable(bot, monkeypatch):
+    from dadbot_system.state import CompositeStateStore, InMemoryStateStore, NamespacedStateStore
+
+    fast = InMemoryStateStore()
+    fast.save_session_state("tenant-doc:test:memory", {"memories": [{"summary": "stale cache"}]})
+    durable = InMemoryStateStore()
+    monkeypatch.setattr(durable, "load_session_state", lambda _key: (_ for _ in ()).throw(OSError("offline")))
+    store = NamespacedStateStore(CompositeStateStore(fast, durable), "tenant-doc:test")
+    monkeypatch.setattr(bot, "_tenant_document_store", store)
+    with pytest.raises(OSError, match="offline"):
+        bot.memory_manager.load_memory_store(allow_tenant_mirror_fallback=False)
+
+
+def test_memory_commit_reports_success_when_tenant_write_succeeds_but_mirror_fails(bot, monkeypatch):
+    writes = []
+    tenant_store = SimpleNamespace(
+        save_session_state=lambda key, value: writes.append((key, value)),
+    )
+    monkeypatch.setattr(bot, "_tenant_document_store", tenant_store)
+    monkeypatch.setattr(bot, "_local_ephemeral_document_store", False)
+    monkeypatch.setattr(
+        bot, "write_json_atomically",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("mirror unavailable")),
+    )
+    bot.mutate_memory_store(memories=[{"summary": "A durable memory entry", "category": "general"}])
+    assert writes[-1][0] == "memory"
+    assert "durable memory" in writes[-1][1]["memories"][0]["summary"].lower()
+
+
+def test_memory_commit_fails_when_ephemeral_store_succeeds_but_mirror_fails(bot, monkeypatch):
+    writes = []
+    tenant_store = SimpleNamespace(save_session_state=lambda key, value: writes.append((key, value)))
+    monkeypatch.setattr(bot, "_tenant_document_store", tenant_store)
+    monkeypatch.setattr(bot, "_local_ephemeral_document_store", True)
+    monkeypatch.setattr(
+        bot, "write_json_atomically",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("mirror unavailable")),
+    )
+    before = bot.memory_catalog()
+    with pytest.raises(RuntimeError, match="mirror unavailable"):
+        bot.mutate_memory_store(memories=[{"summary": "A durable memory entry", "category": "general"}])
+    assert bot.memory_catalog() == before
+    assert writes[-1][1]["memories"] == before
+
+
+def test_memory_commit_does_not_accept_mirror_when_tenant_write_fails(bot, monkeypatch):
+    def fail_write(*_args, **_kwargs):
+        raise OSError("tenant unavailable")
+
+    before = bot.memory_catalog()
+    monkeypatch.setattr(bot, "_tenant_document_store", SimpleNamespace(save_session_state=fail_write))
+    monkeypatch.setattr(bot, "_local_ephemeral_document_store", False)
+    with pytest.raises(RuntimeError, match="tenant unavailable"):
+        bot.mutate_memory_store(memories=[{"summary": "A durable memory entry", "category": "general"}])
+    assert bot.memory_catalog() == before
+
+
+def test_memory_commit_fails_if_tenant_and_mirror_writes_both_fail(bot, monkeypatch):
+    def fail_write(*_args, **_kwargs):
+        raise OSError("no persistence available")
+
+    monkeypatch.setattr(bot, "_tenant_document_store", SimpleNamespace(save_session_state=fail_write))
+    monkeypatch.setattr(bot, "write_json_atomically", fail_write)
+    with pytest.raises(RuntimeError, match="no persistence available"):
+        bot.mutate_memory_store(memories=[{"summary": "A durable memory entry", "category": "general"}])
+
+
+@pytest.mark.parametrize("error_type", [OSError, RuntimeError])
+def test_clear_memory_restores_in_memory_state_when_persistence_fails(bot, monkeypatch, error_type):
+    bot._tenant_document_store = None
+    bot.mutate_memory_store(memories=[{"summary": "A durable memory entry", "category": "general"}])
+    before = bot.memory_manager.memory_projection()["memories"]
+
+    def fail_write(*_args, **_kwargs):
+        raise error_type("disk unavailable")
+
+    monkeypatch.setattr(bot, "write_json_atomically", fail_write)
+    with pytest.raises(error_type, match="disk unavailable"):
+        bot.memory_manager.clear_memory_store()
+    assert bot.memory_manager.memory_projection()["memories"] == before
+
+
+def test_controlled_forgetting_retains_repeated_preference_with_high_confidence_hits(bot, isolated_forgetting_backups):
     stale_date = (date.today() - timedelta(days=420)).isoformat()
     bot.save_memory_catalog(
         [
@@ -427,7 +809,7 @@ def test_controlled_forgetting_retains_repeated_preference_with_high_confidence_
         )
 
 
-def test_controlled_forgetting_never_archives_identity_memory(bot):
+def test_controlled_forgetting_never_archives_identity_memory(bot, isolated_forgetting_backups):
     stale_date = (date.today() - timedelta(days=900)).isoformat()
     bot.save_memory_catalog(
         [
@@ -454,7 +836,7 @@ def test_controlled_forgetting_never_archives_identity_memory(bot):
 
 
 @pytest.mark.slow
-def test_controlled_forgetting_soft_prunes_under_memory_saturation(bot):
+def test_controlled_forgetting_soft_prunes_under_memory_saturation(bot, isolated_forgetting_backups):
     stale_date = (date.today() - timedelta(days=240)).isoformat()
     dense_catalog = []
     for idx in range(40):
@@ -481,7 +863,7 @@ def test_controlled_forgetting_soft_prunes_under_memory_saturation(bot):
 
 
 @pytest.mark.slow
-def test_controlled_forgetting_prioritizes_low_signal_conflicting_memory(bot):
+def test_controlled_forgetting_prioritizes_low_signal_conflicting_memory(bot, isolated_forgetting_backups):
     stale_date = (date.today() - timedelta(days=320)).isoformat()
     bot.save_memory_catalog(
         [
@@ -506,7 +888,7 @@ def test_controlled_forgetting_prioritizes_low_signal_conflicting_memory(bot):
     assert bot.memory_catalog() == []
 
 
-def test_controlled_forgetting_retains_stale_high_importance_memory(bot):
+def test_controlled_forgetting_retains_stale_high_importance_memory(bot, isolated_forgetting_backups):
     stale_date = (date.today() - timedelta(days=700)).isoformat()
     bot.save_memory_catalog(
         [
@@ -534,7 +916,7 @@ def test_controlled_forgetting_retains_stale_high_importance_memory(bot):
 
 
 @pytest.mark.slow
-def test_controlled_forgetting_stress_profile_reduces_retention_under_density(bot):
+def test_controlled_forgetting_stress_profile_reduces_retention_under_density(bot, isolated_forgetting_backups):
     old_date = (date.today() - timedelta(days=420)).isoformat()
     recent_date = (date.today() - timedelta(days=14)).isoformat()
     catalog = []
@@ -789,7 +1171,7 @@ def test_relevant_memories_for_input_preserves_relevant_same_category_entries(bo
     assert any(memory.get("category") == "finance" for memory in memories)
 
 
-def test_relevant_memories_for_input_uses_prompt_budget_to_cap_limit(bot):
+def test_relevant_memories_for_input_honors_explicit_limit_despite_prompt_budget(bot):
     today = date.today().isoformat()
     bot.MEMORY_STORE = {**bot.MEMORY_STORE, "memories": [
         {
@@ -808,7 +1190,7 @@ def test_relevant_memories_for_input_uses_prompt_budget_to_cap_limit(bot):
 
     memories = bot.relevant_memories_for_input("work deadline", limit=4)
 
-    assert len(memories) == 1
+    assert len(memories) == 4
 
 
 @pytest.mark.slow
@@ -876,6 +1258,108 @@ def test_load_memory_store_recovers_from_backup_when_primary_is_corrupted(bot):
     assert recovered["memories"][0]["summary"] == first_snapshot["summary"]
     restored = json.loads(bot.MEMORY_PATH.read_text(encoding="utf-8"))
     assert restored["memories"][0]["summary"] == first_snapshot["summary"]
+
+
+def test_edit_memory_preserves_temporal_and_reinforcement_metadata(bot):
+    bot.mutate_memory_store(memories=[{
+        "summary": "Tony likes pottery.",
+        "category": "general",
+        "event_time": "2025-03-01",
+        "pinned": True,
+        "confidence": 0.9,
+        "access_count": 7,
+        "high_confidence_hits": 3,
+    }])
+    original = bot.memory_catalog()[0]
+
+    updated = bot.update_memory_entry(original["summary"], "Tony enjoys pottery classes.")
+
+    assert updated is not None
+    for key in ("event_time", "pinned", "confidence", "access_count", "high_confidence_hits", "created_at"):
+        assert updated[key] == original[key]
+
+
+def test_edit_reviewed_transcript_invalidates_old_evidence(bot):
+    from dadbot.memory.oral_history_evidence import create_reviewed_evidence, verified_reviewed_evidence
+
+    text = "This is my reviewed oral history."
+    bot.mutate_memory_store(memories=[{
+        "summary": text,
+        "category": "oral_history",
+        "oral_history_evidence": create_reviewed_evidence(text),
+    }])
+    assert verified_reviewed_evidence(bot.memory_catalog()[0]) is not None
+
+    unchanged = bot.update_memory_entry(text, text, mood="positive")
+    assert verified_reviewed_evidence(unchanged) is not None
+
+    edited = bot.update_memory_entry(text, "This is my edited oral history.")
+    assert edited.get("oral_history_evidence") is None
+    assert verified_reviewed_evidence(edited) is None
+
+
+def test_load_memory_store_recovers_from_invalid_archive_snapshot(bot):
+    bot._tenant_document_store = None
+    bot.mutate_memory_store(memories=[{"summary": "A preserved memory", "category": "general"}])
+    expected_memories = bot.memory_catalog()
+    backup_path = bot.json_backup_path(bot.MEMORY_PATH)
+    backup_path.write_text(bot.MEMORY_PATH.read_text(encoding="utf-8"), encoding="utf-8")
+    invalid = json.loads(bot.MEMORY_PATH.read_text(encoding="utf-8"))
+    invalid["archived_memories"] = [{"archive_id": "broken"}]
+    bot.MEMORY_PATH.write_text(json.dumps(invalid), encoding="utf-8")
+
+    recovered = bot._load_memory_store()
+
+    assert recovered["memories"] == expected_memories
+    assert json.loads(bot.MEMORY_PATH.read_text(encoding="utf-8"))["archived_memories"] == []
+
+
+@pytest.mark.parametrize("invalid", ["{bad json", "[]"])
+def test_load_memory_store_refuses_to_replace_unrecoverable_snapshot(bot, invalid):
+    bot._tenant_document_store = None
+    bot.MEMORY_PATH.write_text(invalid, encoding="utf-8")
+    backup_path = bot.json_backup_path(bot.MEMORY_PATH)
+    if backup_path.exists():
+        backup_path.unlink()
+
+    with pytest.raises(RuntimeError, match="no valid snapshot remains"):
+        bot._load_memory_store()
+
+    assert bot.MEMORY_PATH.read_text(encoding="utf-8") == invalid
+
+
+def test_load_memory_store_refuses_to_downgrade_future_schema(bot):
+    bot._tenant_document_store = None
+    snapshot = {"schema_version": 999, "memories": [], "future_data": {"important": True}}
+    bot.MEMORY_PATH.write_text(json.dumps(snapshot), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="newer than supported"):
+        bot._load_memory_store()
+
+    assert json.loads(bot.MEMORY_PATH.read_text(encoding="utf-8")) == snapshot
+
+
+def test_load_memory_store_refuses_invalid_tenant_snapshot(bot, monkeypatch):
+    tenant_store = SimpleNamespace(
+        load_session_state=lambda _key: ["invalid"],
+        save_session_state=MagicMock(),
+    )
+    monkeypatch.setattr(bot, "_tenant_document_store", tenant_store)
+    with pytest.raises(ValueError, match="Invalid tenant memory snapshot"):
+        bot.memory_manager.load_memory_store(allow_tenant_mirror_fallback=False)
+    tenant_store.save_session_state.assert_not_called()
+
+
+def test_failed_memory_migration_does_not_continue_with_partial_store(monkeypatch):
+    from dadbot.memory import migration
+
+    def fail_migration(store):
+        store["partially_migrated"] = True
+        raise ValueError("migration failed")
+
+    monkeypatch.setitem(migration._MIGRATIONS, 0, fail_migration)
+    with pytest.raises(RuntimeError, match="migration v0 to v1 failed"):
+        migration.MemoryMigrationRegistry.migrate({})
 
 
 @pytest.mark.slow

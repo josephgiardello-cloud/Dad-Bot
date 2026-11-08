@@ -357,14 +357,35 @@ def _render_memory_management_section(bot: DadBot) -> None:
             st.success("Dad's saved memory store was cleared.")
             st.rerun()
         if st.button("Run controlled forgetting", use_container_width=True):
-            result = bot.apply_controlled_forgetting(force=True)
+            result = bot.memory_coordinator.apply_manual_controlled_forgetting()
             removed = int(result.get("removed", 0) or 0)
             if removed > 0:
                 st.success(
                     f"Forgot {removed} low-importance memories. Backup: {result.get('backup_path', '')}",
                 )
                 st.rerun()
-            st.info("No memories met forgetting criteria.")
+            else:
+                st.info("No memories met forgetting criteria.")
+        archived = bot.memory_manager.memory_projection().get("archived_memories", [])
+        if archived:
+            st.caption("Archived memories can be restored. Deleting one here does not delete old backups.")
+            archive_by_id = {entry["archive_id"]: entry for entry in archived}
+            selected_archive = st.selectbox(
+                "Archived memory",
+                options=list(archive_by_id),
+                format_func=lambda key: (
+                    f"{archive_by_id[key]['memory']['summary']} ({archive_by_id[key]['archived_at']})"
+                ),
+            )
+            restore_column, delete_column = st.columns(2)
+            if restore_column.button("Restore archived memory"):
+                bot.memory_manager.restore_archived_memory(selected_archive)
+                st.success("Archived memory restored.")
+                st.rerun()
+            if delete_column.button("Delete archived memory"):
+                bot.memory_manager.delete_archived_memory(selected_archive)
+                st.success("Archived memory deleted from the active store.")
+                st.rerun()
 
 
 def _render_consolidated_feedback_section(bot: DadBot) -> None:
@@ -411,8 +432,8 @@ def _render_conflict_resolution_section(bot: DadBot) -> None:
             st.caption("No contradictions detected. Dad's memory is consistent.")
         else:
             for _ci, _pair in enumerate(_contradictions):
-                _left = str(_pair.get("left") or _pair.get("a") or "")
-                _right = str(_pair.get("right") or _pair.get("b") or "")
+                _left = str(_pair.get("left_summary") or _pair.get("left") or _pair.get("a") or "")
+                _right = str(_pair.get("right_summary") or _pair.get("right") or _pair.get("b") or "")
                 if not _left or not _right:
                     continue
                 with st.container(border=True):
@@ -438,35 +459,31 @@ def _render_conflict_resolution_section(bot: DadBot) -> None:
                         use_container_width=False,
                     ):
                         if _resolution == "Keep A":
-                            bot.resolve_consolidated_contradiction(
+                            resolved = bot.resolve_consolidated_contradiction(
                                 _left,
                                 _right,
                                 keep="left",
                                 reason="user_review",
                             )
                         elif _resolution == "Keep B":
-                            bot.resolve_consolidated_contradiction(
+                            resolved = bot.resolve_consolidated_contradiction(
                                 _left,
                                 _right,
                                 keep="right",
                                 reason="user_review",
                             )
-                        elif _resolution == "Both could be true":
-                            bot.resolve_consolidated_contradiction(
-                                _left,
-                                _right,
-                                keep="both",
-                                reason="user_review",
-                            )
                         else:
-                            bot.resolve_consolidated_contradiction(
+                            resolved = bot.resolve_consolidated_contradiction(
                                 _left,
                                 _right,
-                                keep="none",
+                                keep="both" if _resolution == "Both could be true" else "none",
                                 reason="user_review",
                             )
-                        st.success("Resolved. Dad will update his understanding.")
-                        st.rerun()
+                        if resolved:
+                            st.success("Resolved. Dad will update his understanding.")
+                            st.rerun()
+                        else:
+                            st.warning("The memories could not be found; no changes were made.")
 
 
 def _render_living_snapshot_section(living: dict) -> None:

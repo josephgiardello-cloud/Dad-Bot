@@ -23,7 +23,8 @@ def save_reviewed_transcript(bot: Any, transcript: str) -> dict[str, Any] | None
     document_store = getattr(bot, "_tenant_document_store", None)
     try:
         if document_store is not None and not isinstance(bot._customer_state_store, InMemoryStateStore):
-            persisted = document_store.load_session_state("memory")
+            load = getattr(document_store, "load_memory_state", document_store.load_session_state)
+            persisted = load("memory")
         else:
             with bot.MEMORY_PATH.open("r", encoding="utf-8") as handle:
                 persisted = json.load(handle)

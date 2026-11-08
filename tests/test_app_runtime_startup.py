@@ -165,6 +165,22 @@ def test_development_state_store_keeps_in_memory_fallback(monkeypatch):
     assert isinstance(app_runtime.build_customer_document_store(config), app_runtime.InMemoryStateStore)
 
 
+def test_configured_customer_store_fails_closed_on_initialization_error(monkeypatch):
+    persistence = SimpleNamespace(
+        redis_url="", postgres_dsn="configured", session_table="sessions",
+        task_table="tasks", event_table="events",
+    )
+    monkeypatch.setenv("DADBOT_ENVIRONMENT", "development")
+
+    def fail_store(*_args, **_kwargs):
+        raise OSError("database unavailable")
+
+    monkeypatch.setattr(app_runtime, "PostgresStateStore", fail_store)
+    with pytest.raises(RuntimeError, match="Configured customer Postgres") as exc:
+        app_runtime.build_customer_document_store(SimpleNamespace(persistence=persistence))
+    assert isinstance(exc.value.__cause__, OSError)
+
+
 def test_production_vector_memory_does_not_use_noop_fallback(monkeypatch):
     from dadbot.services import vector_memory
 

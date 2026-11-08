@@ -41,13 +41,13 @@ def _parse_epoch(ts_str: str | None) -> float | None:
     """Parse an ISO timestamp string to epoch seconds.  No external clocks."""
     if not ts_str:
         return None
-    for fmt in ("%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
-        try:
-            dt = datetime.strptime(str(ts_str), fmt).replace(tzinfo=UTC)
-            return dt.timestamp()
-        except ValueError:
-            continue
-    return None
+    try:
+        dt = datetime.fromisoformat(str(ts_str))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.timestamp()
 
 
 def _recency_weight(last_epoch: float | None, turn_epoch: float) -> float:
@@ -78,7 +78,7 @@ def _score_entry(entry: dict, turn_epoch: float) -> float:
     reinforcement = _reinforcement_weight(src)
 
     try:
-        quality = float(entry.get("confidence", 0.5) or 0.5)
+        quality = float(entry.get("confidence", 0.5))
     except (TypeError, ValueError):
         quality = 0.5
     quality = max(0.0, min(1.0, quality))

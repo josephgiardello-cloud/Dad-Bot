@@ -186,14 +186,11 @@ def sync_graph_store(manager, turn_context=None):
                 f"(active_stage={active_stage!r}, commit_active={commit_active!r}).",
             )
     snapshot = build_graph_projection(manager, turn_context=turn_context)
-    try:
-        manager.ensure_graph_store()
-        manager._graph_store_backend.replace_graph(
-            snapshot.get("nodes", []),
-            snapshot.get("edges", []),
-        )
-    except Exception as exc:
-        logger.warning("Graph store sync failed: %s", exc)
+    manager.ensure_graph_store()
+    manager._graph_store_backend.replace_graph(
+        snapshot.get("nodes", []),
+        snapshot.get("edges", []),
+    )
     return snapshot
 
 

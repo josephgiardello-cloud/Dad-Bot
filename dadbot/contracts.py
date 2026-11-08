@@ -266,6 +266,9 @@ class SupportsContextRuntime(Protocol):
         user_input: str,
         limit: int = 3,
         graph_result: dict[str, Any] | None = None,
+        *,
+        from_date: str | None = None,
+        to_date: str | None = None,
     ) -> list[dict[str, Any]]: ...
 
     def build_active_consolidated_context(self, user_input: str) -> str | None: ...

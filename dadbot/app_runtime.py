@@ -880,8 +880,7 @@ def build_customer_document_store(config):
         try:
             fast_store = RedisStateStore(config.persistence.redis_url)
         except Exception as e:
-            print(f"[DadBot] Redis unavailable or misconfigured: {e}. Falling back to in-memory store.")
-            fast_store = None
+            raise RuntimeError("Configured customer Redis store could not be initialized") from e
 
     if config.persistence.postgres_dsn:
         try:
@@ -892,8 +891,7 @@ def build_customer_document_store(config):
                 event_table=config.persistence.event_table,
             )
         except Exception as e:
-            print(f"[DadBot] Postgres unavailable or misconfigured: {e}. Falling back to in-memory store.")
-            durable_store = None
+            raise RuntimeError("Configured customer Postgres store could not be initialized") from e
 
     if is_production_environment() and durable_store is None:
         raise RuntimeError(

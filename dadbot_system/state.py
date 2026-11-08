@@ -201,6 +201,18 @@ class CompositeStateStore:
                 return payload
         return None
 
+    def save_memory_state(self, session_id: str, state: dict[str, Any]) -> None:
+        authoritative_store = self.durable_store or self.fast_store
+        if authoritative_store is None:
+            raise RuntimeError("No authoritative memory state store configured")
+        authoritative_store.save_session_state(session_id, state)
+
+    def load_memory_state(self, session_id: str) -> dict[str, Any] | None:
+        authoritative_store = self.durable_store or self.fast_store
+        if authoritative_store is None:
+            raise RuntimeError("No authoritative memory state store configured")
+        return authoritative_store.load_session_state(session_id)
+
     def save_task(self, task_id: str, payload: dict[str, Any]) -> None:
         for store in (self.fast_store, self.durable_store):
             if store is not None:
@@ -268,6 +280,14 @@ class NamespacedStateStore:
 
     def load_session_state(self, session_id: str) -> dict[str, Any] | None:
         return self.store.load_session_state(self._session_key(session_id))
+
+    def save_memory_state(self, session_id: str, state: dict[str, Any]) -> None:
+        save = getattr(self.store, "save_memory_state", self.store.save_session_state)
+        save(self._session_key(session_id), state)
+
+    def load_memory_state(self, session_id: str) -> dict[str, Any] | None:
+        load = getattr(self.store, "load_memory_state", self.store.load_session_state)
+        return load(self._session_key(session_id))
 
     def save_task(self, task_id: str, payload: dict[str, Any]) -> None:
         self.store.save_task(task_id, payload)

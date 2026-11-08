@@ -16,6 +16,9 @@ class SupportsMemoryRetrieval(Protocol):
         query: str,
         limit: int = 5,
         graph_result: Any | None = None,
+        *,
+        from_date: str | None = None,
+        to_date: str | None = None,
     ) -> list[dict[str, Any]]: ...
 
 
@@ -35,6 +38,8 @@ class MemoryService:
         query: str,
         graph_limit: int = 3,
         memory_limit: int = 5,
+        from_date: str | None = None,
+        to_date: str | None = None,
     ) -> list[dict[str, Any]]:
         graph_result = None
         try:
@@ -43,14 +48,14 @@ class MemoryService:
             graph_result = None
 
         try:
-            return list(
-                self.runtime.relevant_memories_for_input(
-                    query,
-                    limit=memory_limit,
-                    graph_result=graph_result,
-                )
-                or []
-            )
+            options: dict[str, Any] = {"limit": memory_limit, "graph_result": graph_result}
+            if from_date is not None:
+                options["from_date"] = from_date
+            if to_date is not None:
+                options["to_date"] = to_date
+            return list(self.runtime.relevant_memories_for_input(query, **options) or [])
+        except ValueError:
+            raise
         except Exception as exc:
             logger.debug("MemoryService retrieval failed (non-fatal): %s", exc)
             return []

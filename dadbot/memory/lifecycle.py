@@ -7,6 +7,7 @@ keeps delegation shims so all existing call-sites continue to work unchanged.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import date, datetime
 
 
@@ -170,9 +171,7 @@ class MemoryLifecycleManager:
 
     def memory_catalog(self):
         raw_memories = self.bot.MEMORY_STORE.get("memories", [])
-        normalized_memories = self._manager.clean_memory_entries(raw_memories)
-        if normalized_memories != raw_memories:
-            self._manager.mutate_memory_store(memories=normalized_memories)
+        normalized_memories = deepcopy(raw_memories)
         self._manager.queue_semantic_memory_index(normalized_memories)
         return normalized_memories
 

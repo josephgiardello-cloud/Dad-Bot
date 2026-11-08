@@ -110,6 +110,21 @@ class MemoryNormalizer:
         return parsed.date().isoformat()
 
     @staticmethod
+    def _memory_event_time(memory: dict) -> str | None:
+        value = memory.get("event_time")
+        if value is None or value == "":
+            return None
+        if isinstance(value, (date, datetime)):
+            return value.isoformat()
+        if not isinstance(value, str):
+            raise ValueError("memory event_time must be an ISO date or datetime")
+        try:
+            datetime.fromisoformat(value)
+        except ValueError as exc:
+            raise ValueError("memory event_time must be an ISO date or datetime") from exc
+        return value
+
+    @staticmethod
     def _coerce_persona_strength(value: object, *, default: float = 1.0) -> float:
         try:
             strength = float(value)
@@ -382,6 +397,10 @@ class MemoryNormalizer:
             "last_reinforced_at": last_reinforced_at,
             "supporting_summaries": supporting_summaries,
             "contradictions": contradictions,
+            "reviewed_conflicts": [
+                str(item) for item in entry.get("reviewed_conflicts", [])
+                if isinstance(item, str) and item
+            ] if isinstance(entry.get("reviewed_conflicts", []), list) else [],
             "updated_at": updated_at,
         }
 
@@ -401,6 +420,7 @@ class MemoryNormalizer:
             "last_reinforced_at": dumped.get("last_reinforced_at"),
             "supporting_summaries": dumped["supporting_summaries"],
             "contradictions": dumped["contradictions"],
+            **({"reviewed_conflicts": dumped["reviewed_conflicts"]} if dumped["reviewed_conflicts"] else {}),
             "updated_at": updated_at,
         }
 
@@ -780,6 +800,7 @@ class MemoryNormalizer:
                 default=0.5,
             ),
             "pinned": bool(memory.get("pinned", False)),
+            "event_time": self._memory_event_time(memory),
             "created_at": created_at,
             "updated_at": updated_at,
             "contradictions": self._normalize_memory_contradictions(
@@ -799,6 +820,8 @@ class MemoryNormalizer:
             normalized["mood"] = dumped["mood"]
         if "created_at" in memory:
             normalized["created_at"] = created_at
+        if dumped["event_time"] is not None:
+            normalized["event_time"] = dumped["event_time"]
         if "updated_at" in memory:
             normalized["updated_at"] = updated_at
         if "confidence" in memory:
@@ -937,6 +960,7 @@ class MemoryNormalizer:
                 default=0.5,
             ),
             "pinned": bool(memory.get("pinned", False)),
+            "event_time": self._memory_event_time(memory),
             "created_at": created_at,
             "updated_at": updated_at,
             "contradictions": self._normalize_memory_contradictions(
@@ -965,6 +989,8 @@ class MemoryNormalizer:
         }
         if dumped["oral_history_evidence"] is not None:
             normalized["oral_history_evidence"] = dumped["oral_history_evidence"]
+        if dumped["event_time"] is not None:
+            normalized["event_time"] = dumped["event_time"]
         self._project_memory_entry_counters(memory, normalized)
         return normalized
 
@@ -1124,6 +1150,18 @@ class MemoryNormalizer:
             if isinstance(store.get("memories"), list)
             else []
         )
+        archived_memories = store.get("archived_memories", [])
+        if not isinstance(archived_memories, list):
+            raise ValueError("archived_memories must be a list")
+        archive_ids = set()
+        for item in archived_memories:
+            if not isinstance(item, dict) or self.normalize_persisted_memory_entry(item.get("memory")) is None:
+                raise ValueError("archived memory must contain a valid memory entry")
+            archive_id = item.get("archive_id")
+            if not isinstance(archive_id, str) or not archive_id.strip() or archive_id in archive_ids:
+                raise ValueError("archived memory IDs must be nonempty and unique")
+            archive_ids.add(archive_id)
+        normalized["archived_memories"] = archived_memories
 
         self._normalize_catalog_list_fields(store, normalized)
         self._normalize_health_fields(store, normalized)
@@ -1138,13 +1176,16 @@ class MemoryNormalizer:
 
         try:
             validated = MemoryStore.model_validate(normalized)
-        except ValidationError:
-            return default_store
+        except ValidationError as exc:
+            raise ValueError("Invalid memory store") from exc
         result = validated.model_dump(mode="json")
         for memory in result["memories"]:
-            for key in ("access_count", "high_confidence_hits", "confidence_history", "last_accessed_at"):
+            for key in ("access_count", "high_confidence_hits", "confidence_history", "last_accessed_at", "event_time"):
                 if memory.get(key) is None:
                     memory.pop(key, None)
+        for memory in result["consolidated_memories"]:
+            if not memory.get("reviewed_conflicts"):
+                memory.pop("reviewed_conflicts", None)
         return result
 
     # -- Private field-group helpers for normalize_memory_store -----------------

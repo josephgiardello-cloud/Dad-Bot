@@ -5,6 +5,7 @@ from copy import deepcopy
 
 import pytest
 from dadbot.core.state_lineage import canonical_state_hash
+from dadbot.core.transaction_coordinator import TransactionContext, TransactionCoordinator
 
 pytestmark = [pytest.mark.unit, pytest.mark.xdist_group("transaction_coordinator")]
 
@@ -22,6 +23,28 @@ def _sample_memory(summary: str) -> dict:
         "category": "work",
         "mood": "stressed",
     }
+
+
+def test_transaction_reports_and_logs_incomplete_rollback(caplog):
+    class Participant:
+        def prepare(self):
+            pass
+
+        def commit(self):
+            raise OSError("commit failed")
+
+        def rollback(self):
+            raise OSError("rollback failed")
+
+    coordinator = TransactionCoordinator(TransactionContext(transaction_id="test"))
+    coordinator.register(Participant())
+    report = coordinator.execute()
+
+    assert not report.ok
+    assert "commit failed" in report.error
+    assert "rollback incomplete" in report.error
+    assert "rollback failed" in report.error
+    assert "Transaction rollback failed" in caplog.text
 
 
 def test_cross_store_partial_failure_rolls_back_all(bot, monkeypatch):
@@ -87,6 +110,29 @@ def test_crash_mid_commit_recovers_previous_state(bot, monkeypatch):
 
     persisted = json.loads(bot.MEMORY_PATH.read_text(encoding="utf-8"))
     assert persisted == before_store
+
+
+def test_graph_backend_write_failure_aborts_memory_commit(bot, monkeypatch):
+    graph_manager = bot.memory_manager.graph_manager
+    backend = graph_manager._graph_store_backend
+    replace_graph = backend.replace_graph
+    before_store = deepcopy(dict(bot.MEMORY_STORE or {}))
+    calls = 0
+
+    def fail_first_write(nodes, edges):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("graph storage unavailable")
+        return replace_graph(nodes, edges)
+
+    monkeypatch.setattr(backend, "replace_graph", fail_first_write)
+    with pytest.raises(RuntimeError, match="graph storage unavailable"):
+        bot.mutate_memory_store(memories=[_sample_memory("I am planning a new career")])
+
+    assert dict(bot.MEMORY_STORE) == before_store
+    assert json.loads(bot.MEMORY_PATH.read_text(encoding="utf-8")) == before_store
+    assert calls >= 2
 
 
 def test_full_replay_equivalence(bot):

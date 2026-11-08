@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from dadbot.memory.storage import _only_memory_access_changed
+from dadbot.services.memory_service import MemoryService
 from dadbot_system.semantic_index import PGVectorSemanticIndex
 
 pytestmark = pytest.mark.unit
@@ -137,3 +138,96 @@ def test_missing_embeddings_are_reported_without_disclosing_the_query(bot, monke
     assert status["degraded"] is True
     assert status["reason"] == "embedding_unavailable"
     assert "private" not in repr(status)
+
+
+def test_time_scoped_retrieval_preserves_out_of_scope_memories(bot, monkeypatch):
+    entries = [
+        {"summary": "My preferred fruit is an apple.", "category": "preferences", "created_at": "2025-01-05"},
+        {"summary": "My preferred fruit is a pear.", "category": "preferences", "created_at": "2025-02-05"},
+        {"summary": "My preferred fruit is a peach.", "category": "preferences", "created_at": "2025-03-05"},
+    ]
+    bot.mutate_memory_store(memories=entries)
+    monkeypatch.setattr(bot, "semantic_memory_matches", lambda *_args, **_kwargs: [])
+    result = bot.memory_query.relevant_memories_for_input(
+        "preferred fruit",
+        graph_result={},
+        from_date="2025-02-01",
+        to_date="2025-02-28",
+    )
+    assert len(result) == 1
+    assert "pear" in result[0]["summary"]
+    saved = bot.memory_catalog()
+    assert len(saved) == 3
+    assert next(item for item in saved if "pear" in item["summary"])["access_count"] == 1
+    assert all(not item.get("access_count") for item in saved if "pear" not in item["summary"])
+
+
+def test_time_scoped_retrieval_rejects_invalid_ranges(bot):
+    with pytest.raises(ValueError, match="from_date"):
+        bot.memory_query.relevant_memories_for_input("fruit", from_date="not-a-date")
+    with pytest.raises(ValueError, match="from_date.*to_date"):
+        bot.memory_query.relevant_memories_for_input("fruit", from_date="2025-03-01", to_date="2025-02-01")
+
+
+def test_time_scoped_service_across_simulated_months(bot, monkeypatch):
+    entries = [
+        {"summary": "The project milestone is planning.", "created_at": "2025-01-15", "category": "work"},
+        {"summary": "The project milestone is building.", "created_at": "2025-03-15", "category": "work"},
+        {"summary": "The project milestone is launch.", "created_at": "2025-06-15", "category": "work"},
+    ]
+    bot.mutate_memory_store(memories=entries)
+    monkeypatch.setattr(bot, "semantic_memory_matches", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(bot, "graph_retrieval_for_input", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(bot.memory_query, "_record_memory_access_signals", lambda *_args: None)
+    service = MemoryService(bot)
+
+    for start, end, expected in (
+        ("2025-01-01", "2025-02-28", "planning"),
+        ("2025-03-01", "2025-05-31", "building"),
+        ("2025-06-01", "2025-06-30", "launch"),
+    ):
+        found = service.retrieve_for_query(query="project milestone", from_date=start, to_date=end)
+        assert len(found) == 1
+        assert expected in found[0]["summary"]
+    assert service.retrieve_for_query(query="project milestone", from_date="2025-07-01") == []
+    with pytest.raises(ValueError, match="from_date"):
+        service.retrieve_for_query(query="project milestone", from_date="invalid")
+
+
+def test_time_scope_uses_recorded_occurrence_not_write_date(bot, monkeypatch):
+    bot.mutate_memory_store(memories=[
+        {
+            "summary": "The project milestone is planning.",
+            "category": "work",
+            "event_time": "2025-01-15T10:00:00+00:00",
+            "created_at": "2025-06-15",
+        },
+        {
+            "summary": "The project milestone is launch.",
+            "category": "work",
+            "created_at": "2025-06-15",
+        },
+    ])
+    monkeypatch.setattr(bot, "semantic_memory_matches", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(bot.memory_query, "_record_memory_access_signals", lambda *_args: None)
+    assert any(item.get("event_time") for item in bot.memory_catalog())
+    january = bot.memory_query.relevant_memories_for_input(
+        "project milestone", graph_result={}, from_date="2025-01-01", to_date="2025-01-31",
+    )
+    assert len(january) == 1
+    assert "planning" in january[0]["summary"]
+    assert january[0]["event_time"].startswith("2025-01-15")
+    saved = json.loads(bot.MEMORY_PATH.read_text(encoding="utf-8"))
+    assert next(item for item in saved["memories"] if "planning" in item["summary"])["event_time"]
+
+
+def test_invalid_event_time_fails_without_losing_existing_memories(bot):
+    bot.mutate_memory_store(memories=[{"summary": "The project milestone is planning.", "category": "work"}])
+    before = bot.memory_catalog()
+    with pytest.raises(ValueError, match="event_time"):
+        bot.mutate_memory_store(memories=[*before, {
+            "summary": "The project milestone is launch.",
+            "category": "work",
+            "event_time": "invalid",
+        }])
+    assert bot.memory_catalog() == before

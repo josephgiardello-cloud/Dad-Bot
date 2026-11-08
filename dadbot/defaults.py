@@ -148,6 +148,7 @@ def default_memory_store() -> dict:
     store.update(
         {
             "memories": [],
+            "archived_memories": [],
             "consolidated_memories": [],
             "persona_evolution": [],
             "wisdom_insights": [],

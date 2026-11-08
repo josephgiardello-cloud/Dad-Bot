@@ -124,6 +124,21 @@ async def test_turn_handler_appends_memory_ledger_event_on_success() -> None:
 
 
 @pytest.mark.asyncio
+async def test_turn_handler_logs_memory_ledger_failure(caplog) -> None:
+    class _BrokenLedger:
+        async def append_memory_event(self, event: dict[str, object]) -> None:
+            raise ValueError("invalid ledger head")
+
+    async def _submit_turn(user_input: str, **kwargs: object):
+        return ("reply", False)
+
+    handler = TurnHandler(submit_turn=_submit_turn, memory_ledger=_BrokenLedger())
+    assert await handler.process_turn(TurnContext(user_input="hello", session_id="s1")) == ("reply", False)
+    assert "Failed to append finalized turn to the memory ledger" in caplog.text
+    assert "invalid ledger head" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_turn_handler_injects_relationship_projection_after_submit() -> None:
     calls: list[dict[str, object]] = []
 

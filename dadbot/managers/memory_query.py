@@ -162,7 +162,11 @@ class MemoryQueryManager:
         return round(max(0.0, min(1.2, weight)), 3)
 
     def memory_diversity_key(self, memory):
-        return self.bot.memory_dedup_key(memory)
+        return (
+            str(memory.get("category") or "general").strip().lower(),
+            self.bot.normalize_memory_text(memory.get("summary", "")),
+            str(memory.get("event_time") or ""),
+        )
 
     def select_diverse_ranked_memories(self, ranked_items, limit, memory_index=1):
         desired = max(1, int(limit or 1))
@@ -356,7 +360,25 @@ class MemoryQueryManager:
         )
         return [entry for _, entry in ranked[: max(1, int(limit or 2))]]
 
-    def relevant_memories_for_input(self, user_input, limit=5, graph_result=None):
+    def relevant_memories_for_input(
+        self, user_input, limit=5, graph_result=None, *, from_date=None, to_date=None,
+    ):
+        bounds = []
+        for name, value in (("from_date", from_date), ("to_date", to_date)):
+            if value is None:
+                bounds.append(None)
+                continue
+            try:
+                parsed = date.fromisoformat(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{name} must be an ISO calendar date (YYYY-MM-DD)") from exc
+            if parsed.isoformat() != value:
+                raise ValueError(f"{name} must be an ISO calendar date (YYYY-MM-DD)")
+            bounds.append(parsed)
+        start_date, end_date = bounds
+        if start_date is not None and end_date is not None and start_date > end_date:
+            raise ValueError("from_date must not be later than to_date")
+
         started = perf_counter()
         stage_seconds = {}
         requested_limit = int(limit or 5)
@@ -364,7 +386,17 @@ class MemoryQueryManager:
         if requested_limit >= 3:
             effective_limit = max(3, effective_limit)
         stage_start = perf_counter()
-        memories = self.bot.memory_catalog()
+        catalog = self.bot.memory_catalog()
+        memories = catalog
+        if start_date is not None or end_date is not None:
+            memories = []
+            for memory in catalog:
+                try:
+                    created = date.fromisoformat(str(memory.get("event_time") or memory.get("created_at") or "")[:10])
+                except ValueError:
+                    continue
+                if (start_date is None or created >= start_date) and (end_date is None or created <= end_date):
+                    memories.append(memory)
         stage_seconds["catalog"] = perf_counter() - stage_start
         if not memories:
             self._lexical_index.scores([], set())
@@ -372,7 +404,8 @@ class MemoryQueryManager:
                 "retrieved_count": 0,
                 "top_score_gap": 0.0,
                 "has_high_confidence": False,
-                "catalog_count": 0,
+                "catalog_count": len(catalog),
+                "eligible_count": 0,
                 "total_seconds": round(perf_counter() - started, 6),
             }
             return []
@@ -437,6 +470,12 @@ class MemoryQueryManager:
             lexical_tokens,
             limit=candidate_limit if bounded else None,
         )
+        if lexical_tokens:
+            for memory in memories:
+                key = self.bot.semantic_memory_key(memory)
+                if key in lexical_scores:
+                    coverage = len(lexical_tokens & self.lexical_query_tokens(str(memory.get("summary") or "")))
+                    lexical_scores[key] = 0.5 * lexical_scores[key] + 0.5 * coverage / len(lexical_tokens)
         stage_seconds["lexical"] = perf_counter() - stage_start
         query_context = {
             "user_message": str(user_input or ""),
@@ -470,6 +509,12 @@ class MemoryQueryManager:
             memory for memory in memories
             if not bounded or self.bot.semantic_memory_key(memory) in candidate_keys
         ]
+        graph_has_catalog_match = bool(graph_boost_tokens) and any(
+            graph_boost_tokens & self.bot.significant_tokens(str(memory.get("summary") or ""))
+            for memory in candidates
+        )
+        if lexical_tokens and max_semantic <= 0.0 and not lexical_scores and not graph_has_catalog_match:
+            candidates = []
         ranked = sorted(
             ((self.score(memory, query_context), memory) for memory in candidates if str(memory.get("summary") or "").strip()),
             key=lambda item: (
@@ -494,14 +539,15 @@ class MemoryQueryManager:
         top_score = selected_scores[0] if selected_scores else 0.0
         second_score = selected_scores[1] if len(selected_scores) > 1 else 0.0
         stage_start = perf_counter()
-        self._record_memory_access_signals(selected, memories)
+        self._record_memory_access_signals(selected, catalog)
         stage_seconds["access_update"] = perf_counter() - stage_start
         self.bot._last_memory_retrieval_diagnostics = {
             "retrieved_count": len(selected),
             "top_score_gap": round(max(0.0, top_score - second_score), 4),
             "has_high_confidence": bool(top_score >= 0.7),
             "top_score": round(top_score, 4),
-            "catalog_count": len(memories),
+            "catalog_count": len(catalog),
+            "eligible_count": len(memories),
             "candidate_count": len(candidates),
             "lexical_candidate_count": len(lexical_scores),
             "graph_candidate_count": len(graph_candidate_keys),
@@ -759,15 +805,17 @@ class MemoryQueryManager:
                 updated_memories.append(memory)
                 continue
 
-            replacement = self.bot.normalize_memory_entry(
-                {
-                    "summary": new_summary,
-                    "category": category if category not in {None, ""} else memory.get("category"),
-                    "mood": mood if mood not in {None, ""} else memory.get("mood"),
-                    "created_at": memory.get("created_at") or date.today().isoformat(),
-                    "updated_at": date.today().isoformat(),
-                },
-            )
+            updated = {
+                **memory,
+                "summary": new_summary,
+                "category": category if category not in {None, ""} else memory.get("category"),
+                "mood": mood if mood not in {None, ""} else memory.get("mood"),
+                "created_at": memory.get("created_at") or date.today().isoformat(),
+                "updated_at": date.today().isoformat(),
+            }
+            if new_summary != memory.get("summary") or updated["category"] != "oral_history":
+                updated.pop("oral_history_evidence", None)
+            replacement = self.bot.normalize_memory_entry(updated)
             if replacement is None:
                 return None
 

@@ -41,8 +41,6 @@ class MemoryHierarchyManager:
                     "timestamp": now,
                 },
             )
-        episodic = episodic[-256:]
-
         profile = dict(long_term.get("profile") or {})
         if "my " in str(user_input or "").lower() or "i " in str(user_input or "").lower():
             profile["last_user_statement"] = str(user_input or "")[:220]
@@ -70,14 +68,21 @@ class MemoryHierarchyManager:
         episodic = list(hierarchy.get("episodic") or [])
         now = float(time.time())
         distilled: list[dict[str, Any]] = []
-        for item in episodic[-64:]:
+        for item in episodic:
             row = dict(item)
-            age_hours = max(0.0, (now - float(row.get("timestamp") or now)) / 3600.0)
-            weight = float(row.get("weight") or 0.5)
-            row["weight"] = max(0.1, min(1.0, weight * (0.995**age_hours)))
-            if float(row.get("weight") or 0.0) >= 0.2:
-                distilled.append(row)
-        hierarchy["episodic"] = distilled[-256:]
+            last_decay = row.get("last_decay_at")
+            if last_decay is None:
+                last_decay = row.get("timestamp")
+            if last_decay is None:
+                last_decay = now
+            last_decay = float(last_decay)
+            age_hours = max(0.0, (now - last_decay) / 3600.0)
+            weight = row.get("weight")
+            weight = 0.5 if weight is None else float(weight)
+            row["weight"] = max(0.0, min(1.0, weight * (0.995**age_hours)))
+            row["last_decay_at"] = max(now, last_decay)
+            distilled.append(row)
+        hierarchy["episodic"] = distilled
         hierarchy["updated_at"] = now
         state["memory_hierarchy"] = hierarchy
         return hierarchy

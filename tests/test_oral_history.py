@@ -46,8 +46,27 @@ def test_empty_reviewed_transcript_does_not_create_memory(bot):
     assert bot.memory_catalog() == before
 
 
+def test_reviewed_transcript_verifies_authoritative_composite_store(bot, monkeypatch):
+    from dadbot_system.state import CompositeStateStore, InMemoryStateStore, NamespacedStateStore
+
+    fast = InMemoryStateStore()
+    durable = InMemoryStateStore()
+    composite = CompositeStateStore(fast, durable)
+    tenant = NamespacedStateStore(composite, "tenant-doc:test")
+    fast.save_session_state("tenant-doc:test:memory", {"memories": []})
+    monkeypatch.setattr(bot, "_customer_state_store", composite)
+    monkeypatch.setattr(bot, "_tenant_document_store", tenant)
+    monkeypatch.setattr(bot, "_local_ephemeral_document_store", False)
+
+    saved = oral_history.save_reviewed_transcript(bot, "My grandmother taught me to bake.")
+
+    assert saved is not None
+    assert durable.load_session_state("tenant-doc:test:memory")["memories"]
+    assert fast.load_session_state("tenant-doc:test:memory")["memories"] == []
+
+
 def test_storage_failure_is_not_reported_as_a_saved_story(bot, monkeypatch):
-    monkeypatch.setattr(bot.memory_manager._storage, "_write_json_memory_store_unlocked", lambda _store: None)
+    monkeypatch.setattr(bot.memory_manager._storage, "_write_json_memory_store_unlocked", lambda _store, **_kwargs: None)
     with pytest.raises(RuntimeError, match="durable storage"):
         oral_history.save_reviewed_transcript(bot, "A story that could not be saved.")
 
