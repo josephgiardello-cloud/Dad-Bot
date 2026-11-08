@@ -146,10 +146,20 @@ def test_validate_replay_determinism_detects_expected_hash(bot):
 
         valid = bot.validate_replay_determinism("trace-replay-002", expected_lock_hash="det-lock-xyz")
         invalid = bot.validate_replay_determinism("trace-replay-002", expected_lock_hash="det-lock-mismatch")
+        invalid_persistence = bot.conversation_persistence.validate_replay_determinism(
+            trace_token="trace-replay-002",
+            expected_lock_hash="det-lock-mismatch",
+        )
 
     assert valid["consistent"] is True
     assert valid["matches_expected"] is True
+    assert invalid["consistent"] is False
+    assert invalid["replay_valid"] is False
+    assert invalid["replay_verdict"] == "FAIL"
+    assert any("does not match observed hash" in item for item in invalid["replay_violations"])
     assert invalid["matches_expected"] is False
+    assert invalid_persistence["consistent"] is False
+    assert invalid_persistence["matches_expected"] is False
 
 
 def test_persistence_replay_operations_require_active_trace(bot):

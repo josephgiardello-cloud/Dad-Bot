@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from dadbot.core.control_plane_lifecycle import ExecutionLifecycleState
 from dadbot.core.execution_result_unified import (
     build_unified_execution_result,
     ensure_unified_execution_result,
 )
-from dadbot.core.control_plane_lifecycle import ExecutionLifecycleState
 
 
 def _prepare_submit_metadata_impl(
@@ -69,16 +69,6 @@ def _prepare_submit_metadata_impl(
         user_input=str(user_input or ""),
         routing_plan=dict(md.get("tool_routing_plan") or {}),
         available_specs=tool_specs,
-    )
-    md["reasoning_hypotheses"] = control_plane._hypothesis_engine.infer_hypotheses(
-        user_input=str(user_input or ""),
-        runtime_plan=dict(md.get("runtime_plan") or {}),
-        tool_routing_plan=dict(md.get("tool_routing_plan") or {}),
-        memory_context=[
-            dict(item)
-            for item in list(md.get("semantic_memory_context") or [])
-            if isinstance(item, dict)
-        ],
     )
     md["safety_state"] = control_plane._semantic_safety_engine.classify(
         user_input=str(user_input or ""),

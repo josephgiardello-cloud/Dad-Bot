@@ -34,6 +34,16 @@ class MockPersistenceService:
             self.drained.append(intent)
 
         ctx.mutation_queue.drain(_drain_executor, hard_fail_on_error=False)
+        checkpoint_snapshot = getattr(ctx, "checkpoint_snapshot", None)
+        if callable(checkpoint_snapshot):
+            self.save_graph_checkpoint(
+                checkpoint_snapshot(
+                    stage="save",
+                    status="atomic_commit",
+                    error=None,
+                ),
+                _skip_turn_event=True,
+            )
         self.events.append({"event_type": "finalize_turn", "trace_id": ctx.trace_id})
         return result if result is not None else ("finalized", False)
 

@@ -13,7 +13,6 @@ from dadbot.core.memory_set_invariants import (
     assert_memory_set_invariants,
 )
 
-
 SYSTEM_STATE_ALGEBRA_SCHEMA_VERSION = "1.0.0"
 SYSTEM_STATE_ALGEBRA_TRACE_SCHEMA_VERSION = "1.0.0"
 SYSTEM_STATE_ALGEBRA_SNAPSHOT_SCHEMA_VERSION = "1.0.0"
@@ -55,6 +54,24 @@ def _stable_hash(payload: dict[str, Any]) -> str:
 
 def _projection(payload: dict[str, Any]) -> dict[str, Any]:
     return _ReadOnlyProjection(dict(payload))
+
+
+def restore_system_state_projections(state: dict[str, Any]) -> None:
+    """Recreate read-only legacy views from the canonical algebra after replay."""
+    canonical = state.get("system_state_algebra")
+    if not isinstance(canonical, dict):
+        return
+    projections = dict(canonical.get("projections") or {})
+    projection_sources = {
+        "turn_truth": "turn_truth",
+        "control_plane_invariant_gate": "control_plane_gate",
+        "turn_truth_terminal": "turn_truth",
+    }
+    for key, source in projection_sources.items():
+        expected = projections.get(source)
+        if key in state and isinstance(expected, dict):
+            state[key] = _projection(expected)
+    _assert_authority_surface_integrity(state)
 
 
 def _assert_authority_surface_integrity(state: dict[str, Any]) -> None:

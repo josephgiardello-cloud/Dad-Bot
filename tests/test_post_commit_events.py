@@ -103,6 +103,11 @@ class _TurnServiceStub:
         self.finalize_calls.append((turn_text, mood, reply, norm_attachments, turn_context))
         return reply, False
 
+    @staticmethod
+    def validate_execution_truth_contract(_turn_context, *, enforce: bool = True):
+        _ = enforce
+        return {"consistent": True}
+
 
 def _make_runtime(*, tenant_id: str = "tenant-1", graph_sync_fails: bool = False, projection_fails: bool = False):
     event_bus = InMemoryEventBus()
@@ -150,7 +155,7 @@ def _checkpoint_snapshot_factory(*, trace_id: str) -> object:
         return {
             "trace_id": trace_id,
             "stage": str(stage or "save"),
-            "status": str(status or "atomic_finalize"),
+            "status": str(status or "atomic_commit"),
             "error": str(error or ""),
             "state": {"safe_result": ("done", False)},
             "metadata": {"determinism": {"lock_hash": "lock-xyz"}},
@@ -202,6 +207,7 @@ def test_finalize_turn_publishes_ephemeral_event_with_durable_event_bus():
 def test_finalize_turn_hard_aborts_on_integrity_failure_marker():
     runtime, _event_bus, _memory_coordinator, _relationship_manager, _graph_manager, _memory_runtime = _make_runtime()
     turn_service = _TurnServiceStub(runtime)
+    turn_service.validate_execution_truth_contract = None
     service = PersistenceService(_PersistenceManagerStub(), turn_service=turn_service)
     turn_context = _make_turn_context()
     turn_context.metadata["integrity_failure"] = True
@@ -215,6 +221,7 @@ def test_finalize_turn_hard_aborts_on_integrity_failure_marker():
 def test_finalize_turn_hard_aborts_on_refusal_state_marker():
     runtime, _event_bus, _memory_coordinator, _relationship_manager, _graph_manager, _memory_runtime = _make_runtime()
     turn_service = _TurnServiceStub(runtime)
+    turn_service.validate_execution_truth_contract = None
     service = PersistenceService(_PersistenceManagerStub(), turn_service=turn_service)
     turn_context = _make_turn_context()
     turn_context.state["refusal_state"] = "integrity_failure"
@@ -223,6 +230,53 @@ def test_finalize_turn_hard_aborts_on_refusal_state_marker():
         service.finalize_turn(turn_context, ("done", False))
 
     assert turn_service.finalize_calls == []
+
+
+def test_strict_finalize_requires_truth_validator_and_lock_hash():
+    runtime, _event_bus, _memory_coordinator, _relationship_manager, _graph_manager, _memory_runtime = _make_runtime()
+    turn_service = _TurnServiceStub(runtime)
+    turn_service.validate_execution_truth_contract = None
+    service = PersistenceService(_PersistenceManagerStub(), turn_service=turn_service)
+    service.strict_mode = True
+    turn_context = _make_turn_context()
+    turn_context.metadata["determinism"] = {"lock_hash": "lock-123"}
+
+    with pytest.raises(PersistenceFailure, match="requires an execution truth-contract validator"):
+        service._finalize_enforce_execution_truth_contract(turn_service, turn_context)
+
+    turn_service.validate_execution_truth_contract = lambda *_args, **_kwargs: {"consistent": True}
+    turn_context.metadata["determinism"] = {}
+    with pytest.raises(PersistenceFailure, match="requires a determinism lock hash"):
+        service._finalize_enforce_execution_truth_contract(turn_service, turn_context)
+
+
+def test_strict_finalize_rejects_inconsistent_truth_contract():
+    runtime, _event_bus, _memory_coordinator, _relationship_manager, _graph_manager, _memory_runtime = _make_runtime()
+    turn_service = _TurnServiceStub(runtime)
+    turn_service.validate_execution_truth_contract = lambda *_args, **_kwargs: {"consistent": False}
+    service = PersistenceService(_PersistenceManagerStub(), turn_service=turn_service)
+    service.strict_mode = True
+    turn_context = _make_turn_context()
+    turn_context.metadata["determinism"] = {"lock_hash": "lock-123"}
+
+    with pytest.raises(PersistenceFailure, match="Execution truth contract violation"):
+        service._finalize_enforce_execution_truth_contract(turn_service, turn_context)
+
+
+def test_strict_invariance_hash_is_bound_to_lock_and_truth_contract():
+    runtime, _event_bus, _memory_coordinator, _relationship_manager, _graph_manager, _memory_runtime = _make_runtime()
+    service = PersistenceService(_PersistenceManagerStub(), turn_service=_TurnServiceStub(runtime))
+    service.strict_mode = True
+
+    def finalize_transition(lock_hash: str) -> str:
+        turn_context = _make_turn_context(trace_id="trace-invariance")
+        turn_context.state["execution_truth_contract"] = {"consistent": True, "decision_outcome": "responded"}
+        turn_context.metadata["determinism"] = {"lock_hash": lock_hash}
+        service._validate_sovereign_commit_transition(turn_context)
+        execution_state = dict(turn_context.metadata["execution_state"])
+        return str(execution_state["invariance_hash"])
+
+    assert finalize_transition("lock-a") != finalize_transition("lock-b")
 
 
 def test_finalize_turn_does_not_emit_post_commit_event_on_failed_commit():
@@ -318,6 +372,7 @@ def test_finalize_turn_blocks_commit_on_memory_authority_divergence():
     service = PersistenceService(persistence, turn_service=_TurnServiceStub(runtime))
     service.strict_mode = True  # authority divergence blocks commit only in strict mode
     turn_context = _make_turn_context(trace_id="trace-authority-bad")
+    turn_context.metadata["determinism"] = {"lock_hash": "lock-authority"}
     turn_context.checkpoint_snapshot = _checkpoint_snapshot_factory(trace_id="trace-authority-bad")
 
     with pytest.raises(PersistenceFailure, match="strict-mode failure") as exc_info:

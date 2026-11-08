@@ -4,7 +4,10 @@ import asyncio
 
 import pytest
 
+from dadbot.core.execution_firewall import ExecutionFirewall
+from dadbot.core.execution_kernel import ExecutionKernel
 from dadbot.core.graph import FatalTurnError, MutationIntent, MutationQueue, TurnContext, TurnGraph
+from dadbot.core.invariant_registry import InvariantRegistry
 from dadbot.core.nodes import TemporalNode
 
 pytestmark = pytest.mark.integration
@@ -53,3 +56,56 @@ def test_turn_graph_raises_when_save_stage_missing() -> None:
 
     with pytest.raises(RuntimeError, match="Kernel validation failed"):
         asyncio.run(graph.execute(context))
+
+
+def test_kernel_validation_blocks_turns_without_registry() -> None:
+    graph = TurnGraph(registry=None)
+
+    with pytest.raises(RuntimeError, match="Kernel validation failed"):
+        graph._enforce_kernel_invariants(
+            turn_context=TurnContext(user_input="hello"),
+            stage="test",
+            operation="test",
+            mutation_outside_save_node=True,
+        )
+
+
+def test_non_strict_injected_kernel_cannot_bypass_validation_gate() -> None:
+    graph = TurnGraph(registry=None)
+    graph.set_execution_kernel(
+        ExecutionKernel(
+            firewall=ExecutionFirewall(),
+            invariant_registry=InvariantRegistry(),
+            quarantine=None,
+            strict=False,
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="Kernel validation failed"):
+        graph._enforce_kernel_invariants(
+            turn_context=TurnContext(user_input="hello"),
+            stage="test",
+            operation="test",
+            mutation_outside_save_node=True,
+        )
+
+
+def test_kernel_validation_shadow_override_is_explicit_and_nonproduction(monkeypatch) -> None:
+    monkeypatch.setenv("DADBOT_ALLOW_KERNEL_VALIDATION_SHADOW", "1")
+    monkeypatch.setenv("DADBOT_ENVIRONMENT", "development")
+    graph = TurnGraph(registry=None)
+
+    graph._enforce_kernel_invariants(
+        turn_context=TurnContext(user_input="hello"),
+        stage="test",
+        operation="test",
+        mutation_outside_save_node=True,
+    )
+
+
+def test_kernel_validation_shadow_override_is_rejected_in_production(monkeypatch) -> None:
+    monkeypatch.setenv("DADBOT_ALLOW_KERNEL_VALIDATION_SHADOW", "1")
+    monkeypatch.setenv("DADBOT_ENVIRONMENT", "production")
+
+    with pytest.raises(RuntimeError, match="cannot be enabled in production"):
+        TurnGraph(registry=None)

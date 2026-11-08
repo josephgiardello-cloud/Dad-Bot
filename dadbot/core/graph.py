@@ -90,6 +90,8 @@ from dadbot.core.runtime_errors import (
 )
 from dadbot.core.side_effect_adapter import SideEffectAdapter
 from dadbot.core.ux_projection import TurnUxProjector  # re-export
+from dadbot.runtime.env_loader import is_production_environment
+from dadbot.utils import env_truthy
 
 logger = logging.getLogger(__name__)
 
@@ -215,11 +217,21 @@ class TurnGraph:
         self._degraded_inference_threshold_ms = 2200.0
         self._degraded_memory_threshold_ms = 1200.0
         self._degraded_graph_sync_threshold_ms = 1200.0
+        self._allow_kernel_validation_shadow = env_truthy(
+            "DADBOT_ALLOW_KERNEL_VALIDATION_SHADOW",
+            default=False,
+        )
+        if self._allow_kernel_validation_shadow and is_production_environment():
+            raise RuntimeError(
+                "DADBOT_ALLOW_KERNEL_VALIDATION_SHADOW cannot be enabled in production",
+            )
+        if self._allow_kernel_validation_shadow:
+            logger.warning("Kernel validation shadow mode is enabled; invariant failures will not block turns")
         self._execution_kernel = ExecutionKernel(
             firewall=ExecutionFirewall(),
             invariant_registry=InvariantRegistry(),
             quarantine=None,
-            strict=(self.registry is not None),
+            strict=not self._allow_kernel_validation_shadow,
         )
         validate_execution_kernel_spec(self._execution_kernel, raise_on_failure=True)
         self._persistence_contract = PersistenceServiceContract()
@@ -1302,7 +1314,7 @@ class TurnGraph:
                 getattr(validate_result, "reason", "kernel validation failed")
                 or "kernel validation failed"
             )
-            if not bool(getattr(self._execution_kernel, "strict", False)):
+            if self._allow_kernel_validation_shadow:
                 logger.warning(
                     "[KERNEL SHADOW VIOLATION] stage=%s operation=%s reason=%s",
                     str(stage or ""),

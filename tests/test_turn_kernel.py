@@ -518,4 +518,6 @@ def test_scheduler_consumes_jobs_from_ledger_pending_tail():
     queued_idx = event_types.index("JOB_QUEUED")
     assert submitted_idx < bound_idx < queued_idx
     assert "JOB_STARTED" in event_types
-    assert event_types[-1] == "JOB_COMPLETED"
+    completed_idx = event_types.index("JOB_COMPLETED")
+    assert completed_idx < len(event_types) - 1
+    assert all(event_type == "SESSION_STATE_UPDATED" for event_type in event_types[completed_idx + 1 :])

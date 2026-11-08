@@ -84,6 +84,18 @@ def test_socket_mutilation_forces_save_node_rollback() -> None:
     assert storage.rollback_calls == 1
 
 
+def test_legacy_save_node_rejects_save_turn_only_service() -> None:
+    class _LegacyPersistence:
+        def save_turn(self, _ctx, _result) -> None:
+            raise AssertionError("legacy save_turn fallback must not run")
+
+    context = TurnContext(user_input="legacy persistence")
+    context.temporal = SimpleNamespace(wall_time="2026-11-07T00:00:00")
+
+    with pytest.raises(RuntimeError, match="must implement finalize_turn"):
+        asyncio.run(SaveNode(_LegacyPersistence()).run(context))
+
+
 def test_zombie_lock_recovers_on_bootstrap() -> None:
     with tempfile.TemporaryDirectory() as td:
         lock_path = Path(td) / "runtime_contract.lock"

@@ -666,15 +666,31 @@ class PersistenceService(
             raise InvariantViolation("TemporalNode required -- execution invalid")
         return service, runtime
 
-    @staticmethod
-    def _finalize_enforce_execution_truth_contract(service: Any, turn_context: Any) -> None:
+    def _finalize_enforce_execution_truth_contract(self, service: Any, turn_context: Any) -> None:
+        metadata = getattr(turn_context, "metadata", None)
+        metadata_dict = metadata if isinstance(metadata, dict) else {}
+        determinism = dict(metadata_dict.get("determinism") or {})
+        lock_hash = str(determinism.get("lock_hash") or "").strip()
+        if self.strict_mode and not lock_hash:
+            raise PersistenceFailure(
+                "Strict SaveNode commit requires a determinism lock hash",
+                context={"trace_id": str(getattr(turn_context, "trace_id", "") or "")},
+            )
+
         validator = getattr(service, "validate_execution_truth_contract", None)
         if not callable(validator):
+            if self.strict_mode:
+                raise PersistenceFailure(
+                    "Strict SaveNode commit requires an execution truth-contract validator",
+                    context={"trace_id": str(getattr(turn_context, "trace_id", "") or "")},
+                )
             return
         try:
             contract = validator(turn_context, enforce=True)
             state = getattr(turn_context, "state", None)
-            if isinstance(state, dict) and isinstance(contract, dict):
+            if not isinstance(contract, dict) or not bool(contract.get("consistent", False)):
+                raise ValueError("execution truth-contract validator returned an inconsistent result")
+            if isinstance(state, dict):
                 state["execution_truth_contract"] = dict(contract)
         except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
             raise PersistenceFailure(
@@ -752,14 +768,38 @@ class PersistenceService(
         after_causal = before_causal + 1
 
         truth_contract = dict(state.get("execution_truth_contract") or {})
-        turn_truth_ok = bool(truth_contract.get("consistent", True))
-        invariance_hash = str(
-            execution_state.get("invariance_hash")
-            or metadata.get("invariance_hash")
-            or hashlib.sha256(
-                f"{trace_id}:{after_causal}:{str(state.get('last_commit_id') or '')}".encode("utf-8"),
+        turn_truth_ok = bool(truth_contract.get("consistent", not self.strict_mode))
+        determinism = dict(metadata.get("determinism") or {})
+        lock_hash = str(determinism.get("lock_hash") or "").strip()
+        if self.strict_mode and not turn_truth_ok:
+            raise PersistenceFailure(
+                "Strict SaveNode commit requires a consistent execution truth contract",
+                context={"trace_id": trace_id},
+            )
+        if self.strict_mode and not lock_hash:
+            raise PersistenceFailure(
+                "Strict SaveNode commit requires a determinism lock hash",
+                context={"trace_id": trace_id},
+            )
+        if self.strict_mode:
+            invariance_evidence = {
+                "trace_id": trace_id,
+                "causal_step_count": after_causal,
+                "commit_id": str(state.get("last_commit_id") or ""),
+                "lock_hash": lock_hash,
+                "execution_truth_contract": truth_contract,
+            }
+            invariance_hash = hashlib.sha256(
+                json.dumps(invariance_evidence, sort_keys=True, default=str).encode("utf-8"),
             ).hexdigest()[:32]
-        )
+        else:
+            invariance_hash = str(
+                execution_state.get("invariance_hash")
+                or metadata.get("invariance_hash")
+                or hashlib.sha256(
+                    f"{trace_id}:{after_causal}:{str(state.get('last_commit_id') or '')}".encode("utf-8"),
+                ).hexdigest()[:32]
+            )
 
         before = {
             "session_id": session_id,
@@ -833,7 +873,7 @@ class PersistenceService(
         if callable(checkpoint_snapshot):
             checkpoint = checkpoint_snapshot(
                 stage="save",
-                status="atomic_finalize",
+                status="atomic_commit",
                 error=None,
             )
             if isinstance(checkpoint, dict):

@@ -124,7 +124,11 @@ def _record_submit_exception_impl(
             confidence=0.9,
             category="outcome",
         )
-    control_plane._merge_session_state(session_id=session_key, state_patch=session_state)
+    control_plane._merge_session_state(
+        session_id=session_key,
+        state_patch=session_state,
+        trace_token=str(trace_token or ""),
+    )
 
 
 __all__ = ["_record_submit_exception_impl"]

@@ -189,13 +189,18 @@ class DadBotHealthMixin:
         matches_expected = True
         if expected_hash:
             matches_expected = observed_hash == expected_hash
+        replay_violations = list(report.violations)
+        if expected_hash and not matches_expected:
+            replay_violations.append(
+                f"Expected lock hash {expected_hash!r} does not match observed hash {observed_hash!r}.",
+            )
 
         return {
             "trace_id": str(trace_token or "").strip(),
-            "replay_valid": report.passed,
-            "replay_verdict": report.verdict,
-            "replay_violations": report.violations,
-            "consistent": bool(determinism.get("consistent", True)),
+            "replay_valid": bool(report.passed) and matches_expected,
+            "replay_verdict": "FAIL" if expected_hash and not matches_expected else report.verdict,
+            "replay_violations": replay_violations,
+            "consistent": bool(determinism.get("consistent", True)) and matches_expected,
             "observed_lock_hash": observed_hash,
             "expected_lock_hash": expected_hash,
             "matches_expected": matches_expected,

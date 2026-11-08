@@ -14,6 +14,15 @@ from datetime import datetime, timedelta
 from typing import Any, Protocol, cast
 
 from dadbot.contracts import AttachmentList, FinalizedTurnResult
+from dadbot.core._control_plane_compaction import CompactionMixin
+from dadbot.core._control_plane_reconciliation import ReconciliationMixin
+from dadbot.core.adaptation_engine import AdaptationEngine
+from dadbot.core.behavior_alignment_trainer import BehaviorAlignmentTrainer
+from dadbot.core.belief_state_engine import BeliefStateEngine
+from dadbot.core.cognitive_policy_engine import CognitivePolicyEngine
+from dadbot.core.compaction import EventCompactor
+from dadbot.core.compositional_tool_planner import CompositionalToolPlanner
+from dadbot.core.contract_evaluator import validate_sovereign_ledger_transition
 from dadbot.core.contracts.lifecycle_events import (
     Claimed,
     Completed,
@@ -21,86 +30,20 @@ from dadbot.core.contracts.lifecycle_events import (
     LeaseExpired,
     Redelivered,
 )
-from dadbot.core.compaction import EventCompactor
-from dadbot.core.belief_state_engine import BeliefStateEngine
-from dadbot.core.compositional_tool_planner import CompositionalToolPlanner
-from dadbot.core.behavior_alignment_trainer import BehaviorAlignmentTrainer
-from dadbot.core.contract_evaluator import validate_sovereign_ledger_transition
-from dadbot.core.cognitive_policy_engine import CognitivePolicyEngine
-from dadbot.core.control_plane_projection import ExecutionProjection
-from dadbot.core.control_plane_reducer import ExecutionState as ReducedExecutionState
-from dadbot.core.control_plane_reducer import ExecutionStatus, lease_expired
-from dadbot.core.execution_boundary import ControlPlaneExecutionBoundary
-from dadbot.core.execution_context import (
-    close_core_state_scope,
+from dadbot.core.control_plane_composition_contracts import (
+    _build_composition_payload_impl,
+    _build_confluence_payload_impl,
+    _confluence_config_from_metadata_impl,
+    _enforce_global_confluence_law_impl,
+    _expected_hashes_from_metadata_impl,
+    _record_turn_composition_contract_impl,
+    _result_output_payload_impl,
+    _validate_composition_expectations_impl,
 )
-from dadbot.core.execution_lease import ExecutionLease
-from dadbot.core.execution_resource_budget import BackpressureSignal, resolve_dynamic_compute_ticket
-from dadbot.core.execution_ledger import ExecutionLedger
-from dadbot.core.execution_ledger_memory import InMemoryExecutionLedger
-from dadbot.core.execution_result_unified import (
-    _TERMINAL_STATUS_VALUES,
-    build_unified_execution_result,
-    ensure_unified_execution_result,
-    mark_unified_execution_failure,
-    mark_unified_execution_success,
-)
-from dadbot.core.failure_taxonomy import classify_failure
-from dadbot.core.distributed_correctness import (
-    DistributedCorrectnessModel,
-    NodeRole,
-)
-from dadbot.core.memory_set_invariants import (
-    MemorySetInvariantViolation,
-)
-from dadbot.core.runtime_errors import (
-    AuthorityViolation,
-    ExecutionStageError,
-    InvariantViolation,
-    PersistenceFailure,
-    ReplayMismatch,
-)
-from dadbot.core.runtime_contracts import (
-    validate_decision_explanation_contract,
-    validate_trace_event_contract,
-)
-from dadbot.core.kernel_gateway import KernelGateway
-from dadbot.core.kernel_signals import get_exporter, get_metrics, get_tracer
-from dadbot.core.ledger_reader import LedgerReader
-from dadbot.core.ledger_writer_adapter import LedgerWriterAdapter
-from dadbot.core.ledger_coordinator import LedgerCoordinator
-from dadbot.core.invariant_enforcer import InvariantEnforcer
-from dadbot.core.recovery_manager import RecoveryManager
-from dadbot.core.runtime_types import ToolSpec
-from dadbot.core.execution_coordinator import ExecutionCoordinator
-from dadbot.core.hypothesis_engine import MultiHypothesisEngine
-from dadbot.core.memory_hierarchy_manager import MemoryHierarchyManager
-from dadbot.core.semantic_memory_graph import SemanticMemoryGraph
-from dadbot.core.semantic_safety_engine import SemanticSafetyEngine
-from dadbot.core.session_planning_optimizer import SessionPlanningOptimizer
-from dadbot.core.tool_routing_engine import ToolRoutingEngine
-from dadbot.core.tool_self_model import ToolSelfModel
-from dadbot.core.adaptation_engine import AdaptationEngine
-from dadbot.core.phase_closure_runtime import PhaseClosureRuntime
-from dadbot.core.response_engine import ResponseEngine
-from dadbot.core.topology_runtime import TopologyRuntime, TopologyValidationResult
-from dadbot.core._control_plane_reconciliation import ReconciliationMixin
-from dadbot.core._control_plane_compaction import CompactionMixin
-from dadbot.core.planning_utils import (
-    mutate_runtime_plan as _mutate_runtime_plan,
-    normalize_tool_runtime_contract as _normalize_tool_runtime_contract,
-    runtime_plan_intent as _runtime_plan_intent,
-    validate_tool_runtime_contract as _validate_tool_runtime_contract,
-)
-from dadbot.core.memory_ranking import rank_semantic_memory_items as _rank_semantic_memory_items
-from dadbot.core.persistence_coordinator import PersistenceCoordinator
 from dadbot.core.control_plane_feedback import (
     _response_influence_share,
     _synthesize_reward_feedback,
     _update_response_engine_drift_monitor,
-)
-from dadbot.core.control_plane_progress import (
-    _write_progress_event,
 )
 from dadbot.core.control_plane_lifecycle import (
     ExecutionLifecycleState,
@@ -114,26 +57,25 @@ from dadbot.core.control_plane_lifecycle import (
     _resolved_execution_mode,
     _target_lifecycle_state_for_event,
 )
-from dadbot.core.control_plane_submit_phase import (
-    _append_submit_turn_phase,
-    _assert_submit_turn_phase_boundary,
-    _assert_submit_turn_phase_trace_complete as _assert_submit_turn_phase_trace_complete,
-    _validate_submit_turn_phase_progress as _validate_submit_turn_phase_progress,
-    submit_turn_phase_order as submit_turn_phase_order,
+from dadbot.core.control_plane_planning import (
+    _prepare_submit_runtime_planning_impl,
 )
+from dadbot.core.control_plane_post_turn import (
+    _apply_submit_success_postprocessing_impl,
+)
+from dadbot.core.control_plane_progress import (
+    _write_progress_event,
+)
+from dadbot.core.control_plane_projection import ExecutionProjection
+from dadbot.core.control_plane_reducer import ExecutionState as ReducedExecutionState
+from dadbot.core.control_plane_reducer import ExecutionStatus, lease_expired
 from dadbot.core.control_plane_submission import (
     _initialize_submit_scope_impl,
     _prepare_submit_register_phase_impl,
     _register_submit_job_impl,
 )
-from dadbot.core.control_plane_planning import (
-    _prepare_submit_runtime_planning_impl,
-)
 from dadbot.core.control_plane_submit_execution import (
     _run_submit_execution_phase_impl,
-)
-from dadbot.core.control_plane_post_turn import (
-    _apply_submit_success_postprocessing_impl,
 )
 from dadbot.core.control_plane_submit_failure import (
     _record_submit_exception_impl,
@@ -141,21 +83,93 @@ from dadbot.core.control_plane_submit_failure import (
 from dadbot.core.control_plane_submit_metadata import (
     _prepare_submit_metadata_impl,
 )
+from dadbot.core.control_plane_submit_phase import (
+    _append_submit_turn_phase,
+    _assert_submit_turn_phase_boundary,
+)
+from dadbot.core.control_plane_submit_phase import (
+    _assert_submit_turn_phase_trace_complete as _assert_submit_turn_phase_trace_complete,
+)
+from dadbot.core.control_plane_submit_phase import (
+    _validate_submit_turn_phase_progress as _validate_submit_turn_phase_progress,
+)
+from dadbot.core.control_plane_submit_phase import (
+    submit_turn_phase_order as submit_turn_phase_order,
+)
 from dadbot.core.control_plane_trace_invariants import (
     _fallback_commit_count_from_session_impl,
     _trace_event_invariant_counts_impl,
     _validate_trace_invariant_impl,
 )
-from dadbot.core.control_plane_composition_contracts import (
-    _build_composition_payload_impl,
-    _build_confluence_payload_impl,
-    _confluence_config_from_metadata_impl,
-    _enforce_global_confluence_law_impl,
-    _expected_hashes_from_metadata_impl,
-    _record_turn_composition_contract_impl,
-    _result_output_payload_impl,
-    _validate_composition_expectations_impl,
+from dadbot.core.distributed_correctness import (
+    DistributedCorrectnessModel,
+    NodeRole,
 )
+from dadbot.core.execution_boundary import ControlPlaneExecutionBoundary
+from dadbot.core.execution_context import (
+    close_core_state_scope,
+)
+from dadbot.core.execution_coordinator import ExecutionCoordinator
+from dadbot.core.execution_lease import ExecutionLease
+from dadbot.core.execution_ledger import ExecutionLedger
+from dadbot.core.execution_ledger_memory import InMemoryExecutionLedger
+from dadbot.core.execution_resource_budget import BackpressureSignal, resolve_dynamic_compute_ticket
+from dadbot.core.execution_result_unified import (
+    _TERMINAL_STATUS_VALUES,
+    build_unified_execution_result,
+    ensure_unified_execution_result,
+    mark_unified_execution_failure,
+    mark_unified_execution_success,
+)
+from dadbot.core.failure_taxonomy import classify_failure
+from dadbot.core.hypothesis_engine import MultiHypothesisEngine
+from dadbot.core.invariant_enforcer import InvariantEnforcer
+from dadbot.core.kernel_gateway import KernelGateway
+from dadbot.core.kernel_signals import get_exporter, get_metrics, get_tracer
+from dadbot.core.ledger_coordinator import LedgerCoordinator
+from dadbot.core.ledger_reader import LedgerReader
+from dadbot.core.ledger_writer_adapter import LedgerWriterAdapter
+from dadbot.core.memory_hierarchy_manager import MemoryHierarchyManager
+from dadbot.core.memory_ranking import rank_semantic_memory_items as _rank_semantic_memory_items
+from dadbot.core.memory_set_invariants import (
+    MemorySetInvariantViolation,
+)
+from dadbot.core.persistence_coordinator import PersistenceCoordinator
+from dadbot.core.phase_closure_runtime import PhaseClosureRuntime
+from dadbot.core.planning_utils import (
+    mutate_runtime_plan as _mutate_runtime_plan,
+)
+from dadbot.core.planning_utils import (
+    normalize_tool_runtime_contract as _normalize_tool_runtime_contract,
+)
+from dadbot.core.planning_utils import (
+    runtime_plan_intent as _runtime_plan_intent,
+)
+from dadbot.core.planning_utils import (
+    validate_tool_runtime_contract as _validate_tool_runtime_contract,
+)
+from dadbot.core.recovery_manager import RecoveryManager
+from dadbot.core.response_engine import ResponseEngine
+from dadbot.core.runtime_contracts import (
+    validate_decision_explanation_contract,
+    validate_trace_event_contract,
+)
+from dadbot.core.runtime_errors import (
+    AuthorityViolation,
+    ExecutionStageError,
+    InvariantViolation,
+    PersistenceFailure,
+    ReplayMismatch,
+)
+from dadbot.core.runtime_types import ToolSpec
+from dadbot.core.semantic_memory_graph import SemanticMemoryGraph
+from dadbot.core.semantic_safety_engine import SemanticSafetyEngine
+from dadbot.core.session_planning_optimizer import SessionPlanningOptimizer
+from dadbot.core.session_store import SessionStore
+from dadbot.core.system_state_algebra import restore_system_state_projections
+from dadbot.core.tool_routing_engine import ToolRoutingEngine
+from dadbot.core.tool_self_model import ToolSelfModel
+from dadbot.core.topology_runtime import TopologyRuntime, TopologyValidationResult
 
 logger = logging.getLogger(__name__)
 
@@ -1676,7 +1690,11 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         transitions.append(state_transition)
         state["state_transition_ledger"] = transitions[-1024:]
         state["last_state_transition"] = dict(state_transition)
-        self._merge_session_state(session_id=str(session_id or "default"), state_patch=state)
+        self._merge_session_state(
+            session_id=str(session_id or "default"),
+            state_patch=state,
+            trace_token=str(job.trace_id or ""),
+        )
         self._emit_runtime_stream_event(
             event_type="state.transition.recorded",
             session_id=str(session_id or "default"),
@@ -1876,14 +1894,35 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         timeline.append(dict(event))
         state["execution_timeline"] = timeline[-512:]
 
-    def _merge_session_state(self, *, session_id: str, state_patch: dict[str, Any]) -> dict[str, Any]:
-        session = self.registry.get_or_create(str(session_id or "default"))
+    def _merge_session_state(
+        self,
+        *,
+        session_id: str,
+        state_patch: dict[str, Any],
+        trace_token: str,
+    ) -> dict[str, Any]:
+        sid = str(session_id or "default")
+        try:
+            persisted_patch = json.loads(json.dumps(dict(state_patch or {}), default=str))
+        except (TypeError, ValueError, RecursionError) as exc:
+            raise RuntimeError("session state is not serializable for ledger persistence") from exc
+        self.ledger_writer.write_event(
+            event_type="SESSION_STATE_UPDATED",
+            session_id=sid,
+            step_key="control_plane.merge_session_state",
+            trace_token=str(trace_token or ""),
+            payload={"state": persisted_patch},
+            committed=True,
+        )
+        patch = dict(state_patch or {})
+        session = self.registry.get_or_create(sid)
         existing = session.setdefault("state", {}) if isinstance(session, dict) else {}
         if not isinstance(existing, dict):
-            return dict(state_patch or {})
+            return patch
         if state_patch is existing:
+            existing.update(patch)
             return existing
-        existing.update(dict(state_patch or {}))
+        existing.update(patch)
         session["state"] = existing
         return existing
 
@@ -3898,10 +3937,26 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
     def bootstrap(self) -> dict[str, Any]:
         events = self.ledger.read()
         self.lifecycle_projection.rebuild_from_ledger(events)
+        session_store = SessionStore(ledger=self.ledger, projection_only=True)
+        session_store.rebuild_from_ledger(events)
+        persisted_sessions = sorted(
+            {
+                str(event.get("session_id") or "default")
+                for event in events
+                if str(event.get("type") or "") == "SESSION_STATE_UPDATED"
+            },
+        )
+        for session_id in persisted_sessions:
+            projected_state = session_store.get(session_id)
+            if projected_state is not None:
+                restore_system_state_projections(projected_state)
+                session = self.registry.get_or_create(session_id)
+                session["state"] = projected_state
         self._ledger_index.refresh(force=True)
         return {
             "event_count": len(events),
             "execution_lifecycle": self.lifecycle_projection.snapshot(),
+            "session_count": len(persisted_sessions),
         }
 
 

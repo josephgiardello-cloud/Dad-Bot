@@ -40,7 +40,7 @@ class ExecutionKernel:
         invariant_registry: InvariantRegistry,
         quarantine: Any,
         *,
-        strict: bool = False,
+        strict: bool = True,
     ):
         self.firewall = firewall
         self.invariants = invariant_registry

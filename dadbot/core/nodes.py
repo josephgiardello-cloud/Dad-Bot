@@ -839,18 +839,17 @@ class SaveNode:
         apply = getattr(self.mgr, "apply_mutations", None)
         finalize = getattr(self.mgr, "finalize_turn", None)
         commit = getattr(self.mgr, "commit_transaction", None)
+        if not callable(finalize):
+            raise RuntimeError(
+                "Persistence service must implement finalize_turn for the atomic SaveNode commit",
+            )
         if callable(begin):
             begin(context)
         if callable(apply):
             apply(context)
-        if callable(finalize):
-            context.state["safe_result"] = finalize(context, context.state.get("safe_result"))
+        context.state["safe_result"] = finalize(context, context.state.get("safe_result"))
         if callable(commit):
             commit(context)
-            return
-        save_turn = getattr(self.mgr, "save_turn", None)
-        if callable(save_turn):
-            save_turn(context, context.state.get("safe_result"))
 
     async def run(self, context: TurnContext) -> TurnContext:
         # LEDGER_EXEMPT: SaveNode predates ledger protocol; persistence outcome recorded in context.fidelity.save

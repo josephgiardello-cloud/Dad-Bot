@@ -4,10 +4,14 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-from dadbot.core.control_plane import ExecutionControlPlane, SessionRegistry
+from dadbot.core.control_plane import ControlPlaneOptions, ExecutionControlPlane, SessionRegistry
 from dadbot.core.distributed_correctness import NodeRole
+from dadbot.core.execution_ledger import ExecutionLedger
+from dadbot.core.kernel_gateway import KernelGateway
+from dadbot.core.ledger_backend import FileWALLedgerBackend
 from dadbot.core.ledger_writer import LedgerWriter
 from dadbot.core.runtime_errors import AuthorityViolation, InvariantViolation, PoisonExecutionError
+from dadbot.core.system_state_algebra import persist_system_state_algebra
 
 
 @pytest.mark.asyncio
@@ -44,6 +48,50 @@ def test_distributed_runtime_authority_rejects_split_brain_claim_path() -> None:
 
     with pytest.raises(AuthorityViolation):
         plane._enforce_distributed_runtime_authority(operation="scheduler_claim")
+
+
+def test_session_state_is_rebuilt_from_durable_ledger_events(tmp_path) -> None:
+    async def _executor(_session: dict, _job) -> tuple[str, bool]:
+        return ("ok", False)
+
+    ledger_path = tmp_path / "session-state.wal"
+    ledger = ExecutionLedger(FileWALLedgerBackend(ledger_path))
+    state = {"planning": {"strategy": "direct_answer"}}
+    persist_system_state_algebra(
+        state=state,
+        algebra={
+            "projections": {
+                "turn_truth": {"trace_id": "trace-1"},
+                "control_plane_gate": {"trace_id": "trace-1"},
+            },
+        },
+        trace_context="test",
+    )
+    plane = ExecutionControlPlane(
+        registry=SessionRegistry(),
+        kernel_executor=_executor,
+        options=ControlPlaneOptions(ledger=ledger),
+    )
+
+    with KernelGateway.open_scope():
+        plane._merge_session_state(
+            session_id="session-1",
+            state_patch=state,
+            trace_token="trace-1",
+        )
+
+    reloaded_ledger = ExecutionLedger(FileWALLedgerBackend(ledger_path))
+    assert reloaded_ledger.load_from_backend() == 1
+    restored = ExecutionControlPlane(
+        registry=SessionRegistry(),
+        kernel_executor=_executor,
+        options=ControlPlaneOptions(ledger=reloaded_ledger),
+    )
+
+    restored_state = restored.registry.get("session-1")["state"]
+    assert restored_state["planning"] == {"strategy": "direct_answer"}
+    with pytest.raises(RuntimeError, match="Read-only"):
+        restored_state["turn_truth"]["trace_id"] = "mutated"
 
 
 def test_distributed_runtime_authority_rejects_non_authoritative_replay_path() -> None:

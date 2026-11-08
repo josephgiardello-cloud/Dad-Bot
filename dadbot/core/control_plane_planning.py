@@ -154,7 +154,11 @@ def _prepare_submit_runtime_planning_impl(
         session_id=session_key,
         metadata=metadata,
     )
-    control_plane._merge_session_state(session_id=session_key, state_patch=session_state)
+    control_plane._merge_session_state(
+        session_id=session_key,
+        state_patch=session_state,
+        trace_token=str(metadata.get("trace_id") or ""),
+    )
 
 
 __all__ = ["_prepare_submit_runtime_planning_impl"]

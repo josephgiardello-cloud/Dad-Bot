@@ -9,8 +9,10 @@ import os
 import platform
 from datetime import datetime, timedelta, timezone
 from importlib import metadata as importlib_metadata
+from pathlib import Path
 from typing import Any, cast
 
+from dadbot.config import DadRuntimeConfig
 from dadbot.contracts import (
     AttachmentList,
     FinalizedTurnResult,
@@ -24,6 +26,7 @@ from dadbot.contracts import (
 from dadbot.core import shadow_mode as _shadow_mode
 from dadbot.core.composite_friction import CompositeFrictionEngine, FrictionSignals
 from dadbot.core.control_plane import (
+    ControlPlaneOptions,
     ExecutionControlPlane,
     ExecutionJob,
     SessionRegistry,
@@ -31,6 +34,7 @@ from dadbot.core.control_plane import (
 from dadbot.core.control_plane_lifecycle import _apply_projection_execution_state
 from dadbot.core.execution_binder import TraceBinder
 from dadbot.core.execution_boundary import ControlPlaneExecutionBoundary
+from dadbot.core.execution_ledger import ExecutionLedger
 from dadbot.core.execution_mode import ExecutionModeResolver
 from dadbot.core.execution_resource_budget import BackpressureSignal
 from dadbot.core.execution_result_unified import ensure_unified_execution_result
@@ -46,6 +50,7 @@ from dadbot.core.interfaces import (
     validate_pipeline_services,
 )
 from dadbot.core.job_builder import JobBuilder
+from dadbot.core.ledger_backend import FileWALLedgerBackend
 from dadbot.core.persistence.base import CheckpointNotFoundError
 from dadbot.core.reflection_ir import DriftReflectionEngine
 from dadbot.core.runtime_errors import (
@@ -58,6 +63,7 @@ from dadbot.core.runtime_errors import (
 from dadbot.core.tool_recording import ToolIOLedger
 from dadbot.registry import ServiceRegistry, boot_registry
 from dadbot.runtime.env_loader import is_production_environment
+from dadbot.utils import env_truthy
 from dadbot.utils.async_bridge import run_coro_in_thread
 
 logger = logging.getLogger(__name__)
@@ -382,10 +388,21 @@ class DadBotOrchestrator:
         kernel_executor = self._execute_job
         if not callable(kernel_executor):
             raise RuntimeError("Orchestrator boot requires a callable kernel executor")
+        options = None
+        if env_truthy("DADBOT_DURABLE_EXECUTION_LEDGER", default=False):
+            session_log_dir = getattr(self.bot, "SESSION_LOG_DIR", None)
+            if session_log_dir is None:
+                session_log_dir = DadRuntimeConfig().session_log_dir
+            ledger = ExecutionLedger(
+                backend=FileWALLedgerBackend(Path(session_log_dir) / "execution_ledger.jsonl"),
+            )
+            ledger.load_from_backend()
+            options = ControlPlaneOptions(ledger=ledger)
         control_plane = ExecutionControlPlane(
             registry=SessionRegistry(),
             kernel_executor=kernel_executor,
             graph=self.graph,
+            options=options,
             enable_observability=self._enable_observability,
         )
         if control_plane.graph is not self.graph or control_plane.kernel_executor != kernel_executor:

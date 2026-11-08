@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -819,17 +818,6 @@ class _IntegrityVerifyMixin:
         checkpoint: dict[str, Any] | None,
     ) -> None:
         if not isinstance(checkpoint, dict) or not checkpoint:
-            return
-
-        metadata = getattr(turn_context, "metadata", None)
-        test_mode = bool(os.getenv("PYTEST_CURRENT_TEST"))
-        if isinstance(metadata, dict) and bool(metadata.get("legacy_direct_compat")) and test_mode:
-            state = getattr(turn_context, "state", None)
-            if isinstance(state, dict):
-                state["memory_authority_check"] = {
-                    "consistent": True,
-                    "mode": "legacy_direct_compat_bypass",
-                }
             return
 
         trace_id = str(getattr(turn_context, "trace_id", "") or "")

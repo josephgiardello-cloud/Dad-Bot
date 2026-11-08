@@ -1292,23 +1292,16 @@ class SaveNode(_NodeContractMixin):
             return
         result = turn_context.state.get("safe_result")
         finalize = getattr(service, "finalize_turn", None)
-        if callable(finalize):
-            try:
-                turn_context.state["safe_result"] = finalize(turn_context, result)
-                save_checkpoint = getattr(service, "save_graph_checkpoint", None)
-                if callable(save_checkpoint):
-                    checkpoint = turn_context.checkpoint_snapshot(
-                        stage="save",
-                        status="atomic_commit",
-                        error=None,
-                    )
-                    save_checkpoint(checkpoint, _skip_turn_event=True)
-                turn_context.fidelity.save = True
-                return
-            except Exception as exc:
-                logger.debug("SaveNode finalize_turn failed: %s", exc)
-                raise
-        service.save_turn(turn_context, result)
+        if not callable(finalize):
+            raise RuntimeError(
+                "Persistence service must implement finalize_turn for the atomic SaveNode commit",
+            )
+        try:
+            turn_context.state["safe_result"] = finalize(turn_context, result)
+            turn_context.fidelity.save = True
+        except Exception as exc:
+            logger.debug("SaveNode finalize_turn failed: %s", exc)
+            raise
         turn_context.fidelity.save = True
 
 

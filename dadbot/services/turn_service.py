@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import inspect
 import logging
-import warnings
 from typing import Any, cast
 
 from dadbot.contracts import (
@@ -13,7 +12,6 @@ from dadbot.contracts import (
     PreparedTurnResult,
     SupportsTurnProcessingRuntime,
 )
-from dadbot.core.execution_context import ensure_execution_trace_root
 from dadbot.core.execution_contract import (
     SovereignContext,
     TurnDelivery,
@@ -23,7 +21,6 @@ from dadbot.core.graph import (
     LedgerMutationOp,
     MutationIntent,
     MutationKind,
-    TurnContext,
 )
 from dadbot.core.turn_coherence import mark_turn_coherence, reset_turn_coherence
 from dadbot.managers.reply_generation import ReplyGenerationManager
@@ -807,101 +804,6 @@ class TurnService(ToolPipelineMixin):
     # Public API: thin shells — accept input, invoke kernel, return output.
     # TurnService is an input adapter only.  No state mutations happen here.
     # ---------------------------------------------------------------------------
-
-    def _resolve_persistence_service(self) -> Any:
-        services = getattr(self.bot, "services", None)
-        persistence_service = getattr(services, "persistence_service", None)
-        if persistence_service is not None:
-            return persistence_service
-        registry = getattr(self.bot, "service_registry", None)
-        get = getattr(registry, "get", None)
-        if callable(get):
-            try:
-                persistence_service = get("persistence_service")
-            except Exception:
-                persistence_service = None
-        if persistence_service is None:
-            cached = getattr(self.bot, "_compat_persistence_service", None)
-            if cached is not None:
-                return cached
-            from dadbot.managers.conversation_persistence import (
-                ConversationPersistenceManager,
-            )
-            from dadbot.services.persistence import PersistenceService
-            from dadbot.services.post_commit_worker import PostCommitWorker
-
-            persistence_service = PersistenceService(
-                ConversationPersistenceManager(self.bot),
-                turn_service=self,
-            )
-            if getattr(self.bot, "_post_commit_worker", None) is None:
-                self.bot._post_commit_worker = PostCommitWorker(self.bot)
-            self.bot._compat_persistence_service = persistence_service
-        return persistence_service
-
-    @staticmethod
-    def _compat_turn_context(
-        user_input: str,
-        attachments: AttachmentList | None = None,
-    ) -> TurnContext:
-        return TurnContext(user_input=user_input, attachments=attachments)
-
-    # DEPRECATED — NO NEW CALLERS. This compat shim bridges legacy direct-call
-    # surfaces that bypass the TurnGraph execution context. Target removal once
-    # all callers are migrated to the graph pipeline. Expiry: 2026-Q3.
-    # All callers must be migrated to process_user_message() or graph.execute().
-    def _finalize_direct_compat_turn(
-        self,
-        stripped_input: str,
-        current_mood: str | None,
-        dad_reply: str | None,
-        attachments: AttachmentList | None = None,
-        *,
-        turn_context: TurnContext | None = None,
-    ) -> FinalizedTurnResult:
-        return self._finalize_turn_compat_context(
-            stripped_input,
-            current_mood,
-            dad_reply,
-            attachments,
-            turn_context=turn_context,
-            mark_legacy_direct_compat=True,
-            emit_deprecation_warning=True,
-        )
-
-    def _finalize_turn_compat_context(
-        self,
-        stripped_input: str,
-        current_mood: str | None,
-        dad_reply: str | None,
-        attachments: AttachmentList | None = None,
-        *,
-        turn_context: TurnContext | None = None,
-        mark_legacy_direct_compat: bool = False,
-        emit_deprecation_warning: bool = False,
-    ) -> FinalizedTurnResult:
-        if emit_deprecation_warning:
-            warnings.warn(
-                "_finalize_direct_compat_turn is a legacy compat shim scheduled for removal in 2026-Q3. "
-                "Migrate callers to process_user_message() or the TurnGraph pipeline.",
-                DeprecationWarning,
-                stacklevel=3,
-            )
-        context = turn_context or self._compat_turn_context(stripped_input, attachments)
-        metadata = getattr(context, "metadata", None)
-        if mark_legacy_direct_compat and isinstance(metadata, dict):
-            metadata.setdefault("legacy_direct_compat", True)
-        context.state["turn_text"] = stripped_input
-        context.state["mood"] = current_mood or "neutral"
-        context.state["norm_attachments"] = attachments or []
-        persistence_service = self._resolve_persistence_service()
-        with ensure_execution_trace_root(
-            operation="turn_service_finalize_direct_compat_turn",
-            prompt="[turn-service-direct-compat-finalize]",
-            metadata={"source": "TurnService._finalize_direct_compat_turn"},
-            required=True,
-        ):
-            return persistence_service.finalize_turn(context, (dad_reply, False))
 
     def _run_orchestrator_sync(
         self,

@@ -1250,7 +1250,7 @@ class ConversationPersistenceManager:
             )
         return {
             "trace_id": str(trace_token or "").strip(),
-            "consistent": bool(determinism.get("consistent", True)),
+            "consistent": bool(determinism.get("consistent", True)) and matches_expected,
             "observed_lock_hash": observed_hash,
             "expected_lock_hash": expected_hash,
             "matches_expected": matches_expected,

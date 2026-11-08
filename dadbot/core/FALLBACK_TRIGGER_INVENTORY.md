@@ -1,49 +1,18 @@
-"""dadbot/core/FALLBACK_TRIGGER_INVENTORY.md
-
-Enumeration of all fallback trigger points in Dad-Bot that could cause
-thin-spine execution to diverge from legacy reference behavior.
-
-CRITICALITY: **HIGH** — Each trigger is a potential contract violation point.
-"""
-
 # FALLBACK TRIGGER INVENTORY
 
 ## Summary
-**Total Identified Triggers: 9 primary categories**
-**Risk Level: CRITICAL for convergence validation**
+This inventory documents runtime fallbacks that can change behavior. The former
+legacy-vs-thin turn-routing branch has been removed; the historical
+`DADBOT_USE_THIN_TURN_HANDLER` setting does not control routing.
 
 ---
 
-## 1. PATH-LEVEL FALLBACK (turn_mixin.py, lines 110-135)
+## 1. Canonical Turn Entry
 
-### Trigger Point
-```python
-# Line 110: PRIMARY BRANCHING DECISION
-if thin_turn_handler_enabled() and callable(submit_turn):
-    # THIN-SPINE PATH: TurnHandler wrapper
-    handler = TurnHandler(submit_turn=submit_turn)
-    return await handler.process_turn(...)
-    
-# Line 120: FALLBACK #1 - Legacy _submit_turn_via_control_plane
-if callable(submit_turn):
-    return await submit_turn(user_input, ...)
-    
-# Line 130: FALLBACK #2 - Direct control_plane.submit_turn
-return await orchestrator.control_plane.submit_turn(...)
-```
-
-### Failure Conditions
-1. `thin_turn_handler_enabled()` returns False
-    - **Deprecated condition**: in the shipped runtime, thin-spine is canonical and this helper is effectively always enabled.
-    - The historical environment variable `DADBOT_USE_THIN_TURN_HANDLER` is legacy-only and should not be relied on for routing control.
-2. `TurnHandler` not callable
-3. `_submit_turn_via_control_plane` not available on orchestrator
-
-### Contract Risk
-- **CRITICAL**: Entire execution path changes
-- Different error handling
-- Different middleware stacks
-- Potential state mutation order changes
+`DadBotTurnMixin._run_graph_turn_async` always delegates through `TurnHandler`
+to `control_plane.submit_turn`. If that canonical entrypoint is unavailable,
+the request fails with a configuration error; it does not switch to a legacy
+turn path.
 
 ---
 

@@ -3073,7 +3073,7 @@ class TestDadBotRegression(unittest.TestCase):
         op = str(turn_context.mutation_queue.pending()[0].payload.get("op") or "")
         self.assertEqual(op, LedgerMutationOp.RECORD_TURN_STATE.value)
 
-        self.bot.turn_service._resolve_persistence_service().finalize_turn(
+        self.bot.services.persistence_service.finalize_turn(
             turn_context,
             ("Glad to hear from you, buddy.", False),
         )

@@ -103,9 +103,12 @@ def test_kernel_rejection_abort_semantics_fail_fast():
 
 def test_persistence_contract_strict_mode_enforced():
     class _MinimalPersistence:
-        # Deliberately incomplete: only save_turn exists.
+        # Deliberately incomplete: commit exists but checkpoint/event APIs do not.
         def save_turn(self, _ctx, _result):
             return None
+
+        def finalize_turn(self, _ctx, result):
+            return result
 
     registry = MockRegistry()
     registry.persistence = _MinimalPersistence()
@@ -125,6 +128,46 @@ def test_persistence_contract_strict_mode_enforced():
     strict_ctx.metadata["persistence_contract_strict"] = True
     with pytest.raises(RuntimeError, match="Persistence service contract violation"):
         asyncio.run(graph.execute(strict_ctx))
+
+
+def test_save_node_requires_atomic_finalize_contract():
+    class _LegacyPersistence:
+        def save_turn(self, _ctx, _result):
+            return None
+
+    registry = SimpleNamespace(get=lambda _name, **_kwargs: _LegacyPersistence())
+    context = TurnContext(user_input="hello")
+
+    with pytest.raises(RuntimeError, match="must implement finalize_turn"):
+        asyncio.run(SaveNode().execute(registry, context))
+
+
+def test_save_node_does_not_duplicate_finalizer_checkpoint():
+    class _Persistence:
+        checkpoints = []
+
+        def finalize_turn(self, context, result):
+            self.save_graph_checkpoint(
+                context.checkpoint_snapshot(
+                    stage="save",
+                    status="atomic_commit",
+                    error=None,
+                ),
+                _skip_turn_event=True,
+            )
+            return result
+
+        def save_graph_checkpoint(self, checkpoint, **_kwargs):
+            self.checkpoints.append(checkpoint)
+
+    persistence = _Persistence()
+    registry = SimpleNamespace(get=lambda _name, **_kwargs: persistence)
+    context = TurnContext(user_input="hello")
+
+    asyncio.run(SaveNode().execute(registry, context))
+
+    assert len(persistence.checkpoints) == 1
+    assert persistence.checkpoints[0]["status"] == "atomic_commit"
 
 
 def test_execution_trace_contract_emitted_on_success():

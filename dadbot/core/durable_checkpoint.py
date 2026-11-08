@@ -15,13 +15,14 @@ class CheckpointIntegrityError(RuntimeError):
 
 
 class DurableCheckpoint:
-    """Durable ledger-head checkpoint with hash-chained integrity.
+    """Process-local ledger-head checkpoint helper with hash-chained integrity.
 
     Contract:
     - A checkpoint records the exact ledger sequence + replay hash at a point in time.
-    - On startup, assert_resume_at_head() verifies the current ledger head matches the
-      last saved checkpoint.  If it doesn't, it raises CheckpointIntegrityError and
-      the runtime must NOT proceed.
+    - ``_checkpoints`` exists only for this object's lifetime. Checkpoint history
+      is not persisted, so this helper cannot verify state across process restarts.
+    - ``assert_resume_at_head()`` verifies the current ledger head against the
+      latest checkpoint held by this instance.
     - Checkpoints are hash-chained: each new checkpoint includes the hash of the
       previous one, forming a tamper-evident sequence.
     """

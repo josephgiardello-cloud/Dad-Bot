@@ -321,21 +321,14 @@ def _load_last_report(artifacts_dir: Path) -> dict | None:
         return None
 
 
-def _load_event_store_events(run_id: str) -> list[dict] | None:
-    """Load persisted events for *run_id* from the SQLite event store."""
-    try:
-        from dadbot.core.event_store import EventStore  # type: ignore
-        store = EventStore()
-        return list(store.load_events(run_id=run_id))
-    except Exception:
-        pass
-    # Fallback: look for a JSON file in artifacts/
+def _load_trace_events(run_id: str) -> list[dict] | None:
+    """Load trace events for *run_id* from the local artifacts directory."""
     candidate = _REPO_ROOT / "artifacts" / f"trace_{run_id}.json"
     if candidate.exists():
-        try:
-            return json.loads(candidate.read_text(encoding="utf-8"))
-        except Exception:
-            pass
+        data = json.loads(candidate.read_text(encoding="utf-8"))
+        if not isinstance(data, list):
+            raise ValueError(f"Trace artifact must contain a JSON list: {candidate}")
+        return data
     return None
 
 
@@ -409,10 +402,10 @@ def cmd_trace(args: argparse.Namespace) -> int:
         return 1
 
     _print_header(f"Execution Timeline: {run_id}")
-    events = _load_event_store_events(run_id)
+    events = _load_trace_events(run_id)
     if events is None:
         print(f"  No events found for run_id={run_id!r}")
-        print("  (Checked: dadbot.core.event_store, artifacts/trace_{run_id}.json)")
+        print(f"  (Checked: artifacts/trace_{run_id}.json)")
         return 1
 
     from dadbot_system.execution_timeline import ExecutionTimelineBuilder

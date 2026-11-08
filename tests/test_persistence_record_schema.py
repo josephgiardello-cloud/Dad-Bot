@@ -235,7 +235,7 @@ def test_normalize_checkpoint_record_preserves_flat_execution_state() -> None:
         {
             "trace_id": "trace-flat-state",
             "stage": "save",
-            "status": "atomic_finalize",
+            "status": "atomic_commit",
             "updated_at": "2026-01-01T00:00:00",
             "state": {"memory": ["persisted"]},
             "metadata": {"session_id": "session-1"},
