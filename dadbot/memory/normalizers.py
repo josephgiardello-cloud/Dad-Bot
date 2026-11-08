@@ -844,6 +844,8 @@ class MemoryNormalizer:
                 "medium": max(0, int(raw.get("medium", 0) or 0)),
                 "low": max(0, int(raw.get("low", 0) or 0)),
             }
+        if memory.get("last_accessed_at"):
+            normalized["last_accessed_at"] = str(memory["last_accessed_at"])
 
     def _normalize_memory_summary(self, memory):
         summary = memory.get("summary", "")
@@ -963,22 +965,7 @@ class MemoryNormalizer:
         }
         if dumped["oral_history_evidence"] is not None:
             normalized["oral_history_evidence"] = dumped["oral_history_evidence"]
-        try:
-            normalized["access_count"] = max(0, int(memory.get("access_count", 0) or 0))
-        except (TypeError, ValueError):
-            normalized["access_count"] = 0
-        try:
-            normalized["high_confidence_hits"] = max(0, int(memory.get("high_confidence_hits", 0) or 0))
-        except (TypeError, ValueError):
-            normalized["high_confidence_hits"] = 0
-        raw = memory.get("confidence_history") or {}
-        if not isinstance(raw, dict):
-            raw = {}
-        normalized["confidence_history"] = {
-            "high": max(0, int(raw.get("high", 0) or 0)),
-            "medium": max(0, int(raw.get("medium", 0) or 0)),
-            "low": max(0, int(raw.get("low", 0) or 0)),
-        }
+        self._project_memory_entry_counters(memory, normalized)
         return normalized
 
     # ------------------------------------------------------------------ quality policy
@@ -1153,7 +1140,12 @@ class MemoryNormalizer:
             validated = MemoryStore.model_validate(normalized)
         except ValidationError:
             return default_store
-        return validated.model_dump(mode="json")
+        result = validated.model_dump(mode="json")
+        for memory in result["memories"]:
+            for key in ("access_count", "high_confidence_hits", "confidence_history", "last_accessed_at"):
+                if memory.get(key) is None:
+                    memory.pop(key, None)
+        return result
 
     # -- Private field-group helpers for normalize_memory_store -----------------
 

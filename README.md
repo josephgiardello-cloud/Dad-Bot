@@ -553,6 +553,30 @@ The Streamlit runtime boots orchestration services into the bot's existing manag
 
 The install script will guide you through the rest.
 
+### Memory retrieval and performance
+
+Memory retrieval records catalog and candidate counts, stage durations, index
+pending/degraded status, and reranker timing in
+`bot.memory_query.get_retrieval_diagnostics()`. These diagnostics do not contain
+memory summaries or the user's query. Access counters are persisted with memory
+state without rebuilding the semantic and graph indexes for access-only updates.
+
+The default retrieval mode scores the complete catalog. For a PostgreSQL
+pgvector deployment, `DADBOT_MEMORY_CANDIDATE_LIMIT` may be set to a positive
+integer to opt into bounded semantic, lexical, and graph candidate selection; `0`
+(the default) retains exhaustive ranking. SQLite remains exhaustive. Bounded
+selection can change recall, so evaluate it on a representative isolated dataset
+before enabling it. An HNSW or IVFFlat index and matching vector dimensions are
+needed for approximate index acceleration; scoped filtering can affect recall.
+
+The optional local reranker uses `DADBOT_MEMORY_RERANKER_ENABLED=1` and
+`DADBOT_QWEN_RERANKER_PATH`. Its confidence gate can be adjusted with
+`DADBOT_MEMORY_RERANKER_TOP_SCORE_THRESHOLD` (default `1.0`, range `(0, 1]`);
+lower values skip reranking more often and can reduce recall. The isolated
+`tests/eval/test_memory_benchmark.py` benchmark reports recall, retrieval p50/p95
+and reranker firing rate. Set `DADBOT_RUN_REAL_EMBEDDING_BENCHMARK=1` to run
+its real local Ollama embedding cases; those cases need `nomic-embed-text`.
+
 ### Local Model Context and Timing
 
 Ollama requests allocate `num_ctx` in power-of-two buckets starting at 512

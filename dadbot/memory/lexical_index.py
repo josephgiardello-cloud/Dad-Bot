@@ -16,28 +16,49 @@ class LexicalMemoryIndex:
         except sqlite3.Error:
             self._connection.close()
             raise
-        self._snapshot: tuple[tuple[str, str], ...] = ()
+        self._snapshot: set[tuple[str, str]] = set()
+        self._rowids: dict[tuple[str, str], int] = {}
+        self._next_rowid = 1
         self._lock = RLock()
         self._closed = False
 
-    def scores(self, rows: list[tuple[str, str]], tokens: set[str]) -> dict[str, float]:
-        snapshot = tuple(sorted(set(rows)))
+    def scores(
+        self, rows: list[tuple[str, str]], tokens: set[str], limit: int | None = None,
+    ) -> dict[str, float]:
+        if limit is not None and limit < 1:
+            raise ValueError("Lexical candidate limit must be positive.")
+        snapshot = set(rows)
         with self._lock:
             if snapshot != self._snapshot:
+                removed = self._snapshot - snapshot
+                added = sorted(snapshot - self._snapshot)
+                new_rowids = {row: self._next_rowid + offset for offset, row in enumerate(added)}
                 with self._connection:
-                    self._connection.execute("DELETE FROM memory_fts")
                     self._connection.executemany(
-                        "INSERT INTO memory_fts(memory_key, summary) VALUES (?, ?)", snapshot,
+                        "DELETE FROM memory_fts WHERE rowid = ?",
+                        [(self._rowids[row],) for row in sorted(removed)],
                     )
+                    self._connection.executemany(
+                        "INSERT INTO memory_fts(rowid, memory_key, summary) VALUES (?, ?, ?)",
+                        [(new_rowids[row], *row) for row in added],
+                    )
+                for row in removed:
+                    del self._rowids[row]
+                self._rowids.update(new_rowids)
+                self._next_rowid += len(added)
                 self._snapshot = snapshot
             if not tokens:
                 return {}
             expression = " OR ".join('"' + token.replace('"', '""') + '"' for token in sorted(tokens))
-            matches = self._connection.execute(
+            sql = (
                 "SELECT memory_key, -bm25(memory_fts) AS score FROM memory_fts "
-                "WHERE memory_fts MATCH ? ORDER BY score DESC, memory_key ASC",
-                (expression,),
-            ).fetchall()
+                "WHERE memory_fts MATCH ? ORDER BY score DESC, memory_key ASC"
+            )
+            params: tuple = (expression,)
+            if limit is not None:
+                sql += " LIMIT ?"
+                params = (expression, limit)
+            matches = self._connection.execute(sql, params).fetchall()
             maximum = max((score for _, score in matches), default=0.0)
             return {key: score / maximum for key, score in matches} if maximum > 0 else {}
 

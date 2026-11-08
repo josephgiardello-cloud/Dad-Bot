@@ -81,3 +81,28 @@ def test_catalogs_are_not_shared_between_tenant_instances(index):
         assert index.scores([("same-key", "mint tea")], {"tea"}) == {"same-key": 1.0}
     finally:
         other.close()
+
+
+def test_incremental_update_preserves_unchanged_rows_and_limits_candidates(index):
+    rows = [("a", "mint tea"), ("b", "coffee tea"), ("c", "green tea")]
+    index.scores(rows, {"tea"})
+    before = dict(index._connection.execute("SELECT memory_key, rowid FROM memory_fts"))
+    updated = [("a", "mint tea"), ("b", "coffee"), ("d", "black tea")]
+    scores = index.scores(updated, {"tea"}, limit=1)
+    after = dict(index._connection.execute("SELECT memory_key, rowid FROM memory_fts"))
+    assert before["a"] == after["a"]
+    assert set(after) == {"a", "b", "d"}
+    assert len(scores) == 1
+    assert "b" not in index.scores(updated, {"tea"})
+    with pytest.raises(ValueError, match="positive"):
+        index.scores(updated, {"tea"}, limit=0)
+
+
+def test_large_catalog_keeps_exact_term_and_removes_deleted_conflict(index):
+    rows = [(str(i), f"synthetic item number {i} common topic") for i in range(1000)]
+    rows.extend([("old", "favorite beverage is green tea"), ("new", "favorite beverage is black tea")])
+    assert index.scores(rows, {"black"}) == {"new": 1.0}
+    assert index.scores(rows, {"marmalade"}) == {}
+    rows = [row for row in rows if row[0] != "old"]
+    assert "old" not in index.scores(rows, {"beverage"})
+    assert "new" in index.scores(rows, {"beverage"})

@@ -38,6 +38,9 @@ logger = logging.getLogger(__name__)
 
 
 _SEMANTIC_TRACKED_KEYS = frozenset({"memories"})
+_MEMORY_ACCESS_FIELDS = frozenset(
+    {"access_count", "confidence_history", "high_confidence_hits", "last_accessed_at"}
+)
 _GRAPH_TRACKED_KEYS = frozenset(
     {
         "memories",
@@ -61,6 +64,24 @@ def _section_changed(
     keys: set[str] | frozenset[str],
 ) -> bool:
     return _section_payload(before, keys) != _section_payload(after, keys)
+
+
+def _only_memory_access_changed(before: dict, after: dict, changed_keys: set[str]) -> bool:
+    if changed_keys != {"memories"}:
+        return False
+    before_memories = before.get("memories")
+    after_memories = after.get("memories")
+    if not isinstance(before_memories, list) or not isinstance(after_memories, list):
+        return False
+    if len(before_memories) != len(after_memories):
+        return False
+    return all(
+        isinstance(old, dict)
+        and isinstance(new, dict)
+        and {k: v for k, v in old.items() if k not in _MEMORY_ACCESS_FIELDS}
+        == {k: v for k, v in new.items() if k not in _MEMORY_ACCESS_FIELDS}
+        for old, new in zip(before_memories, after_memories)
+    )
 
 
 class _MemoryStoreParticipant:
@@ -226,6 +247,9 @@ class MemoryStorageBackend:
             after_store,
             _GRAPH_TRACKED_KEYS,
         )
+        if _only_memory_access_changed(before_store, after_store, changed_keys):
+            semantic_changed = False
+            graph_changed = False
 
         coordinator = transaction_coordinator_cls(
             transaction_context_cls(

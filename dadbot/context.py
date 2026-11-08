@@ -372,7 +372,8 @@ Keep family relationships, ages, timelines, and education history consistent wit
 
         try:
             graph_result = self.bot.graph_retrieval_for_input(user_input_str, limit=3) if user_input_str else None
-        except Exception:
+        except Exception as exc:
+            self.bot.record_runtime_issue("memory retrieval", "graph retrieval failed", exc)
             graph_result = None
 
         try:
@@ -389,11 +390,12 @@ Keep family relationships, ages, timelines, and education history consistent wit
                     self.bot.relevant_memories_for_input(
                         user_input_str,
                         limit=5,
-                        graph_result=graph_result,
+                        graph_result=graph_result or {},
                     )
                     or [],
                 )
-        except Exception:
+        except Exception as exc:
+            self.bot.record_runtime_issue("memory retrieval", "semantic retrieval failed", exc)
             semantic_memories = []
 
         # 2. Get consolidated and deep pattern context

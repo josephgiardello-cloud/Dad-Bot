@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 
+from dadbot_system.semantic_index import PGVectorSemanticIndex
+
 logger = logging.getLogger(__name__)
 
 
@@ -121,16 +123,37 @@ class MemorySearchMixin:
         if not memories:
             return []
 
+        status = {"index_pending": False, "degraded": False}
+        self._semantic_manager._last_retrieval_status = status
+        with self.bot._semantic_index_lock:
+            future = self.bot._semantic_index_future
+            status["index_pending"] = bool(future and not future.done())
         query_context = self.semantic_query_context(query, limit)
         if query_context is None:
+            status.update(degraded=True, reason="embedding_unavailable")
             return []
 
         current_memories = self.semantic_memory_lookup(memories)
+        backend = self._semantic_manager._semantic_index_backend
+        candidate_limit = self.bot.runtime_config.memory_candidate_limit
         try:
-            rows = self.catalog_semantic_rows(current_memories.keys())
+            if candidate_limit > 0 and len(current_memories) > candidate_limit and isinstance(
+                backend, PGVectorSemanticIndex,
+            ):
+                rows = backend.fetch_nearest_by_keys(
+                    current_memories.keys(), query_context["query_embedding"], candidate_limit,
+                )
+                status["bounded"] = True
+            else:
+                rows = self.catalog_semantic_rows(current_memories.keys())
+                status["bounded"] = False
         except Exception as exc:
-            logger.warning("Semantic memory lookup failed for query %r: %s", query, exc)
+            logger.warning("Semantic memory lookup failed: %s", exc)
+            status.update(degraded=True, reason="semantic_lookup_failed")
             return []
+        status["candidate_count"] = len(rows)
+        if not status["bounded"] and len(rows) < len(current_memories):
+            status.update(degraded=True, reason="incomplete_index")
 
         recent_topics = self.bot.recent_memory_topics(limit=4)
         mood_trend = self.bot.current_memory_mood_trend()

@@ -12,6 +12,7 @@ import sqlite3
 from contextlib import closing
 from datetime import datetime
 from pathlib import Path
+from threading import local
 
 import ollama
 
@@ -27,9 +28,18 @@ class SemanticIndexManager:
     def __init__(self, bot) -> None:
         self._bot = bot
         self._embedding_cache: dict = {}
+        self._retrieval_local = local()
         self._semantic_index_backend = self._build_semantic_index_backend()
         self._embedding_lock_namespace = "semantic-memory"
         self._last_embedding_lock_report: dict[str, object] = {}
+
+    @property
+    def _last_retrieval_status(self) -> dict:
+        return getattr(self._retrieval_local, "status", {})
+
+    @_last_retrieval_status.setter
+    def _last_retrieval_status(self, value: dict) -> None:
+        self._retrieval_local.status = value
 
     # ------------------------------------------------------------------
     # Backend construction
@@ -797,18 +807,42 @@ class SemanticIndexManager:
         if not memories:
             return []
 
+        self._last_retrieval_status = {"index_pending": False, "degraded": False}
         self.queue_semantic_memory_index(memories)
+        with self._bot._semantic_index_lock:
+            future = self._bot._semantic_index_future
+            self._last_retrieval_status["index_pending"] = bool(future and not future.done())
 
         query_context = self.semantic_query_context(query, limit)
         if query_context is None:
+            self._last_retrieval_status["degraded"] = True
+            self._last_retrieval_status["reason"] = "embedding_unavailable"
             return []
 
         current_memories = self.semantic_memory_lookup(memories)
         try:
-            rows = self.catalog_semantic_rows(current_memories.keys())
+            candidate_limit = self._bot.runtime_config.memory_candidate_limit
+            if (
+                candidate_limit > 0
+                and len(current_memories) > candidate_limit
+                and isinstance(self._semantic_index_backend, PGVectorSemanticIndex)
+            ):
+                rows = self._semantic_index_backend.fetch_nearest_by_keys(
+                    current_memories.keys(), query_context["query_embedding"], candidate_limit,
+                )
+                self._last_retrieval_status["bounded"] = True
+            else:
+                rows = self.catalog_semantic_rows(current_memories.keys())
+                self._last_retrieval_status["bounded"] = False
         except Exception as exc:
-            logger.warning("Semantic memory lookup failed for query %r: %s", query, exc)
+            logger.warning("Semantic memory lookup failed: %s", exc)
+            self._last_retrieval_status["degraded"] = True
+            self._last_retrieval_status["reason"] = "semantic_lookup_failed"
             return []
+        self._last_retrieval_status["candidate_count"] = len(rows)
+        if not self._last_retrieval_status["bounded"] and len(rows) < len(current_memories):
+            self._last_retrieval_status["degraded"] = True
+            self._last_retrieval_status["reason"] = "incomplete_index"
 
         recent_topics = self._bot.recent_memory_topics(limit=4)
         mood_trend = self._bot.current_memory_mood_trend()

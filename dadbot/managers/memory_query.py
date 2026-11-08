@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import heapq
 from datetime import date
 from time import perf_counter
 
@@ -275,7 +276,9 @@ class MemoryQueryManager:
         recency = self.semantic_memory_freshness_weight(memory)
 
         base_score = (0.6 * semantic_similarity) + (0.25 * importance) + (0.15 * recency)
-        query_words = self.lexical_query_tokens(str(query_context.get("user_message") or ""))
+        query_words = query_context.get("lexical_query_tokens")
+        if query_words is None:
+            query_words = self.lexical_query_tokens(str(query_context.get("user_message") or ""))
         lexical_overlap = float((query_context.get("lexical_scores") or {}).get(memory_key, 0.0))
         if query_words:
             base_score = MEMORY_DENSE_WEIGHT * base_score + (1.0 - MEMORY_DENSE_WEIGHT) * lexical_overlap
@@ -354,20 +357,27 @@ class MemoryQueryManager:
         return [entry for _, entry in ranked[: max(1, int(limit or 2))]]
 
     def relevant_memories_for_input(self, user_input, limit=5, graph_result=None):
+        started = perf_counter()
+        stage_seconds = {}
         requested_limit = int(limit or 5)
         effective_limit = max(1, min(7, requested_limit))
         if requested_limit >= 3:
             effective_limit = max(3, effective_limit)
+        stage_start = perf_counter()
         memories = self.bot.memory_catalog()
+        stage_seconds["catalog"] = perf_counter() - stage_start
         if not memories:
             self._lexical_index.scores([], set())
             self.bot._last_memory_retrieval_diagnostics = {
                 "retrieved_count": 0,
                 "top_score_gap": 0.0,
                 "has_high_confidence": False,
+                "catalog_count": 0,
+                "total_seconds": round(perf_counter() - started, 6),
             }
             return []
 
+        stage_start = perf_counter()
         graph_result = (
             graph_result
             if graph_result is not None
@@ -376,6 +386,7 @@ class MemoryQueryManager:
                 limit=min(3, max(1, effective_limit)),
             )
         )
+        stage_seconds["graph"] = perf_counter() - stage_start
         graph_boost_tokens = set()
         if graph_result:
             for evidence in graph_result.get("supporting_evidence", []):
@@ -394,6 +405,9 @@ class MemoryQueryManager:
         # Recent turns remain available to contextual scoring below.
         semantic_query = str(user_input or "").strip()
 
+        stage_start = perf_counter()
+        semantic_manager = self.bot.memory_manager._semantic_manager
+        semantic_manager._last_retrieval_status = {}
         semantic_matches = list(
             self.bot.semantic_memory_matches(
                 semantic_query,
@@ -403,6 +417,8 @@ class MemoryQueryManager:
             )
             or []
         )
+        stage_seconds["semantic"] = perf_counter() - stage_start
+        semantic_status = dict(semantic_manager._last_retrieval_status)
         max_semantic = max((float(score or 0.0) for score, _memory in semantic_matches), default=0.0)
         semantic_scores = {}
         for semantic_score, memory in semantic_matches:
@@ -412,21 +428,50 @@ class MemoryQueryManager:
             else:
                 semantic_scores[key] = 0.0
 
+        stage_start = perf_counter()
+        bounded = bool(semantic_status.get("bounded"))
+        candidate_limit = self.bot.runtime_config.memory_candidate_limit
+        lexical_tokens = self.lexical_query_tokens(str(user_input or ""))
+        lexical_scores = self._lexical_index.scores(
+            [(self.bot.semantic_memory_key(memory), str(memory.get("summary") or "")) for memory in memories],
+            lexical_tokens,
+            limit=candidate_limit if bounded else None,
+        )
+        stage_seconds["lexical"] = perf_counter() - stage_start
         query_context = {
             "user_message": str(user_input or ""),
             "recent_turn_context": recent_turns,
             "personality_state": personality_state,
             "semantic_scores": semantic_scores,
+            "lexical_query_tokens": lexical_tokens,
             "query_tokens": self.bot.significant_tokens(f"{user_input or ''!s} {recent_turns}"),
             "graph_boost_tokens": graph_boost_tokens,
-            "lexical_scores": self._lexical_index.scores(
-                [(self.bot.semantic_memory_key(memory), str(memory.get("summary") or "")) for memory in memories],
-                self.lexical_query_tokens(str(user_input or "")),
-            ),
+            "lexical_scores": lexical_scores,
         }
 
+        stage_start = perf_counter()
+        candidate_keys = set(semantic_scores) | set(lexical_scores)
+        graph_candidate_keys = set()
+        if bounded and graph_boost_tokens:
+            graph_ranked = heapq.nsmallest(
+                candidate_limit,
+                (
+                    (
+                        len(graph_boost_tokens & self.bot.significant_tokens(str(memory.get("summary") or ""))),
+                        self.bot.semantic_memory_key(memory),
+                    )
+                    for memory in memories
+                ),
+                key=lambda item: (-item[0], item[1]),
+            )
+            graph_candidate_keys = {key for overlap, key in graph_ranked if overlap}
+            candidate_keys.update(graph_candidate_keys)
+        candidates = [
+            memory for memory in memories
+            if not bounded or self.bot.semantic_memory_key(memory) in candidate_keys
+        ]
         ranked = sorted(
-            ((self.score(memory, query_context), memory) for memory in memories if str(memory.get("summary") or "").strip()),
+            ((self.score(memory, query_context), memory) for memory in candidates if str(memory.get("summary") or "").strip()),
             key=lambda item: (
                 float(item[0]),
                 item[1].get("updated_at", ""),
@@ -439,20 +484,32 @@ class MemoryQueryManager:
         if not filtered_ranked and ranked:
             filtered_ranked = ranked[:1]
 
+        stage_seconds["ranking"] = perf_counter() - stage_start
+        stage_start = perf_counter()
         selected, reranker_diagnostics = self.rerank_memories(
             str(user_input or ""), filtered_ranked, effective_limit,
         )
+        stage_seconds["reranking"] = perf_counter() - stage_start
         selected_scores = sorted((float(score) for score, _ in selected), reverse=True)
         top_score = selected_scores[0] if selected_scores else 0.0
         second_score = selected_scores[1] if len(selected_scores) > 1 else 0.0
+        stage_start = perf_counter()
+        self._record_memory_access_signals(selected, memories)
+        stage_seconds["access_update"] = perf_counter() - stage_start
         self.bot._last_memory_retrieval_diagnostics = {
             "retrieved_count": len(selected),
             "top_score_gap": round(max(0.0, top_score - second_score), 4),
             "has_high_confidence": bool(top_score >= 0.7),
             "top_score": round(top_score, 4),
+            "catalog_count": len(memories),
+            "candidate_count": len(candidates),
+            "lexical_candidate_count": len(lexical_scores),
+            "graph_candidate_count": len(graph_candidate_keys),
+            "semantic_status": semantic_status,
+            "stage_seconds": {key: round(value, 6) for key, value in stage_seconds.items()},
+            "total_seconds": round(perf_counter() - started, 6),
             **reranker_diagnostics,
         }
-        self._record_memory_access_signals(selected, memories)
         return [memory for _score, memory in selected]
 
     def get_retrieval_diagnostics(self) -> dict:
@@ -522,7 +579,7 @@ class MemoryQueryManager:
         semantic_memories = self.relevant_memories_for_input(
             user_input,
             limit=semantic_limit,
-            graph_result=graph_result,
+            graph_result=graph_result or {},
         )
         consolidated_memories = self.bot.select_active_consolidated_memories(
             user_input,

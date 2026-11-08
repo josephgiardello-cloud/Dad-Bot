@@ -374,18 +374,28 @@ def _inject_modern_theme() -> None:
             border: 1px solid rgba(179, 201, 235, 0.24) !important;
         }
 
-        div[data-testid="stButton"] button {
+        div[data-testid="stButton"] button,
+        div[data-testid="stDownloadButton"] button {
             border-radius: 14px;
-            border: 1px solid rgba(39, 75, 95, 0.14);
+            border: 1px solid rgba(39, 75, 95, 0.45);
             background: linear-gradient(180deg, rgba(255,255,255,0.96), rgba(244,240,233,0.92));
-            color: var(--dad-ink);
+            color: #142338 !important;
+            font-weight: 600;
             box-shadow: 0 10px 24px rgba(22, 33, 47, 0.08);
             transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
         }
 
-        div[data-testid="stButton"] button:hover {
+        div[data-testid="stButton"] button *,
+        div[data-testid="stDownloadButton"] button *,
+        [data-testid="stSidebar"] div[data-testid="stButton"] button *,
+        [data-testid="stSidebar"] div[data-testid="stDownloadButton"] button * {
+            color: #142338 !important;
+        }
+
+        div[data-testid="stButton"] button:hover,
+        div[data-testid="stDownloadButton"] button:hover {
             transform: translateY(-1px);
-            border-color: rgba(39, 75, 95, 0.28);
+            border-color: rgba(39, 75, 95, 0.72);
             box-shadow: 0 14px 28px rgba(22, 33, 47, 0.12);
         }
 

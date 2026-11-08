@@ -52,6 +52,10 @@ class MemoryEntry(DadBotModel):
     created_at: date | datetime
     updated_at: date | datetime
     contradictions: list[str] = Field(default_factory=list)
+    access_count: int | None = Field(default=None, ge=0)
+    high_confidence_hits: int | None = Field(default=None, ge=0)
+    confidence_history: dict[str, int] | None = None
+    last_accessed_at: str | None = None
 
 
 class ConsolidatedMemory(DadBotModel):

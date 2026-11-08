@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 from datetime import date
 from pathlib import Path
@@ -168,6 +169,9 @@ def run_seeded_benchmark(bot, monkeypatch, cases=None, *, rankings=None):
     if measure_fusion:
         fusion_rows, expected_components = install_fusion_capture(bot, monkeypatch)
     fusion_cases = []
+    latencies = []
+    reranker_fired = 0
+    reranker_times = []
     for case in cases:
         fusion_rows.clear()
         expected_components.clear()
@@ -175,6 +179,11 @@ def run_seeded_benchmark(bot, monkeypatch, cases=None, *, rankings=None):
             case.question,
             limit=3,
         )
+        diagnostics = bot.memory_query.get_retrieval_diagnostics()
+        latencies.append(float(diagnostics["total_seconds"]))
+        reranker_fired += bool(diagnostics.get("reranker_fired"))
+        if diagnostics.get("reranker_fired"):
+            reranker_times.append(float(diagnostics["reranker_seconds"]))
         summaries = [str(memory.get("summary") or "") for memory in retrieved]
         ranked_summaries.append(summaries)
         if measure_fusion:
@@ -192,6 +201,13 @@ def run_seeded_benchmark(bot, monkeypatch, cases=None, *, rankings=None):
                 report_ranking_miss(bot, case, expected_components)
 
     print(f"Seeded benchmark: top-1 {hits_at_1}/{len(cases)}, top-3 {hits_at_3}/{len(cases)}")
+    ordered_latencies = sorted(latencies)
+    print(
+        f"Retrieval p50={ordered_latencies[math.ceil(0.50 * len(latencies)) - 1]:.3f}s "
+        f"p95={ordered_latencies[math.ceil(0.95 * len(latencies)) - 1]:.3f}s; "
+        f"reranker fired={reranker_fired}/{len(cases)} "
+        f"reranker total={sum(reranker_times):.3f}s"
+    )
     fingerprint = hashlib.sha256(json.dumps(ranked_summaries, ensure_ascii=True).encode("ascii")).hexdigest()
     print(f"Ranking fingerprint: {fingerprint}")
     if measure_fusion:

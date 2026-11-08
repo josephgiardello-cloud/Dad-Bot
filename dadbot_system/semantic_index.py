@@ -650,6 +650,29 @@ class PGVectorSemanticIndex(SemanticIndexBackend):
 
         return self.with_connection(operation)
 
+    def fetch_nearest_by_keys(self, keys, query_embedding, limit):
+        ordered_keys = sorted(set(keys))
+        if not ordered_keys:
+            return []
+        if limit < 1:
+            raise ValueError("Semantic candidate limit must be positive.")
+        self.ensure_storage()
+        dimension_filter = self._dimension_filter_sql()
+        dimension_clause = f" AND {dimension_filter}" if dimension_filter else ""
+
+        def operation(connection):
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"SELECT summary_key, summary, category, mood, updated_at, embedding_json "
+                    f"FROM {self.table} WHERE summary_key = ANY(%s){dimension_clause} "
+                    f"ORDER BY {self._embedding_expression()} {self._distance_operator()} "
+                    f"{self._query_vector_cast()}, summary_key ASC LIMIT %s",
+                    (ordered_keys, self._vector_literal(query_embedding), limit),
+                )
+                return self._row_dicts(cursor.fetchall())
+
+        return self.with_connection(operation)
+
     def _filtered_rows(self, query_embedding, query_tokens, query_category, query_mood, limit):
         where_clauses = []
         params = []
