@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import hmac
 import json
@@ -11,6 +12,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from threading import Lock
 from typing import Any
+
+from .tenant_identity import is_versioned_tenant_id, log_legacy_tenant_id_acceptance, require_tenant_id
 
 try:
     from cryptography.fernet import Fernet, InvalidToken
@@ -58,6 +61,35 @@ def _normalize_scope_set(values: list[str] | tuple[str, ...] | set[str] | None) 
 
 def _normalize_tool_set(values: list[str] | tuple[str, ...] | set[str] | None) -> set[str]:
     return {str(value or "").strip() for value in list(values or []) if str(value or "").strip()}
+
+
+def _validate_principal_times(payload: dict[str, Any]) -> None:
+    for field_name in ("iat", "exp"):
+        value = payload.get(field_name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise AuthenticationError(f"Invalid bearer token {field_name}")
+        try:
+            finite = math.isfinite(value)
+        except OverflowError as exc:
+            raise AuthenticationError(f"Invalid bearer token {field_name}") from exc
+        if not finite:
+            raise AuthenticationError(f"Invalid bearer token {field_name}")
+    if payload["exp"] <= time.time() or payload["exp"] <= payload["iat"]:
+        raise AuthenticationError("Bearer token has expired or has an invalid lifetime")
+
+
+def _validate_principal_claims(payload: dict[str, Any]) -> None:
+    for field_name in ("sub", "tenant_id", "jti"):
+        value = payload.get(field_name)
+        if not isinstance(value, str) or not value.strip() or value != value.strip():
+            raise AuthenticationError(f"Invalid bearer token {field_name}")
+    if payload["sub"].lower() == "anonymous":
+        raise AuthenticationError("Anonymous bearer token principal is not permitted")
+    _validate_principal_times(payload)
+    for field_name in ("scopes", "allowed_tools"):
+        value = payload.get(field_name)
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            raise AuthenticationError(f"Invalid bearer token {field_name}")
 
 
 @dataclass(slots=True, frozen=True)
@@ -116,15 +148,31 @@ class ServiceTokenManager:
         ttl_seconds: float = 3600.0,
         token_id: str = "",
     ) -> str:
+        if (
+            not isinstance(subject, str)
+            or not subject.strip()
+            or subject != subject.strip()
+            or subject.lower() == "anonymous"
+        ):
+            raise ValueError("A non-anonymous subject is required")
+        tenant_id = require_tenant_id(
+            tenant_id,
+            issuer=self._issuer,
+            subject=subject,
+            acceptance_path="ServiceTokenManager.issue",
+        )
+        ttl = float(ttl_seconds)
+        if not math.isfinite(ttl) or ttl <= 0:
+            raise ValueError("Token lifetime must be finite and positive")
         now = time.time()
         payload = {
             "v": self.VERSION,
-            "sub": str(subject or "service-client"),
-            "tenant_id": str(tenant_id or "default"),
+            "sub": subject,
+            "tenant_id": tenant_id,
             "scopes": sorted(_normalize_scope_set(scopes)),
             "allowed_tools": sorted(_normalize_tool_set(allowed_tools)),
             "iat": now,
-            "exp": now + max(1.0, float(ttl_seconds)),
+            "exp": now + ttl,
             "iss": self._issuer,
             "jti": str(token_id or hashlib.sha256(f"{now}:{subject}:{tenant_id}".encode()).hexdigest()[:16]),
         }
@@ -135,21 +183,35 @@ class ServiceTokenManager:
     def verify(self, token: str) -> ServicePrincipal:
         try:
             encoded_payload, signature = str(token or "").rsplit(".", 1)
-        except ValueError as exc:
+            payload_bytes = _urlsafe_b64decode(encoded_payload)
+        except (ValueError, binascii.Error) as exc:
             raise AuthenticationError("Malformed bearer token") from exc
 
-        payload_bytes = _urlsafe_b64decode(encoded_payload)
         expected_signature = hmac.new(self._key, payload_bytes, self.ALGORITHM).hexdigest()
-        if not hmac.compare_digest(signature, expected_signature):
+        if not signature.isascii() or not hmac.compare_digest(signature, expected_signature):
             raise AuthenticationError("Invalid bearer token signature")
 
-        payload = dict(json.loads(payload_bytes))
-        if int(payload.get("v") or 0) != self.VERSION:
+        try:
+            payload = json.loads(payload_bytes)
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise AuthenticationError("Malformed bearer token payload") from exc
+        if not isinstance(payload, dict):
+            raise AuthenticationError("Invalid bearer token payload")
+        _validate_principal_claims(payload)
+        if type(payload.get("v")) is not int or payload["v"] != self.VERSION:
             raise AuthenticationError("Unsupported bearer token version")
         if str(payload.get("iss") or "") != self._issuer:
             raise AuthenticationError("Unexpected bearer token issuer")
         if float(payload.get("exp") or 0.0) < time.time():
             raise AuthenticationError("Bearer token has expired")
+
+        if not is_versioned_tenant_id(payload["tenant_id"]):
+            log_legacy_tenant_id_acceptance(
+                payload["tenant_id"],
+                issuer=payload["iss"],
+                subject=payload["sub"],
+                acceptance_path="ServiceTokenManager.verify",
+            )
 
         return ServicePrincipal(
             subject=str(payload.get("sub") or "service-client"),

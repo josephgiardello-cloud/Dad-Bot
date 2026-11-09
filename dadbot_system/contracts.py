@@ -8,6 +8,9 @@ from enum import StrEnum
 from typing import Any, TypedDict, cast
 from uuid import uuid4
 
+from .execution_identity import require_tenant_id
+from .tenant_identity import parse_tenant_id
+
 DEFAULT_TENANT_ID = "default"
 DEFAULT_CHANNEL_NAME = "chat"
 DEFAULT_MODEL = "qwen3.5:9b"
@@ -39,9 +42,8 @@ class ChatResponseEnvelope(TypedDict):
 
 
 def normalize_tenant_id(value: str | None) -> str:
-    normalized = re.sub(r"[^a-zA-Z0-9._-]+", "-", str(value or "").strip().lower())
-    normalized = normalized.strip("-._")
-    return normalized or DEFAULT_TENANT_ID
+    """Compatibility name for strict validation; this function never rewrites."""
+    return str(parse_tenant_id(value))
 
 
 def normalize_channel_name(value: str | None) -> str:
@@ -206,10 +208,11 @@ class ChatRequest:
         return cls(
             session_id=session_id or str(payload.get("session_id") or "").strip(),
             user_input=str(payload.get("user_input") or payload.get("message") or "").strip(),
-            tenant_id=normalize_tenant_id(payload.get("tenant_id")),
+            tenant_id=require_tenant_id(payload.get("tenant_id")),
             attachments=attachments,
             requested_model=str(payload.get("requested_model") or payload.get("model") or "").strip(),
             request_id=str(payload.get("request_id") or uuid4().hex),
+            created_at=str(payload.get("created_at") or utc_now_iso()),
             metadata=metadata,
         )
 
@@ -283,6 +286,7 @@ class SecuritySettings:
     auth_required: bool = True
     token_secret: str = ""
     token_issuer: str = "dadbot"
+    authority_sqlite_path: str = ""
     token_ttl_seconds: int = 3600
     max_requests_per_minute: int = 120
     max_write_requests_per_minute: int = 60
@@ -296,6 +300,7 @@ class SecuritySettings:
 class PersistenceSettings:
     redis_url: str = ""
     postgres_dsn: str = ""
+    sqlite_path: str = ""
     vector_store_url: str = ""
     session_table: str = "dadbot_session_state"
     task_table: str = "dadbot_task_state"
@@ -354,6 +359,7 @@ class ServiceConfig:
         config.security.auth_required = env_flag("DADBOT_API_AUTH_REQUIRED", config.security.auth_required)
         config.security.token_secret = str(os.environ.get("DADBOT_API_TOKEN_SECRET") or "").strip()
         config.security.token_issuer = str(os.environ.get("DADBOT_API_TOKEN_ISSUER") or config.security.token_issuer)
+        config.security.authority_sqlite_path = str(os.environ.get("DADBOT_AUTHORITY_SQLITE_PATH") or "").strip()
         config.security.token_ttl_seconds = env_int("DADBOT_API_TOKEN_TTL_SECONDS", config.security.token_ttl_seconds)
         config.security.max_requests_per_minute = env_int(
             "DADBOT_API_RATE_LIMIT_PER_MINUTE",
@@ -373,6 +379,7 @@ class ServiceConfig:
         config.workers.max_retries = env_int("DADBOT_MAX_RETRIES", config.workers.max_retries)
         config.persistence.redis_url = str(os.environ.get("DADBOT_REDIS_URL") or "").strip()
         config.persistence.postgres_dsn = str(os.environ.get("DADBOT_POSTGRES_DSN") or "").strip()
+        config.persistence.sqlite_path = str(os.environ.get("DADBOT_SERVICE_SQLITE_PATH") or "").strip()
         config.persistence.vector_store_url = str(os.environ.get("DADBOT_VECTOR_STORE_URL") or "").strip()
         config.persistence.event_encryption_key = str(os.environ.get("DADBOT_EVENT_ENCRYPTION_KEY") or "").strip()
         config.telemetry.log_level = str(os.environ.get("DADBOT_LOG_LEVEL") or config.telemetry.log_level)
@@ -404,6 +411,7 @@ class WorkerTask:
     task_id: str = field(default_factory=lambda: uuid4().hex)
     task_kind: str = "chat"
     attempt: int = 1
+    delegation: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -416,6 +424,7 @@ class WorkerTask:
             "task_id": self.task_id,
             "task_kind": self.task_kind,
             "attempt": self.attempt,
+            "delegation": self.delegation,
         }
 
 
@@ -430,6 +439,7 @@ class WorkerResult:
     response: ChatResponse | None = None
     error: str = ""
     completed_at: str = field(default_factory=utc_now_iso)
+    authority_proof: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -442,6 +452,7 @@ class WorkerResult:
             "response": self.response.to_dict() if self.response is not None else None,
             "error": self.error,
             "completed_at": self.completed_at,
+            "authority_proof": self.authority_proof,
         }
 
 
