@@ -28,6 +28,7 @@ dev = [
     "pytest-profiling>=1.8",
     "pytest-mock>=3.14",
     "ruff>=0.8",
+    "import-linter>=2.3,<3",
     "pre-commit>=3.8",
 ]
 llm = [
@@ -136,3 +137,51 @@ ignore = [
 # Tests legitimately access private members and use magic values
 "tests/**" = ["SLF001", "PLR2004", "BLE001", "PLR0913"]
 "tools/**" = ["SLF001", "PLR2004", "BLE001"]
+
+[tool.importlinter]
+root_packages = ["dadbot", "dadbot_system"]
+
+[[tool.importlinter.contracts]]
+name = "Kernel must not import observability"
+type = "forbidden"
+source_modules = [
+    "dadbot.core.boot_mixin",
+    "dadbot.managers.runtime_client",
+    "dadbot.runtime.mcp.tool_client",
+    "dadbot_system.runtime_signals",
+    "dadbot_system.worker",
+]
+forbidden_modules = [
+    "dadbot.telemetry.otel_bridge",
+    "dadbot.telemetry.trace_export",
+    "dadbot_system.telemetry",
+]
+ignore_imports = []
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+name = "Gateway must not import observability"
+type = "forbidden"
+source_modules = ["dadbot_system.api"]
+forbidden_modules = ["dadbot.telemetry.otel_bridge", "dadbot_system.telemetry"]
+ignore_imports = []
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+name = "Kernel-to-observability dependency DAG"
+type = "forbidden"
+source_modules = [
+    "dadbot.core.boot_mixin",
+    "dadbot.managers.runtime_client",
+    "dadbot.runtime.mcp.tool_client",
+    "dadbot_system.api",
+    "dadbot_system.runtime_signals",
+    "dadbot_system.worker",
+]
+forbidden_modules = [
+    "dadbot.telemetry.otel_bridge",
+    "dadbot.telemetry.trace_export",
+    "dadbot_system.telemetry",
+]
+ignore_imports = []
+allow_indirect_imports = true

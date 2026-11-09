@@ -13,8 +13,8 @@ from uuid import uuid4
 from jsonschema import validators
 from jsonschema.exceptions import ValidationError
 
-from dadbot.core.otel_bridge import start_span
 from dadbot.runtime.structured_output import AgentPlan, SchemaValidationError, parse_agent_plan
+from dadbot_system.runtime_signals import start_span
 
 logger = logging.getLogger(__name__)
 

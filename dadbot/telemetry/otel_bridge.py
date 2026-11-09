@@ -66,7 +66,7 @@ class OpenTelemetryEventExporter(EventStreamExporter):
             return
         try:
             self._event_emitter.emit(dict(record))
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.debug("OpenTelemetry event emission failed", exc_info=True)
 
 
@@ -83,7 +83,7 @@ def install_otel_bridge(*, service_name: str = "dadbot") -> dict[str, Any]:
             return {"installed": True, "reason": "already installed"}
         try:
             otel_metrics = importlib.import_module("opentelemetry.metrics")
-            from dadbot.core.trace_export import create_trace_provider
+            from dadbot.telemetry.trace_export import create_trace_provider
         except ImportError as exc:
             logger.warning("OpenTelemetry SDK unavailable; install the service dependencies")
             return {"installed": False, "reason": f"opentelemetry unavailable: {exc}"}
@@ -103,7 +103,7 @@ def get_trace_provider():
 def start_span(name: str, **attributes: Any):
     if _provider is None:
         return nullcontext(None)
-    from dadbot.core.trace_export import start_span as sdk_start_span
+    from dadbot.telemetry.trace_export import start_span as sdk_start_span
 
     return sdk_start_span(_provider, name, attributes)
 

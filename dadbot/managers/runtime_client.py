@@ -13,7 +13,7 @@ import ollama  # type: ignore[reportMissingImports]
 
 from dadbot.contracts import DadBotContext, SupportsDadBotAccess
 from dadbot.core.execution_boundary import ModelGatewayScope, enforce_model_gateway
-from dadbot.core.otel_bridge import start_span
+from dadbot_system.runtime_signals import start_span
 
 logger = logging.getLogger(__name__)
 litellm = importlib.import_module("litellm") if importlib.util.find_spec("litellm") else None

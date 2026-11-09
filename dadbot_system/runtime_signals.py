@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
+from contextlib import nullcontext
+from dataclasses import dataclass
 from typing import Any
 
 from .contracts import TelemetrySettings
@@ -30,6 +33,26 @@ STANDARD_LOG_FIELDS = {
     "message",
     "asctime",
 }
+
+@dataclass(slots=True)
+class _TelemetryAdapter:
+    configure: Callable[[TelemetrySettings | None], Any] | None = None
+    start_span: Callable[..., Any] | None = None
+    shutdown: Callable[[], None] | None = None
+
+
+_adapter = _TelemetryAdapter()
+
+
+def register_telemetry_adapter(
+    *,
+    configure: Callable[[TelemetrySettings | None], Any],
+    start_span: Callable[..., Any],
+    shutdown: Callable[[], None],
+) -> None:
+    _adapter.configure = configure
+    _adapter.start_span = start_span
+    _adapter.shutdown = shutdown
 
 
 class JsonFormatter(logging.Formatter):
@@ -69,12 +92,20 @@ def configure_logging(settings: TelemetrySettings | None = None, *, force: bool 
 
 
 def configure_tracing(settings: TelemetrySettings | None = None):
-    from .telemetry import configure_tracing as configure_service_tracing
-
-    return configure_service_tracing(settings)
+    telemetry = settings or TelemetrySettings()
+    if not telemetry.otel_enabled:
+        return None
+    if _adapter.configure is None:
+        raise RuntimeError("Tracing is enabled but no telemetry adapter is registered")
+    return _adapter.configure(telemetry)
 
 
 def start_span(name: str, **attributes: Any):
-    from .telemetry import start_span as service_start_span
+    if _adapter.start_span is None:
+        return nullcontext(None)
+    return _adapter.start_span(name, **attributes)
 
-    return service_start_span(name, **attributes)
+
+def shutdown_tracing() -> None:
+    if _adapter.shutdown is not None:
+        _adapter.shutdown()
