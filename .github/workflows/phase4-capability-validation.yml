@@ -12,10 +12,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Validate Compose configuration and required environment
+        run: |
+          cp .env.production.example .env.production
+          if env -u POSTGRES_PASSWORD docker compose --env-file /dev/null --profile production config --quiet >/dev/null 2>&1; then
+            echo "Compose accepted an empty required POSTGRES_PASSWORD"
+            exit 1
+          fi
+          POSTGRES_PASSWORD=ci-only-compose-validation docker compose --env-file /dev/null --profile production config --quiet
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+
+      - name: Validate production environment contract
+        run: python ci/production_env_check.py
 
       - name: Install locked dependencies
         run: |

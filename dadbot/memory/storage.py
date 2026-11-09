@@ -12,27 +12,26 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import time
 import uuid
 from contextlib import contextmanager
 from copy import deepcopy
 from pathlib import Path
 
+from dadbot.core.core_state import CoreState, InputEvent, memory_projection, transition
 from dadbot.core.execution_boundary import (
     MemoryWriteOwnerScope,
     enforce_memory_write_owner,
 )
 from dadbot.core.execution_context import (
     ensure_execution_trace_root,
-    record_execution_step,
-)
-from dadbot.core.execution_context import (
     get_active_core_state,
     push_core_state_event,
+    record_execution_step,
     require_bound_core_state_for_mutation,
 )
 from dadbot.core.kernel_locks import KernelEventTotalityLock
 from dadbot.core.mutation_entry_invariants import enforce_mutation_entry_invariants
-from dadbot.core.core_state import CoreState, InputEvent, memory_projection, transition
 from dadbot.core.state_lineage import canonical_state_hash
 from dadbot.memory.migration import MemoryMigrationRegistry
 
@@ -209,7 +208,7 @@ class MemoryStorageBackend:
         if self._local_authority_backend() is None:
             return
         graph = self._manager.graph_manager
-        self._projection_recovery_status = {}
+        self._projection_recovery_status = self._load_projection_recovery_status()
         repairs = (
             ("graph", lambda: (graph.invalidate_projection_cache(), graph.sync_graph_store(turn_context=None))),
             ("semantic", lambda: self._manager.sync_semantic_memory_index(
@@ -217,17 +216,71 @@ class MemoryStorageBackend:
             )),
         )
         for name, repair in repairs:
+            previous = self._projection_recovery_status.get(name, {})
+            generation = int(previous.get("generation") or 0) + 1
             try:
                 repair()
             except (WALCorruptionError, TenantMemoryLedgerCorruption, TenantMemoryRevisionConflict):
                 raise
             except (OSError, sqlite3.Error, RuntimeError) as exc:
                 logger.warning("%s projection recovery failed: %s", name, exc, exc_info=True)
-                self._projection_recovery_status[name] = {"status": "degraded", "error": str(exc)}
-            else:
-                self._projection_recovery_status[name] = {
-                    "status": "sync_succeeded", "source_revision": self._tenant_base_revision,
+                status = {
+                    "status": "degraded",
+                    "generation": generation,
+                    "source_revision": self._tenant_base_revision,
+                    "updated_at": time.time(),
+                    "error": str(exc),
                 }
+            else:
+                status = {
+                    "status": "sync_succeeded",
+                    "generation": generation,
+                    "source_revision": self._tenant_base_revision,
+                    "updated_at": time.time(),
+                }
+            self._persist_projection_recovery_status(name, status)
+            self._projection_recovery_status[name] = status
+
+    def _load_projection_recovery_status(self) -> dict[str, dict]:
+        tenant_id = self.bot.config.tenant_id
+        latest: dict[str, dict] = {}
+        ledger = getattr(self.bot, "_execution_ledger", None)
+        if ledger is None:
+            return latest
+        for event in ledger.read():
+            if event.get("type") != "PROJECTION_STATUS_UPDATED":
+                continue
+            payload = event.get("payload")
+            if not isinstance(payload, dict) or payload.get("tenant_id") != tenant_id:
+                continue
+            projection = payload.get("projection")
+            status = payload.get("status")
+            if projection not in {"graph", "semantic"} or not isinstance(status, dict):
+                continue
+            previous = latest.get(projection)
+            if previous is None or int(status.get("generation") or 0) > int(previous.get("generation") or 0):
+                latest[projection] = deepcopy(status)
+        return latest
+
+    def _persist_projection_recovery_status(self, projection: str, status: dict) -> None:
+        ledger = getattr(self.bot, "_execution_ledger", None)
+        if ledger is None:
+            raise RuntimeError("Projection recovery status requires a durable execution ledger")
+        ledger.write(
+            {
+                "type": "PROJECTION_STATUS_UPDATED",
+                "session_id": "",
+                "trace_id": f"projection-recovery:{projection}",
+                "timestamp": str(status["updated_at"]),
+                "kernel_step_id": "memory.projection.recovery",
+                "committed": True,
+                "payload": {
+                    "tenant_id": self.bot.config.tenant_id,
+                    "projection": projection,
+                    "status": deepcopy(status),
+                },
+            },
+        )
 
     @contextmanager
     def fenced_semantic_index_write(self, memories, expected_revision=None):

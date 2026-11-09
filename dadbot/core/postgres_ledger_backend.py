@@ -19,10 +19,11 @@ if TYPE_CHECKING:
 
 
 class PostgresLedgerBackend(LedgerBackend):
-    """Persist a single execution stream with a transactional head check.
+    """Experimental trusted-local ledger; not supported for authenticated production.
 
     The state store's existing session and event tables hold the head and
     records. The head row serializes all cooperating writers of this stream.
+    See ``docs/decisions/postgres-authenticated-boot.md`` before enabling it.
     """
 
     def __init__(self, store: PostgresStateStore, *, stream: str) -> None:

@@ -487,6 +487,12 @@ class RedisStateStore:
 
 
 class PostgresStateStore:
+    """Experimental trusted-local persistence; not tenant-isolated for authenticated production.
+
+    See ``docs/decisions/postgres-authenticated-boot.md`` before enabling it
+    with authenticated execution.
+    """
+
     def __init__(self, postgres_dsn: str, *, session_table: str, task_table: str, event_table: str) -> None:
         if psycopg is None:
             raise RuntimeError("psycopg package is not installed")

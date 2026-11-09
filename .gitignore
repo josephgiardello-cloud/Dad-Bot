@@ -53,6 +53,7 @@ dad_run_stderr.log
 
 # Temp pytest helpers generated at runtime
 _tmp_pytest_*.py
+.pytest_tmp_*/
 .pytest_slice_output.txt
 .unittest_regression_verbose.log
 _full_suite_enforce_latest.txt
@@ -89,4 +90,3 @@ durability_out.txt
 # ── Shell interpolation escape artifacts ───────────────────────────────────
 # PowerShell $(Join-Path ...) unevaluated as filename (Case A artifact)
 $(Join-Path $env
-

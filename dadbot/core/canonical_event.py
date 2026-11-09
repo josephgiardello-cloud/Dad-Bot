@@ -73,6 +73,7 @@ NON_REPLAY_EVENT_TYPES: frozenset[str] = frozenset(
     {
         "CAPABILITY_AUDIT_EVENT",
         "PolicyTraceEvent",
+        "PROJECTION_STATUS_UPDATED",
     },
 )
 

@@ -261,6 +261,11 @@ class DadBotBootMixin:
         security_mode = self._dependency_overrides.get("storage_security_mode", "TRUSTED_LOCAL")
         if security_mode not in {"AUTHENTICATED", "TRUSTED_LOCAL"}:
             raise ValueError("Invalid execution ledger security mode")
+        if security_mode == "AUTHENTICATED" and backend_name == "postgres":
+            raise RuntimeError(
+                "PostgreSQL execution ledger is not supported for authenticated production; "
+                "use the durable file WAL. See docs/decisions/postgres-authenticated-boot.md."
+            )
         if security_mode == "AUTHENTICATED" and (not durable or backend_name != "file"):
             raise RuntimeError("Authenticated execution requires the durable file WAL")
         if backend_name not in {"file", "postgres"}:
