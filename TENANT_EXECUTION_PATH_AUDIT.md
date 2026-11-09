@@ -5,6 +5,7 @@ established**. The original findings below are an audit snapshot. The
 “Phase 0 closure and Phase 1 status” section records subsequent changes and
 supersedes stale statements where noted; it is not a claim that every file,
 runtime combination or attack scenario has been traced. All work remains
+uncommitted beyond the seven local branch commits; follow-up work is
 uncommitted.
 
 ## Evidence conventions and boundaries
@@ -366,8 +367,9 @@ of the carried-forward WIP commit set:
 
 | Test file | Current evidence / failure mode | Owning triage |
 |---|---|---|
-| [test_phase4a_fixed.py](tests/test_phase4a_fixed.py) | The historical F821 inventory included an undefined `required_fields` reference; the current file defines it. The prior remediation edit also contains numerous `conluence_key_or_turn` calls; the helper exists in the separate `tests/test_phase4a.py` module, so runtime NameError remains possible if a call path is reached. The current targeted `ruff check ... --select F821` invocation reported no diagnostics. | Phase 4 for durability assertions; carried WIP for unrelated failures. Storage failures belong to Phase 3. |
-| [test_phase4a_adversarial_collapse.py](tests/test_phase4a_adversarial_collapse.py) | Present in base history and modified in the carried WIP set. No test was run specifically here to isolate regressions from Phase 1.2 validation or Phase 1.5 normalizer behavior; the staged suite run below is the evidence source. | Phase 4 for durability; Phase 3 for storage; otherwise carried WIP. |
+| [test_phase4a_fixed.py](tests/test_phase4a_fixed.py) | The historical F821 inventory included an undefined `required_fields` reference; the current file defines it, and `ruff check tests --select F821` remains clean. The maxfail-50 suite stage reported a mock trace assertion failure, a real-turn checkpoint failure, and four class setup errors due to a function-scoped `make_test_dadbot` fixture requested at class scope. No `NameError` from `conluence_key_or_turn` and no failure attributed to Phase 1.2/1.5 identity behavior appeared in this stage; those interactions remain unisolated. | Phase 4 for checkpoint/durability assertions; carried WIP for fixture/setup issues. Storage failures belong to Phase 3. |
+| [test_phase4a.py](tests/test_phase4a.py) | The maxfail-50 suite stage reported 16 failures in checkpoint, determinism, scale/pruning, and capability-profile assertions, plus seven setup errors (including missing `self` fixture on module-level tests). No current failure was attributed to Phase 1.2 validator or Phase 1.5 normalizer behavior; that possibility was not separately isolated. | Phase 4 for durability/checkpoint behavior; carried WIP for malformed fixtures/tests. Storage failures belong to Phase 3 only when confirmed storage-related. |
+| [test_phase4a_adversarial_collapse.py](tests/test_phase4a_adversarial_collapse.py) | Present in base history and modified in the carried WIP set. The maxfail-50 stage did not report a failure from this file; it does not isolate a possible Phase 1.2/1.5 interaction. | Phase 4 for durability; Phase 3 for confirmed storage failures; otherwise carried WIP. |
 
 These files are classified as carried-forward WIP rather than remediation
 tests because they predate this branch and contain unrelated Phase 4 work.
@@ -504,7 +506,10 @@ While the compatibility window remains open, the material risks associated
 with those references are still legacy-ID provenance, the ownership meaning
 of `default`, and the unresolved tenant-semantic/collision decisions.
 
-### Current worktree and branch/commit recommendation
+### Historical worktree baseline and branch/commit recommendation
+
+The following status was captured before the later approved branch execution;
+the follow-up execution record below is authoritative for current branch state.
 
 Current `git status --short`: **109 entries, 47 untracked**; **0 untracked
 `.pytest_tmp_*` entries**. `.gitignore` contains `.pytest_tmp_*/`. No branch
@@ -518,7 +523,7 @@ identity regression tests, (3) proposed decision/audit documents, and
 (4) import-linter, F821, and contract-compiler tooling. Do not combine the
 unsigned migration decisions with an implicit data migration.
 
-### Not done in this change
+### Historical non-goals at the earlier Phase 1 / Phase 2.3 snapshot
 
 - No human sign-off or adoption of organization/user/deployment semantics,
   collision mappings, `default` treatment, compatibility owner, or expiry.
@@ -623,6 +628,27 @@ impact are detailed in
 None of these seven failures is fixed in this change. They remain Phase 3
 exit-gate tests.
 
+Exact node-ID rerun on 2026-11-09 used a session-local `--basetemp` after the
+default Windows pytest temp location returned `PermissionError`; all seven
+executed and failed, with no setup errors. No Phase 0/1 change was identified
+in the tested storage/recovery paths; these remain the recorded Phase 3
+baseline. Phase 0 covers local mirror ownership, pulse lookup and auth-off;
+Phase 1 covers identity validation/provisioning, not task-store query scope.
+
+| Exact node ID | Result | Observed failure |
+|---|---|---|
+| `tests/unit/test_sqlite_service_state.py::test_task_namespace_isolated_across_processes` | **FAIL** | Tenant B's lookup returns tenant A's same-ID task. |
+| `tests/unit/test_sqlite_service_state.py::test_identical_task_ids_do_not_overwrite_another_namespace` | **FAIL** | Tenant B's write overwrites the record Tenant A reads. |
+| `tests/unit/test_sqlite_service_state.py::test_task_result_and_response_are_namespace_owned` | **FAIL** | Tenant A reads Tenant B's response. |
+| `tests/unit/test_sqlite_service_state.py::test_incomplete_task_listing_filters_before_limit` | **FAIL** | Tenant B's limited listing returns Tenant A's task. |
+| `tests/unit/test_sqlite_service_state.py::test_legacy_task_is_quarantined_without_implicit_ownership` | **FAIL** | Recovery does not raise or quarantine the unqualified legacy task. |
+| `tests/unit/test_sqlite_service_state.py::test_raw_store_rejects_unqualified_task_lookup` | **FAIL** | Raw unqualified task lookup is accepted. |
+| `tests/unit/test_sqlite_service_state.py::test_fresh_process_recovers_same_task_id_for_both_owners` | **FAIL** | Fresh recovery returns one task instead of two. |
+
+These are not claimed closed if a later run passes; they remain Phase 3 exit
+gate cases until the scoped behavior and acceptance criteria in
+[phase3-entry-criteria.md](docs/decisions/phase3-entry-criteria.md) are met.
+
 ### What a human must decide before Phase 2 proceeds
 
 Complete or explicitly defer with an accountable role and expiry all six
@@ -631,10 +657,9 @@ the three collision groups, `default` treatment, compatibility owner/expiry,
 and the conditional Phase 0 mirror assumption. Until then, TenantContext
 remains an unwired interface and no tenant middleware is authorized.
 
-The proposed branch and commit split, exact commands, and Ruff baseline
-options are in
-[branch-commit-plan.md](docs/decisions/branch-commit-plan.md) and remain
-**AWAITING APPROVAL — NOT EXECUTED**.
+The branch and commit split are recorded in
+[branch-commit-plan.md](docs/decisions/branch-commit-plan.md); they were
+executed locally after approval, with no push or merge.
 
 ### Current implementation validation
 
@@ -650,4 +675,174 @@ options are in
   touched files. No sweeping style changes were made. The narrowed
   `--select E4,E7,E9,F,I` gate passes, as does `ruff check tests --select
   F821`.
-- No full test suite was run.
+- At the time this validation snapshot was written, no full test suite had
+  been run. See the follow-up execution record below for the staged suite
+  result and current changes.
+
+## Follow-up execution record
+
+### Part A — approved local commit split
+
+The approved seven-set split was completed on branch
+`tenant-identity-remediation`: the six tenant-remediation sets and one
+separate carried-forward pre-existing WIP set are recorded with full commit
+SHAs and file lists in
+[branch-commit-plan.md](docs/decisions/branch-commit-plan.md). The carried
+WIP commit is not part of tenant identity remediation. No push or merge was
+performed. `.gitignore` was not staged or committed.
+- **Phase 7: closed** (per the current remediation status); the seven-set
+  local commit record is in [branch-commit-plan.md](docs/decisions/branch-commit-plan.md).
+
+### Part B — independent follow-up work
+
+- **B1 / PostgreSQL authenticated boot:** completed. Authenticated boot with
+  the PostgreSQL execution-ledger backend now fails with a direct error and
+  a pointer to [postgres-authenticated-boot.md](docs/decisions/postgres-authenticated-boot.md).
+  PostgreSQL state/ledger primitives remain documented as experimental
+  trusted-local components; this does not select tenant or `default`
+  semantics.
+- **B2 / deficit 10 — safe log retention:** **deferred, not implemented.**
+  `EventCompactor.compact()` currently refuses trimming with
+  `durable_checkpoint_required` ([compaction.py](dadbot/core/compaction.py#L144)).
+  `DurableCheckpoint` keeps its history only in process memory
+  ([durable_checkpoint.py](dadbot/core/durable_checkpoint.py#L17)), while
+  `SnapshotEngine` keeps snapshots in process and the ledger WAL verifies a
+  chain from its beginning. There is no durable all-consumer cursor registry,
+  durable replay-complete state snapshot, chain-preserving segment/anchor
+  format, or integrated fall-off-log rebuild path. Trimming now would risk
+  losing replay-critical events or invalidating chain verification. No
+  unsafe trim, partial cursor mechanism, or test-only success path was added.
+  The explicit Phase 4 deferral, owner role, substrate, and required tests are
+  recorded in
+  [checkpoint-trimming-deferral.md](docs/decisions/checkpoint-trimming-deferral.md).
+- **B3 / deficit 11 — projection status:** mechanism and focused tests
+  completed. Per-projection generation/status events are written to the
+  durable WAL and reloaded on restart; graph and semantic synchronization
+  remain independent. The focused restart/degradation and independent-sync
+  tests passed. No physical semantic/graph index isolation was selected.
+- **B4 / deficits 7 and 25 — production config:** completed for required
+  config completeness. Both production env files contain
+  `DADBOT_AUTHORITY_SQLITE_PATH`, `DADBOT_DURABLE_EXECUTION_LEDGER`, and
+  `DADBOT_EXECUTION_LEDGER_BACKEND`; the local ignored file's values are not
+  committed or disclosed. Compose now requires `POSTGRES_PASSWORD`, CI
+  verifies Compose rejects an unset password and accepts a validation value,
+  and `ci/production_env_check.py` checks the three required example keys.
+  No auth-off or `default` policy was changed.
+
+### Part C — Phase 3 inventory
+
+The nine-store inventory is in
+[phase3-scope-inventory.md](docs/decisions/phase3-scope-inventory.md). It
+records current keys/constraints/query patterns, the required scoped change,
+proposed Phase 3.2–3.9 ownership, `default` and legacy-task dependencies, and
+acceptance tests. It is an inventory only; no store schema/query/filter was
+changed.
+
+### Part D — scanner-excluded default-suite result
+
+The recursive audit scanner excluded per the prior audit is
+`tests/invariants/test_full_system_audit_matrix.py`; that file invokes
+`run_full_system_audit`, whose import-graph check recursively scans the
+repository. The self-invoking wrapper
+`tests/test_phase4a_patched.py` is also excluded because importing it calls
+`pytest.main(["tests/test_phase4a.py"])` at module scope and recursively
+starts a nested test run; the canonical `tests/test_phase4a.py` is otherwise
+still collected.
+
+The 300-turn `test_soak_simulation_replay_loop` was previously observed to
+consume about 1.78 GB and stall during ledger compaction. It is now explicitly
+quarantined with a pytest skip marker; its assertions are unchanged. The
+owner is the **durability/ledger maintainers** role. Re-enable it only after
+the 300-turn replay case completes in under 120 seconds and under 1 GiB peak
+memory in the designated soak environment, with ledger integrity assertions
+still passing. The default suite records it as skipped rather than silently
+omitting it; this does not assert the underlying performance issue is fixed.
+
+The corrected collection command, with the two exclusions above, reported
+**4,245 collected tests**. The resource-bounded run used
+`--maxfail=500 --timeout=120`, reached natural completion (141 failures is
+below the maxfail threshold), and advanced beyond the previous 44% soak-test
+stall. JUnit recorded **4,246 result cases**: **3,972 passed, 141 failed,
+11 errored, and 122 skipped**. The one-case difference between collection
+output and JUnit records is unexplained and is retained here rather than
+silently normalizing the counts. The suite completed but is not green; this
+is the new baseline.
+
+Collection command:
+`.\.venv\Scripts\python.exe -m pytest --collect-only -q -p no:randomly --ignore=tests/invariants/test_full_system_audit_matrix.py --ignore=tests/test_phase4a_patched.py`.
+Execution command:
+`.\.venv\Scripts\python.exe -m pytest -q -p no:randomly -o faulthandler_timeout=0 --timeout=120 --tb=short --maxfail=500 --junitxml=<session-file> --ignore=tests/invariants/test_full_system_audit_matrix.py --ignore=tests/test_phase4a_patched.py --basetemp=<session-temp>`.
+JUnit and captured console output were kept outside the repository. The seven
+known `test_sqlite_service_state.py` failures all reproduced and are excluded
+from the first-30 list below.
+
+| # | Node ID | Triage |
+|---|---|---|
+| 1 | `tests/distribution_readiness/tier1_kernel/test_contract_enforcement.py::TestNodeStageContracts::test_execute_stamps_contract_version_in_determinism_manifest` | Not remediation-related; SaveNode stage invariant fails. |
+| 2 | `tests/phase4/test_phase4_compliance.py::test_no_unseeded_random_imports_in_core` | Not remediation-related; scanner reports `import random` in carried-forward `dadbot/core/fault_injection.py`. |
+| 3 | `tests/test_agentic_local_actions.py::test_tool_registry_parses_calendar_and_email_commands` | Not remediation-related; `DadBot.parse_tool_command` is unavailable. |
+| 4 | `tests/test_agentic_methods.py::test_plan_and_act_basic` | Not remediation-related; `DadBot.plan_and_act` is unavailable. |
+| 5 | `tests/test_agentic_methods.py::test_background_job_runs` | Not remediation-related; `DadBot.schedule_background_job` is unavailable. |
+| 6 | `tests/test_agentic_methods.py::test_goal_and_progress` | Not remediation-related; `DadBot.set_goal` is unavailable. |
+| 7 | `tests/test_agentic_methods.py::test_reflect_and_learn` | Not remediation-related; `DadBot.reflect_and_learn` is unavailable. |
+| 8 | `tests/test_agentic_methods.py::test_notify_user` | Not remediation-related; `DadBot.notify_user` is unavailable. |
+| 9 | `tests/test_app_runtime_startup.py::test_production_state_stores_require_postgres` | Not remediation-related; test `SimpleNamespace` fixture lacks `persistence.sqlite_path`. |
+| 10 | `tests/test_app_runtime_startup.py::test_development_state_store_keeps_in_memory_fallback` | Not remediation-related; same incomplete `persistence.sqlite_path` fixture. |
+| 11 | `tests/test_dadbot_regression.py::TestDadBotRegression::test_prepare_user_turn_sets_daily_checkin_context_once` | Phase 4; strict SaveNode commit fails because the determinism lock hash is missing. |
+| 12 | `tests/test_durability_and_leases.py::TestLeaseSchedulerIntegration::test_single_worker_acquires_and_releases_lease_per_job` | Phase 4; lease turn fails the canonical response candidate gate. |
+| 13 | `tests/test_durability_and_leases.py::TestLeaseSchedulerIntegration::test_lease_conflict_requeues_and_eventually_executes` | Phase 4; lease turn fails the canonical response candidate gate. |
+| 14 | `tests/test_long_term_signals.py::test_should_evolve_persona_respects_session_gap` | Not remediation-related; persona evolution expectation mismatch. |
+| 15 | `tests/test_long_term_signals.py::test_update_trait_impact_from_relationship_feedback_reinforces_latest_trait` | Not remediation-related; long-term signal behavior assertion. |
+| 16 | `tests/test_long_term_signals.py::test_reject_persona_trait_removes_latest_entry` | Not remediation-related; long-term signal behavior assertion. |
+| 17 | `tests/test_long_term_signals.py::test_generate_wisdom_insight_uses_mocked_ollama_and_deduplicates_recent_entries` | Not remediation-related; wisdom insight behavior assertion. |
+| 18 | `tests/test_long_term_signals.py::test_detect_life_patterns_skips_existing_pattern_identity` | Not remediation-related; life-pattern behavior assertion. |
+| 19 | `tests/test_long_term_signals.py::test_detect_life_patterns_queues_proactive_message_for_new_pattern` | Not remediation-related; life-pattern behavior assertion. |
+| 20 | `tests/test_loyal_elephie_integration.py::TestHybridRetriever::test_rrf_fusion` | Not remediation-related; test expects a mapping but retriever returns a tuple. |
+| 21 | `tests/test_memory_manager.py::test_forgetting_uses_distinct_backups_for_same_turn_and_preserves_retained_memories` | Phase 4; backup write fails because the backup temp file's parent path is absent. |
+| 22 | `tests/test_memory_manager.py::test_forgotten_memory_is_restorable_after_store_reload` | Phase 4; backup write fails because the backup temp file's parent path is absent. |
+| 23 | `tests/test_memory_manager.py::test_manual_forgetting_archives_and_restores_without_turn_context` | Phase 4; backup write fails because the backup temp file's parent path is absent. |
+| 24 | `tests/test_memory_manager.py::test_archived_memory_can_be_deleted_without_changing_active_memory` | Phase 4; backup write fails because the backup temp file's parent path is absent. |
+| 25 | `tests/test_memory_manager.py::test_forgetting_rejects_stale_catalog_without_losing_new_memory` | Phase 4; backup write fails because the backup temp file's parent path is absent. |
+| 26 | `tests/test_memory_manager.py::test_archived_memory_restore_failure_preserves_archive` | Phase 4; backup write fails because the backup temp file's parent path is absent. |
+| 27 | `tests/test_memory_manager.py::test_forgetting_preserves_distinct_kept_memories_with_same_dedup_key` | Phase 4; backup write fails because the backup temp file's parent path is absent. |
+| 28 | `tests/test_phase1_response_authority.py::TestPhase1ResponseAuthority::test_contract_single_callable_output_authority` | Not remediation-related; the test's `SimpleNamespace` fixture lacks `LIGHT_MODE`. |
+| 29 | `tests/test_phase4a.py::TestPhase4ACapabilityMeasurement::test_capability_profile_structure` | Phase 4; capability-profile test raises `UnboundLocalError` for `state`. |
+| 30 | `tests/test_phase4a.py::TestPhase4ARealCheckpointing::test_orchestrator_restores_state_after_simulated_restart` | Infrastructure; the test attempts an unmocked live Ollama call. |
+
+These are triage classifications only; no failure was fixed. Categories
+reflect observed failure mechanisms; failures were not reproduced separately
+for this classification. The earlier unbounded run stalled at 44% in the
+300-turn soak test during deep-copy work in `execution_ledger.read`, reached
+from ledger compaction. With the test explicitly quarantined, the bounded
+default-suite run completed.
+
+### Part E — current deficit status
+
+| Deficit | Current status |
+|---|---|
+| 2, 3, 4, 14, 15, 27 | **Blocked** on sign-off and/or tenant-semantics-dependent store decisions; no middleware or store scope implemented. |
+| 5 | **Status set:** authenticated PostgreSQL boot is explicitly excluded; see the B1 decision. |
+| 6 | **Closed:** kernel boundary checker passes; Import Linter reports 3 kept / 0 broken. |
+| 7, 25 | **Closed for production configuration completeness** only; no `default`/auth-off policy chosen. |
+| 10 | **DEFERRED:** trimming remains disabled pending the substrate in [checkpoint-trimming-deferral.md](docs/decisions/checkpoint-trimming-deferral.md). |
+| 11 | **Mechanism complete and focused tests pass:** projection generation/status survives restart with independent graph/semantic sync. |
+| 20 | **Partial:** the scanner-excluded suite baseline is complete, but 141 failures and 11 errors remain untriaged beyond the required first 30. |
+| 21 | **Unmapped:** no definition for deficit 21 exists in this audit or the referenced remediation decision records; no status is inferred. |
+| 22 | **Resource-bounded suite gate established:** soak case quarantined with owner/re-enable criterion; 4,245 collected, 4,246 JUnit result records, 3,972 passed, 141 failed, 11 errored, 122 skipped. Run completed non-green. |
+| 23 | **Partial:** the test F821 gate was zero; the complete suite now ran but remains non-green, and no new full-suite-wide F821 scan was part of this change. |
+| 24 | **Closed:** contract validation passed and manifest SHA remained unchanged. |
+
+**Phase 2.1/2.2 and Phase 3.1–3.9 remain blocked on SIGN-OFF-PACKET.md
+items.**
+
+### Current change validation
+
+- Strict Phase 0 tests without `--runxfail`: **1 memory-isolation pass and
+  3 pulse/auth-off passes**.
+- `python ci/kernel_boundary_check.py`: **passed**; Import Linter:
+  **3 kept, 0 broken**.
+- The seven listed Phase 3 node IDs: **7 failed, 0 passed, 0 errored**.
+- Explicit selection of `test_soak_simulation_replay_loop`: **skipped** by
+  its quarantine marker.
+- Ruff `E4,E7,E9,F,I` on the changed test file, `compileall` for that file,
+  and `git diff --check`: **passed**.

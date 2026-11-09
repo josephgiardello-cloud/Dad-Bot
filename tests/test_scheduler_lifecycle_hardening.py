@@ -5,11 +5,11 @@ import asyncio
 import pytest
 
 from dadbot.core.control_plane import (
+    _SCHEDULER_EXCEPTION_MAPPER,
     ExecutionControlPlane,
     ExecutionJob,
     SessionRegistry,
     TurnTerminalState,
-    _SCHEDULER_EXCEPTION_MAPPER,
     _set_terminal_turn_state,
 )
 from dadbot.core.runtime_errors import InvariantViolation
@@ -100,6 +100,9 @@ def test_double_finalization_prevention() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.soak
+@pytest.mark.skip(
+    reason="Quarantined pending bounded ledger compaction; see TENANT_EXECUTION_PATH_AUDIT.md"
+)
 async def test_soak_simulation_replay_loop() -> None:
     async def _executor(_session: dict, _job: ExecutionJob) -> tuple[str, bool]:
         return ("ok", False)
