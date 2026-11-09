@@ -20,8 +20,15 @@ class MemoryLifecycleMixin:
         return self._storage.prepare_memory_store_for_save()
 
     def save_memory_store(self):
-        projection = self.normalize_memory_store(self.memory_projection())
-        return self._storage._write_memory_store_unlocked(projection)
+        with self.bot._io_lock:
+            committed = self._storage.committed_tenant_projection()
+            projection = self.normalize_memory_store(self.memory_projection())
+            if committed is not None and projection == committed:
+                return None
+            if self._storage._local_authority_backend() is not None:
+                return self._storage._commit_local_projection(projection)
+            self._storage._require_snapshot_authority()
+            return self._storage._write_memory_store_unlocked(projection)
 
     def export_memory_store(self, export_path):
         return self._storage.export_memory_store(export_path)

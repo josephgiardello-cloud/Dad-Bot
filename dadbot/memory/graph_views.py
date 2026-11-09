@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import logging
+from contextlib import nullcontext
 
 
 logger = logging.getLogger(__name__)
@@ -185,16 +186,36 @@ def sync_graph_store(manager, turn_context=None):
                 "Graph sync violation: graph writes are only allowed at SaveNode commit boundary "
                 f"(active_stage={active_stage!r}, commit_active={commit_active!r}).",
             )
-    snapshot = build_graph_projection(manager, turn_context=turn_context)
-    manager.ensure_graph_store()
-    manager._graph_store_backend.replace_graph(
-        snapshot.get("nodes", []),
-        snapshot.get("edges", []),
-    )
+    storage = getattr(manager._mm, "_storage", None)
+    local_backend = getattr(storage, "_local_authority_backend", None)
+    uses_authority = callable(local_backend) and local_backend() is not None
+    io_lock = getattr(runtime, "_io_lock", None)
+    with io_lock if uses_authority and io_lock is not None else nullcontext():
+        if uses_authority:
+            revision = storage._tenant_base_revision
+            projection = manager._mm.normalize_memory_store(manager._mm.memory_projection())
+        snapshot = build_graph_projection(manager, turn_context=turn_context)
+        fence = storage.fenced_graph_index_write(revision, projection) if uses_authority else nullcontext()
+        with fence:
+            manager.ensure_graph_store()
+            manager._graph_store_backend.replace_graph(
+                snapshot.get("nodes", []),
+                snapshot.get("edges", []),
+            )
     return snapshot
 
 
 def graph_snapshot(manager):
+    storage = getattr(manager._mm, "_storage", None)
+    local_backend = getattr(storage, "_local_authority_backend", None)
+    if callable(local_backend) and local_backend() is not None:
+        with manager._bot._io_lock:
+            revision = storage._tenant_base_revision
+            projection = manager._mm.normalize_memory_store(manager._mm.memory_projection())
+            manager.invalidate_projection_cache()
+            snapshot = build_graph_projection(manager, turn_context=None)
+            with storage.fenced_graph_index_write(revision, projection):
+                return snapshot
     try:
         manager.ensure_graph_store()
         snapshot = manager._graph_store_backend.fetch_graph()

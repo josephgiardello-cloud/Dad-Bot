@@ -39,14 +39,13 @@ from tests.scenario_suite import (
 )
 
 
-
 def _classify_phase4_failure(detail: object) -> str:
     text = str(detail or "").lower()
     infra_hints = ("connection", "timeout", "reused", "unavailable", "service")
     env_hints = ("modulenotfound", "no module named", "importerror", "dll", "not found")
-    if any(hint in text or hint in env_hints):
+    if any(hint in text for hint in env_hints):
         return "test_environment_failure"
-    if any(hint in text or hint in infra_hints):
+    if any(hint in text for hint in infra_hints):
         return "infrastructure_failure"
     return "system_failure"
 
@@ -387,10 +386,10 @@ class TestPhase4ACapabilityMeasurement:
         # Compute scores
         for cat, counts in by_category.items():
             score = counts["score_sum"] / counts["total"] if counts["total"] > 0 else 0.0
-            proile[cat] = score
+            profile[cat] = score
 
-        # Veriy all categories present
-        assert "planning" in proile
+        # Verify all categories are present.
+        assert "planning" in profile
         assert "tool" in profile
         assert "memory" in profile
         assert "ux" in profile
@@ -472,7 +471,7 @@ class TestScenarioSuiteValidation:
 
     def test_scenario_structure(self):
         """Veriy each scenario has required ields."""
-        required_ields = [
+        required_fields = [
             "name",
             "category",
             "input_text",
@@ -650,7 +649,7 @@ class TestPhase4ARealCheckpointing:
             await orchestrator.handle_turn(
                 "log this",
                 session_id="write-log-real",
-                conluence_key=conluence_key_or_turn("write-log-real", "log this"),
+                conluence_key=confluence_key_for_turn("write-log-real", "log this"),
             )
 
         with contextlib.closing(sqlite3.connect(phase4a_db_path)) as conn:
@@ -660,8 +659,8 @@ class TestPhase4ARealCheckpointing:
             ).etchall()
 
         assert len(rows) >= 1, "No rows in checkpoint_writes ater a real turn"
-        statuses = [r[0] or r in rows]
-        assert all(s == "ok" or s in statuses), "Unexpected write statuses: {statuses}"
+        statuses = [row[0] or row[1] for row in rows]
+        assert all(status == "ok" for status in statuses), f"Unexpected write statuses: {statuses}"
 
     @pytest.mark.asyncio
     async def test_manifest_drift_warning_in_lenient_mode(self, phase4a_db_path, caplog, make_test_dadbot):
@@ -670,14 +669,14 @@ class TestPhase4ARealCheckpointing:
         try:
             orch1, cp1, llm1 = _make_orchestrator_with_checkpointer(phase4a_db_path, strict=False, make_test_dadbot=make_test_dadbot)
         except Exception as exc:
-            _ail_certiication_gate("orchestrator_boot", exc)
+            _fail_certification_gate("orchestrator_boot", exc)
         _assert_handle_turn_not_mocked(orch1, "maniest_drit_lenient_initial")
 
         with _stub_llm(llm1):
             await orch1.handle_turn(
                 "irst turn",
                 session_id="drit-lenient",
-                conluence_key=conluence_key_or_turn("drit-lenient", "irst turn"),
+                conluence_key=confluence_key_for_turn("drit-lenient", "irst turn"),
             )
 
         # Mutate the stored maniest's env_hash to simulate drit.
@@ -697,7 +696,7 @@ class TestPhase4ARealCheckpointing:
         try:
             orch2, _cp2, llm2 = _make_orchestrator_with_checkpointer(phase4a_db_path, strict=False, make_test_dadbot=make_test_dadbot)
         except Exception as exc:
-            _ail_certiication_gate("orchestrator_boot_restart", exc)
+            _fail_certification_gate("orchestrator_boot_restart", exc)
         _assert_handle_turn_not_mocked(orch2, "maniest_drit_lenient_resumed")
 
         import logging
@@ -737,7 +736,7 @@ class TestPhase4ADeterminismVeriication:
             orch1, cp1, llm1 = _make_orchestrator_with_checkpointer(phase4a_db_path, make_test_dadbot=make_test_dadbot)
             orch2, cp2, llm2 = _make_orchestrator_with_checkpointer(phase4a_db_path + ".b", make_test_dadbot=make_test_dadbot)
         except Exception as exc:
-            _ail_certiication_gate("orchestrator_boot_pair", exc)
+            _fail_certification_gate("orchestrator_boot_pair", exc)
         _assert_handle_turn_not_mocked(orch1, "lock_hash_stability_a")
         _assert_handle_turn_not_mocked(orch2, "lock_hash_stability_b")
 
@@ -747,13 +746,13 @@ class TestPhase4ADeterminismVeriication:
             await orch1.handle_turn(
                 user_input,
                 session_id="det-a",
-                conluence_key=conluence_key_or_turn("det-a", user_input),
+                conluence_key=confluence_key_for_turn("det-a", user_input),
             )
         with _stub_llm(llm2):
             await orch2.handle_turn(
                 user_input,
                 session_id="det-b",
-                conluence_key=conluence_key_or_turn("det-b", user_input),
+                conluence_key=confluence_key_for_turn("det-b", user_input),
             )
 
         cp1_data = cp1.load_checkpoint("det-a")
@@ -782,14 +781,14 @@ class TestPhase4ADeterminismVeriication:
         try:
             orchestrator, checkpointer, llm = _make_orchestrator_with_checkpointer(phase4a_db_path, make_test_dadbot=make_test_dadbot)
         except Exception as exc:
-            _ail_certiication_gate("orchestrator_boot", exc)
+            _fail_certification_gate("orchestrator_boot", exc)
         _assert_handle_turn_not_mocked(orchestrator, "tool_trace_presence")
 
         with _stub_llm(llm):
             await orchestrator.handle_turn(
                 "tool check",
                 session_id="tool-det",
-                conluence_key=conluence_key_or_turn("tool-det", "tool check"),
+                conluence_key=confluence_key_for_turn("tool-det", "tool check"),
             )
 
         loaded = checkpointer.load_checkpoint("tool-det")
@@ -804,14 +803,14 @@ class TestPhase4ADeterminismVeriication:
         try:
             orchestrator, checkpointer, llm = _make_orchestrator_with_checkpointer(phase4a_db_path, make_test_dadbot=make_test_dadbot)
         except Exception as exc:
-            _ail_certiication_gate("orchestrator_boot", exc)
+            _fail_certification_gate("orchestrator_boot", exc)
         _assert_handle_turn_not_mocked(orchestrator, "checkpoint_chain_integrity")
 
         with _stub_llm(llm):
             await orchestrator.handle_turn(
                 "turn one",
                 session_id="chain-real",
-                conluence_key=conluence_key_or_turn("chain-real", "turn one"),
+                conluence_key=confluence_key_for_turn("chain-real", "turn one"),
             )
         cp_turn1 = checkpointer.load_checkpoint("chain-real")
         hash_turn1 = cp_turn1["checkpoint_hash"]
@@ -820,7 +819,7 @@ class TestPhase4ADeterminismVeriication:
             await orchestrator.handle_turn(
                 "turn two",
                 session_id="chain-real",
-                conluence_key=conluence_key_or_turn("chain-real", "turn two"),
+                conluence_key=confluence_key_for_turn("chain-real", "turn two"),
             )
         cp_turn2 = checkpointer.load_checkpoint("chain-real")
 
@@ -834,7 +833,7 @@ class TestPhase4ADeterminismVeriication:
         try:
             orchestrator, checkpointer, llm = _make_orchestrator_with_checkpointer(phase4a_db_path, make_test_dadbot=make_test_dadbot)
         except Exception as exc:
-            _ail_certiication_gate("orchestrator_boot", exc)
+            _fail_certification_gate("orchestrator_boot", exc)
         _assert_handle_turn_not_mocked(orchestrator, "persistence_metrics")
 
         n_turns = 3
@@ -843,7 +842,7 @@ class TestPhase4ADeterminismVeriication:
                 await orchestrator.handle_turn(
                     f"turn {i}",
                     session_id="metrics-obs",
-                    conluence_key=conluence_key_or_turn("metrics-obs", f"turn {i}"),
+                    conluence_key=confluence_key_for_turn("metrics-obs", f"turn {i}"),
                 )
 
         cp_count = checkpointer.checkpoint_count("metrics-obs")
@@ -963,7 +962,7 @@ asyncio.run(main())
             check=False,
         )
         if result1.returncode != 0:
-            _ail_certiication_gate(
+            _fail_certification_gate(
                 "subprocess_write",
                 "returncode={result1.returncode} stderr={result1.stderr[-800:]}",
             )
@@ -981,7 +980,7 @@ asyncio.run(main())
             check=False,
         )
         if result2.returncode != 0:
-            _ail_certiication_gate(
+            _fail_certification_gate(
                 "subprocess_veriy",
                 "returncode={result2.returncode} stderr={result2.stderr[-800:]}",
             )
@@ -1028,7 +1027,7 @@ class TestPhase4AToolDeterminismAcrossRestarts:
             orch_a, cp_a, llm_a = _make_orchestrator_with_checkpointer(phase4a_db_path, make_test_dadbot=make_test_dadbot)
             orch_b, cp_b, llm_b = _make_orchestrator_with_checkpointer(db_b, make_test_dadbot=make_test_dadbot)
         except Exception as exc:
-            _ail_certiication_gate("orchestrator_boot_pair", exc)
+            _fail_certification_gate("orchestrator_boot_pair", exc)
         _assert_handle_turn_not_mocked(orch_a, "tool_det_session_a")
         _assert_handle_turn_not_mocked(orch_b, "tool_det_session_b")
 
@@ -1038,13 +1037,13 @@ class TestPhase4AToolDeterminismAcrossRestarts:
                 await orch_a.handle_turn(
                     ixed_input,
                     session_id="tool-det-a",
-                    conluence_key=conluence_key_or_turn("tool-det-a", ixed_input),
+                    conluence_key=confluence_key_for_turn("tool-det-a", ixed_input),
                 )
             with _stub_llm(llm_b):
                 await orch_b.handle_turn(
                     ixed_input,
                     session_id="tool-det-b",
-                    conluence_key=conluence_key_or_turn("tool-det-b", ixed_input),
+                    conluence_key=confluence_key_for_turn("tool-det-b", ixed_input),
                 )
             cp_a_data = cp_a.load_checkpoint("tool-det-a")
             cp_b_data = cp_b.load_checkpoint("tool-det-b")
@@ -1071,14 +1070,14 @@ class TestPhase4AToolDeterminismAcrossRestarts:
         try:
             orchestrator, checkpointer, llm = _make_orchestrator_with_checkpointer(phase4a_db_path, make_test_dadbot=make_test_dadbot)
         except Exception as exc:
-            _ail_certiication_gate("orchestrator_boot", exc)
+            _fail_certification_gate("orchestrator_boot", exc)
         _assert_handle_turn_not_mocked(orchestrator, "tool_det_round_trip")
 
         with _stub_llm(llm):
             await orchestrator.handle_turn(
                 "round trip tool hash",
                 session_id="tool-rt",
-                conluence_key=conluence_key_or_turn("tool-rt", "round trip tool hash"),
+                conluence_key=confluence_key_for_turn("tool-rt", "round trip tool hash"),
             )
 
         # Capture hash at save time rom context.
@@ -1099,7 +1098,7 @@ class TestPhase4AToolDeterminismAcrossRestarts:
             orch_a, cp_a, llm_a = _make_orchestrator_with_checkpointer(phase4a_db_path, make_test_dadbot=make_test_dadbot)
             orch_b, cp_b, llm_b = _make_orchestrator_with_checkpointer(db_b, make_test_dadbot=make_test_dadbot)
         except Exception as exc:
-            _ail_certiication_gate("orchestrator_boot_pair", exc)
+            _fail_certification_gate("orchestrator_boot_pair", exc)
         _assert_handle_turn_not_mocked(orch_a, "tool_det_di_a")
         _assert_handle_turn_not_mocked(orch_b, "tool_det_di_b")
 
@@ -1108,13 +1107,13 @@ class TestPhase4AToolDeterminismAcrossRestarts:
                 await orch_a.handle_turn(
                     "alpha input probe",
                     session_id="tool-di-a",
-                    conluence_key=conluence_key_or_turn("tool-di-a", "alpha input probe"),
+                    conluence_key=confluence_key_for_turn("tool-di-a", "alpha input probe"),
                 )
             with _stub_llm(llm_b):
                 await orch_b.handle_turn(
                     "completely dierent beta input",
                     session_id="tool-di-b",
-                    conluence_key=conluence_key_or_turn("tool-di-b", "completely dierent beta input"),
+                    conluence_key=confluence_key_for_turn("tool-di-b", "completely dierent beta input"),
                 )
 
             tth_a = ((cp_a.load_checkpoint("tool-di-a").get("metadata") or {}).get("determinism") or {}).get(
@@ -1180,7 +1179,7 @@ class TestPhase4AScaleAndPruning:
                 await orchestrator.handle_turn(
                     "turn {i}",
                     session_id="prune-scale",
-                    conluence_key=conluence_key_or_turn("prune-scale", "turn {i}"),
+                    conluence_key=confluence_key_for_turn("prune-scale", "turn {i}"),
                 )
 
         inal_count = checkpointer.checkpoint_count("prune-scale")
@@ -1214,12 +1213,12 @@ class TestPhase4AScaleAndPruning:
                     await orch.handle_turn(
                         "session {session_id} turn {t}",
                         session_id=session_id,
-                        conluence_key=conluence_key_or_turn(session_id, "session {session_id} turn {t}"),
+                        conluence_key=confluence_key_for_turn(session_id, "session {session_id} turn {t}"),
                     )
             return cp.checkpoint_count(session_id)
 
         session_ids = [f"concurrent-{i}" for i in range(n_sessions)]
-        counts = await asyncio.gather(*[run_session(sid) or sid in session_ids])
+        counts = await asyncio.gather(*(run_session(session_id) for session_id in session_ids))
 
         for sid, count in zip(session_ids, counts, strict=True):
             assert count == turns_per_session, "Session {sid!r}: expected {turns_per_session} checkpoints, got {count}"
@@ -1297,9 +1296,9 @@ class TestPhase4ALargeStateCheckpoint:
                 "tool": "tool_{j}",
                 "output": rand_str(500),
                 "status": "ok",
-                "latency_ms": rng.uniorm(10, 500),
+                "latency_ms": rng.uniform(10, 500),
             }
-            or j in range(100)
+            for j in range(100)
         ]
         # Pad to target size with a large reeorm ield.
         padding = rand_str(max(0, target_kb * 1024 - 8000))
@@ -1366,7 +1365,7 @@ class TestPhase4ALargeStateCheckpoint:
         fake_hash = _hashlib.sha256(b"large-meta-test").hexdigest()
 
         checkpoint = {
-            "checkpoint_hash": ake_hash,
+            "checkpoint_hash": fake_hash,
             "prev_checkpoint_hash": "",
             "state": large_state,
             "metadata": {"determinism": {"tool_trace_hash": tth, "lock_hash": lh}},
@@ -1387,10 +1386,11 @@ class TestPhase4ALargeStateCheckpoint:
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(60)
-    async def test_orchestrator_handles_large_preloaded_state(self, phase4a_db_path):
+    async def test_orchestrator_handles_large_preloaded_state(self, phase4a_db_path, make_test_dadbot):
         """Orchestrator loads a large pre-seeded checkpoint without OOM or corruption."""
 
         import hashlib as _hashlib
+
         from dadbot.core.persistence import SQLiteCheckpointer
 
         cp_seed = SQLiteCheckpointer(phase4a_db_path, auto_migrate=True, prune_every=0)
@@ -1419,7 +1419,7 @@ class TestPhase4ALargeStateCheckpoint:
             orchestrator = DadBotOrchestrator(bot=bot, strict=False, checkpointer=checkpointer)
             llm = orchestrator.registry.get("llm")
         except Exception as exc:
-            _ail_certiication_gate("orchestrator_boot", exc)
+            _fail_certification_gate("orchestrator_boot", exc)
         _assert_handle_turn_not_mocked(orchestrator, "large_state_preload")
 
         with _stub_llm(llm):

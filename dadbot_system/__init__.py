@@ -43,8 +43,19 @@ _EXPORT_GROUPS: dict[str, list[str]] = {
         "NamespacedStateStore",
         "PostgresStateStore",
         "RedisStateStore",
+        "SQLiteStateStore",
     ],
     ".telemetry": ["configure_logging", "configure_tracing"],
+    ".tenant_identity": [
+        "TenantId",
+        "TenantIdentityProvisioner",
+        "TenantIdentityResolver",
+        "is_versioned_tenant_id",
+        "issue_tenant_identity",
+        "mint_tenant_id",
+        "parse_tenant_id",
+        "resolve_tenant_reference",
+    ],
     ".worker": ["LocalMultiprocessBroker", "WorkerProcessManager"],
 }
 

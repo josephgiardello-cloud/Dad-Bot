@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import copy
 import json
+import sqlite3
+import types
 from collections import defaultdict
+from contextlib import closing
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from threading import RLock
 from typing import Any, Protocol
 
 from .contracts import DEFAULT_TENANT_ID, ChatResponse, EventEnvelope, EventType, normalize_tenant_id
-
-import types
 
 try:
     import redis
@@ -98,6 +100,97 @@ class StateStore(Protocol):
     def append_event(self, session_id: str, event: dict[str, Any]) -> None: ...
 
     def list_events(self, session_id: str) -> list[dict[str, Any]]: ...
+
+
+class SQLiteStateStore:
+    def __init__(self, path: str):
+        if not path or path == ":memory:":
+            raise ValueError("A persistent SQLite state path is required")
+        self.path = str(Path(path).resolve())
+        self._uri = Path(self.path).as_uri() + "?mode=rw"
+        with closing(sqlite3.connect(self.path, timeout=5)) as connection, connection:
+            connection.execute("PRAGMA synchronous=FULL")
+            connection.execute("CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, payload TEXT NOT NULL, response TEXT)"
+            )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS events (sequence INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "session_id TEXT NOT NULL, payload TEXT NOT NULL)"
+            )
+            connection.execute("CREATE INDEX IF NOT EXISTS events_session ON events(session_id, sequence)")
+
+    def _connect(self):
+        connection = sqlite3.connect(self._uri, timeout=5, uri=True)
+        try:
+            connection.execute("PRAGMA synchronous=FULL")
+        except sqlite3.Error:
+            connection.close()
+            raise
+        return connection
+
+    def save_session_state(self, session_id: str, state: dict[str, Any]) -> None:
+        with closing(self._connect()) as connection, connection:
+            connection.execute(
+                "INSERT INTO sessions VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload",
+                (session_id, json.dumps(state)),
+            )
+
+    def load_session_state(self, session_id: str) -> dict[str, Any] | None:
+        with closing(self._connect()) as connection:
+            row = connection.execute("SELECT payload FROM sessions WHERE id=?", (session_id,)).fetchone()
+            return json.loads(row[0]) if row else None
+
+    def save_task(self, task_id: str, payload: dict[str, Any]) -> None:
+        with closing(self._connect()) as connection, connection:
+            connection.execute(
+                "INSERT INTO tasks (id, payload) VALUES (?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET payload=excluded.payload",
+                (task_id, json.dumps(payload)),
+            )
+
+    def load_task(self, task_id: str) -> dict[str, Any] | None:
+        with closing(self._connect()) as connection:
+            row = connection.execute("SELECT payload FROM tasks WHERE id=?", (task_id,)).fetchone()
+            return json.loads(row[0]) if row else None
+
+    def list_incomplete_tasks(self, limit: int = 1000) -> list[dict[str, Any]]:
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                "SELECT payload FROM tasks WHERE json_extract(payload, '$.status') IN ('queued', 'running') "
+                "ORDER BY json_extract(payload, '$.accepted_at'), id LIMIT ?",
+                (max(1, int(limit)),),
+            )
+            return [json.loads(row[0]) for row in rows]
+
+    def save_task_result(self, task_id: str, payload: dict[str, Any], response: dict[str, Any]) -> None:
+        with closing(self._connect()) as connection, connection:
+            cursor = connection.execute(
+                "UPDATE tasks SET payload=?, response=? WHERE id=?",
+                (json.dumps(payload), json.dumps(response), task_id),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError(f"Cannot persist result for unknown task_id={task_id}")
+
+    def save_response(self, task_id: str, response: dict[str, Any]) -> None:
+        with closing(self._connect()) as connection, connection:
+            cursor = connection.execute("UPDATE tasks SET response=? WHERE id=?", (json.dumps(response), task_id))
+            if cursor.rowcount != 1:
+                raise RuntimeError(f"Cannot persist response for unknown task_id={task_id}")
+
+    def load_response(self, task_id: str) -> dict[str, Any] | None:
+        with closing(self._connect()) as connection:
+            row = connection.execute("SELECT response FROM tasks WHERE id=?", (task_id,)).fetchone()
+            return json.loads(row[0]) if row and row[0] is not None else None
+
+    def append_event(self, session_id: str, event: dict[str, Any]) -> None:
+        with closing(self._connect()) as connection, connection:
+            connection.execute("INSERT INTO events (session_id, payload) VALUES (?, ?)", (session_id, json.dumps(event)))
+
+    def list_events(self, session_id: str) -> list[dict[str, Any]]:
+        with closing(self._connect()) as connection:
+            rows = connection.execute("SELECT payload FROM events WHERE session_id=? ORDER BY sequence", (session_id,))
+            return [json.loads(row[0]) for row in rows]
 
 
 class InMemoryStateStore:

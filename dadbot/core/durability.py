@@ -19,6 +19,7 @@ FileLockMutex:
 from __future__ import annotations
 
 import binascii
+import errno
 import json
 import logging
 import os
@@ -112,6 +113,9 @@ class FileLockMutex:
     The lock file contains a JSON record with ``pid``, ``token``, and
     ``acquired_at``.  If the lock file exists but the owning PID is no longer
     alive, the lock is considered stale and is evicted automatically.
+    A persistent sibling guard file serializes all changes to that record
+    across cooperating processes; the operating system releases the guard
+    when a process exits.
 
     Note: This provides *advisory* locking â€” it protects well-behaved
     processes.  It does NOT replace a distributed coordinator (etcd,
@@ -127,6 +131,7 @@ class FileLockMutex:
         stale_after_seconds: float = DEFAULT_STALE_SECONDS,
     ) -> None:
         self._path = Path(lock_path)
+        self._guard_path = self._path.with_name(self._path.name + ".guard")
         self._stale_after = max(1.0, float(stale_after_seconds))
         self._token: str = ""
         self._lock = RLock()
@@ -145,33 +150,36 @@ class FileLockMutex:
         self._path.parent.mkdir(parents=True, exist_ok=True)
 
         while time.monotonic() < deadline:
-            # Evict stale lock if detected.
-            self._evict_if_stale()
-
-            token = uuid.uuid4().hex
-            record = json.dumps(
-                {
-                    "pid": os.getpid(),
-                    "token": token,
-                    "acquired_at": time.time(),
-                },
-            )
-
-            try:
-                fd = os.open(
-                    str(self._path),
-                    os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+            with self._guard(deadline):
+                self._evict_if_stale()
+                token = uuid.uuid4().hex
+                record = json.dumps(
+                    {
+                        "pid": os.getpid(),
+                        "token": token,
+                        "acquired_at": time.time(),
+                    },
                 )
                 try:
-                    os.write(fd, record.encode("utf-8"))
-                finally:
-                    os.close(fd)
-                with self._lock:
-                    self._token = token
-                _debug_lock_event("lock_acquired", path=self._path)
-                return token
-            except FileExistsError:
-                time.sleep(0.05)
+                    fd = os.open(
+                        str(self._path),
+                        os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                    )
+                except FileExistsError:
+                    pass
+                else:
+                    try:
+                        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                            handle.write(record)
+                            handle.flush()
+                    except BaseException:
+                        self._path.unlink(missing_ok=True)
+                        raise
+                    with self._lock:
+                        self._token = token
+                    _debug_lock_event("lock_acquired", path=self._path)
+                    return token
+            time.sleep(0.05)
 
         raise RuntimeError(
             f"FileLockMutex: could not acquire lock at {self._path} within {timeout_seconds:.1f}s",
@@ -179,18 +187,62 @@ class FileLockMutex:
 
     def release(self, token: str) -> bool:
         """Release the lock only if we hold it (token matches).  Returns True on success."""
-        with self._lock:
-            if self._token != token:
-                return False
+        try:
+            with self._guard(time.monotonic() + 5.0):
+                with self._lock:
+                    if self._token != token:
+                        return False
+                    current = self._read_lock_record()
+                    if not current or current.get("token") != token:
+                        return False
+                    self._path.unlink()
+                    self._token = ""
+            _debug_lock_event("lock_released", path=self._path)
+            return True
+        except OSError:
+            return False
+
+    @contextmanager
+    def _guard(self, deadline: float):
+        fd = os.open(str(self._guard_path), os.O_CREAT | os.O_RDWR, 0o600)
+        acquired = False
+        try:
+            if os.fstat(fd).st_size == 0:
+                os.write(fd, b"\0")
+            while time.monotonic() < deadline:
+                try:
+                    if sys.platform == "win32":
+                        import msvcrt
+
+                        os.lseek(fd, 0, os.SEEK_SET)
+                        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                    else:
+                        import fcntl
+
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    acquired = True
+                    break
+                except OSError as exc:
+                    if exc.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+                        raise
+                    time.sleep(0.01)
+            if not acquired:
+                raise RuntimeError(f"FileLockMutex: could not acquire guard at {self._guard_path}")
+            yield
+        finally:
             try:
-                current = self._read_lock_record()
-                if current and current.get("token") == token:
-                    self._path.unlink(missing_ok=True)
-                self._token = ""
-                _debug_lock_event("lock_released", path=self._path)
-                return True
-            except OSError:
-                return False
+                if acquired:
+                    if sys.platform == "win32":
+                        import msvcrt
+
+                        os.lseek(fd, 0, os.SEEK_SET)
+                        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                    else:
+                        import fcntl
+
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
 
     @contextmanager
     def locked(self, *, timeout_seconds: float = 5.0):
@@ -208,20 +260,22 @@ class FileLockMutex:
     def _read_lock_record(self) -> dict[str, Any] | None:
         try:
             raw = self._path.read_text(encoding="utf-8")
-            return json.loads(raw)
-        except (OSError, json.JSONDecodeError):
+            record = json.loads(raw)
+            return record if isinstance(record, dict) else None
+        except (FileNotFoundError, UnicodeDecodeError, json.JSONDecodeError):
             return None
 
     def _evict_if_stale(self) -> bool:
         record = self._read_lock_record()
         if record is None:
-            return False
-        acquired_at = float(record.get("acquired_at") or 0)
-        if (time.time() - acquired_at) < self._stale_after:
-            # Also check if PID is alive.
-            pid = int(record.get("pid") or 0)
-            if pid > 0 and _pid_is_alive(pid):
+            try:
+                self._path.unlink()
+                return True
+            except FileNotFoundError:
                 return False
+        pid = int(record.get("pid") or 0)
+        if pid > 0 and _pid_is_alive(pid):
+            return False
         # Stale â€” remove it.
         try:
             self._path.unlink(missing_ok=True)
@@ -233,9 +287,6 @@ class FileLockMutex:
     def is_held(self) -> bool:
         record = self._read_lock_record()
         if record is None:
-            return False
-        acquired_at = float(record.get("acquired_at") or 0)
-        if (time.time() - acquired_at) >= self._stale_after:
             return False
         pid = int(record.get("pid") or 0)
         return pid > 0 and _pid_is_alive(pid)
@@ -265,7 +316,7 @@ def _pid_is_alive(pid: int) -> bool:
             pid,
         )
         if not handle:
-            return False
+            return ctypes.windll.kernel32.GetLastError() != 87
         try:
             exit_code = ctypes.c_ulong(0)
             if ctypes.windll.kernel32.GetExitCodeProcess(
@@ -273,13 +324,15 @@ def _pid_is_alive(pid: int) -> bool:
                 ctypes.byref(exit_code),
             ):
                 return exit_code.value == STILL_ACTIVE
-            return False
+            return True
         finally:
             ctypes.windll.kernel32.CloseHandle(handle)
     try:
         os.kill(pid, 0)  # POSIX: signal 0 checks existence without delivering.
         return True
-    except (ProcessLookupError, PermissionError, OSError):
+    except PermissionError:
+        return True
+    except (ProcessLookupError, OSError):
         return False
 
 

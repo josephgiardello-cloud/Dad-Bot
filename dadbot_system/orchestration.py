@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from dadbot.core.kernel_mutation_gate import apply_event, emit_event
 
@@ -19,8 +19,12 @@ from .contracts import (
     WorkerTask,
     normalize_tenant_id,
 )
+from .execution_identity import ExecutionIdentity, require_identifier, require_tenant_id
 from .runtime_signals import start_span
 from .state import AppStateContainer, InMemoryStateStore, NamespacedStateStore, StateStore
+
+if TYPE_CHECKING:
+    from .delegation import SQLiteDelegationStore
 
 logger = logging.getLogger(__name__)
 
@@ -45,13 +49,21 @@ class DadBotOrchestrator:
         self._sessions: dict[str, AppStateContainer] = {}
         self._tool_registry = ToolRegistry()
         self._recovered_task_ids: set[str] = set()
+        self._authenticated_execution = False
+        self._delegation_store: SQLiteDelegationStore | None = None
+
+    def require_authenticated_execution(self) -> None:
+        self._authenticated_execution = True
+
+    def configure_delegation_store(self, store) -> None:
+        self._delegation_store = store
 
     @staticmethod
     def tenant_namespace(tenant_id: str) -> str:
-        return f"tenant:{normalize_tenant_id(tenant_id)}"
+        return f"tenant:{require_tenant_id(tenant_id)}"
 
     def session(self, session_id: str, tenant_id: str = DEFAULT_TENANT_ID) -> AppStateContainer:
-        normalized_tenant_id = normalize_tenant_id(tenant_id)
+        normalized_tenant_id = require_tenant_id(tenant_id)
         container_key = f"{normalized_tenant_id}:{session_id}"
         container = self._sessions.get(container_key)
         if container is None:
@@ -86,7 +98,15 @@ class DadBotOrchestrator:
             edges=[("api", "queue"), ("queue", "worker"), ("worker", "state")],
         )
 
-    def submit_chat(self, request: ChatRequest) -> WorkerTask:
+    def submit_chat(self, request: ChatRequest, *, bearer_token: str = "") -> WorkerTask:
+        delegation_store = self._delegation_store
+        if self._authenticated_execution and delegation_store is None:
+            from .delegation import AuthorityUnavailableError
+
+            raise AuthorityUnavailableError("Delegated execution authority is unavailable")
+        require_tenant_id(request.tenant_id)
+        require_identifier(request.session_id, "session")
+        require_identifier(request.request_id, "request")
         tenant_event = emit_event(
             "MUTATION_EVENT",
             {
@@ -115,6 +135,8 @@ class DadBotOrchestrator:
                 session_state=container.snapshot(),
                 execution_graph=graph,
             )
+            if self._authenticated_execution and delegation_store is not None:
+                task.delegation = delegation_store.issue(bearer_token, task)
             self.state_store.save_task(
                 task.task_id,
                 {
@@ -125,10 +147,12 @@ class DadBotOrchestrator:
                     "status": "queued",
                     "request": request.to_dict(),
                     "session_state": task.session_state,
+                    "delegated_session_state": task.session_state if self._authenticated_execution else None,
                     "execution_graph": graph.to_dict(),
                     "accepted_at": task.accepted_at,
                     "task_kind": task.task_kind,
                     "attempt": task.attempt,
+                    "delegation": task.delegation,
                 },
             )
             self._publish(
@@ -160,6 +184,9 @@ class DadBotOrchestrator:
             return task
 
     def recover_pending_tasks(self, *, limit: int = 1000) -> int:
+        if self._authenticated_execution and self._delegation_store is None:
+            logger.error("Incomplete tasks remain queued: delegated execution authority is unavailable")
+            return 0
         recovered = 0
         for payload in self.state_store.list_incomplete_tasks(limit=limit):
             task_id = str(payload.get("task_id") or "").strip()
@@ -174,9 +201,19 @@ class DadBotOrchestrator:
             if not task_id or not session_id or not isinstance(request_payload, dict):
                 raise RuntimeError("Cannot recover persisted task with incomplete request metadata")
 
-            tenant_id = normalize_tenant_id(payload.get("tenant_id"))
-            request = ChatRequest.from_dict(request_payload, session_id=session_id)
-            request.tenant_id = tenant_id
+            tenant_id = require_tenant_id(payload.get("tenant_id"))
+            identity = ExecutionIdentity(
+                tenant_id=tenant_id,
+                session_id=session_id,
+                request_id=require_identifier(payload.get("request_id"), "request"),
+                task_id=task_id,
+            )
+            identity.require_match(
+                tenant_id=request_payload.get("tenant_id"),
+                session_id=request_payload.get("session_id"),
+                request_id=request_payload.get("request_id"),
+            )
+            request = ChatRequest.from_dict(request_payload)
             session_state = payload.get("session_state")
             if not isinstance(session_state, dict):
                 session_state = self.session(session_id, tenant_id).snapshot()
@@ -190,7 +227,20 @@ class DadBotOrchestrator:
                 task_id=task_id,
                 task_kind=str(payload.get("task_kind") or "chat"),
                 attempt=max(1, int(payload.get("attempt") or 1) + 1),
+                delegation=str(payload.get("delegation") or ""),
             )
+            if self._authenticated_execution:
+                from .delegation import AuthorityUnavailableError
+                from .security import AuthorizationError
+
+                store = self._delegation_store
+                if store is None:
+                    raise RuntimeError("Delegation authority became unavailable during recovery")
+                try:
+                    store.verify(task.delegation, task, operation="execute")
+                except (AuthorizationError, AuthorityUnavailableError) as exc:
+                    logger.error("Task %s remains queued: authority verification failed: %s", task_id, exc)
+                    continue
             self.broker.enqueue(task)
             self._recovered_task_ids.add(task_id)
             recovered += 1
@@ -207,8 +257,85 @@ class DadBotOrchestrator:
         return drained
 
     def apply_worker_result(self, result: WorkerResult) -> ChatResponse | None:
-        task_payload = self.state_store.load_task(result.task_id) or {}
-        tenant_id = normalize_tenant_id(task_payload.get("tenant_id") or result.tenant_id)
+        if self._authenticated_execution and self._delegation_store is not None:
+            with self._delegation_store.publication_fence():
+                return self._apply_worker_result(result)
+        return self._apply_worker_result(result)
+
+    def _apply_worker_result(self, result: WorkerResult) -> ChatResponse | None:
+        task_payload = self.state_store.load_task(result.task_id)
+        if not task_payload:
+            raise ValueError("worker result identity mismatch: task not found")
+        identity = ExecutionIdentity(
+            tenant_id=require_tenant_id(task_payload.get("tenant_id")),
+            session_id=require_identifier(task_payload.get("session_id"), "session"),
+            request_id=require_identifier(task_payload.get("request_id"), "request"),
+            task_id=require_identifier(task_payload.get("task_id"), "task"),
+        )
+        if identity.task_id != result.task_id:
+            raise ValueError("worker result task identity mismatch")
+        request_payload = task_payload.get("request")
+        if not isinstance(request_payload, dict):
+            raise ValueError("worker result request identity mismatch")
+        identity.require_match(
+            tenant_id=request_payload.get("tenant_id"),
+            session_id=request_payload.get("session_id"),
+            request_id=request_payload.get("request_id"),
+        )
+        identity.require_match(tenant_id=result.tenant_id, session_id=result.session_id, request_id=result.request_id)
+        if result.response is not None:
+            identity.require_match(
+                tenant_id=result.response.tenant_id,
+                session_id=result.response.session_id,
+                request_id=result.response.request_id,
+            )
+        from .worker import AUTHORITY_UNAVAILABLE
+
+        authority_error = result.status == "failed" and result.error == AUTHORITY_UNAVAILABLE
+        if self._authenticated_execution and not authority_error:
+            from .delegation import AuthorityUnavailableError
+            from .security import AuthorizationError
+
+            store = self._delegation_store
+            try:
+                if store is None:
+                    raise AuthorityUnavailableError(AUTHORITY_UNAVAILABLE)
+                delegated_state = task_payload.get("delegated_session_state")
+                if delegated_state is None:
+                    delegated_state = task_payload.get("session_state") or {}
+                if not isinstance(delegated_state, dict):
+                    raise ValueError("Invalid delegated session state")
+                task = WorkerTask(
+                    task_id=identity.task_id,
+                    session_id=identity.session_id,
+                    tenant_id=identity.tenant_id,
+                    request=ChatRequest.from_dict(request_payload),
+                    session_state=dict(delegated_state),
+                    delegation=str(task_payload.get("delegation") or ""),
+                )
+                store.verify_result(task, result)
+            except (AuthorizationError, AuthorityUnavailableError) as exc:
+                logger.warning("Task %s result rejected: %s", result.task_id, exc)
+                authority_error = True
+        if authority_error:
+            if str(task_payload.get("status") or "").lower() not in {"queued", "running"}:
+                raise ValueError("authority rejection does not match an incomplete task")
+            logger.error("Task %s remains queued: %s", result.task_id, AUTHORITY_UNAVAILABLE)
+            task_payload["error"] = AUTHORITY_UNAVAILABLE
+            self.state_store.save_task(result.task_id, task_payload)
+            return None
+        if str(task_payload.get("status") or "").lower() not in {"queued", "running"}:
+            response = dict(result.response.to_dict()) if result.response is not None else None
+            if (
+                task_payload.get("status") != result.status
+                or task_payload.get("error") != result.error
+                or task_payload.get("completed_at") != result.completed_at
+                or task_payload.get("session_state") != dict(result.session_state or {})
+                or self.state_store.load_response(result.task_id) != response
+            ):
+                raise ValueError("worker result conflicts with an already completed task")
+            return result.response
+        tenant_id = identity.tenant_id
         container = self.session(result.session_id, tenant_id)
         if result.session_state:
             container.load_snapshot(result.session_state)

@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 import uuid
+from contextlib import contextmanager
 from copy import deepcopy
 from pathlib import Path
 
@@ -173,13 +175,188 @@ class MemoryStorageBackend:
     """
 
     def __init__(self, bot, manager) -> None:
+        from dadbot_system.delegation import _execution_authority
+
         self.bot = bot
         self._manager = manager
+        self._authenticated_authority_required = _execution_authority.get() is not None
         self._projected_store: dict[str, object] = {}
+        self._tenant_base_revision: int | None = None
+        self._tenant_recovery_required = False
+
+    def require_authenticated_authority(self) -> None:
+        self._authenticated_authority_required = True
+
+    def _authorize_tenant_memory(self) -> None:
+        from dadbot_system.delegation import _execution_authority, require_tenant_authority
+
+        if self._authenticated_authority_required or _execution_authority.get() is not None:
+            require_tenant_authority(self.bot.config.tenant_id)
+
+    def _local_authority_backend(self):
+        from dadbot.core.ledger_backend import FileWALLedgerBackend
+
+        ledger = getattr(self.bot, "_execution_ledger", None)
+        backend = getattr(ledger, "_backend", None)
+        return backend if isinstance(backend, FileWALLedgerBackend) else None
+
+    def recover_local_projections(self):
+        """Attempt each rebuild independently; the ledger remains authoritative."""
+        self._authorize_tenant_memory()
+        from dadbot.core.ledger_backend import WALCorruptionError
+        from dadbot.core.tenant_memory_ledger import TenantMemoryLedgerCorruption, TenantMemoryRevisionConflict
+
+        if self._local_authority_backend() is None:
+            return
+        graph = self._manager.graph_manager
+        self._projection_recovery_status = {}
+        repairs = (
+            ("graph", lambda: (graph.invalidate_projection_cache(), graph.sync_graph_store(turn_context=None))),
+            ("semantic", lambda: self._manager.sync_semantic_memory_index(
+                list(self._manager.memory_projection().get("memories") or []),
+            )),
+        )
+        for name, repair in repairs:
+            try:
+                repair()
+            except (WALCorruptionError, TenantMemoryLedgerCorruption, TenantMemoryRevisionConflict):
+                raise
+            except (OSError, sqlite3.Error, RuntimeError) as exc:
+                logger.warning("%s projection recovery failed: %s", name, exc, exc_info=True)
+                self._projection_recovery_status[name] = {"status": "degraded", "error": str(exc)}
+            else:
+                self._projection_recovery_status[name] = {
+                    "status": "sync_succeeded", "source_revision": self._tenant_base_revision,
+                }
+
+    @contextmanager
+    def fenced_semantic_index_write(self, memories, expected_revision=None):
+        self._authorize_tenant_memory()
+        """Only index the current committed catalog while holding the WAL fence."""
+        backend = self._local_authority_backend()
+        if backend is None:
+            yield
+            return
+        from dadbot.core.durability import FileLockMutex
+        from dadbot.core.execution_ledger import ExecutionLedger
+        from dadbot.core.ledger_backend import WALCorruptionError
+        from dadbot.core.tenant_memory_ledger import TenantMemoryRevisionConflict
+
+        with self.bot._io_lock, backend._lock:
+            lock = FileLockMutex(backend._path.with_name(backend._path.name + ".lock"))
+            with lock.locked():
+                if not backend._path.exists():
+                    raise WALCorruptionError("Execution WAL is missing during semantic index repair")
+                ledger = ExecutionLedger()
+                ledger._backend._events = backend._load_unlocked()
+                ledger.load_from_backend()
+                current = ledger.replay_tenant_memory(self.bot.config.tenant_id)
+                if current.state is None or current.revision == 0:
+                    raise RuntimeError("Tenant memory authority is unavailable during semantic indexing")
+                if list(current.state.get("memories") or []) != list(memories):
+                    raise RuntimeError("Semantic index input does not match committed tenant memory")
+                if expected_revision is not None and current.revision != expected_revision:
+                    raise TenantMemoryRevisionConflict(
+                        "Semantic candidate is not based on the committed tenant revision"
+                    )
+                yield current.revision
+
+    @contextmanager
+    def fenced_graph_index_write(self, expected_revision, expected_projection):
+        self._authorize_tenant_memory()
+        backend = self._local_authority_backend()
+        if backend is None:
+            yield
+            return
+        from dadbot.core.durability import FileLockMutex
+        from dadbot.core.execution_ledger import ExecutionLedger
+        from dadbot.core.ledger_backend import WALCorruptionError
+        from dadbot.core.tenant_memory_ledger import TenantMemoryRevisionConflict
+
+        with backend._lock:
+            lock = FileLockMutex(backend._path.with_name(backend._path.name + ".lock"))
+            with lock.locked():
+                if not backend._path.exists():
+                    raise WALCorruptionError("Execution WAL is missing during graph index repair")
+                ledger = ExecutionLedger()
+                ledger._backend._events = backend._load_unlocked()
+                ledger.load_from_backend()
+                current = ledger.replay_tenant_memory(self.bot.config.tenant_id)
+                if (
+                    current.state is None
+                    or current.revision != expected_revision
+                    or self._manager.normalize_memory_store(current.state) != expected_projection
+                ):
+                    raise TenantMemoryRevisionConflict("Graph projection is not based on the committed tenant revision")
+                yield
+
+    def _commit_local_projection(self, projection: dict, publish=None) -> None:
+        from dadbot_system.delegation import tenant_mutation_fence
+
+        with tenant_mutation_fence(
+            self.bot.config.tenant_id, required=self._authenticated_authority_required
+        ):
+            self._commit_local_projection_fenced(projection, publish=publish)
+
+    def _commit_local_projection_fenced(self, projection: dict, publish=None) -> None:
+        self._authorize_tenant_memory()
+        from dadbot.core.local_tenant_establishment import commit_local_tenant
+        from dadbot.core.tenant_memory_ledger import TenantMemoryRevisionConflict
+
+        if self._tenant_recovery_required or self._tenant_base_revision is None:
+            raise RuntimeError("Tenant memory requires restart and ledger recovery before writing")
+        committed = self.bot._execution_ledger.replay_tenant_memory(self.bot.config.tenant_id)
+        if not isinstance(committed.state, dict):
+            raise RuntimeError("Committed tenant memory is unavailable")
+        semantic_changed = _section_changed(committed.state, projection, _SEMANTIC_TRACKED_KEYS)
+        graph_changed = _section_changed(committed.state, projection, _GRAPH_TRACKED_KEYS)
+        if semantic_changed or graph_changed:
+            raise RuntimeError(
+                "Tenant memory changes requiring semantic or graph repair are not yet supported",
+            )
+
+        try:
+            revision = commit_local_tenant(
+                self._local_authority_backend(),
+                self.bot.config.tenant_id,
+                self._tenant_base_revision,
+                uuid.uuid4().hex,
+                projection,
+                publish or (lambda: None),
+                self._repair_established_snapshot,
+            )
+            self.bot._execution_ledger.load_from_backend()
+        except TenantMemoryRevisionConflict:
+            raise
+        except Exception:
+            self._tenant_recovery_required = True
+            raise
+        self._tenant_base_revision = revision
+
+    def committed_tenant_projection(self) -> dict | None:
+        self._authorize_tenant_memory()
+        ledger = getattr(self.bot, "_execution_ledger", None)
+        if ledger is None:
+            return None
+        tenant = ledger.refresh_tenant_memory(self.bot.config.tenant_id)
+        if tenant.revision == 0:
+            return None
+        if not isinstance(tenant.state, dict):
+            raise RuntimeError("Committed tenant memory has no valid state")
+        return self._manager.normalize_memory_store(deepcopy(tenant.state))
+
+    def _require_snapshot_authority(self) -> None:
+        if self.committed_tenant_projection() is not None:
+            raise RuntimeError(
+                "Tenant memory is ledger-authoritative; snapshot-only writes are disabled "
+                "until the ledger-backed memory commit path is available",
+            )
 
     # ------------------------------------------------------------------ private write helpers
 
     def _write_json_memory_store_unlocked(self, store_projection: dict, *, required: bool = True):
+        self._authorize_tenant_memory()
+        self._require_snapshot_authority()
         try:
             self.bot.write_json_atomically(
                 self.bot.MEMORY_PATH,
@@ -197,6 +374,8 @@ class MemoryStorageBackend:
                 raise
 
     def _write_memory_store_unlocked(self, store_projection: dict):
+        self._authorize_tenant_memory()
+        self._require_snapshot_authority()
         self._manager.cache_invalidation_revision += 1
         tenant_store = getattr(self.bot, "_tenant_document_store", None)
         if tenant_store is not None:
@@ -364,6 +543,7 @@ class MemoryStorageBackend:
         owner=None,
         **changes,
     ):
+        self._authorize_tenant_memory()
         with ensure_execution_trace_root(
             operation="memory_write",
             prompt="[memory-storage-mutate]",
@@ -415,6 +595,11 @@ class MemoryStorageBackend:
         save: bool,
     ) -> dict:
         """Shared mutation + commit + projection routing logic (lock-agnostic)."""
+        local_authority = self._local_authority_backend() is not None
+        if save and not local_authority:
+            self._require_snapshot_authority()
+        if local_authority and self._tenant_recovery_required:
+            raise RuntimeError("Tenant memory requires restart and ledger recovery before writing")
         before_state = self._resolve_transition_base_state()
         before_store = self._manager.normalize_memory_store(
             deepcopy(
@@ -443,9 +628,42 @@ class MemoryStorageBackend:
                 key: normalized_candidate.get(key)
                 for key in sorted(event_changes.keys())
             }
-        next_state = self._emit_memory_events(before_store=before_store, changes=event_changes)
-        after_store = self._project_memory_store(next_state)
-        if save:
+        if save and local_authority:
+            candidate_state = before_state
+            for key, value in event_changes.items():
+                candidate_state = transition(
+                    candidate_state,
+                    InputEvent(
+                        event_type="MemoryDeleted" if value is None else "MemoryUpdated",
+                        payload={"key": str(key)} if value is None else {"key": str(key), "value": value},
+                    ),
+                )
+            durable_candidate = self._manager.normalize_memory_store(
+                memory_projection(candidate_state, defaults=self.bot.default_memory_store()),
+            )
+            published = []
+
+            def publish():
+                next_state = self._emit_memory_events(before_store=before_store, changes=event_changes)
+                result = self._project_memory_store(next_state)
+                if result != durable_candidate:
+                    raise RuntimeError("Published memory projection differs from committed tenant state")
+                published.append(result)
+
+            self._commit_local_projection(durable_candidate, publish=publish)
+        try:
+            if save and local_authority:
+                after_store = published[0]
+            else:
+                next_state = self._emit_memory_events(before_store=before_store, changes=event_changes)
+                after_store = self._project_memory_store(next_state)
+            if save and local_authority and after_store != durable_candidate:
+                raise RuntimeError("Published memory projection differs from committed tenant state")
+        except Exception:
+            if save and local_authority:
+                self._tenant_recovery_required = True
+            raise
+        if save and not local_authority:
             self._coordinated_commit(
                 before_store=before_store,
                 after_store=after_store,
@@ -484,6 +702,7 @@ class MemoryStorageBackend:
         This closes legacy projection-only reset paths so equivalent resets
         always produce equivalent event/state transitions.
         """
+        self._authorize_tenant_memory()
         normalized = self._manager.normalize_memory_store(dict(store or {}))
         next_state = self._emit_memory_event(
             "MemoryInitialized",
@@ -497,8 +716,68 @@ class MemoryStorageBackend:
 
     # ------------------------------------------------------------------ load
 
+    def _load_legacy_for_establishment(self, *, allow_tenant_mirror_fallback: bool) -> dict:
+        self._authorize_tenant_memory()
+        tenant_store = getattr(self.bot, "_tenant_document_store", None)
+        if tenant_store is not None:
+            load = getattr(tenant_store, "load_memory_state", tenant_store.load_session_state)
+            persisted = load("memory")
+            if persisted is not None:
+                if not isinstance(persisted, dict):
+                    raise ValueError("Invalid tenant memory snapshot: expected an object")
+                return self._manager.normalize_memory_store(MemoryMigrationRegistry.migrate(deepcopy(persisted)))
+            if not allow_tenant_mirror_fallback:
+                return self._manager.normalize_memory_store(self.bot.default_memory_store())
+        if not allow_tenant_mirror_fallback:
+            return self._manager.normalize_memory_store(self.bot.default_memory_store())
+        legacy_paths = (self.bot.MEMORY_PATH, self.bot.json_backup_path(self.bot.MEMORY_PATH))
+        if any(path.exists() for path in legacy_paths):
+            raise RuntimeError(
+                "A shared legacy memory snapshot has no tenant ownership evidence; "
+                "establish tenant ownership before importing it"
+            )
+        return self._manager.normalize_memory_store(self.bot.default_memory_store())
+
+    def _repair_established_snapshot(self, state: dict) -> None:
+        self._authorize_tenant_memory()
+        tenant_store = getattr(self.bot, "_tenant_document_store", None)
+        if tenant_store is not None:
+            save = getattr(tenant_store, "save_memory_state", tenant_store.save_session_state)
+            save("memory", state)
+
     def load_memory_store(self, *, allow_tenant_mirror_fallback=True):
         """Load from disk / document store, normalize, and return the dict."""
+        self._authorize_tenant_memory()
+        ledger = getattr(self.bot, "_execution_ledger", None)
+        from dadbot.core.ledger_backend import FileWALLedgerBackend
+        from dadbot.core.local_tenant_establishment import establish_local_tenant
+
+        backend = getattr(ledger, "_backend", None)
+        if isinstance(backend, FileWALLedgerBackend):
+            state = establish_local_tenant(
+                backend,
+                self.bot.config.tenant_id,
+                lambda: self._load_legacy_for_establishment(
+                    allow_tenant_mirror_fallback=allow_tenant_mirror_fallback,
+                ),
+                self._repair_established_snapshot,
+                empty_state_factory=self.bot.default_memory_store,
+            )
+            ledger.load_from_backend()
+            tenant = ledger.replay_tenant_memory(self.bot.config.tenant_id)
+            if tenant.state != state:
+                raise RuntimeError("Tenant memory changed during startup; retry hydration")
+            self._tenant_base_revision = tenant.revision
+            initialized = self._emit_memory_event("MemoryInitialized", {"store": state})
+            return self._project_memory_store(initialized)
+        if ledger is not None:
+            tenant = ledger.replay_tenant_memory(self.bot.config.tenant_id)
+            if tenant.revision:
+                raise RuntimeError(
+                    "Tenant memory authority exists in the execution ledger, but memory "
+                    "hydration and writes are not yet ledger-authoritative; refusing to "
+                    "load a snapshot that could overwrite committed memory",
+                )
         tenant_document_store = getattr(self.bot, "_tenant_document_store", None)
         if tenant_document_store is not None:
             load = getattr(tenant_document_store, "load_memory_state", tenant_document_store.load_session_state)
@@ -516,7 +795,7 @@ class MemoryStorageBackend:
                     level=logging.INFO,
                 )
             if isinstance(persisted, dict):
-                migrated = MemoryMigrationRegistry.migrate(persisted)
+                migrated = MemoryMigrationRegistry.migrate(deepcopy(persisted))
                 normalized = self._manager.normalize_memory_store(migrated)
                 if normalized != persisted:
                     save("memory", normalized)
@@ -554,7 +833,7 @@ class MemoryStorageBackend:
                     loaded = json_load(memory_file)
                 if not isinstance(loaded, dict):
                     raise ValueError("Memory snapshot must be an object")
-                migrated = MemoryMigrationRegistry.migrate(loaded)
+                migrated = MemoryMigrationRegistry.migrate(deepcopy(loaded))
                 normalized = self._manager.normalize_memory_store(migrated)
             except (OSError, json.JSONDecodeError, ValueError, TypeError) as exc:
                 last_error = exc
@@ -599,16 +878,19 @@ class MemoryStorageBackend:
     # ------------------------------------------------------------------ save / export / clear
 
     def prepare_memory_store_for_save(self):
+        self._authorize_tenant_memory()
         with MemoryWriteOwnerScope.bind("MemoryManager"):
             return self.mutate_memory_store(save=False, owner="MemoryManager")
 
     def export_memory_store(self, export_path):
+        self._authorize_tenant_memory()
         destination = Path(export_path)
         with self.bot._io_lock:
             normalized = self._manager.normalize_memory_store(self._manager.memory_projection())
             self.bot.write_json_atomically(destination, normalized, backup=False)
 
     def clear_memory_projection(self):
+        self._authorize_tenant_memory()
         """Reset memory by canonical event and persist resulting projection."""
         enforce_mutation_entry_invariants(
             mutation_kind="memory_store",
@@ -620,6 +902,13 @@ class MemoryStorageBackend:
             changed_keys=["*"],
         )
         with self.bot._io_lock:
+            if self._local_authority_backend() is not None:
+                def clear(store):
+                    store.clear()
+                    store.update(self.bot.default_memory_store())
+
+                return self._manager.mutate_memory_store(mutator=clear)
+            self._require_snapshot_authority()
             before_store = deepcopy(self._manager.memory_projection())
             cleared_state = self._emit_memory_event("MemoryCleared", {})
             after_store = self._project_memory_store(cleared_state)

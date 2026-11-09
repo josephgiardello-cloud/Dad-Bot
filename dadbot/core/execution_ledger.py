@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
-import warnings
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from copy import deepcopy
@@ -95,8 +94,15 @@ def _chain_hash(prev_chain_hash: str, event_sha256: str) -> str:
 def _verify_persisted_chain(events: list[dict[str, Any]]) -> list[str]:
     violations: list[str] = []
     prev_chain = ""
+    chain_started = False
     for idx, event in enumerate(list(events or [])):
-        expected_event_sha = _event_sha256(event)
+        has_chain_fields = any(
+            key in event for key in ("event_sha256", "prev_chain_hash", "chain_hash")
+        )
+        canonical_event = dict(event)
+        if not has_chain_fields and not str(canonical_event.get("event_id") or ""):
+            canonical_event["event_id"] = _deterministic_event_id(canonical_event)
+        expected_event_sha = _event_sha256(canonical_event)
         expected_prev = prev_chain
         expected_chain = _chain_hash(expected_prev, expected_event_sha)
 
@@ -104,9 +110,15 @@ def _verify_persisted_chain(events: list[dict[str, Any]]) -> list[str]:
         actual_prev = str(event.get("prev_chain_hash") or "")
         actual_chain = str(event.get("chain_hash") or "")
 
+        if has_chain_fields:
+            chain_started = True
+        if chain_started and (
+            not actual_event_sha or not actual_chain or "prev_chain_hash" not in event
+        ):
+            violations.append(f"event[{idx}].chain_fields_missing")
         if actual_event_sha and actual_event_sha != expected_event_sha:
             violations.append(f"event[{idx}].event_sha256_mismatch")
-        if actual_prev and actual_prev != expected_prev:
+        if has_chain_fields and actual_prev != expected_prev:
             violations.append(f"event[{idx}].prev_chain_hash_mismatch")
         if actual_chain and actual_chain != expected_chain:
             violations.append(f"event[{idx}].chain_hash_mismatch")
@@ -124,6 +136,9 @@ class ExecutionLedger:
         *,
         strict_writes: bool = False,
     ) -> None:
+        from dadbot_system.delegation import _execution_authority
+
+        self._authenticated_authority_required = _execution_authority.get() is not None
         self._backend = backend or InMemoryLedgerBackend()
         self._events: list[dict[str, Any]] = []
         self._cache: dict[str, Any] = {
@@ -139,7 +154,9 @@ class ExecutionLedger:
         self._session_heads: dict[str, str] = {}
         self._session_indices: dict[str, int] = {}
         self._write_guard_depth = 0
+        self._tenant_memory_commit_depth = 0
         self._strict_writes = bool(strict_writes)
+        self._backend_uncertain = False
         self._replay_filters: list[Callable[[list[dict[str, Any]]], list[dict[str, Any]]]] = []
 
     @property
@@ -158,8 +175,15 @@ class ExecutionLedger:
                 "ExecutionLedger strict mode requires WriteBoundaryGuard",
             )
 
+    def _ensure_backend_reconciled(self) -> None:
+        if self._backend_uncertain:
+            raise RuntimeError(
+                "Execution ledger backend state is uncertain; reload and verify the backend before continuing",
+            )
+
     def get_next_sequence(self) -> int:
         with self._lock:
+            self._ensure_backend_reconciled()
             return int(self._cache.get("sequence_counter") or 0) + 1
 
     def get_next_trace_sequence(self, trace_token: str = "", **legacy_kwargs: Any) -> int:
@@ -168,12 +192,14 @@ class ExecutionLedger:
             unknown = ", ".join(sorted(str(name) for name in legacy_kwargs))
             raise TypeError(f"Unexpected keyword argument(s): {unknown}")
         with self._lock:
+            self._ensure_backend_reconciled()
             counters = dict(self._cache.get("trace_sequence_counters") or {})
             key = str(trace_token or legacy_trace or "").strip()
             return int(counters.get(key, 0)) + 1
 
     def event_count(self) -> int:
         with self._lock:
+            self._ensure_backend_reconciled()
             return int(self._cache.get("event_count") or 0)
 
     def _rebuild_cache(self) -> None:
@@ -189,7 +215,10 @@ class ExecutionLedger:
             if seq > int(trace_sequence_counters.get(trace_id, 0)):
                 trace_sequence_counters[trace_id] = seq
 
-        self._cache["sequence_counter"] = len(self._events)
+        self._cache["sequence_counter"] = max(
+            len(self._events),
+            max((int(event.get("sequence") or 0) for event in self._events), default=0),
+        )
         self._cache["event_count"] = len(self._events)
         self._cache["last_event_hash"] = (
             str(self._events[-1].get("chain_hash") or "") if self._events else None
@@ -201,6 +230,7 @@ class ExecutionLedger:
 
     def telemetry_snapshot(self) -> dict[str, Any]:
         with self._lock:
+            self._ensure_backend_reconciled()
             self.validate_cache()
             return {
                 "sequence_counter": int(self._cache.get("sequence_counter") or 0),
@@ -276,19 +306,21 @@ class ExecutionLedger:
         self._ensure_write_allowed()
         LedgerEnforcer().validate(dict(event or {}))
         with self._lock:
-            payload = dict(event or {})
+            self._ensure_backend_reconciled()
+            payload = deepcopy(dict(event or {}))
+            if payload.get("type") == "TENANT_MEMORY_COMMITTED" and not self._tenant_memory_commit_depth:
+                raise WriteBoundaryViolationError("Tenant memory events must use commit_tenant_memory")
             cache = self._cache
             next_sequence = int(cache.get("sequence_counter") or 0) + 1
             session_id, _ = self._apply_session_lineage(payload)
             self._seal_payload_hash_chain(payload, next_sequence)
-            self._update_session_heads(payload, session_id)
-
-            self._events.append(payload)
+            self._backend_uncertain = True
             self._backend.append(
                 deepcopy(payload),
                 committed=bool(payload.get("committed", False)),
             )
-
+            self._update_session_heads(payload, session_id)
+            self._events.append(payload)
             cache["sequence_counter"] = int(payload.get("sequence") or next_sequence)
             cache["event_count"] = int(cache.get("event_count") or 0) + 1
             cache["last_event_hash"] = str(payload.get("chain_hash") or "")
@@ -296,17 +328,161 @@ class ExecutionLedger:
             self._update_recent_tail_cache(payload, cache)
             cache["version"] = int(cache.get("version") or 0) + 1
             self.validate_cache()
-            return payload
+            self._backend_uncertain = False
+            return deepcopy(payload)
 
     def append(self, event: dict[str, Any]) -> dict[str, Any]:
         return self.write(event)
 
+    def require_authenticated_authority(self) -> None:
+        self._authenticated_authority_required = True
+
+    def _authorize_tenant_memory(self, tenant_id: str) -> None:
+        from dadbot_system.delegation import _execution_authority, require_tenant_authority
+
+        if self._authenticated_authority_required or _execution_authority.get() is not None:
+            require_tenant_authority(tenant_id)
+
+    def replay_tenant_memory(self, tenant_id: str):
+        from dadbot.core.tenant_memory_ledger import replay_tenant_memory
+
+        self._authorize_tenant_memory(tenant_id)
+        with self._lock:
+            self._ensure_backend_reconciled()
+            return replay_tenant_memory(self._events, tenant_id)
+
+    def refresh_tenant_memory(self, tenant_id: str):
+        """Reload a reconciled ledger before consulting a tenant projection."""
+        self._authorize_tenant_memory(tenant_id)
+        with self._lock:
+            self._ensure_backend_reconciled()
+            self.load_from_backend()
+            return self.replay_tenant_memory(tenant_id)
+
+    def reconcile_tenant_memory_operation(
+        self,
+        *,
+        tenant_id: str,
+        expected_revision: int,
+        operation_id: str,
+        state: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Reload an uncertain ledger and find a previously submitted operation."""
+        from dadbot.core.tenant_memory_ledger import (
+            TenantMemoryOperationConflict,
+            same_tenant_memory,
+            validate_tenant_memory_state,
+        )
+
+        self._authorize_tenant_memory(tenant_id)
+        if not isinstance(operation_id, str) or not operation_id or operation_id != operation_id.strip():
+            raise ValueError("Operation ID must be a nonempty normalized string")
+        if type(expected_revision) is not int or expected_revision < 0:
+            raise ValueError("Expected revision must be a nonnegative integer")
+        normalized_state = validate_tenant_memory_state(state)
+        with self._lock:
+            self.load_from_backend()
+            current = self.replay_tenant_memory(tenant_id)
+            previous = current.operations.get(operation_id)
+            if previous is None:
+                return None
+            if previous["expected_revision"] != expected_revision or not same_tenant_memory(
+                previous["state"], normalized_state
+            ):
+                raise TenantMemoryOperationConflict("Operation ID already belongs to a different mutation")
+            return deepcopy(previous["event"])
+
+    def commit_tenant_memory(
+        self,
+        *,
+        tenant_id: str,
+        expected_revision: int,
+        operation_id: str,
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        from dadbot_system.delegation import tenant_mutation_fence
+
+        with tenant_mutation_fence(tenant_id, required=self._authenticated_authority_required):
+            return self._commit_tenant_memory(
+                tenant_id=tenant_id,
+                expected_revision=expected_revision,
+                operation_id=operation_id,
+                state=state,
+            )
+
+    def _commit_tenant_memory(
+        self,
+        *,
+        tenant_id: str,
+        expected_revision: int,
+        operation_id: str,
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        from datetime import datetime, timezone
+
+        from dadbot.core.ledger_backend import CRCFileWALLedgerBackend, FileWALLedgerBackend
+        from dadbot.core.postgres_ledger_backend import PostgresLedgerBackend
+        from dadbot.core.tenant_memory_ledger import (
+            TENANT_MEMORY_EVENT,
+            TenantMemoryOperationConflict,
+            TenantMemoryRevisionConflict,
+            same_tenant_memory,
+            validate_tenant_memory_state,
+        )
+
+        self._authorize_tenant_memory(tenant_id)
+        if not isinstance(operation_id, str) or not operation_id or operation_id != operation_id.strip():
+            raise ValueError("Operation ID must be a nonempty normalized string")
+        if type(expected_revision) is not int or expected_revision < 0:
+            raise ValueError("Expected revision must be a nonnegative integer")
+        if not isinstance(self._backend, (FileWALLedgerBackend, CRCFileWALLedgerBackend, PostgresLedgerBackend)):
+            raise RuntimeError("Tenant memory requires a supported durable ledger backend")
+        if isinstance(self._backend, (FileWALLedgerBackend, CRCFileWALLedgerBackend)):
+            if not self._backend._fsync_enabled:
+                raise RuntimeError("Tenant memory requires a ledger with fsync enabled")
+        normalized_state = validate_tenant_memory_state(state)
+        with self._lock:
+            self._ensure_backend_reconciled()
+            current = self.replay_tenant_memory(tenant_id)
+            previous = current.operations.get(operation_id)
+            if previous is not None:
+                if previous["expected_revision"] != expected_revision or not same_tenant_memory(
+                    previous["state"], normalized_state
+                ):
+                    raise TenantMemoryOperationConflict("Operation ID already belongs to a different mutation")
+                return deepcopy(previous["event"])
+            if current.revision != expected_revision:
+                raise TenantMemoryRevisionConflict(
+                    f"Tenant memory revision changed: expected {expected_revision}, current {current.revision}",
+                )
+            self._authorize_tenant_memory(tenant_id)
+            self._tenant_memory_commit_depth += 1
+            try:
+                return self.write({
+                    "type": TENANT_MEMORY_EVENT,
+                    "session_id": "",
+                    "trace_id": "",
+                    "kernel_step_id": "tenant-memory",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "committed": True,
+                    "payload": {
+                        "tenant_id": tenant_id,
+                        "operation_id": operation_id,
+                        "expected_revision": expected_revision,
+                        "revision": expected_revision + 1,
+                        "state": normalized_state,
+                    },
+                })
+            finally:
+                self._tenant_memory_commit_depth -= 1
+
     def read(self, full: bool = True) -> list[dict[str, Any]]:
         with self._lock:
+            self._ensure_backend_reconciled()
             self.validate_cache()
             if full:
-                return self._events
-            return list(self._cache.get("recent_tail") or [])
+                return deepcopy(self._events)
+            return deepcopy(list(self._cache.get("recent_tail") or []))
 
     def replay_hash(self) -> str:
         events = [event for event in self.read() if str(event.get("type") or "") not in NON_REPLAY_EVENT_TYPES]
@@ -400,7 +576,15 @@ class ExecutionLedger:
 
     def load_from_backend(self) -> int:
         with self._lock:
+            self._backend_uncertain = True
             events = list(get_migrator().migrate_all(list(self._backend.load())))
+            from dadbot.core.tenant_memory_ledger import (
+                replay_all_tenant_memory,
+                validate_tenant_event_seal,
+            )
+
+            for event in events:
+                validate_tenant_event_seal(event)
             if self._has_persisted_chain(events):
                 violations = _verify_persisted_chain(events)
                 if violations:
@@ -410,15 +594,18 @@ class ExecutionLedger:
                     )
             report = SequenceValidator.validate(events)
             if not bool(report.get("ok")):
-                warnings.warn(
-                    f"sequence anomaly: {report.get('violations') or []}",
-                    RuntimeWarning,
-                    stacklevel=2,
+                raise RuntimeError(
+                    f"Execution ledger sequence anomaly: {report.get('violations') or []}",
                 )
+            tenant_events = deepcopy([event for event in events if event.get("type") == "TENANT_MEMORY_COMMITTED"])
             events = self._apply_replay_filters(events)
+            if tenant_events != [event for event in events if event.get("type") == "TENANT_MEMORY_COMMITTED"]:
+                raise RuntimeError("Replay filters cannot modify tenant memory events")
+            replay_all_tenant_memory(events)
             self._rehydrate_loaded_events(events)
             self._rebuild_cache()
             self.validate_cache()
+            self._backend_uncertain = False
             return len(self._events)
 
 InMemoryExecutionLedger = ExecutionLedger

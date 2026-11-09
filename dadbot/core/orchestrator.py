@@ -389,7 +389,12 @@ class DadBotOrchestrator:
         if not callable(kernel_executor):
             raise RuntimeError("Orchestrator boot requires a callable kernel executor")
         options = None
-        if env_truthy("DADBOT_DURABLE_EXECUTION_LEDGER", default=False):
+        boot_ledger = getattr(self.bot, "_execution_ledger", None)
+        if boot_ledger is not None:
+            options = ControlPlaneOptions(ledger=boot_ledger)
+        elif env_truthy("DADBOT_DURABLE_EXECUTION_LEDGER", default=False):
+            if str(os.getenv("DADBOT_EXECUTION_LEDGER_BACKEND", "file")).strip().lower() != "file":
+                raise RuntimeError("The configured execution ledger must be initialized during bot boot")
             session_log_dir = getattr(self.bot, "SESSION_LOG_DIR", None)
             if session_log_dir is None:
                 session_log_dir = DadRuntimeConfig().session_log_dir

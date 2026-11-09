@@ -1138,18 +1138,16 @@ class MemoryNormalizer:
             return default_store
 
         normalized = dict(default_store)
-        normalized["memories"] = (
-            sorted(
-                [
-                    entry
-                    for entry in (self.normalize_persisted_memory_entry(item) for item in store.get("memories", []))
-                    if entry is not None
-                ],
-                key=self.memory_sort_key,
-            )
-            if isinstance(store.get("memories"), list)
-            else []
-        )
+        raw_memories = store.get("memories", [])
+        if not isinstance(raw_memories, list):
+            raise ValueError("memories must be a list")
+        memories = []
+        for item in raw_memories:
+            entry = self.normalize_persisted_memory_entry(item)
+            if entry is None:
+                raise ValueError("memories must contain valid memory entries")
+            memories.append(entry)
+        normalized["memories"] = sorted(memories, key=self.memory_sort_key)
         archived_memories = store.get("archived_memories", [])
         if not isinstance(archived_memories, list):
             raise ValueError("archived_memories must be a list")

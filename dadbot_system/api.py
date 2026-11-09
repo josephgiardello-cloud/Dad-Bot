@@ -11,12 +11,14 @@ import os
 import re
 import time
 from contextlib import asynccontextmanager
-from typing import Any, cast
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, cast
 
+from dadbot.api_models import build_pulse_envelope, build_turn_envelope
 from dadbot.core.execution_contract import ExecutionMode, SovereignContext
 from dadbot.core.execution_ledger import IntegrityBreachError
-from dadbot.api_models import build_pulse_envelope, build_turn_envelope
 from dadbot.managers.tts import TTSManager
+from dadbot.runtime.env_loader import is_production_environment
 
 from .contracts import (
     DEFAULT_TENANT_ID,
@@ -27,7 +29,9 @@ from .contracts import (
     ServiceConfig,
     normalize_channel_name,
 )
+from .execution_identity import require_tenant_id
 from .kernel import ControlPlane, build_control_plane
+from .runtime_signals import configure_tracing, shutdown_tracing
 from .security import (
     AuthenticationError,
     AuthorizationError,
@@ -41,6 +45,14 @@ from .state import NamespacedStateStore
 
 logger = logging.getLogger(__name__)
 
+if TYPE_CHECKING:
+    from fastapi import Request
+else:
+    try:
+        from fastapi import Request
+    except ImportError:
+        Request = None
+
 try:
     from fastapi import (  # type: ignore[reportMissingImports]
         APIRouter,
@@ -48,7 +60,6 @@ try:
         FastAPI,
         Header,
         HTTPException,
-        Request,
         WebSocket,
         WebSocketDisconnect,
     )
@@ -60,7 +71,6 @@ except ImportError:
     FastAPI = cast(Any, None)
     Header = cast(Any, None)
     HTTPException = cast(Any, None)
-    Request = cast(Any, None)
     CORSMiddleware = cast(Any, None)
     JSONResponse = cast(Any, None)
 
@@ -99,6 +109,8 @@ def create_api_app(
 
     service_config = config or ServiceConfig()
     security_config = service_config.security
+    if not security_config.auth_required and is_production_environment():
+        raise RuntimeError("API authentication cannot be disabled in production")
     veto_proxy_enabled = str(os.environ.get("DADBOT_VETO_PROXY_ENABLED", "1")).strip().lower() in {
         "1",
         "true",
@@ -138,6 +150,38 @@ def create_api_app(
     )
     if security_config.auth_required and not security_config.token_secret:
         raise RuntimeError("DADBOT_API_TOKEN_SECRET is required when API authentication is enabled")
+    if security_config.auth_required:
+        require_authenticated_execution = getattr(orchestrator, "require_authenticated_execution", None)
+        if not callable(require_authenticated_execution):
+            raise RuntimeError("Authenticated service requires an authority-enforcing orchestrator")
+        if not security_config.authority_sqlite_path:
+            raise RuntimeError("Authenticated service requires a configured durable authority store")
+        if security_config.authority_sqlite_path:
+            from .delegation import SQLiteDelegationStore
+            from .state import SQLiteStateStore
+
+            authority_path = Path(security_config.authority_sqlite_path).resolve()
+            state_store = getattr(orchestrator, "state_store", None)
+            configured_state_path = service_config.persistence.sqlite_path
+            actual_state_path = state_store.path if isinstance(state_store, SQLiteStateStore) else ""
+            state_paths = (configured_state_path, actual_state_path)
+            if any(
+                path
+                and (
+                    authority_path == Path(path).resolve()
+                    or (authority_path.exists() and Path(path).exists() and authority_path.samefile(path))
+                )
+                for path in state_paths
+            ):
+                raise RuntimeError("Authority and service state require separate SQLite database files")
+            delegation_store = SQLiteDelegationStore(
+                security_config.authority_sqlite_path,
+                security_config.token_secret,
+                issuer=security_config.token_issuer,
+            )
+            delegation_store.check_available()
+            orchestrator.configure_delegation_store(delegation_store)
+        require_authenticated_execution()
 
     _control_plane = control_plane if control_plane is not None else build_control_plane()
     token_manager = (
@@ -207,6 +251,15 @@ def create_api_app(
 
     def _resolve_tenant(principal: ServicePrincipal, requested_tenant_id: str | None = None) -> str:
         effective_tenant_id = str(principal.tenant_id or DEFAULT_TENANT_ID)
+        try:
+            require_tenant_id(
+                effective_tenant_id,
+                issuer=principal.issuer or ("auth-off" if principal.subject == "anonymous" else "unbound"),
+                subject=principal.subject,
+                acceptance_path="api._resolve_tenant",
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=403, detail="Invalid principal tenant identity") from exc
         requested = str(requested_tenant_id or "").strip()
         if requested and requested != effective_tenant_id:
             raise HTTPException(status_code=403, detail="tenant_id does not match the authenticated principal")
@@ -259,6 +312,23 @@ def create_api_app(
         resolved_payload["metadata"] = metadata
         return resolved_payload
 
+    def _submit_chat_request(request: ChatRequest, http_request: Request):
+        if not (security_config.auth_required and security_config.authority_sqlite_path):
+            return orchestrator.submit_chat(request)
+        from .delegation import AuthorityUnavailableError
+
+        token = _extract_bearer_token(
+            http_request.headers.get("authorization"), http_request.headers.get("x-dadbot-token")
+        )
+        try:
+            return orchestrator.submit_chat(request, bearer_token=token)
+        except AuthenticationError as exc:
+            raise HTTPException(status_code=401, detail=str(exc)) from exc
+        except AuthorizationError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except AuthorityUnavailableError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
     async def _http_principal(
         request: Request,
         authorization: str | None = Header(default=None),
@@ -279,8 +349,6 @@ def create_api_app(
     @asynccontextmanager
     async def lifespan(_app):
         if service_config.telemetry.otel_enabled:
-            from .telemetry import configure_tracing
-
             configure_tracing(service_config.telemetry)
 
         recovered_tasks = orchestrator.recover_pending_tasks()
@@ -292,12 +360,26 @@ def create_api_app(
             _session_id = str(payload.get("_session_id") or "")
             request = ChatRequest.from_dict(payload, session_id=_session_id)
             _timeout = float(payload.get("timeout_seconds") or 60.0)
-            task = orchestrator.submit_chat(request)
-            task_status, response = await _wait_for_task_completion(task.task_id, timeout_seconds=_timeout)
+            task_id = str(payload.get("_submitted_task_id") or "")
+            if task_id:
+                task_status = orchestrator.task_status(task_id)
+                if (
+                    not task_status
+                    or task_status.get("tenant_id") != request.tenant_id
+                    or task_status.get("session_id") != request.session_id
+                    or task_status.get("request_id") != request.request_id
+                ):
+                    raise RuntimeError("Scheduled task identity mismatch")
+                execution_graph = task_status.get("execution_graph")
+            else:
+                task = orchestrator.submit_chat(request)
+                task_id = task.task_id
+                execution_graph = task.execution_graph.to_dict() if task.execution_graph is not None else None
+            task_status, response = await _wait_for_task_completion(task_id, timeout_seconds=_timeout)
             return {
                 "task": task_status,
                 "response": response,
-                "execution_graph": task.execution_graph.to_dict() if task.execution_graph is not None else None,
+                "execution_graph": execution_graph,
             }
 
         _scheduler_task = _control_plane.task_manager.register(
@@ -318,9 +400,7 @@ def create_api_app(
             if websocket_tickets is not None:
                 await asyncio.to_thread(websocket_tickets.close)
             if service_config.telemetry.otel_enabled:
-                from dadbot.core.otel_bridge import shutdown_otel_bridge
-
-                shutdown_otel_bridge()
+                shutdown_tracing()
 
     app = FastAPI(title=service_config.api.title, lifespan=lifespan)
     app.add_middleware(
@@ -351,11 +431,15 @@ def create_api_app(
         return response
 
     async def _wait_for_task_completion(task_id: str, *, timeout_seconds: float = 60.0):
+        from .worker import AUTHORITY_UNAVAILABLE
+
         deadline = asyncio.get_running_loop().time() + max(1.0, float(timeout_seconds or 60.0))
         while asyncio.get_running_loop().time() < deadline:
             status = orchestrator.task_status(task_id)
             if status is None:
                 return None, None
+            if status.get("error") == AUTHORITY_UNAVAILABLE:
+                raise HTTPException(status_code=503, detail=AUTHORITY_UNAVAILABLE)
             response = orchestrator.response_for_task(task_id)
             if response is not None:
                 return status, response
@@ -675,14 +759,15 @@ def create_api_app(
             ],
         }
 
-    def _session_state_snapshot(session_id: str) -> dict[str, Any]:
-        registry = getattr(orchestrator, "session_registry", None) or getattr(_control_plane, "registry", None)
-        session = (
-            registry.get(session_id) if registry is not None and callable(getattr(registry, "get", None)) else None
-        )
-        if not isinstance(session, dict):
+    def _session_state_snapshot(session_id: str, tenant_id: str) -> dict[str, Any]:
+        get_session = getattr(orchestrator, "session", None)
+        if not callable(get_session):
             return {}
-        state = session.get("state")
+        session = get_session(session_id, tenant_id)
+        snapshot = getattr(session, "snapshot", None)
+        if not callable(snapshot):
+            return {}
+        state = snapshot()
         return dict(state) if isinstance(state, dict) else {}
 
     def _mean(values: list[float]) -> float:
@@ -812,7 +897,7 @@ def create_api_app(
         return resolved_payload
 
     def _build_pulse_payload(session_id: str, tenant_id: str, *, event_type: str = "pulse.snapshot") -> dict[str, Any]:
-        session_state = _session_state_snapshot(session_id)
+        session_state = _session_state_snapshot(session_id, tenant_id)
         pulse_envelope = build_pulse_envelope(
             session_id=session_id,
             tenant_id=tenant_id,
@@ -870,7 +955,9 @@ def create_api_app(
         return payload
 
     @router.post("/sessions/{session_id}/chat")
-    async def submit_chat(session_id: str, payload: dict, principal: ServicePrincipal = Depends(_http_principal)):
+    async def submit_chat(
+        session_id: str, payload: dict, http_request: Request, principal: ServicePrincipal = Depends(_http_principal)
+    ):
         _enforce_scope(principal, "write")
         _enforce_rate_limit(principal, "write")
         tenant_id = _resolve_tenant(principal, payload.get("tenant_id"))
@@ -878,7 +965,7 @@ def create_api_app(
         request = ChatRequest.from_dict(request_payload, session_id=session_id)
         if not request.user_input and not request.attachments:
             raise HTTPException(status_code=400, detail="user_input or attachments are required")
-        task = orchestrator.submit_chat(request)
+        task = _submit_chat_request(request, http_request)
         return {
             "task_id": task.task_id,
             "request_id": request.request_id,
@@ -896,6 +983,7 @@ def create_api_app(
         channel_name: str,
         session_id: str,
         payload: dict,
+        http_request: Request,
         principal: ServicePrincipal = Depends(_http_principal),
     ):
         _enforce_scope(principal, "write")
@@ -909,7 +997,7 @@ def create_api_app(
         request = ChatRequest.from_dict(request_payload, session_id=session_id)
         if not request.user_input and not request.attachments:
             raise HTTPException(status_code=400, detail="user_input or attachments are required")
-        task = orchestrator.submit_chat(request)
+        task = _submit_chat_request(request, http_request)
         gateway = dict(request.metadata.get("gateway") or {})
         return {
             "task_id": task.task_id,
@@ -922,7 +1010,9 @@ def create_api_app(
         }
 
     @router.post("/sessions/{session_id}/turn")
-    async def execute_turn(session_id: str, payload: dict, principal: ServicePrincipal = Depends(_http_principal)):
+    async def execute_turn(
+        session_id: str, payload: dict, http_request: Request, principal: ServicePrincipal = Depends(_http_principal)
+    ):
         _enforce_scope(principal, "write")
         _enforce_rate_limit(principal, "write")
         tenant_id = _resolve_tenant(principal, payload.get("tenant_id"))
@@ -960,7 +1050,13 @@ def create_api_app(
                 )
 
         timeout_seconds = float(resolved_payload.get("timeout_seconds") or 60.0)
+        resolved_payload["request_id"] = check_request.request_id
         job_payload = {**resolved_payload, "_session_id": session_id}
+        job_payload.pop("_submitted_task_id", None)
+        if security_config.auth_required and security_config.authority_sqlite_path:
+            request = ChatRequest.from_dict(resolved_payload, session_id=session_id)
+            task = _submit_chat_request(request, http_request)
+            job_payload["_submitted_task_id"] = task.task_id
         result_future = await _control_plane.submit_turn(session_id, job_payload)
 
         try:
@@ -999,7 +1095,9 @@ def create_api_app(
         )
 
     @router.post("/sessions/{session_id}/stream")
-    async def submit_stream(session_id: str, payload: dict, principal: ServicePrincipal = Depends(_http_principal)):
+    async def submit_stream(
+        session_id: str, payload: dict, http_request: Request, principal: ServicePrincipal = Depends(_http_principal)
+    ):
         _enforce_scope(principal, "write")
         _enforce_rate_limit(principal, "write")
         tenant_id = _resolve_tenant(principal, payload.get("tenant_id"))
@@ -1008,7 +1106,7 @@ def create_api_app(
         if not request.user_input and not request.attachments:
             raise HTTPException(status_code=400, detail="user_input or attachments are required")
 
-        task = orchestrator.submit_chat(request)
+        task = _submit_chat_request(request, http_request)
         return {
             "task_id": task.task_id,
             "request_id": request.request_id,

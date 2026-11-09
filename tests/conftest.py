@@ -82,6 +82,13 @@ def bot(make_test_dadbot):
 
 
 @pytest.fixture
+def persistence_failure_patch(bot):
+    """Restore injected persistence failures before the bot is shut down."""
+    with pytest.MonkeyPatch.context() as patch:
+        yield patch
+
+
+@pytest.fixture
 def today_iso():
     return date.today().isoformat()
 

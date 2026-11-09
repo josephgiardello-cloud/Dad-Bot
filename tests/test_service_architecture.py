@@ -26,6 +26,7 @@ class FakeBroker:
 
 class FakeBot:
     def __init__(self, model_name="fake-model"):
+        self.config = type("Config", (), {"tenant_id": "default"})()
         self.MODEL_NAME = model_name
         self.ACTIVE_MODEL = model_name
         self.async_calls = 0
@@ -316,7 +317,9 @@ def test_orchestrator_recovers_persisted_queued_task_with_same_identity():
 
 def test_worker_processor_retries_and_returns_response_with_fake_bot():
     fake_bot = FakeBot()
-    processor = DadBotTaskProcessor(ServiceConfig(), bot_factory=lambda model_name: fake_bot)
+    config = ServiceConfig()
+    config.security.auth_required = False
+    processor = DadBotTaskProcessor(config, bot_factory=lambda model_name, tenant_id: fake_bot)
     request = ChatRequest(session_id="session-2", user_input="hello there")
     task = WorkerTask(
         session_id=request.session_id,
@@ -336,7 +339,9 @@ def test_worker_processor_retries_and_returns_response_with_fake_bot():
 
 def test_worker_does_not_restore_stale_session_memory_store():
     fake_bot = FakeBot()
-    processor = DadBotTaskProcessor(ServiceConfig(), bot_factory=lambda model_name: fake_bot)
+    config = ServiceConfig()
+    config.security.auth_required = False
+    processor = DadBotTaskProcessor(config, bot_factory=lambda model_name, tenant_id: fake_bot)
     request = ChatRequest(session_id="session-memory", user_input="continue after restart")
     task = WorkerTask(
         session_id=request.session_id,
@@ -356,6 +361,7 @@ def test_worker_does_not_restore_stale_session_memory_store():
 def test_worker_processor_requires_execute_turn_entrypoint():
     class LegacySyncBot:
         def __init__(self):
+            self.config = type("Config", (), {"tenant_id": "default"})()
             self.MODEL_NAME = "legacy-sync"
             self.ACTIVE_MODEL = "legacy-sync"
 
@@ -366,7 +372,9 @@ def test_worker_processor_requires_execute_turn_entrypoint():
             return {"history": [{"role": "system", "content": "Dad system prompt"}]}
 
     legacy_bot = LegacySyncBot()
-    processor = DadBotTaskProcessor(ServiceConfig(), bot_factory=lambda model_name: legacy_bot)
+    config = ServiceConfig()
+    config.security.auth_required = False
+    processor = DadBotTaskProcessor(config, bot_factory=lambda model_name, tenant_id: legacy_bot)
     request = ChatRequest(session_id="legacy-session", user_input="hello there")
     task = WorkerTask(session_id=request.session_id, request=request)
 

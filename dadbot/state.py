@@ -751,15 +751,19 @@ class RuntimeStateManager(_StateThreadMixin, _StatePromptBudgetMixin):
 
     def load_session_state_snapshot(self, snapshot):
         payload = copy.deepcopy(dict(snapshot or {}))
-        normalized_memory_store = None
-        memory_store_payload = payload.get("memory_store")
-        if isinstance(memory_store_payload, dict):
-            normalized_memory_store = self.bot.memory_manager.normalize_memory_store(
-                memory_store_payload,
-            )
-            payload["memory_store"] = copy.deepcopy(normalized_memory_store)
-
         with self.bot._session_lock, self.bot._io_lock:
+            normalized_memory_store = None
+            memory_store_payload = payload.get("memory_store")
+            storage = getattr(self.bot.memory_manager, "_storage", None)
+            committed_projection = getattr(storage, "committed_tenant_projection", None)
+            committed_memory = committed_projection() if callable(committed_projection) else None
+            if committed_memory is not None:
+                memory_store_payload = committed_memory
+            if isinstance(memory_store_payload, dict):
+                normalized_memory_store = self.bot.memory_manager.normalize_memory_store(
+                    memory_store_payload,
+                )
+                payload["memory_store"] = copy.deepcopy(normalized_memory_store)
             history = [dict(message) for message in payload.get("history", []) if isinstance(message, dict)]
             if not history:
                 payload["history"] = self.bot.new_chat_session()

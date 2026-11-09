@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import subprocess
+import sys
+import textwrap
+
 import pytest
 
 pytestmark = pytest.mark.unit
@@ -92,6 +96,72 @@ def test_session_state_is_rebuilt_from_durable_ledger_events(tmp_path) -> None:
     assert restored_state["planning"] == {"strategy": "direct_answer"}
     with pytest.raises(RuntimeError, match="Read-only"):
         restored_state["turn_truth"]["trace_id"] = "mutated"
+
+
+@pytest.mark.parametrize("crash_point", ["before_append", "after_append"])
+def test_session_memory_projection_replays_across_process_crash(tmp_path, crash_point) -> None:
+    ledger_path = tmp_path / "session-state.wal"
+    seed = ExecutionLedger(FileWALLedgerBackend(ledger_path))
+    LedgerWriter(seed).write_event(
+        "SESSION_STATE_UPDATED",
+        session_id="session-1",
+        trace_id="seed",
+        kernel_step_id="test",
+        payload={"state": {"memory_store": {"memories": ["before"]}}},
+        committed=True,
+    )
+    script = textwrap.dedent(
+        """
+        import os
+        import sys
+        from dadbot.core.control_plane import ControlPlaneOptions, ExecutionControlPlane, SessionRegistry
+        from dadbot.core.execution_ledger import ExecutionLedger
+        from dadbot.core.kernel_gateway import KernelGateway
+        from dadbot.core.ledger_backend import FileWALLedgerBackend
+
+        async def executor(session, job):
+            return ("ok", False)
+
+        ledger = ExecutionLedger(FileWALLedgerBackend(sys.argv[1]))
+        ledger.load_from_backend()
+        plane = ExecutionControlPlane(
+            registry=SessionRegistry(), kernel_executor=executor,
+            options=ControlPlaneOptions(ledger=ledger),
+        )
+        def crash(*args, **kwargs):
+            os._exit(17)
+        with KernelGateway.open_scope():
+            if sys.argv[2] == "before_append":
+                plane.ledger_writer.write_event = crash
+            else:
+                plane.registry.get_or_create = crash
+            plane._merge_session_state(
+                session_id="session-1",
+                state_patch={"memory_store": {"memories": ["after"]}},
+                trace_token="crash-test",
+            )
+        """
+    )
+    process = subprocess.run(
+        [sys.executable, "-c", script, str(ledger_path), crash_point],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert process.returncode == 17, process.stderr
+    recovered_ledger = ExecutionLedger(FileWALLedgerBackend(ledger_path))
+    recovered_ledger.load_from_backend()
+
+    async def executor(_session, _job):
+        return ("ok", False)
+
+    plane = ExecutionControlPlane(
+        registry=SessionRegistry(), kernel_executor=executor,
+        options=ControlPlaneOptions(ledger=recovered_ledger),
+    )
+    expected = "before" if crash_point == "before_append" else "after"
+    assert plane.registry.get("session-1")["state"]["memory_store"]["memories"] == [expected]
+    assert recovered_ledger.verify_replay(mode="chain")["ok"]
 
 
 def test_distributed_runtime_authority_rejects_non_authoritative_replay_path() -> None:

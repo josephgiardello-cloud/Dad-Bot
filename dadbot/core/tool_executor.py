@@ -252,6 +252,9 @@ def execute_tool(
             is_replayed = True
 
     if record is None:
+        from dadbot_system.delegation import verify_live_authority
+
+        verify_live_authority()
         sandbox = _ToolSandbox()
         started = time.perf_counter()
         record = sandbox.execute(

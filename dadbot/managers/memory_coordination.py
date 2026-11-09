@@ -1144,6 +1144,9 @@ Rules:
         if not loser_label:
             return 0
 
+        storage = getattr(memory_manager, "_storage", None)
+        local_backend = getattr(storage, "_local_authority_backend", None)
+        local_authority = callable(local_backend) and local_backend() is not None
         try:
             snapshot = graph_manager.graph_snapshot()
             nodes = list(snapshot.get("nodes", []))
@@ -1164,10 +1167,16 @@ Rules:
                     invalidated += 1
 
             if invalidated:
+                if local_authority:
+                    raise RuntimeError(
+                        "Cannot mutate graph edges independently of ledger-authoritative tenant memory",
+                    )
                 graph_manager.ensure_graph_store()
                 graph_manager._graph_store_backend.replace_graph(nodes, edges)
             return invalidated
         except Exception as exc:
+            if local_authority:
+                raise
             logger.warning("Failed to invalidate superseded graph edges: %s", exc)
             return 0
 

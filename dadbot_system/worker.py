@@ -6,6 +6,7 @@ import logging
 import multiprocessing as mp
 import queue
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -18,14 +19,17 @@ from .contracts import (
     EventEnvelope,
     EventType,
     ServiceConfig,
+    TelemetrySettings,
     WorkerResult,
     WorkerTask,
-    normalize_tenant_id,
 )
-from .runtime_signals import configure_logging, configure_tracing, start_span
+from .execution_identity import ExecutionIdentity, require_tenant_id
+from .runtime_signals import configure_logging, configure_tracing, shutdown_tracing, start_span
 from .state import StateStore
 
 logger = logging.getLogger(__name__)
+
+AUTHORITY_UNAVAILABLE = "Delegated execution authority is unavailable; authenticated execution denied"
 
 
 def _coerce_turn_result(response_obj: object) -> tuple[str, bool]:
@@ -108,21 +112,23 @@ class DadBotTaskProcessor:
 
     def _get_bot(self, session_id: str, requested_model: str, *, tenant_id: str = DEFAULT_TENANT_ID):
         model_name = requested_model or self.config.default_model
-        normalized_tenant_id = normalize_tenant_id(tenant_id)
+        normalized_tenant_id = require_tenant_id(tenant_id)
         key = (normalized_tenant_id, session_id, model_name)
         bot = self._bots.get(key)
         if bot is None:
             if self._bot_factory is not None:
-                try:
-                    bot = self._bot_factory(model_name=model_name, tenant_id=normalized_tenant_id)
-                except TypeError:
-                    bot = self._bot_factory(model_name=model_name)
+                bot = self._bot_factory(model_name=model_name, tenant_id=normalized_tenant_id)
             else:
                 from Dad import DadBot
 
                 bot_kwargs: dict[str, Any] = {
                     "model_name": model_name,
                     "tenant_id": normalized_tenant_id,
+                }
+                dependencies: dict[str, Any] = {
+                    "storage_security_mode": (
+                        "AUTHENTICATED" if self.config.security.auth_required else "TRUSTED_LOCAL"
+                    ),
                 }
                 from dadbot.runtime.env_loader import is_production_environment
 
@@ -131,14 +137,15 @@ class DadBotTaskProcessor:
 
                     if self._runtime_state_store is None:
                         self._runtime_state_store = build_service_state_store(self.config)
-                    bot_kwargs["dependency_registry"] = {
-                        "runtime_state_bundle": build_runtime_state_bundle(
+                    dependencies["runtime_state_bundle"] = build_runtime_state_bundle(
                             self._runtime_state_store,
                             tenant_id=normalized_tenant_id,
                             planner_debug_factory=DadBot.default_planner_debug_state,
-                        ),
-                    }
+                        )
+                bot_kwargs["dependency_registry"] = dependencies
                 bot = DadBot(**bot_kwargs)
+            if getattr(getattr(bot, "config", None), "tenant_id", None) != normalized_tenant_id:
+                raise ValueError("worker bot tenant identity mismatch")
             if hasattr(bot, "ensure_ollama_ready"):
                 try:
                     ready = bool(bot.ensure_ollama_ready())
@@ -151,6 +158,8 @@ class DadBotTaskProcessor:
                             model_name,
                         )
             self._bots[key] = bot
+        if getattr(getattr(bot, "config", None), "tenant_id", None) != normalized_tenant_id:
+            raise ValueError("worker bot tenant identity mismatch")
         return bot
 
     def _build_request_attachments(self, request: ChatRequest) -> list[dict]:
@@ -174,6 +183,10 @@ class DadBotTaskProcessor:
         return service_policy
 
     async def _execute_request_async(self, bot, request: ChatRequest) -> tuple[str, bool]:
+        if self.config.security.auth_required:
+            from .delegation import require_live_authority
+
+            require_live_authority()
         attachments = self._build_request_attachments(request)
         request_policy = self._request_policy_metadata(request)
         previous_policy = getattr(bot, "_service_request_policy", None)
@@ -209,9 +222,56 @@ class DadBotTaskProcessor:
                 bot._service_request_policy = previous_policy
 
     def process(self, task: WorkerTask) -> WorkerResult:
-        if not self._circuit.allow_request():
-            error = "Circuit breaker is open for worker requests"
+        from .delegation import AuthorityUnavailableError, SQLiteDelegationStore, _execution_authority
+        from .security import AuthorizationError
+
+        store = None
+        if self.config.security.auth_required:
+            if self.config.security.authority_sqlite_path:
+                try:
+                    store = SQLiteDelegationStore(
+                        self.config.security.authority_sqlite_path,
+                        self.config.security.token_secret,
+                        issuer=self.config.security.token_issuer,
+                    )
+                    store.verify(task.delegation, task, operation="execute")
+                except (AuthorizationError, AuthorityUnavailableError, ValueError) as exc:
+                    logger.warning("Task %s failed delegation verification: %s", task.task_id, exc)
+                    store = None
+            if store is None:
+                logger.error("%s (task_id=%s)", AUTHORITY_UNAVAILABLE, task.task_id)
+                return WorkerResult(
+                    task_id=task.task_id,
+                    session_id=task.session_id,
+                    request_id=task.request.request_id,
+                    tenant_id=task.tenant_id,
+                    status="failed",
+                    error=AUTHORITY_UNAVAILABLE,
+                )
+        try:
+            identity = ExecutionIdentity(
+                tenant_id=task.tenant_id,
+                session_id=task.session_id,
+                request_id=task.request.request_id,
+                task_id=task.task_id,
+            )
+            identity.require_match(
+                tenant_id=task.request.tenant_id,
+                session_id=task.request.session_id,
+                request_id=task.request.request_id,
+            )
+        except ValueError as exc:
+            logger.warning("Rejected worker task with invalid identity: %s", exc)
             return WorkerResult(
+                task_id=task.task_id,
+                session_id=task.session_id,
+                request_id=task.request.request_id,
+                tenant_id=task.tenant_id,
+                status="failed",
+                error=str(exc),
+            )
+        def finish_failure(error: str) -> WorkerResult:
+            result = WorkerResult(
                 task_id=task.task_id,
                 session_id=task.session_id,
                 request_id=task.request.request_id,
@@ -219,6 +279,17 @@ class DadBotTaskProcessor:
                 status="failed",
                 error=error,
             )
+            if store is not None:
+                try:
+                    result.authority_proof = store.sign_result(task, result)
+                except (AuthorizationError, AuthorityUnavailableError) as exc:
+                    logger.warning("Task %s lost authority before failure publication: %s", task.task_id, exc)
+                    result.error = AUTHORITY_UNAVAILABLE
+            return result
+
+        if not self._circuit.allow_request():
+            error = "Circuit breaker is open for worker requests"
+            return finish_failure(error)
 
         policy = RetryPolicy(
             max_attempts=max(1, self.config.workers.max_retries + 1),
@@ -231,8 +302,22 @@ class DadBotTaskProcessor:
             with start_span(
                 "worker.process_task", task_id=task.task_id, request_id=task.request.request_id, attempt=attempt
             ):
+                authority_token = None
                 try:
+                    if store is not None:
+                        store.verify(task.delegation, task, operation="execute")
+                        authority_token = _execution_authority.set((store, task))
                     bot = self._get_bot(task.session_id, task.request.requested_model, tenant_id=task.tenant_id)
+                    if store is not None:
+                        ledger = getattr(bot, "_execution_ledger", None)
+                        mark_ledger = getattr(ledger, "require_authenticated_authority", None)
+                        if callable(mark_ledger):
+                            mark_ledger()
+                        memory = getattr(bot, "memory_manager", None)
+                        storage = getattr(memory, "_storage", None)
+                        mark_storage = getattr(storage, "require_authenticated_authority", None)
+                        if callable(mark_storage):
+                            mark_storage()
                     if task.session_state:
                         session_snapshot = dict(task.session_state)
                         # Memory is tenant-scoped and durable; the session copy may predate the task's side effects.
@@ -256,7 +341,7 @@ class DadBotTaskProcessor:
                         active_model=str(getattr(bot, "ACTIVE_MODEL", "") or ""),
                         status="completed",
                     )
-                    return WorkerResult(
+                    result = WorkerResult(
                         task_id=task.task_id,
                         session_id=task.session_id,
                         request_id=task.request.request_id,
@@ -265,29 +350,47 @@ class DadBotTaskProcessor:
                         session_state=bot.snapshot_session_state(),
                         response=response,
                     )
+                    if store is not None:
+                        result.authority_proof = store.sign_result(task, result)
+                    return result
+                except (AuthorizationError, AuthorityUnavailableError) as exc:
+                    logger.warning("Task %s lost execution authority: %s", task.task_id, exc)
+                    return WorkerResult(
+                        task_id=task.task_id,
+                        session_id=task.session_id,
+                        request_id=task.request.request_id,
+                        tenant_id=task.tenant_id,
+                        status="failed",
+                        error=AUTHORITY_UNAVAILABLE,
+                    )
                 except TimeoutError:
                     last_error = f"Worker timed out after {policy.timeout_seconds:.1f}s"
                 except Exception as exc:
                     last_error = str(exc)
+                finally:
+                    if authority_token is not None:
+                        _execution_authority.reset(authority_token)
 
                 self._circuit.record_failure()
                 if attempt < policy.max_attempts:
                     time.sleep(policy.backoff_seconds * attempt)
 
-        return WorkerResult(
-            task_id=task.task_id,
-            session_id=task.session_id,
-            request_id=task.request.request_id,
-            status="failed",
-            tenant_id=task.tenant_id,
-            error=last_error,
-        )
+        return finish_failure(last_error)
 
 
-def worker_process_main(config_payload: dict, request_queue, result_queue, event_queue=None):
+def worker_process_main(
+    config_payload: dict,
+    request_queue,
+    result_queue,
+    event_queue=None,
+    telemetry_initializer: Callable[[TelemetrySettings], Any] | None = None,
+):
     config = ServiceConfig.from_dict(config_payload)
     configure_logging(config.telemetry)
-    configure_tracing(config.telemetry)
+    if telemetry_initializer is None:
+        configure_tracing(config.telemetry)
+    else:
+        telemetry_initializer(config.telemetry)
     processor = DadBotTaskProcessor(config)
     worker_name = mp.current_process().name
 
@@ -310,9 +413,7 @@ def worker_process_main(config_payload: dict, request_queue, result_queue, event
             result_queue.put(result)
     finally:
         if config.telemetry.otel_enabled:
-            from dadbot.core.otel_bridge import shutdown_otel_bridge
-
-            shutdown_otel_bridge()
+            shutdown_tracing()
 
     if event_queue is not None:
         event_queue.put(
@@ -326,10 +427,18 @@ def worker_process_main(config_payload: dict, request_queue, result_queue, event
 
 
 class WorkerProcessManager:
-    def __init__(self, broker: LocalMultiprocessBroker, config: ServiceConfig, event_queue=None):
+    def __init__(
+        self,
+        broker: LocalMultiprocessBroker,
+        config: ServiceConfig,
+        event_queue=None,
+        *,
+        telemetry_initializer: Callable[[TelemetrySettings], Any] | None = None,
+    ):
         self.broker = broker
         self.config = config
         self.event_queue = event_queue
+        self._telemetry_initializer = telemetry_initializer
         self._processes: list[mp.Process] = []
 
     def start(self) -> None:
@@ -339,7 +448,13 @@ class WorkerProcessManager:
         for index in range(max(1, self.config.workers.worker_count)):
             process = context.Process(
                 target=worker_process_main,
-                args=(self.config.to_dict(), self.broker.request_queue, self.broker.result_queue, self.event_queue),
+                args=(
+                    self.config.to_dict(),
+                    self.broker.request_queue,
+                    self.broker.result_queue,
+                    self.event_queue,
+                    self._telemetry_initializer,
+                ),
                 name=f"dadbot-worker-{index + 1}",
             )
             process.start()

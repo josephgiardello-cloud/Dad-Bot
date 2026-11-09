@@ -11,17 +11,71 @@ Usage:
 
 from __future__ import annotations
 
+import hmac
 import inspect
 import json
 import os
 import threading
 from abc import ABC, abstractmethod
+from contextlib import nullcontext
 from copy import deepcopy
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 if TYPE_CHECKING:
     from dadbot.contracts import SovereignEvent
+
+
+class WALCorruptionError(RuntimeError):
+    """The WAL cannot be replayed safely without operator recovery."""
+
+
+class LedgerBackendRecoveryRequired(RuntimeError):
+    """A buffered write has an uncertain outcome and must not be retried."""
+
+
+class LedgerHeadConflict(RuntimeError):
+    """The ledger changed since the caller read its head."""
+
+
+def _require_safe_buffer_flush(uncertain: bool) -> None:
+    if uncertain:
+        raise LedgerBackendRecoveryRequired(
+            "Buffered ledger flush outcome is uncertain; preserve the buffer and reconcile the inner backend",
+        )
+
+
+def _require_complete_wal_tail(path: Path) -> None:
+    with path.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        if handle.tell():
+            handle.seek(-1, os.SEEK_END)
+            if handle.read(1) != b"\n":
+                raise WALCorruptionError(f"Incomplete WAL tail in {path}; recovery is required before appending")
+
+
+def _validate_append_head(persisted: list[dict[str, Any]], event: dict[str, Any]) -> None:
+    from dadbot.core.execution_ledger import _verify_persisted_chain
+    from dadbot.core.tenant_memory_ledger import validate_tenant_event_seal
+
+    validate_tenant_event_seal(event)
+    if "chain_hash" not in event:
+        if any("chain_hash" in record for record in persisted):
+            raise LedgerHeadConflict(
+                "Unchained events cannot be appended to a chained execution ledger",
+            )
+        return
+    violations = _verify_persisted_chain([*persisted, event])
+    sequence_report = SequenceValidator.validate([*persisted, event])
+    if violations or not sequence_report["ok"]:
+        raise LedgerHeadConflict(
+            "Execution ledger head changed or is invalid; reload and verify before retrying",
+        )
+    if event.get("type") == "TENANT_MEMORY_COMMITTED":
+        from dadbot.core.tenant_memory_ledger import replay_all_tenant_memory
+
+        replay_all_tenant_memory([*persisted, event])
 
 
 def _coerce_event_record(event: dict[str, Any] | SovereignEvent) -> dict[str, Any]:
@@ -108,8 +162,8 @@ class FileWALLedgerBackend(LedgerBackend):
     - When committed=True (or when the event type is in COMMITTED_TYPES), the
       flush is followed by os.fsync() â€” the write is not returned until the OS
       confirms the bytes hit the storage device.
-    - load() replays all valid JSONL lines; corrupt lines (invalid JSON) are
-      skipped with a warning, not raised, so the system can still boot.
+    - load() refuses malformed records and incomplete tails rather than
+      replaying a state with missing events.
 
     Crash recovery:
     - On startup, call ExecutionLedger.load_from_backend() to repopulate the
@@ -127,49 +181,219 @@ class FileWALLedgerBackend(LedgerBackend):
         },
     )
 
-    def __init__(self, path: str | Path, *, fsync: bool = True) -> None:
+    def __init__(
+        self, path: str | Path, *, fsync: bool = True,
+        security_mode: str | None = None, tenant_id: str | None = None,
+    ) -> None:
+        if security_mode not in (None, "AUTHENTICATED", "TRUSTED_LOCAL"):
+            raise ValueError("Invalid WAL security mode")
+        if security_mode == "AUTHENTICATED":
+            from dadbot_system.delegation import require_tenant_authority
+            from dadbot_system.execution_identity import require_tenant_id
+
+            tenant_id = require_tenant_id(tenant_id)
+            require_tenant_authority(tenant_id)
         self._path = Path(path)
+        self._security_mode = security_mode
+        self._tenant_id = tenant_id
+        self._known_binding: dict[str, Any] | None = None
         self._fsync_enabled = bool(fsync)
         self._lock = threading.RLock()
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        # Create the file if it doesn't exist.
+        from dadbot.core.durability import FileLockMutex
+        from dadbot_system.delegation import tenant_mutation_fence
+
+        fence = (
+            tenant_mutation_fence(tenant_id, required=True)
+            if security_mode == "AUTHENTICATED" and tenant_id is not None
+            else nullcontext()
+        )
+        with fence, FileLockMutex(self._path.with_name(self._path.name + ".lock")).locked():
+            if not self._path.exists():
+                if self._binding_path.exists():
+                    raise WALCorruptionError("Execution WAL is missing but its binding exists")
+                if any(self._path.parent.glob(self._path.name + ".tenant-*")):
+                    raise WALCorruptionError("Execution WAL is missing but tenant establishment evidence exists")
+                if security_mode == "AUTHENTICATED":
+                    self._create_authenticated_wal(tenant_id)
+                else:
+                    self._path.touch()
+            self._read_binding()
+
+    @property
+    def _binding_path(self) -> Path:
+        return self._path.with_name(self._path.name + ".binding")
+
+    def _create_authenticated_wal(self, tenant_id: str | None) -> None:
+        from dadbot_system.delegation import _execution_authority, require_tenant_authority
+        from dadbot_system.execution_identity import require_tenant_id
+        from dadbot_system.security import AuthorizationError
+
+        owner = require_tenant_id(tenant_id)
+        require_tenant_authority(owner)
+        authority = _execution_authority.get()
+        if authority is None:
+            raise AuthorizationError("Delegated execution authority is missing")
+        store, _ = authority
+        binding = {
+            "mode": "AUTHENTICATED",
+            "tenant_id": owner,
+            "storage_id": uuid4().hex,
+            "version": 2,
+            "authority_id": store.storage_identity(),
+        }
+        payload = json.dumps(binding, sort_keys=True, separators=(",", ":"))
+        signature = store._signature("wal-binding-v1:" + payload)
+        header = json.dumps({"wal_binding": binding, "signature": signature}) + "\n"
+        with self._binding_path.open("x", encoding="utf-8", newline="\n") as handle:
+            handle.write(header)
+            handle.flush()
+            os.fsync(handle.fileno())
+        with self._path.open("x", encoding="utf-8", newline="\n") as handle:
+            handle.write(header)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+    def _read_binding(self) -> bool:
         if not self._path.exists():
-            self._path.touch()
+            raise WALCorruptionError("Execution WAL is missing")
+        with self._path.open("r", encoding="utf-8") as handle:
+            first = handle.readline()
+        try:
+            record = json.loads(first) if first else None
+        except ValueError as exc:
+            raise WALCorruptionError("Invalid WAL header or first record") from exc
+        if not isinstance(record, dict) or "wal_binding" not in record:
+            if self._security_mode == "AUTHENTICATED" or self._known_binding is not None or self._binding_path.exists():
+                raise WALCorruptionError("Legacy unbound WAL requires an explicit ownership transition")
+            return False
+        if not self._binding_path.exists():
+            raise WALCorruptionError("Execution WAL binding anchor is missing")
+        try:
+            with self._binding_path.open("r", encoding="utf-8") as handle:
+                anchor = json.load(handle)
+        except (OSError, ValueError) as exc:
+            raise WALCorruptionError("Execution WAL binding anchor is invalid") from exc
+        if anchor != record:
+            raise WALCorruptionError("Execution WAL binding does not match its anchor")
+        self._verify_binding(record)
+        return True
+
+    def _verify_binding(self, record: dict[str, Any]) -> None:
+        from dadbot_system.delegation import _execution_authority, require_tenant_authority
+        from dadbot_system.security import AuthorizationError
+
+        binding = record["wal_binding"]
+        if not isinstance(binding, dict) or set(binding) != {
+            "mode", "tenant_id", "storage_id", "version", "authority_id"
+        } or binding.get("mode") != "AUTHENTICATED" or binding.get("version") != 2:
+            raise WALCorruptionError("Invalid WAL security binding")
+        if not isinstance(binding.get("storage_id"), str) or len(binding["storage_id"]) != 32:
+            raise WALCorruptionError("Invalid WAL storage identity")
+        if self._security_mode == "TRUSTED_LOCAL":
+            raise AuthorizationError("Authenticated WAL cannot be opened in trusted-local mode")
+        owner = binding.get("tenant_id")
+        if not isinstance(owner, str):
+            raise WALCorruptionError("Invalid WAL tenant binding")
+        if self._tenant_id is not None and self._tenant_id != owner:
+            raise AuthorizationError("WAL tenant binding mismatch")
+        require_tenant_authority(owner)
+        authority = _execution_authority.get()
+        if authority is None:
+            raise AuthorizationError("Delegated execution authority is missing")
+        store, _ = authority
+        if store.storage_identity() != binding.get("authority_id"):
+            raise AuthorizationError("WAL authority store mismatch")
+        payload = json.dumps(binding, sort_keys=True, separators=(",", ":"))
+        signature = record.get("signature")
+        if not isinstance(signature, str) or not hmac.compare_digest(
+            signature, store._signature("wal-binding-v1:" + payload)
+        ):
+            raise WALCorruptionError("Invalid WAL binding signature")
+        if self._known_binding is not None and self._known_binding != binding:
+            raise WALCorruptionError("WAL binding changed")
+        self._known_binding = dict(binding)
 
     def append(self, event: dict[str, Any] | SovereignEvent, *, committed: bool = False) -> None:
         serialized = _coerce_event_record(event)
-        line = json.dumps(serialized, default=str) + "\n"
-        should_fsync = self._fsync_enabled and (
-            committed or str(serialized.get("type") or "") in self.COMMITTED_TYPES
-        )
-        with self._lock, open(self._path, "a", encoding="utf-8") as handle:
-            handle.write(line)
-            handle.flush()
-            if should_fsync:
-                os.fsync(handle.fileno())
+        self._append_authorized(serialized, committed=committed)
+
+    def _append_authorized(self, serialized: dict[str, Any], *, committed: bool) -> None:
+        from dadbot_system.delegation import _execution_authority, tenant_mutation_fence
+
+        authority = _execution_authority.get()
+        fence = tenant_mutation_fence(authority[1].tenant_id, required=True) if authority is not None else nullcontext()
+        with fence:
+            if "wal_binding" in serialized:
+                raise WALCorruptionError("WAL binding cannot be appended as an event")
+            self._authorize_event(serialized)
+            line = json.dumps(serialized, default=str) + "\n"
+            should_fsync = self._fsync_enabled and (
+                committed or str(serialized.get("type") or "") in self.COMMITTED_TYPES
+            )
+            from dadbot.core.durability import FileLockMutex
+
+            with self._lock, FileLockMutex(self._path.with_name(self._path.name + ".lock")).locked():
+                _require_complete_wal_tail(self._path)
+                _validate_append_head(self._load_unlocked(), serialized)
+                with open(self._path, "a", encoding="utf-8") as handle:
+                    handle.write(line)
+                    handle.flush()
+                    if should_fsync:
+                        os.fsync(handle.fileno())
+
+    @staticmethod
+    def _authorize_event(event: dict[str, Any]) -> None:
+        from dadbot_system.delegation import _execution_authority, require_tenant_authority
+        from dadbot_system.security import AuthorizationError
+
+        authority = _execution_authority.get()
+        if authority is None:
+            return
+        _, task = authority
+        require_tenant_authority(task.tenant_id)
+        payload = event.get("payload")
+        tenant = payload.get("tenant_id") if isinstance(payload, dict) else None
+        if event.get("type") == "TENANT_MEMORY_COMMITTED" and not isinstance(tenant, str):
+            raise AuthorizationError("Tenant memory event lacks a tenant identity")
+        if tenant is not None:
+            require_tenant_authority(tenant)
+        tenant = event.get("tenant_id")
+        if tenant is not None:
+            require_tenant_authority(tenant)
 
     def load(self) -> list[dict[str, Any]]:
-        with self._lock:
-            if not self._path.exists():
-                return []
-            events: list[dict[str, Any]] = []
-            with open(self._path, encoding="utf-8") as handle:
-                for line_number, raw_line in enumerate(handle, start=1):
-                    line = raw_line.strip()
-                    if not line:
-                        continue
-                    try:
-                        events.append(json.loads(line))
-                    except json.JSONDecodeError as exc:
-                        # Tolerate a partial write at the tail â€” skip and continue.
-                        import warnings
+        from dadbot.core.durability import FileLockMutex
 
-                        warnings.warn(
-                            f"FileWALLedgerBackend: skipping corrupt line {line_number} in {self._path}: {exc}",
-                            RuntimeWarning,
-                            stacklevel=2,
-                        )
-            return events
+        with self._lock, FileLockMutex(self._path.with_name(self._path.name + ".lock")).locked():
+            return self._load_unlocked()
+
+    def _load_unlocked(self) -> list[dict[str, Any]]:
+        self._authorize_event({})
+        bound = self._read_binding()
+        if not self._path.exists():
+            return []
+        events: list[dict[str, Any]] = []
+        with open(self._path, encoding="utf-8", newline="") as handle:
+            for line_number, raw_line in enumerate(handle, start=1):
+                if not raw_line.endswith("\n"):
+                    raise WALCorruptionError(f"Incomplete WAL tail at line {line_number} in {self._path}")
+                line = raw_line.strip()
+                if not line:
+                    raise WALCorruptionError(f"Empty WAL record at line {line_number} in {self._path}")
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise WALCorruptionError(f"Corrupt WAL record at line {line_number} in {self._path}") from exc
+                if not isinstance(event, dict):
+                    raise WALCorruptionError(f"Invalid WAL record at line {line_number} in {self._path}")
+                if line_number == 1 and bound:
+                    continue
+                if "wal_binding" in event:
+                    raise WALCorruptionError("Unexpected WAL binding record")
+                self._authorize_event(event)
+                events.append(event)
+        return events
 
     def close(self) -> None:
         pass  # File handles are opened per-write; nothing to release.
@@ -188,10 +412,8 @@ class CRCFileWALLedgerBackend(LedgerBackend):
 
     Line format: ``<crc32_hex_8chars> <json_payload>\\n``
 
-    On load, lines with a bad or missing CRC are silently skipped with a
-    ``RuntimeWarning`` â€” the system can still boot from a partially-corrupt
-    file.  A plain-JSON fallback is attempted for legacy lines that pre-date
-    the CRC format.
+    Corrupt records and incomplete tails fail closed. A plain-JSON fallback
+    remains available for legacy lines that pre-date the CRC format.
 
     This backend satisfies Tier 0 item 1: corruption detection at the storage
     layer with partial-write recovery.
@@ -215,35 +437,38 @@ class CRCFileWALLedgerBackend(LedgerBackend):
         should_fsync = self._fsync_enabled and (
             committed or str(serialized.get("type") or "") in self.COMMITTED_TYPES
         )
-        with self._lock, open(self._path, "a", encoding="utf-8") as handle:
-            handle.write(line)
-            handle.flush()
-            if should_fsync:
-                os.fsync(handle.fileno())
+        from dadbot.core.durability import FileLockMutex
+
+        with self._lock, FileLockMutex(self._path.with_name(self._path.name + ".lock")).locked():
+            _require_complete_wal_tail(self._path)
+            _validate_append_head(self._load_unlocked(), serialized)
+            with open(self._path, "a", encoding="utf-8") as handle:
+                handle.write(line)
+                handle.flush()
+                if should_fsync:
+                    os.fsync(handle.fileno())
 
     def load(self) -> list[dict[str, Any]]:
+        from dadbot.core.durability import FileLockMutex
+
+        with self._lock, FileLockMutex(self._path.with_name(self._path.name + ".lock")).locked():
+            return self._load_unlocked()
+
+    def _load_unlocked(self) -> list[dict[str, Any]]:
         from dadbot.core.durability import CRC32LineCodec
 
-        with self._lock:
-            if not self._path.exists():
-                return []
-            events: list[dict[str, Any]] = []
-            with open(self._path, encoding="utf-8") as handle:
-                for line_number, raw in enumerate(handle, start=1):
-                    if not raw.strip():
-                        continue
-                    event = CRC32LineCodec.decode(raw)
-                    if event is None:
-                        import warnings
-
-                        warnings.warn(
-                            f"CRCFileWALLedgerBackend: corrupt/partial line {line_number} in {self._path} â€” skipping",
-                            RuntimeWarning,
-                            stacklevel=2,
-                        )
-                        continue
-                    events.append(event)
-            return events
+        if not self._path.exists():
+            return []
+        events: list[dict[str, Any]] = []
+        with open(self._path, encoding="utf-8", newline="") as handle:
+            for line_number, raw in enumerate(handle, start=1):
+                if not raw.endswith("\n"):
+                    raise WALCorruptionError(f"Incomplete WAL tail at line {line_number} in {self._path}")
+                event = CRC32LineCodec.decode(raw)
+                if not isinstance(event, dict):
+                    raise WALCorruptionError(f"Corrupt WAL record at line {line_number} in {self._path}")
+                events.append(event)
+        return events
 
     def close(self) -> None:
         pass
@@ -345,9 +570,11 @@ class EventualConsistencyBackend(LedgerBackend):
         self._buffer_size = max(1, int(buffer_size))
         self._buffer: list[tuple[dict[str, Any], bool]] = []
         self._lock = threading.RLock()
+        self._flush_uncertain = False
 
     def append(self, event: dict[str, Any] | SovereignEvent, *, committed: bool = False) -> None:
         with self._lock:
+            _require_safe_buffer_flush(self._flush_uncertain)
             self._buffer.append((deepcopy(_coerce_event_record(event)), committed))
             if committed or len(self._buffer) >= self._buffer_size:
                 self._flush_locked()
@@ -358,10 +585,13 @@ class EventualConsistencyBackend(LedgerBackend):
             return self._flush_locked()
 
     def _flush_locked(self) -> int:
+        _require_safe_buffer_flush(self._flush_uncertain)
         count = len(self._buffer)
+        self._flush_uncertain = True
         for ev, committed in self._buffer:
             self._inner.append(ev, committed=committed)
         self._buffer.clear()
+        self._flush_uncertain = False
         return count
 
     def load(self) -> list[dict[str, Any]]:
@@ -401,9 +631,11 @@ class BatchWriteBackend(LedgerBackend):
         self._batch_size = max(1, int(batch_size))
         self._buffer: list[tuple[dict[str, Any], bool]] = []
         self._lock = threading.RLock()
+        self._flush_uncertain = False
 
     def append(self, event: dict[str, Any] | SovereignEvent, *, committed: bool = False) -> None:
         with self._lock:
+            _require_safe_buffer_flush(self._flush_uncertain)
             self._buffer.append((deepcopy(_coerce_event_record(event)), committed))
             if committed or len(self._buffer) >= self._batch_size:
                 self._flush_locked()
@@ -413,10 +645,13 @@ class BatchWriteBackend(LedgerBackend):
             return self._flush_locked()
 
     def _flush_locked(self) -> int:
+        _require_safe_buffer_flush(self._flush_uncertain)
         count = len(self._buffer)
+        self._flush_uncertain = True
         for ev, committed in self._buffer:
             self._inner.append(ev, committed=committed)
         self._buffer.clear()
+        self._flush_uncertain = False
         return count
 
     def load(self) -> list[dict[str, Any]]:

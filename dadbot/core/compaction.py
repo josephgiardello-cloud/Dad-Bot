@@ -1,7 +1,7 @@
 """Event log compaction and archive tier.
 
 CompactionPolicy â€” decides when compaction should trigger.
-EventCompactor   â€” trims pre-snapshot events from the in-memory ledger.
+EventCompactor   â€” reports when safe compaction is unavailable.
 ArchiveTier      â€” writes discarded events to a gzip-compressed JSONL file.
 
 Usage::
@@ -129,15 +129,7 @@ class ArchiveTier:
 
 
 class EventCompactor:
-    """Trims in-memory ledger events before the snapshot head.
-
-    Compaction only runs when:
-      - a snapshot exists (no snapshot â†’ cannot compact safely), AND
-      - the CompactionPolicy says the threshold is exceeded (or force=True).
-
-    Events trimmed from the ledger are written to the ArchiveTier (if provided)
-    before removal so they can be audited or replayed later.
-    """
+    """Prevent destructive trimming until durable checkpoint replay is supported."""
 
     def __init__(
         self,
@@ -168,8 +160,6 @@ class EventCompactor:
 
         """
         events = ledger.read()
-        n = len(events)
-
         if not events:
             return {
                 "compacted": False,
@@ -186,52 +176,11 @@ class EventCompactor:
                 "reason": "no_snapshot",
             }
 
-        head_seq = int(snapshot.get("head_sequence") or 0)
-        oldest_ts = float((events[0].get("timestamp")) or 0.0)
-        events_since_snapshot = max(0, n - head_seq)
-
-        if not force and not self._policy.should_compact(
-            event_count=n,
-            oldest_event_timestamp=oldest_ts,
-            events_since_snapshot=events_since_snapshot,
-        ):
-            return {
-                "compacted": False,
-                "events_removed": 0,
-                "archive_path": None,
-                "reason": "below_threshold",
-            }
-
-        # Keep min_snapshot_distance events before the snapshot head.
-        cutoff = max(0, head_seq - self._policy.min_snapshot_distance)
-        events_to_archive = events[:cutoff]
-        events_to_keep = events[cutoff:]
-
-        if not events_to_archive:
-            return {
-                "compacted": False,
-                "events_removed": 0,
-                "archive_path": None,
-                "reason": "nothing_to_compact",
-            }
-
-        archive_path: str | None = None
-        if self._archive is not None:
-            path = self._archive.archive(events_to_archive, label="compact")
-            archive_path = str(path)
-
-        # Replace the in-memory event list directly.
-        # EventCompactor is an authorised system operation â€” direct access
-        # to _events is intentional here (same as snapshot restore).
-        with ledger._lock:
-            ledger._events = list(events_to_keep)
-
-        self._compaction_count += 1
         return {
-            "compacted": True,
-            "events_removed": len(events_to_archive),
-            "archive_path": archive_path,
-            "compaction_count": self._compaction_count,
+            "compacted": False,
+            "events_removed": 0,
+            "archive_path": None,
+            "reason": "durable_checkpoint_required",
         }
 
     @property

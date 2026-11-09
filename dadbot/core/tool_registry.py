@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import Any, Protocol
 
 from dadbot.core.runtime_types import (
+    CanonicalPayload,
     ToolDeterminismClass,
     ToolExecutionStatus,
     ToolInvocation,
@@ -42,7 +43,6 @@ class ToolRegistry:
     # These wrap the logic from AgenticHandler and bot methods.
     # ----------------------------------------------------------------------
     import logging
-    from dadbot.core.runtime_types import CanonicalPayload
 
     def make_set_reminder_executor(bot):
         def executor(invocation):

@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from dadbot_system import DadBotOrchestrator, InMemoryStateStore, ServiceConfig, create_api_app
+from dadbot_system.delegation import SQLiteDelegationStore
 from dadbot_system.security import ServiceTokenManager
 
 pytestmark = pytest.mark.integration
@@ -50,13 +51,24 @@ def headers(*, tenant="family-a", scopes=("read", "write"), ttl=3600):
 def make_app(*, redis_url="redis://ticket-test.invalid/0", secret=SECRET, auth_required=True):
     config = ServiceConfig.from_dict(
         {
-            "security": {"token_secret": secret, "auth_required": auth_required},
+            "security": {
+                "token_secret": secret,
+                "auth_required": auth_required,
+                "authority_sqlite_path": make_app.authority_path,
+            },
             "persistence": {"redis_url": redis_url},
         }
     )
     broker = SimpleNamespace(enqueue=lambda task: None, get_result_nowait=lambda: None)
     orchestrator = DadBotOrchestrator(broker, state_store=InMemoryStateStore(), planner_debug_factory=dict)
     return create_api_app(orchestrator, config=config, runtime_bot=SimpleNamespace())
+
+
+@pytest.fixture(autouse=True)
+def configured_authority(tmp_path, monkeypatch):
+    path = str(tmp_path / "authority.sqlite")
+    SQLiteDelegationStore.initialize(path)
+    monkeypatch.setattr(make_app, "authority_path", path, raising=False)
 
 
 @pytest.fixture

@@ -16,12 +16,12 @@ from socket import AF_INET, SO_REUSEADDR, SOCK_STREAM, SOL_SOCKET, socket
 from typing import Any
 from urllib.request import urlopen
 
-from dadbot.runtime.supervisor import get_runtime_supervisor
 from dadbot.runtime.env_loader import (
     bootstrap_environment,
     is_production_environment,
     validate_startup_environment,
 )
+from dadbot.runtime.supervisor import get_runtime_supervisor
 from dadbot.runtime_adapter import runtime_contract_errors
 from dadbot_system import (
     AppStateContainer,
@@ -36,6 +36,7 @@ from dadbot_system import (
     PostgresStateStore,
     RedisStateStore,
     ServiceConfig,
+    SQLiteStateStore,
     WorkerProcessManager,
     configure_logging,
     configure_tracing,
@@ -840,6 +841,12 @@ def stop_streamlit_app(script_path: str | Path | None = None):
 
 
 def build_service_state_store(config):
+    if config.persistence.sqlite_path:
+        if config.persistence.postgres_dsn or config.persistence.redis_url:
+            raise ValueError("SQLite service state cannot be combined with PostgreSQL or Redis")
+        if is_production_environment():
+            raise RuntimeError("SQLite service state is only supported for local installations")
+        return SQLiteStateStore(config.persistence.sqlite_path)
     fast_store = None
     durable_store = None
 
@@ -1026,10 +1033,13 @@ def launch_api_service(args, *, dadbot_cls=None):
             append_signoff=not args.no_signoff,
             light_mode=args.light,
             tenant_id=args.tenant_id,
-            dependency_registry={"runtime_state_bundle": runtime_state_bundle},
+            dependency_registry={
+                "runtime_state_bundle": runtime_state_bundle,
+                "storage_security_mode": "AUTHENTICATED" if config.security.auth_required else "TRUSTED_LOCAL",
+            },
         )
     except Exception as exc:
-        if is_production_environment():
+        if is_production_environment() or config.security.auth_required:
             raise
         logger.warning("DadBot bootstrap failed in API mode, using orchestrator adapter fallback", exc_info=True)
         print(f"[DadBot] API runtime fallback enabled due to DadBot bootstrap error: {exc}")
@@ -1039,7 +1049,7 @@ def launch_api_service(args, *, dadbot_cls=None):
             tenant_id=args.tenant_id,
         )
 
-    worker_manager = WorkerProcessManager(broker, config)
+    worker_manager = WorkerProcessManager(broker, config, telemetry_initializer=configure_tracing)
     worker_manager.start()
     app = create_api_app(orchestrator, worker_manager=worker_manager, config=config, runtime_bot=runtime_bot)
     try:

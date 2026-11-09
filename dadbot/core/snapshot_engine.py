@@ -105,12 +105,21 @@ class SnapshotEngine:
         After this call session_store contains the state as of snapshot head.
         Call replay_tail() afterwards to apply events that arrived since.
         """
-        store_snap = dict(snapshot.get("session_snapshot") or {})
-        sessions = dict(store_snap.get("sessions") or {})
+        session_store.rebuild_from_ledger(self._snapshot_session_events(snapshot))
+
+    @staticmethod
+    def _snapshot_session_events(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+        snapshot_hash = snapshot.get("snapshot_hash")
+        if not isinstance(snapshot_hash, str) or snapshot_hash != SnapshotEngine._hash_snapshot(snapshot):
+            raise SnapshotConsistencyError("Snapshot hash is missing or invalid")
+        store_snap = snapshot.get("session_snapshot")
+        if not isinstance(store_snap, dict) or not isinstance(store_snap.get("sessions"), dict):
+            raise SnapshotConsistencyError("Snapshot must contain a session projection")
+        sessions = store_snap["sessions"]
         seed_events: list[dict[str, Any]] = []
         for session_id, state in sessions.items():
-            if not isinstance(state, dict):
-                continue
+            if not isinstance(session_id, str) or not session_id or not isinstance(state, dict):
+                raise SnapshotConsistencyError("Snapshot contains an invalid session projection")
             seed_events.append(
                 {
                     "type": "SESSION_STATE_UPDATED",
@@ -120,7 +129,7 @@ class SnapshotEngine:
                     "payload": {"state": dict(state)},
                 },
             )
-        session_store.rebuild_from_ledger(seed_events)
+        return seed_events
 
     def replay_tail(
         self,
@@ -136,15 +145,14 @@ class SnapshotEngine:
         head_sequence = int(snapshot.get("head_sequence") or 0)
         all_events = ledger.read()
         tail = [event for event in all_events if int(event.get("sequence") or 0) > head_sequence]
-        if tail:
-            restored_events = [
-                event for event in all_events if int(event.get("sequence") or 0) <= head_sequence
-            ]
-            session_store.rebuild_from_ledger(restored_events + tail)
+        session_store.rebuild_from_ledger(self._snapshot_session_events(snapshot) + tail)
         return {
             "head_sequence": head_sequence,
             "tail_events_applied": len(tail),
-            "final_sequence": int(all_events[-1].get("sequence") or 0) if all_events else 0,
+            "final_sequence": max(
+                head_sequence,
+                max((int(event.get("sequence") or 0) for event in tail), default=0),
+            ),
         }
 
     def verify_snapshot(
@@ -170,12 +178,30 @@ class SnapshotEngine:
         stored_hash = hashlib.sha256(
             json.dumps(stored_reduced, sort_keys=True, default=str).encode(),
         ).hexdigest()
+        snapshot_hash = snapshot.get("snapshot_hash")
+        snapshot_hash_ok = isinstance(snapshot_hash, str) and snapshot_hash == self._hash_snapshot(snapshot)
+        prefix_present = head_sequence == 0 or any(
+            int(event.get("sequence") or 0) == head_sequence for event in events_at_head
+        )
+        try:
+            snapshot_events = self._snapshot_session_events(snapshot)
+        except SnapshotConsistencyError:
+            session_projection_ok = False
+        else:
+            snapshot_store = SessionStore()
+            snapshot_store.rebuild_from_ledger(snapshot_events)
+            replayed_store = SessionStore()
+            replayed_store.rebuild_from_ledger(events_at_head)
+            session_projection_ok = snapshot_store.snapshot()["sessions"] == replayed_store.snapshot()["sessions"]
 
         return {
-            "ok": current_hash == stored_hash,
+            "ok": current_hash == stored_hash and snapshot_hash_ok and prefix_present and session_projection_ok,
             "head_sequence": head_sequence,
             "current_state_hash": current_hash,
             "stored_state_hash": stored_hash,
+            "snapshot_hash_ok": snapshot_hash_ok,
+            "prefix_present": prefix_present,
+            "session_projection_ok": session_projection_ok,
         }
 
     # ------------------------------------------------------------------

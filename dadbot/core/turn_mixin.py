@@ -350,15 +350,12 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
 
     def _snapshot_kernel_state(self) -> dict[str, Any]:
         snapshot_fn = getattr(self, "snapshot_session_state", None)
-        if callable(snapshot_fn):
-            try:
-                raw = snapshot_fn()
-                if isinstance(raw, Mapping):
-                    return {str(k): v for k, v in raw.items()}
-                return {}
-            except Exception:  # noqa: BLE001
-                return {}
-        return {}
+        if not callable(snapshot_fn):
+            raise RuntimeError("Checkpoint requires a session state snapshot provider")
+        raw = snapshot_fn()
+        if not isinstance(raw, Mapping):
+            raise TypeError("Checkpoint session state snapshot must be a mapping")
+        return {str(k): v for k, v in raw.items()}
 
     def _restore_kernel_state(self, snapshot: dict[str, Any]) -> None:
         restore_fn = getattr(self, "load_session_state_snapshot", None)
@@ -368,13 +365,18 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
     def _checkpoint_turn_state(self, *, state_hash: str = "") -> None:
         tap = self._resolve_event_tap()
         if tap is None:
+            if not getattr(self, "_checkpoint_unavailable_reported", False):
+                logger.warning("Turn checkpoint unavailable: no event tap is configured")
+                self._checkpoint_unavailable_reported = True
             return
         maybe_checkpoint = getattr(tap, "maybe_checkpoint", None)
-        if callable(maybe_checkpoint):
-            maybe_checkpoint(
-                state_snapshot={"kernel_state": self._snapshot_kernel_state()},
-                state_hash=str(state_hash or ""),
-            )
+        if not callable(maybe_checkpoint):
+            raise RuntimeError("Configured event tap does not provide maybe_checkpoint")
+        self._checkpoint_unavailable_reported = False
+        maybe_checkpoint(
+            state_snapshot={"kernel_state": self._snapshot_kernel_state()},
+            state_hash=str(state_hash or ""),
+        )
 
     # ------------------------------------------------------------------
     # Stream helper

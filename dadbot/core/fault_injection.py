@@ -18,6 +18,7 @@ FaultBoundary:
 
 from __future__ import annotations
 
+import random
 import secrets
 import time
 from collections import defaultdict
@@ -69,8 +70,8 @@ class ErrorClassifier:
         CompensatingActionRequired: ErrorClassification.COMPENSATING,
         ConnectionError: ErrorClassification.RETRYABLE,
         TimeoutError: ErrorClassification.RETRYABLE,
-        OSError: ErrorClassification.RETRYABLE,
         PermissionError: ErrorClassification.TERMINAL,
+        OSError: ErrorClassification.RETRYABLE,
         ValueError: ErrorClassification.TERMINAL,
         TypeError: ErrorClassification.TERMINAL,
         RuntimeError: ErrorClassification.TERMINAL,

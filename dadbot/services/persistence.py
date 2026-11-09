@@ -462,9 +462,15 @@ class PersistenceService(
             source="PersistenceService._restore_transaction_snapshot",
             changed_keys=["memory_store", "graph_snapshot", "session_state"],
         )
+        memory_manager = getattr(runtime, "memory_manager", None)
+        storage = getattr(memory_manager, "_storage", None)
+        committed_projection = getattr(storage, "committed_tenant_projection", None)
+        committed_memory = committed_projection() if callable(committed_projection) else None
         session_state = dict(snapshot.get("session_state", {}) or {})
         if session_state:
             runtime.load_session_state_snapshot(deepcopy(session_state))
+        elif committed_memory is not None:
+            runtime.MEMORY_STORE = deepcopy(committed_memory)
         else:
             runtime.MEMORY_STORE = deepcopy(
                 dict(snapshot.get("memory_store", {}) or {}),
@@ -490,10 +496,15 @@ class PersistenceService(
 
         graph_snapshot = dict(snapshot.get("graph_snapshot", {}) or {})
         graph_manager = getattr(
-            getattr(runtime, "memory_manager", None),
+            memory_manager,
             "graph_manager",
             None,
         )
+        if committed_memory is not None:
+            if graph_manager is not None:
+                graph_manager.invalidate_projection_cache()
+                graph_manager.sync_graph_store(turn_context=None)
+            return
         backend = getattr(graph_manager, "_graph_store_backend", None) if graph_manager is not None else None
         replace_graph = getattr(backend, "replace_graph", None)
         if callable(replace_graph):

@@ -1,7 +1,8 @@
-import socket
 import base64
+import socket
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -11,6 +12,7 @@ uvicorn = pytest.importorskip("uvicorn")
 pytest.importorskip("fastapi")
 testclient = pytest.importorskip("fastapi.testclient")
 
+from dadbot.core.execution_contract import TurnResponse
 from dadbot_system import (
     DadBotOrchestrator,
     DadServiceClient,
@@ -21,7 +23,9 @@ from dadbot_system import (
     create_api_app,
 )
 from dadbot_system.contracts import ChatResponse, WorkerResult
+from dadbot_system.delegation import SQLiteDelegationStore
 from dadbot_system.security import ServiceTokenManager
+from dadbot_system.worker import DadBotTaskProcessor
 
 SERVICE_TOKEN_SECRET = "integration-service-token-secret"
 
@@ -33,6 +37,7 @@ def service_config(*, read_limit: int = 120, write_limit: int = 60, admin_limit:
                 "auth_required": True,
                 "token_secret": SERVICE_TOKEN_SECRET,
                 "token_issuer": "dadbot",
+                "authority_sqlite_path": ImmediateResultBroker.authority_path,
                 "max_requests_per_minute": read_limit,
                 "max_write_requests_per_minute": write_limit,
                 "max_admin_requests_per_minute": admin_limit,
@@ -79,16 +84,41 @@ def planner_debug_factory():
 
 
 class ImmediateResultBroker:
+    authority_path = ""
+
     def __init__(self):
         self.results = []
 
+    def append_executed(self, task, template):
+        class Bot:
+            def __init__(self, tenant_id):
+                self.config = type("Config", (), {"tenant_id": tenant_id})()
+                self.ACTIVE_MODEL = template.response.active_model
+
+            def load_session_state_snapshot(self, snapshot):
+                pass
+
+            async def execute_turn(self, request):
+                return TurnResponse(reply=template.response.reply, should_end=template.response.should_end)
+
+            def snapshot_session_state(self):
+                return template.session_state
+
+        processor = DadBotTaskProcessor(
+            service_config(), bot_factory=lambda *, model_name, tenant_id: Bot(tenant_id)
+        )
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            result = executor.submit(processor.process, task).result()
+        self.results.append(result)
+
     def enqueue(self, task):
         reply = f"Dad heard: {task.request.user_input}"
-        self.results.append(
+        self.append_executed(task,
             WorkerResult(
                 task_id=task.task_id,
                 session_id=task.session_id,
                 request_id=task.request.request_id,
+                tenant_id=task.tenant_id,
                 status="completed",
                 session_state={
                     "history": [
@@ -105,6 +135,7 @@ class ImmediateResultBroker:
                 response=ChatResponse(
                     session_id=task.session_id,
                     request_id=task.request.request_id,
+                    tenant_id=task.tenant_id,
                     reply=reply,
                     active_model=task.request.requested_model or "llama3.2",
                 ),
@@ -119,11 +150,12 @@ class ImmediateResultBroker:
 
 class MandatoryHaltBroker(ImmediateResultBroker):
     def enqueue(self, task):
-        self.results.append(
+        self.append_executed(task,
             WorkerResult(
                 task_id=task.task_id,
                 session_id=task.session_id,
                 request_id=task.request.request_id,
+                tenant_id=task.tenant_id,
                 status="completed",
                 session_state={
                     "history": [{"role": "assistant", "content": "unsafe raw output"}],
@@ -138,6 +170,7 @@ class MandatoryHaltBroker(ImmediateResultBroker):
                 response=ChatResponse(
                     session_id=task.session_id,
                     request_id=task.request.request_id,
+                    tenant_id=task.tenant_id,
                     reply="unsafe raw output",
                     active_model=task.request.requested_model or "llama3.2",
                 ),
@@ -158,11 +191,12 @@ class CountingBroker(ImmediateResultBroker):
 class SparseStateBroker(ImmediateResultBroker):
     def enqueue(self, task):
         reply = f"Dad heard: {task.request.user_input}"
-        self.results.append(
+        self.append_executed(task,
             WorkerResult(
                 task_id=task.task_id,
                 session_id=task.session_id,
                 request_id=task.request.request_id,
+                tenant_id=task.tenant_id,
                 status="completed",
                 session_state={
                     "history": [{"role": "assistant", "content": reply}],
@@ -170,11 +204,23 @@ class SparseStateBroker(ImmediateResultBroker):
                 response=ChatResponse(
                     session_id=task.session_id,
                     request_id=task.request.request_id,
+                    tenant_id=task.tenant_id,
                     reply=reply,
                     active_model=task.request.requested_model or "llama3.2",
                 ),
             )
         )
+
+
+@pytest.fixture(autouse=True)
+def integration_authority(tmp_path, monkeypatch):
+    path = str(tmp_path / "authority.sqlite")
+    SQLiteDelegationStore.initialize(path)
+    store = SQLiteDelegationStore(path, SERVICE_TOKEN_SECRET)
+    for subject in ("integration-client", "dadbot-client"):
+        for tenant in ("default", "family-a", "family-b"):
+            store.grant_membership(issuer="dadbot", subject=subject, tenant_id=tenant, scopes={"write"})
+    monkeypatch.setattr(ImmediateResultBroker, "authority_path", path)
 
 
 class FakeRuntimeBot:
@@ -393,6 +439,70 @@ def test_api_pulse_websocket_streams_vitals_and_thinking_state():
     assert initial["session_id"] == "pulse-session"
     assert updated["session_id"] == "pulse-session"
     assert updated["trust_meter"]["trust_level"] == 50
+
+
+def test_api_pulse_websocket_does_not_read_another_tenants_session():
+    from fastapi.testclient import TestClient
+
+    orchestrator = DadBotOrchestrator(
+        ImmediateResultBroker(),
+        state_store=InMemoryStateStore(),
+        planner_debug_factory=planner_debug_factory,
+    )
+    family_a = orchestrator.session("shared-session", "family-a")
+    family_b = orchestrator.session("shared-session", "family-b")
+    family_a.snapshot = lambda: {
+        "cognition_stream": [{"thought_trace": "family-a thought"}],
+        "last_reflection_summary": {"current_risk_level": "high", "marker": "family-a"},
+    }
+    family_b.snapshot = lambda: {
+        "cognition_stream": [{"thought_trace": "family-b thought"}],
+        "last_reflection_summary": {"current_risk_level": "low", "marker": "family-b"},
+    }
+    app = create_api_app(orchestrator, config=service_config())
+
+    with TestClient(app) as client:
+        payloads = {}
+        for tenant_id in ("family-a", "family-b"):
+            with client.websocket_connect(
+                "/v1/sessions/shared-session/pulse/stream",
+                headers=auth_headers(tenant_id=tenant_id),
+            ) as websocket:
+                payloads[tenant_id] = websocket.receive_json()
+
+    assert payloads["family-a"]["tenant_id"] == "family-a"
+    assert payloads["family-a"]["cognition_stream"][0]["thought_trace"] == "family-a thought"
+    assert payloads["family-a"]["reflection_summary"]["marker"] == "family-a"
+    assert payloads["family-b"]["tenant_id"] == "family-b"
+    assert payloads["family-b"]["cognition_stream"][0]["thought_trace"] == "family-b thought"
+    assert payloads["family-b"]["reflection_summary"]["marker"] == "family-b"
+
+
+def test_api_refuses_auth_off_in_production(monkeypatch):
+    monkeypatch.setenv("DADBOT_ENVIRONMENT", "production")
+    config = ServiceConfig.from_dict({"security": {"auth_required": False}})
+    orchestrator = DadBotOrchestrator(
+        ImmediateResultBroker(),
+        state_store=InMemoryStateStore(),
+        planner_debug_factory=planner_debug_factory,
+    )
+
+    with pytest.raises(RuntimeError, match="cannot be disabled in production"):
+        create_api_app(orchestrator, config=config)
+
+
+def test_api_allows_auth_off_in_development(monkeypatch):
+    monkeypatch.setenv("DADBOT_ENVIRONMENT", "development")
+    config = ServiceConfig.from_dict({"security": {"auth_required": False}})
+    orchestrator = DadBotOrchestrator(
+        ImmediateResultBroker(),
+        state_store=InMemoryStateStore(),
+        planner_debug_factory=planner_debug_factory,
+    )
+
+    app = create_api_app(orchestrator, config=config)
+
+    assert app is not None
 
 
 def test_api_spatial_websocket_relays_text_and_audio_payload():
@@ -810,6 +920,24 @@ def test_api_rejects_tenant_mismatch():
         )
 
     assert response.status_code == 403
+
+
+def test_api_rejects_noncanonical_principal_before_submission():
+    from fastapi.testclient import TestClient
+
+    broker = ImmediateResultBroker()
+    orchestrator = DadBotOrchestrator(broker, state_store=InMemoryStateStore())
+    app = create_api_app(orchestrator, config=service_config())
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/sessions/shared/chat",
+            json={"user_input": "hello", "tenant_id": "family/a"},
+            headers=auth_headers(tenant_id="family-a"),
+        )
+
+    assert response.status_code == 403
+    assert not broker.results
 
 
 def test_api_rate_limits_repeated_write_requests():
