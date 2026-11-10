@@ -37,9 +37,22 @@ jobs:
           uv sync --locked --extra dev --extra service --extra mcp
           echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
 
+      - name: Provision restricted integration-test role and pgvector
+        env:
+          PGPASSWORD: ${{ secrets.POSTGRES_PASSWORD != '' && secrets.POSTGRES_PASSWORD || 'dadbot_ci_ephemeral' }}
+        run: |
+          psql --host=127.0.0.1 --username=dadbot --dbname=dadbot \
+            --set=ON_ERROR_STOP=1 --set=test_password="$PGPASSWORD" <<'SQL'
+          CREATE EXTENSION IF NOT EXISTS vector;
+          CREATE ROLE dadbot_test LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE PASSWORD :'test_password';
+          GRANT USAGE, CREATE ON SCHEMA public TO dadbot_test;
+          SQL
+
       - name: Run live PGVector integration test
         env:
-          DADBOT_TEST_POSTGRES_DSN: postgresql://dadbot:${{ secrets.POSTGRES_PASSWORD != '' && secrets.POSTGRES_PASSWORD || 'dadbot_ci_ephemeral' }}@127.0.0.1:5432/dadbot
+          PGPASSWORD: ${{ secrets.POSTGRES_PASSWORD != '' && secrets.POSTGRES_PASSWORD || 'dadbot_ci_ephemeral' }}
+          DADBOT_TEST_POSTGRES_DSN: host=127.0.0.1 port=5432 dbname=dadbot user=dadbot_test
+          DADBOT_TENANT_ID: t1_aaaaaaaaaaaaaaaaaaaaaaaaaa
         run: python -m pytest -q tests/test_semantic_pgvector_integration.py
 
       - name: Run deterministic memory quality checks
