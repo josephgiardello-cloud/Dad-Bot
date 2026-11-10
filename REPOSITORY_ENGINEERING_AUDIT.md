@@ -2,8 +2,8 @@
 
 **Inspection date:** 2026-11-09; follow-up verification: 2026-11-10
 **Mode:** Repository audit plus bounded follow-up implementation
-**Scope:** Current checkout, including uncommitted changes
-**Verdict:** The latest worktree and clean-clone `tests/unit` runs are green; an immediately preceding worktree run reproduced the characterized intermittent checkpoint/cache failure. Multiple product surfaces and release gates remain incomplete. Overall status is **PARTIAL**; this is not a production-readiness certification.
+**Scope:** Committed remediation branch, with final code verification at `bfca2d2` on 2026-11-10
+**Verdict:** The final worktree and clean-clone `tests/unit` runs pass; the checkpoint/cache failure was reproduced, traced to a mutating snapshot timestamp, and corrected. Multiple product surfaces and release gates remain incomplete. Overall status is **PARTIAL**; this is not a production-readiness certification.
 
 ## A. Executive engineering assessment
 
@@ -11,13 +11,13 @@ Dad-Bot is a Python 3.13 conversational assistant with a Streamlit user interfac
 
 The engineering risk is the gap between this architectural breadth and demonstrated, user-facing completeness:
 
-- The working tree is materially modified. Findings describe this checkout and cannot be attributed to a clean commit baseline.
-- The original inspection collected 4,336 tests. The latest post-push worktree run and the clean-clone run each completed with **1,961 passed, 10 skipped, 0 failed**. An immediately preceding worktree run had **1 failed, 1,960 passed, and 10 skipped** in the known source-grounding checkpoint/cache test; this intermittent failure is characterized but its underlying cause remains open. The phase-isolated staged Phase 0 run was also red (**50 failed, 1,856 passed, 10 skipped**), showing the increments are not independently green.
+- The original inspection collected 4,336 tests. After the snapshot-race correction, both the worktree and a fresh clone of pushed code at `bfca2d2` completed `tests/unit` with **1,962 passed, 10 skipped, 0 failed**. The clean-clone run used an isolated `%TEMP%` basetemp.
+- The staged Phase 0-only snapshot was red (**50 failed, 1,856 passed, 10 skipped**) because it omitted production and test-support prerequisites included in later increments. The combined Phase 0–3 commit remains the verification unit; Phase 0 was not independently green.
 - Runtime composition is split across launchers, control planes, kernel services, and several persistence authorities. Some integrated features coexist with simpler stubs or alternate paths.
 - The model path is effectively Ollama-only; several advertised tool and voice capabilities are not end-to-end product workflows; retrieval can degrade to empty results.
 - Operational checks are weaker than the system complexity warrants: `/health` is liveness-only; `/ready` covers state, authority, workers, and opt-in model/vector probes, but coverage thresholds are absent and the CI Ruff gate is narrow.
 
-No P0 issue was established in the original audit. The source-grounding checkpoint/cache failure remains intermittent: ten fixed-order trials did not reproduce it; one full worktree run reproduced it; the next full worktree run and the clean-clone run passed. The underlying divergence cause remains unlocated and is tracked as open.
+No P0 issue was established in the original audit. The source-grounding checkpoint/cache failure was reproduced during follow-up isolation. `sync_active_thread_snapshot()` advanced `chat_threads[].updated_at` on every snapshot, and a stale `RuntimeStateManager` override bypassed the corrected mixin implementation. The override was removed so snapshot synchronization is idempotent; the focused regressions and final worktree/clean-clone suites pass. The exact tracebacks, search procedure, and pre-/post-fix results are recorded below.
 
 ## Roadmap execution update
 
@@ -29,7 +29,7 @@ are independently reproducible.
 
 | Phase | Status |
 |---|---|
-| 0 — Baseline | The stale-contract updates retain their intended assertions and the tenant-qualified snapshot fix remains covered. However, the staged Phase 0-only full-unit run was red (50 failed, 1,856 passed, 10 skipped) because it omitted prerequisites and production/test-support changes from later increments. The phase-isolated commit is therefore not independently green; the combined state is the verification unit. The source-grounding/checkpoint failure remains open. |
+| 0 — Baseline | The stale-contract updates retain their intended assertions and the tenant-qualified snapshot fix remains covered. The staged Phase 0-only full-unit run was red (50 failed, 1,856 passed, 10 skipped) because it omitted prerequisites and production/test-support changes from later increments. The phase-isolated commit is therefore not independently green; the combined state is the verification unit. The later checkpoint timestamp race was corrected in the follow-up commits described below. |
 | 1 — Runtime composition | Three bounded increments verified. `launch.py`, `Dad.py`, and `api_entrypoint.py` converge on `dadbot.app_runtime.main`; an import-linter contract forbids `app_runtime` from importing `dadbot.runtime.launcher`. `/health` is liveness; `/ready` checks state/authority dependencies, worker status, and optionally model/vector probes. Authenticated workers quarantine during authority outage, hold already-dequeued work, and resume after recovery with capped backoff. Model/vector readiness remains opt-in and does not change current Compose behavior. Broader database-failure recovery and task/WAL/effect durability mapping remain open. |
 | 2 — Tool capability truthfulness | Two bounded increments verified. The authorized durable `set_reminder` workflow remains available; fake reminder/calendar/web-search defaults were removed from the legacy registries. Registry/planner, kernel replay, and MCP execution remain disjoint. |
 | 3 — AI and memory | Implemented and focused-verified. Configured context is now sent exactly; test doubles match the runtime contract; retrieval-only APIs fail explicitly on partial/degraded results; turn status, optional memory-backend readiness, and bounded `/doctor` counts expose retrieval health. SQLite and PostgreSQL semantic-index connections can be probed; graph persistence and non-semantic memory projections remain unprobed. |
@@ -124,8 +124,9 @@ the result; rerunning the command recreates them.
     tenant projection; one observed a stale value and another found no mirror
     file. The intended mirror guarantee needs a decision grounded in the
     durability contract before changing code.
-  - **Order-sensitive failure still open:** the source-grounding approval and
-    revocation cache test passed in the isolated 26-test file run but failed
+  - **Order-sensitive failure observed during the original audit:** the
+    source-grounding approval and revocation cache test passed in the isolated
+    26-test file run but failed
     in the full run during strict SaveNode finalization with memory-authority
     divergence. Repeating
     `.\.venv\Scripts\pytest.exe --basetemp=.pytest_tmp_source_cache_triage_N -o addopts='' -q tests\unit\test_source_grounding.py::test_canonical_approval_and_revocation_invalidate_repeated_prompt_cache`
@@ -719,11 +720,11 @@ Verification:
   due to a missing `occurred_at` in a divergence-checkpoint envelope. The
   same test failed once in isolation and passed in a fresh isolated rerun.
   The final full-unit rerun passed **1,951 passed, 10 skipped, 0 failed** in
-  265.33 seconds. This pre-existing checkpoint/cache flake remains open and
-  was not changed in this worker increment.
-- The canonical-runtime import-linter contract remains **KEPT**. The complete
-  import-linter command still exits nonzero for two API-to-telemetry
-  violations in the existing `/doctor` trace-provider path.
+  265.33 seconds. The failure was investigated and corrected in the later
+  follow-up recorded below.
+- At this increment, the canonical-runtime import-linter contract was
+  **KEPT**; a later clean-clone `lint-imports --no-cache` run kept all five
+  current contracts with zero broken contracts and exit code 0.
 - Ruff `--select I,F` passed on the touched worker/contracts/test paths.
   `--select E501` still reports two existing long lines in
   `dadbot_system/worker.py:231` and `tests/test_service_api_integration.py:1304`;
@@ -732,8 +733,71 @@ Verification:
   `tests/unit/test_durable_submission_authority.py:670`; this increment did
   not touch that line. Other changed paths pass the whitespace check.
 
-No tool-spine consolidation was included. Full Phase 1 remains in progress;
-this is a dirty-checkout result, not clean-commit attribution.
+No tool-spine consolidation was included. Full Phase 1 remains in progress.
+The preceding increment-specific evidence was collected on a materially
+modified checkout; the follow-up results below are from pushed commits and a
+fresh clone.
+
+### Post-push checkpoint/cache race characterization and correction
+
+The source-grounding failure was not a stale test or merely an order-dependent
+fixture. A fresh-clone search with `--maxfail=1 -p no:randomly` completed five
+full-suite trials, each passing **1,961 tests with 10 skipped**; trial 6 failed
+after 1,425 passes and 4 skips in the unparameterized
+`test_canonical_approval_and_revocation_invalidate_repeated_prompt_cache`.
+Running that exact test alone passed three times and failed on the fourth,
+showing that a preceding test was not required. Earlier ten fixed-order trials
+had also passed before the race was captured. A later clean-clone full run
+before the live-path correction failed in the separate, also unparameterized
+`test_canonical_source_turns_make_no_model_or_embedding_calls`; its exact
+focused rerun then passed.
+
+Both `occurred_at missing or invalid in divergence checkpoint envelope`
+tracebacks were secondary errors synthesized while handling strict
+finalization. The diagnostic captures showed a single authority-state
+difference: `session_state.chat_threads[0].updated_at` was one second later in
+the projected snapshot (`12:41:57` versus `12:41:56` in the first capture;
+`13:11:19` versus `13:11:18` in the second). The second failure occurred before
+the final correction and has the same root cause, not a separate malformed
+checkpoint. The sibling
+`test_source_store_failure_releases_scheduler_and_allows_retry` is parameterized
+as `[OSError]` and `[sqlite3.OperationalError]`; its earlier
+`[sqlite3.OperationalError]` failure was separate, and both parameterizations
+passed its exact isolated rerun.
+
+The producer was `sync_active_thread_snapshot()`, which advanced `updated_at`
+on every snapshot even when the thread contents had not changed. The first
+follow-up changed the mixin, but a stale duplicate override in
+`RuntimeStateManager` (`dadbot/state.py`) still routed the live path through
+the unconditional update. The next follow-up removed that override so the
+manager inherits the idempotent mixin implementation. The unit regression
+uses an advancing timestamp sequence: a changed snapshot advances the value,
+and the immediately following unchanged snapshot preserves it. No divergence
+checks or assertions were weakened.
+
+Before the live-path correction, ten isolated runs of the source-turn test
+passed; the complete source-grounding file passed four times before the fifth
+run reproduced the cache test while still on the incomplete override path.
+After the live-path correction, the focused timestamp/source-grounding
+selection passed **3 tests**. The final worktree full-unit run and a fresh
+clone of pushed code at `bfca2d2` each
+passed **1,962 tests, 10 skipped, 0 failed**. `lint-imports --no-cache` on that
+clone analyzed 528 files and 963 dependencies; all **5 contracts were kept,
+0 broken**, exit code 0. This verifies the current code state; it does not
+prove that no unrelated intermittent failure can occur in future runs.
+
+Provenance: the original program used the requested single combined Phase 0–3
+commit shape (`cb872050`), followed by the post-push audit reconciliation
+(`a9d89b26`). The first timestamp follow-up (`982fd65f`) changed only the
+mixin and did not reach the live override; the corrective follow-up
+(`cea9b0d1`) removed that override. A separate remote CI commit
+(`cfcef37f`) arrived during the push attempt and was merged without rewriting
+history; the final code verification was at merge commit `bfca2d2c`. The
+temporary `.audit_commit_inventory.txt` was a scratch classification snapshot,
+not an authoritative inventory manifest, and was discarded. No original
+manifest of the pre-program 71-modified/2-deleted/10-untracked state was
+available, so those historical counts cannot be independently attributed to
+specific paths from provenance artifacts.
 
 ### Memory JSON persistence contract
 
@@ -1139,7 +1203,7 @@ tenantless replay events.
 
 | Priority | Finding and evidence | Why it matters / affected paths | Confidence | Recommended correction |
 |---|---|---|---|---|
-| **P1 — Phase 0 stale-contract work closed; separate intermittent test remains open** | Original unit baseline was 80 failed / 1,860 passed / 10 skipped; the stale-contract baseline was 33 failed / 1,918 passed / 10 skipped. Phase 1 full runs include a final green 1,951 passed / 10 skipped run and one run with a failure in `test_canonical_approval_and_revocation_invalidate_repeated_prompt_cache`; the isolated case failed once and passed once. The failure reports a malformed divergence checkpoint missing `occurred_at`. | Dirty-checkout attribution; issue is not caused or altered by the Phase 1 worker changes, but current stability is not deterministic. | High that intermittent failure occurred; cause unknown | Keep Phase 0 disposition; separately diagnose the checkpoint envelope/order behavior if it recurs. |
+| **P1 — Phase 0 stale-contract work closed; checkpoint timestamp race corrected** | Original unit baseline was 80 failed / 1,860 passed / 10 skipped; the stale-contract baseline was 33 failed / 1,918 passed / 10 skipped. The cache and source-turn tests intermittently failed during strict SaveNode finalization. Captures isolated a one-second difference in `chat_threads[].updated_at`; the error text about missing `occurred_at` was secondary. Snapshot synchronization is now idempotent on the live `RuntimeStateManager` path, with an advancing-clock regression. Final worktree and clean-clone runs each pass 1,962 tests with 10 skipped. | Thread snapshots no longer mutate their timestamp during an unchanged read. The Phase 0-only staged snapshot remains red because it omits later-increment prerequisites; the combined remediation is the verification unit. | High for captured root cause and covered fix; finite passing runs cannot rule out unrelated future flakes | Keep the strict divergence check and the new regression; investigate any future divergence from its captured diff rather than weakening the comparison. |
 | **P1 — worker quarantine path implemented; durability limits remain** | Authenticated workers transition `available → quarantined → unavailable` on repeated authority-poll failures, apply capped exponential backoff, hold a dequeued task across transient outages, and resume the same identity after recovery. Tests cover before-effect recovery, post-commit execution-ledger replay, authority flapping, worker aggregation, and `/ready` status codes. | Revoked/invalid delegations are not retried as transient outages. A process crash while holding a task relies on durable startup recovery; ambiguous in-flight effects remain subject to the existing execution-ledger replay/ambiguity contract. | High for covered local worker and readiness behaviors; not a distributed queue guarantee | Preserve these tests; separately validate durable recovery after worker process termination and external side-effect ambiguity before claiming exactly-once behavior. |
 | **P2 — Phase 1 readiness expanded; external probes opt-in** | `/health` remains liveness. `/ready` checks state store, authenticated authority store, and worker status; it now has cached, timeout-bounded opt-in Ollama model-name and vector endpoint probes. Disabled probes report `unprobed`; probe details contain timestamp and error type only. Tests cover success, timeout, cache serialization, environment configuration, and required model up/down/up transitions. | Default behavior stays compatible. Deployments can require configured model/vector checks before HTTP 200 without changing authority/quarantine semantics. Compose still does not opt in. | High for local/injected probe semantics; external Ollama, PostgreSQL vector, and HTTP vector service reachability were not tested live | Recommend `DADBOT_READINESS_PROBES=model` and `DADBOT_READINESS_REQUIRED=model` where model availability is required; add `vector` only when `DADBOT_VECTOR_STORE_URL` is part of the serving path. Do not change Compose defaults until deployment-specific endpoint and startup policy are agreed. |
 | **P2 — truthful defaults resolved; unification remains open** | Placeholder `reminder`, `calendar`, and `web_search` entries were removed from both default legacy registries. Surface/negative tests verify they are not registered or advertised and cannot execute; the separate authorized `set_reminder` regression remains covered. The service planner, kernel record/replay, and MCP plan loop are still disjoint. | Before removal, model/caller selection could produce success-shaped results without an effect and without approval, authority, or audit. Remaining disjoint paths can still have different semantics. | High for the removed defaults and covered reminder flow; medium-high for cross-path differences | Keep the placeholder surfaces absent. Unify the distinct paths only in a dedicated increment with explicit authorization, audit, replay, and compatibility contracts. |
@@ -1259,13 +1323,14 @@ Phases 2 and 3 can proceed in parallel after the execution contract is stable; P
 
 ## J. Evidence, exclusions, and limitations
 
-- This report describes the checkout at HEAD `6616ed01` (`2026-11-09`) plus the current working tree. It is not an assessment of the commit alone.
-- The worktree had 71 modified tracked paths, 2 deleted tracked files, and 10 untracked files at inspection. Tracked diff was approximately 4,588 additions and 1,229 deletions. The audit did not clean, stage, revert, or otherwise alter those changes.
+- The original audit described HEAD `6616ed01` (`2026-11-09`). The remediation program retained the selected Option C shape: one combined Phase 0–3 commit (`cb872050`), followed by an audit reconciliation (`a9d89b26`) and the timestamp-race follow-ups listed above. The final code at pushed HEAD `bfca2d2c` was checked from a fresh clone; the later audit amendment changes documentation only.
+- The original audit reported 71 modified tracked paths, 2 deleted tracked files, and 10 untracked files, with approximately 4,588 additions and 1,229 deletions. No contemporaneous inventory manifest was available to verify those path classifications. `.audit_commit_inventory.txt` was a temporary classification scratch snapshot, not authoritative provenance, and was discarded; the historical counts are retained as reported, not independently attributed.
+- On the pushed code at `bfca2d2c`, isolated-basetemp `tests/unit` completed with **1,962 passed, 10 skipped, 0 failed** in both the worktree and a fresh clone. A single `lint-imports --no-cache` run in that clone analyzed 528 files and 963 dependencies; it reported **5 kept, 0 broken** and exited 0. Earlier phase-specific results below are historical snapshots, not the final verification result.
 - No `.env` or credential contents were read. Secret/config values and private test data were excluded.
 - The unit suite’s final valid run used an isolated temporary directory. Earlier invalid harness attempts are not included in pass/fail totals.
 - Live PostgreSQL/Redis results are from the immediately preceding integration work and existing audit record, not a fresh service run in this audit. The disposable services were stopped.
 - The audit used source/test inspection and targeted tooling; it did not inspect every line of all 1,048 tracked Python files. Major execution paths and major subsystem evidence were sampled with bounded read-only exploration. External integrations, every MCP permission branch, deployment against production-like infrastructure, performance/load, and full Windows operations remain unverified.
-- Findings about test failures are observed outcomes, not proven production root causes. Root-cause attribution requires Phase 0.
+- The checkpoint timestamp failure was root-caused and corrected as described above. No live PostgreSQL or Redis startup/recovery, live model/vector outage, embedding-quality readiness, or production-like deployment was exercised. Graph/non-semantic memory remains unprobed, and voice/VAD/barge-in, PWA/service-worker behavior, Docker profile split/root entrypoint, coverage/type gates, and the multi-authority persistence contract remain open Phase 4/5 work.
 - At the time of the original audit, no source, test, configuration, migration,
   or existing audit/specification file was changed to produce its findings.
   Section K is a later follow-up that updates this report and the MCP
