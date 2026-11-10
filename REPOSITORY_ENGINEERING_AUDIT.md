@@ -3,7 +3,7 @@
 **Inspection date:** 2026-11-09; follow-up verification: 2026-11-10
 **Mode:** Repository audit plus bounded follow-up implementation
 **Scope:** Current checkout, including uncommitted changes
-**Verdict:** The latest full `tests/unit` run in this dirty checkout had one intermittent failure; the immediately preceding complete run was green. Multiple product surfaces and release gates remain incomplete. Overall status is **PARTIAL**; this is not a production-readiness certification.
+**Verdict:** The latest worktree and clean-clone `tests/unit` runs are green; an immediately preceding worktree run reproduced the characterized intermittent checkpoint/cache failure. Multiple product surfaces and release gates remain incomplete. Overall status is **PARTIAL**; this is not a production-readiness certification.
 
 ## A. Executive engineering assessment
 
@@ -12,12 +12,12 @@ Dad-Bot is a Python 3.13 conversational assistant with a Streamlit user interfac
 The engineering risk is the gap between this architectural breadth and demonstrated, user-facing completeness:
 
 - The working tree is materially modified. Findings describe this checkout and cannot be attributed to a clean commit baseline.
-- The original inspection collected 4,336 tests. A complete worktree run passed **1,960 tests, with 10 skipped**; a later complete run had **1 failed, 1,960 passed, and 10 skipped** because the characterized source-grounding checkpoint/cache flake recurred. The phase-isolated staged Phase 0 run was also red (**50 failed, 1,856 passed, 10 skipped**), showing the increments are not independently green.
+- The original inspection collected 4,336 tests. The latest post-push worktree run and the clean-clone run each completed with **1,961 passed, 10 skipped, 0 failed**. An immediately preceding worktree run had **1 failed, 1,960 passed, and 10 skipped** in the known source-grounding checkpoint/cache test; this intermittent failure is characterized but its underlying cause remains open. The phase-isolated staged Phase 0 run was also red (**50 failed, 1,856 passed, 10 skipped**), showing the increments are not independently green.
 - Runtime composition is split across launchers, control planes, kernel services, and several persistence authorities. Some integrated features coexist with simpler stubs or alternate paths.
 - The model path is effectively Ollama-only; several advertised tool and voice capabilities are not end-to-end product workflows; retrieval can degrade to empty results.
 - Operational checks are weaker than the system complexity warrants: `/health` is liveness-only; `/ready` covers state, authority, workers, and opt-in model/vector probes, but coverage thresholds are absent and the CI Ruff gate is narrow.
 
-No P0 issue was established in the original audit. The source-grounding checkpoint/cache failure remains intermittent: ten fixed-order trials did not reproduce it, but a subsequent complete worktree run did. The underlying divergence cause remains unlocated and is tracked as open.
+No P0 issue was established in the original audit. The source-grounding checkpoint/cache failure remains intermittent: ten fixed-order trials did not reproduce it; one full worktree run reproduced it; the next full worktree run and the clean-clone run passed. The underlying divergence cause remains unlocated and is tracked as open.
 
 ## Roadmap execution update
 
@@ -551,10 +551,18 @@ the API now uses the runtime-signals adapter, and the complete current
 import-linter result is clean.
 
 The latest complete worktree unit result for this finalization pass is the
-intermittent red run above. The immediately preceding full run was
-**1,960 passed, 10 skipped, 0 failed**. The post-push clean-clone result must
-be recorded separately and must match the audit's stated committed baseline
-before the remediation can be considered reproducible.
+green rerun: **1,961 passed, 10 skipped, 0 failed** in 285.62 seconds.
+The preceding worktree run was red only in
+`tests/unit/test_source_grounding.py::test_canonical_approval_and_revocation_invalidate_repeated_prompt_cache`,
+with **1 failed, 1,960 passed, and 10 skipped**. This is the already
+characterized order-dependent checkpoint/cache flake, not a new
+worktree-only failure. The post-push clean clone at commit
+`cb8720501cabc07c247d6cd832e9f90cc0fb581a` also completed with **1,961
+passed, 10 skipped, 0 failed** in 258.70 seconds, and import-linter reported
+**5 kept, 0 broken** (528 files, 963 dependencies). Thus the latest worktree
+and clean-clone outcomes agree; the earlier difference is reconciled as the
+known intermittent flake resurfacing. The clean-clone result is the
+authoritative artifact for the pushed commit.
 
 The combined commit leaves the following Phase 4/5 work explicitly open:
 voice/VAD/barge-in completion; PWA/service-worker behavior; Docker profile
