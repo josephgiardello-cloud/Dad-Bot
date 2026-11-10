@@ -181,6 +181,35 @@ def test_configured_customer_store_fails_closed_on_initialization_error(monkeypa
     assert isinstance(exc.value.__cause__, OSError)
 
 
+@pytest.mark.parametrize(
+    ("backend", "factory_name", "expected_error"),
+    [
+        ("redis", "RedisStateStore", "Configured Redis state store"),
+        ("postgres", "PostgresStateStore", "Configured Postgres state store"),
+    ],
+)
+def test_configured_service_store_fails_closed_on_initialization_error(
+    monkeypatch, backend, factory_name, expected_error
+):
+    persistence = SimpleNamespace(
+        redis_url="configured" if backend == "redis" else "",
+        postgres_dsn="configured" if backend == "postgres" else "",
+        sqlite_path="",
+        session_table="sessions",
+        task_table="tasks",
+        event_table="events",
+    )
+    monkeypatch.setenv("DADBOT_ENVIRONMENT", "development")
+
+    def fail_store(*_args, **_kwargs):
+        raise OSError("database unavailable")
+
+    monkeypatch.setattr(app_runtime, factory_name, fail_store)
+    with pytest.raises(RuntimeError, match=expected_error) as exc:
+        app_runtime.build_service_state_store(SimpleNamespace(persistence=persistence))
+    assert isinstance(exc.value.__cause__, OSError)
+
+
 def test_production_vector_memory_does_not_use_noop_fallback(monkeypatch):
     from dadbot.services import vector_memory
 
@@ -224,8 +253,8 @@ def test_runtime_state_bundle_persists_state_and_events_with_tenant_namespace():
 
     bundle["container"].update(lambda state: setattr(state, "session_summary", "Persisted"), reason="test")
 
-    assert store.load_session_state("tenant:family-a:dadbot-runtime")["session_summary"] == "Persisted"
-    events = store.list_events("tenant:family-a:dadbot-runtime")
+    assert store.owned_sessions.load_session_state("family-a", "dadbot-runtime")["session_summary"] == "Persisted"
+    events = store.owned_sessions.list_events("family-a", "dadbot-runtime")
     assert len(events) == 1
     assert events[0]["event_type"] == "state.updated"
     assert subscriber.get_nowait().event_id == events[0]["event_id"]

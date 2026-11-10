@@ -52,10 +52,27 @@ push or merge was performed.
 | Audit updates | `b46a4040676585db1fb6868bd9f5ac6d18fcfcb6` | `TENANT_EXECUTION_PATH_AUDIT.md` |
 | Carried-forward pre-existing WIP (not tenant remediation) | `ef28cc66c6ca109cc138f03d50ba58585182afc5` | `DURABLE_MEMORY_IMPLEMENTATION_STATUS.md`, `ENGINEERING_INVARIANTS_AUDIT.md`, `README.md`, `TENANT_AUTHORITY_ARCHITECTURE_SPEC.md`, `dadbot/app_runtime.py`, `dadbot/base/_memory_lifecycle_mixin.py`, `dadbot/base/_memory_search_mixin.py`, `dadbot/core/boot_mixin.py`, `dadbot/core/compaction.py`, `dadbot/core/durability.py`, `dadbot/core/execution_ledger.py`, `dadbot/core/fault_injection.py`, `dadbot/core/ledger_backend.py`, `dadbot/core/orchestrator.py`, `dadbot/core/postgres_ledger_backend.py`, `dadbot/core/snapshot_engine.py`, `dadbot/core/tenant_memory_ledger.py`, `dadbot/core/tool_executor.py`, `dadbot/core/tool_registry.py`, `dadbot/core/turn_mixin.py`, `dadbot/managers/memory_coordination.py`, `dadbot/memory/graph_manager.py`, `dadbot/memory/graph_views.py`, `dadbot/memory/manager.py`, `dadbot/memory/normalizers.py`, `dadbot/memory/semantic_manager.py`, `dadbot/memory/storage.py`, `dadbot/services/persistence.py`, `dadbot/state.py`, `dadbot_system/__init__.py`, `dadbot_system/api.py`, `dadbot_system/client.py`, `dadbot_system/orchestration.py`, `dadbot_system/owned_sqlite_tasks.py`, `dadbot_system/semantic_index.py`, `dadbot_system/state.py`, `dadbot_system/worker.py`, `docs/system_contract_map.md`, `tests/conftest.py`, `tests/integration/test_postgres_execution_ledger.py`, `tests/persistence_test.py`, `tests/test_config_drift.py`, `tests/test_determinism_capability_receipts.py`, `tests/test_durable_execution.py`, `tests/test_memory_manager.py`, `tests/test_phase4a_adversarial_collapse.py`, `tests/test_phase4a_fixed.py`, `tests/test_production_hardening_wave3.py`, `tests/test_production_hardening_wave4.py`, `tests/test_service_api_integration.py`, `tests/test_service_architecture.py`, `tests/test_service_websocket_tickets.py`, `tests/unit/test_authenticated_wal_boundary.py`, `tests/unit/test_control_plane_ledger_bounds.py`, `tests/unit/test_delegated_memory_boundary.py`, `tests/unit/test_durable_submission_authority.py`, `tests/unit/test_execution_ledger_boot_order.py`, `tests/unit/test_lifecycle_checkpoint_failures.py`, `tests/unit/test_local_authority_mutation_application.py`, `tests/unit/test_local_tenant_establishment_application.py`, `tests/unit/test_memory_authority_application.py`, `tests/unit/test_memory_snapshot_write_guard.py`, `tests/unit/test_owned_sqlite_tasks.py`, `tests/unit/test_semantic_index_repair_failures.py`, `tests/unit/test_snapshot_tail_recovery.py`, `tests/unit/test_sqlite_service_state.py`, `tests/unit/test_tenant_memory_ledger.py`, `tests/unit/test_tenant_memory_restore_authority.py`, `tests/unit/test_tool_registry.py`, `tests/unit/test_wal_recovery_integrity.py`, `uv.lock` |
 
-`.gitignore` was deliberately not included in the seven commits; it remains a
-pre-existing local modification. B1–B4, the Phase 3 inventory, and subsequent
-audit updates are separate uncommitted changes. Do not amend the seven
-commits or push/merge.
+`.gitignore` was deliberately not included in the original seven commits.
+B1–B4 and the initial Phase 3 inventory were recorded in the later
+`6616ed01` follow-up commit. Subsequent Stage 1 changes are separate from
+both sets. Do not amend the original seven commits or push/merge.
+
+### Subsequent local follow-up commits
+
+The original seven-set split was followed by two local commits. They were not
+replayed or amended:
+
+| Commit | Set | Files |
+|---|---|---|
+| `5273599567e97cd99ec63748d9978f0522c6f6fd` | Resource-bounded suite and B2 trimming deferral | `TENANT_EXECUTION_PATH_AUDIT.md`, `docs/decisions/checkpoint-trimming-deferral.md`, `tests/test_scheduler_lifecycle_hardening.py` |
+| `6616ed0179d4f64e1e77b8634894d7eb56b3f0a8` | Carried-forward durability/config work, explicitly separate from tenant wiring | `.env.production.example`, `.github/workflows/phase4-capability-validation.yml`, `.gitignore`, `ci/production_env_check.py`, `dadbot/core/boot_mixin.py`, `dadbot/core/canonical_event.py`, `dadbot/core/otel_bridge.py`, `dadbot/core/postgres_ledger_backend.py`, `dadbot/core/trace_export.py`, `dadbot/memory/storage.py`, `dadbot_system/state.py`, `docker-compose.yml`, `docs/decisions/branch-commit-plan.md`, `docs/decisions/phase3-scope-inventory.md`, `docs/decisions/postgres-authenticated-boot.md`, `tests/unit/test_authenticated_postgres_boot.py`, `tests/unit/test_projection_status_durability.py` |
+
+Commit `6616ed01` has an explicit provenance body identifying its changes as
+carried-forward WIP and excluding them from Phase 2 tenant-context wiring and
+Phase 3 tenant scoping. No additional carried-forward source set is present
+in the current Stage 1 diff; generated `.phase32-test-data/` is ignored, not
+committed. The current Stage 1 implementation and documentation changes are
+reviewed and committed separately.
 
 ## Reproducible command record
 

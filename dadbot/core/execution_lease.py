@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from dadbot.core.tenant_session import resolve_tenant_id
+
 
 class LeaseConflictError(RuntimeError):
     """Raised when a different worker already owns the active lease."""
@@ -38,8 +40,8 @@ class ExecutionLease:
         self.default_ttl_seconds = float(
             default_ttl_seconds or self.DEFAULT_TTL_SECONDS,
         )
-        self._leases: dict[str, dict[str, Any]] = {}
-        self._fencing_counters: dict[str, int] = {}
+        self._leases: dict[tuple[str, str], dict[str, Any]] = {}
+        self._fencing_counters: dict[tuple[str, str], int] = {}
         self._lock = threading.RLock()
 
     def _normalize_session(self, session_id: str) -> str:
@@ -47,6 +49,9 @@ class ExecutionLease:
         if not sid:
             raise ValueError("session_id must be non-empty")
         return sid
+
+    def _identity(self, session_id: str, tenant_id: str | None = None) -> tuple[str, str]:
+        return resolve_tenant_id(tenant_id, default_tenant_id="default"), self._normalize_session(session_id)
 
     def _expired(self, lease: dict[str, Any], now: float) -> bool:
         return float(lease.get("expires_at", 0.0) or 0.0) <= now
@@ -56,14 +61,17 @@ class ExecutionLease:
         session_id: str,
         owner_id: str,
         ttl_seconds: float | None = None,
+        *,
+        tenant_id: str | None = None,
     ) -> dict[str, Any]:
-        sid = self._normalize_session(session_id)
+        tenant, sid = self._identity(session_id, tenant_id)
+        identity = (tenant, sid)
         owner = str(owner_id or "").strip() or "worker"
         ttl = float(ttl_seconds or self.default_ttl_seconds)
         now = time.monotonic()
 
         with self._lock:
-            current = self._leases.get(sid)
+            current = self._leases.get(identity)
             if current and not self._expired(current, now):
                 current_owner = str(current.get("owner_id") or "")
                 if current_owner and current_owner != owner:
@@ -75,12 +83,13 @@ class ExecutionLease:
                 token = int(current.get("fencing_token") or 1)
                 lease_id = str(current.get("lease_id") or f"lease-{uuid4().hex}")
             else:
-                token = int(self._fencing_counters.get(sid, 0)) + 1
-                self._fencing_counters[sid] = token
+                token = int(self._fencing_counters.get(identity, 0)) + 1
+                self._fencing_counters[identity] = token
                 lease_id = f"lease-{uuid4().hex}"
 
             lease = {
                 "session_id": sid,
+                "tenant_id": tenant,
                 "owner_id": owner,
                 "lease_id": lease_id,
                 "ttl_seconds": ttl,
@@ -88,7 +97,7 @@ class ExecutionLease:
                 "expires_at": now + max(0.001, ttl),
                 "fencing_token": token,
             }
-            self._leases[sid] = lease
+            self._leases[identity] = lease
             return dict(lease)
 
     def renew(
@@ -96,12 +105,15 @@ class ExecutionLease:
         session_id: str,
         owner_id: str,
         ttl_seconds: float | None = None,
+        *,
+        tenant_id: str | None = None,
     ) -> dict[str, Any]:
-        sid = self._normalize_session(session_id)
+        tenant, sid = self._identity(session_id, tenant_id)
+        identity = (tenant, sid)
         owner = str(owner_id or "").strip() or "worker"
         now = time.monotonic()
         with self._lock:
-            current = self._leases.get(sid)
+            current = self._leases.get(identity)
             if not current or self._expired(current, now):
                 raise LeaseConflictError(
                     f"cannot renew expired or missing lease for {sid!r}",
@@ -117,39 +129,39 @@ class ExecutionLease:
             current["ttl_seconds"] = ttl
             return dict(current)
 
-    def release(self, session_id: str, owner_id: str) -> bool:
-        sid = self._normalize_session(session_id)
+    def release(self, session_id: str, owner_id: str, *, tenant_id: str | None = None) -> bool:
+        identity = self._identity(session_id, tenant_id)
         owner = str(owner_id or "").strip() or "worker"
         with self._lock:
-            current = self._leases.get(sid)
+            current = self._leases.get(identity)
             if not current:
                 return False
             if str(current.get("owner_id") or "") != owner:
                 return False
-            self._leases.pop(sid, None)
+            self._leases.pop(identity, None)
             return True
 
-    def owner_of(self, session_id: str) -> str | None:
-        sid = self._normalize_session(session_id)
+    def owner_of(self, session_id: str, *, tenant_id: str | None = None) -> str | None:
+        identity = self._identity(session_id, tenant_id)
         with self._lock:
-            lease = self._leases.get(sid)
+            lease = self._leases.get(identity)
             if not lease or self._expired(lease, time.monotonic()):
                 return None
             return str(lease.get("owner_id") or "") or None
 
-    def lease_for(self, session_id: str) -> dict[str, Any] | None:
-        sid = self._normalize_session(session_id)
+    def lease_for(self, session_id: str, *, tenant_id: str | None = None) -> dict[str, Any] | None:
+        identity = self._identity(session_id, tenant_id)
         with self._lock:
-            lease = self._leases.get(sid)
+            lease = self._leases.get(identity)
             if not lease or self._expired(lease, time.monotonic()):
                 return None
             return dict(lease)
 
-    def is_held(self, session_id: str) -> bool:
-        return self.owner_of(session_id) is not None
+    def is_held(self, session_id: str, *, tenant_id: str | None = None) -> bool:
+        return self.owner_of(session_id, tenant_id=tenant_id) is not None
 
-    def require_session_lease(self, session_id: str, owner_id: str) -> None:
-        owner = self.owner_of(session_id)
+    def require_session_lease(self, session_id: str, owner_id: str, *, tenant_id: str | None = None) -> None:
+        owner = self.owner_of(session_id, tenant_id=tenant_id)
         requested = str(owner_id or "").strip() or "worker"
         if owner is None or owner == requested:
             return
@@ -161,10 +173,10 @@ class ExecutionLease:
         now = time.monotonic()
         evicted: list[str] = []
         with self._lock:
-            for sid, lease in list(self._leases.items()):
+            for identity, lease in list(self._leases.items()):
                 if self._expired(lease, now):
-                    evicted.append(sid)
-                    self._leases.pop(sid, None)
+                    evicted.append(identity[1])
+                    self._leases.pop(identity, None)
         return evicted
 
     def snapshot(self) -> dict[str, Any]:
@@ -173,10 +185,10 @@ class ExecutionLease:
             leases = [dict(lease) for _, lease in sorted(self._leases.items())]
         return {"active_lease_count": len(leases), "leases": leases}
 
-    def fencing_token_for(self, session_id: str) -> int | None:
-        sid = self._normalize_session(session_id)
+    def fencing_token_for(self, session_id: str, *, tenant_id: str | None = None) -> int | None:
+        identity = self._identity(session_id, tenant_id)
         with self._lock:
-            lease = self._leases.get(sid)
+            lease = self._leases.get(identity)
             if not lease or self._expired(lease, time.monotonic()):
                 return None
             return int(lease.get("fencing_token") or 0)

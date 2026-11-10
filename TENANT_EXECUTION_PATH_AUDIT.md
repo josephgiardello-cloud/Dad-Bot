@@ -1,12 +1,11 @@
 # Tenant identity, ownership and execution-path audit
 
 Status: **partial repository-wide investigation; tenant isolation is not
-established**. The original findings below are an audit snapshot. The
-“Phase 0 closure and Phase 1 status” section records subsequent changes and
-supersedes stale statements where noted; it is not a claim that every file,
-runtime combination or attack scenario has been traced. All work remains
-uncommitted beyond the seven local branch commits; follow-up work is
-uncommitted.
+fully established**. The original findings below are an audit snapshot. The
+later execution records supersede stale statuses where noted; they are not a
+claim that every file, runtime combination or attack scenario has been
+traced. All changes remain local to `tenant-identity-remediation`; no push or
+merge has been performed.
 
 ## Evidence conventions and boundaries
 
@@ -53,14 +52,13 @@ uncommitted.
    `TypeError` from inside the factory. The production/default factory passes
    tenant ID; whether a particular custom deployment uses the fallback is
    unknown.
-6. **Code-observed: some API operations resolve a singleton runtime.**
-   Spatial WebSocket authentication verifies a tenant but discards the result
-   before resolving `runtime_bot`; admin automation also resolves that bot
-   without a tenant comparison ([`api.py`](dadbot_system/api.py#L367),
-   [`api.py`](dadbot_system/api.py#L1035),
-   [`api.py`](dadbot_system/api.py#L1248)). This is not proof that every
-   configuration exposes another tenant, because the runtime binding and
-   intended administrative scope vary; a multi-tenant test is needed.
+6. **Closed for authenticated spatial and admin runtime effects.** Spatial
+   WebSocket requests now submit tenant-bound delegated tasks using the
+   authenticated principal. Admin automation requires a runtime bot bound to
+   the principal's tenant and executes within a live authority scope; action
+   tools fail closed without verified authority. Two-tenant, missing-context,
+   and revocation regressions cover these paths. Trusted-local action execution
+   remains supported.
 7. **Code-observed: local MCP and generic tool helpers have different trust
    models.** Local MCP uses one provided or global bot and exposes memory,
    file and action tools; no per-call tenant principal is visible in the
@@ -81,7 +79,7 @@ executed for this report.
 | Entry and identity / ownership | Enforcement and failure | Downstream | Tests | Bypass / unknown |
 |---|---|---|---|---|
 | CLI, Streamlit and service boot -> `DadBot` constructor -> [`_initialize_config`](dadbot/core/boot_mixin.py#L197): explicit tenant or environment, normalized by [`DadBotConfig`](dadbot/config.py#L344). Paths come from global runtime configuration. | Normalization replaces characters and defaults empty input. Path creation does not establish per-tenant ownership. Invalid environment modes fail separately. | Profile, memory, indexes, logs, ledger and background managers. | [`test_config_drift.py`](tests/test_config_drift.py), [`test_execution_ledger_boot_order.py`](tests/unit/test_execution_ledger_boot_order.py). | Normalization collision reproduced; tenant ownership of paths and existing-data migration are not enforced. Streamlit and CLI authorization are local trust assumptions, not network-API guarantees. |
-| [`_initialize_document_store`](dadbot/core/boot_mixin.py#L233): configured store, namespace `tenant-doc:<tenant>`. | Namespace prefixes document/session keys; initialization behavior depends on selected store. | Profile and memory snapshot hydration. | [`test_dadbot_regression.py`](tests/test_dadbot_regression.py) document-store tenant test; [`test_app_runtime_startup.py`](tests/test_app_runtime_startup.py#L216). | Prefixing does not scope every state-store method; shared filesystem fallbacks remain separate. |
+| [`_initialize_document_store`](dadbot/core/boot_mixin.py#L233): configured store, namespace `tenant-doc:<tenant>` plus the explicit tenant identity. | Session/document snapshots route to the backend's `owned_sessions` repository; legacy namespaced rows are rejected by the owner-aware backend rather than adopted. | Profile and memory snapshot hydration. | [`test_dadbot_regression.py`](tests/test_dadbot_regression.py) document-store tenant test; [`test_app_runtime_startup.py`](tests/test_app_runtime_startup.py#L216); owned SQLite legacy-rejection test. | Generic state-store methods and shared filesystem fallbacks remain separate paths; authenticated Redis/PostgreSQL live-service behavior still needs integration evidence. |
 | [`_hydrate_profile_and_memory`](dadbot/core/boot_mixin.py#L351): runtime config and namespaced store. | [`load_profile`](dadbot/managers/runtime_storage.py#L88) falls back to global profile file if no tenant document. | Profile facts, prompts, memory initialization. | Profile and document-store tests above. | Code-observed unowned profile fallback; no fresh-process cross-tenant profile test identified in this investigation. |
 | [`shutdown`](dadbot/core/boot_mixin.py#L575): bot-bound tenant/config, no caller principal. | Waits for background manager and calls save in `finally`; errors propagate, completion flag set only after save. | Snapshot/ledger and per-bot caches. | Lifecycle and authority tests in [`test_local_authority_mutation_application.py`](tests/unit/test_local_authority_mutation_application.py). | Cross-process shutdown with shared paths and pending indexing/exports needs acceptance tests. |
 
@@ -92,10 +90,10 @@ executed for this report.
 | [`_http_principal`](dadbot_system/api.py#L262): bearer/header token verified by `ServiceTokenManager`; health bypasses token. | Missing/invalid token -> 401 when auth enabled; optional auth-disabled mode gives anonymous default tenant read/write/admin. Individual handlers enforce scopes. | Chat, automation, events and task APIs. | [`test_service_api_integration.py`](tests/test_service_api_integration.py#L314). | Production policy permits configuration to disable authentication; whether deployment should prohibit it is a design decision. Health is intentionally unauthenticated. |
 | [`submit_chat`, channel ingest and turn](dadbot_system/api.py#L872): principal tenant and requested tenant. | Write scope, process-local rate limit and exact requested/principal check; identity is inserted into request metadata. | Orchestrator, control plane, task store and worker. | [`test_api_rejects_tenant_mismatch`](tests/test_service_api_integration.py#L794). | Subsequent lossy normalization and shared backends can break isolation despite ingress check. Audit every alternate ingress and metadata consumer. |
 | [`get_task_status`](dadbot_system/api.py#L1024): principal and stored task payload. | Read scope; load by task ID, then compare payload tenant; missing -> 404, mismatch -> 403. | Global task/response store. | API integration tests; cross-tenant task-ID coverage not confirmed. | [`NamespacedStateStore`](dadbot_system/state.py#L268) forwards task methods without prefix; correctness depends on API checks and payload integrity. Missing tenant field and internal callers need tests. |
-| Events and replay ([`api.py`](dadbot_system/api.py#L1129), [`api.py`](dadbot_system/api.py#L1180)): principal or path-bound ticket and requested tenant. | Read scope, tenant comparison; live event stream additionally filters both session and tenant; handshake errors close socket. | Namespaced event store and event bus. | [`test_service_api_integration.py`](tests/test_service_api_integration.py#L337). | Test two principals using the same session ID, replay, ticket reuse and recovery; default tenant argument behavior must be checked. |
+| Events and replay ([`api.py`](dadbot_system/api.py#L1129), [`api.py`](dadbot_system/api.py#L1180)): principal or path-bound ticket and optional requested tenant. | Read scope; omitted tenant resolves to the principal, while an explicit mismatch is rejected; live event stream filters both session and tenant. | Namespaced event store and event bus. | [`test_service_api_integration.py`](tests/test_service_api_integration.py): omitted-tenant event/replay reads and cross-tenant rejection. | Ticket reuse and event recovery remain separate checks. |
 | Pulse ([`api.py`](dadbot_system/api.py#L1216)): authenticated effective tenant. | Handshake validates tenant; `_session_state_snapshot` resolves the orchestrator session with both session ID and tenant ID. | Tenant-keyed orchestrator session container. | Pulse happy-path and same-session cross-tenant integration tests. | Alternate orchestrator implementations without tenant-aware `session()` return an empty snapshot rather than falling back to the shared registry. |
-| Spatial and admin automation ([`api.py`](dadbot_system/api.py#L1035), [`api.py`](dadbot_system/api.py#L1248)): principal scope; global runtime bot. | Spatial requires write scope; automation requires admin. Tenant result is not used to select/check runtime bot in examined code. | Runtime memory, maintenance, browser/MCP. | Existing spatial and automation integration tests. | Test cross-tenant access and establish whether admin is global or tenant-scoped before drawing an exposure conclusion. |
-| [`recover_pending_tasks`](dadbot_system/orchestration.py#L164), `apply_worker_result`: persisted task tenant, request and result. | Recovery normalizes stored tenant and reconstructs request; malformed essential metadata raises; result handler selects tenant from stored payload or result. | Broker, worker, state store and response/event persistence. | Service recovery tests; tenant-spoof/recovery matrix not verified. | Stored task integrity, result/session consistency and authorization revalidation across restart are not established. |
+| Spatial and admin automation ([`api.py`](dadbot_system/api.py#L1035), [`api.py`](dadbot_system/api.py#L1248)): authenticated principal and effective tenant. | Spatial submits a delegated task; admin runtime operations require matching runtime tenant and active authority; missing authority blocks live action tools. | Worker, runtime maintenance, browser/MCP. | [`test_service_api_integration.py`](tests/test_service_api_integration.py): same-session tenant isolation, runtime mismatch, and membership revocation. | Other direct runtime integrations remain in the wider audit scope. |
+| [`recover_pending_tasks`](dadbot_system/orchestration.py#L164), `apply_worker_result`: persisted task tenant, request and result. | Postgres recovery enumerates tenant IDs from its transactionally updated task catalog; Redis + Postgres exposes a tenant-qualified composite store with durable status precedence; request digest canonicalization survives serialization. | Broker, worker, state store and response/event persistence. | Live Postgres API-lifespan, tenant-catalog, RLS, and Redis + Postgres recovery/publication tests pass; persisted recovery was run in a fresh Python process. | Broader Phase 3.4 gates listed below remain open. |
 
 ### Ledger, memory, projections and replay
 
@@ -286,8 +284,10 @@ selection results, not a full current suite or security certification.
 
 ### Phase 1 implementation status
 
-- **Decision record:** proposed, not signed off:
-  [`docs/decisions/tenant-identity.md`](docs/decisions/tenant-identity.md).
+- **Decision record (Phase 1 snapshot):** proposed at that time; the later
+  signed choices are recorded in
+  [`docs/decisions/SIGN-OFF-PACKET.md`](docs/decisions/SIGN-OFF-PACKET.md)
+  and [tenant-identity.md](docs/decisions/tenant-identity.md).
   It recommends organization/workspace identity for hosted multi-user
   deployments, but records alternatives and the unanswered owner questions.
 - **Contract:** [`tenant_identity.py`](dadbot_system/tenant_identity.py#L33)
@@ -446,23 +446,23 @@ The migration inventory is a dry run only at
 220 observations, 22 normalized groups, three collision groups, and no
 state changes.
 
-### Blocked pending sign-off
+### Signed tenant-identity decisions
 
-- **Collision 1 — `default`:** missing/empty input versus literal `default`.
-  The validator now rejects empty input, but literal `default` remains
-  compatibility-valid. No membership or shared-mirror entitlement was
-  established by the repository scan.
-- **Collision 2 — `family-a`:** `family-a` versus `family/a`. The slash form
-  is rejected as an external ID; no current ownership, membership, or mirror
-  entitlement was proven.
-- **Collision 3 — `tenant-a`:** `tenant-a` versus `tenant/a`. The slash form
-  is rejected as an external ID; no current ownership, membership, or mirror
-  entitlement was proven.
-- **`default` treatment:** choose compatibility-only, migration to an issued
-  ID, or complete retirement after a compatibility window.
-- **Compatibility owner and expiry:** both remain TBD in the proposed record.
-- No collision group has been automatically merged or split. The test-source
-  values in the inventory are not deployment ownership evidence.
+Items 1–6 of the [sign-off packet](docs/decisions/SIGN-OFF-PACKET.md) were
+signed on **2026-11-09**: split each collision group; retain `default` only
+for compatibility outside production behind
+`DADBOT_ALLOW_LEGACY_DEFAULT_TENANT`; assign the compatibility window to
+Platform Lead through **2027-02-07**; and acknowledge the conditional Phase 0
+mirror assumption. These policy choices do not establish which real-world
+owner holds any scanned state. No membership, token, alias, or tenant data
+has been migrated, and there is no implicit mirror entitlement.
+
+For this implementation stage, recovery tenant enumeration is authorized
+from tenant IDs on persisted `SQLiteOwnedTasks` rows only; it is not a
+general tenant catalog. Legacy unqualified tasks remain quarantined. RLS
+scope is limited to Phase 3.2 task/response/incomplete-task storage, verified
+with a local `NOBYPASSRLS` role; it does not reopen authenticated PostgreSQL
+boot or alter Phase 3.3–3.9 stores.
 
 ### D1-D3 evidence
 
@@ -497,7 +497,7 @@ state changes.
 | Test(s) | Classification | Evidence / action |
 |---|---|---|
 | 49 F821 diagnostics in the five D2 files listed above | Real test-code defects; fixed. | Undefined test helpers/fixtures (including misspelled helper names and required-field variables) were restored; no tests were removed. The current F821 gate is zero. |
-| `test_task_namespace_isolated_across_processes`; `test_identical_task_ids_do_not_overwrite_another_namespace`; `test_task_result_and_response_are_namespace_owned`; `test_incomplete_task_listing_filters_before_limit`; `test_legacy_task_is_quarantined_without_implicit_ownership`; `test_raw_store_rejects_unqualified_task_lookup`; `test_fresh_process_recovers_same_task_id_for_both_owners` in `tests/unit/test_sqlite_service_state.py` | Existing Phase 3 storage-boundary gaps, not regressions from identity logging. | These seven failures were exposed by the focused authority selection: raw SQLite state remains unscoped, recovery remains global, and legacy rows are not quarantined. Tenant-context/store scoping is explicitly out of scope here; leave the tests in place and address them in Phase 3. |
+| `test_task_namespace_isolated_across_processes`; `test_identical_task_ids_do_not_overwrite_another_namespace`; `test_task_result_and_response_are_namespace_owned`; `test_incomplete_task_listing_filters_before_limit`; `test_legacy_task_is_quarantined_without_implicit_ownership`; `test_raw_store_rejects_unqualified_task_lookup`; `test_fresh_process_recovers_same_task_id_for_both_owners` in `tests/unit/test_sqlite_service_state.py` | Historical Phase 3 storage-boundary gaps, not regressions from identity logging. | These seven failures were exposed by the earlier focused authority selection. They now pass after Stage 1 task/response/incomplete-task scoping; see the current verification section below. |
 | Focused identity/compiler/delegation/service-binding selection, excluding `test_sqlite_service_state.py` | Passed. | **58 passed** after the legacy logging and compiler no-rewrite changes. |
 
 The source audit does not define or number deficits **9, 18, or 19**; their
@@ -539,9 +539,8 @@ unsigned migration decisions with an implicit data migration.
 
 ## Sign-off, traceability, and Phase 3 readiness (current)
 
-This section supersedes earlier status prose when it conflicts with the
-sign-off packet and the current Phase 2.3 results below. No human decision is
-presumed.
+This section supersedes earlier status prose where it conflicts with the
+signed packet and current execution evidence.
 
 ### Audit finding to numbered remediation mapping
 
@@ -550,12 +549,12 @@ presumed.
 | Finding 1 — shared memory mirror could establish another tenant's state | Phase 0 item 1 | **Closed for the verified local mirror path**; conditional assumption remains. | [strict process-isolation acceptance test](tests/unit/test_tenant_isolation_acceptance.py#L10); conditional assumption below. |
 | Finding 2 — shared semantic/graph indexes and stores lack tenant ownership | Phase 3 items 7–8; task/response scoping is Phase 3.2 | **Blocked / out of scope here.** | [Phase 3 entry criteria](docs/decisions/phase3-entry-criteria.md); seven failing state-store node IDs below. |
 | Finding 3 — pulse session lookup was not tenant-scoped | Phase 0 item 2 | **Closed for the pulse route.** | [same-session two-tenant pulse test](tests/test_service_api_integration.py#L444). |
-| Finding 4 — lossy tenant ID normalizer | **Deficit 9 — identity normalization** | **Partial:** strict validator and opaque issuance exist; exact legacy IDs including `default` remain accepted pending sign-off/provenance retirement. | [tenant identity validator](dadbot_system/tenant_identity.py#L67); [collision inventory](docs/decisions/tenant-identity-migration-report.md). |
-| Finding 5 — worker factory may drop tenant identity on `TypeError` | Phase 1 item 5 / verified execution-context boundary | **Partial:** factory behavior is covered by targeted identity tests; a mandatory request-to-store context is not wired. | [worker identity binding tests](tests/unit/test_service_identity_binding.py); [TenantContext interface](dadbot_system/tenant_context.py#L15). |
-| Finding 6 — singleton runtime-bot resolution in spatial/automation paths | Phase 1 item 5; Phase 2.1/2.2 ingress-to-runtime binding | **Blocked / out of scope:** sign-off and context wiring are prerequisites. | [API spatial/admin path inventory](#execution-path-inventory). |
+| Finding 4 — lossy tenant ID normalizer | **Deficit 9 — identity normalization** | **Partial:** strict validator and opaque issuance exist; split policy is signed, but owner-backed mappings and legacy provenance retirement remain open. | [tenant identity validator](dadbot_system/tenant_identity.py#L67); [collision inventory](docs/decisions/tenant-identity-migration-report.md). |
+| Finding 5 — worker factory may drop tenant identity on `TypeError` | Phase 1 item 5 / verified execution-context boundary | **Partial:** HTTP/WebSocket tenant binding and task-store handoff are implemented; the custom worker-factory `TypeError` fallback remains a separate risk. | [worker identity binding tests](tests/unit/test_service_identity_binding.py); [TenantContext implementation](dadbot_system/tenant_context.py#L15). |
+| Finding 6 — singleton runtime-bot resolution in spatial/automation paths | Phase 1 item 5; Phase 2.1/2.2 ingress-to-runtime binding | **Partially closed:** request/socket context is bound and scoped; broader runtime-bot operations beyond the Stage 1 route coverage remain in the execution-path inventory. | [API spatial/admin path inventory](#execution-path-inventory); Stage 1 validation below. |
 | Finding 7 — local MCP and generic tool helpers have different trust models | Phase 3 item 8 for tenant-scoped tool/idempotency state; execution-context binding item 5 | **Open / incomplete discovery.** | [MCP/tool inventory](#execution-path-inventory); broader tool entry-point tracing remains incomplete. |
-| Tenant meaning and ownership were not defined | **Deficit 18 — tenant definition** | **Blocked pending sign-off.** | [proposed tenant semantics](docs/decisions/tenant-identity.md); [sign-off packet item 6](docs/decisions/SIGN-OFF-PACKET.md#6-conditional-phase-0-assumption). |
-| Legacy aliases and collision migration lack owner-backed mapping | **Deficit 19 — legacy alias migration** | **Blocked pending sign-off; dry-run only.** | [collision decisions](docs/decisions/tenant-identity-collisions.md); [migration report](docs/decisions/tenant-identity-migration-report.md). |
+| Tenant meaning and ownership were not defined | **Deficit 18 — tenant definition** | **Policy signed; actual owner mapping remains unverified.** | [signed packet](docs/decisions/SIGN-OFF-PACKET.md); [tenant semantics](docs/decisions/tenant-identity.md). |
+| Legacy aliases and collision migration lack owner-backed mapping | **Deficit 19 — legacy alias migration** | **Split policy signed; migration remains blocked on owner evidence.** | [collision decisions](docs/decisions/tenant-identity-collisions.md); [migration report](docs/decisions/tenant-identity-migration-report.md). |
 | Kernel imported service telemetry and optional exporters | **Deficit 6 — kernel boundary gate** | **Closed for the seven reported import violations; gate now passes.** | [kernel boundary check](ci/kernel_boundary_check.py); configured Import Linter contracts in [pyproject.toml](pyproject.toml#L145). |
 | Undefined names in tests | **Deficit 23 — test F821** | **Closed:** zero test F821 diagnostics. | `ruff check tests --select F821` — All checks passed. |
 | Stale contract-test node IDs / check-mode manifest rewrite | **Deficit 24 — contract anchors** | **Closed:** IDs validate and check mode leaves the manifest unchanged. | `tools/contract_test_compiler.py --check --validate-nodeids`; manifest SHA-256 unchanged. |
@@ -564,20 +563,6 @@ The available architecture specification does not contain a separate
 numbered 1–24 deficit catalog. This crosswalk uses its numbered remediation
 items where present and explicitly records the requested numbered deficits
 6, 9, 18, 19, 23, and 24; it does not invent labels for unspecified IDs.
-
-### Blocked pending sign-off
-
-- **Item 1:** `""` / `default` — no merge, split, or owner has been selected.
-- **Item 2:** `family-a` / `family/a` — no merge, split, or alias has been selected.
-- **Item 3:** `tenant-a` / `tenant/a` — no merge, split, or alias has been selected.
-- **Item 4:** the production/local policy for literal `default`.
-- **Item 5:** compatibility-window owner role and expiry date.
-- **Item 6:** acknowledgement or rejection of the conditional Phase 0
-  assumption.
-
-All six decisions and their consequences are collected in
-[docs/decisions/SIGN-OFF-PACKET.md](docs/decisions/SIGN-OFF-PACKET.md).
-The options remain proposals; no option is selected in this change.
 
 ### Conditional assumptions
 
@@ -608,11 +593,11 @@ sharing must use explicit ownership evidence and an approved grant.
   anchors, zero untested); `--check --validate-nodeids` succeeded and
   manifest SHA-256 remained unchanged.
 
-### Phase 3 entry failures — exit gate, not fixed here
+### Phase 3 entry failures — historical baseline, current gate passes
 
-The fresh `tests/unit/test_sqlite_service_state.py` run reproduced these
-seven failures; full failure mode, owner phase, acceptance test, and Phase 1.5
-impact are detailed in
+The pre-Stage-1 `tests/unit/test_sqlite_service_state.py` run reproduced
+these seven failures; their historical failure modes, ownership and
+Phase 1.5 impact are detailed in
 [phase3-entry-criteria.md](docs/decisions/phase3-entry-criteria.md):
 
 | Node ID suffix | Owning work |
@@ -625,10 +610,12 @@ impact are detailed in
 | `test_raw_store_rejects_unqualified_task_lookup` | 3.2 — raw API removal / qualified lookup |
 | `test_fresh_process_recovers_same_task_id_for_both_owners` | 3.3, dependent on 3.2 — tenant-aware recovery |
 
-None of these seven failures is fixed in this change. They remain Phase 3
-exit-gate tests.
+After the Stage 1 task/response/incomplete-task changes, all seven nodes pass
+unmarked. The updated verification is in
+[phase3-entry-criteria.md](docs/decisions/phase3-entry-criteria.md). This
+closes the named task-state exit gate, not the remaining Phase 3.3–3.9 stores.
 
-Exact node-ID rerun on 2026-11-09 used a session-local `--basetemp` after the
+The historical exact node-ID rerun on 2026-11-09 used a session-local `--basetemp` after the
 default Windows pytest temp location returned `PermissionError`; all seven
 executed and failed, with no setup errors. No Phase 0/1 change was identified
 in the tested storage/recovery paths; these remain the recorded Phase 3
@@ -637,25 +624,52 @@ Phase 1 covers identity validation/provisioning, not task-store query scope.
 
 | Exact node ID | Result | Observed failure |
 |---|---|---|
-| `tests/unit/test_sqlite_service_state.py::test_task_namespace_isolated_across_processes` | **FAIL** | Tenant B's lookup returns tenant A's same-ID task. |
-| `tests/unit/test_sqlite_service_state.py::test_identical_task_ids_do_not_overwrite_another_namespace` | **FAIL** | Tenant B's write overwrites the record Tenant A reads. |
-| `tests/unit/test_sqlite_service_state.py::test_task_result_and_response_are_namespace_owned` | **FAIL** | Tenant A reads Tenant B's response. |
-| `tests/unit/test_sqlite_service_state.py::test_incomplete_task_listing_filters_before_limit` | **FAIL** | Tenant B's limited listing returns Tenant A's task. |
-| `tests/unit/test_sqlite_service_state.py::test_legacy_task_is_quarantined_without_implicit_ownership` | **FAIL** | Recovery does not raise or quarantine the unqualified legacy task. |
-| `tests/unit/test_sqlite_service_state.py::test_raw_store_rejects_unqualified_task_lookup` | **FAIL** | Raw unqualified task lookup is accepted. |
-| `tests/unit/test_sqlite_service_state.py::test_fresh_process_recovers_same_task_id_for_both_owners` | **FAIL** | Fresh recovery returns one task instead of two. |
+| `tests/unit/test_sqlite_service_state.py::test_task_namespace_isolated_across_processes` | Historical **FAIL**; current **PASS** | Composite task ownership is preserved across processes. |
+| `tests/unit/test_sqlite_service_state.py::test_identical_task_ids_do_not_overwrite_another_namespace` | Historical **FAIL**; current **PASS** | Identical task IDs coexist under tenant-qualified keys. |
+| `tests/unit/test_sqlite_service_state.py::test_task_result_and_response_are_namespace_owned` | Historical **FAIL**; current **PASS** | Response/result reads and writes use the tenant-qualified task key. |
+| `tests/unit/test_sqlite_service_state.py::test_incomplete_task_listing_filters_before_limit` | Historical **FAIL**; current **PASS** | Incomplete listing scopes before applying the limit. |
+| `tests/unit/test_sqlite_service_state.py::test_legacy_task_is_quarantined_without_implicit_ownership` | Historical **FAIL**; current **PASS** | Unqualified legacy rows are rejected from recovery. |
+| `tests/unit/test_sqlite_service_state.py::test_raw_store_rejects_unqualified_task_lookup` | Historical **FAIL**; current **PASS** | Unqualified application task lookup is rejected. |
+| `tests/unit/test_sqlite_service_state.py::test_fresh_process_recovers_same_task_id_for_both_owners` | Historical **FAIL**; current **PASS** | Fresh-process recovery discovers both tenant-owned tasks. |
 
-These are not claimed closed if a later run passes; they remain Phase 3 exit
-gate cases until the scoped behavior and acceptance criteria in
-[phase3-entry-criteria.md](docs/decisions/phase3-entry-criteria.md) are met.
+The current run also passes
+`tests/unit/test_owned_sqlite_tasks.py::test_concurrent_tenant_writes_survive_fresh_construction`,
+which writes the same task and session IDs from separate processes and verifies
+tenant-specific task lists and responses after fresh construction. Memory
+recall in matrix case 1 and memory clear/export/delete in case 3 are explicitly
+deferred until the tenant-scoped semantic/graph work in Phase 3.5/3.6; see
+the Stage 1 record below.
 
-### What a human must decide before Phase 2 proceeds
+### Signed decisions and remaining implementation boundary
 
-Complete or explicitly defer with an accountable role and expiry all six
-items in [SIGN-OFF-PACKET.md](docs/decisions/SIGN-OFF-PACKET.md), especially
-the three collision groups, `default` treatment, compatibility owner/expiry,
-and the conditional Phase 0 mirror assumption. Until then, TenantContext
-remains an unwired interface and no tenant middleware is authorized.
+All six items in [SIGN-OFF-PACKET.md](docs/decisions/SIGN-OFF-PACKET.md) are
+signed: the three collision groups are split; `default` is reserved for
+compatibility-only use, prohibited in production, and gated in dev/local;
+the compatibility owner is Platform Lead with expiry 2027-02-07; and the
+Phase 0 conditional assumption is acknowledged. No owner mapping, membership,
+token, alias, or mirror is created by the policy choice alone.
+
+### Tool-action explanation endpoint
+
+The authenticated `GET /v1/sessions/{session_id}/actions/explain` endpoint
+returns a bounded explanation of tool actions in the latest turn. The worker
+copies at most 50 action summaries into its session-state result before
+signing it. Each summary is projected only after validating the event
+checksum chain and SHA-256 input/output fingerprints. Explanations include
+the tool, status, authorization decision and authority mode, trace/timestamp,
+and event-chain references; raw arguments and results are excluded. The route
+uses the authenticated tenant's session snapshot and read authorization.
+
+Focused verification command:
+`py -3 -m pytest --basetemp=.pytest_tmp_explain_final -q tests/test_action_explanation.py tests/test_execute_tool_recording.py tests/test_service_api_integration.py tests/test_service_architecture.py tests/test_e2e_orchestrator_turn.py::test_e2e_orchestrator_full_runtime_lane_certifying_expected_tool_execution`
+— **59 passed, 0 failed, 0 skipped**. This includes the tenant-scoped
+`test_explain_session_actions_is_tenant_scoped_and_uses_persisted_audit_records`,
+the `test_worker_result_persists_bounded_tool_action_audit` handoff regression,
+event checksum-projection tests, and the reminder tool end-to-end test.
+`compileall`, focused Ruff `--select F`, and touched-file `git diff --check`
+also passed. This does not provide a cross-turn history, reconstruct arbitrary
+conversation context, or establish an independent proof beyond the checksum
+and authority evidence captured in the event record.
 
 The branch and commit split are recorded in
 [branch-commit-plan.md](docs/decisions/branch-commit-plan.md); they were
@@ -687,9 +701,10 @@ The approved seven-set split was completed on branch
 `tenant-identity-remediation`: the six tenant-remediation sets and one
 separate carried-forward pre-existing WIP set are recorded with full commit
 SHAs and file lists in
-[branch-commit-plan.md](docs/decisions/branch-commit-plan.md). The carried
-WIP commit is not part of tenant identity remediation. No push or merge was
-performed. `.gitignore` was not staged or committed.
+[branch-commit-plan.md](docs/decisions/branch-commit-plan.md). The later
+`ef28cc66` and `6616ed01` commits also carry pre-existing durability/config
+WIP with explicit provenance bodies; they are separate from tenant identity
+remediation and Stage 1. No push or merge was performed.
 - **Phase 7: closed** (per the current remediation status); the seven-set
   local commit record is in [branch-commit-plan.md](docs/decisions/branch-commit-plan.md).
 
@@ -738,7 +753,11 @@ proposed Phase 3.2–3.9 ownership, `default` and legacy-task dependencies, and
 acceptance tests. It is an inventory only; no store schema/query/filter was
 changed.
 
-### Part D — scanner-excluded default-suite result
+### Part D — historical scanner-excluded suite baseline
+
+The counts and first-30 disposition table below are the pre-Stage-1 suite
+baseline. The current bounded suite rerun and complete Stage 1 disposition
+are recorded at the end of this audit.
 
 The recursive audit scanner excluded per the prior audit is
 `tests/invariants/test_full_system_audit_matrix.py`; that file invokes
@@ -809,9 +828,9 @@ from the first-30 list below.
 | 29 | `tests/test_phase4a.py::TestPhase4ACapabilityMeasurement::test_capability_profile_structure` | Phase 4; capability-profile test raises `UnboundLocalError` for `state`. |
 | 30 | `tests/test_phase4a.py::TestPhase4ARealCheckpointing::test_orchestrator_restores_state_after_simulated_restart` | Infrastructure; the test attempts an unmocked live Ollama call. |
 
-These are triage classifications only; no failure was fixed. Categories
-reflect observed failure mechanisms; failures were not reproduced separately
-for this classification. The earlier unbounded run stalled at 44% in the
+These are triage classifications only; no failure was fixed in that baseline
+change. Categories reflect observed failure mechanisms; failures were not
+reproduced separately for that classification. The earlier unbounded run stalled at 44% in the
 300-turn soak test during deep-copy work in `execution_ledger.read`, reached
 from ledger compaction. With the test explicitly quarantined, the bounded
 default-suite run completed.
@@ -820,29 +839,271 @@ default-suite run completed.
 
 | Deficit | Current status |
 |---|---|
-| 2, 3, 4, 14, 15, 27 | **Blocked** on sign-off and/or tenant-semantics-dependent store decisions; no middleware or store scope implemented. |
+| 2, 3, 4, 14, 15, 27 | **Signed; partial implementation:** Phase 2.1/2.2 and Phase 3.1–3.3 task-state work are validated. Core control-plane session ownership, SQLite checkpoint ownership, production-wired Redis/PostgreSQL session adapters, and durable cross-process worker-cache invalidation are implemented. Phase 3.4 remains open pending checkpoint backend parity and other independent gates. Phase 3.5–3.9 remain open; physical semantic/graph index isolation (27) remains intentionally undecided. |
 | 5 | **Status set:** authenticated PostgreSQL boot is explicitly excluded; see the B1 decision. |
-| 6 | **Closed:** kernel boundary checker passes; Import Linter reports 3 kept / 0 broken. |
-| 7, 25 | **Closed for production configuration completeness** only; no `default`/auth-off policy chosen. |
+| 6 | **Closed:** kernel boundary checker passes; Import Linter reports 4 kept / 0 broken, including the owned-store factory contract. |
+| 7, 25 | **Closed for production configuration completeness**; the `default` compatibility policy is signed, but production auth-off behavior is unchanged by that policy. |
 | 10 | **DEFERRED:** trimming remains disabled pending the substrate in [checkpoint-trimming-deferral.md](docs/decisions/checkpoint-trimming-deferral.md). |
 | 11 | **Mechanism complete and focused tests pass:** projection generation/status survives restart with independent graph/semantic sync. |
-| 20 | **Partial:** the scanner-excluded suite baseline is complete, but 141 failures and 11 errors remain untriaged beyond the required first 30. |
-| 21 | **Unmapped:** no definition for deficit 21 exists in this audit or the referenced remediation decision records; no status is inferred. |
+| 20 | **Partial:** scanner-excluded suite baseline is complete; full disposition of the 141 failures and 11 errors is the current Stage 0 task. |
+| 21 | **Closed:** carried-forward work is committed separately with explicit provenance; this is commit hygiene, not a claim that discovery is complete. |
 | 22 | **Resource-bounded suite gate established:** soak case quarantined with owner/re-enable criterion; 4,245 collected, 4,246 JUnit result records, 3,972 passed, 141 failed, 11 errored, 122 skipped. Run completed non-green. |
 | 23 | **Partial:** the test F821 gate was zero; the complete suite now ran but remains non-green, and no new full-suite-wide F821 scan was part of this change. |
 | 24 | **Closed:** contract validation passed and manifest SHA remained unchanged. |
 
-**Phase 2.1/2.2 and Phase 3.1–3.9 remain blocked on SIGN-OFF-PACKET.md
-items.**
+Phase 2.1/2.2, task-state recovery, core control-plane sessions, SQLite
+checkpoints, tenant-owned Redis/PostgreSQL session adapters, and durable
+cross-process worker-cache invalidation are implemented and wired into
+production callers. Redis and PostgreSQL session integration ran against
+disposable local services, including PostgreSQL under a
+`NOSUPERUSER NOBYPASSRLS` role. Phase 3.4 remains open because checkpoint
+backend parity and independent lifecycle gates are not fully demonstrated.
+Phase 3.5–3.9 remain open. The semantic/graph-dependent memory portions of
+matrix cases 1 and 3 are **BLOCKED** until Phase 3.5/3.6 is deliberately
+scheduled.
 
 ### Current change validation
 
 - Strict Phase 0 tests without `--runxfail`: **1 memory-isolation pass and
   3 pulse/auth-off passes**.
 - `python ci/kernel_boundary_check.py`: **passed**; Import Linter:
-  **3 kept, 0 broken**.
-- The seven listed Phase 3 node IDs: **7 failed, 0 passed, 0 errored**.
+  **4 kept, 0 broken**.
+- The seven listed Phase 3 node IDs: **7 passed, 0 failed, 0 errored**.
+- Focused Phase 3.4 validation (session lifecycle, ledger readers, SQLite
+  checkpoints, recovery, lease/reconciliation, service architecture, and app
+  runtime): passed; the previously excluded three service-architecture and
+  two app-runtime regressions are included. Fresh-process same-ID session and
+  checkpoint recovery pass.
+- Redis/PostgreSQL tenant-owned session adapters are production-wired through
+  `TenantOwnedStateStoreView`, `NamespacedStateStore`, `DadBotOrchestrator`,
+  and `build_runtime_state_bundle`. The live-backend selection
+  (`test_owned_redis_sessions.py`, `test_owned_postgres_sessions.py`,
+  `test_postgres_execution_ledger.py`, `test_owned_sqlite_sessions.py`, and
+  `test_control_plane_tenant_sessions.py`) completed with **41 passed, 0
+  skipped, 0 failed** against Redis 8.0.5 and PostgreSQL 18. PostgreSQL used a
+  disposable application role verified as `NOSUPERUSER NOBYPASSRLS`; tests
+  confirmed cross-tenant RLS read/write denial and transaction-local tenant
+  context reset after commit and rollback. Redis and PostgreSQL session tests
+  exercised same-ID tenant isolation, mutation/listing/termination,
+  mismatched ownership, unowned-record rejection, concurrency, and
+  fresh-process recovery. The PostgreSQL session adapter's colliding
+  truncated table-name bug and a legacy-row query placeholder mismatch were
+  found by these live tests and corrected.
+- Durable worker-cache invalidation is production-wired through the authority
+  SQLite store. `revoke_session` commits a monotonically increasing revision
+  and latest tenant/session revocation record in the same transaction as
+  delegation revocation. Authenticated worker processes poll every 100 ms
+  while idle and evict only the matching tenant/session cache; task-time
+  authority checks remain in force. A spawned `worker_process_main` test
+  demonstrated same-ID isolation for two tenants across termination and later
+  work. Upgrading an existing authority database requires rerunning the
+  idempotent `SQLiteDelegationStore.initialize`; startup fails closed without
+  the revocation schema.
+- Authority/worker/API regression selection (`test_durable_submission_authority.py`,
+  `test_delegated_authority_acceptance.py`, `test_service_api_integration.py`,
+  `test_service_websocket_tickets.py`, and `test_sqlite_service_state.py`):
+  **110 passed, 1 skipped, 0 failed**. The skipped live Redis websocket-ticket
+  test requires `DADBOT_TEST_REDIS_URL`; live Redis session-store evidence is
+  reported separately above. The run exposed a websocket-ticket fixture that
+  had not provisioned its browser principal's membership; the fixture now
+  grants explicit read/write membership rather than weakening authorization.
+- The previous **246 passed, 26 skipped, 0 failed, 0 errors** result was a
+  DSN-less run and is superseded for backend parity by the live 41-test run.
+- Authenticated `DadBotOrchestrator.terminate_session` revokes delegated
+  authority scoped to `(tenant_id, session_id)` before deleting persisted
+  session state. An in-flight worker revalidates authority and fails closed;
+  idle workers consume durable revocation revisions and evict the matching
+  cache within the polling interval. The test verifies another tenant's
+  same-ID cache remains intact. No public API deletion route was found; the
+  production termination caller currently available is the orchestrator
+  method. SQLite termination rollback on an interrupted revocation write is
+  covered; checkpoint Redis/PostgreSQL parity and their interrupted-write
+  behavior remain unverified.
+- The stale JSON-mirror path was reproduced. `load_memory_store` now derives
+  its default fallback permission from `_local_ephemeral_document_store`;
+  persistent-store outages fail closed instead of restoring stale JSON, while
+  the intentional local-ephemeral fallback remains available. The regression
+  test verifies no stale state is re-written after a failed authoritative
+  read.
+- The final combined service/session/authority selection passed **119 tests**
+  with no skips or failures, including the previously excluded
+  service-architecture and app-runtime regressions. The memory-manager and
+  durable-submission-authority selection collected **106 tests** and
+  completed with exit code 0; existing marked skips were unchanged. The
+  stale-mirror regression passed in a separate focused run (**1 passed**). A
+  long pytest temporary path caused Windows backup path errors on an initial
+  run; rerunning with a short `%TEMP%` base passed.
+- Ruff's full configured rules reported existing import-order, complexity,
+  line-length, and other findings across the already-dirty files; no
+  repository-wide lint-clean claim is made. Final focused Ruff F checks,
+  `compileall` for the changed Python files, and `git diff --check` passed.
+  The selected E501 check found one existing worker-readiness log line outside
+  this change.
 - Explicit selection of `test_soak_simulation_replay_loop`: **skipped** by
   its quarantine marker.
-- Ruff `E4,E7,E9,F,I` on the changed test file, `compileall` for that file,
-  and `git diff --check`: **passed**.
+- Semantic/graph memory matrix cases remain blocked; this pass did not start
+  Phase 3.5 or 3.6.
+
+### Phase 3.4 checkpoint and revocation follow-up
+
+- The graph checkpoint production path is `JobBuilder.build` ->
+  `TurnContext.checkpoint_snapshot` -> `PersistenceService.save_graph_checkpoint`
+  -> `ConversationPersistenceManager.persist_graph_checkpoint` ->
+  tenant-bound `ExecutionLedger`. Checkpoint snapshots now carry `session_id`
+  from the job metadata and include it in the checkpoint hash. Reads and turn
+  event replay are scoped by active/explicit tenant and session; loading rejects
+  checkpoint trace/session metadata that disagrees with its ledger event.
+- `StreamlitRuntime.restore_checkpoint` now supplies the active thread and
+  configured tenant to the resume path. Recent-checkpoint listing filters by
+  the same identities and excludes malformed envelope/checkpoint pairs. No
+  production callsite for `ReplayModeMixin._try_load_checkpoint` was found;
+  that legacy helper remains a separate unverified surface.
+- SQLite checkpoint validation now checks serialized `trace_id` as well as
+  tenant/session identity. Existing SQLite tests cover same-ID tenant
+  isolation, fresh-process recovery, concurrent operations, legacy-row
+  quarantine, tampered metadata, and transactional interrupted writes.
+- Authenticated worker execution fails closed when durable session-revocation
+  authority cannot be read. An injected SQLite revocation-write failure now
+  verifies that termination rolls back the revision/delegation update and
+  does not evict or delete the in-memory session.
+- Checkpoint restore now revalidates live delegation authority at both
+  `SQLiteCheckpointer`'s tenant-resolution boundary and the graph-ledger
+  recovery boundary. The core orchestrator requires authority when configured
+  for authenticated storage; missing or revoked authority is rejected before
+  checkpoint state is hydrated. A real SQLite authority + authenticated file
+  WAL regression verifies revocation blocks both checkpoint restore paths.
+- Focused validation passed: `.venv\Scripts\python.exe -m pytest
+  --basetemp=.pytest_tmp_phase34
+  tests/test_ledger_authority_invariants.py tests/persistence_test.py
+  tests/test_persistence_service_schema_gate.py
+  tests/test_replay_mode_mixin.py tests/unit/test_durable_submission_authority.py
+  -q` (**96 passed, no skips**). Slow/stress memory selection
+  `.venv\Scripts\python.exe -m pytest --basetemp=.pytest_tmp_phase34
+  --run-slow --run-stress tests/test_memory_manager.py -q` completed
+  successfully (**84 passed**).
+  The first attempt without `--basetemp` could not create pytest's existing
+  `%TEMP%\pytest-of-josep` path due to Windows access denial; the short
+  repository-local temp base resolved the environment issue.
+- At this audit stage, Redis/PostgreSQL checkpoint adapters and live checkpoint
+  integration tests were absent. The subsequent Phase 3.4 checkpoint gate
+  update below records the trusted-local adapters and live results.
+- Cross-process cache invalidation and the stale-authority JSON-mirror
+  regression were separate open gates at this audit stage. The later checkpoint
+  gate update records the mirror rerun; the earlier cache-invalidation evidence
+  remains unchanged.
+
+### Authority, task recovery and event-identity repair
+
+- Authenticated WebSocket and admin automation paths now retain and verify
+  tenant authority through live effects. Spatial requests use task delegation
+  and signed worker publication; admin operations verify runtime-tenant binding
+  and revalidate active membership. Direct authenticated action-tool calls
+  without authority are rejected; trusted-local mode is unchanged.
+- Postgres task recovery now uses a tenant catalog updated in the same
+  transaction as task writes. `CompositeStateStore` exposes the same
+  tenant-qualified interface for Redis + Postgres, and recovery treats the
+  durable backend as authoritative when a fast-store task is stale.
+- Event and replay reads derive omitted tenant IDs from the authenticated
+  principal and reject an explicitly different tenant. Request canonicalization
+  also preserves gateway metadata across persisted task recovery.
+- Live integration services were isolated disposable Docker containers using
+  the repository Compose images `pgvector/pgvector:pg16` and `redis:7-alpine`.
+  The test database used a `NOSUPERUSER NOBYPASSRLS` role; the running
+  application containers and their data were not used or modified.
+- Live integration command, with the two `DADBOT_TEST_*` environment
+  variables set to those isolated services:
+
+  ```powershell
+  .\.venv\Scripts\python.exe -m pytest tests\integration\test_postgres_execution_ledger.py tests\integration\test_owned_postgres_sessions.py tests\integration\test_owned_redis_sessions.py --basetemp=.venv\pytest-temp-live-all -q
+  ```
+
+  Result: **30 passed, 0 failed, 0 skipped**. This includes empty and
+  multi-tenant persisted Postgres API lifespan recovery; tenant catalog
+  discovery and forced RLS; completed-task publication and restart recovery in
+  a separate Python process; rejection of a revoked task; and Redis + Postgres
+  stale-state conflicts in both directions. Durable queued status wins over
+  stale Redis completion, and durable completion suppresses stale Redis
+  queued recovery. Identical task IDs remained isolated by tenant.
+- Focused regression command:
+
+  ```powershell
+  .\.venv\Scripts\python.exe -m pytest tests\unit\test_durable_submission_authority.py tests\test_service_api_integration.py tests\unit\test_owned_sqlite_sessions.py --basetemp=.venv\pytest-temp-focused-final -q
+  ```
+
+  Result: **62 passed, 0 failed, 0 skipped**.
+- The first live Postgres run exposed a missing local `psycopg` import in
+  `PostgresOwnedTasks.list_task_tenants`; tenant enumeration and API recovery
+  failed before use. The import was added, and all affected live and focused
+  tests passed on rerun.
+
+### Phase 3.4 checkpoint gate status update
+
+- Completed the selected trusted-local backend work without changing the
+  authenticated production ledger policy. `PostgresCheckpointer` uses
+  versioned PostgreSQL tables and commits each checkpoint row and success
+  write-log row in one transaction. `RedisCheckpointer` uses tenant/session
+  namespaced keys and a Lua transaction for checkpoint/index/registry/log
+  updates. `RedisPostgresCheckpointer` always reads PostgreSQL as the durable
+  authority; Redis is refreshed from PostgreSQL and is never used as a fallback
+  if PostgreSQL is unavailable. Each remote adapter requires explicit
+  `trusted_local=True`; none is automatically wired into the authenticated
+  application.
+- Live integration services were isolated disposable Docker containers using
+  `pgvector/pgvector:pg16` and `redis:7-alpine`, bound to localhost ports
+  56263 and 56264. PostgreSQL tests used a `NOSUPERUSER NOBYPASSRLS` role.
+  The existing application containers and their data were not used or
+  modified; the disposable test containers were stopped after verification.
+- Live command, with `DADBOT_TEST_POSTGRES_DSN` and `DADBOT_TEST_REDIS_URL`
+  pointed at those isolated services:
+
+  ```powershell
+  .\.venv\Scripts\python.exe -m pytest tests\integration\test_checkpoint_backends.py --basetemp=.venv\pytest-temp-checkpoint-backends-concurrent -q
+  ```
+
+  Result: **9 passed, 0 failed, 0 skipped**. This covered PostgreSQL and Redis
+  tenant-qualified recovery across fresh Python processes; same-session and
+  same-trace tenant isolation; hash-chain and manifest checks; replacement,
+  prune, delete, and concurrent same-trace updates; injected transactional
+  PostgreSQL write failure and pre-mutation Redis script rejection; metadata
+  tampering; and PostgreSQL precedence over a stale conflicting Redis record.
+  Repeated construction verified idempotent PostgreSQL migration and Redis
+  schema initialization.
+- The final combined checkpoint, mirror, and authority command
+  passed:
+
+  ```powershell
+  .\.venv\Scripts\python.exe -m pytest tests\integration\test_checkpoint_backends.py tests\persistence_test.py tests\test_memory_manager.py::test_unavailable_tenant_memory_never_rehydrates_stale_json_mirror tests\test_memory_manager.py::test_composite_tenant_memory_does_not_read_stale_cache_when_durable_unavailable tests\unit\test_durable_submission_authority.py::test_authority_initializer_upgrades_partial_schema_without_resetting_state tests\unit\test_durable_submission_authority.py::test_interrupted_session_termination_rolls_back_revocation_and_keeps_session --basetemp=.venv\pytest-temp-phase34-final-combined -q
+  ```
+
+  **39 tests, 0 failed, 0 skipped**. This includes SQLite transactional
+  interrupted-write handling, corrupted-payload rejection, tenant-isolated
+  fresh-process recovery, and orchestrator restart restoration. The authority
+  upgrade test removes the revocation table, verifies unavailable-state
+  rejection, reruns initialization, and confirms identity/revision preservation
+  and idempotence. The stale JSON-mirror regression confirms an unavailable
+  authoritative tenant store raises without restoring or rewriting stale JSON.
+- The required focused regression command was rerun:
+
+  ```powershell
+  .\.venv\Scripts\python.exe -m pytest tests\unit\test_durable_submission_authority.py tests\test_service_api_integration.py tests\unit\test_owned_sqlite_sessions.py --basetemp=.venv\pytest-temp-focused-phase34-final2 -q
+  ```
+
+  Result: **62 passed, 0 failed, 0 skipped**.
+- The final production-path audit confirms that graph checkpoints in the
+  application remain `PersistenceService.save_graph_checkpoint` ->
+  `ConversationPersistenceManager.persist_graph_checkpoint` ->
+  `ExecutionLedger`. No production constructor for `AbstractCheckpointer` was
+  found; it remains optional injection. Authenticated startup still requires
+  the durable file WAL and rejects PostgreSQL execution-ledger mode. The new
+  adapters therefore close the requested trusted-local backend parity gate,
+  not authenticated PostgreSQL support or automatic application wiring.
+- An initial remote test run found a test-only SQL-template formatting error
+  in the PostgreSQL metadata-tampering case; the SQL path was parameterized
+  and the final live rerun passed. A prior preliminary combined run also had a
+  transient orchestrator restart `StateDivergenceError`; it passed in
+  isolation, the full SQLite suite, and the final combined run without a code
+  change to suppress it.
+- **Phase 3.4 acceptance gates: PASS for the selected trusted-local scope.**
+  Authenticated production continues to use the durable file WAL. This is not
+  a production-readiness claim for PostgreSQL or Redis in authenticated mode;
+  no Phase 3.5/3.6 work was started.

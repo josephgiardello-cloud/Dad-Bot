@@ -105,6 +105,7 @@ def test_session_memory_projection_replays_across_process_crash(tmp_path, crash_
     LedgerWriter(seed).write_event(
         "SESSION_STATE_UPDATED",
         session_id="session-1",
+        tenant_id="default",
         trace_id="seed",
         kernel_step_id="test",
         payload={"state": {"memory_store": {"memories": ["before"]}}},
@@ -528,6 +529,7 @@ async def test_boot_reconcile_reports_ambiguous_effects_for_recovery() -> None:
     plane = ExecutionControlPlane(registry=SessionRegistry(), kernel_executor=_executor)
     LedgerWriter(plane.ledger).append_effect_begin(
         session_id="s-amb",
+        tenant_id="default",
         trace_id="tr-amb",
         effect_id="eff-amb-1",
         request_id="req-amb-1",
@@ -554,6 +556,7 @@ async def test_boot_reconcile_auto_consumes_reconcile_required_effects(monkeypat
     writer = LedgerWriter(plane.ledger)
     writer.append_effect_begin(
         session_id="s-auto",
+        tenant_id="default",
         trace_id="tr-auto-begin",
         effect_id="eff-auto-1",
         request_id="req-auto-1",
@@ -561,6 +564,7 @@ async def test_boot_reconcile_auto_consumes_reconcile_required_effects(monkeypat
     writer.write_event(
         event_type="JOB_RECONCILE_REQUIRED",
         session_id="s-auto",
+        tenant_id="default",
         trace_id="tr-auto-required",
         kernel_step_id="control_plane.reconcile.required",
         payload={
@@ -599,6 +603,7 @@ async def test_boot_reconcile_auto_consumer_honors_max_items(monkeypatch) -> Non
 
     writer.append_effect_begin(
         session_id="s-bound",
+        tenant_id="default",
         trace_id="tr-bound-begin-1",
         effect_id="eff-bound-1",
         request_id="req-bound-1",
@@ -606,6 +611,7 @@ async def test_boot_reconcile_auto_consumer_honors_max_items(monkeypatch) -> Non
     writer.write_event(
         event_type="JOB_RECONCILE_REQUIRED",
         session_id="s-bound",
+        tenant_id="default",
         trace_id="tr-bound-required-1",
         kernel_step_id="control_plane.reconcile.required",
         payload={
@@ -617,6 +623,7 @@ async def test_boot_reconcile_auto_consumer_honors_max_items(monkeypatch) -> Non
 
     writer.append_effect_begin(
         session_id="s-bound",
+        tenant_id="default",
         trace_id="tr-bound-begin-2",
         effect_id="eff-bound-2",
         request_id="req-bound-2",
@@ -624,6 +631,7 @@ async def test_boot_reconcile_auto_consumer_honors_max_items(monkeypatch) -> Non
     writer.write_event(
         event_type="JOB_RECONCILE_REQUIRED",
         session_id="s-bound",
+        tenant_id="default",
         trace_id="tr-bound-required-2",
         kernel_step_id="control_plane.reconcile.required",
         payload={

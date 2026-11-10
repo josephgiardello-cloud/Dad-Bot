@@ -15,15 +15,22 @@ class EffectJournal:
         self._index = index
 
     @staticmethod
-    def derive_effect_id(*, session_id: str, request_id: str, trace_token: str = "", **legacy_kwargs: Any) -> str:
+    def derive_effect_id(
+        *,
+        session_id: str,
+        request_id: str,
+        trace_token: str = "",
+        tenant_id: str = "",
+        **legacy_kwargs: Any,
+    ) -> str:
         legacy_trace = legacy_kwargs.pop("trace_id", "")
         if legacy_kwargs:
             unknown = ", ".join(sorted(str(name) for name in legacy_kwargs))
             raise TypeError(f"Unexpected keyword argument(s): {unknown}")
         token = str(request_id or "").strip()
         if token:
-            return f"eff:{token}"
-        seed = f"{str(session_id or 'default')}|{str(trace_token or legacy_trace or '')}"
+            return f"eff:{str(tenant_id or '').strip()}:{token}" if tenant_id else f"eff:{token}"
+        seed = f"{str(tenant_id or '').strip()}|{str(session_id or 'default')}|{str(trace_token or legacy_trace or '')}"
         return f"eff:{hashlib.sha256(seed.encode('utf-8')).hexdigest()[:20]}"
 
     def begin(

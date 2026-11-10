@@ -3,9 +3,21 @@
 These checks do not authenticate a principal or establish resource ownership.
 """
 
+import os
 from dataclasses import dataclass
 
 from .tenant_identity import require_tenant_id
+
+
+def require_scoped_tenant_id(value: object) -> str:
+    tenant_id = require_tenant_id(value)
+    if tenant_id == "default":
+        from dadbot.runtime.env_loader import is_production_environment
+
+        enabled = os.environ.get("DADBOT_ALLOW_LEGACY_DEFAULT_TENANT", "").strip().lower()
+        if is_production_environment() or enabled not in {"1", "true", "yes", "on"}:
+            raise ValueError("The default tenant is allowed only in gated non-production environments")
+    return tenant_id
 
 
 def require_identifier(value: object, name: str) -> str:
@@ -22,7 +34,7 @@ class ExecutionIdentity:
     task_id: str
 
     def __post_init__(self) -> None:
-        require_tenant_id(self.tenant_id)
+        require_scoped_tenant_id(self.tenant_id)
         require_identifier(self.session_id, "session")
         require_identifier(self.request_id, "request")
         require_identifier(self.task_id, "task")

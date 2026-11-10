@@ -181,7 +181,7 @@ class MemoryManager(MemoryLifecycleMixin, MemorySearchMixin, MemoryIntegrationMi
         self._memory_projection_version = None
         return self._memory_core_state_cache
 
-    def load_memory_store(self, *, allow_tenant_mirror_fallback=True):
+    def load_memory_store(self, *, allow_tenant_mirror_fallback: bool | None = None):
         return self._storage.load_memory_store(allow_tenant_mirror_fallback=allow_tenant_mirror_fallback)
 
     def should_do_daily_checkin(self) -> bool:

@@ -11,14 +11,28 @@ from dadbot.config import DadRuntimeConfig
 from dadbot.core.execution_contract import TurnResponse
 from dadbot.memory.reranker import get_local_reranker, select_candidates
 from dadbot.services.source_grounding import SOURCE_REFUSAL, GroundingViolation, SourceGroundingService
-from dadbot_system.contracts import ChatRequest, ServiceConfig
+from dadbot_system.contracts import ChatRequest, ServiceConfig, WorkerTask
+from dadbot_system.delegation import SQLiteDelegationStore, _execution_authority
+from dadbot_system.security import ServiceTokenManager
 from dadbot_system.worker import DadBotTaskProcessor
 
 pytestmark = pytest.mark.unit
 
 
 @pytest.mark.parametrize("source_mode,expected", [(True, {"source_mode": True}), (False, {}), ("true", {})])
-def test_api_worker_preserves_explicit_source_mode(source_mode, expected):
+def test_api_worker_preserves_explicit_source_mode(source_mode, expected, tmp_path):
+    tenant_id = "tenant-reranker"
+    secret = "production-reranker-authority-test-secret"
+    authority_path = str(tmp_path / "authority.db")
+    SQLiteDelegationStore.initialize(authority_path)
+    store = SQLiteDelegationStore(authority_path, secret)
+    store.grant_membership(
+        issuer="dadbot",
+        subject="reranker-test",
+        tenant_id=tenant_id,
+        scopes={"write"},
+    )
+    tokens = ServiceTokenManager(secret)
     received = []
 
     async def execute(request):
@@ -26,9 +40,23 @@ def test_api_worker_preserves_explicit_source_mode(source_mode, expected):
         return TurnResponse(reply="quoted source")
 
     bot = SimpleNamespace(execute_turn=execute)
-    request = ChatRequest(session_id="source-api", user_input="source query", metadata={"source_mode": source_mode})
+    request = ChatRequest(
+        session_id="source-api",
+        tenant_id=tenant_id,
+        user_input="source query",
+        metadata={"source_mode": source_mode},
+    )
+    task = WorkerTask(session_id=request.session_id, tenant_id=tenant_id, request=request)
+    task.delegation = store.issue(
+        tokens.issue(subject="reranker-test", tenant_id=tenant_id, scopes={"write"}),
+        task,
+    )
     processor = DadBotTaskProcessor(ServiceConfig())
-    reply, _ = asyncio.run(processor._execute_request_async(bot, request))
+    authority_token = _execution_authority.set((store, task))
+    try:
+        reply, _ = asyncio.run(processor._execute_request_async(bot, request))
+    finally:
+        _execution_authority.reset(authority_token)
     assert reply == "quoted source"
     assert received[0].metadata == expected
 

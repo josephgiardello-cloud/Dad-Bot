@@ -303,7 +303,7 @@ class TestLeaseSchedulerIntegration:
 
         async def mock_executor(session, job):
             execution_log.append(f"executing:{job.session_id}")
-            return {"reply": "ok"}
+            return "ok", False
 
         async def _run():
             registry = SessionRegistry()
@@ -318,7 +318,7 @@ class TestLeaseSchedulerIntegration:
             return result, lease_mgr
 
         result, lease_mgr = asyncio.run(_run())
-        assert result["reply"] == "ok"
+        assert result[0] == "ok"
         assert "executing:s1" in execution_log
         # Lease released after job completes.
         assert not lease_mgr.is_held(session_id="s1")
@@ -334,7 +334,7 @@ class TestLeaseSchedulerIntegration:
 
         async def mock_executor(session, job):
             call_count["n"] += 1
-            return {"reply": "done"}
+            return "done", False
 
         async def _run():
             registry = SessionRegistry()
@@ -351,5 +351,5 @@ class TestLeaseSchedulerIntegration:
             return await plane.submit_turn(session_id="s1", user_input="hello", timeout_seconds=5.0)
 
         result = asyncio.run(_run())
-        assert result["reply"] == "done"
+        assert result[0] == "done"
         assert call_count["n"] == 1

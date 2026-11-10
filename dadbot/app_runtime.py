@@ -568,6 +568,7 @@ def launch_streamlit_app(
     *,
     append_signoff=True,
     light_mode=False,
+    model_name: str | None = None,
     script_path: str | Path | None = None,
 ):
     supervisor = get_runtime_supervisor()
@@ -635,6 +636,8 @@ def launch_streamlit_app(
         command_env["DADBOT_LIGHT_MODE"] = "1"
     else:
         command_env.pop("DADBOT_LIGHT_MODE", None)
+    if model_name:
+        command_env["DADBOT_LLM_MODEL"] = model_name
     command = [
         sys.executable,
         "-m",
@@ -645,6 +648,8 @@ def launch_streamlit_app(
         "false",
         "--server.headless",
         "true",
+        "--server.address",
+        "127.0.0.1",
         "--server.port",
         str(chosen_port),
     ]
@@ -678,7 +683,24 @@ def launch_streamlit_app(
                     )
                 return process.wait()
 
-            exit_code = process.wait()
+            if process.poll() is None:
+                logger.error(
+                    "Streamlit runtime did not become ready at %s within the startup timeout.",
+                    local_url,
+                )
+                process.terminate()
+                try:
+                    exit_code = process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    try:
+                        exit_code = process.wait(timeout=5)
+                    except subprocess.TimeoutExpired as exc:
+                        raise RuntimeError(
+                            "Streamlit runtime did not stop after forced termination.",
+                        ) from exc
+            else:
+                exit_code = process.wait()
             supervisor.set_state("DEGRADED")
             logger.error(
                 "Streamlit runtime exited before readiness on attempt %d/%d with code %s.",
@@ -687,7 +709,7 @@ def launch_streamlit_app(
                 exit_code,
             )
             if attempt >= max_start_attempts:
-                return exit_code
+                return exit_code or 1
             logger.warning("Attempting automatic Streamlit recovery restart.")
     except KeyboardInterrupt:
         if process is not None and process.poll() is None:
@@ -841,21 +863,21 @@ def stop_streamlit_app(script_path: str | Path | None = None):
 
 
 def build_service_state_store(config):
-    if config.persistence.sqlite_path:
+    sqlite_path = str(getattr(config.persistence, "sqlite_path", "") or "").strip()
+    if sqlite_path:
         if config.persistence.postgres_dsn or config.persistence.redis_url:
             raise ValueError("SQLite service state cannot be combined with PostgreSQL or Redis")
         if is_production_environment():
             raise RuntimeError("SQLite service state is only supported for local installations")
-        return SQLiteStateStore(config.persistence.sqlite_path)
+        return SQLiteStateStore(sqlite_path)
     fast_store = None
     durable_store = None
 
     if config.persistence.redis_url:
         try:
             fast_store = RedisStateStore(config.persistence.redis_url)
-        except Exception as e:
-            print(f"[DadBot] Redis unavailable or misconfigured: {e}. Falling back to in-memory store.")
-            fast_store = None
+        except Exception as exc:
+            raise RuntimeError("Configured Redis state store could not be initialized") from exc
 
     if config.persistence.postgres_dsn:
         try:
@@ -865,9 +887,8 @@ def build_service_state_store(config):
                 task_table=config.persistence.task_table,
                 event_table=config.persistence.event_table,
             )
-        except Exception as e:
-            print(f"[DadBot] Postgres unavailable or misconfigured: {e}. Falling back to in-memory store.")
-            durable_store = None
+        except Exception as exc:
+            raise RuntimeError("Configured Postgres state store could not be initialized") from exc
 
     if is_production_environment() and durable_store is None:
         raise RuntimeError(
@@ -920,6 +941,7 @@ def build_runtime_state_bundle(state_store, *, tenant_id: str, planner_debug_fac
     namespaced_store = NamespacedStateStore(
         state_store,
         DadBotOrchestrator.tenant_namespace(normalized_tenant_id),
+        tenant_id=normalized_tenant_id,
     )
     event_bus = DurableEventBus(namespaced_store)
     container = AppStateContainer(
@@ -1009,12 +1031,18 @@ def launch_api_service(args, *, dadbot_cls=None):
                 deadline = time.monotonic() + 45.0
                 while time.monotonic() < deadline:
                     self._orchestrator.drain_results(limit=100)
-                    response = self._orchestrator.response_for_task(task.task_id)
+                    response = self._orchestrator.response_for_task(
+                        task.task_id,
+                        tenant_id=request.tenant_id,
+                    )
                     if response is not None:
                         reply = str(response.get("reply") or "")
                         should_end = bool(response.get("should_end", False))
                         return reply, should_end
-                    status = self._orchestrator.task_status(task.task_id) or {}
+                    status = self._orchestrator.task_status(
+                        task.task_id,
+                        tenant_id=request.tenant_id,
+                    ) or {}
                     if str(status.get("status") or "").strip().lower() == "failed":
                         raise RuntimeError(str(status.get("error") or "Worker execution failed"))
                     time.sleep(0.05)
@@ -1138,24 +1166,23 @@ def main(
     if args.serve_api:
         return launch_api_service(args, dadbot_cls=resolved_dadbot_cls)
 
-    bot = resolved_dadbot_cls(
-        model_name=args.model or "qwen3.5:9b",
-        append_signoff=not args.no_signoff,
-        light_mode=args.light,
-        tenant_id=args.tenant_id,
-    )
-
-    if args.clear_memory:
-        bot.memory.clear_memory_store()
-        bot.print_system_message("Dad's saved memory has been cleared.")
-        return 0
-    if args.export_memory:
-        bot.memory.export_memory_store(args.export_memory)
-        bot.print_system_message(
-            f"Dad's saved memory was exported to {args.export_memory}.",
+    if args.cli or args.clear_memory or args.export_memory:
+        bot = resolved_dadbot_cls(
+            model_name=args.model or "qwen3.5:9b",
+            append_signoff=not args.no_signoff,
+            light_mode=args.light,
+            tenant_id=args.tenant_id,
         )
-        return 0
-    if args.cli:
+        if args.clear_memory:
+            bot.memory.clear_memory_store()
+            bot.print_system_message("Dad's saved memory has been cleared.")
+            return 0
+        if args.export_memory:
+            bot.memory.export_memory_store(args.export_memory)
+            bot.print_system_message(
+                f"Dad's saved memory was exported to {args.export_memory}.",
+            )
+            return 0
         if args.disable_service_client:
             bot.chat_loop()
         else:
@@ -1170,6 +1197,7 @@ def main(
     return launch_streamlit_app(
         append_signoff=not args.no_signoff,
         light_mode=args.light,
+        model_name=args.model,
         script_path=base_script_path,
     )
 

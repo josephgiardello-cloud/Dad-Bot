@@ -177,15 +177,45 @@ def test_mcp_transport_span_never_exports_tool_arguments_or_results(trace_output
 
     class Session:
         async def call_tool(self, name, arguments):
-            assert name == "PRIVATE-TOOL"
+            assert name == "get_state"
             assert arguments == {"value": "PRIVATE-ARGUMENT"}
             return SimpleNamespace(structured_content={"value": "PRIVATE-RESULT"}, is_error=True)
 
-    result = asyncio.run(MCPToolClient.call_tool(Session(), "PRIVATE-TOOL", {"value": "PRIVATE-ARGUMENT"}))
+    result = asyncio.run(MCPToolClient.call_tool(Session(), "get_state", {"value": "PRIVATE-ARGUMENT"}))
     assert result["is_error"] is True
     record = json.loads(trace_output.getvalue())
     assert record["name"] == "mcp.call_tool"
-    assert record["attributes"] == {"mcp.method.name": "tools/call", "mcp.result.is_error": True}
+    assert record["attributes"] == {
+        "mcp.method.name": "tools/call",
+        "mcp.result.is_error": True,
+        "mcp.server.name": "home_assistant",
+        "mcp.tool.name": "get_state",
+    }
+    assert "PRIVATE" not in trace_output.getvalue()
+
+
+def test_tool_execution_span_uses_safe_dadbot_attributes(trace_output):
+    from dadbot.core.tool_executor import execute_tool
+
+    context = SimpleNamespace(
+        trace_id="PRIVATE-APP-TRACE",
+        state={},
+        metadata={},
+    )
+    execute_tool(
+        tool_name="set_reminder",
+        parameters={"value": "PRIVATE-ARGUMENT"},
+        executor=lambda: {"value": "PRIVATE-RESULT"},
+        turn_context=context,
+    )
+
+    record = json.loads(trace_output.getvalue())
+    assert record["name"] == "dadbot.tool.execute"
+    assert record["attributes"] == {
+        "dadbot.server.name": "dadbot",
+        "dadbot.tool.is_error": False,
+        "dadbot.tool.name": "set_reminder",
+    }
     assert "PRIVATE" not in trace_output.getvalue()
 
 

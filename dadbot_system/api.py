@@ -10,9 +10,15 @@ import logging
 import os
 import re
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
+from datetime import datetime, timezone
+from functools import wraps
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
+from urllib.error import HTTPError
+from urllib.parse import urlparse
+from urllib.request import Request as URLRequest
+from urllib.request import urlopen
 
 from dadbot.api_models import build_pulse_envelope, build_turn_envelope
 from dadbot.core.execution_contract import ExecutionMode, SovereignContext
@@ -31,7 +37,15 @@ from .contracts import (
 )
 from .execution_identity import require_tenant_id
 from .kernel import ControlPlane, build_control_plane
-from .runtime_signals import configure_tracing, shutdown_tracing
+from .mcp_security import (
+    MCP_CONNECT_SCOPE,
+    MCP_TOKEN_MAX_TTL_SECONDS,
+    MCP_TOOL_BASE_SCOPES,
+    approved_mcp_tools,
+    mcp_resource_url,
+    mcp_tool_scope,
+)
+from .runtime_signals import configure_tracing, is_trace_provider_available, shutdown_tracing
 from .security import (
     AuthenticationError,
     AuthorizationError,
@@ -41,7 +55,7 @@ from .security import (
     SlidingWindowRateLimiter,
     TicketStoreUnavailableError,
 )
-from .state import NamespacedStateStore
+from .state import TenantOwnedStateStoreView
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +107,77 @@ except ImportError:
     WebSocketDisconnect = WebSocketDisconnectError
 
 
+def _probe_model_dependency(endpoint: str, model_name: str, timeout_seconds: float) -> tuple[str, str | None]:
+    if not model_name:
+        return "degraded", "ModelConfigurationError"
+    base_url = endpoint.rstrip("/")
+    tags_url = base_url if base_url.endswith("/api/tags") else f"{base_url}/api/tags"
+    request = URLRequest(tags_url, headers={"Accept": "application/json"})
+    with urlopen(request, timeout=timeout_seconds) as response:
+        payload = json.loads(response.read())
+    models = payload.get("models") if isinstance(payload, dict) else None
+    names = {
+        str(item.get("name") or "").strip()
+        for item in models or []
+        if isinstance(item, dict)
+    }
+    if model_name in names:
+        return "ok", None
+    return "degraded", "ModelNotFoundError"
+
+
+def _probe_vector_dependency(vector_url: str, _model_name: str, timeout_seconds: float) -> tuple[str, str | None]:
+    if not vector_url:
+        return "degraded", "ConfigurationError"
+    parsed = urlparse(vector_url)
+    if parsed.scheme in {"postgres", "postgresql"}:
+        import psycopg
+
+        with psycopg.connect(
+            vector_url,
+            connect_timeout=max(1, int(timeout_seconds + 0.999)),
+        ) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT 1")
+                cursor.fetchone()
+        return "ok", None
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return "unavailable", "ConfigurationError"
+
+    request = URLRequest(vector_url, method="HEAD")
+    try:
+        with urlopen(request, timeout=timeout_seconds) as response:
+            status_code = int(response.status)
+    except HTTPError as exc:
+        if exc.code in {405, 501}:
+            request = URLRequest(vector_url, headers={"Range": "bytes=0-0"})
+            with urlopen(request, timeout=timeout_seconds) as response:
+                status_code = int(response.status)
+        else:
+            status_code = int(exc.code)
+    if status_code < 400:
+        return "ok", None
+    if status_code < 500:
+        return "degraded", "HTTPError"
+    return "unavailable", "HTTPError"
+
+
+def _probe_memory_dependency(runtime_bot: Any, _timeout_seconds: float) -> tuple[str, str | None]:
+    context_service = getattr(runtime_bot, "context_service", None)
+    semantic_index = getattr(context_service, "semantic_index", None)
+    with_connection = getattr(semantic_index, "with_connection", None)
+    if not callable(with_connection):
+        return "unavailable", "MemoryBackendUnavailableError"
+
+    def check_connection(connection: Any) -> None:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT 1")
+            cursor.fetchone()
+
+    with_connection(check_connection)
+    return "ok", None
+
+
 def create_api_app(
     orchestrator,
     *,
@@ -109,6 +194,31 @@ def create_api_app(
 
     service_config = config or ServiceConfig()
     security_config = service_config.security
+    probe_names = {"model", "vector", "memory"}
+    configured_probes = {
+        str(name).strip().lower() for name in service_config.api.readiness_probes if str(name).strip()
+    }
+    required_probes = {
+        str(name).strip().lower()
+        for name in service_config.api.readiness_required_probes
+        if str(name).strip()
+    }
+    unsupported_probes = (configured_probes | required_probes) - probe_names
+    if unsupported_probes:
+        raise ValueError(f"Unsupported readiness probes: {', '.join(sorted(unsupported_probes))}")
+    configured_probes.update(required_probes)
+    probe_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+    probe_locks = {name: asyncio.Lock() for name in probe_names}
+    from .delegation import (
+        AuthorityUnavailableError,
+        SQLiteDelegationStore,
+        require_live_effect_authority,
+    )
+    from .delegation import (
+        runtime_authority_scope as bind_runtime_authority,
+    )
+
+    delegation_store = None
     if not security_config.auth_required and is_production_environment():
         raise RuntimeError("API authentication cannot be disabled in production")
     veto_proxy_enabled = str(os.environ.get("DADBOT_VETO_PROXY_ENABLED", "1")).strip().lower() in {
@@ -157,7 +267,6 @@ def create_api_app(
         if not security_config.authority_sqlite_path:
             raise RuntimeError("Authenticated service requires a configured durable authority store")
         if security_config.authority_sqlite_path:
-            from .delegation import SQLiteDelegationStore
             from .state import SQLiteStateStore
 
             authority_path = Path(security_config.authority_sqlite_path).resolve()
@@ -224,15 +333,30 @@ def create_api_app(
         if not token:
             raise HTTPException(status_code=401, detail="Missing bearer token")
         try:
-            return token_manager.verify(token)
+            principal = token_manager.verify(token)
         except AuthenticationError as exc:
             raise HTTPException(status_code=401, detail=str(exc)) from exc
+        if principal.audience not in {"", "dadbot-api"}:
+            raise HTTPException(status_code=401, detail="Bearer token audience is not valid for this API")
+        return principal
 
     def _enforce_scope(principal: ServicePrincipal, scope: str) -> None:
         try:
             principal.require_scope(scope)
+            if security_config.auth_required:
+                if delegation_store is None:
+                    raise HTTPException(status_code=503, detail="Delegation authority is unavailable")
+                delegation_store.require_membership(
+                    issuer=principal.issuer,
+                    subject=principal.subject,
+                    tenant_id=principal.tenant_id,
+                    scope=scope,
+                )
         except AuthorizationError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except AuthorityUnavailableError as exc:
+            logger.error("Delegation authority unavailable during request authorization")
+            raise HTTPException(status_code=503, detail="Delegation authority unavailable") from exc
 
     def _enforce_rate_limit(principal: ServicePrincipal, bucket: str) -> None:
         if bucket == "admin":
@@ -329,22 +453,111 @@ def create_api_app(
         except AuthorityUnavailableError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
 
+    def _websocket_tenant_dependency(path: str, scope: str):
+        async def bind(
+            websocket: WebSocket,
+            tenant_id: str = "",
+            session_id: str = "",
+        ):
+            try:
+                principal, effective_tenant_id = await _websocket_principal(
+                    websocket,
+                    path=path.format(session_id=session_id),
+                    scope=scope,
+                    tenant_id=tenant_id,
+                )
+            except HTTPException as exc:
+                from fastapi import WebSocketException
+
+                raise WebSocketException(
+                    code=1013 if exc.status_code == 503 else 4401
+                ) from exc
+
+            from dadbot_system.tenant_context import require_request_context
+
+            websocket.state.service_principal = principal
+            with require_live_effect_authority(required=security_config.auth_required):
+                with _request_tenant_context_scope(effective_tenant_id):
+                    websocket.state.tenant_context = require_request_context()
+                    yield effective_tenant_id
+
+        return bind
+
+
+    def _request_tenant_context_scope(tenant_id: str):
+        import os
+
+        from dadbot.runtime.env_loader import runtime_environment
+        from dadbot_system.tenant_context import (
+            TenantContext,
+            local_default_context_scope,
+            tenant_context_scope,
+        )
+
+        if tenant_id == DEFAULT_TENANT_ID:
+            enabled = (
+                runtime_environment() != "production"
+                and os.environ.get("DADBOT_ALLOW_LEGACY_DEFAULT_TENANT", "")
+                .strip()
+                .lower()
+                in {"1", "true", "yes", "on"}
+            )
+            if not enabled:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Legacy default tenant compatibility is disabled",
+                )
+            return local_default_context_scope(enabled=True)
+
+        try:
+            context = TenantContext(tenant_id)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=403,
+                detail="Tenant context requires an issued canonical tenant ID",
+            ) from exc
+        return tenant_context_scope(context)
+
+
     async def _http_principal(
         request: Request,
         authorization: str | None = Header(default=None),
         x_dadbot_token: str | None = Header(default=None),
-    ) -> ServicePrincipal:
-        if request.url.path.rstrip("/") in {"/health", f"{_version_prefix()}/health"}:
+    ):
+        if request.url.path.rstrip("/") in {
+            "/health",
+            "/ready",
+            f"{_version_prefix()}/health",
+            f"{_version_prefix()}/ready",
+        }:
             principal = ServicePrincipal(
                 subject="health-check",
                 tenant_id=DEFAULT_TENANT_ID,
                 scopes=frozenset({"read"}),
             )
             request.state.service_principal = principal
-            return principal
-        principal = _resolve_principal(_extract_bearer_token(authorization, x_dadbot_token))
+            yield principal
+            return
+
+        principal = _resolve_principal(
+            _extract_bearer_token(authorization, x_dadbot_token)
+        )
         request.state.service_principal = principal
-        return principal
+
+        body = await request.body()
+        payload = json.loads(body) if body else {}
+        requested_tenant = (
+            payload.get("tenant_id", request.query_params.get("tenant_id"))
+            if isinstance(payload, dict)
+            else request.query_params.get("tenant_id")
+        )
+        tenant_id = _resolve_tenant(principal, requested_tenant)
+        from dadbot_system.tenant_context import require_request_context
+
+        with require_live_effect_authority(required=security_config.auth_required):
+            with _request_tenant_context_scope(tenant_id):
+                request.state.tenant_context = require_request_context()
+                yield principal
 
     @asynccontextmanager
     async def lifespan(_app):
@@ -362,7 +575,10 @@ def create_api_app(
             _timeout = float(payload.get("timeout_seconds") or 60.0)
             task_id = str(payload.get("_submitted_task_id") or "")
             if task_id:
-                task_status = orchestrator.task_status(task_id)
+                task_status = orchestrator.task_status(
+                    task_id,
+                    tenant_id=request.tenant_id,
+                )
                 if (
                     not task_status
                     or task_status.get("tenant_id") != request.tenant_id
@@ -375,7 +591,11 @@ def create_api_app(
                 task = orchestrator.submit_chat(request)
                 task_id = task.task_id
                 execution_graph = task.execution_graph.to_dict() if task.execution_graph is not None else None
-            task_status, response = await _wait_for_task_completion(task_id, timeout_seconds=_timeout)
+            task_status, response = await _wait_for_task_completion(
+                task_id,
+                tenant_id=request.tenant_id,
+                timeout_seconds=_timeout,
+            )
             return {
                 "task": task_status,
                 "response": response,
@@ -430,29 +650,81 @@ def create_api_app(
         response.headers.setdefault("Cache-Control", "no-store")
         return response
 
-    async def _wait_for_task_completion(task_id: str, *, timeout_seconds: float = 60.0):
+    async def _wait_for_task_completion(
+        task_id: str,
+        *,
+        tenant_id: str,
+        timeout_seconds: float = 60.0,
+    ):
         from .worker import AUTHORITY_UNAVAILABLE
 
         deadline = asyncio.get_running_loop().time() + max(1.0, float(timeout_seconds or 60.0))
         while asyncio.get_running_loop().time() < deadline:
-            status = orchestrator.task_status(task_id)
+            status = orchestrator.task_status(task_id, tenant_id=tenant_id)
             if status is None:
                 return None, None
             if status.get("error") == AUTHORITY_UNAVAILABLE:
                 raise HTTPException(status_code=503, detail=AUTHORITY_UNAVAILABLE)
-            response = orchestrator.response_for_task(task_id)
+            response = orchestrator.response_for_task(task_id, tenant_id=tenant_id)
             if response is not None:
                 return status, response
             if str(status.get("status") or "").strip().lower() == "failed":
                 return status, None
             await asyncio.sleep(0.05)
-        return orchestrator.task_status(task_id), orchestrator.response_for_task(task_id)
+        return (
+            orchestrator.task_status(task_id, tenant_id=tenant_id),
+            orchestrator.response_for_task(task_id, tenant_id=tenant_id),
+        )
 
     def _resolve_runtime_bot():
         bot = runtime_bot if runtime_bot is not None else getattr(orchestrator, "runtime_bot", None)
         if bot is None:
             raise HTTPException(status_code=503, detail="Runtime bot is not available for automation controls")
         return bot
+
+    @contextmanager
+    def _runtime_authority(principal: ServicePrincipal, scope: str):
+        bot = _resolve_runtime_bot()
+        if not security_config.auth_required:
+            yield bot
+            return
+        tenant_id = _resolve_tenant(principal)
+        bot_tenant_id = str(getattr(getattr(bot, "config", None), "tenant_id", "") or "")
+        if bot_tenant_id != tenant_id:
+            raise HTTPException(
+                status_code=403,
+                detail="Runtime bot is not bound to the authenticated tenant",
+            )
+        if delegation_store is None:
+            raise HTTPException(status_code=503, detail="Delegation authority is unavailable")
+        try:
+            with bind_runtime_authority(
+                delegation_store,
+                principal,
+                scope=scope,
+                tenant_id=tenant_id,
+            ):
+                yield bot
+        except AuthorizationError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except AuthorityUnavailableError as exc:
+            logger.error("Delegation authority unavailable during runtime operation")
+            raise HTTPException(status_code=503, detail="Delegation authority unavailable") from exc
+
+    def _with_runtime_authority(scope: str):
+        def decorate(handler):
+            @wraps(handler)
+            async def wrapped(*args, **kwargs):
+                principal = kwargs.get("principal")
+                if not isinstance(principal, ServicePrincipal):
+                    raise RuntimeError("Runtime operation requires an authenticated principal")
+                _enforce_scope(principal, scope)
+                with _runtime_authority(principal, scope):
+                    return await handler(*args, **kwargs)
+
+            return wrapped
+
+        return decorate
 
     def _extract_spatial_text(payload: dict[str, Any]) -> str:
         for key in ("text", "transcript", "message", "prompt", "user_input"):
@@ -466,15 +738,6 @@ def create_api_app(
                 if isinstance(value, str) and value.strip():
                     return value.strip()
         return ""
-
-    def _call_runtime_reply(bot: Any, user_text: str) -> str:
-        processor = getattr(bot, "process_user_message", None)
-        if callable(processor):
-            result = processor(user_text)
-            if isinstance(result, tuple) and result:
-                return str(result[0] or "").strip()
-            return str(result or "").strip()
-        raise RuntimeError("Runtime bot does not expose process_user_message")
 
     def _encode_spatial_audio(bot: Any, reply_text: str) -> tuple[str, str, str]:
         if not reply_text.strip():
@@ -509,7 +772,9 @@ def create_api_app(
                 "intervention": dict(intervention or {}),
             },
         )
-        scoped_store = NamespacedStateStore(orchestrator.state_store, orchestrator.tenant_namespace(tenant_id))
+        scoped_store = TenantOwnedStateStoreView(
+            orchestrator.state_store, tenant_id, orchestrator.task_store
+        )
         serialized = envelope.to_dict()
         scoped_store.append_event(session_id, serialized)
         event_bus = getattr(orchestrator, "event_bus", None)
@@ -532,7 +797,15 @@ def create_api_app(
         task_id = str(task_data.get("task_id") or "")
         session_id = str(task_data.get("session_id") or response_data.get("session_id") or "")
         request_id = str(response_data.get("request_id") or task_data.get("request_id") or "")
-        tenant_id = str(task_data.get("tenant_id") or response_data.get("tenant_id") or DEFAULT_TENANT_ID)
+        task_tenant_id = str(task_data.get("tenant_id") or "").strip()
+        response_tenant_id = str(response_data.get("tenant_id") or "").strip()
+        if task_tenant_id and response_tenant_id and task_tenant_id != response_tenant_id:
+            raise HTTPException(status_code=403, detail="Tenant context mismatch")
+        tenant_id = task_tenant_id or response_tenant_id
+        if not tenant_id:
+            raise HTTPException(status_code=403, detail="Tenant context is required")
+        task_data["tenant_id"] = tenant_id
+        response_data["tenant_id"] = tenant_id
 
         intervention_event = _publish_service_intervention_event(
             session_id=session_id,
@@ -580,8 +853,13 @@ def create_api_app(
         }
 
         if task_id:
-            orchestrator.state_store.save_task(task_id, task_data)
-            orchestrator.state_store.save_response(task_id, response_data)
+            orchestrator.task_store.save_task(tenant_id, task_id, task_data)
+            orchestrator.task_store.save_task_result(
+                tenant_id,
+                task_id,
+                task_data,
+                response_data,
+            )
 
         return task_data, response_data, intervention_event
 
@@ -870,6 +1148,199 @@ def create_api_app(
                     return snapshot
         return None
 
+    async def _cached_probe(name: str) -> dict[str, Any]:
+        if name not in configured_probes:
+            return {"status": "unprobed", "probed_at": None, "error_type": None}
+
+        timeout_seconds = min(
+            5.0,
+            max(0.001, service_config.api.readiness_probe_timeout_ms / 1000.0),
+        )
+        cache_seconds = max(0, service_config.api.readiness_probe_cache_seconds)
+        async with probe_locks[name]:
+            now = time.monotonic()
+            cached = probe_cache.get(name)
+            if cached is not None and cache_seconds > 0 and now - cached[0] < cache_seconds:
+                return dict(cached[1])
+
+            model_name = str(
+                getattr(runtime_bot, "ACTIVE_MODEL", "") or service_config.default_model
+            ).strip()
+            endpoint = str(os.environ.get("OLLAMA_HOST") or "http://127.0.0.1:11434").strip()
+            vector_url = str(service_config.persistence.vector_store_url or "").strip()
+            probe_fn = {
+                "model": lambda: _probe_model_dependency(endpoint, model_name, timeout_seconds),
+                "vector": lambda: _probe_vector_dependency(vector_url, "", timeout_seconds),
+                "memory": lambda: _probe_memory_dependency(runtime_bot, timeout_seconds),
+            }[name]
+            try:
+                status, error_type = await asyncio.wait_for(
+                    asyncio.to_thread(probe_fn),
+                    timeout=timeout_seconds,
+                )
+            except TimeoutError:
+                status, error_type = "unavailable", "TimeoutError"
+            except Exception as exc:
+                status, error_type = "unavailable", type(exc).__name__
+
+            result = {
+                "status": status,
+                "probed_at": datetime.now(timezone.utc).isoformat(),
+                "error_type": error_type,
+            }
+            if cache_seconds > 0:
+                probe_cache[name] = (time.monotonic(), result)
+            return dict(result)
+
+    async def _readiness_checks() -> tuple[dict[str, dict[str, Any]], bool]:
+        dependencies: dict[str, str] = {}
+        runtime: dict[str, str] = {}
+        ready = True
+
+        state_store_check = getattr(orchestrator.state_store, "check_available", None)
+        try:
+            if not callable(state_store_check):
+                raise RuntimeError("State store does not support availability checks")
+            state_store_check()
+            dependencies["state_store"] = "available"
+        except Exception as exc:
+            logger.error("State store readiness check failed: %s", type(exc).__name__)
+            dependencies["state_store"] = "unavailable"
+            ready = False
+
+        if security_config.auth_required:
+            try:
+                if delegation_store is None:
+                    raise RuntimeError("Delegation authority store is not configured")
+                delegation_store.check_available()
+                dependencies["authority_store"] = "available"
+            except Exception as exc:
+                logger.error("Authority store readiness check failed: %s", type(exc).__name__)
+                dependencies["authority_store"] = "unavailable"
+                ready = False
+        else:
+            dependencies["authority_store"] = "disabled"
+
+        worker_status = getattr(worker_manager, "readiness_status", None) if worker_manager is not None else None
+        if not isinstance(worker_status, str) or worker_status not in (
+            "available",
+            "starting",
+            "quarantined",
+            "unavailable",
+        ):
+            worker_status = "available" if worker_manager is not None and worker_manager.is_ready else "unavailable"
+        runtime["workers"] = worker_status
+        ready = ready and worker_status == "available"
+
+        model_check, vector_check, memory_check = await asyncio.gather(
+            _cached_probe("model"),
+            _cached_probe("vector"),
+            _cached_probe("memory"),
+        )
+        ready = ready and all(
+            name not in required_probes or result["status"] == "ok"
+            for name, result in (
+                ("model", model_check),
+                ("vector", vector_check),
+                ("memory", memory_check),
+            )
+        )
+        return {
+            "dependencies": dependencies,
+            "runtime": runtime,
+            "model": model_check,
+            "vector": vector_check,
+            "memory": memory_check,
+        }, ready
+
+    async def _doctor_diagnostics() -> dict[str, Any]:
+        checks, ready = await _readiness_checks()
+        optional_probe_degraded = any(
+            checks[name]["status"] in {"degraded", "unavailable"}
+            for name in ("model", "vector", "memory")
+        )
+        diagnostics: dict[str, Any] = {
+            "status": "ok" if ready and not optional_probe_degraded else "degraded",
+            "checks": checks,
+        }
+        from dadbot.services.memory_service import MemoryService
+
+        diagnostics["memory_retrieval_status_counts"] = MemoryService.recent_retrieval_status_counts()
+
+        tool_registry = getattr(orchestrator, "tool_registry", None)
+        if callable(tool_registry):
+            tool_registry = tool_registry()
+        list_capabilities = getattr(tool_registry, "list_capabilities", None)
+        if callable(list_capabilities):
+            try:
+                tool_count = len(list_capabilities())
+                diagnostics["tool_registry"] = {"status": "available", "registered_count": tool_count}
+            except Exception as exc:
+                logger.error("Tool registry diagnostic failed: %s", type(exc).__name__)
+                diagnostics["tool_registry"] = {"status": "unavailable"}
+                diagnostics["status"] = "degraded"
+        else:
+            diagnostics["tool_registry"] = {"status": "not_exposed"}
+
+        if service_config.telemetry.otel_enabled:
+            try:
+                trace_enabled = is_trace_provider_available()
+            except ImportError:
+                trace_enabled = False
+            diagnostics["trace_backend"] = {
+                "status": "available" if trace_enabled else "unavailable",
+            }
+            if not trace_enabled:
+                diagnostics["status"] = "degraded"
+        else:
+            diagnostics["trace_backend"] = {"status": "disabled"}
+
+        model_name = str(getattr(runtime_bot, "ACTIVE_MODEL", "") or "").strip()
+        model_probe_status = checks["model"]["status"]
+        diagnostics["model_runtime"] = {
+            "status": (
+                "configured_not_probed" if model_name else "not_probed"
+            ) if model_probe_status == "unprobed" else model_probe_status,
+            **({"active_model": model_name[:128]} if model_name else {}),
+        }
+        vector_configured = bool(str(service_config.persistence.vector_store_url or "").strip())
+        vector_probe_status = checks["vector"]["status"]
+        diagnostics["vector_store"] = {
+            "status": (
+                "configured_not_probed" if vector_configured else "not_configured"
+            ) if vector_probe_status == "unprobed" else vector_probe_status,
+        }
+
+        health_snapshot = getattr(runtime_bot, "current_runtime_health_snapshot", None)
+        if callable(health_snapshot):
+            try:
+                snapshot = health_snapshot(force=False, log_warnings=False, persist=False)
+                if isinstance(snapshot, dict):
+                    diagnostics["runtime_health"] = {
+                        key: snapshot[key]
+                        for key in (
+                            "level",
+                            "health_score",
+                            "memory_context_ratio",
+                            "prompt_guard_trim_count",
+                            "recent_runtime_issue_count",
+                        )
+                        if key in snapshot
+                    }
+                    if str(snapshot.get("level") or "").lower() in {"yellow", "red"}:
+                        diagnostics["status"] = "degraded"
+                else:
+                    raise TypeError("Runtime health snapshot must be a mapping")
+            except Exception as exc:
+                logger.error("Runtime health diagnostic failed: %s", type(exc).__name__)
+                diagnostics["runtime_health"] = {"status": "unavailable"}
+                diagnostics["status"] = "degraded"
+        else:
+            diagnostics["runtime_health"] = {"status": "not_exposed"}
+
+        diagnostics["pending_approvals"] = {"status": "not_exposed"}
+        return diagnostics
+
     def _integrity_metadata_from_state(session_state: dict[str, Any]) -> dict[str, Any]:
         last_integrity_status = dict(session_state.get("last_integrity_status") or {})
         return {
@@ -908,6 +1379,71 @@ def create_api_app(
         return pulse_envelope.model_dump(mode="json")
 
     router = APIRouter()
+
+    @router.post("/mcp/token")
+    async def issue_mcp_access_token(payload: dict, principal: ServicePrincipal = Depends(_http_principal)):
+        if not security_config.auth_required or token_manager is None or delegation_store is None:
+            raise HTTPException(status_code=503, detail="Authenticated MCP token exchange is unavailable")
+        _enforce_rate_limit(principal, "write")
+        requested_tools = payload.get("tools")
+        if (
+            not isinstance(requested_tools, list)
+            or not requested_tools
+            or len(requested_tools) > len(MCP_TOOL_BASE_SCOPES)
+            or any(not isinstance(tool, str) or not tool.strip() for tool in requested_tools)
+            or len(set(requested_tools)) != len(requested_tools)
+        ):
+            raise HTTPException(status_code=422, detail="tools must be a non-empty list of unique tool names")
+        try:
+            manifest = approved_mcp_tools()
+            resource_url = mcp_resource_url()
+        except (OSError, ValueError, RuntimeError) as exc:
+            logger.error("MCP token exchange is unavailable because its manifest or resource URL is invalid")
+            raise HTTPException(status_code=503, detail="MCP tool policy is unavailable") from exc
+        if any(tool not in manifest or tool not in MCP_TOOL_BASE_SCOPES for tool in requested_tools):
+            raise HTTPException(status_code=422, detail="tools contains an unknown or unapproved MCP tool")
+        if principal.allowed_tools and not set(requested_tools).issubset(principal.allowed_tools):
+            raise HTTPException(status_code=403, detail="Requested MCP tools exceed the principal's tool grant")
+
+        base_scopes = {MCP_TOOL_BASE_SCOPES[tool] for tool in requested_tools}
+        for scope in base_scopes:
+            _enforce_scope(principal, scope)
+
+        ttl_seconds = payload.get("ttl_seconds", 120)
+        if (
+            isinstance(ttl_seconds, bool)
+            or not isinstance(ttl_seconds, int)
+            or not 1 <= ttl_seconds <= MCP_TOKEN_MAX_TTL_SECONDS
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail=f"ttl_seconds must be an integer from 1 to {MCP_TOKEN_MAX_TTL_SECONDS}",
+            )
+        _resolve_tenant(principal, None)
+        scopes = {
+            MCP_CONNECT_SCOPE,
+            *(mcp_tool_scope(tool) for tool in requested_tools),
+            *base_scopes,
+        }
+        try:
+            token = token_manager.issue(
+                subject=principal.subject,
+                tenant_id=principal.tenant_id,
+                scopes=scopes,
+                allowed_tools=requested_tools,
+                ttl_seconds=ttl_seconds,
+                audience=resource_url,
+            )
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=403, detail="Unable to issue an MCP token for this principal") from exc
+        return {
+            "access_token": token,
+            "token_type": "Bearer",
+            "audience": resource_url,
+            "expires_in": ttl_seconds,
+            "scopes": sorted(scopes),
+            "allowed_tools": requested_tools,
+        }
 
     @router.post("/websocket/ticket")
     async def issue_websocket_ticket(payload: dict, principal: ServicePrincipal = Depends(_http_principal)):
@@ -953,6 +1489,28 @@ def create_api_app(
         if diagnostics is not None:
             payload["response_engine_diagnostics"] = diagnostics
         return payload
+
+    @router.get("/ready")
+    async def readiness_check():
+        check_groups, ready = await _readiness_checks()
+
+        return JSONResponse(
+            status_code=200 if ready else 503,
+            content={
+                "status": "ready" if ready else "not_ready",
+                "checks": check_groups,
+            },
+        )
+
+    @router.get("/doctor")
+    async def doctor_check(principal: ServicePrincipal = Depends(_http_principal)):
+        _enforce_scope(principal, "admin")
+        _enforce_rate_limit(principal, "admin")
+        diagnostics = await _doctor_diagnostics()
+        return JSONResponse(
+            status_code=200 if diagnostics["status"] == "ok" else 503,
+            content=diagnostics,
+        )
 
     @router.post("/sessions/{session_id}/chat")
     async def submit_chat(
@@ -1123,14 +1681,15 @@ def create_api_app(
     async def get_task_status(task_id: str, principal: ServicePrincipal = Depends(_http_principal)):
         _enforce_scope(principal, "read")
         _enforce_rate_limit(principal, "read")
-        status = orchestrator.task_status(task_id)
+        tenant_id = _resolve_tenant(principal, None)
+        status = orchestrator.task_status(task_id, tenant_id=tenant_id)
         if status is None:
             raise HTTPException(status_code=404, detail="Task not found")
-        _resolve_tenant(principal, status.get("tenant_id"))
-        response = orchestrator.response_for_task(task_id)
+        response = orchestrator.response_for_task(task_id, tenant_id=tenant_id)
         return {"task": status, "response": response}
 
     @router.get("/automation/status")
+    @_with_runtime_authority("admin")
     async def automation_status(principal: ServicePrincipal = Depends(_http_principal)):
         _enforce_scope(principal, "admin")
         _enforce_rate_limit(principal, "admin")
@@ -1155,6 +1714,7 @@ def create_api_app(
         }
 
     @router.post("/automation/heartbeat")
+    @_with_runtime_authority("admin")
     async def trigger_heartbeat(payload: dict | None = None, principal: ServicePrincipal = Depends(_http_principal)):
         _enforce_scope(principal, "admin")
         _enforce_rate_limit(principal, "admin")
@@ -1167,6 +1727,7 @@ def create_api_app(
         return {"status": "completed", "result": result}
 
     @router.post("/automation/self-improvement")
+    @_with_runtime_authority("admin")
     async def trigger_self_improvement(
         payload: dict | None = None,
         principal: ServicePrincipal = Depends(_http_principal),
@@ -1197,6 +1758,7 @@ def create_api_app(
         return {"status": "completed", "result": perform_cycle()}
 
     @router.get("/automation/browser/status")
+    @_with_runtime_authority("admin")
     async def browser_status(principal: ServicePrincipal = Depends(_http_principal)):
         _enforce_scope(principal, "admin")
         _enforce_rate_limit(principal, "admin")
@@ -1206,6 +1768,7 @@ def create_api_app(
         return dict(bot.local_mcp_status() or {})
 
     @router.post("/automation/browser/start")
+    @_with_runtime_authority("admin")
     async def browser_start(payload: dict | None = None, principal: ServicePrincipal = Depends(_http_principal)):
         _enforce_scope(principal, "admin")
         _enforce_rate_limit(principal, "admin")
@@ -1216,6 +1779,7 @@ def create_api_app(
         return dict(bot.start_local_mcp_server_process(restart=bool(options.get("restart", False))) or {})
 
     @router.post("/automation/browser/stop")
+    @_with_runtime_authority("admin")
     async def browser_stop(principal: ServicePrincipal = Depends(_http_principal)):
         _enforce_scope(principal, "admin")
         _enforce_rate_limit(principal, "admin")
@@ -1227,7 +1791,7 @@ def create_api_app(
     @router.get("/sessions/{session_id}/events")
     async def get_session_events(
         session_id: str,
-        tenant_id: str = DEFAULT_TENANT_ID,
+        tenant_id: str | None = None,
         principal: ServicePrincipal = Depends(_http_principal),
     ):
         _enforce_scope(principal, "read")
@@ -1235,10 +1799,29 @@ def create_api_app(
         effective_tenant_id = _resolve_tenant(principal, tenant_id)
         return orchestrator.session_events(session_id, tenant_id=effective_tenant_id)
 
+    @router.get("/sessions/{session_id}/actions/explain")
+    async def explain_session_actions(
+        session_id: str,
+        tenant_id: str | None = None,
+        limit: int = 10,
+        principal: ServicePrincipal = Depends(_http_principal),
+    ):
+        _enforce_scope(principal, "read")
+        _enforce_rate_limit(principal, "read")
+        effective_tenant_id = _resolve_tenant(principal, tenant_id)
+        from .action_explanation import explain_last_actions
+
+        session_state = _session_state_snapshot(session_id, effective_tenant_id)
+        return {
+            "session_id": session_id,
+            "tenant_id": effective_tenant_id,
+            **explain_last_actions(session_state.get("last_tool_actions"), limit=limit),
+        }
+
     @router.get("/sessions/{session_id}/replay")
     async def replay_session_events(
         session_id: str,
-        tenant_id: str = DEFAULT_TENANT_ID,
+        tenant_id: str | None = None,
         event_type: str = "",
         since_event_id: str = "",
         limit: int = 200,
@@ -1276,14 +1859,17 @@ def create_api_app(
         }
 
     @router.websocket("/sessions/{session_id}/events/stream")
-    async def stream_session_events(websocket: WebSocket, session_id: str, tenant_id: str = ""):
-        try:
-            _, effective_tenant_id = await _websocket_principal(
-                websocket, path=f"/sessions/{session_id}/events/stream", scope="read", tenant_id=tenant_id
+    async def stream_session_events(
+        websocket: WebSocket,
+        session_id: str,
+        tenant_id: str = Depends(
+            _websocket_tenant_dependency(
+                "/sessions/{session_id}/events/stream",
+                "read",
             )
-        except HTTPException as exc:
-            await websocket.close(code=1013 if exc.status_code == 503 else 4401)
-            return
+        ),
+    ):
+        effective_tenant_id = tenant_id
 
         await websocket.accept()
         event_bus = getattr(orchestrator, "event_bus", None)
@@ -1312,14 +1898,17 @@ def create_api_app(
                 event_bus.unsubscribe(subscriber)
 
     @router.websocket("/sessions/{session_id}/pulse/stream")
-    async def stream_session_pulse(websocket: WebSocket, session_id: str, tenant_id: str = ""):
-        try:
-            _, effective_tenant_id = await _websocket_principal(
-                websocket, path=f"/sessions/{session_id}/pulse/stream", scope="read", tenant_id=tenant_id
+    async def stream_session_pulse(
+        websocket: WebSocket,
+        session_id: str,
+        tenant_id: str = Depends(
+            _websocket_tenant_dependency(
+                "/sessions/{session_id}/pulse/stream",
+                "read",
             )
-        except HTTPException as exc:
-            await websocket.close(code=1013 if exc.status_code == 503 else 4401)
-            return
+        ),
+    ):
+        effective_tenant_id = tenant_id
 
         await websocket.accept()
         last_signature = ""
@@ -1344,15 +1933,15 @@ def create_api_app(
             return
 
     @router.websocket("/spatial/ws")
-    async def spatial_avatar_bridge(websocket: WebSocket, tenant_id: str = ""):
-        try:
-            await _websocket_principal(websocket, path="/spatial/ws", scope="write", tenant_id=tenant_id)
-        except HTTPException as exc:
-            await websocket.close(code=1013 if exc.status_code == 503 else 4401)
-            return
+    async def spatial_avatar_bridge(
+        websocket: WebSocket,
+        tenant_id: str = Depends(
+            _websocket_tenant_dependency("/spatial/ws", "write")
+        ),
+    ):
 
         await websocket.accept()
-        bot = _resolve_runtime_bot()
+        principal = websocket.state.service_principal
         while True:
             try:
                 raw_message = await websocket.receive_text()
@@ -1381,17 +1970,34 @@ def create_api_app(
                 continue
 
             try:
-                reply_text = _call_runtime_reply(bot, user_text)
+                request_payload = _apply_request_identity(
+                    {"user_input": user_text, "channel": "spatial"},
+                    principal,
+                    tenant_id=tenant_id,
+                )
+                request = ChatRequest.from_dict(request_payload, session_id="spatial-avatar")
+                task = orchestrator.submit_chat(request, execution_principal=principal)
+                task_status, response = await _wait_for_task_completion(
+                    task.task_id,
+                    tenant_id=tenant_id,
+                    timeout_seconds=45.0,
+                )
+                if response is None:
+                    detail = str((task_status or {}).get("error") or "Worker did not return a response")
+                    raise HTTPException(status_code=503, detail=detail)
+                reply_text = str(response.get("reply") or "")
             except Exception as exc:
+                message = str(exc.detail) if isinstance(exc, HTTPException) else str(exc)
                 await websocket.send_json(
                     {
                         "type": "error",
                         "error": "runtime_failure",
-                        "message": str(exc),
+                        "message": message,
                     }
                 )
                 continue
 
+            bot = runtime_bot if runtime_bot is not None else getattr(orchestrator, "runtime_bot", None)
             audio_base64, audio_error, audio_mime = _encode_spatial_audio(bot, reply_text)
             response_payload = {
                 "type": "response",

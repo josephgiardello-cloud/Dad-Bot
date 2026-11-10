@@ -168,7 +168,15 @@ class RuntimeStateManager(_StateThreadMixin, _StatePromptBudgetMixin):
             validated = PlannerDebugState.model_validate(
                 self.bot.default_planner_debug_state(),
             )
-        return validated.model_dump(mode="python")
+        normalized = validated.model_dump(mode="python")
+        normalized.update(
+            {
+                key: value
+                for key, value in payload.items()
+                if key not in normalized
+            },
+        )
+        return normalized
 
     @staticmethod
     def _coerce_non_negative_int(value):

@@ -1,9 +1,10 @@
 # Phase 3 entry criteria — SQLite task and response ownership
 
-> **Inventory only. None of these failures is fixed by this document or the
-> current change. They remain Phase 3 exit-gate acceptance tests.**
+> **Historical baseline.** The seven failures below were observed before
+> tenant-owned task storage was wired. Current verification is recorded under
+> “Current Stage 1 verification” and supersedes the historical failure status.
 
-Pre-flight rerun:
+Historical pre-implementation rerun:
 `.\.venv\Scripts\python.exe -m pytest --basetemp=<session-temp>\signoff-preflight-phase3 tests\unit\test_sqlite_service_state.py -q`
 reported **7 failed** and the remaining tests in that file passed. Failure
 descriptions are based on that run. The Phase 1.5 validator accepts exact
@@ -24,5 +25,69 @@ ownership; none of these failures is caused by rewriting an ID.
 
 All seven node IDs must pass unmarked after Phase 3 task/response scoping and
 tenant-aware recovery are implemented. The raw store must not remain an
-application-accessible fallback. This change intentionally does not alter
-SQLite schemas, raw-store APIs, recovery, task listing, or any of these tests.
+application-accessible fallback.
+
+### Current Stage 1 verification — 2026-11-09
+
+The seven node IDs above were rerun unmarked after wiring `SQLiteOwnedTasks`
+through orchestration and tenant-scoping task, response, incomplete-listing,
+and recovery access. **All seven passed; none failed or errored.** The same
+run also passed the real-process concurrent same-session task/response test.
+This closes the listed task/response/recovery gate only; it does not close
+Phase 3.3–3.9 store work or the deferred memory matrix cases.
+
+### Current Phase 3.4 progress — core sessions and SQLite checkpoints
+
+The control-plane registry and termination state, job/dedupe/lease identity,
+session-state replay, public ledger/timeline reads, worker/orchestrator
+propagation, and scheduler/reconciliation scopes are tenant-qualified.
+Unowned session events and queued jobs are excluded from recovery. Durable
+SQLite checkpoints now use `(tenant_id, session_id, trace_id)`, check stored
+metadata against row ownership, scope hash-chain and cleanup queries, and
+quarantine pre-v2 unowned tables. Fresh-process same-ID tests cover both
+control-plane session replay and checkpoint recovery; tests also cover
+cross-tenant reads/deletes, concurrency, missing/mismatched owners, and
+interrupted checkpoint writes.
+
+The focused command covering persistence, tenant-session, ledger-bound,
+ledger-reader, turn-kernel, lease, WAL recovery, reconciliation, service
+architecture, and app-runtime tests passed. The previously excluded three
+service-architecture and two app-runtime regressions are included and pass.
+The stale-authority mirror regression was reproduced: when an authoritative
+document-store read failed, the default `allow_tenant_mirror_fallback=True`
+could silently import stale JSON and write it back. The default now derives
+from `_local_ephemeral_document_store`; persistent stores fail closed, while
+the explicit local-ephemeral fallback remains available. The regression test
+asserts that a failed authoritative read neither loads the stale JSON nor
+writes it back; it passed in the final run.
+
+**Phase 3.4 remains open:** Redis and PostgreSQL tenant-owned session
+repositories are now implemented and wired through service orchestration and
+tenant-bound runtime/document persistence. Redis uses tenant-qualified keys
+and atomic legacy-key guards; PostgreSQL uses owner-qualified tables, forced
+RLS, tenant-scoped queries, and quarantines unowned legacy rows by rejecting
+access pending explicit migration. Both live adapters were exercised against
+disposable local services. PostgreSQL ran as a `NOSUPERUSER NOBYPASSRLS` role;
+tests verified forced-RLS cross-tenant read/write denial and transaction-local
+tenant-context reset. Redis and PostgreSQL tests covered same-ID isolation,
+metadata mismatch, tenant-scoped listing, termination, concurrency, and
+fresh-process recovery. The final live-backend selection completed with
+**41 passed, 0 skipped, 0 failed**.
+
+Authenticated session termination now revokes the affected tenant/session
+delegations before deleting persisted session state and advances a durable
+tenant/session revocation revision in the authority SQLite store. Authenticated
+workers poll that state while idle and evict only the matching tenant/session
+cache. A spawned-worker regression confirms that termination under one tenant
+causes its bot to be recreated while the same session ID under another tenant
+remains cached and authorized. Existing authority databases must be upgraded
+by rerunning the idempotent `SQLiteDelegationStore.initialize`; workers and API
+startup fail closed if the revocation schema is absent. No legacy checkpoint
+or event was assigned an owner.
+
+The final combined service/session/authority regression selection completed
+with **119 passed, 0 skipped, 0 failed**. The previously excluded
+service-architecture and app-runtime tests were included in that run.
+
+Semantic/graph-dependent memory matrix cases remain **BLOCKED** pending an
+explicit decision to schedule Phase 3.5/3.6.

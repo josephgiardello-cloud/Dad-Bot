@@ -9,6 +9,7 @@ from dadbot.core.execution_result_unified import ensure_unified_execution_result
 from dadbot.core.invariant_gate import InvariantGate, InvariantViolationError
 from dadbot.core.kernel_signals import get_metrics
 from dadbot.core.runtime_contracts import validate_ledger_entry_contract
+from dadbot.core.tenant_session import current_tenant_id
 
 
 class LedgerWriter:
@@ -95,6 +96,16 @@ class LedgerWriter:
 
     def _write(self, payload: dict[str, Any]) -> dict[str, Any]:
         payload = dict(validate_ledger_entry_contract(payload))
+        event_payload = dict(payload.get("payload") or {})
+        metadata = dict(event_payload.get("metadata") or {})
+        tenant_id = str(
+            payload.get("tenant_id")
+            or metadata.get("tenant_id")
+            or current_tenant_id()
+            or "",
+        ).strip()
+        if tenant_id:
+            payload["tenant_id"] = tenant_id
         self._validate_semantic_payload(
             event_type=str(payload.get("type") or ""),
             step_key=str(payload.get("kernel_step_id") or ""),
@@ -118,6 +129,7 @@ class LedgerWriter:
         event_type: str,
         *,
         session_id: str,
+        tenant_id: str | None = None,
         step_key: str = "",
         trace_token: str = "",
         payload: dict[str, Any] | None = None,
@@ -149,6 +161,7 @@ class LedgerWriter:
             {
                 "type": str(event_type),
                 "session_id": str(session_id or "default"),
+                **({"tenant_id": str(tenant_id).strip()} if tenant_id is not None else {}),
                 "trace_id": trace,
                 "kernel_step_id": step,
                 "payload": dict(payload or {}),
@@ -368,6 +381,7 @@ class LedgerWriter:
         self,
         *,
         session_id: str,
+        tenant_id: str | None = None,
         trace_token: str = "",
         effect_id: str,
         request_id: str = "",
@@ -383,6 +397,7 @@ class LedgerWriter:
             {
                 "type": "EFFECT_BEGIN",
                 "session_id": str(session_id or "default"),
+                **({"tenant_id": str(tenant_id).strip()} if tenant_id is not None else {}),
                 "trace_id": str(trace_token or legacy_trace or "").strip(),
                 "kernel_step_id": str(step_key or legacy_step or "scheduler.execute.effect.begin"),
                 "payload": {
@@ -398,6 +413,7 @@ class LedgerWriter:
         self,
         *,
         session_id: str,
+        tenant_id: str | None = None,
         trace_token: str = "",
         effect_id: str,
         request_id: str = "",
@@ -413,6 +429,7 @@ class LedgerWriter:
             {
                 "type": "EFFECT_COMMIT",
                 "session_id": str(session_id or "default"),
+                **({"tenant_id": str(tenant_id).strip()} if tenant_id is not None else {}),
                 "trace_id": str(trace_token or legacy_trace or "").strip(),
                 "kernel_step_id": str(step_key or legacy_step or "scheduler.execute.effect.commit"),
                 "payload": {

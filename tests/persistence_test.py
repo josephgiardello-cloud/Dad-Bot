@@ -13,7 +13,10 @@ Required coverage:
 from __future__ import annotations
 
 import contextlib
+import json
 import sqlite3
+import subprocess
+import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -29,6 +32,7 @@ from dadbot.core.persistence import (
     CheckpointNotFoundError,
     SQLiteCheckpointer,
 )
+from dadbot.core.tenant_session import tenant_session_scope
 from tests.harness.graph_runner import confluence_key_for_turn
 
 
@@ -77,6 +81,175 @@ class TestCheckpointSaveLoad:
         loaded = checkpointer.load_checkpoint("s1", "t1")
         assert loaded["checkpoint_hash"] == "hash-1"
         assert loaded["state"]["turn"] == 1
+
+
+def test_tenant_owned_checkpoints_survive_fresh_process_and_isolate_same_ids(temp_db_path: str) -> None:
+    tenant_a = SQLiteCheckpointer(temp_db_path, default_tenant_id="tenant-a", prune_every=0)
+    tenant_b = SQLiteCheckpointer(temp_db_path, default_tenant_id="tenant-b", prune_every=0)
+    tenant_a.save_checkpoint(
+        "shared-session",
+        "shared-trace",
+        _checkpoint(turn=1, checkpoint_hash="tenant-a"),
+        _manifest(),
+    )
+    tenant_b.save_checkpoint(
+        "shared-session",
+        "shared-trace",
+        _checkpoint(turn=2, checkpoint_hash="tenant-b"),
+        _manifest(),
+    )
+
+    script = (
+        "import sys; "
+        "from dadbot.core.persistence import SQLiteCheckpointer; "
+        "cp = SQLiteCheckpointer(sys.argv[1], default_tenant_id=sys.argv[2]); "
+        "loaded = cp.load_checkpoint('shared-session', 'shared-trace'); "
+        "assert loaded['checkpoint_hash'] == sys.argv[3]; "
+        "assert loaded['metadata']['tenant_id'] == sys.argv[2]"
+    )
+    for tenant, expected in (("tenant-a", "tenant-a"), ("tenant-b", "tenant-b")):
+        completed = subprocess.run(
+            [sys.executable, "-c", script, temp_db_path, tenant, expected],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert completed.returncode == 0, completed.stderr
+
+    with tenant_session_scope("tenant-a", "shared-session"):
+        with pytest.raises(CheckpointIntegrityError, match="tenant identity"):
+            tenant_a.load_checkpoint("shared-session", "shared-trace", tenant_id="tenant-b")
+    with pytest.raises(CheckpointNotFoundError):
+        tenant_a.load_checkpoint("shared-session", "shared-trace", tenant_id="tenant-c")
+    assert tenant_a.checkpoint_count("shared-session") == 1
+    assert tenant_a.checkpoint_count("shared-session", tenant_id="tenant-b") == 1
+    assert tenant_a.delete_session("shared-session", tenant_id="tenant-a") == 1
+    assert tenant_b.checkpoint_count("shared-session") == 1
+
+
+def test_concurrent_tenant_checkpoint_writes_do_not_collide(temp_db_path: str) -> None:
+    checkpointer_a = SQLiteCheckpointer(temp_db_path, default_tenant_id="tenant-a", prune_every=0)
+    checkpointer_b = SQLiteCheckpointer(temp_db_path, default_tenant_id="tenant-b", prune_every=0)
+
+    def save(checkpointer: SQLiteCheckpointer, checkpoint_hash: str, turn: int) -> bool:
+        return checkpointer.save_checkpoint(
+            "shared-session",
+            "shared-trace",
+            _checkpoint(turn=turn, checkpoint_hash=checkpoint_hash),
+            _manifest(),
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(save, checkpointer_a, "tenant-a-hash", 1),
+            pool.submit(save, checkpointer_b, "tenant-b-hash", 2),
+        ]
+        assert all(future.result(timeout=10) for future in futures)
+
+    assert checkpointer_a.load_checkpoint("shared-session", "shared-trace")["checkpoint_hash"] == "tenant-a-hash"
+    assert checkpointer_b.load_checkpoint("shared-session", "shared-trace")["checkpoint_hash"] == "tenant-b-hash"
+
+
+def test_checkpoint_owner_mismatch_and_interrupted_write_fail_closed(temp_db_path: str) -> None:
+    checkpointer = SQLiteCheckpointer(temp_db_path, default_tenant_id="tenant-a", prune_every=0)
+    mismatched = _checkpoint(turn=1, checkpoint_hash="mismatch")
+    mismatched["metadata"]["tenant_id"] = "tenant-b"
+    with pytest.raises(CheckpointIntegrityError):
+        checkpointer.save_checkpoint("session", "trace", mismatched, _manifest())
+
+    with contextlib.closing(sqlite3.connect(temp_db_path)) as conn:
+        conn.execute(
+            """
+            CREATE TRIGGER reject_successful_checkpoint_write
+            BEFORE INSERT ON checkpoint_writes
+            WHEN NEW.status = 'ok'
+            BEGIN
+                SELECT RAISE(ABORT, 'simulated interruption');
+            END
+            """,
+        )
+        conn.commit()
+    with pytest.raises(CheckpointError):
+        checkpointer.save_checkpoint(
+            "session",
+            "trace",
+            _checkpoint(turn=1, checkpoint_hash="interrupted"),
+            _manifest(),
+        )
+    assert checkpointer.checkpoint_count("session") == 0
+    with contextlib.closing(sqlite3.connect(temp_db_path)) as conn:
+        row = conn.execute(
+            "SELECT status FROM checkpoint_writes WHERE tenant_id = ? AND session_id = ?",
+            ("tenant-a", "session"),
+        ).fetchone()
+    assert row == ("error",)
+
+
+def test_checkpoint_trace_metadata_cannot_disagree_with_row_identity(temp_db_path: str) -> None:
+    checkpointer = SQLiteCheckpointer(temp_db_path, default_tenant_id="tenant-a", prune_every=0)
+    mismatched = _checkpoint(turn=1, checkpoint_hash="trace-mismatch")
+    mismatched["metadata"]["trace_id"] = "other-trace"
+    with pytest.raises(CheckpointIntegrityError, match="trace_id"):
+        checkpointer.save_checkpoint("session", "trace", mismatched, _manifest())
+
+    checkpointer.save_checkpoint(
+        "session",
+        "trace",
+        _checkpoint(turn=1, checkpoint_hash="valid-trace"),
+        _manifest(),
+    )
+    with contextlib.closing(sqlite3.connect(temp_db_path)) as conn:
+        row = conn.execute(
+            "SELECT payload FROM checkpoints WHERE tenant_id=? AND session_id=? AND trace_id=?",
+            ("tenant-a", "session", "trace"),
+        ).fetchone()
+        payload = json.loads(row[0])
+        payload["checkpoint"]["metadata"]["trace_id"] = "other-trace"
+        conn.execute(
+            "UPDATE checkpoints SET payload=? WHERE tenant_id=? AND session_id=? AND trace_id=?",
+            (json.dumps(payload), "tenant-a", "session", "trace"),
+        )
+        conn.commit()
+    with pytest.raises(CheckpointIntegrityError, match="trace_id"):
+        checkpointer.load_checkpoint("session", "trace")
+
+
+def test_checkpoint_migration_quarantines_unowned_legacy_rows(temp_db_path: str) -> None:
+    with contextlib.closing(sqlite3.connect(temp_db_path)) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE checkpoints (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                trace_id TEXT NOT NULL,
+                checkpoint_hash TEXT NOT NULL,
+                prev_checkpoint_hash TEXT,
+                manifest_hash TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                UNIQUE(session_id, trace_id)
+            );
+            CREATE TABLE checkpoint_writes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                trace_id TEXT NOT NULL,
+                checkpoint_hash TEXT NOT NULL,
+                status TEXT NOT NULL,
+                error TEXT,
+                created_at REAL NOT NULL
+            );
+            INSERT INTO checkpoints(session_id, trace_id, checkpoint_hash, manifest_hash, payload, created_at)
+            VALUES ('legacy-session', 'legacy-trace', 'legacy-hash', 'legacy-manifest', '{}', 0);
+            """,
+        )
+        conn.commit()
+
+    checkpointer = SQLiteCheckpointer(temp_db_path, default_tenant_id="tenant-a")
+    with pytest.raises(CheckpointNotFoundError):
+        checkpointer.load_checkpoint("legacy-session", "legacy-trace")
+    with contextlib.closing(sqlite3.connect(temp_db_path)) as conn:
+        legacy = conn.execute("SELECT COUNT(*) FROM checkpoints_unowned_legacy").fetchone()
+    assert legacy == (1,)
 
     def test_load_most_recent_checkpoint(self, checkpointer: SQLiteCheckpointer):
         checkpointer.save_checkpoint("s1", "t1", _checkpoint(turn=1, checkpoint_hash="hash-1"), _manifest())
@@ -237,8 +410,8 @@ class TestCheckpointPruning:
         with contextlib.closing(sqlite3.connect(temp_db_path)) as conn:
             conn.row_factory = sqlite3.Row
             row = conn.execute(
-                "SELECT COUNT(*) AS n FROM checkpoint_writes WHERE session_id = ?",
-                ("s-log",),
+                "SELECT COUNT(*) AS n FROM checkpoint_writes WHERE tenant_id = ? AND session_id = ?",
+                ("default", "s-log"),
             ).fetchone()
             assert int((row["n"] if row is not None else 0) or 0) == 5
 
@@ -246,10 +419,13 @@ class TestCheckpointPruning:
         with contextlib.closing(sqlite3.connect(temp_db_path)) as conn:
             conn.execute(
                 """
-                INSERT INTO checkpoint_writes(session_id, trace_id, checkpoint_hash, status, error, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO checkpoint_writes(
+                    tenant_id, session_id, trace_id, checkpoint_hash,
+                    status, error, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                ("orphan-s", "orphan-t", "orphan-h", "ok", "", 0.0),
+                ("default", "orphan-s", "orphan-t", "orphan-h", "ok", "", 0.0),
             )
             conn.commit()
 
@@ -460,7 +636,12 @@ class TestPhase4GapClosure:
         )
 
         # Ensure explicit failure records are exportable through the same table.
-        checkpointer._log_write_failure(session_id="obs", trace_id="trace-3", error="simulated write failure")
+        checkpointer._log_write_failure(
+            tenant_id="default",
+            session_id="obs",
+            trace_id="trace-3",
+            error="simulated write failure",
+        )
 
         with contextlib.closing(sqlite3.connect(temp_db_path)) as conn:
             conn.row_factory = sqlite3.Row
@@ -468,10 +649,10 @@ class TestPhase4GapClosure:
                 """
                 SELECT session_id, trace_id, checkpoint_hash, status, error
                 FROM checkpoint_writes
-                WHERE session_id = ?
+                WHERE tenant_id = ? AND session_id = ?
                 ORDER BY id ASC
                 """,
-                ("obs",),
+                ("default", "obs"),
             ).fetchall()
 
         exported = [dict(row) for row in rows]
@@ -519,13 +700,14 @@ class TestPhase4GapClosure:
             strict=True,
             checkpointer=checkpointer_a,
         )
-        monkeypatch.setattr(orchestrator_a.registry.get("agent_service"), "run_agent", _stub_agent)
+        monkeypatch.setattr(orchestrator_a.registry.get("agent_service"), "generate_candidate", _stub_agent)
         _stub_expensive_paths()
 
         result_a = await orchestrator_a.handle_turn(
             input_text,
             session_id=session_id,
             confluence_key=confluence_key_for_turn(session_id, input_text),
+            metadata={"request_id": "restart-boundary-first"},
         )
         context_a = getattr(orchestrator_a, "_last_turn_context", None)
         assert isinstance(context_a, TurnContext)
@@ -542,12 +724,13 @@ class TestPhase4GapClosure:
             strict=True,
             checkpointer=checkpointer_b,
         )
-        monkeypatch.setattr(orchestrator_b.registry.get("agent_service"), "run_agent", _stub_agent)
+        monkeypatch.setattr(orchestrator_b.registry.get("agent_service"), "generate_candidate", _stub_agent)
 
         result_b = await orchestrator_b.handle_turn(
             input_text,
             session_id=session_id,
             confluence_key=confluence_key_for_turn(session_id, input_text),
+            metadata={"request_id": "restart-boundary-second"},
         )
         context_b = getattr(orchestrator_b, "_last_turn_context", None)
         assert isinstance(context_b, TurnContext)
@@ -560,10 +743,10 @@ class TestPhase4GapClosure:
                 """
                 SELECT trace_id, checkpoint_hash, status
                 FROM checkpoint_writes
-                WHERE session_id = ? AND status = 'ok'
+                WHERE tenant_id = ? AND session_id = ? AND status = 'ok'
                 ORDER BY id ASC
                 """,
-                (session_id,),
+                ("default", session_id),
             ).fetchall()
 
         assert len(rows) >= 2

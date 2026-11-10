@@ -27,6 +27,7 @@ from dadbot.core.system_state_algebra import (
     persist_system_state_algebra,
 )
 from dadbot.core.tool_executor import execute_tool
+from dadbot.memory.working_memory import record_successful_tool_step
 from dadbot.models import AgenticToolPlan
 
 # Keep the historic logger name so existing tests and log pipelines remain stable.
@@ -247,6 +248,12 @@ class ToolPipelineMixin:
             return
         state["decision_outcome"] = str(decision_outcome)
         state["robustness_suppressed"] = str(decision_outcome) == "robustness_suppressed"
+
+    def _tool_authorization_denial(self, tool_name: str) -> str:
+        normalized_tool_name = str(tool_name or "").strip()
+        if self.bot.authorize_tool_execution(normalized_tool_name):
+            return ""
+        return f"Tool '{normalized_tool_name}' is not authorized by the current request policy."
 
     @staticmethod
     def _extract_executed_tools_from_state(state: dict[str, Any]) -> list[str]:
@@ -993,11 +1000,18 @@ Return ONLY valid JSON (no extra text):
             if part
         ).strip()
 
-        refreshed = self._memory_service.retrieve_for_query(
+        retrieval = self._memory_service.retrieve_for_query_with_status(
             query=query,
             graph_limit=3,
             memory_limit=5,
         )
+        self._memory_service.record_retrieval_status(
+            state,
+            status=retrieval.status,
+            errors=retrieval.errors,
+            source="post_tool",
+        )
+        refreshed = retrieval.memories
 
         if not refreshed:
             return
@@ -1074,6 +1088,14 @@ Return ONLY valid JSON (no extra text):
             compensating_action=_compensate,
             turn_context=turn_context,
         )
+        if turn_context is not None:
+            record_successful_tool_step(
+                self.bot,
+                turn_context,
+                tool_name="set_reminder",
+                parameters=dict(params),
+                record=record,
+            )
         _result_holder.append(record.result)
         if record.status == "failed":
             self.bot.update_planner_debug(
@@ -1170,6 +1192,14 @@ Return ONLY valid JSON (no extra text):
             executor=_executor,
             turn_context=turn_context,
         )
+        if turn_context is not None:
+            record_successful_tool_step(
+                self.bot,
+                turn_context,
+                tool_name="set_reminder",
+                parameters=dict(params),
+                record=record,
+            )
         if record.status == "failed":
             self.bot.update_planner_debug(
                 planner_status="execution_failed",
@@ -1259,6 +1289,14 @@ Return ONLY valid JSON (no extra text):
             # web_search is read-only; no compensating action needed
             turn_context=turn_context,
         )
+        if turn_context is not None:
+            record_successful_tool_step(
+                self.bot,
+                turn_context,
+                tool_name="web_search",
+                parameters={"query": normalized_query},
+                record=record,
+            )
         if record.status == "failed":
             self.bot.update_planner_debug(
                 planner_status="execution_failed",
@@ -1312,6 +1350,14 @@ Return ONLY valid JSON (no extra text):
             executor=lambda: self.bot.lookup_web(normalized_query),
             turn_context=turn_context,
         )
+        if turn_context is not None:
+            record_successful_tool_step(
+                self.bot,
+                turn_context,
+                tool_name="web_search",
+                parameters={"query": normalized_query},
+                record=record,
+            )
         if record.status == "failed":
             self.bot.update_planner_debug(
                 planner_status="execution_failed",
@@ -1358,6 +1404,17 @@ Return ONLY valid JSON (no extra text):
         plan_reason: str,
         turn_context: Any | None = None,
     ) -> tuple[str | None, str | None]:
+        authorization_denial = self._tool_authorization_denial(tool_name)
+        if authorization_denial:
+            self.bot.update_planner_debug(
+                planner_status="authorization_denied",
+                planner_reason=authorization_denial,
+                planner_tool=tool_name,
+                planner_parameters=params,
+                final_path="tool_authorization",
+            )
+            return None, authorization_denial
+
         # Gap C: record planning + tool_execution causal steps.
         _tc_state = getattr(turn_context, "state", None)
         if isinstance(_tc_state, dict):
@@ -1401,6 +1458,17 @@ Return ONLY valid JSON (no extra text):
         plan_reason: str,
         turn_context: Any | None = None,
     ) -> tuple[str | None, str | None]:
+        authorization_denial = self._tool_authorization_denial(tool_name)
+        if authorization_denial:
+            self.bot.update_planner_debug(
+                planner_status="authorization_denied",
+                planner_reason=authorization_denial,
+                planner_tool=tool_name,
+                planner_parameters=params,
+                final_path="tool_authorization",
+            )
+            return None, authorization_denial
+
         # Gap C hardening: async path must follow same causal transition graph.
         _tc_state = getattr(turn_context, "state", None)
         if isinstance(_tc_state, dict):
@@ -1628,6 +1696,38 @@ Return ONLY valid JSON (no extra text):
             deterministic_route = self._deterministic_tool_route(stripped_input)
             if deterministic_route is not None:
                 tool_name, params, route_reason = deterministic_route
+                if tool_name == _SET_REMINDER_TOOL:
+                    parameters_valid, validation_reason = self._validate_reminder_params(
+                        params,
+                        stripped_input,
+                    )
+                    if not parameters_valid:
+                        self._record_tool_decision_outcome(
+                            turn_context=turn_context,
+                            decision_outcome="no_tool_needed",
+                        )
+                        self.bot.update_planner_debug(
+                            planner_status="invalid_parameters",
+                            planner_reason=validation_reason,
+                            planner_tool=tool_name,
+                            planner_parameters=params,
+                            final_path="tool_validation",
+                        )
+                        return None, validation_reason
+                authorization_denial = self._tool_authorization_denial(tool_name)
+                if authorization_denial:
+                    self._record_tool_decision_outcome(
+                        turn_context=turn_context,
+                        decision_outcome="no_tool_needed",
+                    )
+                    self.bot.update_planner_debug(
+                        planner_status="authorization_denied",
+                        planner_reason=authorization_denial,
+                        planner_tool=tool_name,
+                        planner_parameters=params,
+                        final_path="tool_authorization",
+                    )
+                    return None, authorization_denial
                 memory_allowed, memory_reason = self._memory_authority_decision(
                     turn_context=turn_context,
                     tool_name=tool_name,
@@ -1822,6 +1922,38 @@ Return ONLY valid JSON (no extra text):
             deterministic_route = self._deterministic_tool_route(stripped_input)
             if deterministic_route is not None:
                 tool_name, params, route_reason = deterministic_route
+                if tool_name == _SET_REMINDER_TOOL:
+                    parameters_valid, validation_reason = self._validate_reminder_params(
+                        params,
+                        stripped_input,
+                    )
+                    if not parameters_valid:
+                        self._record_tool_decision_outcome(
+                            turn_context=turn_context,
+                            decision_outcome="no_tool_needed",
+                        )
+                        self.bot.update_planner_debug(
+                            planner_status="invalid_parameters",
+                            planner_reason=validation_reason,
+                            planner_tool=tool_name,
+                            planner_parameters=params,
+                            final_path="tool_validation",
+                        )
+                        return None, validation_reason
+                authorization_denial = self._tool_authorization_denial(tool_name)
+                if authorization_denial:
+                    self._record_tool_decision_outcome(
+                        turn_context=turn_context,
+                        decision_outcome="no_tool_needed",
+                    )
+                    self.bot.update_planner_debug(
+                        planner_status="authorization_denied",
+                        planner_reason=authorization_denial,
+                        planner_tool=tool_name,
+                        planner_parameters=params,
+                        final_path="tool_authorization",
+                    )
+                    return None, authorization_denial
                 memory_allowed, memory_reason = self._memory_authority_decision(
                     turn_context=turn_context,
                     tool_name=tool_name,

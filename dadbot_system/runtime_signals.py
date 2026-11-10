@@ -39,6 +39,7 @@ class _TelemetryAdapter:
     configure: Callable[[TelemetrySettings | None], Any] | None = None
     start_span: Callable[..., Any] | None = None
     shutdown: Callable[[], None] | None = None
+    trace_provider_available: Callable[[], bool] | None = None
 
 
 _adapter = _TelemetryAdapter()
@@ -49,10 +50,12 @@ def register_telemetry_adapter(
     configure: Callable[[TelemetrySettings | None], Any],
     start_span: Callable[..., Any],
     shutdown: Callable[[], None],
+    trace_provider_available: Callable[[], bool] | None = None,
 ) -> None:
     _adapter.configure = configure
     _adapter.start_span = start_span
     _adapter.shutdown = shutdown
+    _adapter.trace_provider_available = trace_provider_available
 
 
 class JsonFormatter(logging.Formatter):
@@ -109,3 +112,9 @@ def start_span(name: str, **attributes: Any):
 def shutdown_tracing() -> None:
     if _adapter.shutdown is not None:
         _adapter.shutdown()
+
+
+def is_trace_provider_available() -> bool:
+    if _adapter.trace_provider_available is None:
+        return False
+    return _adapter.trace_provider_available()

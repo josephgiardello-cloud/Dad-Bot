@@ -7,10 +7,8 @@ import sys
 
 import pytest
 
-from dadbot.core.ledger_backend import WALCorruptionError
 from dadbot.core.execution_ledger import ExecutionLedger
-from dadbot.core.ledger_backend import FileWALLedgerBackend
-
+from dadbot.core.ledger_backend import FileWALLedgerBackend, WALCorruptionError
 
 _STARTUP = r"""
 import os
@@ -53,6 +51,7 @@ def _environment(tmp_path):
         "DADBOT_SEMANTIC_DB_PATH": str(root / "semantic.sqlite"),
         "DADBOT_GRAPH_DB_PATH": str(root / "graph.sqlite"),
         "DADBOT_SESSION_LOG_DIR": str(root / "sessions"),
+        "DADBOT_ALLOW_LEGACY_DEFAULT_TENANT": "true",
         "PYTEST_CURRENT_TEST": "authority-subprocess",
     })
     return env

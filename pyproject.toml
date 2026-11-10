@@ -49,7 +49,9 @@ voice = [
     "av>=11,<19",
     "openai-whisper>=20231117",
     "edge-tts>=6.1",
+    "piper-tts>=1.2,<2",
     "pyttsx3>=2.98",
+    "streamlit-webrtc>=0.79.1,<1",
 ]
 notifications = [
     "notify-py>=0.3.43,<0.4",
@@ -185,3 +187,34 @@ forbidden_modules = [
 ]
 ignore_imports = []
 allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+name = "Owned task store implementation is accessed only through its factory"
+type = "forbidden"
+source_modules = [
+    "dadbot_system.api",
+    "dadbot_system.client",
+    "dadbot_system.contracts",
+    "dadbot_system.delegation",
+    "dadbot_system.event_durability",
+    "dadbot_system.event_tap",
+    "dadbot_system.execution_identity",
+    "dadbot_system.graph_store",
+    "dadbot_system.kernel",
+    "dadbot_system.orchestration",
+    "dadbot_system.security",
+    "dadbot_system.state",
+    "dadbot_system.tenant_context",
+    "dadbot_system.tenant_identity",
+    "dadbot_system.worker",
+]
+forbidden_modules = ["dadbot_system.owned_sqlite_tasks"]
+ignore_imports = ["dadbot_system.owned_tasks -> dadbot_system.owned_sqlite_tasks"]
+allow_indirect_imports = false
+
+[[tool.importlinter.contracts]]
+name = "Canonical app runtime must not import the alternate launcher"
+type = "forbidden"
+source_modules = ["dadbot.app_runtime"]
+forbidden_modules = ["dadbot.runtime.launcher"]
+allow_indirect_imports = false

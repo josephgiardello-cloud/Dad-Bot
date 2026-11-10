@@ -212,6 +212,8 @@ class FileWALLedgerBackend(LedgerBackend):
             if not self._path.exists():
                 if self._binding_path.exists():
                     raise WALCorruptionError("Execution WAL is missing but its binding exists")
+                if self._authenticated_marker_path.exists():
+                    raise WALCorruptionError("Execution WAL is missing but its authenticated marker exists")
                 if any(self._path.parent.glob(self._path.name + ".tenant-*")):
                     raise WALCorruptionError("Execution WAL is missing but tenant establishment evidence exists")
                 if security_mode == "AUTHENTICATED":
@@ -223,6 +225,10 @@ class FileWALLedgerBackend(LedgerBackend):
     @property
     def _binding_path(self) -> Path:
         return self._path.with_name(self._path.name + ".binding")
+
+    @property
+    def _authenticated_marker_path(self) -> Path:
+        return self._path.with_name(self._path.name + ".authenticated")
 
     def _create_authenticated_wal(self, tenant_id: str | None) -> None:
         from dadbot_system.delegation import _execution_authority, require_tenant_authority
@@ -245,6 +251,10 @@ class FileWALLedgerBackend(LedgerBackend):
         payload = json.dumps(binding, sort_keys=True, separators=(",", ":"))
         signature = store._signature("wal-binding-v1:" + payload)
         header = json.dumps({"wal_binding": binding, "signature": signature}) + "\n"
+        with self._authenticated_marker_path.open("x", encoding="utf-8", newline="\n") as handle:
+            handle.write(binding["storage_id"] + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
         with self._binding_path.open("x", encoding="utf-8", newline="\n") as handle:
             handle.write(header)
             handle.flush()
@@ -266,6 +276,8 @@ class FileWALLedgerBackend(LedgerBackend):
         if not isinstance(record, dict) or "wal_binding" not in record:
             if self._security_mode == "AUTHENTICATED" or self._known_binding is not None or self._binding_path.exists():
                 raise WALCorruptionError("Legacy unbound WAL requires an explicit ownership transition")
+            if self._authenticated_marker_path.exists():
+                raise WALCorruptionError("Authenticated WAL security binding is missing")
             return False
         if not self._binding_path.exists():
             raise WALCorruptionError("Execution WAL binding anchor is missing")

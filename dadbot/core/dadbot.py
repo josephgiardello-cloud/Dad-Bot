@@ -55,6 +55,60 @@ if ollama is None:
 logger = logging.getLogger(__name__)
 
 
+class _MemoryStoreProjection(dict):
+    def __init__(self, value: dict[str, Any], on_change):
+        super().__init__(value)
+        self._on_change = on_change
+
+    def _commit(self) -> None:
+        self._on_change(dict(self))
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        self._commit()
+
+    def __delitem__(self, key):
+        super().__delitem__(key)
+        self._commit()
+
+    def clear(self):
+        if self:
+            super().clear()
+            self._commit()
+
+    def pop(self, key, *default):
+        existed = key in self
+        value = super().pop(key, *default)
+        if existed:
+            self._commit()
+        return value
+
+    def popitem(self):
+        item = super().popitem()
+        self._commit()
+        return item
+
+    def setdefault(self, key, default=None):
+        existed = key in self
+        value = super().setdefault(key, default)
+        if not existed:
+            self._commit()
+        return value
+
+    def update(self, *args, **kwargs):
+        super().update(*args, **kwargs)
+        self._commit()
+
+    def __ior__(self, other):
+        self.update(other)
+        return self
+
+    def __deepcopy__(self, memo):
+        import copy
+
+        return copy.deepcopy(dict(self), memo)
+
+
 class DadBot(
     DadBotBootMixin,
     DadBotTurnMixin,
@@ -72,9 +126,44 @@ class DadBot(
 
     # Compatibility shims for test expectations
     _CONFIG_ATTR_MAP = {}
+    _RUNTIME_STATE_ATTR_MAP = {
+        "_pending_daily_checkin_context": "pending_daily_checkin_context",
+        "_active_tool_observation_context": "active_tool_observation_context",
+        "_last_planner_debug": "planner_debug",
+    }
+    _INTERNAL_RUNTIME_ATTR_MAP = {
+        "_prompt_guard_stats": "prompt_guard_stats",
+        "_last_memory_context_stats": "last_memory_context_stats",
+        "_last_output_moderation": "last_output_moderation",
+        "_last_reply_supervisor": "last_reply_supervisor",
+        "_last_turn_pipeline": "last_turn_pipeline",
+        "_last_turn_health_state": "last_turn_health_state",
+        "_last_turn_ux_feedback": "last_turn_ux_feedback",
+        "_shadow_decision_bus": "shadow_decision_bus",
+        "_last_shadow_decision_report": "last_shadow_decision_report",
+        "_background_task_ids": "background_task_ids",
+    }
     _DEPRECATED_FACADE_ALIAS_MAP = {}
 
     def __getattr__(self, name):
+        state_target = self._RUNTIME_STATE_ATTR_MAP.get(name)
+        if state_target is not None:
+            try:
+                manager = object.__getattribute__(self, "runtime_state_manager")
+            except AttributeError:
+                manager = None
+            if manager is not None:
+                return getattr(manager, state_target)
+
+        internal_target = self._INTERNAL_RUNTIME_ATTR_MAP.get(name)
+        if internal_target is not None:
+            try:
+                runtime = object.__getattribute__(self, "_internal_runtime")
+            except AttributeError:
+                runtime = None
+            if runtime is not None:
+                return getattr(runtime, internal_target)
+
         try:
             services = object.__getattribute__(self, "services")
         except AttributeError:
@@ -94,6 +183,29 @@ class DadBot(
         if name in required:
             raise AttributeError(f"DadBot is missing required manager attribute: {name}")
         raise AttributeError(f"DadBot has no attribute '{name}'")
+
+    def __setattr__(self, name, value):
+        state_target = type(self)._RUNTIME_STATE_ATTR_MAP.get(name)
+        if state_target is not None:
+            try:
+                manager = object.__getattribute__(self, "runtime_state_manager")
+            except AttributeError:
+                manager = None
+            if manager is not None:
+                setattr(manager, state_target, value)
+                return
+
+        internal_target = type(self)._INTERNAL_RUNTIME_ATTR_MAP.get(name)
+        if internal_target is not None:
+            try:
+                runtime = object.__getattribute__(self, "_internal_runtime")
+            except AttributeError:
+                runtime = None
+            if runtime is not None:
+                setattr(runtime, internal_target, value)
+                return
+
+        object.__setattr__(self, name, value)
 
     """
     DadBot is intentionally thin.  Logic lives in dedicated managers held by
@@ -448,7 +560,10 @@ class DadBot(
 
     @property
     def MEMORY_STORE(self) -> dict[str, Any]:
-        return self.memory_manager.memory_store
+        return _MemoryStoreProjection(
+            self.memory_manager.memory_store,
+            self.memory_manager._storage.replace_projection_via_canonical_event,
+        )
 
     @MEMORY_STORE.setter
     def MEMORY_STORE(self, value: dict[str, Any]) -> None:
@@ -457,6 +572,10 @@ class DadBot(
     @property
     def session_moods(self) -> Any:
         return self.runtime_state_manager.session_moods
+
+    @session_moods.setter
+    def session_moods(self, value):
+        self.runtime_state_manager.session_moods = value
 
     @property
     def session_summary(self) -> Any:

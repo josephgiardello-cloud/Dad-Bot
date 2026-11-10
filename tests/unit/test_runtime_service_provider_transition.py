@@ -2,8 +2,8 @@ import inspect
 
 import pytest
 
-from dadbot.core.dadbot import DadBot
 from dadbot.core.boot_mixin import DadBotBootMixin
+from dadbot.core.dadbot import DadBot
 from dadbot.core.policy_store import DadPolicyStore, InMemoryAsyncPolicyPersistence
 from dadbot.core.runtime_errors import ConfigurationError
 from dadbot.core.turn_mixin import DadBotTurnMixin
@@ -79,8 +79,9 @@ def test_dadbot_prefers_explicit_runtime_services_constructor_injection(monkeypa
     monkeypatch.setenv("DADBOT_SESSION_LOG_DIR", str(tmp_path / "session_logs"))
 
     runtime_services = _RuntimeServicesStub()
-    bot = DadBot(runtime_services=runtime_services)
+    bot = DadBot(runtime_services=runtime_services, tenant_id="tenant-runtime-services")
     try:
+        assert bot.config.tenant_id == "tenant-runtime-services"
         assert bot.runtime_services is runtime_services
         assert bot._get_policy_store() is runtime_services.policy_store
         assert bot._get_memory_ledger() is runtime_services.memory_ledger

@@ -266,21 +266,29 @@ class MemoryStorageBackend:
         ledger = getattr(self.bot, "_execution_ledger", None)
         if ledger is None:
             raise RuntimeError("Projection recovery status requires a durable execution ledger")
-        ledger.write(
-            {
-                "type": "PROJECTION_STATUS_UPDATED",
-                "session_id": "",
-                "trace_id": f"projection-recovery:{projection}",
-                "timestamp": str(status["updated_at"]),
-                "kernel_step_id": "memory.projection.recovery",
-                "committed": True,
-                "payload": {
-                    "tenant_id": self.bot.config.tenant_id,
-                    "projection": projection,
-                    "status": deepcopy(status),
-                },
+        event = {
+            "type": "PROJECTION_STATUS_UPDATED",
+            "session_id": "",
+            "trace_id": f"projection-recovery:{projection}",
+            "timestamp": str(status["updated_at"]),
+            "kernel_step_id": "memory.projection.recovery",
+            "committed": True,
+            "payload": {
+                "tenant_id": self.bot.config.tenant_id,
+                "projection": projection,
+                "status": deepcopy(status),
             },
-        )
+        }
+        from dadbot.core.ledger_backend import LedgerHeadConflict
+
+        for attempt in range(3):
+            try:
+                ledger.write(event)
+                return
+            except LedgerHeadConflict:
+                if attempt == 2:
+                    raise
+                ledger.load_from_backend()
 
     @contextmanager
     def fenced_semantic_index_write(self, memories, expected_revision=None):
@@ -798,9 +806,13 @@ class MemoryStorageBackend:
             save = getattr(tenant_store, "save_memory_state", tenant_store.save_session_state)
             save("memory", state)
 
-    def load_memory_store(self, *, allow_tenant_mirror_fallback=True):
+    def load_memory_store(self, *, allow_tenant_mirror_fallback: bool | None = None):
         """Load from disk / document store, normalize, and return the dict."""
         self._authorize_tenant_memory()
+        if allow_tenant_mirror_fallback is None:
+            allow_tenant_mirror_fallback = bool(
+                getattr(self.bot, "_local_ephemeral_document_store", False)
+            )
         ledger = getattr(self.bot, "_execution_ledger", None)
         from dadbot.core.ledger_backend import FileWALLedgerBackend
         from dadbot.core.local_tenant_establishment import establish_local_tenant

@@ -12,6 +12,7 @@ from typing import Any
 CANONICAL_EVENT_FIELDS: frozenset[str] = frozenset(
     {
         "type",
+        "tenant_id",
         "session_id",
         "session_index",
         "event_id",

@@ -220,7 +220,14 @@ class MCPToolClient:
 
     @staticmethod
     async def call_tool(session: Any, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        with start_span("mcp.call_tool", **{"mcp.method.name": "tools/call"}) as span:
+        with start_span(
+            "mcp.call_tool",
+            **{
+                "mcp.method.name": "tools/call",
+                "mcp.server.name": "home_assistant",
+                "mcp.tool.name": str(name or ""),
+            },
+        ) as span:
             result = await session.call_tool(name, arguments=arguments)
             if span is not None:
                 span.set_attribute("mcp.result.is_error", bool(result.is_error))

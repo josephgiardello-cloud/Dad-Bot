@@ -38,9 +38,20 @@ class BoundaryComplianceDeclaration(DadBotModel):
     notes: list[str] = Field(default_factory=list)
 
 
+class MemoryProvenance(DadBotModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    source: str = Field(min_length=1, max_length=80)
+    trust_level: float = Field(ge=0.0, le=1.0)
+    agent: str = Field(default="unknown", min_length=1, max_length=80)
+    evidence: str | None = Field(default=None, max_length=500)
+    trace_id: str | None = Field(default=None, max_length=128)
+
+
 class MemoryEntry(DadBotModel):
     summary: str
     category: str = "general"
+    provenance: MemoryProvenance | None = None
     oral_history_evidence: dict[str, Any] | None = None
     mood: str = "neutral"
     confidence: float = Field(0.5, ge=0.0, le=1.0)

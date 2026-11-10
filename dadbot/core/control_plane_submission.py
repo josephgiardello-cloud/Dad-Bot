@@ -31,6 +31,7 @@ async def _register_submit_job_impl(
         user_input=str(user_input or ""),
         attachments=attachments,
         metadata=metadata,
+        tenant_id=str(metadata.get("tenant_id") or ""),
         trace_id=trace_token,
     )
     current_lifecycle_state = control_plane._coerce_projection_lifecycle_state(job.job_id)

@@ -9,7 +9,14 @@ from threading import Event
 import pytest
 
 from dadbot.core.tenant_memory_ledger import TenantMemoryRevisionConflict
+from dadbot_system.state import InMemoryStateStore
 from tests.unit.test_local_tenant_establishment_application import _environment
+
+
+def _owned_document_store(tenant_id, state):
+    store = InMemoryStateStore()
+    store.owned_sessions.save_session_state(tenant_id, "memory", state)
+    return store
 
 
 def test_mutation_survives_restart(make_test_dadbot, monkeypatch, tmp_path):
@@ -20,10 +27,11 @@ def test_mutation_survives_restart(make_test_dadbot, monkeypatch, tmp_path):
     first.mutate_memory_store(last_mood="positive")
     assert first._execution_ledger.replay_tenant_memory(first.config.tenant_id).revision == 2
     first.shutdown()
+    memory.write_text(json.dumps({"last_mood": "stale-mirror"}), encoding="utf-8")
     second = make_test_dadbot(memory_path=memory, session_log_dir=sessions)
     assert second.MEMORY_STORE["last_mood"] == "positive"
     assert second._execution_ledger.replay_tenant_memory(second.config.tenant_id).revision == 2
-    assert json.loads(memory.read_text(encoding="utf-8"))["last_mood"] == "positive"
+    assert json.loads(memory.read_text(encoding="utf-8"))["last_mood"] == "stale-mirror"
 
 
 def test_startup_rebuilds_stale_graph_from_ledger(make_test_dadbot, monkeypatch, tmp_path):
@@ -49,19 +57,30 @@ def test_startup_recovers_semantic_and_graph_independently(make_test_dadbot, mon
 
     monkeypatch.setenv("DADBOT_DURABLE_EXECUTION_LEDGER", "1")
     memory = tmp_path / "memory.json"
-    memory.write_text(json.dumps({"memories": [{"summary": "Example memory"}]}), encoding="utf-8")
-    monkeypatch.setattr(SemanticIndexManager, "embed_texts", lambda self, texts, purpose=None: [[1.0] * 12 for _ in texts])
+    tenant_id = "tenant-semantic-recovery"
+    document_store = _owned_document_store(
+        tenant_id,
+        {"memories": [{"summary": "Example memory"}]},
+    )
+    monkeypatch.setattr(
+        SemanticIndexManager,
+        "embed_texts",
+        lambda self, texts, purpose=None: [[1.0] * 12 for _ in texts],
+    )
     original = SQLiteGraphStore.replace_graph
 
     def fail_graph(self, nodes, edges):
         raise OSError("graph unavailable")
 
     monkeypatch.setattr(SQLiteGraphStore, "replace_graph", fail_graph)
-    bot = make_test_dadbot(memory_path=memory)
+    bot = make_test_dadbot(memory_path=memory, tenant_id=tenant_id, document_store=document_store)
     status = bot.memory_manager._storage._projection_recovery_status
     assert bot.lifecycle_state == "ready"
     assert status["graph"]["status"] == "degraded"
-    assert status["semantic"] == {"status": "sync_succeeded", "source_revision": 1}
+    assert status["semantic"]["status"] == "sync_succeeded"
+    assert status["semantic"]["source_revision"] == 1
+    assert status["semantic"]["generation"] >= 1
+    assert status["semantic"]["updated_at"] > 0
     assert bot.memory_manager._semantic_manager._semantic_index_backend.existing_content_hashes()
     assert bot._execution_ledger.replay_tenant_memory(bot.config.tenant_id).revision == 1
     monkeypatch.setattr(SQLiteGraphStore, "replace_graph", original)
@@ -72,18 +91,23 @@ def test_semantic_startup_failure_keeps_graph_available_and_reports_degraded(mak
 
     monkeypatch.setenv("DADBOT_DURABLE_EXECUTION_LEDGER", "1")
     memory = tmp_path / "memory.json"
-    memory.write_text(json.dumps({"memories": [{"summary": "Example memory"}]}), encoding="utf-8")
+    tenant_id = "tenant-semantic-recovery"
+    document_store = _owned_document_store(
+        tenant_id,
+        {"memories": [{"summary": "Example memory"}]},
+    )
 
     def fail_embeddings(self, texts, purpose=None):
         raise RuntimeError("embedding unavailable")
 
     monkeypatch.setattr(SemanticIndexManager, "embed_texts", fail_embeddings)
-    bot = make_test_dadbot(memory_path=memory)
+    bot = make_test_dadbot(memory_path=memory, tenant_id=tenant_id, document_store=document_store)
     status = bot.memory_manager._storage._projection_recovery_status
     assert bot.lifecycle_state == "ready"
     assert status["semantic"]["status"] == "degraded"
     assert "embedding unavailable" in status["semantic"]["error"]
-    assert status["graph"] == {"status": "sync_succeeded", "source_revision": 1}
+    assert status["graph"]["status"] == "sync_succeeded"
+    assert status["graph"]["source_revision"] == 1
     assert bot._execution_ledger.replay_tenant_memory(bot.config.tenant_id).revision == 1
 
 
@@ -164,8 +188,12 @@ def test_clear_with_indexed_memories_does_not_append_without_fenced_repairs(
 ):
     monkeypatch.setenv("DADBOT_DURABLE_EXECUTION_LEDGER", "1")
     memory = tmp_path / "memory.json"
-    memory.write_text(json.dumps({"memories": [{"summary": "Example memory"}]}), encoding="utf-8")
-    bot = make_test_dadbot(memory_path=memory)
+    tenant_id = "tenant-semantic-recovery"
+    document_store = _owned_document_store(
+        tenant_id,
+        {"memories": [{"summary": "Example memory"}]},
+    )
+    bot = make_test_dadbot(memory_path=memory, tenant_id=tenant_id, document_store=document_store)
     before = bot._execution_ledger.replay_tenant_memory(bot.config.tenant_id)
     with pytest.raises(RuntimeError, match="semantic or graph repair"):
         bot.clear_memory_store()
@@ -204,7 +232,7 @@ def test_direct_graph_edge_invalidation_rejects_established_tenant(make_test_dad
 
 
 def test_local_graph_read_does_not_return_unverified_persisted_graph(make_test_dadbot, monkeypatch):
-    import dadbot.memory.graph_views as graph_views
+    from dadbot.memory import graph_views
 
     monkeypatch.setenv("DADBOT_DURABLE_EXECUTION_LEDGER", "1")
     bot = make_test_dadbot()
@@ -236,8 +264,12 @@ def test_stale_local_graph_read_fails_closed(make_test_dadbot, monkeypatch, tmp_
 def test_semantic_index_rejects_stale_catalog_and_clear(make_test_dadbot, monkeypatch, tmp_path):
     monkeypatch.setenv("DADBOT_DURABLE_EXECUTION_LEDGER", "1")
     memory = tmp_path / "memory.json"
-    memory.write_text(json.dumps({"memories": [{"summary": "Example memory"}]}), encoding="utf-8")
-    bot = make_test_dadbot(memory_path=memory)
+    tenant_id = "tenant-semantic-recovery"
+    document_store = _owned_document_store(
+        tenant_id,
+        {"memories": [{"summary": "Example memory"}]},
+    )
+    bot = make_test_dadbot(memory_path=memory, tenant_id=tenant_id, document_store=document_store)
     semantic = bot.memory_manager._semantic_manager
     monkeypatch.setattr(semantic, "embed_texts", lambda texts, purpose=None: [[1.0] * 12 for _ in texts])
     catalog = bot.memory_manager.memory_projection()["memories"]
@@ -255,8 +287,12 @@ def test_semantic_index_rejects_stale_catalog_and_clear(make_test_dadbot, monkey
 def test_stale_semantic_content_is_not_used_for_local_retrieval(make_test_dadbot, monkeypatch, tmp_path):
     monkeypatch.setenv("DADBOT_DURABLE_EXECUTION_LEDGER", "1")
     memory = tmp_path / "memory.json"
-    memory.write_text(json.dumps({"memories": [{"summary": "Example memory"}]}), encoding="utf-8")
-    bot = make_test_dadbot(memory_path=memory)
+    tenant_id = "tenant-semantic-recovery"
+    document_store = _owned_document_store(
+        tenant_id,
+        {"memories": [{"summary": "Example memory"}]},
+    )
+    bot = make_test_dadbot(memory_path=memory, tenant_id=tenant_id, document_store=document_store)
     manager = bot.memory_manager
     semantic = manager._semantic_manager
     monkeypatch.setattr(semantic, "embed_texts", lambda texts, purpose=None: [[1.0] * 12 for _ in texts])
@@ -277,8 +313,16 @@ def test_semantic_repair_rejects_catalog_after_external_commit(make_test_dadbot,
 
     monkeypatch.setenv("DADBOT_DURABLE_EXECUTION_LEDGER", "1")
     memory = tmp_path / "memory.json"
-    memory.write_text(json.dumps({"memories": [{"summary": "Example memory"}]}), encoding="utf-8")
-    bot = make_test_dadbot(memory_path=memory)
+    tenant_id = "tenant-semantic-recovery"
+    document_store = _owned_document_store(
+        tenant_id,
+        {"memories": [{"summary": "Example memory"}]},
+    )
+    bot = make_test_dadbot(
+        memory_path=memory,
+        tenant_id=tenant_id,
+        document_store=document_store,
+    )
     semantic = bot.memory_manager._semantic_manager
     monkeypatch.setattr(semantic, "embed_texts", lambda texts, purpose=None: [[1.0] * 12 for _ in texts])
     stale = bot.memory_manager.memory_projection()["memories"]
@@ -304,10 +348,24 @@ def test_semantic_repair_rejects_catalog_after_external_commit(make_test_dadbot,
 def test_semantic_repair_rejects_candidate_after_concurrent_commit(make_test_dadbot, monkeypatch, tmp_path):
     monkeypatch.setenv("DADBOT_DURABLE_EXECUTION_LEDGER", "1")
     memory = tmp_path / "memory.json"
-    memory.write_text(json.dumps({"memories": [{"summary": "Example memory"}]}), encoding="utf-8")
+    tenant_id = "tenant-semantic-recovery"
+    document_store = _owned_document_store(
+        tenant_id,
+        {"memories": [{"summary": "Example memory"}]},
+    )
     sessions = tmp_path / "sessions"
-    first = make_test_dadbot(memory_path=memory, session_log_dir=sessions)
-    second = make_test_dadbot(memory_path=memory, session_log_dir=sessions)
+    first = make_test_dadbot(
+        memory_path=memory,
+        session_log_dir=sessions,
+        tenant_id=tenant_id,
+        document_store=document_store,
+    )
+    second = make_test_dadbot(
+        memory_path=memory,
+        session_log_dir=sessions,
+        tenant_id=tenant_id,
+        document_store=document_store,
+    )
     semantic = first.memory_manager._semantic_manager
     started = Event()
     release = Event()
@@ -362,7 +420,7 @@ def test_stale_graph_sync_cannot_overwrite_newer_tenant(make_test_dadbot, monkey
 
 
 def test_graph_rebuild_rechecks_revision_before_replacement(make_test_dadbot, monkeypatch, tmp_path):
-    import dadbot.memory.graph_views as graph_views
+    from dadbot.memory import graph_views
 
     monkeypatch.setenv("DADBOT_DURABLE_EXECUTION_LEDGER", "1")
     sessions = tmp_path / "sessions"

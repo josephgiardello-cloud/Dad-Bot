@@ -103,7 +103,10 @@ class ReplayModeMixin:
                 return None
 
             try:
-                checkpoint = load_latest(trace_token=str(trace_id or ""))
+                checkpoint = load_latest(
+                    trace_token=str(trace_id or ""),
+                    session_id=str(session_id or "").strip() or "default",
+                )
                 if isinstance(checkpoint, dict):
                     return checkpoint
             except Exception:

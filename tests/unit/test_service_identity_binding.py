@@ -162,9 +162,9 @@ def test_recovery_rejects_conflicting_persisted_request_identity(field):
     task = DadBotOrchestrator(broker, state_store=store).submit_chat(
         ChatRequest(session_id="same-session", tenant_id="tenant-a", user_input="hello")
     )
-    saved = store.load_task(task.task_id)
+    saved = store.owned_tasks.load_task(task.tenant_id, task.task_id)
     saved["request"][field] = "tenant-b" if field == "tenant_id" else "other-session"
-    store.save_task(task.task_id, saved)
+    store.owned_tasks.save_task(task.tenant_id, task.task_id, saved)
     recovered = Broker()
 
     with pytest.raises(ValueError, match="mismatch"):
@@ -177,7 +177,7 @@ def test_orchestrator_rejects_mismatched_worker_result_without_state_change(fiel
     store = InMemoryStateStore()
     orchestrator = DadBotOrchestrator(Broker(), state_store=store)
     task = orchestrator.submit_chat(ChatRequest(session_id="same-session", tenant_id="tenant-a", user_input="hello"))
-    before = store.load_task(task.task_id)
+    before = store.owned_tasks.load_task(task.tenant_id, task.task_id)
     response = ChatResponse(
         session_id=task.session_id,
         request_id=task.request.request_id,
@@ -195,12 +195,12 @@ def test_orchestrator_rejects_mismatched_worker_result_without_state_change(fiel
     if field == "response_tenant":
         result.response.tenant_id = "tenant-b"
     else:
-        setattr(result, field, "different")
+        setattr(result, field, "tenant-b" if field == "tenant_id" else "different")
 
     with pytest.raises(ValueError, match="mismatch"):
         orchestrator.apply_worker_result(result)
-    assert store.load_task(task.task_id) == before
-    assert store.load_response(task.task_id) is None
+    assert store.owned_tasks.load_task(task.tenant_id, task.task_id) == before
+    assert store.owned_tasks.load_response(task.tenant_id, task.task_id) is None
 
 
 def test_orchestrator_rejects_lossy_tenant_alias_before_state_or_enqueue():
@@ -242,9 +242,9 @@ def test_result_rejects_tampered_persisted_request_before_publication():
     store = InMemoryStateStore()
     orchestrator = DadBotOrchestrator(Broker(), state_store=store)
     task = orchestrator.submit_chat(ChatRequest(session_id="same-session", tenant_id="tenant-a", user_input="hello"))
-    saved = store.load_task(task.task_id)
+    saved = store.owned_tasks.load_task(task.tenant_id, task.task_id)
     saved["request"]["tenant_id"] = "tenant-b"
-    store.save_task(task.task_id, saved)
+    store.owned_tasks.save_task(task.tenant_id, task.task_id, saved)
     result = WorkerResult(
         task_id=task.task_id,
         session_id=task.session_id,
@@ -261,5 +261,5 @@ def test_result_rejects_tampered_persisted_request_before_publication():
 
     with pytest.raises(ValueError, match="mismatch"):
         orchestrator.apply_worker_result(result)
-    assert store.load_task(task.task_id) == saved
-    assert store.load_response(task.task_id) is None
+    assert store.owned_tasks.load_task(task.tenant_id, task.task_id) == saved
+    assert store.owned_tasks.load_response(task.tenant_id, task.task_id) is None

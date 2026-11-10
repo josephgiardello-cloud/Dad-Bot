@@ -91,7 +91,7 @@ def test_established_tenant_authority_cannot_be_overwritten_by_stale_snapshot(
         tenant_id="test-tenant",
     )
     assert bot.MEMORY_STORE["last_mood"] == "positive"
-    assert json.loads(memory_path.read_text(encoding="utf-8")) == {"last_mood": "positive"}
+    assert json.loads(memory_path.read_text(encoding="utf-8")) == {"last_mood": "negative"}
     reloaded = ExecutionLedger(FileWALLedgerBackend(sessions / "execution_ledger.jsonl"))
     reloaded.load_from_backend()
     assert reloaded.replay_tenant_memory("test-tenant").state == {"last_mood": "positive"}

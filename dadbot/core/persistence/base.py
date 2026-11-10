@@ -19,11 +19,13 @@ class CheckpointNotFoundError(CheckpointError):
 class AbstractCheckpointer(ABC):
     """Abstract interface for checkpoint persistence backends.
 
-    Implementations (SQLiteCheckpointer, PostgresCheckpointer) handle:
+    Concrete implementations handle:
     - Saving and loading checkpoints with hash-chain verification
     - Manifest drift detection on load
     - Pruning old checkpoints to prevent unbounded growth
-    - Concurrent access via session_id + trace_id composite key
+    - Tenant-owned checkpoint access via (tenant_id, session_id, trace_id)
+
+    PostgreSQL and Redis adapters are opt-in and require trusted-local mode.
     """
 
     @abstractmethod
@@ -33,6 +35,8 @@ class AbstractCheckpointer(ABC):
         trace_id: str,
         checkpoint: dict[str, Any],
         manifest: dict[str, Any],
+        *,
+        tenant_id: str | None = None,
     ) -> bool:
         """Save a checkpoint with integrity verification.
 
@@ -67,6 +71,7 @@ class AbstractCheckpointer(ABC):
         *,
         current_manifest: dict[str, Any] | None = None,
         strict: bool = False,
+        tenant_id: str | None = None,
     ) -> dict[str, Any]:
         """Load and verify a checkpoint.
 
@@ -89,6 +94,8 @@ class AbstractCheckpointer(ABC):
         session_id: str,
         keep_count: int = 10,
         older_than_days: int | None = None,
+        *,
+        tenant_id: str | None = None,
     ) -> int:
         """Delete old checkpoints, keeping only the most recent N.
 
@@ -102,7 +109,7 @@ class AbstractCheckpointer(ABC):
         """
 
     @abstractmethod
-    def delete_session(self, session_id: str) -> int:
+    def delete_session(self, session_id: str, *, tenant_id: str | None = None) -> int:
         """Delete all checkpoints for a session.
 
         Args:
@@ -124,8 +131,10 @@ class AbstractCheckpointer(ABC):
         trace_id: str,
         checkpoint: dict[str, Any],
         manifest: dict[str, Any],
+        *,
+        tenant_id: str | None = None,
     ) -> bool:
-        return self.save_checkpoint(session_id, trace_id, checkpoint, manifest)
+        return self.save_checkpoint(session_id, trace_id, checkpoint, manifest, tenant_id=tenant_id)
 
     def load(
         self,
@@ -134,12 +143,14 @@ class AbstractCheckpointer(ABC):
         *,
         current_manifest: dict[str, Any] | None = None,
         strict: bool = False,
+        tenant_id: str | None = None,
     ) -> dict[str, Any]:
         return self.load_checkpoint(
             session_id,
             trace_id,
             current_manifest=current_manifest,
             strict=strict,
+            tenant_id=tenant_id,
         )
 
     def checkpoint(
@@ -149,12 +160,14 @@ class AbstractCheckpointer(ABC):
         *,
         current_manifest: dict[str, Any] | None = None,
         strict: bool = False,
+        tenant_id: str | None = None,
     ) -> dict[str, Any]:
         return self.load(
             session_id,
             trace_id,
             current_manifest=current_manifest,
             strict=strict,
+            tenant_id=tenant_id,
         )
 
 
@@ -168,6 +181,8 @@ class AbstractAsyncCheckpointer(ABC):
         trace_id: str,
         checkpoint: dict[str, Any],
         manifest: dict[str, Any],
+        *,
+        tenant_id: str | None = None,
     ) -> bool:
         ...
 
@@ -179,6 +194,7 @@ class AbstractAsyncCheckpointer(ABC):
         *,
         current_manifest: dict[str, Any] | None = None,
         strict: bool = False,
+        tenant_id: str | None = None,
     ) -> dict[str, Any]:
         ...
 
@@ -188,6 +204,8 @@ class AbstractAsyncCheckpointer(ABC):
         session_id: str,
         keep_count: int = 10,
         older_than_days: int | None = None,
+        *,
+        tenant_id: str | None = None,
     ) -> int:
         ...
 
@@ -201,8 +219,16 @@ class AbstractAsyncCheckpointer(ABC):
         trace_id: str,
         checkpoint: dict[str, Any],
         manifest: dict[str, Any],
+        *,
+        tenant_id: str | None = None,
     ) -> bool:
-        return await self.save_checkpoint(session_id, trace_id, checkpoint, manifest)
+        return await self.save_checkpoint(
+            session_id,
+            trace_id,
+            checkpoint,
+            manifest,
+            tenant_id=tenant_id,
+        )
 
     async def load(
         self,
@@ -211,12 +237,14 @@ class AbstractAsyncCheckpointer(ABC):
         *,
         current_manifest: dict[str, Any] | None = None,
         strict: bool = False,
+        tenant_id: str | None = None,
     ) -> dict[str, Any]:
         return await self.load_checkpoint(
             session_id,
             trace_id,
             current_manifest=current_manifest,
             strict=strict,
+            tenant_id=tenant_id,
         )
 
     async def checkpoint(
@@ -226,12 +254,14 @@ class AbstractAsyncCheckpointer(ABC):
         *,
         current_manifest: dict[str, Any] | None = None,
         strict: bool = False,
+        tenant_id: str | None = None,
     ) -> dict[str, Any]:
         return await self.load(
             session_id,
             trace_id,
             current_manifest=current_manifest,
             strict=strict,
+            tenant_id=tenant_id,
         )
 
 

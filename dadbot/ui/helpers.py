@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import re
 import os
-import shutil
 from contextlib import suppress
 from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.error import URLError
 from urllib.request import urlopen
@@ -18,6 +18,7 @@ from urllib.request import urlopen
 import ollama
 import streamlit as st
 
+from dadbot.speech.tts import resolve_piper_executable
 from dadbot.ui.prefs_state import ui_preferences, voice_preferences
 
 if TYPE_CHECKING:
@@ -133,7 +134,11 @@ def local_tts_backend_status(preferences: dict | None = None) -> tuple[bool, str
     ).strip()
     elevenlabs_voice_id = str(voice.get("elevenlabs_voice_id") or os.environ.get("DADBOT_ELEVENLABS_VOICE_ID") or "").strip()
     elevenlabs_ready = bool(elevenlabs_key and elevenlabs_voice_id)
-    piper_ready = bool(shutil.which("piper") and piper_model_path)
+    piper_ready = bool(
+        resolve_piper_executable()
+        and piper_model_path
+        and Path(piper_model_path).is_file()
+    )
     edge_ready = edge_tts is not None
     pyttsx3_ready = pyttsx3 is not None
 

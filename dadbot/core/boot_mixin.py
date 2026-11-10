@@ -246,6 +246,7 @@ class DadBotBootMixin:
             self._tenant_document_store = NamespacedStateStore(
                 self._customer_state_store,
                 f"tenant-doc:{self.config.tenant_id}",
+                tenant_id=self.config.tenant_id,
             )
         self._lifecycle_state = DadBotLifecycleState.DOCUMENT_STORE
 

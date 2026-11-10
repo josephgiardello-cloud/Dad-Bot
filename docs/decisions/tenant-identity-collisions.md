@@ -1,15 +1,16 @@
 # Tenant identity and collision decisions
 
-> **REQUIRES SIGN-OFF — DO NOT IMPLEMENT.**
+> **SIGNED POLICY — 2026-11-09.**
 >
-> No group below has been merged, split, mapped, assigned membership, or
-> granted shared-mirror access. The inventory is a read-only scan of the
-> working tree, not an ownership registry.
+> The three collision groups are to be split into distinct issued tenant IDs.
+> This is a policy decision only: no group has been migrated, mapped to an
+> owner, assigned membership, or granted shared-mirror access. Ownership must
+> be verified before any per-tenant data or membership migration.
 
-**Status: PROPOSED — REQUIRES SIGN-OFF**
+**Status: SIGNED POLICY; DATA MIGRATION NOT AUTHORIZED WITHOUT OWNER EVIDENCE**
 
-**Decision owner:** TBD — a named tenant-authority owner must be assigned.
-**Decision expiry:** TBD — requires sign-off.
+**Decision owner:** Platform Lead.
+**Compatibility expiry:** 2027-02-07.
 
 Source inventory: [tenant-identity-migration-report.md](./tenant-identity-migration-report.md).
 The scan recorded 220 observations in 22 lossy-normalizer groups. It found
@@ -21,11 +22,11 @@ proof that the values exist as deployed tenants.
 
 ## A. All 22 legacy-normalized groups
 
-Resolve `default` / empty in Item **1**, `family-a` / `family/a` in Item
-**2**, `tenant-a` / `tenant/a` in Item **3**, and the retained literal
-`default` policy in Item **4** of
-[SIGN-OFF-PACKET.md](./SIGN-OFF-PACKET.md). The packet presents options
-without selecting one.
+The signed choices for `default` / empty, `family-a` / `family/a`, and
+`tenant-a` / `tenant/a` are **split** (Items **1–3**); literal `default` is
+reserved compatibility-only, prohibited in production, and gated in
+dev/local (Item **4**). See [SIGN-OFF-PACKET.md](./SIGN-OFF-PACKET.md) for
+the signed consequences and exact gate name.
 
 Each observed input below maps to the normalized form shown only under the
 old lossy normalizer. These are not proposed canonical IDs. The source report
@@ -56,10 +57,12 @@ contains exact line references for each observation.
 | `test` | `test` | `tests/unit/test_production_reranker.py`; `tests/unit/test_source_grounding.py` | Unknown; fixture-only; no implicit mirror entitlement. |
 | `test-tenant` | `test-tenant` | `tests/integration/test_postgres_execution_ledger.py`; `tests/test_service_split.py`; `tests/unit/test_execution_ledger_boot_order.py` | Unknown; fixture-only; no implicit mirror entitlement. |
 
-### Options to decide separately for each group
+### Policy options (for historical rationale)
 
 The options below apply independently to **each of the 22 rows**, including
-non-collision groups. None is selected.
+non-collision groups. For the three collision rows, the signed split choice
+above supersedes this historical options table. No identity mapping or
+membership migration follows solely from the policy choice.
 
 | Option | Shared-mirror effect | Membership-row effect | Current test effect |
 |---|---|---|---|
@@ -116,12 +119,10 @@ numbers are in the linked scan report. Tests that require rejection of
 
 ## C. `default` treatment options
 
-Select an option only through Item **4** in
-[SIGN-OFF-PACKET.md](./SIGN-OFF-PACKET.md); this record remains unsigned.
-
-**PROPOSED — REQUIRES SIGN-OFF. No option is selected.** These options are
-independent of the collision-group options above; they do not grant any
-shared-mirror entitlement.
+Item **4** in [SIGN-OFF-PACKET.md](./SIGN-OFF-PACKET.md) is signed:
+`default` is reserved for compatibility-only use, prohibited in production,
+and gated in dev/local. The historical alternatives below are retained for
+rationale only; none grants shared-mirror entitlement.
 
 | Option | Token issuance and verification | Membership rows | Shared-mirror fallback | Auth-off anonymous principal | Tests relying on `default` |
 |---|---|---|---|---|---|

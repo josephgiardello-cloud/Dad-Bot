@@ -1,7 +1,9 @@
 """Tenant-qualified SQLite task storage.
 
 This repository does not authenticate callers; its tenant argument must come
-from an independently verified execution boundary.
+from an independently verified execution boundary. Recovery owners are derived
+only from owned task rows. Unqualified legacy rows require explicit migration
+and are never adopted or recovered.
 """
 
 from __future__ import annotations
@@ -12,7 +14,7 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any
 
-from .execution_identity import require_identifier, require_tenant_id
+from .execution_identity import require_identifier, require_scoped_tenant_id
 
 
 class SQLiteOwnedTasks:
@@ -44,7 +46,7 @@ class SQLiteOwnedTasks:
 
     @staticmethod
     def _identity(tenant_id: str, task_id: str) -> None:
-        require_tenant_id(tenant_id)
+        require_scoped_tenant_id(tenant_id)
         require_identifier(task_id, "task")
 
     @classmethod
@@ -76,7 +78,7 @@ class SQLiteOwnedTasks:
         return payload
 
     def list_incomplete_tasks(self, tenant_id: str, *, limit: int = 1000) -> list[dict[str, Any]]:
-        require_tenant_id(tenant_id)
+        require_scoped_tenant_id(tenant_id)
         with closing(self._connect()) as connection:
             rows = connection.execute(
                 "SELECT task_id, payload FROM owned_tasks_v1 WHERE tenant_id=? "
@@ -90,6 +92,14 @@ class SQLiteOwnedTasks:
             self._payload(tenant_id, task_id, payload)
             tasks.append(payload)
         return tasks
+
+    def list_task_tenants(self) -> list[str]:
+        """Enumerate recovery owners from qualified task rows, never a tenant catalog."""
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT tenant_id FROM owned_tasks_v1 ORDER BY tenant_id"
+            ).fetchall()
+        return [require_scoped_tenant_id(row[0]) for row in rows]
 
     def save_task_result(
         self, tenant_id: str, task_id: str, payload: dict[str, Any], response: dict[str, Any]

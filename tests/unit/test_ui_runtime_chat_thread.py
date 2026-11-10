@@ -93,8 +93,18 @@ class TestUIRuntimeAPISendUserMessage:
 class TestStreamlitRuntimeSendUserMessage:
     """Tests on the StreamlitRuntime wrapper (delegates to UIRuntimeAPI)."""
 
-    def test_build_creates_runtime_with_session_lock(self):
+    def test_build_creates_runtime_with_session_lock(self, monkeypatch, tmp_path):
         from dadbot.runtime_core.streamlit_runtime import StreamlitRuntime
+
+        monkeypatch.setenv("DADBOT_TENANT_ID", "ui-runtime-test-tenant")
+        for name, filename in {
+            "DADBOT_PROFILE_PATH": "profile.json",
+            "DADBOT_MEMORY_PATH": "memory.json",
+            "DADBOT_SEMANTIC_DB_PATH": "semantic.sqlite3",
+            "DADBOT_GRAPH_DB_PATH": "graph.sqlite3",
+            "DADBOT_SESSION_LOG_DIR": "sessions",
+        }.items():
+            monkeypatch.setenv(name, str(tmp_path / filename))
 
         runtime = StreamlitRuntime.build()
         try:

@@ -1,4 +1,4 @@
-"""Unwired request-scoped tenant context contract for Phase 2."""
+"""Request-scoped tenant context for service HTTP and WebSocket ingress."""
 
 from __future__ import annotations
 
@@ -28,11 +28,46 @@ class TenantContext:
 _tenant_context: ContextVar[TenantContext | None] = ContextVar("dadbot_tenant_context", default=None)
 
 
+@dataclass(frozen=True, slots=True)
+class LocalDefaultPrincipalContext:
+    tenant_id: str = "default"
+    principal: str = "local-compatibility"
+
+
+_local_default_context: ContextVar[LocalDefaultPrincipalContext | None] = ContextVar(
+    "local_default_tenant_context",
+    default=None,
+)
+
+
 def require_tenant_context() -> TenantContext:
     context = _tenant_context.get()
     if context is None:
         raise TenantContextMissingError("Tenant context is required")
     return context
+
+
+def require_request_context() -> TenantContext | LocalDefaultPrincipalContext:
+    context = _tenant_context.get()
+    if context is not None:
+        return context
+    local_context = _local_default_context.get()
+    if local_context is not None:
+        return local_context
+    raise TenantContextMissingError("Tenant context is required")
+
+
+@contextmanager
+def local_default_context_scope(*, enabled: bool) -> Iterator[None]:
+    if not enabled:
+        raise ValueError("Local default tenant compatibility is disabled")
+    token: Token[LocalDefaultPrincipalContext | None] = _local_default_context.set(
+        LocalDefaultPrincipalContext()
+    )
+    try:
+        yield
+    finally:
+        _local_default_context.reset(token)
 
 
 @contextmanager

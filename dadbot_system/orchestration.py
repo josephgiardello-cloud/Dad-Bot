@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import logging
 from dataclasses import replace
+from itertools import islice
 from typing import TYPE_CHECKING, Any
 
 from dadbot.core.kernel_mutation_gate import apply_event, emit_event
 
 from .contracts import (
-    DEFAULT_TENANT_ID,
     ChatRequest,
     ChatResponse,
     EventEnvelope,
@@ -20,8 +20,15 @@ from .contracts import (
     normalize_tenant_id,
 )
 from .execution_identity import ExecutionIdentity, require_identifier, require_tenant_id
+from .owned_tasks import OwnedTaskStore, build_owned_task_store
 from .runtime_signals import start_span
-from .state import AppStateContainer, InMemoryStateStore, NamespacedStateStore, StateStore
+from .state import (
+    AppStateContainer,
+    InMemoryStateStore,
+    SQLiteStateStore,
+    StateStore,
+    TenantOwnedStateStoreView,
+)
 
 if TYPE_CHECKING:
     from .delegation import SQLiteDelegationStore
@@ -41,14 +48,27 @@ class ToolRegistry:
 
 
 class DadBotOrchestrator:
-    def __init__(self, broker, *, state_store: StateStore | None = None, event_bus=None, planner_debug_factory=None):
+    def __init__(
+        self, broker, *, state_store: StateStore | None = None,
+        task_store: OwnedTaskStore | None = None, event_bus=None, planner_debug_factory=None,
+    ):
         self.broker = broker
         self.state_store = state_store or InMemoryStateStore()
+        if task_store is not None:
+            self.task_store = task_store
+        elif isinstance(self.state_store, SQLiteStateStore):
+            self.task_store = build_owned_task_store(sqlite_path=self.state_store.path)
+        elif isinstance(self.state_store, InMemoryStateStore):
+            self.task_store = build_owned_task_store(in_memory_store=self.state_store.owned_tasks)
+        elif getattr(self.state_store, "task_store", None) is not None:
+            self.task_store = self.state_store.task_store
+        else:
+            raise RuntimeError("An explicit tenant-qualified task store is required for this state backend")
         self.event_bus = event_bus
         self._planner_debug_factory = planner_debug_factory or (lambda: {})
-        self._sessions: dict[str, AppStateContainer] = {}
+        self._sessions: dict[tuple[str, str], AppStateContainer] = {}
         self._tool_registry = ToolRegistry()
-        self._recovered_task_ids: set[str] = set()
+        self._recovered_task_ids: set[tuple[str, str]] = set()
         self._authenticated_execution = False
         self._delegation_store: SQLiteDelegationStore | None = None
 
@@ -62,20 +82,43 @@ class DadBotOrchestrator:
     def tenant_namespace(tenant_id: str) -> str:
         return f"tenant:{require_tenant_id(tenant_id)}"
 
-    def session(self, session_id: str, tenant_id: str = DEFAULT_TENANT_ID) -> AppStateContainer:
+    def session(self, session_id: str, tenant_id: str) -> AppStateContainer:
         normalized_tenant_id = require_tenant_id(tenant_id)
-        container_key = f"{normalized_tenant_id}:{session_id}"
+        require_identifier(session_id, "session")
+        container_key = (normalized_tenant_id, session_id)
         container = self._sessions.get(container_key)
         if container is None:
             container = AppStateContainer(
                 session_id,
                 self._planner_debug_factory,
                 tenant_id=normalized_tenant_id,
-                store=NamespacedStateStore(self.state_store, self.tenant_namespace(normalized_tenant_id)),
+                store=TenantOwnedStateStoreView(self.state_store, normalized_tenant_id, self.task_store),
                 event_bus=self.event_bus,
             )
             self._sessions[container_key] = container
         return container
+
+    def list_sessions(self, tenant_id: str) -> list[str]:
+        normalized_tenant_id = require_tenant_id(tenant_id)
+        store = TenantOwnedStateStoreView(self.state_store, normalized_tenant_id, self.task_store)
+        return store.list_sessions()
+
+    def terminate_session(self, session_id: str, tenant_id: str) -> bool:
+        normalized_tenant_id = require_tenant_id(tenant_id)
+        require_identifier(session_id, "session")
+        store = TenantOwnedStateStoreView(self.state_store, normalized_tenant_id, self.task_store)
+        if self._authenticated_execution:
+            if self._delegation_store is None:
+                from .delegation import AuthorityUnavailableError
+
+                raise AuthorityUnavailableError("Delegated execution authority is unavailable")
+            self._delegation_store.revoke_session(
+                tenant_id=normalized_tenant_id,
+                session_id=session_id,
+            )
+        deleted = store.delete_session(session_id)
+        self._sessions.pop((normalized_tenant_id, session_id), None)
+        return deleted
 
     def tool_registry(self) -> ToolRegistry:
         return self._tool_registry
@@ -98,7 +141,13 @@ class DadBotOrchestrator:
             edges=[("api", "queue"), ("queue", "worker"), ("worker", "state")],
         )
 
-    def submit_chat(self, request: ChatRequest, *, bearer_token: str = "") -> WorkerTask:
+    def submit_chat(
+        self,
+        request: ChatRequest,
+        *,
+        bearer_token: str = "",
+        execution_principal=None,
+    ) -> WorkerTask:
         delegation_store = self._delegation_store
         if self._authenticated_execution and delegation_store is None:
             from .delegation import AuthorityUnavailableError
@@ -136,8 +185,12 @@ class DadBotOrchestrator:
                 execution_graph=graph,
             )
             if self._authenticated_execution and delegation_store is not None:
-                task.delegation = delegation_store.issue(bearer_token, task)
-            self.state_store.save_task(
+                if execution_principal is not None:
+                    task.delegation = delegation_store.issue_for_principal(execution_principal, task)
+                else:
+                    task.delegation = delegation_store.issue(bearer_token, task)
+            self.task_store.save_task(
+                request.tenant_id,
                 task.task_id,
                 {
                     "task_id": task.task_id,
@@ -188,9 +241,16 @@ class DadBotOrchestrator:
             logger.error("Incomplete tasks remain queued: delegated execution authority is unavailable")
             return 0
         recovered = 0
-        for payload in self.state_store.list_incomplete_tasks(limit=limit):
+        self.task_store.reject_legacy_recovery()
+        pending = (
+            payload
+            for tenant_id in self.task_store.list_task_tenants()
+            for payload in self.task_store.list_incomplete_tasks(tenant_id, limit=limit)
+        )
+        for payload in islice(pending, max(1, int(limit))):
             task_id = str(payload.get("task_id") or "").strip()
-            if task_id in self._recovered_task_ids:
+            tenant_id = require_tenant_id(payload.get("tenant_id"))
+            if (tenant_id, task_id) in self._recovered_task_ids:
                 continue
             accepted_at = str(payload.get("accepted_at") or "").strip()
             if not accepted_at:
@@ -201,7 +261,6 @@ class DadBotOrchestrator:
             if not task_id or not session_id or not isinstance(request_payload, dict):
                 raise RuntimeError("Cannot recover persisted task with incomplete request metadata")
 
-            tenant_id = require_tenant_id(payload.get("tenant_id"))
             identity = ExecutionIdentity(
                 tenant_id=tenant_id,
                 session_id=session_id,
@@ -242,7 +301,7 @@ class DadBotOrchestrator:
                     logger.error("Task %s remains queued: authority verification failed: %s", task_id, exc)
                     continue
             self.broker.enqueue(task)
-            self._recovered_task_ids.add(task_id)
+            self._recovered_task_ids.add((tenant_id, task_id))
             recovered += 1
         return recovered
 
@@ -263,7 +322,7 @@ class DadBotOrchestrator:
         return self._apply_worker_result(result)
 
     def _apply_worker_result(self, result: WorkerResult) -> ChatResponse | None:
-        task_payload = self.state_store.load_task(result.task_id)
+        task_payload = self.task_store.load_task(require_tenant_id(result.tenant_id), result.task_id)
         if not task_payload:
             raise ValueError("worker result identity mismatch: task not found")
         identity = ExecutionIdentity(
@@ -322,7 +381,7 @@ class DadBotOrchestrator:
                 raise ValueError("authority rejection does not match an incomplete task")
             logger.error("Task %s remains queued: %s", result.task_id, AUTHORITY_UNAVAILABLE)
             task_payload["error"] = AUTHORITY_UNAVAILABLE
-            self.state_store.save_task(result.task_id, task_payload)
+            self.task_store.save_task(identity.tenant_id, result.task_id, task_payload)
             return None
         if str(task_payload.get("status") or "").lower() not in {"queued", "running"}:
             response = dict(result.response.to_dict()) if result.response is not None else None
@@ -331,7 +390,7 @@ class DadBotOrchestrator:
                 or task_payload.get("error") != result.error
                 or task_payload.get("completed_at") != result.completed_at
                 or task_payload.get("session_state") != dict(result.session_state or {})
-                or self.state_store.load_response(result.task_id) != response
+                or self.task_store.load_response(identity.tenant_id, result.task_id) != response
             ):
                 raise ValueError("worker result conflicts with an already completed task")
             return result.response
@@ -360,15 +419,23 @@ class DadBotOrchestrator:
             lambda state, evt: {**state, **dict(evt.payload.get("updates") or {})},
         )
         if result.response is not None:
-            self.state_store.save_task_result(
+            self.task_store.save_task_result(
+                tenant_id,
                 result.task_id,
                 task_payload,
                 dict(result.response.to_dict()),
             )
-            container.record_response(result.task_id, result.response)
+            container.record_event(
+                EventType.RESPONSE_READY,
+                {
+                    "task_id": result.task_id,
+                    "request_id": result.response.request_id,
+                    "status": result.response.status,
+                },
+            )
             return result.response
 
-        self.state_store.save_task(result.task_id, task_payload)
+        self.task_store.save_task(tenant_id, result.task_id, task_payload)
         self._publish(
             EventEnvelope(
                 session_id=result.session_id,
@@ -379,21 +446,28 @@ class DadBotOrchestrator:
         )
         return None
 
-    def task_status(self, task_id: str) -> dict[str, Any] | None:
+    def task_status(self, task_id: str, *, tenant_id: str) -> dict[str, Any] | None:
+        require_tenant_id(tenant_id)
+        require_identifier(task_id, "task")
         self.drain_results()
-        return self.state_store.load_task(task_id)
+        return self.task_store.load_task(tenant_id, task_id)
 
-    def response_for_task(self, task_id: str) -> dict[str, Any] | None:
+    def response_for_task(self, task_id: str, *, tenant_id: str) -> dict[str, Any] | None:
+        require_tenant_id(tenant_id)
+        require_identifier(task_id, "task")
         self.drain_results()
-        return self.state_store.load_response(task_id)
+        return self.task_store.load_response(tenant_id, task_id)
 
-    def session_events(self, session_id: str, tenant_id: str = DEFAULT_TENANT_ID) -> list[dict[str, Any]]:
+    def save_task(self, task_id: str, payload: dict[str, Any], *, tenant_id: str) -> None:
+        self.task_store.save_task(tenant_id, task_id, payload)
+
+    def session_events(self, session_id: str, tenant_id: str) -> list[dict[str, Any]]:
         self.drain_results()
-        scoped_store = NamespacedStateStore(self.state_store, self.tenant_namespace(tenant_id))
+        scoped_store = TenantOwnedStateStoreView(self.state_store, tenant_id, self.task_store)
         return scoped_store.list_events(session_id)
 
     def _publish(self, event: EventEnvelope) -> None:
-        scoped_store = NamespacedStateStore(self.state_store, self.tenant_namespace(event.tenant_id))
+        scoped_store = TenantOwnedStateStoreView(self.state_store, event.tenant_id, self.task_store)
         scoped_store.append_event(event.session_id, event.to_dict())
         if self.event_bus is not None:
             self.event_bus.publish(event)

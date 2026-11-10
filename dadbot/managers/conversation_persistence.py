@@ -47,6 +47,7 @@ from dadbot.core.persistence_record_schema import (
     trace_event_errors,
 )
 from dadbot.core.persistence_schema_config import is_strict_persistence_schema_mode
+from dadbot.core.tenant_session import current_tenant_session
 
 POLICY_TRACE_EVENT_TYPE = "PolicyTraceEvent"
 _WRITE_P95_SLO_MS = 15.0
@@ -243,7 +244,13 @@ class ConversationPersistenceManager:
             json.dumps(payload, sort_keys=True, ensure_ascii=True, default=str).encode("utf-8"),
         ).hexdigest()
 
-    def _latest_checkpoint_for_trace(self, trace_token: str) -> dict[str, Any] | None:
+    def _latest_checkpoint_for_trace(
+        self,
+        trace_token: str,
+        *,
+        session_id: str,
+        tenant_id: str = "",
+    ) -> dict[str, Any] | None:
         normalized = str(trace_token or "").strip()
         if not normalized:
             return None
@@ -251,16 +258,38 @@ class ConversationPersistenceManager:
         for event in reversed(ledger.read()):
             if str(event.get("type") or "") != "GRAPH_CHECKPOINT":
                 continue
+            event_session_id = str(event.get("session_id") or "").strip()
+            if event_session_id != session_id:
+                continue
+            if tenant_id and str(event.get("tenant_id") or "").strip() != tenant_id:
+                continue
             payload = dict(event.get("payload") or {})
             if str(payload.get("trace_id") or "").strip() != normalized:
                 continue
             checkpoint = dict(payload.get("checkpoint") or {})
             if checkpoint:
+                if (
+                    str(checkpoint.get("session_id") or "").strip() != event_session_id
+                    or str(checkpoint.get("trace_id") or "").strip() != normalized
+                ):
+                    raise PersistenceSchemaError(
+                        "Persisted checkpoint identity does not match its ledger event",
+                    )
                 return normalize_checkpoint_record(checkpoint)
         return None
 
-    def _build_checkpoint_continuity(self, checkpoint: dict[str, Any], *, trace_token: str) -> dict[str, Any]:
-        replay = self.replay_turn_events(trace_token=trace_token)
+    def _build_checkpoint_continuity(
+        self,
+        checkpoint: dict[str, Any],
+        *,
+        trace_token: str,
+    ) -> dict[str, Any]:
+        active_identity = current_tenant_session()
+        replay = self.replay_turn_events(
+            trace_token=trace_token,
+            session_id=str((checkpoint or {}).get("session_id") or "default"),
+            tenant_id=active_identity.tenant_id if active_identity is not None else None,
+        )
         determinism = dict(replay.get("determinism") or {})
         continuity = {
             "execution_fingerprint": str(determinism.get("execution_fingerprint") or "").strip(),
@@ -403,7 +432,14 @@ class ConversationPersistenceManager:
         trace_id = str((checkpoint or {}).get("trace_id") or "").strip()
         if not trace_id:
             return
-        prior = self._latest_checkpoint_for_trace(trace_id)
+        active_identity = current_tenant_session()
+        session_id = str((checkpoint or {}).get("session_id") or "default").strip() or "default"
+        tenant_id = active_identity.tenant_id if active_identity is not None else ""
+        prior = self._latest_checkpoint_for_trace(
+            trace_id,
+            session_id=session_id,
+            tenant_id=tenant_id,
+        )
         if not isinstance(prior, dict):
             return
         current_prev = str((checkpoint or {}).get("prev_checkpoint_hash") or "").strip()
@@ -500,6 +536,16 @@ class ConversationPersistenceManager:
         if ledger is None:
             raise RuntimeTraceViolation("ExecutionLedger is required for conversation persistence authority")
         return ledger
+
+    def _require_checkpoint_authority(self, tenant_id: str) -> None:
+        from dadbot_system.delegation import require_tenant_authority_if_active
+
+        dependency_overrides = getattr(self.bot, "_dependency_overrides", {})
+        authenticated = (
+            isinstance(dependency_overrides, dict)
+            and dependency_overrides.get("storage_security_mode") == "AUTHENTICATED"
+        )
+        require_tenant_authority_if_active(tenant_id, required=authenticated)
 
     def _strict_schema_reject_enabled(self) -> bool:
         # Use centralized config resolver: checks env + bot attribute
@@ -681,7 +727,14 @@ class ConversationPersistenceManager:
         payload = copy.deepcopy(dict(checkpoint or {}))
         if not payload:
             return
+        source_session_id = str(payload.get("session_id") or "").strip()
         payload = self._thin_checkpoint_payload(payload)
+        active_identity = current_tenant_session()
+        if active_identity is not None:
+            if source_session_id and source_session_id != active_identity.session_id:
+                raise RuntimeTraceViolation("Checkpoint session identity does not match the active session")
+            payload["session_id"] = active_identity.session_id
+            self._require_checkpoint_authority(active_identity.tenant_id)
 
         trace_id = str(payload.get("trace_id") or "unknown").strip() or "unknown"
         stage = str(payload.get("stage") or "stage").strip().replace(" ", "-") or "stage"
@@ -881,6 +934,12 @@ class ConversationPersistenceManager:
         payload = copy.deepcopy(dict(event or {}))
         if not payload:
             return
+        active_identity = current_tenant_session()
+        source_session_id = str(payload.get("session_id") or "").strip()
+        if active_identity is not None:
+            if source_session_id and source_session_id != active_identity.session_id:
+                raise RuntimeTraceViolation("Turn event session identity does not match the active session")
+            payload["session_id"] = active_identity.session_id
         trace_id = str(payload.get("trace_id") or "unknown").strip() or "unknown"
         payload["trace_id"] = trace_id
         sequence = self._compute_next_sequence(trace_id)
@@ -991,11 +1050,26 @@ class ConversationPersistenceManager:
         limit: int = 0,
         *,
         events_snapshot: list[dict[str, Any]] | None = None,
+        session_id: str | None = None,
+        tenant_id: str | None = None,
     ) -> list[dict[str, Any]]:
         self._require_active_trace("list_turn_events")
         normalized = str(trace_token or "").strip()
         if not normalized:
             return []
+
+        active_identity = current_tenant_session()
+        requested_session_id = str(session_id or "").strip()
+        requested_tenant_id = str(tenant_id or "").strip()
+        if active_identity is not None:
+            if requested_session_id and requested_session_id != active_identity.session_id:
+                raise RuntimeTraceViolation("Turn event lookup session does not match the active session")
+            if requested_tenant_id and requested_tenant_id != active_identity.tenant_id:
+                raise RuntimeTraceViolation("Turn event lookup tenant does not match the active session")
+            requested_session_id = active_identity.session_id
+            requested_tenant_id = active_identity.tenant_id
+        if not requested_session_id:
+            requested_session_id = "default"
 
         snapshot = events_snapshot
         if snapshot is None:
@@ -1005,6 +1079,10 @@ class ConversationPersistenceManager:
         strict_reject = self._strict_schema_reject_enabled()
         for event in snapshot:
             if str(event.get("type") or "") != "TURN_EVENT":
+                continue
+            if str(event.get("session_id") or "").strip() != requested_session_id:
+                continue
+            if requested_tenant_id and str(event.get("tenant_id") or "").strip() != requested_tenant_id:
                 continue
             payload = dict(event.get("payload") or {})
             if str(payload.get("trace_id") or "").strip() != normalized:
@@ -1174,12 +1252,16 @@ class ConversationPersistenceManager:
         trace_token: str,
         *,
         events_snapshot: list[dict[str, Any]] | None = None,
+        session_id: str | None = None,
+        tenant_id: str | None = None,
     ) -> dict[str, Any]:
         self._require_active_trace("replay_turn_events")
         normalized = str(trace_token or "").strip()
         events = self.list_turn_events(
             trace_token=normalized,
             events_snapshot=events_snapshot,
+            session_id=session_id,
+            tenant_id=tenant_id,
         )
         strict_sequence_hash, strict_sequence = KernelReplaySequenceLock.strict_hash(
             trace_token=normalized,
@@ -1268,7 +1350,14 @@ class ConversationPersistenceManager:
             "verification_path": "posthoc",
         }
 
-    def load_latest_graph_checkpoint(self, trace_token: str = "", **legacy_kwargs: Any) -> dict | None:
+    def load_latest_graph_checkpoint(
+        self,
+        trace_token: str = "",
+        *,
+        session_id: str | None = None,
+        tenant_id: str | None = None,
+        **legacy_kwargs: Any,
+    ) -> dict | None:
         with ensure_execution_trace_root(
             operation="load_latest_graph_checkpoint",
             prompt="[conversation-persistence-load-checkpoint]",
@@ -1277,9 +1366,29 @@ class ConversationPersistenceManager:
         ):
             self._require_active_trace("load_latest_graph_checkpoint")
             normalized_trace_id = str(trace_token or legacy_kwargs.get("trace_id") or "").strip()
+            active_identity = current_tenant_session()
+            requested_session_id = str(session_id or "").strip()
+            requested_tenant_id = str(tenant_id or "").strip()
+            if active_identity is not None:
+                if requested_session_id and requested_session_id != active_identity.session_id:
+                    raise RuntimeTraceViolation("Checkpoint lookup session does not match the active session")
+                if requested_tenant_id and requested_tenant_id != active_identity.tenant_id:
+                    raise RuntimeTraceViolation("Checkpoint lookup tenant does not match the active session")
+                requested_session_id = active_identity.session_id
+                requested_tenant_id = active_identity.tenant_id
+            if not requested_session_id:
+                requested_session_id = "default"
+            if requested_tenant_id:
+                self._require_checkpoint_authority(requested_tenant_id)
             ledger = self._execution_ledger()
             for event in reversed(ledger.read()):
                 if str(event.get("type") or "") != "GRAPH_CHECKPOINT":
+                    continue
+                event_session_id = str(event.get("session_id") or "").strip()
+                if event_session_id != requested_session_id:
+                    continue
+                event_tenant_id = str(event.get("tenant_id") or "").strip()
+                if requested_tenant_id and event_tenant_id != requested_tenant_id:
                     continue
                 payload = dict(event.get("payload") or {})
                 event_trace_id = str(payload.get("trace_id") or "").strip()
@@ -1288,17 +1397,30 @@ class ConversationPersistenceManager:
                 checkpoint = dict(payload.get("checkpoint") or {})
                 if checkpoint:
                     if self._strict_schema_reject_enabled():
-                        return assert_valid_checkpoint_record(checkpoint)
-                    checkpoint = normalize_checkpoint_record(checkpoint)
-                    errors = checkpoint_record_errors(checkpoint)
-                    if errors:
+                        checkpoint = assert_valid_checkpoint_record(checkpoint)
+                    else:
+                        checkpoint = normalize_checkpoint_record(checkpoint)
+                        errors = checkpoint_record_errors(checkpoint)
+                        if errors:
+                            raise PersistenceSchemaError(
+                                "Malformed persisted checkpoint: " + "; ".join(errors),
+                            )
+                    checkpoint_session_id = str(checkpoint.get("session_id") or "").strip()
+                    checkpoint_trace_id = str(checkpoint.get("trace_id") or "").strip()
+                    if checkpoint_session_id != event_session_id or checkpoint_trace_id != event_trace_id:
                         raise PersistenceSchemaError(
-                            "Malformed persisted checkpoint: " + "; ".join(errors),
+                            "Persisted checkpoint identity does not match its ledger event",
                         )
                     return checkpoint
             return None
 
-    def resume_graph_checkpoint(self, trace_token: str = "") -> dict | None:
+    def resume_graph_checkpoint(
+        self,
+        trace_token: str = "",
+        *,
+        session_id: str | None = None,
+        tenant_id: str | None = None,
+    ) -> dict | None:
         with ensure_execution_trace_root(
             operation="resume_graph_checkpoint",
             prompt="[conversation-persistence-resume-checkpoint]",
@@ -1306,12 +1428,20 @@ class ConversationPersistenceManager:
             required=True,
         ):
             self._require_active_trace("resume_graph_checkpoint")
-            checkpoint = self.load_latest_graph_checkpoint(trace_token=trace_token)
+            checkpoint = self.load_latest_graph_checkpoint(
+                trace_token=trace_token,
+                session_id=session_id,
+                tenant_id=tenant_id,
+            )
             if not isinstance(checkpoint, dict):
                 return None
             session_state = checkpoint.get("session_state")
             if not isinstance(session_state, dict):
-                events = self.list_turn_events(trace_token=trace_token)
+                events = self.list_turn_events(
+                    trace_token=trace_token,
+                    session_id=session_id,
+                    tenant_id=tenant_id,
+                )
                 for event in reversed(events):
                     if str(event.get("event_type") or "").strip().lower() != "graph_checkpoint":
                         continue

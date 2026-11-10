@@ -781,6 +781,7 @@ class MemoryNormalizer:
         return {
             "summary": summary,
             "category": category,
+            "provenance": memory.get("provenance") if isinstance(memory.get("provenance"), dict) else None,
             "oral_history_evidence": (
                 memory["oral_history_evidence"] if isinstance(memory.get("oral_history_evidence"), dict) else None
             ),
@@ -814,6 +815,8 @@ class MemoryNormalizer:
             "summary": dumped["summary"],
             "category": dumped["category"],
         }
+        if dumped["provenance"] is not None:
+            normalized["provenance"] = dumped["provenance"]
         if dumped["oral_history_evidence"] is not None:
             normalized["oral_history_evidence"] = dumped["oral_history_evidence"]
         if "mood" in memory:
@@ -941,6 +944,7 @@ class MemoryNormalizer:
         payload = {
             "summary": summary,
             "category": category,
+            "provenance": memory.get("provenance") if isinstance(memory.get("provenance"), dict) else None,
             "oral_history_evidence": (
                 memory["oral_history_evidence"] if isinstance(memory.get("oral_history_evidence"), dict) else None
             ),
@@ -987,6 +991,8 @@ class MemoryNormalizer:
             "updated_at": updated_at,
             "contradictions": dumped["contradictions"],
         }
+        if dumped["provenance"] is not None:
+            normalized["provenance"] = dumped["provenance"]
         if dumped["oral_history_evidence"] is not None:
             normalized["oral_history_evidence"] = dumped["oral_history_evidence"]
         if dumped["event_time"] is not None:

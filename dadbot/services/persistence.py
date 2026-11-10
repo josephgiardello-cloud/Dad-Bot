@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import os
+import sqlite3
 import time
 import uuid
 from copy import deepcopy
@@ -45,6 +46,7 @@ from dadbot.core.runtime_errors import (
     PersistenceFailure,
 )
 from dadbot.managers.conversation_persistence import ConversationPersistenceManager
+from dadbot.memory.working_memory import promote_committed_working_memory
 from dadbot.services._persistence_mixins import (
     StateDivergenceError,
     _AuthorityStateMixin,
@@ -195,6 +197,7 @@ class PersistenceService(
     def _enqueue_async_checkpoint(
         self,
         *,
+        tenant_id: str,
         session_id: str,
         trace_token: str,
         checkpoint: dict[str, Any],
@@ -219,6 +222,7 @@ class PersistenceService(
             trace_id=trace_token,
             checkpoint=dict(checkpoint),
             manifest=dict(manifest),
+            tenant_id=tenant_id,
         )
         self._checkpoint_futures.append((sequence_id, future))
 
@@ -563,6 +567,8 @@ class PersistenceService(
 
     def commit_transaction(self, turn_context: Any) -> None:
         state = getattr(turn_context, "state", None)
+        service = self.turn_service
+        runtime = None if service is None else getattr(service, "bot", None)
         if isinstance(state, dict):
             transaction = dict(state.get("_save_transaction", {}) or {})
             if transaction:
@@ -584,6 +590,16 @@ class PersistenceService(
                     commit_id=commit_id,
                 )
                 self._record_merkle_anchor(turn_context, commit_id=commit_id)
+                if runtime is not None:
+                    try:
+                        promote_committed_working_memory(runtime, turn_context)
+                    except (OSError, sqlite3.Error, ValueError) as exc:
+                        logger.error(
+                            "Post-commit working-memory promotion failed (error_type=%s)",
+                            type(exc).__name__,
+                            exc_info=True,
+                        )
+                        state["working_memory_promotion_error"] = type(exc).__name__
             state["_save_transaction_active"] = False
             state["_save_mutations_applied"] = False
 
@@ -907,6 +923,9 @@ class PersistenceService(
                 control_plane.get("session_id") or _md.get("session_id") or "default",
             )
             trace_id = str(getattr(turn_context, "trace_id", "") or "")
+            tenant_id = str(_md.get("tenant_id") or "")
+            if not tenant_id:
+                raise PersistenceFailure("Checkpoint persistence requires an owning tenant_id")
             manifest = dict(
                 getattr(turn_context, "metadata", {}).get("determinism_manifest") or {},
             )
@@ -914,6 +933,7 @@ class PersistenceService(
             async_allowed = bool(self._async_checkpoint_pipeline_enabled) and not bool(self.strict_mode)
             if async_allowed:
                 self._enqueue_async_checkpoint(
+                    tenant_id=tenant_id,
                     session_id=session_id,
                     trace_token=trace_id,
                     checkpoint=checkpoint_payload,
@@ -926,6 +946,7 @@ class PersistenceService(
                         trace_id=trace_id,
                         checkpoint=checkpoint_payload,
                         manifest=manifest,
+                        tenant_id=tenant_id,
                     )
                 except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
                     logger.error("PersistenceService.checkpointer save failed: %s", exc)
@@ -1184,14 +1205,32 @@ class PersistenceService(
                 ) from exc
             logger.error("PersistenceService.save_graph_checkpoint failed: %s", exc)
 
-    def load_latest_graph_checkpoint(self, trace_token: str = "", **legacy_kwargs: Any) -> dict[str, Any] | None:
+    def load_latest_graph_checkpoint(
+        self,
+        trace_token: str = "",
+        *,
+        session_id: str | None = None,
+        tenant_id: str | None = None,
+        **legacy_kwargs: Any,
+    ) -> dict[str, Any] | None:
         try:
             resolved_trace = str(trace_token or legacy_kwargs.get("trace_id") or "").strip()
             manager: Any = self.persistence_manager
-            try:
-                checkpoint = manager.load_latest_graph_checkpoint(trace_token=resolved_trace)
-            except TypeError:
-                checkpoint = manager.load_latest_graph_checkpoint(trace_id=resolved_trace)
+            identity_kwargs = {}
+            if session_id is not None:
+                identity_kwargs["session_id"] = session_id
+            if tenant_id is not None:
+                identity_kwargs["tenant_id"] = tenant_id
+            if identity_kwargs:
+                checkpoint = manager.load_latest_graph_checkpoint(
+                    trace_token=resolved_trace,
+                    **identity_kwargs,
+                )
+            else:
+                try:
+                    checkpoint = manager.load_latest_graph_checkpoint(trace_token=resolved_trace)
+                except TypeError:
+                    checkpoint = manager.load_latest_graph_checkpoint(trace_id=resolved_trace)
             if checkpoint is None:
                 return None
             strict_reject = self._strict_schema_reject_enabled()
@@ -1218,9 +1257,23 @@ class PersistenceService(
             logger.error("PersistenceService.load_latest_graph_checkpoint failed: %s", exc)
             return None
 
-    def resume_graph_checkpoint(self, trace_token: str = "") -> dict[str, Any] | None:
+    def resume_graph_checkpoint(
+        self,
+        trace_token: str = "",
+        *,
+        session_id: str | None = None,
+        tenant_id: str | None = None,
+    ) -> dict[str, Any] | None:
         try:
-            checkpoint = self.persistence_manager.resume_graph_checkpoint(trace_token=trace_token)
+            identity_kwargs = {}
+            if session_id is not None:
+                identity_kwargs["session_id"] = session_id
+            if tenant_id is not None:
+                identity_kwargs["tenant_id"] = tenant_id
+            checkpoint = self.persistence_manager.resume_graph_checkpoint(
+                trace_token=trace_token,
+                **identity_kwargs,
+            )
             if checkpoint is None:
                 return None
             strict_reject = self._strict_schema_reject_enabled()

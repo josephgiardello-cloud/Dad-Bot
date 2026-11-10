@@ -80,19 +80,28 @@ def scrub_text(text: str) -> tuple[str, list[str]]:
 
 
 def scrub_memory_entry(entry: dict) -> dict:
-    """Return a *new* dict with PII scrubbed from 'summary' and 'detail' fields."""
+    """Return a new dict with PII scrubbed from memory text and provenance evidence."""
     if not isinstance(entry, dict):
         return entry
 
     scrubbed = dict(entry)
+    existing_tags = scrubbed.get("_pii_scrubbed", [])
+    found_types = {str(tag) for tag in existing_tags} if isinstance(existing_tags, list) else set()
     for field in ("summary", "detail", "text", "content"):
         raw = scrubbed.get(field)
         if isinstance(raw, str) and raw:
             cleaned, found = scrub_text(raw)
             scrubbed[field] = cleaned
-            if found:
-                tags = scrubbed.get("_pii_scrubbed", [])
-                scrubbed["_pii_scrubbed"] = list(set(list(tags) + found))
+            found_types.update(found)
+
+    provenance = scrubbed.get("provenance")
+    if isinstance(provenance, dict) and isinstance(provenance.get("evidence"), str):
+        cleaned_evidence, found = scrub_text(provenance["evidence"])
+        scrubbed["provenance"] = {**provenance, "evidence": cleaned_evidence}
+        found_types.update(found)
+
+    if found_types:
+        scrubbed["_pii_scrubbed"] = sorted(found_types)
 
     return scrubbed
 

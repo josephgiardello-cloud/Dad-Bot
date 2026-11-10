@@ -10,7 +10,13 @@ from datetime import date, datetime, timezone
 
 from dadbot.memory.conflict_detector import ConflictDetector
 from dadbot.memory.scoring import MemoryScorer
+from dadbot.memory.working_memory import new_memory_fact_reference
 from dadbot.pii_scrubber import scrub_memory_entry
+from dadbot.services.memory_service import (
+    MEMORY_FACT_EXTRACTION_PROMPT,
+    USER_MESSAGE_TRUST_LEVEL,
+    extract_facts,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -148,66 +154,7 @@ class MemoryCoordinator:
 
     @staticmethod
     def memory_extraction_prompt():
-        return """
-You extract durable memory summaries from Tony's prior messages.
-Return only JSON.
-Rules:
-- Include only lasting personal context or ongoing concerns Tony shared.
-    - Prefer short, specific statements Dad can actually use later.
-    - Keep concrete details over generic labels. Good: "Tony is stressed about a work deadline because his boss moved it up." Bad: "Tony feels stressed."
-    - Capture actionable context when present, including what Tony is dealing with, why it matters, or what follow-up would help.
-- Return an array of objects with keys 'summary', 'category', and 'mood'.
-- Return ONLY a JSON array of objects. Example:
-    [{"summary": "Tony is stressed about a work deadline his boss moved up.", "category": "work", "mood": "stressed"}]
-- Do not include one-off greetings, filler, or facts already covered by Dad's built-in profile.
-    - Avoid vague summaries like "personal struggles", "mental health", or "emotional state" unless the user gave a specific enduring detail.
-- Keep each memory under 25 words.
-- If there is nothing durable to remember, return [].
-""".strip()
-
-    def normalize_parsed_memories(self, parsed):
-        if isinstance(parsed, dict):
-            if "memories" in parsed and isinstance(parsed["memories"], list):
-                parsed = parsed["memories"]
-            else:
-                parsed = [
-                    {
-                        "summary": value,
-                        "category": key,
-                        "mood": self.bot.last_saved_mood(),
-                    }
-                    for key, value in parsed.items()
-                ]
-
-        if not isinstance(parsed, list):
-            return []
-
-        cleaned = []
-        for item in self.bot.flatten_memory_payload(parsed):
-            if isinstance(item, str):
-                summary = self.bot.coerce_memory_summary(item)
-                if summary:
-                    cleaned.append(
-                        {
-                            "summary": self.bot.naturalize_memory_summary(summary),
-                            "category": self.bot.infer_memory_category(summary),
-                            "mood": self.bot.last_saved_mood(),
-                        },
-                    )
-            elif isinstance(item, dict):
-                summary = self.bot.coerce_memory_summary(item.get("summary", ""))
-                if summary:
-                    cleaned.append(
-                        {
-                            "summary": self.bot.naturalize_memory_summary(summary),
-                            "category": item.get("category") or self.bot.infer_memory_category(summary),
-                            "mood": self.bot.normalize_mood(
-                                item.get("mood") or self.bot.last_saved_mood(),
-                            ),
-                        },
-                    )
-
-        return cleaned[:5]
+        return MEMORY_FACT_EXTRACTION_PROMPT
 
     def extract_session_memories(self, history):
         transcript = self.bot.build_memory_transcript(history)
@@ -216,34 +163,45 @@ Rules:
             return []
 
         try:
-            response = self.bot.call_ollama_chat(
-                messages=[
-                    {"role": "system", "content": self.memory_extraction_prompt()},
-                    {"role": "user", "content": transcript},
-                ],
-                response_format="json",
-                purpose="memory extraction",
-            )
-            content = self.bot.extract_ollama_message_content(response)
-        except (RuntimeError, KeyError, TypeError) as exc:
+            facts = extract_facts(self.bot, transcript)
+        except (RuntimeError, KeyError, TypeError, ValueError) as exc:
             self.bot.record_runtime_issue(
                 "memory extraction",
-                "skipping new durable memory capture for this pass",
+                "skipping new structured memory capture for this pass",
                 exc,
             )
             return []
 
-        try:
-            parsed = self.bot.parse_model_json_content(content)
-        except (json.JSONDecodeError, TypeError) as exc:
-            logger.warning("Memory extraction returned invalid JSON: %s", exc)
-            return []
+        return [
+            {
+                "summary": fact.fact,
+                "category": fact.category,
+                "mood": self.bot.normalize_mood(fact.mood),
+                "provenance": {
+                    "source": "user_message",
+                    "trust_level": USER_MESSAGE_TRUST_LEVEL,
+                    "agent": "ollama_memory_extractor",
+                    "evidence": fact.fact,
+                },
+            }
+            for fact in facts
+        ]
 
-        return self.normalize_parsed_memories(parsed)
+    @staticmethod
+    def _set_validated_memory_fact_refs(turn_context, memories=None):
+        state = getattr(turn_context, "state", None)
+        if not isinstance(state, dict):
+            return
+        state["_validated_memory_fact_refs"] = [
+            new_memory_fact_reference()
+            for entry in list(memories or [])
+            if str((entry.get("provenance") or {}).get("evidence") or "").strip()
+        ]
 
     def update_memory_store(self, history, turn_context=None):
         if not self._assert_save_commit_boundary(turn_context):
             return
+        self._set_validated_memory_fact_refs(turn_context)
         extracted_memories = self.extract_session_memories(history)
 
         if not extracted_memories:
@@ -255,11 +213,16 @@ Rules:
         today_stamp = self._turn_wall_date(turn_context)
 
         for memory_entry in extracted_memories:
+            provenance = dict(memory_entry.get("provenance") or {})
+            trace_id = str(getattr(turn_context, "trace_id", "") or "")
+            if trace_id:
+                provenance["trace_id"] = trace_id
             memory = self.bot.normalize_memory_entry(
                 {
                     "summary": memory_entry.get("summary", ""),
                     "category": memory_entry.get("category"),
                     "mood": memory_entry.get("mood"),
+                    "provenance": provenance or None,
                     "created_at": today_stamp,
                     "updated_at": today_stamp,
                 },
@@ -274,6 +237,8 @@ Rules:
             if normalized in normalized_existing:
                 normalized_existing[normalized]["updated_at"] = today_stamp
                 normalized_existing[normalized]["category"] = memory["category"]
+                if memory.get("provenance") is not None:
+                    normalized_existing[normalized]["provenance"] = memory["provenance"]
                 if memory.get("mood"):
                     normalized_existing[normalized]["mood"] = memory["mood"]
                 rescored = self.score_memory_entry(normalized_existing[normalized])
@@ -292,6 +257,7 @@ Rules:
         )
 
         self.bot.save_memory_catalog(existing)
+        self._set_validated_memory_fact_refs(turn_context, extracted_memories)
 
     # ------------------------------------------------------------------ #
     # Stage: Scoring  (delegates to MemoryScorer)                         #

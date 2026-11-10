@@ -8,6 +8,7 @@ from dadbot_system.state import InMemoryStateStore
 from dadbot_system.worker import DadBotTaskProcessor
 
 pytestmark = pytest.mark.integration
+_TENANT_ID = "t1_aaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 
 class FakeBroker:
@@ -26,7 +27,7 @@ class FakeBroker:
 
 class FakeBot:
     def __init__(self, model_name="fake-model"):
-        self.config = type("Config", (), {"tenant_id": "default"})()
+        self.config = type("Config", (), {"tenant_id": _TENANT_ID})()
         self.MODEL_NAME = model_name
         self.ACTIVE_MODEL = model_name
         self.async_calls = 0
@@ -215,19 +216,20 @@ def test_orchestrator_tracks_task_status_response_and_events():
         planner_debug_factory=planner_debug_factory,
     )
 
-    request = ChatRequest(session_id="session-1", user_input="hello there")
+    request = ChatRequest(session_id="session-1", tenant_id=_TENANT_ID, user_input="hello there")
     task = orchestrator.submit_chat(request)
 
     assert broker.enqueued[0].task_id == task.task_id
     assert task.execution_graph is not None
     assert task.execution_graph.edges == [("api", "queue"), ("queue", "worker"), ("worker", "state")]
-    assert orchestrator.task_status(task.task_id)["status"] == "queued"
+    assert orchestrator.task_status(task.task_id, tenant_id=_TENANT_ID)["status"] == "queued"
 
     broker.results.append(
         WorkerResult(
             task_id=task.task_id,
             session_id=request.session_id,
             request_id=request.request_id,
+            tenant_id=_TENANT_ID,
             status="completed",
             session_state={
                 "history": [{"role": "system", "content": "Dad system prompt"}],
@@ -243,15 +245,16 @@ def test_orchestrator_tracks_task_status_response_and_events():
             response=ChatResponse(
                 session_id=request.session_id,
                 request_id=request.request_id,
+                tenant_id=_TENANT_ID,
                 reply="Love you, buddy.",
                 active_model="llama3.2",
             ),
         )
     )
 
-    response = orchestrator.response_for_task(task.task_id)
-    task_status = orchestrator.task_status(task.task_id)
-    events = orchestrator.session_events(request.session_id)
+    response = orchestrator.response_for_task(task.task_id, tenant_id=_TENANT_ID)
+    task_status = orchestrator.task_status(task.task_id, tenant_id=_TENANT_ID)
+    events = orchestrator.session_events(request.session_id, tenant_id=_TENANT_ID)
 
     assert response["reply"] == "Love you, buddy."
     assert task_status["status"] == "completed"
@@ -320,10 +323,11 @@ def test_worker_processor_retries_and_returns_response_with_fake_bot():
     config = ServiceConfig()
     config.security.auth_required = False
     processor = DadBotTaskProcessor(config, bot_factory=lambda model_name, tenant_id: fake_bot)
-    request = ChatRequest(session_id="session-2", user_input="hello there")
+    request = ChatRequest(session_id="session-2", tenant_id=_TENANT_ID, user_input="hello there")
     task = WorkerTask(
         session_id=request.session_id,
         request=request,
+        tenant_id=_TENANT_ID,
         session_state={"history": [{"role": "system", "content": "Dad system prompt"}]},
     )
 
@@ -337,15 +341,58 @@ def test_worker_processor_retries_and_returns_response_with_fake_bot():
     assert fake_bot.loaded_snapshot["history"][0]["role"] == "system"
 
 
+def test_worker_result_persists_bounded_tool_action_audit():
+    fake_bot = FakeBot()
+    config = ServiceConfig()
+    config.security.auth_required = False
+    processor = DadBotTaskProcessor(config, bot_factory=lambda model_name, tenant_id: fake_bot)
+    request = ChatRequest(session_id="session-actions", tenant_id=_TENANT_ID, user_input="hello there")
+    task = WorkerTask(
+        session_id=request.session_id,
+        request=request,
+        tenant_id=_TENANT_ID,
+    )
+
+    async def execute_turn_with_action_audit(request, *, state=None, chunk_callback=None):
+        fake_bot._last_tool_action_audit = [
+            {
+                "event_id": "event-1",
+                "event_checksum": "checksum-1",
+                "tool_name": "set_reminder",
+                "status": "succeeded",
+                "authorization_decision": "verified",
+                "authority_mode": "delegated_task",
+            }
+        ]
+        return TurnResponse(reply=f"Dad heard: {request.input.text}", should_end=False)
+
+    fake_bot.execute_turn = execute_turn_with_action_audit
+
+    result = processor.process(task)
+
+    assert result.status == "completed"
+    assert result.session_state["last_tool_actions"] == [
+        {
+            "event_id": "event-1",
+            "event_checksum": "checksum-1",
+            "tool_name": "set_reminder",
+            "status": "succeeded",
+            "authorization_decision": "verified",
+            "authority_mode": "delegated_task",
+        }
+    ]
+
+
 def test_worker_does_not_restore_stale_session_memory_store():
     fake_bot = FakeBot()
     config = ServiceConfig()
     config.security.auth_required = False
     processor = DadBotTaskProcessor(config, bot_factory=lambda model_name, tenant_id: fake_bot)
-    request = ChatRequest(session_id="session-memory", user_input="continue after restart")
+    request = ChatRequest(session_id="session-memory", tenant_id=_TENANT_ID, user_input="continue after restart")
     task = WorkerTask(
         session_id=request.session_id,
         request=request,
+        tenant_id=_TENANT_ID,
         session_state={
             "history": [{"role": "system", "content": "Dad system prompt"}],
             "memory_store": {"reminders": [{"id": "stale", "title": "stale session copy"}]},
@@ -361,7 +408,7 @@ def test_worker_does_not_restore_stale_session_memory_store():
 def test_worker_processor_requires_execute_turn_entrypoint():
     class LegacySyncBot:
         def __init__(self):
-            self.config = type("Config", (), {"tenant_id": "default"})()
+            self.config = type("Config", (), {"tenant_id": _TENANT_ID})()
             self.MODEL_NAME = "legacy-sync"
             self.ACTIVE_MODEL = "legacy-sync"
 
@@ -375,8 +422,8 @@ def test_worker_processor_requires_execute_turn_entrypoint():
     config = ServiceConfig()
     config.security.auth_required = False
     processor = DadBotTaskProcessor(config, bot_factory=lambda model_name, tenant_id: legacy_bot)
-    request = ChatRequest(session_id="legacy-session", user_input="hello there")
-    task = WorkerTask(session_id=request.session_id, request=request)
+    request = ChatRequest(session_id="legacy-session", tenant_id=_TENANT_ID, user_input="hello there")
+    task = WorkerTask(session_id=request.session_id, request=request, tenant_id=_TENANT_ID)
 
     result = processor.process(task)
 

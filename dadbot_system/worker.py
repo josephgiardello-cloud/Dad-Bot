@@ -5,6 +5,7 @@ import inspect
 import logging
 import multiprocessing as mp
 import queue
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -30,6 +31,34 @@ from .state import StateStore
 logger = logging.getLogger(__name__)
 
 AUTHORITY_UNAVAILABLE = "Delegated execution authority is unavailable; authenticated execution denied"
+WORKER_AUTHORITY_STARTING = 0
+WORKER_AUTHORITY_AVAILABLE = 1
+WORKER_AUTHORITY_QUARANTINED = 2
+WORKER_AUTHORITY_UNAVAILABLE = 3
+AUTHORITY_UNAVAILABLE_AFTER_FAILURES = 3
+AUTHORITY_RETRY_INITIAL_SECONDS = 0.1
+AUTHORITY_RETRY_MAX_SECONDS = 1.6
+
+
+@dataclass(slots=True)
+class _AuthorityPollState:
+    consecutive_failures: int = 0
+
+    @property
+    def status(self) -> int:
+        if self.consecutive_failures == 0:
+            return WORKER_AUTHORITY_AVAILABLE
+        if self.consecutive_failures >= AUTHORITY_UNAVAILABLE_AFTER_FAILURES:
+            return WORKER_AUTHORITY_UNAVAILABLE
+        return WORKER_AUTHORITY_QUARANTINED
+
+    def record(self, available: bool) -> float:
+        if available:
+            self.consecutive_failures = 0
+            return 0.0
+        self.consecutive_failures += 1
+        exponent = min(self.consecutive_failures - 1, 30)
+        return min(AUTHORITY_RETRY_INITIAL_SECONDS * (2**exponent), AUTHORITY_RETRY_MAX_SECONDS)
 
 
 def _coerce_turn_result(response_obj: object) -> tuple[str, bool]:
@@ -105,10 +134,55 @@ class DadBotTaskProcessor:
         self._bot_factory = bot_factory
         self._bots: dict[tuple[str, str, str], object] = {}
         self._runtime_state_store: StateStore | None = None
+        self._session_revocation_cursor: int | None = None
+        self._session_revocation_lock = threading.Lock()
+        self._session_revocation_unavailable = False
         self._circuit = CircuitBreaker(
             config.workers.circuit_breaker_failures,
             config.workers.circuit_breaker_reset_seconds,
         )
+
+    def poll_session_revocations(self) -> bool:
+        if not self.config.security.auth_required:
+            return True
+        if not self.config.security.authority_sqlite_path:
+            self._bots.clear()
+            if not self._session_revocation_unavailable:
+                logger.warning("Worker cache invalidation authority path is not configured")
+            self._session_revocation_unavailable = True
+            return False
+        from .delegation import AuthorityUnavailableError, SQLiteDelegationStore
+
+        try:
+            store = SQLiteDelegationStore(
+                self.config.security.authority_sqlite_path,
+                self.config.security.token_secret,
+                issuer=self.config.security.token_issuer,
+            )
+            with self._session_revocation_lock:
+                if self._session_revocation_cursor is None:
+                    self._session_revocation_cursor = store.session_revocation_cursor()
+                else:
+                    revocations = store.session_revocations_after(self._session_revocation_cursor)
+                    for revision, tenant_id, session_id in revocations:
+                        self._evict_session_bots(tenant_id, session_id)
+                        self._session_revocation_cursor = revision
+        except (AuthorityUnavailableError, ValueError) as exc:
+            self._bots.clear()
+            if not self._session_revocation_unavailable:
+                logger.warning("Worker cache invalidation authority unavailable: %s", exc)
+            self._session_revocation_unavailable = True
+            return False
+        else:
+            if self._session_revocation_unavailable:
+                logger.info("Worker cache invalidation authority recovered")
+            self._session_revocation_unavailable = False
+            return True
+
+    def _evict_session_bots(self, tenant_id: str, session_id: str) -> None:
+        for key in tuple(self._bots):
+            if key[0] == tenant_id and key[1] == session_id:
+                del self._bots[key]
 
     def _get_bot(self, session_id: str, requested_model: str, *, tenant_id: str = DEFAULT_TENANT_ID):
         model_name = requested_model or self.config.default_model
@@ -225,6 +299,16 @@ class DadBotTaskProcessor:
         from .delegation import AuthorityUnavailableError, SQLiteDelegationStore, _execution_authority
         from .security import AuthorizationError
 
+        if not self.poll_session_revocations():
+            return WorkerResult(
+                task_id=task.task_id,
+                session_id=task.session_id,
+                request_id=task.request.request_id,
+                tenant_id=task.tenant_id,
+                status="failed",
+                error=AUTHORITY_UNAVAILABLE,
+                retryable=True,
+            )
         store = None
         if self.config.security.auth_required:
             if self.config.security.authority_sqlite_path:
@@ -235,10 +319,27 @@ class DadBotTaskProcessor:
                         issuer=self.config.security.token_issuer,
                     )
                     store.verify(task.delegation, task, operation="execute")
-                except (AuthorizationError, AuthorityUnavailableError, ValueError) as exc:
+                except AuthorityUnavailableError as exc:
+                    logger.warning(
+                        "Task %s could not verify delegation while authority is unavailable: %s",
+                        task.task_id,
+                        exc,
+                    )
+                    return WorkerResult(
+                        task_id=task.task_id,
+                        session_id=task.session_id,
+                        request_id=task.request.request_id,
+                        tenant_id=task.tenant_id,
+                        status="failed",
+                        error=AUTHORITY_UNAVAILABLE,
+                        retryable=True,
+                    )
+                except (AuthorizationError, ValueError) as exc:
+                    self._evict_session_bots(task.tenant_id, task.session_id)
                     logger.warning("Task %s failed delegation verification: %s", task.task_id, exc)
                     store = None
             if store is None:
+                self._evict_session_bots(task.tenant_id, task.session_id)
                 logger.error("%s (task_id=%s)", AUTHORITY_UNAVAILABLE, task.task_id)
                 return WorkerResult(
                     task_id=task.task_id,
@@ -324,6 +425,7 @@ class DadBotTaskProcessor:
                         session_snapshot.pop("memory_store", None)
                         bot.load_session_state_snapshot(session_snapshot)
 
+                    bot._last_tool_action_audit = []
                     reply, should_end = asyncio.run(
                         asyncio.wait_for(
                             self._execute_request_async(bot, task.request),
@@ -341,19 +443,26 @@ class DadBotTaskProcessor:
                         active_model=str(getattr(bot, "ACTIVE_MODEL", "") or ""),
                         status="completed",
                     )
+                    session_state = bot.snapshot_session_state()
+                    action_audit = getattr(bot, "_last_tool_action_audit", [])
+                    if isinstance(action_audit, list):
+                        session_state["last_tool_actions"] = [
+                            dict(action) for action in action_audit[-50:] if isinstance(action, dict)
+                        ]
                     result = WorkerResult(
                         task_id=task.task_id,
                         session_id=task.session_id,
                         request_id=task.request.request_id,
                         status="completed",
                         tenant_id=task.tenant_id,
-                        session_state=bot.snapshot_session_state(),
+                        session_state=session_state,
                         response=response,
                     )
                     if store is not None:
                         result.authority_proof = store.sign_result(task, result)
                     return result
                 except (AuthorizationError, AuthorityUnavailableError) as exc:
+                    self._evict_session_bots(task.tenant_id, task.session_id)
                     logger.warning("Task %s lost execution authority: %s", task.task_id, exc)
                     return WorkerResult(
                         task_id=task.task_id,
@@ -362,6 +471,7 @@ class DadBotTaskProcessor:
                         tenant_id=task.tenant_id,
                         status="failed",
                         error=AUTHORITY_UNAVAILABLE,
+                        retryable=isinstance(exc, AuthorityUnavailableError),
                     )
                 except TimeoutError:
                     last_error = f"Worker timed out after {policy.timeout_seconds:.1f}s"
@@ -378,12 +488,17 @@ class DadBotTaskProcessor:
         return finish_failure(last_error)
 
 
-def worker_process_main(
+def worker_process_main(  # noqa: PLR0913
     config_payload: dict,
     request_queue,
     result_queue,
     event_queue=None,
     telemetry_initializer: Callable[[TelemetrySettings], Any] | None = None,
+    stop_event=None,
+    authority_status=None,
+    worker_index: int = 0,
+    *,
+    bot_factory: Callable[..., Any] | None = None,
 ):
     config = ServiceConfig.from_dict(config_payload)
     configure_logging(config.telemetry)
@@ -391,7 +506,7 @@ def worker_process_main(
         configure_tracing(config.telemetry)
     else:
         telemetry_initializer(config.telemetry)
-    processor = DadBotTaskProcessor(config)
+    processor = DadBotTaskProcessor(config, bot_factory=bot_factory)
     worker_name = mp.current_process().name
 
     if event_queue is not None:
@@ -405,11 +520,48 @@ def worker_process_main(
         )
 
     try:
+        poll_state = _AuthorityPollState()
+        pending_task = None
         while True:
-            task = request_queue.get()
+            if stop_event is not None and stop_event.is_set():
+                break
+            if config.security.auth_required:
+                authority_available = processor.poll_session_revocations()
+                retry_delay = poll_state.record(authority_available)
+                if authority_status is not None:
+                    authority_status[worker_index] = poll_state.status
+                if not authority_available:
+                    if stop_event is not None:
+                        stop_event.wait(retry_delay)
+                    else:
+                        time.sleep(retry_delay)
+                    continue
+                if pending_task is None:
+                    try:
+                        task = request_queue.get(timeout=0.1)
+                    except queue.Empty:
+                        continue
+                else:
+                    task = pending_task
+            else:
+                try:
+                    task = request_queue.get(timeout=0.1 if stop_event is not None else None)
+                except queue.Empty:
+                    continue
             if task is None:
                 break
             result = processor.process(task)
+            if config.security.auth_required and result.retryable:
+                pending_task = task
+                retry_delay = poll_state.record(False)
+                if authority_status is not None:
+                    authority_status[worker_index] = poll_state.status
+                if stop_event is not None:
+                    stop_event.wait(retry_delay)
+                else:
+                    time.sleep(retry_delay)
+                continue
+            pending_task = None
             result_queue.put(result)
     finally:
         if config.telemetry.otel_enabled:
@@ -440,12 +592,18 @@ class WorkerProcessManager:
         self.event_queue = event_queue
         self._telemetry_initializer = telemetry_initializer
         self._processes: list[mp.Process] = []
+        self._stop_event = None
+        self._authority_status = None
 
     def start(self) -> None:
         if self._processes:
             return
         context = mp.get_context("spawn")
-        for index in range(max(1, self.config.workers.worker_count)):
+        worker_count = max(1, self.config.workers.worker_count)
+        self._stop_event = context.Event()
+        if self.config.security.auth_required:
+            self._authority_status = context.Array("b", worker_count, lock=True)
+        for index in range(worker_count):
             process = context.Process(
                 target=worker_process_main,
                 args=(
@@ -454,6 +612,9 @@ class WorkerProcessManager:
                     self.broker.result_queue,
                     self.event_queue,
                     self._telemetry_initializer,
+                    self._stop_event,
+                    self._authority_status,
+                    index,
                 ),
                 name=f"dadbot-worker-{index + 1}",
             )
@@ -461,12 +622,42 @@ class WorkerProcessManager:
             self._processes.append(process)
 
     def shutdown(self) -> None:
-        for _ in self._processes:
-            self.broker.request_queue.put(None)
+        if self._stop_event is not None:
+            self._stop_event.set()
+        if not self.config.security.auth_required:
+            for _ in self._processes:
+                self.broker.request_queue.put(None)
         for process in self._processes:
             process.join(timeout=5)
         self._processes.clear()
+        self._stop_event = None
+        self._authority_status = None
 
     @property
     def worker_count(self) -> int:
         return len(self._processes)
+
+    @property
+    def is_ready(self) -> bool:
+        return self.readiness_status == "available"
+
+    @property
+    def readiness_status(self) -> str:
+        expected = max(1, self.config.workers.worker_count)
+        processes_ready = len(self._processes) == expected and all(
+            process.is_alive() and process.exitcode is None for process in self._processes
+        )
+        if not processes_ready:
+            return "unavailable"
+        if self.config.security.auth_required:
+            if self._authority_status is None:
+                return "starting"
+            statuses = [int(self._authority_status[index]) for index in range(expected)]
+            if any(status == WORKER_AUTHORITY_UNAVAILABLE for status in statuses):
+                return "unavailable"
+            if any(status == WORKER_AUTHORITY_QUARANTINED for status in statuses):
+                return "quarantined"
+            if all(status == WORKER_AUTHORITY_AVAILABLE for status in statuses):
+                return "available"
+            return "starting"
+        return "available"

@@ -17,9 +17,16 @@ from .tenant_identity import require_tenant_id
 
 if TYPE_CHECKING:
     from .contracts import WorkerTask
+    from .security import ServicePrincipal
 
 _execution_authority: ContextVar[tuple[SQLiteDelegationStore, WorkerTask] | None] = ContextVar(
     "delegated_execution_authority", default=None
+)
+_runtime_authority: ContextVar[tuple[SQLiteDelegationStore, ServicePrincipal, str] | None] = ContextVar(
+    "authenticated_runtime_authority", default=None
+)
+_live_effect_authority_required: ContextVar[bool] = ContextVar(
+    "live_effect_authority_required", default=False
 )
 _mutation_fence: ContextVar[tuple[str, str] | None] = ContextVar("tenant_mutation_fence", default=None)
 
@@ -29,28 +36,130 @@ def verify_live_authority() -> None:
     if authority is not None:
         store, task = authority
         store.verify(task.delegation, task, operation="execute")
+        return
+    runtime_authority = _runtime_authority.get()
+    if runtime_authority is not None:
+        store, principal, scope = runtime_authority
+        if principal.expires_at <= time.time():
+            raise AuthorizationError("Runtime authority principal has expired")
+        principal.require_scope(scope)
+        store.require_membership(
+            issuer=principal.issuer,
+            subject=principal.subject,
+            tenant_id=principal.tenant_id,
+            scope=scope,
+        )
+        return
+    if _live_effect_authority_required.get():
+        raise AuthorizationError("Verified live execution authority is required")
+
+
+def live_authority_audit_context() -> dict[str, str]:
+    """Return a privacy-preserving identity for an already-verified execution."""
+    authority = _execution_authority.get()
+    if authority is not None:
+        _store, task = authority
+        return {
+            "authority_mode": "delegated",
+            "tenant_id": str(task.tenant_id or ""),
+            "session_id": str(task.session_id or ""),
+            "task_id": str(task.task_id or ""),
+        }
+
+    runtime_authority = _runtime_authority.get()
+    if runtime_authority is not None:
+        _store, principal, scope = runtime_authority
+        principal_ref = hashlib.sha256(
+            f"{principal.issuer}:{principal.subject}".encode("utf-8"),
+        ).hexdigest()[:20]
+        return {
+            "authority_mode": "authenticated",
+            "tenant_id": str(principal.tenant_id or ""),
+            "principal_ref": principal_ref,
+            "scope": str(scope or ""),
+        }
+
+    if _live_effect_authority_required.get():
+        return {"authority_mode": "required_missing"}
+    return {"authority_mode": "trusted_local"}
+
+
+@contextmanager
+def require_live_effect_authority(*, required: bool = True):
+    token = _live_effect_authority_required.set(bool(required))
+    try:
+        yield
+    finally:
+        _live_effect_authority_required.reset(token)
+
+
+@contextmanager
+def runtime_authority_scope(
+    store: SQLiteDelegationStore,
+    principal: ServicePrincipal,
+    *,
+    scope: str,
+    tenant_id: str,
+):
+    tenant = require_tenant_id(tenant_id)
+    if principal.tenant_id != tenant:
+        raise AuthorizationError("Runtime authority tenant mismatch")
+    if principal.expires_at <= time.time():
+        raise AuthorizationError("Runtime authority principal has expired")
+    principal.require_scope(scope)
+    with store.publication_fence():
+        store.require_membership(
+            issuer=principal.issuer,
+            subject=principal.subject,
+            tenant_id=tenant,
+            scope=scope,
+        )
+        authority_token = _runtime_authority.set((store, principal, scope))
+        required_token = _live_effect_authority_required.set(True)
+        try:
+            yield
+        finally:
+            _live_effect_authority_required.reset(required_token)
+            _runtime_authority.reset(authority_token)
 
 
 def require_live_authority() -> None:
-    if _execution_authority.get() is None:
+    if _execution_authority.get() is None and _runtime_authority.get() is None:
         raise AuthorizationError("Delegated execution authority is missing")
     verify_live_authority()
 
 
 def require_tenant_authority(tenant_id: str) -> None:
     authority = _execution_authority.get()
-    if authority is None:
+    tenant = require_tenant_id(tenant_id)
+    if authority is not None:
+        store, task = authority
+        store.verify(task.delegation, task, operation="execute")
+        if task.tenant_id != tenant:
+            raise AuthorizationError("Delegated execution tenant mismatch")
+        return
+    runtime_authority = _runtime_authority.get()
+    if runtime_authority is None:
         raise AuthorizationError("Delegated execution authority is missing")
-    store, task = authority
-    store.verify(task.delegation, task, operation="execute")
-    if task.tenant_id != require_tenant_id(tenant_id):
-        raise AuthorizationError("Delegated execution tenant mismatch")
+    store, principal, scope = runtime_authority
+    if principal.tenant_id != tenant:
+        raise AuthorizationError("Runtime authority tenant mismatch")
+    verify_live_authority()
+
+
+def require_tenant_authority_if_active(tenant_id: str, *, required: bool = False) -> None:
+    if required or _execution_authority.get() is not None or _runtime_authority.get() is not None:
+        require_tenant_authority(tenant_id)
 
 
 @contextmanager
 def tenant_mutation_fence(tenant_id: str, *, required: bool):
     authority = _execution_authority.get()
     if authority is None:
+        if _runtime_authority.get() is not None:
+            require_tenant_authority(tenant_id)
+            yield
+            return
         if required:
             raise AuthorizationError("Delegated execution authority is missing")
         yield
@@ -98,6 +207,22 @@ class SQLiteDelegationStore:
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS delegations (id TEXT PRIMARY KEY, payload TEXT NOT NULL, "
                 "signature TEXT NOT NULL, revoked INTEGER NOT NULL DEFAULT 0)"
+            )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS session_revocation_clock "
+                "(singleton INTEGER PRIMARY KEY CHECK (singleton = 1), revision INTEGER NOT NULL)"
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO session_revocation_clock VALUES (1, 0)"
+            )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS session_revocations "
+                "(tenant_id TEXT NOT NULL, session_id TEXT NOT NULL, revision INTEGER NOT NULL, "
+                "PRIMARY KEY (tenant_id, session_id))"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS session_revocations_revision_idx "
+                "ON session_revocations (revision)"
             )
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS authority_identity "
@@ -150,8 +275,54 @@ class SQLiteDelegationStore:
             with closing(self._connect()) as connection:
                 connection.execute("SELECT id, payload, signature, revoked FROM delegations LIMIT 0")
                 connection.execute("SELECT issuer, subject, tenant, scopes, version, active FROM memberships LIMIT 0")
+                revision = connection.execute(
+                    "SELECT revision FROM session_revocation_clock WHERE singleton = 1"
+                ).fetchone()
+                connection.execute("SELECT tenant_id, session_id, revision FROM session_revocations LIMIT 0")
         except sqlite3.Error as exc:
             raise AuthorityUnavailableError("Delegation authority store unavailable or uninitialized") from exc
+        if revision is None or not isinstance(revision[0], int) or revision[0] < 0:
+            raise AuthorityUnavailableError("Delegation authority revocation schema is invalid")
+
+    def session_revocation_cursor(self) -> int:
+        try:
+            with closing(self._connect()) as connection:
+                row = connection.execute(
+                    "SELECT revision FROM session_revocation_clock WHERE singleton = 1"
+                ).fetchone()
+        except sqlite3.Error as exc:
+            raise AuthorityUnavailableError("Session revocation cursor is unavailable") from exc
+        if row is None or not isinstance(row[0], int) or row[0] < 0:
+            raise AuthorityUnavailableError("Session revocation cursor is invalid")
+        return row[0]
+
+    def session_revocations_after(self, revision: int, *, limit: int = 256) -> list[tuple[int, str, str]]:
+        if not isinstance(revision, int) or revision < 0 or not isinstance(limit, int) or limit < 1:
+            raise ValueError("A nonnegative revocation cursor and positive limit are required")
+        try:
+            with closing(self._connect()) as connection:
+                rows = connection.execute(
+                    "SELECT revision, tenant_id, session_id FROM session_revocations "
+                    "WHERE revision>? ORDER BY revision LIMIT ?",
+                    (revision, limit),
+                ).fetchall()
+        except sqlite3.Error as exc:
+            raise AuthorityUnavailableError("Session revocations are unavailable") from exc
+        result = []
+        try:
+            for row_revision, tenant_id, session_id in rows:
+                if not isinstance(row_revision, int) or row_revision <= revision:
+                    raise ValueError("Invalid session revocation revision")
+                result.append(
+                    (
+                        row_revision,
+                        require_tenant_id(tenant_id),
+                        require_identifier(session_id, "session"),
+                    )
+                )
+        except (TypeError, ValueError) as exc:
+            raise AuthorityUnavailableError("Session revocation record is invalid") from exc
+        return result
 
     @contextmanager
     def publication_fence(self):
@@ -168,8 +339,13 @@ class SQLiteDelegationStore:
 
     @staticmethod
     def _task_digest(task) -> str:
+        from .contracts import ChatRequest
+
         encoded = json.dumps(
-            {"request": task.request.to_dict(), "session_state": task.session_state},
+            {
+                "request": ChatRequest.from_dict(task.request.to_dict()).to_dict(),
+                "session_state": task.session_state,
+            },
             sort_keys=True, separators=(",", ":"), ensure_ascii=True,
         ).encode()
         return hashlib.sha256(encoded).hexdigest()
@@ -304,8 +480,35 @@ class SQLiteDelegationStore:
         except sqlite3.Error as exc:
             raise AuthorityUnavailableError("Delegation authority store unavailable") from exc
 
+    def require_membership(self, *, issuer: str, subject: str, tenant_id: str, scope: str) -> None:
+        issuer = require_identifier(issuer, "issuer")
+        subject = require_identifier(subject, "principal")
+        tenant_id = require_tenant_id(
+            tenant_id,
+            issuer=issuer,
+            subject=subject,
+            acceptance_path="SQLiteDelegationStore.require_membership",
+        )
+        normalized_scope = str(scope or "").strip().lower()
+        if not normalized_scope:
+            raise ValueError("A required membership scope is required")
+        try:
+            with closing(self._connect()) as connection:
+                membership = connection.execute(
+                    "SELECT scopes, active FROM memberships WHERE issuer=? AND subject=? AND tenant=?",
+                    (issuer, subject, tenant_id),
+                ).fetchone()
+                scopes = set(json.loads(membership[0])) if membership else set()
+        except (sqlite3.Error, json.JSONDecodeError) as exc:
+            raise AuthorityUnavailableError("Delegation authority store unavailable") from exc
+        if not membership or not membership[1] or not ({"admin", normalized_scope} & scopes):
+            raise AuthorizationError(f"Principal has no active tenant membership for {normalized_scope}")
+
     def issue(self, token: str, task) -> str:
         principal = self._tokens.verify(token)
+        return self.issue_for_principal(principal, task)
+
+    def issue_for_principal(self, principal, task) -> str:
         principal.require_scope("write")
         task_tenant_id = require_tenant_id(
             task.tenant_id,
@@ -407,5 +610,35 @@ class SQLiteDelegationStore:
                 )
                 if cursor.rowcount != 1:
                     raise AuthorizationError("Delegation not found")
+        except sqlite3.Error as exc:
+            raise AuthorityUnavailableError("Delegation authority store unavailable") from exc
+
+    def revoke_session(self, *, tenant_id: str, session_id: str) -> int:
+        tenant = require_tenant_id(tenant_id)
+        session = require_identifier(session_id, "session")
+        try:
+            with closing(self._connect()) as connection, connection:
+                connection.execute("BEGIN IMMEDIATE")
+                cursor = connection.execute(
+                    "UPDATE delegations SET revoked=1 WHERE revoked=0 "
+                    "AND json_extract(payload, '$.tenant_id')=? "
+                    "AND json_extract(payload, '$.session_id')=?",
+                    (tenant, session),
+                )
+                connection.execute(
+                    "UPDATE session_revocation_clock SET revision=revision+1 WHERE singleton=1"
+                )
+                revision_row = connection.execute(
+                    "SELECT revision FROM session_revocation_clock WHERE singleton=1"
+                ).fetchone()
+                if revision_row is None or not isinstance(revision_row[0], int):
+                    raise AuthorityUnavailableError("Session revocation clock is unavailable")
+                connection.execute(
+                    "INSERT INTO session_revocations (tenant_id, session_id, revision) VALUES (?, ?, ?) "
+                    "ON CONFLICT (tenant_id, session_id) DO UPDATE SET revision=excluded.revision",
+                    (tenant, session, revision_row[0]),
+                )
+                connection.commit()
+                return cursor.rowcount
         except sqlite3.Error as exc:
             raise AuthorityUnavailableError("Delegation authority store unavailable") from exc

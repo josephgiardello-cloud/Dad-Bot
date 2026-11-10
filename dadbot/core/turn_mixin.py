@@ -139,11 +139,13 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
     @staticmethod
     def _derive_confluence_key(
         *,
+        tenant_id: str = "",
         session_id: str,
         user_input: str,
         attachments: AttachmentList | None,
     ) -> str:
         payload = {
+            "tenant_id": str(tenant_id or ""),
             "session_id": str(session_id or "default"),
             "user_input": str(user_input or ""),
             "attachments": list(attachments or []),
@@ -165,6 +167,7 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
             getattr(self, "active_thread_id", "") or "default",
         )
         confluence_key = self._derive_confluence_key(
+            tenant_id=str(request_metadata.get("tenant_id") or ""),
             session_id=session_id,
             user_input=str(user_input or ""),
             attachments=attachments,
@@ -432,6 +435,13 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
             getattr(self, "active_thread_id", "") or "default",
         )
         request_metadata = dict(getattr(request, "metadata", {}) or {})
+        request_context = request.context or self._build_sovereign_context(mode=request.mode)
+        context_tenant_id = str(request_context.tenant_id or "").strip()
+        metadata_tenant_id = str(request_metadata.get("tenant_id") or "").strip()
+        if metadata_tenant_id and context_tenant_id and metadata_tenant_id != context_tenant_id:
+            raise ValueError("turn metadata tenant identity does not match its trusted context")
+        if context_tenant_id:
+            request_metadata["tenant_id"] = context_tenant_id
         event_mode = self._delivery_event_mode(request.delivery)
         previous_session_id = str(getattr(self, "_execute_turn_session_id", "") or "")
         previous_request_metadata = dict(getattr(self, "_execute_turn_request_metadata", {}) or {})

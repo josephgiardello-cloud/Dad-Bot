@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import os
 import threading
 import time
-import os
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
@@ -43,7 +43,7 @@ class SharedRedis:
         pass
 
 
-def headers(*, tenant="family-a", scopes=("read", "write"), ttl=3600):
+def headers(*, tenant="t1_aaaaaaaaaaaaaaaaaaaaaaaaaa", scopes=("read", "write"), ttl=3600):
     token = ServiceTokenManager(SECRET).issue(subject="browser", tenant_id=tenant, scopes=set(scopes), ttl_seconds=ttl)
     return {"Authorization": f"Bearer {token}"}
 
@@ -68,6 +68,12 @@ def make_app(*, redis_url="redis://ticket-test.invalid/0", secret=SECRET, auth_r
 def configured_authority(tmp_path, monkeypatch):
     path = str(tmp_path / "authority.sqlite")
     SQLiteDelegationStore.initialize(path)
+    SQLiteDelegationStore(path, SECRET).grant_membership(
+        issuer="dadbot",
+        subject="browser",
+        tenant_id="t1_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+        scopes={"read", "write"},
+    )
     monkeypatch.setattr(make_app, "authority_path", path, raising=False)
 
 
@@ -79,7 +85,7 @@ def shared_redis(monkeypatch):
     return backend
 
 
-def issue(client, *, channel="pulse", session="first", tenant="family-a", credentials=None):
+def issue(client, *, channel="pulse", session="first", tenant="t1_aaaaaaaaaaaaaaaaaaaaaaaaaa", credentials=None):
     return client.post(
         "/v1/websocket/ticket",
         headers=credentials if credentials is not None else headers(),
@@ -87,7 +93,7 @@ def issue(client, *, channel="pulse", session="first", tenant="family-a", creden
     )
 
 
-def pulse_path(ticket, session="first", tenant="family-a"):
+def pulse_path(ticket, session="first", tenant="t1_aaaaaaaaaaaaaaaaaaaaaaaaaa"):
     return f"/v1/sessions/{session}/pulse/stream?ticket={ticket}&tenant_id={tenant}"
 
 
@@ -101,7 +107,7 @@ def test_ticket_is_consumed_once_across_api_workers(shared_redis):
         token = payload["ticket"]
         assert all(token not in key for key in shared_redis.values)
         with second.websocket_connect(pulse_path(token)) as websocket:
-            assert websocket.receive_json()["tenant_id"] == "family-a"
+            assert websocket.receive_json()["tenant_id"] == "t1_aaaaaaaaaaaaaaaaaaaaaaaaaa"
         with pytest.raises(WebSocketDisconnect) as error:
             with first.websocket_connect(pulse_path(token)):
                 pass
@@ -130,6 +136,7 @@ def test_other_websocket_channels_accept_their_own_tickets(shared_redis, channel
 )
 def test_no_auth_development_mode_cannot_bypass_server_authentication(monkeypatch, auth_required, secret_key, allowed):
     monkeypatch.setenv("DADBOT_SECRET_KEY", secret_key)
+    monkeypatch.setenv("DADBOT_ALLOW_LEGACY_DEFAULT_TENANT", "true")
     with TestClient(make_app(redis_url="", auth_required=auth_required)) as client:
         path = "/v1/sessions/first/pulse/stream"
         if allowed:
@@ -147,7 +154,7 @@ def test_no_auth_development_mode_cannot_bypass_server_authentication(monkeypatc
     [
         ({"channel": "pulse", "session_id": "first"}, {}, 401),
         ({"channel": "spatial"}, headers(scopes=("read",)), 403),
-        ({"channel": "pulse", "session_id": "first", "tenant_id": "family-b"}, headers(), 403),
+        ({"channel": "pulse", "session_id": "first", "tenant_id": "t1_bbbbbbbbbbbbbbbbbbbbbbbbbb"}, headers(), 403),
         ({"channel": "invalid"}, headers(), 422),
         ({"channel": "pulse"}, headers(), 422),
         ({"channel": "pulse", "session_id": "a/b"}, headers(), 422),
@@ -188,7 +195,7 @@ def test_ticket_cannot_cross_service_secret_boundaries(shared_redis):
             with second.websocket_connect(pulse_path(token)):
                 pass
         with first.websocket_connect(pulse_path(token)) as websocket:
-            assert websocket.receive_json()["tenant_id"] == "family-a"
+            assert websocket.receive_json()["tenant_id"] == "t1_aaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 
 def test_ticket_expires_no_later_than_the_original_principal(shared_redis, monkeypatch):
@@ -234,7 +241,7 @@ def test_ticket_exchange_checks_secret_key_without_putting_it_in_websocket_url(s
         response = issue(client, credentials=credentials)
         assert response.status_code == 200
         with client.websocket_connect(pulse_path(response.json()["ticket"])) as websocket:
-            assert websocket.receive_json()["tenant_id"] == "family-a"
+            assert websocket.receive_json()["tenant_id"] == "t1_aaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 
 def test_secret_protected_ticket_exchange_allows_only_configured_cors_preflights(shared_redis, monkeypatch):
@@ -263,7 +270,7 @@ def test_real_redis_cross_worker_exchange_and_atomic_consumption():
     with TestClient(make_app(redis_url=url)) as first, TestClient(make_app(redis_url=url)) as second:
         token = issue(first).json()["ticket"]
         with second.websocket_connect(pulse_path(token)) as websocket:
-            assert websocket.receive_json()["tenant_id"] == "family-a"
+            assert websocket.receive_json()["tenant_id"] == "t1_aaaaaaaaaaaaaaaaaaaaaaaaaa"
         with pytest.raises(WebSocketDisconnect):
             with first.websocket_connect(pulse_path(token)):
                 pass

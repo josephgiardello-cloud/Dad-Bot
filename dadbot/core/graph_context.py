@@ -159,6 +159,7 @@ class TurnContext:
         chain_prev = str(self.last_checkpoint_hash or self.prev_checkpoint_hash or "")
         snapshot = {
             "trace_id": self.trace_id,
+            "session_id": str(self.metadata.get("session_id") or "default").strip() or "default",
             "stage": str(stage or "unknown"),
             "status": str(status or "unknown"),
             "error": str(error or "").strip(),
@@ -196,6 +197,7 @@ class TurnContext:
         # Compute hash over the lightweight header fields (not the full state blob).
         _chain_payload = {
             "trace_id": self.trace_id,
+            "session_id": snapshot["session_id"],
             "stage": snapshot["stage"],
             "status": snapshot["status"],
             "event_sequence": snapshot["event_sequence"],

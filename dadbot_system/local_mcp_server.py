@@ -1,60 +1,162 @@
 from __future__ import annotations
 
-import atexit
 import ast
+import asyncio
+import atexit
 import fnmatch
 import html
 import json
+import logging
 import os
 import pathlib
 import re
 import webbrowser
 from datetime import datetime
+from functools import wraps
 from typing import Any
 from urllib.parse import quote_plus, urlparse
 from urllib.request import Request, urlopen
 
 from Dad import DadBot
 
+from .mcp_security import (
+    MCP_CONNECT_SCOPE,
+    MCP_RESOURCE_TO_TOOL,
+    MCP_SERVER_NAME,
+    MCP_TOKEN_MAX_TTL_SECONDS,
+    MCP_TOOL_BASE_SCOPES,
+    MCPToolManifestError,
+    approved_mcp_tools,
+    load_mcp_tool_manifest,
+    mcp_resource_url,
+    mcp_tool_scope,
+    verify_mcp_tool_manifest,
+)
+
 try:
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.mcpserver import MCPServer
 except ImportError:  # pragma: no cover - optional dependency
-    FastMCP = None
+    MCPServer = None
 
 
 _BOT: DadBot | None = None
-_LOCAL_MCP_TOOL_NAMES = [
-    "runtime_health_snapshot",
-    "maintenance_snapshot",
-    "workshop_snapshot",
-    "memory_snapshot",
-    "memory_search",
-    "add_reminder",
-    "list_reminders",
-    "add_calendar_event",
-    "list_calendar_events",
-    "draft_email",
-    "read_local_state",
-    "write_local_state",
-    "heritage_cross_link_query",
-    "browser_capabilities",
-    "browser_open_url",
-    "computer_list_directory",
-    "computer_read_text_file",
-    "computer_write_text_file",
-    "computer_search_directory",
-    "computer_summarize_directory",
-    "computer_refactor_python_function",
-    "research_fetch_url",
-    "research_search_web",
-    "executive_add_task",
-    "executive_list_tasks",
-    "executive_complete_task",
-]
+_LOCAL_MCP_TOOL_NAMES = list(MCP_TOOL_BASE_SCOPES)
+logger = logging.getLogger(__name__)
 
 
 def mcp_available() -> bool:
-    return FastMCP is not None
+    return MCPServer is not None
+
+
+class MCPToolAuthority:
+    """Validate short-lived MCP grants against the live tenant authority."""
+
+    def __init__(self, token_manager, delegation_store, *, resource_url: str):
+        self.token_manager = token_manager
+        self.delegation_store = delegation_store
+        self.resource_url = resource_url
+        self.manifest = load_mcp_tool_manifest()
+
+    async def verify_token(self, token: str):
+        from mcp.server.auth.provider import AccessToken
+
+        from dadbot_system.security import AuthenticationError
+
+        try:
+            principal = self.token_manager.verify(token, expected_audience=self.resource_url)
+        except AuthenticationError:
+            return None
+        if (
+            MCP_CONNECT_SCOPE not in principal.scopes
+            or not principal.allowed_tools
+            or principal.issued_at <= 0
+            or principal.expires_at - principal.issued_at > MCP_TOKEN_MAX_TTL_SECONDS
+        ):
+            return None
+        for tool_name in principal.allowed_tools:
+            policy = self.manifest.get(tool_name)
+            if policy is None or mcp_tool_scope(tool_name) not in principal.scopes:
+                return None
+            if not principal.has_scope(str(policy["base_scope"])):
+                return None
+        return AccessToken(
+            token=token,
+            client_id=principal.subject,
+            scopes=sorted(principal.scopes),
+            expires_at=int(principal.expires_at),
+            resource=self.resource_url,
+            subject=principal.subject,
+            claims=principal.to_metadata(),
+        )
+
+    def call_tool(self, tool_name: str, callback, *, runtime_bot):
+        from mcp.server.auth.middleware.auth_context import get_access_token
+
+        from dadbot_system.delegation import runtime_authority_scope
+        from dadbot_system.security import AuthenticationError, AuthorizationError
+
+        access_token = get_access_token()
+        if access_token is None:
+            raise AuthorizationError("Authenticated MCP bearer token is required")
+        try:
+            principal = self.token_manager.verify(
+                access_token.token,
+                expected_audience=self.resource_url,
+            )
+        except AuthenticationError as exc:
+            raise AuthorizationError("MCP bearer token is invalid or expired") from exc
+        if (
+            principal.issued_at <= 0
+            or principal.expires_at - principal.issued_at > MCP_TOKEN_MAX_TTL_SECONDS
+        ):
+            raise AuthorizationError("MCP bearer token lifetime exceeds the allowed limit")
+
+        policy = self.manifest.get(tool_name)
+        required_scope = mcp_tool_scope(tool_name)
+        if (
+            policy is None
+            or tool_name not in principal.allowed_tools
+            or required_scope not in principal.scopes
+            or not principal.has_scope(str(policy["base_scope"]))
+        ):
+            raise AuthorizationError(f"MCP token does not authorize tool: {tool_name}")
+        configured_tenant = str(getattr(getattr(runtime_bot, "config", None), "tenant_id", "") or "")
+        if principal.tenant_id != configured_tenant:
+            raise AuthorizationError("MCP token tenant does not match the configured server tenant")
+
+        with runtime_authority_scope(
+            self.delegation_store,
+            principal,
+            scope=str(policy["base_scope"]),
+            tenant_id=principal.tenant_id,
+        ):
+            return callback()
+
+
+class MCPToolVisibilityMiddleware:
+    async def __call__(self, context, call_next):
+        result = await call_next(context)
+        if result is None or context.method not in {"tools/list", "resources/list"}:
+            return result
+        from mcp.server.auth.middleware.auth_context import get_access_token
+
+        access_token = get_access_token()
+        claims = access_token.claims if access_token is not None else None
+        allowed_tools = set(claims.get("allowed_tools", [])) if isinstance(claims, dict) else set()
+        collection_name = "tools" if context.method == "tools/list" else "resources"
+
+        def is_visible(item: Any) -> bool:
+            if context.method == "tools/list":
+                name = item.get("name") if isinstance(item, dict) else getattr(item, "name", None)
+                return name in allowed_tools
+            uri = item.get("uri") if isinstance(item, dict) else getattr(item, "uri", None)
+            return MCP_RESOURCE_TO_TOOL.get(uri) in allowed_tools
+
+        if isinstance(result, dict):
+            visible = [item for item in result.get(collection_name, []) if is_visible(item)]
+            return {**result, collection_name: visible}
+        visible = [item for item in getattr(result, collection_name) if is_visible(item)]
+        return result.model_copy(update={collection_name: visible})
 
 
 def _get_bot(bot: DadBot | None = None) -> DadBot:
@@ -92,12 +194,20 @@ def _json_safe(value: Any) -> Any:
 def local_mcp_status(bot: DadBot | None = None) -> dict[str, Any]:
     runtime = _get_bot(bot) if bot is not None else None
     local_store = dict(getattr(runtime, "MEMORY_STORE", {}).get("mcp_local_store") or {}) if runtime is not None else {}
+    configured = bool(
+        mcp_available()
+        and os.environ.get("DADBOT_API_TOKEN_SECRET")
+        and os.environ.get("DADBOT_AUTHORITY_SQLITE_PATH")
+    )
     return {
         "available": mcp_available(),
-        "configured": mcp_available(),
-        "server_name": "dadbot-local-services",
+        "configured": configured,
+        "server_name": MCP_SERVER_NAME,
         "tool_count": len(_LOCAL_MCP_TOOL_NAMES),
         "tool_names": list(_LOCAL_MCP_TOOL_NAMES),
+        "transport": "streamable-http",
+        "resource_url": mcp_resource_url(),
+        "tool_manifest_valid": bool(approved_mcp_tools()),
         "capabilities": ["memory", "calendar", "email", "browser", "filesystem", "research", "executive"],
         "local_state_entries": len(local_store),
     }
@@ -307,28 +417,89 @@ def _python_function_refactor(
     }
 
 
-def build_server(bot: DadBot | None = None):
-    if FastMCP is None:  # pragma: no cover - import guard only
+def _build_mcp_tool_authority_from_environment() -> MCPToolAuthority:
+    from dadbot_system.delegation import SQLiteDelegationStore
+    from dadbot_system.security import ServiceTokenManager
+
+    token_secret = str(os.environ.get("DADBOT_API_TOKEN_SECRET") or "").strip()
+    authority_path = str(os.environ.get("DADBOT_AUTHORITY_SQLITE_PATH") or "").strip()
+    issuer = str(os.environ.get("DADBOT_API_TOKEN_ISSUER") or "dadbot").strip()
+    if not token_secret or not authority_path:
+        raise RuntimeError(
+            "Authenticated MCP requires DADBOT_API_TOKEN_SECRET and DADBOT_AUTHORITY_SQLITE_PATH",
+        )
+    store = SQLiteDelegationStore(authority_path, token_secret, issuer=issuer)
+    store.check_available()
+    return MCPToolAuthority(
+        ServiceTokenManager(token_secret, issuer=issuer),
+        store,
+        resource_url=mcp_resource_url(),
+    )
+
+
+def build_server(bot: DadBot | None = None, *, authority: MCPToolAuthority | None = None):
+    if MCPServer is None:  # pragma: no cover - import guard only
         raise RuntimeError("Local MCP support requires the optional 'mcp' package. Install dad-bot[mcp].")
 
-    server = FastMCP("dadbot-local-services")
+    from mcp.server.auth.settings import AuthSettings
 
-    @server.tool()
+    authority = authority or _build_mcp_tool_authority_from_environment()
+    issuer_url = str(
+        os.environ.get("DADBOT_MCP_ISSUER_URL")
+        or os.environ.get("DADBOT_API_PUBLIC_URL")
+        or "http://127.0.0.1:8010"
+    ).strip()
+    server = MCPServer(
+        MCP_SERVER_NAME,
+        auth=AuthSettings(
+            issuer_url=issuer_url,
+            resource_server_url=authority.resource_url,
+            required_scopes=[MCP_CONNECT_SCOPE],
+            validate_token_resource=True,
+        ),
+        token_verifier=authority,
+        middleware=[MCPToolVisibilityMiddleware()],
+    )
+
+    def authorized_tool(function):
+        tool_name = function.__name__
+        policy = authority.manifest.get(tool_name)
+        if policy is None:
+            raise MCPToolManifestError(f"Tool has no approved MCP scope: {tool_name}")
+
+        @wraps(function)
+        def guarded_tool(*args, **kwargs):
+            return authority.call_tool(
+                tool_name,
+                lambda: function(*args, **kwargs),
+                runtime_bot=_get_bot(bot),
+            )
+
+        return server.tool(
+            name=tool_name,
+            description=function.__doc__,
+            meta={
+                "dadbot:base_scope": policy["base_scope"],
+                "dadbot:required_scope": policy["required_scope"],
+            },
+        )(guarded_tool)
+
+    @authorized_tool
     def runtime_health_snapshot() -> dict[str, Any]:
         """Return DadBot's current runtime health snapshot."""
         return _json_safe(_get_bot(bot).current_runtime_health_snapshot(force=True, log_warnings=False, persist=True))
 
-    @server.tool()
+    @authorized_tool
     def maintenance_snapshot() -> dict[str, Any]:
         """Return maintenance cadence state, including daily memory compaction."""
         return _json_safe(_get_bot(bot).maintenance_snapshot())
 
-    @server.tool()
+    @authorized_tool
     def workshop_snapshot() -> dict[str, Any]:
         """Return DadBot's workshop/dashboard snapshot."""
         return _json_safe(_get_bot(bot).dashboard_status_snapshot())
 
-    @server.tool()
+    @authorized_tool
     def memory_snapshot() -> dict[str, Any]:
         """Return compressed memory surfaces including narrative memories."""
         runtime = _get_bot(bot)
@@ -341,47 +512,47 @@ def build_server(bot: DadBot | None = None):
             }
         )
 
-    @server.tool()
+    @authorized_tool
     def memory_search(query: str, limit: int = 5) -> dict[str, Any]:
         """Search semantic and graph-backed memory context."""
         runtime = _get_bot(bot)
         return _json_safe(runtime.retrieve_context(str(query or ""), strategy="hybrid", limit=max(1, int(limit or 1))))
 
-    @server.tool()
+    @authorized_tool
     def add_reminder(title: str, due_text: str = "") -> dict[str, Any] | None:
         """Create or update a local reminder."""
         result = _get_bot(bot).add_reminder(title, due_text)
         return _json_safe(result) if result is not None else None
 
-    @server.tool()
+    @authorized_tool
     def list_reminders(limit: int = 8) -> list[dict[str, Any]]:
         """List open reminders from local DadBot storage."""
         return _json_safe(_get_bot(bot).reminder_catalog(include_done=False)[: max(1, int(limit or 1))])
 
-    @server.tool()
+    @authorized_tool
     def add_calendar_event(title: str, due_text: str = "") -> dict[str, Any] | None:
         """Create a local calendar event stored by DadBot."""
         result = _get_bot(bot).agentic_handler.add_calendar_event(title, due_text)
         return _json_safe(result) if result is not None else None
 
-    @server.tool()
+    @authorized_tool
     def list_calendar_events(limit: int = 8) -> list[dict[str, Any]]:
         """List local calendar events stored by DadBot."""
         return _json_safe(_get_bot(bot).agentic_handler.list_calendar_events(limit=limit))
 
-    @server.tool()
+    @authorized_tool
     def draft_email(recipient: str, subject: str = "", body: str = "") -> dict[str, Any] | None:
         """Create a local email draft on disk and return its metadata."""
         result = _json_safe(_get_bot(bot).agentic_handler.draft_email(recipient, subject=subject, body=body))
         return result if result is not None else None
 
-    @server.tool()
+    @authorized_tool
     def read_local_state(key: str) -> dict[str, Any]:
         """Read a small JSON-compatible record from DadBot's local MCP store."""
         store = dict(_get_bot(bot).MEMORY_STORE.get("mcp_local_store") or {})
         return {"key": key, "value": _json_safe(store.get(str(key).strip()))}
 
-    @server.tool()
+    @authorized_tool
     def write_local_state(key: str, value: str) -> dict[str, Any]:
         """Write a JSON-compatible record into DadBot's local MCP store."""
         runtime_bot = _get_bot(bot)
@@ -397,7 +568,7 @@ def build_server(bot: DadBot | None = None):
         runtime_bot.mutate_memory_store(mcp_local_store=store)
         return {"key": normalized_key, "stored": True, "value": _json_safe(parsed_value)}
 
-    @server.tool()
+    @authorized_tool
     def heritage_cross_link_query(context: str, max_links: int = 3) -> list[dict[str, Any]]:
         """Find semantically cross-linked narrative memories from past life arcs."""
         from dadbot.managers.heritage_graph import HeritageGraphManager
@@ -408,7 +579,7 @@ def build_server(bot: DadBot | None = None):
             )
         )
 
-    @server.tool()
+    @authorized_tool
     def browser_capabilities() -> dict[str, Any]:
         """Describe DadBot's local browser/computer-use capabilities."""
         payload = dict(local_mcp_status(_get_bot(bot)) or {})
@@ -417,7 +588,7 @@ def build_server(bot: DadBot | None = None):
         payload["computer_actions"] = ["list_directory", "read_text_file", "write_text_file"]
         return _json_safe(payload)
 
-    @server.tool()
+    @authorized_tool
     def browser_open_url(url: str) -> dict[str, Any]:
         """Open a browser URL using the local machine default browser."""
         normalized_url = str(url or "").strip()
@@ -434,7 +605,7 @@ def build_server(bot: DadBot | None = None):
         )
         return {"url": normalized_url, "opened": opened}
 
-    @server.tool()
+    @authorized_tool
     def computer_list_directory(path: str = ".", limit: int = 40) -> dict[str, Any]:
         """List files inside the Dad-Bot workspace."""
         target = _resolve_workspace_path(path)
@@ -452,7 +623,7 @@ def build_server(bot: DadBot | None = None):
             entries.append(entry)
         return {"path": str(target.relative_to(_project_root())), "entries": entries}
 
-    @server.tool()
+    @authorized_tool
     def computer_read_text_file(path: str, max_chars: int = 4000) -> dict[str, Any]:
         """Read a UTF-8 text file from the Dad-Bot workspace."""
         target = _resolve_workspace_path(path)
@@ -466,7 +637,7 @@ def build_server(bot: DadBot | None = None):
             "truncated": len(clipped) < len(content),
         }
 
-    @server.tool()
+    @authorized_tool
     def computer_write_text_file(path: str, content: str, append: bool = False) -> dict[str, Any]:
         """Write a UTF-8 text file inside the Dad-Bot workspace."""
         target = _resolve_workspace_path(path, allow_create=True)
@@ -479,7 +650,7 @@ def build_server(bot: DadBot | None = None):
             "appended": bool(append),
         }
 
-    @server.tool()
+    @authorized_tool
     def computer_search_directory(
         path: str = ".",
         pattern: str = "*.py",
@@ -518,7 +689,7 @@ def build_server(bot: DadBot | None = None):
         )
         return {"path": str(base.relative_to(_project_root())), "query": query, "count": len(matches), "summary": summary, "matches": matches}
 
-    @server.tool()
+    @authorized_tool
     def computer_summarize_directory(path: str = ".", max_files: int = 60) -> dict[str, Any]:
         """Summarize directory contents by type, size, and recent activity."""
         base = _resolve_workspace_path(path)
@@ -553,7 +724,7 @@ def build_server(bot: DadBot | None = None):
             "recent_files": recent,
         }
 
-    @server.tool()
+    @authorized_tool
     def computer_refactor_python_function(
         path: str,
         function_name: str,
@@ -575,7 +746,7 @@ def build_server(bot: DadBot | None = None):
             prepend_docstring=str(prepend_docstring or "").strip(),
         )
 
-    @server.tool()
+    @authorized_tool
     def research_fetch_url(url: str, max_chars: int = 6000) -> dict[str, Any]:
         """Fetch live web content from a URL and return stripped text preview."""
         normalized_url = str(url or "").strip()
@@ -602,7 +773,7 @@ def build_server(bot: DadBot | None = None):
             **memory_status,
         }
 
-    @server.tool()
+    @authorized_tool
     def research_search_web(query: str, max_results: int = 5) -> dict[str, Any]:
         """Run a live web search via DuckDuckGo HTML and return top organic links."""
         q = str(query or "").strip()
@@ -629,7 +800,7 @@ def build_server(bot: DadBot | None = None):
 
         return {"query": q, "count": len(results), "results": results}
 
-    @server.tool()
+    @authorized_tool
     def executive_add_task(title: str, due_text: str = "", priority: str = "normal") -> dict[str, Any]:
         """Add an executive task to markdown-backed task board."""
         normalized_title = str(title or "").strip()
@@ -651,7 +822,7 @@ def build_server(bot: DadBot | None = None):
         _write_markdown_tasks(path, tasks[-400:])
         return {"stored": True, "task": task, "path": str(path.relative_to(_project_root()))}
 
-    @server.tool()
+    @authorized_tool
     def executive_list_tasks(status: str = "open", limit: int = 20) -> dict[str, Any]:
         """List executive tasks from markdown board."""
         normalized_status = str(status or "open").strip().lower()
@@ -674,7 +845,7 @@ def build_server(bot: DadBot | None = None):
             "path": str(path.relative_to(_project_root())),
         }
 
-    @server.tool()
+    @authorized_tool
     def executive_complete_task(task_id: str) -> dict[str, Any]:
         """Mark a markdown-backed executive task complete by ID."""
         normalized_id = str(task_id or "").strip()
@@ -696,23 +867,34 @@ def build_server(bot: DadBot | None = None):
 
         @server.resource("dadbot://memory/narratives")
         def narrative_memory_resource() -> str:
-            runtime = _get_bot(bot)
-            return json.dumps(_json_safe(runtime.narrative_memories()), indent=2)
+            return authority.call_tool(
+                "memory_snapshot",
+                lambda: json.dumps(_json_safe(_get_bot(bot).narrative_memories()), indent=2),
+                runtime_bot=_get_bot(bot),
+            )
 
         @server.resource("dadbot://workshop/status")
         def workshop_resource() -> str:
-            runtime = _get_bot(bot)
-            return json.dumps(_json_safe(runtime.dashboard_status_snapshot()), indent=2)
+            return authority.call_tool(
+                "workshop_snapshot",
+                lambda: json.dumps(_json_safe(_get_bot(bot).dashboard_status_snapshot()), indent=2),
+                runtime_bot=_get_bot(bot),
+            )
 
         @server.resource("dadbot://memory/heritage")
         def heritage_graph_resource() -> str:
             from dadbot.managers.heritage_graph import HeritageGraphManager
 
-            runtime = _get_bot(bot)
-            # Return cross-links based on last known session topic
-            last_archive = list(runtime.session_archive() or [])
-            seed = str((last_archive[-1].get("summary") or "") if last_archive else "")
-            return json.dumps(_json_safe(HeritageGraphManager(runtime).cross_link_query(seed, max_links=5)), indent=2)
+            def read_heritage() -> str:
+                runtime = _get_bot(bot)
+                last_archive = list(runtime.session_archive() or [])
+                seed = str((last_archive[-1].get("summary") or "") if last_archive else "")
+                return json.dumps(
+                    _json_safe(HeritageGraphManager(runtime).cross_link_query(seed, max_links=5)),
+                    indent=2,
+                )
+
+            return authority.call_tool("heritage_cross_link_query", read_heritage, runtime_bot=_get_bot(bot))
 
     return server
 
@@ -741,7 +923,21 @@ def main(bot: DadBot | None = None) -> None:
     atexit.register(_cleanup_pid)
 
     server = build_server(bot=bot)
-    server.run()
+    asyncio.run(_verify_registered_tools(server))
+    server.run(
+        transport="streamable-http",
+        host=str(os.environ.get("DADBOT_MCP_HOST") or "127.0.0.1"),
+        port=max(1, int(os.environ.get("DADBOT_MCP_PORT", "8765"))),
+        streamable_http_path="/mcp",
+    )
+
+
+async def _verify_registered_tools(server) -> None:
+    try:
+        verify_mcp_tool_manifest(await server.list_tools())
+    except MCPToolManifestError:
+        logger.exception("Local MCP startup blocked by tool manifest validation")
+        raise
 
 
 if __name__ == "__main__":  # pragma: no cover - manual entrypoint

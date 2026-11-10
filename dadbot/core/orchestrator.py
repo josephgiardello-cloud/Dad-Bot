@@ -384,6 +384,16 @@ class DadBotOrchestrator:
     def strict(self) -> bool:
         return self._strict
 
+    def _require_checkpoint_authority(self, tenant_id: str) -> None:
+        from dadbot_system.delegation import require_tenant_authority_if_active
+
+        dependency_overrides = getattr(self.bot, "_dependency_overrides", {})
+        authenticated = (
+            isinstance(dependency_overrides, dict)
+            and dependency_overrides.get("storage_security_mode") == "AUTHENTICATED"
+        )
+        require_tenant_authority_if_active(tenant_id, required=authenticated)
+
     def _build_control_plane(self) -> ExecutionControlPlane:
         kernel_executor = self._execute_job
         if not callable(kernel_executor):
@@ -716,6 +726,8 @@ class DadBotOrchestrator:
         self,
         session_id: str,
         manifest: dict[str, Any],
+        *,
+        tenant_id: str,
     ) -> dict[str, Any] | None:
         """Load checkpoint if checkpointer is configured; return ``None`` if absent."""
         if self._checkpointer is None:
@@ -723,10 +735,16 @@ class DadBotOrchestrator:
         load_checkpoint = getattr(self._checkpointer, "load_checkpoint", None)
         if not callable(load_checkpoint):
             return None
+        self._require_checkpoint_authority(tenant_id)
         try:
             return cast(
                 "dict[str, Any]",
-                load_checkpoint(session_id, current_manifest=manifest, strict=bool(self._strict)),
+                load_checkpoint(
+                    session_id,
+                    current_manifest=manifest,
+                    strict=bool(self._strict),
+                    tenant_id=tenant_id,
+                ),
             )
         except CheckpointNotFoundError:
             return None
@@ -827,9 +845,58 @@ class DadBotOrchestrator:
         bot = getattr(self, "bot", None)
         if bot is not None:
             bot._last_turn_health_evidence = evidence
+            bot._last_tool_action_audit = self._tool_action_audit_from_context(context)
             audit_report = dict(context.state.get("capability_audit_report") or {})
             if audit_report:
                 bot._last_capability_audit_report = audit_report
+
+    @staticmethod
+    def _tool_action_audit_from_context(context: TurnContext, *, limit: int = 50) -> list[dict[str, Any]]:
+        actions: list[dict[str, Any]] = []
+        previous_checksum = ""
+        try:
+            for raw_event in list(context.state.get("sovereign_events") or []):
+                if not isinstance(raw_event, dict):
+                    raise ValueError("Sovereign event must be a mapping")
+                event = SovereignEvent.model_validate(raw_event)
+                if not event.verify_checksum(previous_checksum):
+                    raise ValueError("Sovereign event checksum chain is invalid")
+                previous_checksum = event.checksum
+                if event.event_type != "TOOL_EXECUTION":
+                    continue
+                payload = event.payload.model_dump(mode="json")
+                tool_name = str(payload.get("tool_name") or "")[:128]
+                if not tool_name:
+                    continue
+                result = dict(payload.get("tool_result") or {})
+                metadata = dict(result.get("metadata") or {})
+                input_hash = str(payload.get("input_hash") or "")
+                output_hash = str(payload.get("output_hash") or result.get("output_hash") or "")
+                if (
+                    len(input_hash) != 64
+                    or len(output_hash) != 64
+                    or any(char not in "0123456789abcdef" for char in input_hash + output_hash)
+                ):
+                    raise ValueError("Tool action audit hashes are invalid")
+                actions.append(
+                    {
+                        "event_id": str(event.event_id),
+                        "event_checksum": str(event.checksum),
+                        "previous_checksum": str(event.previous_checksum or ""),
+                        "timestamp": event.timestamp.astimezone(timezone.utc).isoformat(),
+                        "trace_id": str(event.turn_id or ""),
+                        "tool_name": tool_name,
+                        "status": str(payload.get("status") or "")[:32],
+                        "authorization_decision": str(metadata.get("authorization_decision") or "unknown")[:32],
+                        "authority_mode": str(metadata.get("authority_mode") or "unknown")[:32],
+                        "input_hash": input_hash,
+                        "output_hash": output_hash,
+                    }
+                )
+        except (TypeError, ValueError):
+            logger.error("Tool action audit projection rejected an invalid event stream")
+            return []
+        return actions[-max(1, int(limit)):]
 
     def _attach_runtime_ledger_emit(self, context: TurnContext, job: ExecutionJob) -> None:
         try:
@@ -870,7 +937,11 @@ class DadBotOrchestrator:
         session_state: dict[str, Any] | None,
         manifest: dict[str, Any],
     ) -> str:
-        loaded_checkpoint = self._load_checkpoint_data(str(job.session_id or "default"), manifest)
+        loaded_checkpoint = self._load_checkpoint_data(
+            str(job.session_id or "default"),
+            manifest,
+            tenant_id=str(job.tenant_id or ""),
+        )
         loaded_checkpoint_anchor = str((session_state or {}).get("last_checkpoint_hash") or "") if isinstance(session_state, dict) else ""
 
         # Correctness Matrix #1: decisions must reason from projection-derived lifecycle state.
@@ -995,12 +1066,14 @@ class DadBotOrchestrator:
 
         load_checkpoint = getattr(self._checkpointer, "load_checkpoint", None)
         if callable(load_checkpoint):
+            self._require_checkpoint_authority(str(job.tenant_id or ""))
             with contextlib.suppress(Exception):
                 persisted_checkpoint = load_checkpoint(
                     str(job.session_id or "default"),
                     trace_token=str(context.trace_id or ""),
                     current_manifest=manifest,
                     strict=bool(self._strict),
+                    tenant_id=str(job.tenant_id or ""),
                 )
                 if isinstance(persisted_checkpoint, dict):
                     context.last_checkpoint_hash = str(persisted_checkpoint.get("checkpoint_hash") or "")

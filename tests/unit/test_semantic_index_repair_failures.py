@@ -1,12 +1,18 @@
-from unittest.mock import MagicMock
 import sqlite3
-import json
 import subprocess
 import sys
+from unittest.mock import MagicMock
 
 import pytest
 
+from dadbot_system.state import InMemoryStateStore
 from tests.unit.test_local_tenant_establishment_application import _environment
+
+
+def _owned_document_store(tenant_id, state):
+    store = InMemoryStateStore()
+    store.owned_sessions.save_session_state(tenant_id, "memory", state)
+    return store
 
 
 def test_incomplete_embeddings_do_not_report_success_or_delete_stale_entries(bot, monkeypatch):
@@ -63,7 +69,10 @@ def test_sqlite_semantic_rebuild_rolls_back_replacement_if_delete_fails(bot, mon
             manager.sync_semantic_memory_index(new)
         assert backend.existing_content_hashes() == original
     finally:
-        backend.with_connection(lambda connection: connection.execute("DROP TRIGGER reject_semantic_delete"), write=True)
+        backend.with_connection(
+            lambda connection: connection.execute("DROP TRIGGER reject_semantic_delete"),
+            write=True,
+        )
 
 
 def test_local_semantic_verification_failure_rolls_back_publication(make_test_dadbot, monkeypatch, tmp_path):
@@ -71,9 +80,21 @@ def test_local_semantic_verification_failure_rolls_back_publication(make_test_da
 
     monkeypatch.setenv("DADBOT_DURABLE_EXECUTION_LEDGER", "1")
     memory = tmp_path / "memory.json"
-    memory.write_text(json.dumps({"memories": [{"summary": "Example memory"}]}), encoding="utf-8")
-    monkeypatch.setattr(SemanticIndexManager, "embed_texts", lambda self, texts, purpose=None: [[1.0] * 12 for _ in texts])
-    bot = make_test_dadbot(memory_path=memory)
+    tenant_id = "tenant-semantic-repair"
+    document_store = _owned_document_store(
+        tenant_id,
+        {"memories": [{"summary": "Example memory"}]},
+    )
+    monkeypatch.setattr(
+        SemanticIndexManager,
+        "embed_texts",
+        lambda self, texts, purpose=None: [[1.0] * 12 for _ in texts],
+    )
+    bot = make_test_dadbot(
+        memory_path=memory,
+        tenant_id=tenant_id,
+        document_store=document_store,
+    )
     semantic = bot.memory_manager._semantic_manager
     backend = semantic._semantic_index_backend
     backend.with_connection(
@@ -102,9 +123,21 @@ def test_local_semantic_candidate_rejects_changed_index(make_test_dadbot, monkey
 
     monkeypatch.setenv("DADBOT_DURABLE_EXECUTION_LEDGER", "1")
     memory = tmp_path / "memory.json"
-    memory.write_text(json.dumps({"memories": [{"summary": "Example memory"}]}), encoding="utf-8")
-    monkeypatch.setattr(SemanticIndexManager, "embed_texts", lambda self, texts, purpose=None: [[1.0] * 12 for _ in texts])
-    bot = make_test_dadbot(memory_path=memory)
+    tenant_id = "tenant-semantic-repair"
+    document_store = _owned_document_store(
+        tenant_id,
+        {"memories": [{"summary": "Example memory"}]},
+    )
+    monkeypatch.setattr(
+        SemanticIndexManager,
+        "embed_texts",
+        lambda self, texts, purpose=None: [[1.0] * 12 for _ in texts],
+    )
+    bot = make_test_dadbot(
+        memory_path=memory,
+        tenant_id=tenant_id,
+        document_store=document_store,
+    )
     semantic = bot.memory_manager._semantic_manager
     backend = semantic._semantic_index_backend
     backend.with_connection(
@@ -126,13 +159,30 @@ def test_local_semantic_candidate_rejects_changed_index(make_test_dadbot, monkey
 
 
 def test_process_exit_during_sqlite_semantic_publication_preserves_previous_index(tmp_path):
-    (tmp_path / "memory.json").write_text(
-        json.dumps({"memories": [{"summary": "Old indexed memory", "category": "general"}]}),
-        encoding="utf-8",
-    )
     env = _environment(tmp_path)
+    seed = r"""
+from dadbot.core.dadbot import DadBot
+bot = DadBot()
+tenant_id = bot.config.tenant_id
+state = bot.memory_manager.normalize_memory_store({
+    **bot.MEMORY_STORE,
+    "memories": [{"summary": "Old indexed memory", "category": "general"}],
+})
+bot._execution_ledger.commit_tenant_memory(
+    tenant_id=tenant_id,
+    expected_revision=1,
+    operation_id="seed-owned-semantic-memory",
+    state=state,
+)
+import os
+os._exit(0)
+"""
+    result = subprocess.run([sys.executable, "-c", seed], env=env, timeout=60, check=False)
+    assert result.returncode == 0
     interrupted = r"""
 import os
+from dadbot.memory.semantic_manager import SemanticIndexManager
+SemanticIndexManager.embed_texts = lambda self, texts, purpose=None: [[1.0] * 12 for _ in texts]
 from dadbot.core.dadbot import DadBot
 from dadbot.core.execution_ledger import ExecutionLedger
 from dadbot.core.ledger_backend import FileWALLedgerBackend
@@ -146,7 +196,7 @@ state = bot.memory_manager.normalize_memory_store({**bot.MEMORY_STORE, "memories
 ]})
 other = ExecutionLedger(FileWALLedgerBackend(bot.config.session_log_dir / "execution_ledger.jsonl"))
 other.load_from_backend()
-other.commit_tenant_memory(tenant_id=bot.config.tenant_id, expected_revision=1,
+other.commit_tenant_memory(tenant_id=bot.config.tenant_id, expected_revision=2,
                            operation_id="external-index-change", state=state)
 original = semantic._semantic_index_backend._upsert_rows_on_connection
 def terminate(connection, rows):
@@ -171,7 +221,7 @@ semantic = bot.memory_manager._semantic_manager
 keys = semantic._semantic_index_backend.existing_content_hashes()
 assert len(keys) == 1 and any("new" in key.lower() for key in keys), keys
 assert bot.memory_manager._storage._projection_recovery_status["semantic"]["status"] == "sync_succeeded"
-assert bot._execution_ledger.replay_tenant_memory(bot.config.tenant_id).revision == 2
+assert bot._execution_ledger.replay_tenant_memory(bot.config.tenant_id).revision == 3
 bot.shutdown()
 """
     result = subprocess.run([sys.executable, "-c", verify], env=env, timeout=60, check=False)

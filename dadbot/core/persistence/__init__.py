@@ -4,6 +4,11 @@ Provides abstract checkpointer interface and SQLite implementation for durable s
 management with hash-chain integrity, manifest drift detection, and pruning.
 """
 
+from dadbot.core.persistence.backend_checkpointers import (
+    PostgresCheckpointer,
+    RedisCheckpointer,
+    RedisPostgresCheckpointer,
+)
 from dadbot.core.persistence.base import (
     AbstractAsyncCheckpointer,
     AbstractCheckpointer,
@@ -23,5 +28,8 @@ __all__ = [
     "CheckpointError",
     "CheckpointIntegrityError",
     "CheckpointNotFoundError",
+    "PostgresCheckpointer",
+    "RedisCheckpointer",
+    "RedisPostgresCheckpointer",
     "SQLiteCheckpointer",
 ]

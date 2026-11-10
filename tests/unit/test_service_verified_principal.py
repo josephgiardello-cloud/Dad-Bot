@@ -9,12 +9,14 @@ import pytest
 from dadbot_system import DadBotOrchestrator, InMemoryStateStore, ServiceConfig, create_api_app
 from dadbot_system.delegation import SQLiteDelegationStore
 from dadbot_system.security import ServiceTokenManager
-from dadbot_system.state import NamespacedStateStore, SQLiteStateStore
+from dadbot_system.state import SQLiteStateStore
 
 pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient
 
 SECRET = "service-principal-regression-key"
+TENANT_A = "t1_aaaaaaaaaaaaaaaaaaaaaaaaaa"
+TENANT_B = "t1_bbbbbbbbbbbbbbbbbbbbbbbbbb"
 
 
 class Broker:
@@ -39,7 +41,7 @@ def valid_claims():
     return {
         "v": 1,
         "sub": "principal",
-        "tenant_id": "tenant-a",
+        "tenant_id": TENANT_A,
         "scopes": ["write"],
         "allowed_tools": [],
         "iat": time.time() - 1,
@@ -56,7 +58,7 @@ def configured_authority(tmp_path):
     config.security.authority_sqlite_path = str(tmp_path / "authority.sqlite")
     SQLiteDelegationStore.initialize(config.security.authority_sqlite_path)
     SQLiteDelegationStore(config.security.authority_sqlite_path, SECRET).grant_membership(
-        issuer="dadbot", subject="principal", tenant_id="tenant-a", scopes={"write"}
+        issuer="dadbot", subject="principal", tenant_id=TENANT_A, scopes={"write"}
     )
     return config
 
@@ -88,7 +90,7 @@ def test_api_rejects_signed_incomplete_or_invalid_principal_before_submission(cl
         response = client.post(
             "/v1/sessions/shared/chat",
             headers={"Authorization": f"Bearer {signed_token(claims)}"},
-            json={"tenant_id": claims["tenant_id"] or "default", "user_input": "hello"},
+            json={"tenant_id": claims["tenant_id"] or TENANT_A, "user_input": "hello"},
         )
 
     assert response.status_code == 401
@@ -104,14 +106,14 @@ def test_api_rejects_forged_principal_before_submission(configured_authority):
         response = client.post(
             "/v1/sessions/shared/chat",
             headers={"Authorization": f"Bearer {signed_token(valid_claims(), key='different-key')}"},
-            json={"tenant_id": "tenant-a", "user_input": "hello"},
+            json={"tenant_id": TENANT_A, "user_input": "hello"},
         )
 
     assert response.status_code == 401
     assert not broker.enqueued
 
 
-@pytest.mark.parametrize(("subject", "tenant"), [("", "tenant-a"), ("anonymous", "tenant-a"), ("user", "")])
+@pytest.mark.parametrize(("subject", "tenant"), [("", TENANT_A), ("anonymous", TENANT_A), ("user", "")])
 def test_token_issuer_rejects_missing_or_anonymous_identity(subject, tenant):
     with pytest.raises(ValueError):
         ServiceTokenManager(SECRET).issue(subject=subject, tenant_id=tenant, scopes={"write"})
@@ -121,42 +123,60 @@ def test_authorized_principal_can_submit_same_tenant_task(configured_authority):
     broker = Broker()
     config = configured_authority
     app = create_api_app(DadBotOrchestrator(broker, state_store=InMemoryStateStore()), config=config)
-    token = ServiceTokenManager(SECRET).issue(subject="principal", tenant_id="tenant-a", scopes={"write"})
+    token = ServiceTokenManager(SECRET).issue(subject="principal", tenant_id=TENANT_A, scopes={"write"})
 
     with TestClient(app) as client:
         response = client.post(
             "/v1/sessions/shared/chat",
             headers={"Authorization": f"Bearer {token}"},
-            json={"tenant_id": "tenant-a", "user_input": "hello"},
+            json={"tenant_id": TENANT_A, "user_input": "hello"},
         )
 
     assert response.status_code == 200
-    assert broker.enqueued[0].tenant_id == "tenant-a"
+    assert broker.enqueued[0].tenant_id == TENANT_A
 
 
 def test_revoked_membership_cannot_read_session_events(configured_authority, tmp_path):
     config = configured_authority
     authority = SQLiteDelegationStore(config.security.authority_sqlite_path, SECRET)
     authority.grant_membership(
-        issuer="dadbot", subject="principal", tenant_id="tenant-a", scopes={"read"}
+        issuer="dadbot", subject="principal", tenant_id=TENANT_A, scopes={"read"}
     )
     config.persistence.sqlite_path = str(tmp_path / "state.sqlite")
     state = SQLiteStateStore(config.persistence.sqlite_path)
-    NamespacedStateStore(state, "tenant:tenant-a").append_event(
-        "same-session", {"tenant_id": "tenant-a", "marker": "synthetic-private"}
+    state.owned_sessions.append_event(
+        TENANT_A,
+        "same-session",
+        {"tenant_id": TENANT_A, "session_id": "same-session", "marker": "synthetic-private"},
     )
     app = create_api_app(DadBotOrchestrator(Broker(), state_store=state), config=config)
-    token = ServiceTokenManager(SECRET).issue(subject="principal", tenant_id="tenant-a", scopes={"read"})
+    token = ServiceTokenManager(SECRET).issue(subject="principal", tenant_id=TENANT_A, scopes={"read"})
     headers = {"Authorization": f"Bearer {token}"}
 
     with TestClient(app) as client:
-        before = client.get("/v1/sessions/same-session/events?tenant_id=tenant-a", headers=headers)
+        before = client.get(f"/v1/sessions/same-session/events?tenant_id={TENANT_A}", headers=headers)
         assert before.status_code == 200
         assert before.json()[0]["marker"] == "synthetic-private"
-        authority.revoke_membership(issuer="dadbot", subject="principal", tenant_id="tenant-a")
-        after = client.get("/v1/sessions/same-session/events?tenant_id=tenant-a", headers=headers)
+        authority.revoke_membership(issuer="dadbot", subject="principal", tenant_id=TENANT_A)
+        after = client.get(f"/v1/sessions/same-session/events?tenant_id={TENANT_A}", headers=headers)
 
     assert after.status_code in {401, 403}
+
+
+def test_read_scope_requires_active_tenant_membership(configured_authority, tmp_path):
+    config = configured_authority
+    config.persistence.sqlite_path = str(tmp_path / "state.sqlite")
+    state = SQLiteStateStore(config.persistence.sqlite_path)
+    app = create_api_app(DadBotOrchestrator(Broker(), state_store=state), config=config)
+    token = ServiceTokenManager(SECRET).issue(subject="principal", tenant_id=TENANT_A, scopes={"read"})
+
+    with TestClient(app) as client:
+        response = client.get(
+            f"/v1/sessions/session-without-read/events?tenant_id={TENANT_A}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 403
 
 
 @pytest.mark.parametrize("failure", ["revoked", "unavailable"])
@@ -175,27 +195,30 @@ def test_invalid_read_authority_is_rejected_before_event_sql(configured_authorit
     authority_path = tmp_path / "authority.sqlite"
     authority = SQLiteDelegationStore(str(authority_path), SECRET)
     authority.grant_membership(
-        issuer="dadbot", subject="principal", tenant_id="tenant-a", scopes={"read"}
+        issuer="dadbot", subject="principal", tenant_id=TENANT_A, scopes={"read"}
     )
+    config.security.authority_sqlite_path = str(authority_path)
     config.persistence.sqlite_path = str(tmp_path / "state.sqlite")
     state = TracedSQLiteStateStore(config.persistence.sqlite_path)
-    NamespacedStateStore(state, "tenant:tenant-a").append_event(
-        "same-session", {"tenant_id": "tenant-a", "marker": "synthetic-private"}
+    state.owned_sessions.append_event(
+        TENANT_A,
+        "same-session",
+        {"tenant_id": TENANT_A, "session_id": "same-session", "marker": "synthetic-private"},
     )
     app = create_api_app(DadBotOrchestrator(Broker(), state_store=state), config=config)
-    token = ServiceTokenManager(SECRET).issue(subject="principal", tenant_id="tenant-a", scopes={"read"})
+    token = ServiceTokenManager(SECRET).issue(subject="principal", tenant_id=TENANT_A, scopes={"read"})
     headers = {"Authorization": f"Bearer {token}"}
 
     with TestClient(app) as client:
-        before = client.get("/v1/sessions/same-session/events?tenant_id=tenant-a", headers=headers)
+        before = client.get(f"/v1/sessions/same-session/events?tenant_id={TENANT_A}", headers=headers)
         assert before.status_code == 200
         assert before.json()[0]["marker"] == "synthetic-private"
         state.statements.clear()
         if failure == "revoked":
-            authority.revoke_membership(issuer="dadbot", subject="principal", tenant_id="tenant-a")
+            authority.revoke_membership(issuer="dadbot", subject="principal", tenant_id=TENANT_A)
         else:
             authority_path.rename(tmp_path / "authority-unavailable.sqlite")
-        response = client.get("/v1/sessions/same-session/events?tenant_id=tenant-a", headers=headers)
+        response = client.get(f"/v1/sessions/same-session/events?tenant_id={TENANT_A}", headers=headers)
 
     event_reads = [
         statement for statement in state.statements
@@ -220,7 +243,7 @@ def test_api_denies_invalid_authority_without_queuing(kind, configured_authority
     if kind == "invalid-signature":
         token = token.rsplit(".", 1)[0] + ".invalid"
     headers = {} if kind == "missing" else {"Authorization": f"Bearer {token}"}
-    tenant = "tenant-b" if kind == "wrong-tenant-admin" else "tenant-a"
+    tenant = TENANT_B if kind == "wrong-tenant-admin" else TENANT_A
 
     with TestClient(app) as client:
         response = client.post(

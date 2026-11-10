@@ -1,7 +1,8 @@
 """Unit tests for replay mode detection and checkpoint restoration."""
 
-import pytest
 from unittest.mock import Mock
+
+import pytest
 
 from dadbot.core.replay_mode_mixin import ReplayModeMixin
 from dadbot.core.tool_recording import ToolIOLedger
@@ -50,6 +51,10 @@ def test_replay_mode_detect_with_checkpoint():
 
     assert metadata["replay_mode"] is True
     assert metadata["checkpoint_available"] is True
+    mock_persistence.load_latest_graph_checkpoint.assert_called_once_with(
+        trace_token="trace-456",
+        session_id="session-123",
+    )
 
 
 def test_replay_mode_restore_tool_io_ledger():

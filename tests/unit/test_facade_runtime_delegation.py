@@ -14,8 +14,11 @@ def test_conversation_history_delegates_to_runtime_state_manager():
 
 def test_missing_facade_method_resolves_from_service_registry():
     provider = SimpleNamespace(select_active_consolidated_memories=lambda *args: [])
-    registry = SimpleNamespace(get_provider=lambda name: provider if name == "select_active_consolidated_memories" else None)
-    bot = SimpleNamespace(services=SimpleNamespace(registry=registry))
+    registry = SimpleNamespace(
+        get_provider=lambda name: provider if name == "select_active_consolidated_memories" else None,
+    )
+    bot = object.__new__(DadBot)
+    bot.services = SimpleNamespace(registry=registry)
 
     resolved = DadBot.__getattr__(bot, "select_active_consolidated_memories")
 
@@ -28,12 +31,14 @@ def test_memory_store_facade_reads_and_replaces_canonical_projection():
     memory_manager = SimpleNamespace(
         memory_store=store,
         _storage=SimpleNamespace(
-            replace_projection_via_canonical_event=lambda value: replacements.append(value),
+            replace_projection_via_canonical_event=replacements.append,
         ),
     )
     bot = SimpleNamespace(memory_manager=memory_manager)
 
-    assert DadBot.MEMORY_STORE.__get__(bot, DadBot) is store
+    projection = DadBot.MEMORY_STORE.__get__(bot, DadBot)
+    assert projection == store
+    assert projection is not store
     DadBot.MEMORY_STORE.__set__(bot, {"memories": [{"summary": "remembered"}]})
 
     assert replacements == [{"memories": [{"summary": "remembered"}]}]

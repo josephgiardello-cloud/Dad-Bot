@@ -81,11 +81,7 @@ class RuntimeClientManager:
             context_budget = min(context_budget, model_limit)
         if context_budget < 256:
             raise ValueError("Ollama num_ctx must allow at least 256 tokens")
-        # Bucket allocation, not prompt capacity: the guard retains the requested budget.
-        allocation = max(512, 1 << (context_budget - 1).bit_length())
-        if isinstance(model_limit, int) and model_limit > 0:
-            allocation = min(allocation, model_limit)
-        request_options["num_ctx"] = allocation
+        request_options["num_ctx"] = context_budget
         reserved = max(64, int(self.bot.RESERVED_RESPONSE_TOKENS))
         capabilities = runtime.ollama_show_payload(model).get("capabilities") or []
         if "thinking" in capabilities:

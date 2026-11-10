@@ -191,6 +191,7 @@ def test_effect_journal_blocks_crash_restart_mid_lease_replay():
     seed_writer = LedgerWriter(shared_ledger)
     seed_writer.append_effect_begin(
         session_id="s-effect-crash",
+        tenant_id="default",
         trace_id="tr-effect-crash",
         effect_id="eff-crash-1",
         request_id="req-crash-1",
@@ -239,6 +240,7 @@ def test_apply_reconciliation_closes_ambiguous_request_and_effect_state():
     seed_writer.append_job_started(seed_job)
     seed_writer.append_effect_begin(
         session_id="s-reconcile",
+        tenant_id="default",
         trace_id="tr-seed-reconcile",
         effect_id="eff-reconcile-1",
         request_id="req-reconcile-1",
@@ -290,6 +292,7 @@ def test_apply_reconciliation_resume_mode_records_resume_eligible_resolution():
     seed_writer.append_job_started(seed_job)
     seed_writer.append_effect_begin(
         session_id="s-reconcile-resume",
+        tenant_id="default",
         trace_id="tr-seed-resume",
         effect_id="eff-reconcile-resume-1",
         request_id="req-reconcile-resume-1",
@@ -341,6 +344,7 @@ def test_apply_reconciliation_rejects_conflicting_mode_for_same_effect_and_reque
     seed_writer.append_job_started(seed_job)
     seed_writer.append_effect_begin(
         session_id="s-reconcile-conflict",
+        tenant_id="default",
         trace_id="tr-seed-conflict",
         effect_id="eff-reconcile-conflict-1",
         request_id="req-reconcile-conflict-1",
@@ -582,16 +586,18 @@ def test_ledger_replay_rebuilds_projection_and_returns_pending_jobs():
     ledger.write(
         {
             "type": "SESSION_STATE_UPDATED",
+            "tenant_id": "default",
             "session_id": "s-recover",
             "trace_id": "tr",
             "timestamp": 1.0,
             "kernel_step_id": "session_store.apply",
-            "payload": {"state": {"x": 1}, "version": 1},
+            "payload": {"tenant_id": "default", "state": {"x": 1}, "version": 1},
         }
     )
     ledger.write(
         {
             "type": "JOB_QUEUED",
+            "tenant_id": "default",
             "session_id": "s-recover",
             "trace_id": "tr",
             "timestamp": 2.0,
@@ -601,7 +607,7 @@ def test_ledger_replay_rebuilds_projection_and_returns_pending_jobs():
                 "request_id": "req-recover-1",
                 "user_input": "hello",
                 "attachments": [],
-                "metadata": {"trace_id": "tr"},
+                "metadata": {"trace_id": "tr", "tenant_id": "default"},
                 "priority": 0,
                 "submitted_at": 2.0,
             },
@@ -621,7 +627,7 @@ def test_ledger_replay_rebuilds_projection_and_returns_pending_jobs():
     assert len(pending) == 1
     assert pending[0]["job_id"] == "job-recover-1"
 
-    state = session_store.get("s-recover")
+    state = session_store.get("s-recover", tenant_id="default")
     assert state == {"x": 1}
 
 

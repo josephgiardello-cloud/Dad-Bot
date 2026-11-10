@@ -93,4 +93,15 @@ def shutdown_tracing() -> None:
     shutdown_otel_bridge()
 
 
-register_telemetry_adapter(configure=configure_tracing, start_span=start_span, shutdown=shutdown_tracing)
+def is_trace_provider_available() -> bool:
+    from dadbot.telemetry.otel_bridge import get_trace_provider
+
+    return get_trace_provider() is not None
+
+
+register_telemetry_adapter(
+    configure=configure_tracing,
+    start_span=start_span,
+    shutdown=shutdown_tracing,
+    trace_provider_available=is_trace_provider_available,
+)

@@ -83,6 +83,11 @@ from dadbot.core.control_plane_submit_failure import (
 from dadbot.core.control_plane_submit_metadata import (
     _prepare_submit_metadata_impl,
 )
+from dadbot.core.tenant_session import (
+    current_tenant_id,
+    resolve_tenant_id,
+    tenant_session_scope,
+)
 from dadbot.core.control_plane_submit_phase import (
     _append_submit_turn_phase,
     _assert_submit_turn_phase_boundary,
@@ -243,6 +248,7 @@ class ExecutionJob:
     user_input: str
     attachments: AttachmentList | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    tenant_id: str = ""
     trace_id: str = ""
     job_id: str = ""
 
@@ -254,9 +260,16 @@ class ExecutionJob:
 
     def __post_init__(self) -> None:
         metadata = dict(self.metadata or {})
+        metadata_tenant = str(metadata.get("tenant_id") or "").strip()
+        supplied_tenant = str(self.tenant_id or "").strip()
+        tenant_id = supplied_tenant or metadata_tenant or "default"
+        if supplied_tenant and metadata_tenant and metadata_tenant != supplied_tenant:
+            raise ValueError("execution job tenant identity does not match its metadata")
+        metadata["tenant_id"] = tenant_id
         trace_id = str(self.trace_id or metadata.get("trace_id") or "").strip()
         if not trace_id:
             trace_id = self._stable_token(
+                tenant_id,
                 self.session_id,
                 metadata.get("request_id"),
                 self.user_input,
@@ -265,10 +278,11 @@ class ExecutionJob:
             )
         job_id = str(self.job_id or metadata.get("job_id") or "").strip()
         if not job_id:
-            job_id = self._stable_token(self.session_id, trace_id, prefix="job")
+            job_id = self._stable_token(tenant_id, self.session_id, trace_id, prefix="job")
         metadata["trace_id"] = trace_id
         metadata["job_id"] = job_id
         self.metadata = metadata
+        self.tenant_id = tenant_id
         self.trace_id = trace_id
         self.job_id = job_id
 
@@ -323,34 +337,43 @@ class ControlPlaneOptions:
 class SessionRegistry:
     """Simple in-memory session registry used by the scheduler."""
 
-    def __init__(self) -> None:
-        self._sessions: dict[str, dict[str, Any]] = {}
-        self._terminated: set[str] = set()
+    def __init__(self, *, default_tenant_id: str = "default") -> None:
+        self.default_tenant_id = str(default_tenant_id or "").strip()
+        self._sessions: dict[tuple[str, str], dict[str, Any]] = {}
+        self._terminated: set[tuple[str, str]] = set()
 
-    def bind(self, session_id: str) -> dict[str, Any]:
-        sid = str(session_id or "default")
-        session = self._sessions.get(sid)
+    def _identity(self, session_id: str, tenant_id: str | None = None) -> tuple[str, str]:
+        sid = str(session_id or "").strip()
+        if not sid:
+            raise ValueError("session_id is required")
+        tenant = resolve_tenant_id(tenant_id, default_tenant_id=self.default_tenant_id)
+        return tenant, sid
+
+    def bind(self, session_id: str, *, tenant_id: str | None = None) -> dict[str, Any]:
+        tenant, sid = self._identity(session_id, tenant_id)
+        key = (tenant, sid)
+        session = self._sessions.get(key)
         if session is None:
-            session = {"session_id": sid, "state": {}}
-            self._sessions[sid] = session
+            session = {"tenant_id": tenant, "session_id": sid, "state": {}}
+            self._sessions[key] = session
         return session
 
-    def get(self, session_id: str) -> dict[str, Any] | None:
-        return self._sessions.get(str(session_id or "default"))
+    def get(self, session_id: str, *, tenant_id: str | None = None) -> dict[str, Any] | None:
+        return self._sessions.get(self._identity(session_id, tenant_id))
 
-    def get_or_create(self, session_id: str) -> dict[str, Any]:
-        return self.bind(session_id)
+    def get_or_create(self, session_id: str, *, tenant_id: str | None = None) -> dict[str, Any]:
+        return self.bind(session_id, tenant_id=tenant_id)
 
-    async def create_session(self, session_id: str) -> dict[str, Any]:
-        sid = str(session_id or "default")
-        self._terminated.discard(sid)
-        return self.bind(sid)
+    async def create_session(self, session_id: str, *, tenant_id: str | None = None) -> dict[str, Any]:
+        identity = self._identity(session_id, tenant_id)
+        self._terminated.discard(identity)
+        return self.bind(session_id, tenant_id=identity[0])
 
-    def terminate_session(self, session_id: str) -> None:
-        self._terminated.add(str(session_id or "default"))
+    def terminate_session(self, session_id: str, *, tenant_id: str | None = None) -> None:
+        self._terminated.add(self._identity(session_id, tenant_id))
 
-    def is_terminated(self, session_id: str) -> bool:
-        return str(session_id or "default") in self._terminated
+    def is_terminated(self, session_id: str, *, tenant_id: str | None = None) -> bool:
+        return self._identity(session_id, tenant_id) in self._terminated
 
 
 class DurableReconcileQueue:
@@ -397,38 +420,49 @@ class DurableReconcileQueue:
             committed=False,
         )
 
-    def _extract_reconcile_event_fields(self, event: dict[str, Any]) -> tuple[str, str, str, str]:
+    def _extract_reconcile_event_fields(self, event: dict[str, Any]) -> tuple[str, str, str, str, str]:
+        tenant_id = str(event.get("tenant_id") or "").strip()
         sid = str(event.get("session_id") or "default").strip() or "default"
         payload = dict(event.get("payload") or {})
         rid = str(payload.get("request_id") or "").strip()
         eid = str(payload.get("effect_id") or "").strip()
         reason = str(payload.get("reason") or "").strip()
-        return sid, rid, eid, reason
+        return tenant_id, sid, rid, eid, reason
 
-    def _entry_needs_reconciliation(self, session_id: str, request_id: str, effect_id: str) -> bool:
-        if request_id and self._request_is_ambiguous(session_id, request_id):
-            return True
-        if effect_id and self._effect_is_ambiguous(session_id, effect_id):
-            return True
-        return False
+    def _entry_needs_reconciliation(
+        self,
+        tenant_id: str,
+        session_id: str,
+        request_id: str,
+        effect_id: str,
+    ) -> bool:
+        with tenant_session_scope(tenant_id, session_id, allow_tenant_switch=True):
+            if request_id and self._request_is_ambiguous(session_id, request_id):
+                return True
+            if effect_id and self._effect_is_ambiguous(session_id, effect_id):
+                return True
+            return False
 
     def pending_entries(self) -> list[dict[str, Any]]:
         pending: list[dict[str, Any]] = []
-        seen: set[tuple[str, str, str]] = set()
+        seen: set[tuple[str, str, str, str]] = set()
         for event in self._ledger.read():
             if str(event.get("type") or "") != "JOB_RECONCILE_REQUIRED":
                 continue
-            sid, rid, eid, reason = self._extract_reconcile_event_fields(event)
+            tenant_id, sid, rid, eid, reason = self._extract_reconcile_event_fields(event)
+            if not tenant_id:
+                continue
             if not rid and not eid:
                 continue
-            key = (sid, rid, eid)
+            key = (tenant_id, sid, rid, eid)
             if key in seen:
                 continue
             seen.add(key)
-            if not self._entry_needs_reconciliation(sid, rid, eid):
+            if not self._entry_needs_reconciliation(tenant_id, sid, rid, eid):
                 continue
             pending.append(
                 {
+                    "tenant_id": tenant_id,
                     "session_id": sid,
                     "request_id": rid,
                     "effect_id": eid,
@@ -474,7 +508,7 @@ class DurableReconcileQueue:
                 break
             signature = "|".join(
                 sorted(
-                    f"{str(item.get('session_id') or 'default')}::{str(item.get('request_id') or '')}::{str(item.get('effect_id') or '')}"
+                    f"{str(item.get('tenant_id') or '')}::{str(item.get('session_id') or 'default')}::{str(item.get('request_id') or '')}::{str(item.get('effect_id') or '')}"
                     for item in pending
                 ),
             )
@@ -488,13 +522,17 @@ class DurableReconcileQueue:
             for item in pending[:budget]:
                 attempted += 1
                 try:
-                    report = apply(
-                        session_id=str(item.get("session_id") or "default"),
-                        request_id=str(item.get("request_id") or ""),
-                        effect_id=str(item.get("effect_id") or ""),
-                        reason=str(item.get("reason") or "queued_reconcile_required"),
-                        mode=mode,
-                    )
+                    tenant_id = str(item.get("tenant_id") or "")
+                    session_id = str(item.get("session_id") or "default")
+                    with tenant_session_scope(tenant_id, session_id, allow_tenant_switch=True):
+                        report = apply(
+                            tenant_id=tenant_id,
+                            session_id=session_id,
+                            request_id=str(item.get("request_id") or ""),
+                            effect_id=str(item.get("effect_id") or ""),
+                            reason=str(item.get("reason") or "queued_reconcile_required"),
+                            mode=mode,
+                        )
                 except Exception:
                     failed += 1
                     continue
@@ -1030,10 +1068,14 @@ class Scheduler:
         self.writer.append_job_queued(job)
         return future
 
-    def _release_runtime_lease(self, *, session_id: str) -> None:
+    def _release_runtime_lease(self, *, session_id: str, tenant_id: str) -> None:
         if self.execution_lease is not None:
             with contextlib.suppress(Exception):
-                self.execution_lease.release(session_id=str(session_id or "default"), owner_id=self.worker_id)
+                self.execution_lease.release(
+                    session_id=str(session_id or "default"),
+                    owner_id=self.worker_id,
+                    tenant_id=tenant_id,
+                )
         if callable(self._on_runtime_lease_sync):
             self._on_runtime_lease_sync("")
 
@@ -1104,9 +1146,10 @@ class Scheduler:
                 session_id=str(job.session_id or "default"),
                 owner_id=self.worker_id,
                 ttl_seconds=self.lease_ttl_seconds,
+                tenant_id=job.tenant_id,
             )
         if projected.owner and not lease_expired(projected, now=now):
-            self._release_runtime_lease(session_id=job.session_id)
+            self._release_runtime_lease(session_id=job.session_id, tenant_id=job.tenant_id)
             self._pending_job_ids.append(job_id)
             self._notify_work_available()
             return False
@@ -1177,7 +1220,7 @@ class Scheduler:
         )
         self.writer.append_job_completed(job, result)
         self._resolve_future(future, result=result)
-        self._release_runtime_lease(session_id=job.session_id)
+        self._release_runtime_lease(session_id=job.session_id, tenant_id=job.tenant_id)
         self._record_job_observability(
             event="completed",
             job=job,
@@ -1228,7 +1271,7 @@ class Scheduler:
         )
         self.writer.append_job_failed(job, exc, failure=failure)
         self._resolve_future(future, error=exc)
-        self._release_runtime_lease(session_id=job.session_id)
+        self._release_runtime_lease(session_id=job.session_id, tenant_id=job.tenant_id)
         self._record_job_observability(
             event="failed",
             job=job,
@@ -1294,7 +1337,22 @@ class Scheduler:
             return False
         job, future = job_pair
         assert str(job.trace_id or "").strip(), "Missing trace_id at scheduler drain"
+        with tenant_session_scope(job.tenant_id, job.session_id, allow_tenant_switch=True):
+            return await self._drain_job_once_in_scope(
+                executor=executor,
+                job_id=job_id,
+                job=job,
+                future=future,
+            )
 
+    async def _drain_job_once_in_scope(
+        self,
+        *,
+        executor: Callable[[dict[str, Any], ExecutionJob], Awaitable[FinalizedTurnResult]],
+        job_id: str,
+        job: ExecutionJob,
+        future: asyncio.Future[FinalizedTurnResult],
+    ) -> bool:
         started_at = time.perf_counter()
         projected = self.projection.get(job.job_id)
         _apply_projection_execution_state(job, projected)
@@ -1317,7 +1375,7 @@ class Scheduler:
             if not claimed:
                 return False
         except RuntimeError:
-            self._release_runtime_lease(session_id=job.session_id)
+            self._release_runtime_lease(session_id=job.session_id, tenant_id=job.tenant_id)
             self._pending_job_ids.append(job_id)
             self._notify_work_available()
             return False
@@ -1442,9 +1500,15 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         )
         self.lifecycle_projection = getattr(self._scheduler, "projection", ExecutionProjection())
         self.recovery = RecoveryManager(ledger=self.ledger)
-        self._inflight_by_request: dict[tuple[str, str, str], asyncio.Future[FinalizedTurnResult]] = {}
+        self._inflight_by_request: dict[tuple[str, str, str, str], asyncio.Future[FinalizedTurnResult]] = {}
         self._inflight_lock = asyncio.Lock()
         self.graph = graph
+        agent_service = self._get_optional_service("agent_service")
+        bot = getattr(agent_service, "bot", None)
+        self._default_tenant_id = str(
+            getattr(getattr(bot, "config", None), "tenant_id", "") or registry.default_tenant_id or "default",
+        ).strip()
+        self.registry.default_tenant_id = self._default_tenant_id
         bind_execution_token = getattr(self.graph, "set_required_execution_token", None)
         if callable(bind_execution_token):
             bind_execution_token(self.execution_token)
@@ -1872,6 +1936,9 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
             "sequence": int(self._stream_event_sequence),
             "payload": dict(payload or {}),
         }
+        tenant_id = current_tenant_id()
+        if tenant_id:
+            event["tenant_id"] = tenant_id
         event = dict(validate_trace_event_contract(event))
         self._append_stream_timeline(
             session_id=str(session_id or "default"),
@@ -1900,8 +1967,29 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         session_id: str,
         state_patch: dict[str, Any],
         trace_token: str,
+        tenant_id: str | None = None,
     ) -> dict[str, Any]:
-        sid = str(session_id or "default")
+        sid = str(session_id or "").strip()
+        if not sid:
+            raise ValueError("session_id is required")
+        tenant = resolve_tenant_id(tenant_id, default_tenant_id=self._default_tenant_id)
+        with tenant_session_scope(tenant, sid):
+            return self._merge_session_state_in_scope(
+                session_id=sid,
+                state_patch=state_patch,
+                trace_token=trace_token,
+                tenant_id=tenant,
+            )
+
+    def _merge_session_state_in_scope(
+        self,
+        *,
+        session_id: str,
+        state_patch: dict[str, Any],
+        trace_token: str,
+        tenant_id: str,
+    ) -> dict[str, Any]:
+        sid = str(session_id)
         try:
             persisted_patch = json.loads(json.dumps(dict(state_patch or {}), default=str))
         except (TypeError, ValueError, RecursionError) as exc:
@@ -1909,13 +1997,14 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         self.ledger_writer.write_event(
             event_type="SESSION_STATE_UPDATED",
             session_id=sid,
+            tenant_id=tenant_id,
             step_key="control_plane.merge_session_state",
             trace_token=str(trace_token or ""),
-            payload={"state": persisted_patch},
+            payload={"tenant_id": tenant_id, "state": persisted_patch},
             committed=True,
         )
         patch = dict(state_patch or {})
-        session = self.registry.get_or_create(sid)
+        session = self.registry.get_or_create(sid, tenant_id=tenant_id)
         existing = session.setdefault("state", {}) if isinstance(session, dict) else {}
         if not isinstance(existing, dict):
             return patch
@@ -1999,11 +2088,11 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
             resolved.stream_sink = legacy_options["stream_sink"]
         return resolved
 
-    async def create_session(self, session_id: str) -> dict[str, Any]:
-        return await self.registry.create_session(session_id)
+    async def create_session(self, session_id: str, *, tenant_id: str | None = None) -> dict[str, Any]:
+        return await self.registry.create_session(session_id, tenant_id=tenant_id)
 
-    def terminate_session(self, session_id: str) -> None:
-        self.registry.terminate_session(session_id)
+    def terminate_session(self, session_id: str, *, tenant_id: str | None = None) -> None:
+        self.registry.terminate_session(session_id, tenant_id=tenant_id)
 
     def _active_lease_count(self) -> int:
         snapshot = dict(self.lifecycle_projection.snapshot() or {})
@@ -2118,7 +2207,7 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         request_id: str,
         effect_id: str,
         metadata: dict[str, Any],
-    ) -> tuple[str, tuple[str, str, str], asyncio.Future[FinalizedTurnResult] | None, bool, FinalizedTurnResult | None]:
+    ) -> tuple[str, tuple[str, str, str, str], asyncio.Future[FinalizedTurnResult] | None, bool, FinalizedTurnResult | None]:
         self._emit_progress_snapshot(
             phase="before_replay",
             session_id=session_key,
@@ -2148,7 +2237,7 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
             effect_id=effect_id,
             metadata=metadata,
         )
-        dedupe_key = (session_key, request_id, effect_id)
+        dedupe_key = (str(metadata.get("tenant_id") or ""), session_key, request_id, effect_id)
         dedupe_future, owns_dedupe_slot = await self._acquire_preflight_dedupe_slot(
             request_id=request_id,
             effect_id=effect_id,
@@ -2174,7 +2263,7 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         effect_id: str,
         metadata: dict[str, Any],
         durable_result: FinalizedTurnResult | None,
-    ) -> tuple[str, tuple[str, str, str], None, bool, FinalizedTurnResult] | None:
+    ) -> tuple[str, tuple[str, str, str, str], None, bool, FinalizedTurnResult] | None:
         if durable_result is None:
             return None
         self._emit_progress_snapshot(
@@ -2186,7 +2275,12 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
             note="durable completed result returned",
             extra={"request_id": request_id},
         )
-        return effect_id, (session_key, request_id, effect_id), None, False, durable_result
+        return effect_id, (
+            str(metadata.get("tenant_id") or ""),
+            session_key,
+            request_id,
+            effect_id,
+        ), None, False, durable_result
 
     def _resolve_preflight_effect_id(
         self,
@@ -2198,6 +2292,7 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
     ) -> str:
         if not effect_id and request_id:
             effect_id = self._effect_journal.derive_effect_id(
+                tenant_id=str(metadata.get("tenant_id") or ""),
                 session_id=session_key,
                 request_id=request_id,
                 trace_id=str(metadata.get("trace_id") or ""),
@@ -2214,7 +2309,7 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         *,
         request_id: str,
         effect_id: str,
-        dedupe_key: tuple[str, str, str],
+        dedupe_key: tuple[str, str, str, str],
     ) -> tuple[asyncio.Future[FinalizedTurnResult] | None, bool]:
         dedupe_future: asyncio.Future[FinalizedTurnResult] | None = None
         owns_dedupe_slot = False
@@ -2322,7 +2417,13 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
             )
 
         if not request_id and not str(metadata.get("effect_id") or "").strip():
-            candidate_job_id = ExecutionJob._stable_token(session_key, trace_id, prefix="job")
+            tenant_id = resolve_tenant_id(metadata.get("tenant_id"))
+            candidate_job_id = ExecutionJob._stable_token(
+                tenant_id,
+                session_key,
+                trace_id,
+                prefix="job",
+            )
             projected_candidate = self.lifecycle_projection.get(candidate_job_id)
             if projected_candidate is not None and projected_candidate.status in {
                 ExecutionStatus.COMPLETED,
@@ -3580,7 +3681,14 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         metadata: dict[str, Any] | None = None,
         timeout_seconds: float | None = None,
     ) -> FinalizedTurnResult:
-        session_key = str(session_id or "default")
+        session_key = str(session_id or "")
+        tenant_id = resolve_tenant_id(metadata.get("tenant_id") if isinstance(metadata, dict) else None)
+        if not session_key:
+            raise ValueError("session_id is required")
+        if isinstance(metadata, dict) and metadata.get("tenant_id") not in (None, tenant_id):
+            raise ValueError("metadata tenant identity does not match the active session")
+        if isinstance(metadata, dict):
+            metadata["tenant_id"] = tenant_id
         if self.registry.is_terminated(session_key):
             raise RuntimeError(f"session {session_key!r} has been terminated")
         # Refresh distributed authority lease before checking to ensure thin-spine path
@@ -3738,29 +3846,67 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         metadata: dict[str, Any] | None = None,
         timeout_seconds: float | None = None,
     ) -> FinalizedTurnResult:
+        md = dict(metadata or {})
+        tenant_id = str(md.get("tenant_id") or current_tenant_id() or "").strip()
+        if not tenant_id:
+            agent_service = self._get_optional_service("agent_service")
+            bot = getattr(agent_service, "bot", None)
+            tenant_id = str(getattr(getattr(bot, "config", None), "tenant_id", "") or "default").strip()
+        try:
+            from dadbot_system.delegation import _execution_authority
+        except ImportError:
+            _execution_authority = None
+        if _execution_authority is not None and _execution_authority.get() is not None and not md.get("tenant_id"):
+            raise ValueError("tenant_id is required for authenticated control-plane submission")
+        md["tenant_id"] = tenant_id
         # Structural anchor: _validate_trace_invariant is executed in _submit_turn_kernel.
         assert callable(getattr(self, "_validate_trace_invariant", None))
-        return await self.kernel_gateway.submit_turn(
-            session_id=session_id,
-            user_input=user_input,
-            attachments=attachments,
-            metadata=metadata,
-            timeout_seconds=timeout_seconds,
-        )
+        with tenant_session_scope(tenant_id, session_id):
+            return await self.kernel_gateway.submit_turn(
+                session_id=session_id,
+                user_input=user_input,
+                attachments=attachments,
+                metadata=md,
+                timeout_seconds=timeout_seconds,
+            )
 
-    def ledger_events(self) -> list[dict[str, Any]]:
-        return self.ledger.read()
+    def ledger_events(
+        self,
+        *,
+        tenant_id: str | None = None,
+        session_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        tenant = resolve_tenant_id(tenant_id, default_tenant_id=self._default_tenant_id)
+        events = [
+            event
+            for event in self.ledger.read()
+            if str(event.get("tenant_id") or "") == tenant
+        ]
+        if session_id is not None:
+            sid = str(session_id or "").strip()
+            if not sid:
+                raise ValueError("session_id must be non-empty when supplied")
+            events = [event for event in events if str(event.get("session_id") or "") == sid]
+        return events
 
-    def execution_timeline(self, *, session_id: str, limit: int = 128) -> list[dict[str, Any]]:
-        session = self.registry.get_or_create(str(session_id or "default"))
+    def execution_timeline(
+        self,
+        *,
+        session_id: str,
+        limit: int = 128,
+        tenant_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        tenant = resolve_tenant_id(tenant_id, default_tenant_id=self._default_tenant_id)
+        session = self.registry.get_or_create(str(session_id or "default"), tenant_id=tenant)
         state = session.setdefault("state", {}) if isinstance(session, dict) else {}
         if not isinstance(state, dict):
             return []
         timeline = [dict(item) for item in list(state.get("execution_timeline") or []) if isinstance(item, dict)]
         return timeline[-max(0, int(limit)):]
 
-    def explain_last_decision(self, *, session_id: str) -> dict[str, Any]:
-        session = self.registry.get_or_create(str(session_id or "default"))
+    def explain_last_decision(self, *, session_id: str, tenant_id: str | None = None) -> dict[str, Any]:
+        tenant = resolve_tenant_id(tenant_id, default_tenant_id=self._default_tenant_id)
+        session = self.registry.get_or_create(str(session_id or "default"), tenant_id=tenant)
         state = session.setdefault("state", {}) if isinstance(session, dict) else {}
         if not isinstance(state, dict):
             return dict(
@@ -3782,7 +3928,7 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
                     },
                 ),
             )
-        timeline = self.execution_timeline(session_id=session_id, limit=64)
+        timeline = self.execution_timeline(session_id=session_id, limit=64, tenant_id=tenant)
         last_plan = {}
         for event in reversed(timeline):
             if str(event.get("event_type") or "") in {"plan.updated", "plan.created"}:
@@ -3941,16 +4087,20 @@ class ExecutionControlPlane(ReconciliationMixin, CompactionMixin):
         session_store.rebuild_from_ledger(events)
         persisted_sessions = sorted(
             {
-                str(event.get("session_id") or "default")
+                (
+                    str(event.get("tenant_id") or "").strip(),
+                    str(event.get("session_id") or "default"),
+                )
                 for event in events
                 if str(event.get("type") or "") == "SESSION_STATE_UPDATED"
+                and str(event.get("tenant_id") or "").strip()
             },
         )
-        for session_id in persisted_sessions:
-            projected_state = session_store.get(session_id)
+        for tenant_id, session_id in persisted_sessions:
+            projected_state = session_store.get(session_id, tenant_id=tenant_id)
             if projected_state is not None:
                 restore_system_state_projections(projected_state)
-                session = self.registry.get_or_create(session_id)
+                session = self.registry.get_or_create(session_id, tenant_id=tenant_id)
                 session["state"] = projected_state
         self._ledger_index.refresh(force=True)
         return {

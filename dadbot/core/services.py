@@ -3,26 +3,19 @@ Central service wiring for DadBot.
 Composes and injects all core components for extensibility and integration.
 """
 from dadbot.agentic.planner import ReActPlanner
+from dadbot.core.metrics import metrics
 from dadbot.runtime.env_loader import is_production_environment
+from dadbot.speech.asr import ASR
+from dadbot.speech.tts import TTS
+
 
 # Kernel boundary: do not import from dadbot.tools.executors here.
-# Use local stubs for all tool executors and registry unless injected.
-class ReminderExecutor:
-    def __init__(self): pass
-    def __call__(self, *a, **kw): return "reminder set"
-class CalendarExecutor:
-    def __init__(self): pass
-    def __call__(self, *a, **kw): return {"action": "create_calendar_event"}
-class WebSearchExecutor:
-    def __init__(self): pass
-    def __call__(self, *a, **kw): return "web search result"
+# Tools must be explicitly injected until this composition path has authorized executors.
 class ToolRegistry:
     def __init__(self): self._tools = {}
     def register(self, name, tool): self._tools[name] = tool
     def get(self, name): return self._tools.get(name)
-from dadbot.core.metrics import metrics
-from dadbot.speech.asr import ASR
-from dadbot.speech.tts import TTS
+    def describe_all(self): return ', '.join(self._tools.keys())
 
 def build_services(**overrides):
     """
@@ -41,15 +34,10 @@ def build_services(**overrides):
                 + ", ".join(missing),
             )
 
-    # Phase B tool registry with all executors
+    # This legacy planner registry stays empty unless callers inject real executors.
     tool_registry = overrides.get('tool_registry')
     if tool_registry is None:
         tool_registry = ToolRegistry()
-    # Only register local stubs if not injected
-    if overrides.get('tool_registry') is None:
-        tool_registry.register('reminder', ReminderExecutor())
-        tool_registry.register('calendar', CalendarExecutor())
-        tool_registry.register('web_search', WebSearchExecutor())
     planner = overrides.get('planner')
     if planner is None:
         planner = ReActPlanner(

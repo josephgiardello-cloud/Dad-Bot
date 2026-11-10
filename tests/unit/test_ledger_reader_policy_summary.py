@@ -17,6 +17,7 @@ def test_summarize_policy_events_rolls_up_actions_and_policy() -> None:
     writer.write_event(
         event_type="PolicyTraceEvent",
         session_id="s-1",
+        tenant_id="tenant-a",
         trace_id="t-1",
         kernel_step_id="save_node.policy_trace",
         payload={
@@ -31,6 +32,7 @@ def test_summarize_policy_events_rolls_up_actions_and_policy() -> None:
     writer.write_event(
         event_type="PolicyTraceEvent",
         session_id="s-1",
+        tenant_id="tenant-a",
         trace_id="t-1",
         kernel_step_id="save_node.policy_trace",
         payload={
@@ -43,7 +45,11 @@ def test_summarize_policy_events_rolls_up_actions_and_policy() -> None:
         committed=False,
     )
 
-    summary = reader.summarize_policy_trace_events(session_id="s-1", trace_id="t-1")
+    summary = reader.summarize_policy_trace_events(
+        session_id="s-1",
+        trace_id="t-1",
+        tenant_id="tenant-a",
+    )
 
     assert summary["event_type"] == "PolicyTraceEvent"
     assert summary["event_count"] == 2

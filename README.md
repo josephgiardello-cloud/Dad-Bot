@@ -42,7 +42,7 @@ contracts have narrow, strict xfails with explicit reasons; the canonical
 - **Actually remembers you**: Learns from your conversations over weeks/months. Tracks your goals, relationships, mood patterns.
 - **Feels real**: Adaptive personality, emotional awareness, proactive check-ins. More than a chatbot.
 - **Privacy controls**: Ollama chat and local voice backends are available; Auto voice may select a cloud-backed TTS service when installed/configured.
-- **Voice support path**: Local STT/Piper options and optional edge-tts/ElevenLabs backends are included; setup maturity depends on your machine tooling.
+- **Voice support path**: Browser voice capture can transcribe locally, submit a normal runtime turn, and synthesize the reply in local Piper sentence chunks. A Piper model must be configured; full-duplex streaming and acoustic barge-in are still experimental.
 - **No subscriptions**: Install once, use forever.
 
 ---
@@ -52,7 +52,7 @@ contracts have narrow, strict xfails with explicit reasons; the canonical
 
 - 🧠 **Deep Long-Term Memory** — Remembers conversations, goals, relationships, and emotional context
 - 💭 **Relationship Modeling** — Understands trust, emotional momentum, and personal history
-- 🎤 **Voice Pipeline (Experimental)** — Local STT/TTS integration hooks are present; full turnkey setup is still maturing
+- 🎤 **Voice Pipeline (Partial)** — Browser capture → local Whisper → canonical conversation runtime → local Piper reply is wired. Streaming playback, VAD turn detection, and hands-free barge-in are not yet certified.
 - 📜 **Oral History Capture** — Record or upload audio, review and correct the local transcript, then explicitly save it as an `oral_history` memory. The original audio is not retained.
 - 📅 **Calendar & Proactive Flows (Partial)** — Core reminder/check-in plumbing exists; full calendar-sync automation remains in progress
 - 📬 **Proactive Flows** — Daily check-in is fully supported; calendar sync and advanced scheduling are in development.
@@ -573,6 +573,49 @@ Every proposed MCP call pauses for explicit approval in the Chat page. The UI sh
 
 The MCP loop returns the model's validated final answer, prompted in the Dad persona, rather than raw tool payloads or unparsed plans. If model finalization fails after tool execution, it reports that failure and warns that device actions may already have occurred; it does not claim success or fall back to a "no action performed" reply. This protection does not depend on Streamlit reply normalization.
 
+### Authenticated local MCP server
+
+The optional Dad-Bot-owned MCP server is a separate Streamable HTTP service at
+`http://127.0.0.1:8765/mcp` by default. It requires the `mcp` extra,
+`DADBOT_API_TOKEN_SECRET`, and `DADBOT_AUTHORITY_SQLITE_PATH`; use the same
+secret, issuer, and explicitly initialized authority database as the
+authenticated API. Initialize the authority database once with
+`SQLiteDelegationStore.initialize(path)` and provision active tenant memberships
+before starting the API; API startup validates the existing store but does not
+create a missing one. Then start the server with
+`python -m dadbot_system.local_mcp_server`.
+The server binds to loopback by default; changing `DADBOT_MCP_HOST` to expose
+it beyond the local machine requires an appropriately secured network boundary.
+
+An authenticated API client can exchange its API bearer token for a narrowly
+scoped MCP token. `$env:DADBOT_API_AUTH_TOKEN` must be a provisioned API token
+for an active tenant member with the base scope required by each requested
+tool:
+
+```powershell
+Invoke-RestMethod `
+  -Method Post `
+  -Uri "http://127.0.0.1:8010/v1/mcp/token" `
+  -Headers @{ Authorization = "Bearer $env:DADBOT_API_AUTH_TOKEN" } `
+  -ContentType "application/json" `
+  -Body '{"tools":["memory_snapshot","list_reminders"],"ttl_seconds":120}'
+```
+
+The caller must hold active tenant membership and the base `read` or `write`
+scope for every requested tool. Issued bearer tokens are audience-bound to
+`DADBOT_MCP_RESOURCE_URL` (default `http://127.0.0.1:8765/mcp`), include
+tool-specific grants, and expire within five minutes. The MCP server checks
+tenant authority again when each tool or resource is accessed; revocation
+therefore blocks subsequent effects. Tool listing and resource listing expose
+only items covered by the token. Set `DADBOT_MCP_RESOURCE_URL` consistently in
+the API and MCP server if the endpoint differs from the default.
+
+Startup fails closed when the approved tool manifest is missing, invalid, or
+does not match the registered tool schemas and descriptions. The manifest is a
+reviewed schema-drift lock, not a cryptographically signed manifest. Tokens use
+Dad-Bot's existing HMAC-signed service-token mechanism; this endpoint is not a
+standard OAuth 2.1 authorization server.
+
 ---
 
 ## ⚠️ Experimental Features & Warnings
@@ -860,6 +903,17 @@ does not change the in-memory ledger. On replay, the next sequence accounts for
 the highest persisted sequence, including gaps in older logs.
 Without an independent trusted chain head, whole-file truncation or complete
 replacement cannot reliably be detected.
+
+### Optional checkpoint adapters
+
+`SQLiteCheckpointer` remains the default standalone checkpoint backend.
+`PostgresCheckpointer` and `RedisCheckpointer` are opt-in adapters and require
+`trusted_local=True`; they are not automatically constructed by the application.
+`RedisPostgresCheckpointer` uses PostgreSQL as the durable authority and Redis
+only as a cache, so cache failure or stale/conflicting cache data cannot replace
+the PostgreSQL result. These adapters are not supported for authenticated
+production, which continues to require the durable file execution WAL.
+
 File-backed ledger appends now use a shared advisory file lock and verify the
 persisted chain before accepting a chained event; stale writers must reload
 before retrying. Unchained legacy records can precede chained records but
@@ -1049,7 +1103,7 @@ Anything beyond those lanes should be treated as supplemental, not mandatory.
 | Capability | Maturity | Evidence |
 |---|---|---|
 | Core local chat + memory pipeline | Available, with UI limitations | `dadbot/core/dadbot.py`, `dadbot/core/turn_mixin.py`, `dadbot/core/graph.py`; the Streamlit sample currently uses no-op turn-event/checkpoint persistence services. Profile and memory storage are separate. |
-| Voice stack hooks and optional deps | Experimental | `pyproject.toml` (`[project.optional-dependencies].voice`), `dad_streamlit.py`, `dadbot/agentic.py` |
+| Captured voice-to-reply path | Partial; full-duplex streaming not certified | `dadbot/speech/voice_loop.py`, `dadbot/ui/media/service.py`, `[project.optional-dependencies].voice` |
 | Local reminders + local calendar events | Shipped (local storage) | `dadbot/agentic.py` (`add_reminder`, `add_calendar_event`, `list_calendar_events`) |
 | Calendar feed synchronization | Partial | `dadbot/core/boot_mixin.py` (`ical_feed_url`, `schedule_calendar_sync`) |
 | Proactive heartbeat/nudges | Partial | `dadbot/core/boot_mixin.py` (`_run_proactive_heartbeat_loop`), `dadbot/assistant_runtime.py` |
@@ -1099,6 +1153,39 @@ The checked-in [system audit report](artifacts/system_audit_matrix_report.json) 
 - **Health Levels**: `green` (normal) → `yellow` (pressure) → `red` (critical)
 - **Adaptive Guardrails**: Auto-throttling when memory/prompt pressure rises
 - **Status Dashboard**: Real-time memory usage, trim counters, runtime health signals
+
+The API's `/v1/health` route is a lightweight liveness/identity response.
+`/v1/ready` returns 200 only when state storage, configured authority storage,
+and workers are available; its checks are grouped into `dependencies`,
+`runtime`, `model`, `vector`, and `memory`. Model, vector, and memory probes
+are disabled by default, preserving the existing readiness behavior. Set
+`DADBOT_READINESS_PROBES=model,vector,memory` to enable selected probes and
+`DADBOT_READINESS_REQUIRED=model,vector,memory` to make the selected checks
+gate readiness. Probe timeouts are capped at five seconds
+(`DADBOT_READINESS_PROBE_TIMEOUT_MS`, default 1000 ms), and results are cached
+for ten seconds by default (`DADBOT_READINESS_PROBE_CACHE_SECONDS`). The model
+probe checks the configured Ollama model via `/api/tags`; the vector probe
+checks `DADBOT_VECTOR_STORE_URL` as a PostgreSQL DSN or HTTP(S) endpoint.
+The memory probe checks the configured semantic retrieval backend's connection
+with `SELECT 1`; it does not generate or assess embeddings. Memory retrieval
+status counts in `/v1/doctor` summarize the latest 100 in-process retrieval
+status observations and include no queries, memory content, or exception text.
+Compose does not enable these probes by default; production deployments should
+require model readiness when Ollama availability is necessary to serve turns,
+and require vector/memory readiness only when those backends are part of the
+serving path.
+The admin-scoped `/v1/doctor` route adds tool-registry, trace-provider, and
+cached runtime-health diagnostics and reflects enabled probe results.
+Pending-approval status is reported as not exposed until the API has an
+approval-status provider.
+
+Authenticated clients with session read access can request
+`GET /v1/sessions/{session_id}/actions/explain?limit=10` for a bounded,
+human-readable explanation of the latest turn's tool actions. The response is
+tenant-scoped and built from checksum-validated audit events; it includes
+authority decision metadata and input/output fingerprints, but never raw tool
+arguments or results. It is an explanation of recorded action metadata, not a
+replay or proof of the complete conversation.
 
 #### Local OpenTelemetry span export
 
@@ -1190,6 +1277,7 @@ refusals and lexical false positives remain possible.
 
 - **Local mode** — Ollama chat, local STT, and Piper TTS can be configured to stay on-device.
 - **Cloud voice mode** — edge-tts and ElevenLabs send reply text to their respective services; the Auto backend can choose them when available. Do not use Auto when strict local-only processing is required.
+- **Local voice setup** — Install the `voice` extra with `uv sync --extra voice`, configure a Piper model path in Voice preferences, and select local Piper. Audio is held transiently during capture and is not saved as memory.
 - **Diagnostics** — Local logs, events, and snapshots may contain conversation text. Local inference does not mean that no data is written to disk.
 - **Story Mode Lock** — Optional password protection for sensitive contexts
 - **Data export** — Full access to your memory files (JSON, SQLite)

@@ -490,6 +490,140 @@ class TestDadBotRegression(unittest.TestCase):
         self.assertEqual(snapshot["planner_tool"], "set_reminder")
         self.assertEqual(snapshot["final_path"], "planner_tool")
 
+    def test_reminder_tool_authorization_and_restart_idempotency(self):
+        import time
+
+        from dadbot_system.delegation import SQLiteDelegationStore, runtime_authority_scope
+        from dadbot_system.security import ServicePrincipal
+        from dadbot.core.memory_set_invariants import record_causal_step_locked
+
+        tenant_id = "t1_aaaaaaaaaaaaaaaaaaaaaaaaaa"
+        subject = "reminder-workflow-test"
+        authority_path = Path(self.temp_dir.name) / "reminder-authority.sqlite"
+        SQLiteDelegationStore.initialize(str(authority_path))
+        authority = SQLiteDelegationStore(str(authority_path), "reminder-test-secret")
+        authority.grant_membership(
+            issuer="dadbot",
+            subject=subject,
+            tenant_id=tenant_id,
+            scopes={"write"},
+        )
+        principal = ServicePrincipal(
+            subject=subject,
+            tenant_id=tenant_id,
+            scopes=frozenset({"write"}),
+            allowed_tools=frozenset(),
+            issuer="dadbot",
+            expires_at=time.time() + 3600,
+            token_id="reminder-workflow",
+        )
+        memory_path = Path(self.bot.MEMORY_PATH)
+        command = "Remind me to water the plants"
+        trace_id = "reminder-restart-idempotency"
+
+        self.bot.update_agentic_tool_profile(
+            {"enabled": True, "auto_reminders": True, "auto_web_lookup": False},
+            save=False,
+        )
+        self.bot._service_request_policy = {"allowed_tools": []}
+        with runtime_authority_scope(
+            authority,
+            principal,
+            scope="write",
+            tenant_id=tenant_id,
+        ):
+            denied_reply, denied_observation = self.bot.turn_service.plan_agentic_tools(
+                command,
+                "neutral",
+                turn_context=TurnContext(user_input=command, trace_id=trace_id),
+            )
+
+        self.assertIsNone(denied_reply)
+        self.assertIn("not authorized", denied_observation.lower())
+        self.assertEqual(self.bot.reminder_catalog(include_done=True), [])
+        self.assertEqual(self.bot.planner_debug_snapshot()["planner_status"], "authorization_denied")
+
+        async_denied_reply, async_denied_observation = asyncio.run(
+            self.bot.turn_service.plan_agentic_tools_async(
+                command,
+                "neutral",
+                turn_context=TurnContext(user_input=command),
+            )
+        )
+        self.assertIsNone(async_denied_reply)
+        self.assertIn("not authorized", async_denied_observation.lower())
+        self.assertEqual(self.bot.reminder_catalog(include_done=True), [])
+
+        self.bot._service_request_policy = {"allowed_tools": ["set_reminder"]}
+        first_context = TurnContext(user_input=command, trace_id=trace_id)
+        record_causal_step_locked(
+            first_context.state,
+            "retrieval",
+            context="reminder-workflow-test",
+        )
+        with runtime_authority_scope(
+            authority,
+            principal,
+            scope="write",
+            tenant_id=tenant_id,
+        ):
+            reply, observation = self.bot.turn_service.plan_agentic_tools(
+                command,
+                "neutral",
+                turn_context=first_context,
+            )
+
+        self.assertIsNone(observation)
+        self.assertIn("set that reminder", reply.lower())
+        first_reminders = self.bot.reminder_catalog(include_done=True)
+        self.assertEqual(len(first_reminders), 1)
+        self.assertEqual(first_context.state["decision_outcome"], "executed_tool")
+        self.assertTrue(first_context.state["sovereign_events"])
+
+        restarted_bot = self.make_bot(memory_path=memory_path, tenant_id=tenant_id)
+        restarted_bot.update_agentic_tool_profile(
+            {"enabled": True, "auto_reminders": True, "auto_web_lookup": False},
+            save=False,
+        )
+        restarted_bot._service_request_policy = {"allowed_tools": ["set_reminder"]}
+        replay_context = TurnContext(user_input=command, trace_id=trace_id)
+        record_causal_step_locked(
+            replay_context.state,
+            "retrieval",
+            context="reminder-workflow-test",
+        )
+        with runtime_authority_scope(
+            authority,
+            principal,
+            scope="write",
+            tenant_id=tenant_id,
+        ):
+            replay_reply, replay_observation = restarted_bot.turn_service.plan_agentic_tools(
+                command,
+                "neutral",
+                turn_context=replay_context,
+            )
+
+        self.assertIsNone(replay_observation)
+        self.assertIn("set that reminder", replay_reply.lower())
+        restarted_reminders = restarted_bot.reminder_catalog(include_done=True)
+        self.assertEqual(len(restarted_reminders), 1)
+        self.assertEqual(restarted_reminders[0]["id"], first_reminders[0]["id"])
+
+    def test_deterministic_reminder_rejects_oversized_title(self):
+        self.bot.update_agentic_tool_profile(
+            {"enabled": True, "auto_reminders": True, "auto_web_lookup": False},
+            save=False,
+        )
+        command = f"Remind me to {'x' * 301}"
+
+        reply, observation = self.bot.turn_service.plan_agentic_tools(command, "neutral")
+
+        self.assertIsNone(reply)
+        self.assertIn("title too long", observation.lower())
+        self.assertEqual(self.bot.reminder_catalog(include_done=True), [])
+        self.assertEqual(self.bot.planner_debug_snapshot()["planner_status"], "invalid_parameters")
+
     def test_prepare_user_turn_uses_planner_before_heuristic_tool_logic(self):
         self.bot.mood_manager.detect = lambda *_args, **_kwargs: "neutral"
         self.bot.direct_reply_for_input = lambda *_args, **_kwargs: None
@@ -1745,8 +1879,9 @@ class TestDadBotRegression(unittest.TestCase):
     def test_memory_extraction_prompt_requires_json_array(self):
         prompt = self.bot.memory_extraction_prompt()
 
-        self.assertIn("Return ONLY a JSON array of objects.", prompt)
-        self.assertIn('"summary"', prompt)
+        self.assertIn("Return only a JSON array", prompt)
+        self.assertIn('"fact"', prompt)
+        self.assertIn("Do not paraphrase", prompt)
 
     def test_build_cross_session_context_includes_consolidated_memories(self):
         self.bot.MEMORY_STORE = {**self.bot.MEMORY_STORE, "consolidated_memories": [

@@ -202,7 +202,12 @@ class ChatRequest:
             AttachmentPayload.from_dict(item) for item in payload.get("attachments", []) if isinstance(item, dict)
         ]
         metadata = dict(payload.get("metadata") or {})
-        gateway = extract_gateway_metadata(payload, channel_name=payload.get("channel"))
+        gateway_metadata = metadata.get("gateway")
+        existing_gateway = gateway_metadata if isinstance(gateway_metadata, dict) else {}
+        gateway = extract_gateway_metadata(
+            {**payload, "gateway": existing_gateway},
+            channel_name=payload.get("channel") or existing_gateway.get("channel"),
+        )
         if gateway:
             metadata["gateway"] = gateway
         return cls(
@@ -276,6 +281,10 @@ class ApiSettings:
     )
     version_prefix: str = "/v1"
     legacy_routes_enabled: bool = True
+    readiness_probes: list[str] = field(default_factory=list)
+    readiness_required_probes: list[str] = field(default_factory=list)
+    readiness_probe_timeout_ms: int = 1000
+    readiness_probe_cache_seconds: int = 10
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -355,6 +364,24 @@ class ServiceConfig:
         config.api.legacy_routes_enabled = env_flag(
             "DADBOT_API_LEGACY_ROUTES_ENABLED",
             config.api.legacy_routes_enabled,
+        )
+        config.api.readiness_probes = [
+            item.strip().lower()
+            for item in env_csv("DADBOT_READINESS_PROBES", [])
+            if item.strip()
+        ]
+        config.api.readiness_required_probes = [
+            item.strip().lower()
+            for item in env_csv("DADBOT_READINESS_REQUIRED", [])
+            if item.strip()
+        ]
+        config.api.readiness_probe_timeout_ms = min(
+            5000,
+            max(1, env_int("DADBOT_READINESS_PROBE_TIMEOUT_MS", config.api.readiness_probe_timeout_ms)),
+        )
+        config.api.readiness_probe_cache_seconds = max(
+            0,
+            env_int("DADBOT_READINESS_PROBE_CACHE_SECONDS", config.api.readiness_probe_cache_seconds),
         )
         config.security.auth_required = env_flag("DADBOT_API_AUTH_REQUIRED", config.security.auth_required)
         config.security.token_secret = str(os.environ.get("DADBOT_API_TOKEN_SECRET") or "").strip()
@@ -440,6 +467,7 @@ class WorkerResult:
     error: str = ""
     completed_at: str = field(default_factory=utc_now_iso)
     authority_proof: str = ""
+    retryable: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -453,6 +481,7 @@ class WorkerResult:
             "error": self.error,
             "completed_at": self.completed_at,
             "authority_proof": self.authority_proof,
+            "retryable": self.retryable,
         }
 
 

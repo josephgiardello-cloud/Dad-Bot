@@ -54,6 +54,7 @@ dad_run_stderr.log
 # Temp pytest helpers generated at runtime
 _tmp_pytest_*.py
 .pytest_tmp_*/
+.phase32-test-data/
 .pytest_slice_output.txt
 .unittest_regression_verbose.log
 _full_suite_enforce_latest.txt

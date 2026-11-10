@@ -30,6 +30,9 @@ from dadbot.core.ledger_writer import LedgerWriter
 from dadbot.core.session_store import SessionStore
 
 _SNAPSHOT_EVENT_TYPE = "ledger_snapshot_projection"
+_TENANT_SESSION_KEY_PREFIX = "tenant-session:v1:"
+_LEGACY_SESSION_KEY_PREFIX = "legacy-session:v1:"
+_SESSION_KEY_ENCODING = "tenant-session-json-v1"
 
 
 class SnapshotConsistencyError(RuntimeError):
@@ -80,6 +83,7 @@ class SnapshotEngine:
             "reduced_state": deepcopy(reduced_state),
             "session_snapshot": deepcopy(store_snapshot),
         }
+        snapshot = self._normalize_snapshot_session_keys(snapshot)
         snapshot["snapshot_hash"] = self._hash_snapshot(snapshot)
 
         self._ledger_ref = ledger
@@ -115,21 +119,57 @@ class SnapshotEngine:
         store_snap = snapshot.get("session_snapshot")
         if not isinstance(store_snap, dict) or not isinstance(store_snap.get("sessions"), dict):
             raise SnapshotConsistencyError("Snapshot must contain a session projection")
+        encoded_keys = store_snap.get("session_key_encoding") == _SESSION_KEY_ENCODING
+        if store_snap.get("session_key_encoding") not in (None, _SESSION_KEY_ENCODING):
+            raise SnapshotConsistencyError("Snapshot contains an unsupported session identity encoding")
         sessions = store_snap["sessions"]
         seed_events: list[dict[str, Any]] = []
-        for session_id, state in sessions.items():
-            if not isinstance(session_id, str) or not session_id or not isinstance(state, dict):
+        for encoded_session_id, state in sessions.items():
+            if not isinstance(encoded_session_id, str) or not encoded_session_id or not isinstance(state, dict):
                 raise SnapshotConsistencyError("Snapshot contains an invalid session projection")
+            tenant_id, session_id = (
+                SnapshotEngine._decode_snapshot_session_identity(encoded_session_id)
+                if encoded_keys
+                else (None, encoded_session_id)
+            )
             seed_events.append(
                 {
                     "type": "SESSION_STATE_UPDATED",
-                    "session_id": str(session_id or "default"),
+                    "session_id": session_id,
+                    **({"tenant_id": tenant_id} if tenant_id is not None else {}),
                     "kernel_step_id": "snapshot_engine.restore",
                     "trace_id": "snapshot_engine.restore",
                     "payload": {"state": dict(state)},
                 },
             )
         return seed_events
+
+    @staticmethod
+    def _decode_snapshot_session_identity(encoded_identity: str) -> tuple[str | None, str]:
+        if encoded_identity.startswith(_TENANT_SESSION_KEY_PREFIX):
+            try:
+                identity = json.loads(encoded_identity[len(_TENANT_SESSION_KEY_PREFIX):])
+            except json.JSONDecodeError as exc:
+                raise SnapshotConsistencyError("Snapshot contains an invalid tenant session identity") from exc
+            if (
+                not isinstance(identity, list)
+                or len(identity) != 2
+                or not all(isinstance(part, str) for part in identity)
+                or not identity[0]
+                or not identity[1]
+            ):
+                raise SnapshotConsistencyError("Snapshot contains an invalid tenant session identity")
+            tenant_id, session_id = identity
+            return tenant_id, session_id
+        if encoded_identity.startswith(_LEGACY_SESSION_KEY_PREFIX):
+            try:
+                session_id = json.loads(encoded_identity[len(_LEGACY_SESSION_KEY_PREFIX):])
+            except json.JSONDecodeError as exc:
+                raise SnapshotConsistencyError("Snapshot contains an invalid legacy session identity") from exc
+            if not isinstance(session_id, str) or not session_id:
+                raise SnapshotConsistencyError("Snapshot contains an invalid legacy session identity")
+            return None, session_id
+        return None, encoded_identity
 
     def replay_tail(
         self,
@@ -228,12 +268,47 @@ class SnapshotEngine:
 
     @staticmethod
     def _hash_snapshot(data: dict[str, Any]) -> str:
+        normalized = SnapshotEngine._normalize_snapshot_session_keys(data)
         serialized = json.dumps(
-            {key: value for key, value in sorted(data.items()) if key != "snapshot_hash"},
+            {key: value for key, value in sorted(normalized.items()) if key != "snapshot_hash"},
             sort_keys=True,
             default=str,
         ).encode("utf-8")
         return hashlib.sha256(serialized).hexdigest()
+
+    @staticmethod
+    def _normalize_snapshot_session_keys(data: dict[str, Any]) -> dict[str, Any]:
+        normalized = deepcopy(data)
+        store_snapshot = normalized.get("session_snapshot")
+        if not isinstance(store_snapshot, dict) or not isinstance(store_snapshot.get("sessions"), dict):
+            return normalized
+        encoding = store_snapshot.get("session_key_encoding")
+        if encoding == _SESSION_KEY_ENCODING:
+            if any(not isinstance(identity, str) for identity in store_snapshot["sessions"]):
+                raise SnapshotConsistencyError("Encoded snapshot session identities must be strings")
+            return normalized
+        if encoding is not None:
+            raise SnapshotConsistencyError("Snapshot contains an unsupported session identity encoding")
+
+        sessions: dict[str, Any] = {}
+        for identity, state in store_snapshot["sessions"].items():
+            if isinstance(identity, tuple) and len(identity) == 2 and all(isinstance(part, str) for part in identity):
+                encoded_identity = _TENANT_SESSION_KEY_PREFIX + json.dumps(list(identity), separators=(",", ":"))
+            elif isinstance(identity, str):
+                encoded_identity = (
+                    _LEGACY_SESSION_KEY_PREFIX + json.dumps(identity, separators=(",", ":"))
+                    if identity.startswith((_TENANT_SESSION_KEY_PREFIX, _LEGACY_SESSION_KEY_PREFIX))
+                    else identity
+                )
+            else:
+                raise SnapshotConsistencyError("Snapshot contains an invalid session identity")
+            if encoded_identity in sessions:
+                raise SnapshotConsistencyError("Snapshot contains duplicate serialized session identities")
+            sessions[encoded_identity] = state
+
+        store_snapshot["sessions"] = sessions
+        store_snapshot["session_key_encoding"] = _SESSION_KEY_ENCODING
+        return normalized
 
     def _append_snapshot_event(
         self,

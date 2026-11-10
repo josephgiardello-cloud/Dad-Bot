@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dadbot.core.execution_ledger import ExecutionLedger
+from dadbot.core.tenant_session import current_tenant_id, resolve_tenant_id
 
 POLICY_TRACE_EVENT_TYPE = "PolicyTraceEvent"
 
@@ -11,22 +12,48 @@ class LedgerReader:
     def __init__(self, ledger: ExecutionLedger):
         self._ledger = ledger
 
-    def events(self) -> list[dict[str, object]]:
-        return self._ledger.read()
+    def events(
+        self,
+        *,
+        tenant_id: str | None = None,
+        include_all_tenants: bool = False,
+    ) -> list[dict[str, object]]:
+        events = self._ledger.read()
+        if include_all_tenants:
+            if tenant_id is not None:
+                raise ValueError("tenant_id cannot be combined with include_all_tenants")
+            if current_tenant_id():
+                raise ValueError("all-tenant ledger reads are not available in a tenant session scope")
+            return events
+        tenant = resolve_tenant_id(tenant_id)
+        return [event for event in events if str(event.get("tenant_id") or "") == tenant]
 
-    def events_for_job(self, job_id: str) -> list[dict[str, object]]:
+    def events_for_job(self, job_id: str, *, tenant_id: str | None = None) -> list[dict[str, object]]:
         jid = str(job_id or "")
+        if not jid:
+            raise ValueError("job_id is required")
+        tenant = resolve_tenant_id(tenant_id)
         return [
             e
-            for e in self._ledger.read()
+            for e in self.events(tenant_id=tenant)
             if str((e.get("payload") or {}).get("job_id") or e.get("job_id") or "") == jid
         ]
 
-    def events_by_type(self, event_type: str) -> list[dict[str, object]]:
+    def events_by_type(
+        self,
+        event_type: str,
+        *,
+        tenant_id: str | None = None,
+        include_all_tenants: bool = False,
+    ) -> list[dict[str, object]]:
         target = str(event_type or "").strip()
         if not target:
             return []
-        return [e for e in self._ledger.read() if str(e.get("type") or "") == target]
+        return [
+            event
+            for event in self.events(tenant_id=tenant_id, include_all_tenants=include_all_tenants)
+            if str(event.get("type") or "") == target
+        ]
 
     @staticmethod
     def _resolve_policy_trace_filters(
@@ -49,9 +76,11 @@ class LedgerReader:
         *,
         session_id: str,
         trace_token: str,
+        tenant_id: str,
     ) -> list[dict[str, object]]:
         if session_id:
             events = [event for event in events if str(event.get("session_id") or "") == session_id]
+        events = [event for event in events if str(event.get("tenant_id") or "") == tenant_id]
         if trace_token:
             events = [event for event in events if str(event.get("trace_id") or "") == trace_token]
         return events
@@ -62,15 +91,17 @@ class LedgerReader:
         session_id: str = "",
         trace_token: str = "",
         limit: int = 0,
+        tenant_id: str | None = None,
         **legacy_kwargs: object,
     ) -> list[dict[str, object]]:
+        tenant = resolve_tenant_id(tenant_id)
         sid, tid = self._resolve_policy_trace_filters(
             session_id=session_id,
             trace_token=trace_token,
             legacy_kwargs=dict(legacy_kwargs),
         )
-        events = self.events_by_type(POLICY_TRACE_EVENT_TYPE)
-        events = self._filter_policy_events(events, session_id=sid, trace_token=tid)
+        events = self.events_by_type(POLICY_TRACE_EVENT_TYPE, tenant_id=tenant)
+        events = self._filter_policy_events(events, session_id=sid, trace_token=tid, tenant_id=tenant)
         if limit and limit > 0:
             return events[-int(limit):]
         return events
@@ -136,6 +167,7 @@ class LedgerReader:
         session_id: str = "",
         trace_token: str = "",
         limit: int = 0,
+        tenant_id: str | None = None,
         **legacy_kwargs: object,
     ) -> dict[str, object]:
         _, resolved_trace_token = self._resolve_policy_trace_filters(
@@ -147,6 +179,7 @@ class LedgerReader:
             session_id=session_id,
             trace_token=resolved_trace_token,
             limit=limit,
+            tenant_id=tenant_id,
         )
 
         action_counts, policies_seen, latest_action, latest_step_name, latest_trace_id = (
@@ -162,8 +195,8 @@ class LedgerReader:
             latest_trace_id,
         )
 
-    def is_terminal(self, job_id: str) -> bool:
-        for event in reversed(self.events_for_job(job_id)):
+    def is_terminal(self, job_id: str, *, tenant_id: str | None = None) -> bool:
+        for event in reversed(self.events_for_job(job_id, tenant_id=tenant_id)):
             event_type = str(event.get("type") or "")
             if event_type in {"JOB_COMPLETED", "JOB_FAILED"}:
                 return True

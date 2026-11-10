@@ -5,6 +5,7 @@ import inspect
 import logging
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextvars import copy_context
 from dataclasses import dataclass, field
 from datetime import datetime
 from threading import Event, RLock
@@ -64,7 +65,8 @@ class BackgroundTaskManager:
             )
             self._tasks[resolved_task_id] = task
 
-        future = self.executor.submit(self._run_task, task.task_id, func, args, kwargs)
+        context = copy_context()
+        future = self.executor.submit(context.run, self._run_task, task.task_id, func, args, kwargs)
         future.dadbot_task_id = task.task_id
         future.dadbot_task_kind = task.kind
         with self._lock:

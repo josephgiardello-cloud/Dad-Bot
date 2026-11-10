@@ -58,6 +58,8 @@ def _deterministic_event_id(payload: dict[str, Any]) -> str:
             payload.get("payload"),
         ),
     }
+    if "tenant_id" in payload:
+        seed["tenant_id"] = str(payload.get("tenant_id") or "")
     return (
         "evt-"
         + hashlib.sha256(
@@ -68,7 +70,7 @@ def _deterministic_event_id(payload: dict[str, Any]) -> str:
 
 def _canonical_event_for_hash(event: dict[str, Any]) -> dict[str, Any]:
     event_type = str(event.get("type") or "")
-    return {
+    canonical = {
         "type": event_type,
         "session_id": str(event.get("session_id") or ""),
         "session_index": int(event.get("session_index") or 0),
@@ -77,6 +79,9 @@ def _canonical_event_for_hash(event: dict[str, Any]) -> dict[str, Any]:
         "event_id": str(event.get("event_id") or ""),
         "payload": _canonical_trace_payload(event_type, event.get("payload")),
     }
+    if "tenant_id" in event:
+        canonical["tenant_id"] = str(event.get("tenant_id") or "")
+    return canonical
 
 
 def _event_sha256(event: dict[str, Any]) -> str:
@@ -151,8 +156,8 @@ class ExecutionLedger:
             "version": 0,
         }
         self._lock = threading.RLock()
-        self._session_heads: dict[str, str] = {}
-        self._session_indices: dict[str, int] = {}
+        self._session_heads: dict[tuple[str, str], str] = {}
+        self._session_indices: dict[tuple[str, str], int] = {}
         self._write_guard_depth = 0
         self._tenant_memory_commit_depth = 0
         self._strict_writes = bool(strict_writes)
@@ -246,21 +251,23 @@ class ExecutionLedger:
 
     def _apply_session_lineage(self, payload: dict[str, Any]) -> tuple[str, str]:
         session_id = str(payload.get("session_id") or "")
+        tenant_id = str(payload.get("tenant_id") or "")
+        identity = (tenant_id, session_id)
         parent_event_id = str(payload.get("parent_event_id") or "")
-        current_head = str(self._session_heads.get(session_id) or "")
+        current_head = str(self._session_heads.get(identity) or "")
         if session_id:
             if parent_event_id:
-                if current_head and parent_event_id != current_head:
+                if parent_event_id != current_head:
                     raise RuntimeError(
                         f"causal chain violation: session_id={session_id!r} parent={parent_event_id!r} head={current_head!r}",
                     )
             else:
                 payload["parent_event_id"] = current_head
-            payload["session_index"] = int(self._session_indices.get(session_id, 0)) + 1
+            payload["session_index"] = int(self._session_indices.get(identity, 0)) + 1
         else:
             payload.setdefault("parent_event_id", "")
             payload.setdefault("session_index", 0)
-        return session_id, current_head
+        return identity, current_head
 
     def _seal_payload_hash_chain(self, payload: dict[str, Any], next_sequence: int) -> None:
         payload.setdefault("payload", {})
@@ -275,12 +282,13 @@ class ExecutionLedger:
         payload["prev_chain_hash"] = prev_chain_hash
         payload["chain_hash"] = _chain_hash(prev_chain_hash, event_sha256)
 
-    def _update_session_heads(self, payload: dict[str, Any], session_id: str) -> None:
+    def _update_session_heads(self, payload: dict[str, Any], identity: tuple[str, str]) -> None:
+        session_id = identity[1]
         if not session_id:
             return
         event_id = str(payload.get("event_id") or "")
-        self._session_heads[session_id] = event_id
-        self._session_indices[session_id] = int(payload.get("session_index") or 0)
+        self._session_heads[identity] = event_id
+        self._session_indices[identity] = int(payload.get("session_index") or 0)
 
     def _update_trace_sequence_cache(self, payload: dict[str, Any], cache: dict[str, Any]) -> None:
         if str(payload.get("type") or "") != "TURN_EVENT":
@@ -312,14 +320,14 @@ class ExecutionLedger:
                 raise WriteBoundaryViolationError("Tenant memory events must use commit_tenant_memory")
             cache = self._cache
             next_sequence = int(cache.get("sequence_counter") or 0) + 1
-            session_id, _ = self._apply_session_lineage(payload)
+            identity, _ = self._apply_session_lineage(payload)
             self._seal_payload_hash_chain(payload, next_sequence)
             self._backend_uncertain = True
             self._backend.append(
                 deepcopy(payload),
                 committed=bool(payload.get("committed", False)),
             )
-            self._update_session_heads(payload, session_id)
+            self._update_session_heads(payload, identity)
             self._events.append(payload)
             cache["sequence_counter"] = int(payload.get("sequence") or next_sequence)
             cache["event_count"] = int(cache.get("event_count") or 0) + 1
@@ -567,10 +575,12 @@ class ExecutionLedger:
             prev_chain = _chain_hash(prev_chain, event_sha256)
             event["chain_hash"] = prev_chain
             session_id = str(event.get("session_id") or "")
+            tenant_id = str(event.get("tenant_id") or "")
+            identity = (tenant_id, session_id)
             event_id = str(event.get("event_id") or "")
             if session_id and event_id:
-                self._session_heads[session_id] = event_id
-                self._session_indices[session_id] = int(
+                self._session_heads[identity] = event_id
+                self._session_indices[identity] = int(
                     event.get("session_index") or 0,
                 )
 

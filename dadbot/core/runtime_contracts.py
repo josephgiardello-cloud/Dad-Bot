@@ -40,6 +40,7 @@ class DecisionExplanationEnvelope(TypedDict):
 class LedgerEntryEnvelope(TypedDict):
     type: str
     session_id: str
+    tenant_id: NotRequired[str]
     trace_id: str
     kernel_step_id: str
     payload: dict[str, Any]
@@ -168,6 +169,7 @@ def validate_ledger_entry_contract(payload: dict[str, Any]) -> LedgerEntryEnvelo
     return {
         "type": str(envelope.get("type") or ""),
         "session_id": str(envelope.get("session_id") or "default"),
+        **({"tenant_id": str(envelope.get("tenant_id") or "")} if "tenant_id" in envelope else {}),
         "trace_id": str(envelope.get("trace_id") or ""),
         "kernel_step_id": str(envelope.get("kernel_step_id") or ""),
         "payload": dict(envelope.get("payload") or {}),

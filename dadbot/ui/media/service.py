@@ -120,6 +120,77 @@ class MediaService:
     def synthesize_reply(self, bot, reply_text: str) -> None:
         self.render_reply_tts(bot, reply_text)
 
+    def _process_voice_transcript(self, bot, controller, transcript: str) -> str:
+        from dadbot.speech.voice_loop import VoiceTurnLoop, concatenate_wav_chunks
+        from dadbot.ui import interaction_controller, state_manager
+
+        voice = controller.voice_config
+        tts_enabled = bool(voice.get("tts_enabled", True)) and not bool(voice.get("muted", False))
+        tts_manager = TTSManager(bot)
+
+        def execute_turn(prompt: str) -> str:
+            try:
+                runtime_result = interaction_controller.process_prompt_via_runtime(
+                    thread_id=str(
+                        interaction_controller.get_chat_event_api().active_thread_id or "default",
+                    ),
+                    prompt=prompt,
+                    attachments=[],
+                )
+            except Exception as exc:
+                state_manager.record_runtime_rejection(exc, action="voice_turn")
+                raise
+            return str(runtime_result.get("reply") or "")
+
+        def synthesize_local_chunk(text: str) -> tuple[bytes | None, str, str]:
+            audio, error = tts_manager.synthesize_piper_audio(text)
+            return audio, error, "audio/wav"
+
+        voice_loop = VoiceTurnLoop(
+            execute_turn=execute_turn,
+            synthesize_chunk=synthesize_local_chunk if tts_enabled else None,
+        )
+        with st.spinner("Dad is thinking..."):
+            result = voice_loop.run_transcript(transcript)
+
+        if result.response:
+            st.markdown(f"**Dad:** {result.response}")
+            if result.error:
+                st.warning(result.error)
+            elif result.audio_chunks:
+                audio_chunks = [
+                    audio
+                    for audio, audio_format in result.audio_chunks
+                    if audio_format == "audio/wav"
+                ]
+                try:
+                    if len(audio_chunks) != len(result.audio_chunks):
+                        raise ValueError("The local voice loop returned a non-WAV speech chunk.")
+                    reply_audio = concatenate_wav_chunks(audio_chunks)
+                except ValueError as exc:
+                    st.error(f"Could not combine local speech chunks: {exc}")
+                    controller.mark_error(str(exc))
+                else:
+                    controller.begin_speaking()
+                    try:
+                        st.audio(
+                            reply_audio,
+                            format="audio/wav",
+                            autoplay=bool(voice.get("tts_autoplay", True)),
+                        )
+                    finally:
+                        controller.complete_turn()
+            elif tts_enabled and not result.error:
+                st.warning("The local Piper voice is unavailable. Configure Piper and its model to hear replies.")
+        elif result.error:
+            st.error(result.error)
+
+        if result.error:
+            controller.mark_error(result.error)
+        elif not result.audio_chunks:
+            controller.complete_turn()
+        return result.response
+
     def render_oral_history_capture(self, bot) -> None:
         with st.expander("Save an oral history", expanded=False):
             st.caption(
@@ -406,8 +477,8 @@ class MediaService:
             if mode == "always_listening" and bool(
                 voice.get("auto_send_always_listening", True),
             ):
-                st.info("Always-listening captured and queued this utterance.")
                 persist_voice_profile_if_changed(bot, voice)
+                self._process_voice_transcript(bot, controller, edited)
                 return edited
 
             if st.button(
@@ -416,6 +487,7 @@ class MediaService:
                 type="primary",
             ):
                 persist_voice_profile_if_changed(bot, voice)
+                self._process_voice_transcript(bot, controller, edited)
                 return edited
             persist_voice_profile_if_changed(bot, voice)
             return None
@@ -478,8 +550,6 @@ class MediaService:
         persist_voice_profile_if_changed(bot, voice)
 
     def render_realtime_voice_call(self, bot):
-        from dadbot.ui import interaction_controller, state_manager
-
         controller = get_voice_session_controller(bot)
         voice = controller.voice_config
 
@@ -591,26 +661,7 @@ class MediaService:
         ):
             prompt = str(st.session_state.get("realtime_transcript") or "").strip()
             if prompt:
-                with st.spinner("Dad is thinking..."):
-                    try:
-                        runtime_result = interaction_controller.process_prompt_via_runtime(
-                            thread_id=str(
-                                interaction_controller.get_chat_event_api().active_thread_id or "default",
-                            ),
-                            prompt=prompt,
-                            attachments=[],
-                        )
-                        reply_text = str(runtime_result.get("reply") or "")
-
-                        if reply_text:
-                            st.markdown(f"**Dad:** {reply_text}")
-                            self.render_reply_tts(bot, reply_text)
-                    except Exception as exc:
-                        state_manager.record_runtime_rejection(
-                            exc,
-                            action="realtime_voice_send",
-                        )
-                        st.error(f"Dad Runtime blocked or failed this request: {exc}")
+                self._process_voice_transcript(bot, controller, prompt)
 
                 st.session_state["realtime_transcript"] = ""
             else:

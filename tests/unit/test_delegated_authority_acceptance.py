@@ -11,6 +11,8 @@ from dadbot_system.security import ServiceTokenManager
 from dadbot_system.state import InMemoryStateStore
 from dadbot_system.worker import AUTHORITY_UNAVAILABLE, DadBotTaskProcessor
 
+TENANT_A = "t1_" + "a" * 26
+
 
 class _TenantBot:
     def __init__(self, tenant_id):
@@ -29,9 +31,9 @@ def _configured_authority(tmp_path):
     config.security.authority_sqlite_path = str(tmp_path / "authority.sqlite")
     SQLiteDelegationStore.initialize(config.security.authority_sqlite_path)
     authority = SQLiteDelegationStore(config.security.authority_sqlite_path, config.security.token_secret)
-    authority.grant_membership(issuer="dadbot", subject="user", tenant_id="tenant-a", scopes={"write"})
+    authority.grant_membership(issuer="dadbot", subject="user", tenant_id=TENANT_A, scopes={"write"})
     token = ServiceTokenManager(config.security.token_secret).issue(
-        subject="user", tenant_id="tenant-a", scopes={"write"},
+        subject="user", tenant_id=TENANT_A, scopes={"write"},
     )
     return config, authority, token
 
@@ -45,7 +47,7 @@ def _process_uncredentialed_task(result_queue):
         config,
         bot_factory=lambda *, model_name, tenant_id: _TenantBot(tenant_id),
     )
-    request = ChatRequest(session_id="same-session", tenant_id="tenant-a", user_input="hello")
+    request = ChatRequest(session_id="same-session", tenant_id=TENANT_A, user_input="hello")
     task = WorkerTask(session_id=request.session_id, tenant_id=request.tenant_id, request=request)
     result = processor.process(task)
     result_queue.put((result.status, result.error))
@@ -79,21 +81,22 @@ def test_authority_outage_preserves_queued_task_for_recovery():
     broker = Broker()
     store = InMemoryStateStore()
     orchestrator = DadBotOrchestrator(broker, state_store=store)
-    request = ChatRequest(session_id="same-session", tenant_id="tenant-a", user_input="hello")
+    request = ChatRequest(session_id="same-session", tenant_id=TENANT_A, user_input="hello")
     task = orchestrator.submit_chat(request)
     config = ServiceConfig()
     constructed = []
     processor = DadBotTaskProcessor(config, bot_factory=lambda **kwargs: constructed.append(kwargs))
 
     result = processor.process(task)
+    assert result.retryable
     orchestrator.apply_worker_result(result)
 
     assert not constructed
-    persisted = store.load_task(task.task_id)
+    persisted = store.owned_tasks.load_task(task.tenant_id, task.task_id)
     assert persisted is not None
     assert persisted["status"] == "queued"
     assert persisted["error"] == AUTHORITY_UNAVAILABLE
-    assert store.load_response(task.task_id) is None
+    assert store.owned_tasks.load_response(task.tenant_id, task.task_id) is None
     restarted_broker = Broker()
     assert DadBotOrchestrator(restarted_broker, state_store=store).recover_pending_tasks() == 1
     assert restarted_broker.task.task_id == task.task_id
@@ -103,10 +106,10 @@ def test_authority_outage_preserves_queued_task_for_recovery():
 async def test_direct_worker_execution_is_denied_without_authority():
     config = ServiceConfig()
     processor = DadBotTaskProcessor(config)
-    request = ChatRequest(session_id="same-session", tenant_id="tenant-a", user_input="hello")
+    request = ChatRequest(session_id="same-session", tenant_id=TENANT_A, user_input="hello")
 
     with pytest.raises(RuntimeError, match="authority"):
-        await processor._execute_request_async(_TenantBot("tenant-a"), request)
+        await processor._execute_request_async(_TenantBot(TENANT_A), request)
 
 
 def test_authenticated_api_cannot_publish_identity_consistent_unverified_result(tmp_path):
@@ -119,7 +122,7 @@ def test_authenticated_api_cannot_publish_identity_consistent_unverified_result(
     broker = Broker()
     orchestrator = DadBotOrchestrator(broker, state_store=store)
     create_api_app(orchestrator, config=config)
-    request = ChatRequest(session_id="same-session", tenant_id="tenant-a", user_input="hello")
+    request = ChatRequest(session_id="same-session", tenant_id=TENANT_A, user_input="hello")
     task = orchestrator.submit_chat(request, bearer_token=token)
     result = WorkerResult(
         task_id=task.task_id,
@@ -136,10 +139,10 @@ def test_authenticated_api_cannot_publish_identity_consistent_unverified_result(
     )
 
     assert orchestrator.apply_worker_result(result) is None
-    persisted = store.load_task(task.task_id)
+    persisted = store.owned_tasks.load_task(task.tenant_id, task.task_id)
     assert persisted is not None
     assert persisted["status"] == "queued"
-    assert store.load_response(task.task_id) is None
+    assert store.owned_tasks.load_response(task.tenant_id, task.task_id) is None
 
 
 def test_authenticated_api_rejects_orchestrator_without_authority_enforcement():
@@ -181,14 +184,14 @@ def test_authenticated_api_does_not_requeue_tasks_without_authority_on_restart(t
     config, _authority, _token = _configured_authority(tmp_path)
     store = InMemoryStateStore()
     initial = DadBotOrchestrator(Broker(), state_store=store)
-    task = initial.submit_chat(ChatRequest(session_id="same-session", tenant_id="tenant-a", user_input="hello"))
+    task = initial.submit_chat(ChatRequest(session_id="same-session", tenant_id=TENANT_A, user_input="hello"))
     broker = Broker()
     restarted = DadBotOrchestrator(broker, state_store=store)
     create_api_app(restarted, config=config)
 
     assert restarted.recover_pending_tasks() == 0
     assert broker.tasks == []
-    persisted = store.load_task(task.task_id)
+    persisted = store.owned_tasks.load_task(task.tenant_id, task.task_id)
     assert persisted is not None
     assert persisted["status"] == "queued"
 
@@ -218,20 +221,20 @@ def test_synchronous_api_reports_authority_outage_without_losing_task(tmp_path):
         response = client.post(
             "/v1/sessions/same-session/turn",
             headers={"Authorization": f"Bearer {token}"},
-            json={"tenant_id": "tenant-a", "user_input": "hello", "timeout_seconds": 2},
+            json={"tenant_id": TENANT_A, "user_input": "hello", "timeout_seconds": 2},
         )
 
     assert response.status_code == 503
     assert response.json()["detail"] == AUTHORITY_UNAVAILABLE
-    assert len(store.list_incomplete_tasks()) == 1
+    assert len(store.owned_tasks.list_incomplete_tasks(TENANT_A)) == 1
 
 
 def test_direct_authenticated_orchestrator_rejects_submission_without_authority():
     store = InMemoryStateStore()
     orchestrator = DadBotOrchestrator(object(), state_store=store)
     orchestrator.require_authenticated_execution()
-    request = ChatRequest(session_id="same-session", tenant_id="tenant-a", user_input="hello")
+    request = ChatRequest(session_id="same-session", tenant_id=TENANT_A, user_input="hello")
 
     with pytest.raises(AuthorityUnavailableError, match="authority"):
         orchestrator.submit_chat(request)
-    assert store.list_incomplete_tasks() == []
+    assert store.owned_tasks.list_incomplete_tasks(request.tenant_id) == []

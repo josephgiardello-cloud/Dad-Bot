@@ -58,6 +58,36 @@ def test_normalize_memory_entry_validates_dates_and_scores_without_changing_surf
     assert entry["contradictions"] == ["missed the budget once"]
 
 
+def test_memory_entry_provenance_survives_normalization_and_persisted_normalization(bot):
+    source = {
+        "source": "user_message",
+        "trust_level": 0.9,
+        "agent": "ollama_memory_extractor",
+        "evidence": "I am saving for an emergency fund.",
+        "trace_id": "trace-123",
+    }
+
+    entry = bot.normalize_memory_entry(
+        {
+            "summary": "I am saving for an emergency fund.",
+            "category": "finance",
+            "provenance": source,
+        }
+    )
+
+    assert entry["provenance"] == source
+    assert bot.normalize_persisted_memory_entry(entry)["provenance"] == source
+    bot.save_memory_catalog([entry])
+    assert bot.memory_catalog()[0]["provenance"] == source
+    assert bot.normalize_memory_entry(
+        {
+            "summary": "I am saving for an emergency fund.",
+            "category": "finance",
+            "provenance": {**source, "trust_level": 1.1},
+        }
+    ) is None
+
+
 def test_normalize_relationship_state_preserves_runtime_vocab_and_date_surface(bot):
     entry = bot.normalize_relationship_state(
         {
@@ -706,6 +736,33 @@ def test_composite_tenant_memory_does_not_read_stale_cache_when_durable_unavaila
     monkeypatch.setattr(bot, "_tenant_document_store", store)
     with pytest.raises(OSError, match="offline"):
         bot.memory_manager.load_memory_store(allow_tenant_mirror_fallback=False)
+
+
+def test_unavailable_tenant_memory_never_rehydrates_stale_json_mirror(bot, monkeypatch):
+    stale = {"memories": [{"summary": "Revoked memory", "category": "general"}]}
+    bot.MEMORY_PATH.write_text(json.dumps(stale), encoding="utf-8")
+    persisted = {}
+    writes = []
+    monkeypatch.setattr(bot, "_local_ephemeral_document_store", False)
+
+    def load_memory(_key):
+        raise OSError("tenant store temporarily unavailable")
+
+    def save_memory(key, value):
+        writes.append((key, copy.deepcopy(value)))
+        persisted[key] = copy.deepcopy(value)
+
+    monkeypatch.setattr(
+        bot,
+        "_tenant_document_store",
+        SimpleNamespace(load_session_state=load_memory, save_session_state=save_memory),
+    )
+
+    with pytest.raises(OSError, match="temporarily unavailable"):
+        bot.memory_manager.load_memory_store()
+
+    assert writes == []
+    assert persisted == {}
 
 
 def test_memory_commit_reports_success_when_tenant_write_succeeds_but_mirror_fails(bot, monkeypatch):

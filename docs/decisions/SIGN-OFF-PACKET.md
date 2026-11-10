@@ -1,7 +1,11 @@
 # Tenant identity and migration sign-off
 
-> **AWAITING HUMAN SIGN-OFF — PROPOSED OPTIONS ONLY; NONE IS SELECTED.**
-> No tenant data, membership, token, alias, or mirror was changed.
+> **SIGNED — 2026-11-09.** The decisions below authorize design and
+> implementation work within the stated scope; they do not themselves migrate
+> tenant data, memberships, tokens, aliases, or mirrors.
+
+**Decision record:** approved choices and parameters were supplied by the
+repository owner in the 2026-11-09 task instruction.
 
 Evidence: the dry-run inventory found 220 observations in 22 legacy-normalized
 groups, with three collisions and no proof of deployed ownership. See
@@ -22,12 +26,14 @@ literal `default` be resolved?
 | Keep with owner | Retain literal `default` only for a named, provisioned owner; empty input remains invalid. Record issuer/subject memberships; allow tokens only under the signed compatibility policy. | Update auth-off dev tests to require the approved owner/flag. No mirror entitlement follows from the name; Phase 0 remains unchanged absent a sharing grant. |
 | Defer with owner | Freeze migrations; assign a role to reconcile state, membership, and tokens. No new mapping or token policy is inferred. | Keep existing default-related tests as compatibility tests, and preserve production auth-off rejection. Phase 0 remains conditional and fail-closed. |
 
-**Non-binding recommended default:** defer with an accountable tenant-authority
+**Pre-sign-off recommendation (superseded by the signed choice):** defer with an accountable tenant-authority
 owner until ownership can be established; this avoids an irreversible merge
 or an unsupported assignment to the anonymous principal.
 
-**Sign-off:** `[ ] merge  [ ] split  [ ] keep-with-owner  [ ] defer-with-owner`
-**Owner role:** `____________________`  **Notes:** `____________________`
+**Signed choice:** `[ ] merge  [x] split  [ ] keep-with-owner  [ ] defer-with-owner`
+**Owner role:** `Platform Lead`. Empty input remains rejected; any literal
+`default` state is assigned only after its owner is verified and receives a
+distinct issued ID. No membership or mirror entitlement is inferred.
 
 ## 2. Collision: `family-a` / `family/a`
 
@@ -41,11 +47,12 @@ exact alias, or a deferred owner decision?
 | Keep with owner | Keep `family-a` only as an explicitly owned legacy identity; permit `family/a` solely as an exact registered issuer-scoped alias to one issued ID. Membership and token claims use the resolved ID. | Tests must provision the exact alias and must not expect normalization. No mirror entitlement; Phase 0 remains unchanged. |
 | Defer with owner | No merge, alias, or membership migration until an owner resolves the collision. | Preserve rejection and separation tests. No mirror entitlement; Phase 0 remains conditional and fail-closed. |
 
-**Non-binding recommended default:** defer with owner because the scan found
+**Pre-sign-off recommendation (superseded by the signed choice):** defer with owner because the scan found
 fixtures, not deployment ownership evidence.
 
-**Sign-off:** `[ ] merge  [ ] split  [ ] keep-with-owner  [ ] defer-with-owner`
-**Owner role:** `____________________`  **Notes:** `____________________`
+**Signed choice:** `[ ] merge  [x] split  [ ] keep-with-owner  [ ] defer-with-owner`
+**Owner role:** `Platform Lead`. The two spellings remain distinct; ownership
+verification and separate issued IDs/memberships precede any migration.
 
 ## 3. Collision: `tenant-a` / `tenant/a`
 
@@ -59,11 +66,12 @@ exact alias, or a deferred owner decision?
 | Keep with owner | Retain `tenant-a` for an explicitly named owner; `tenant/a` can be an exact issuer-scoped alias only if provisioned. Tokens/membership use the resolved ID. | Alias tests must provision the mapping and isolation tests must retain distinct IDs. No implicit mirror entitlement; Phase 0 remains unchanged. |
 | Defer with owner | Freeze mapping pending owner verification; do not merge records or memberships. | Keep strict alias rejection and isolation tests. Phase 0 remains conditional and fail-closed. |
 
-**Non-binding recommended default:** defer with owner until state and membership
+**Pre-sign-off recommendation (superseded by the signed choice):** defer with owner until state and membership
 ownership can be verified.
 
-**Sign-off:** `[ ] merge  [ ] split  [ ] keep-with-owner  [ ] defer-with-owner`
-**Owner role:** `____________________`  **Notes:** `____________________`
+**Signed choice:** `[ ] merge  [x] split  [ ] keep-with-owner  [ ] defer-with-owner`
+**Owner role:** `Platform Lead`. The two spellings remain distinct; ownership
+verification and separate issued IDs/memberships precede any migration.
 
 ## 4. Treatment of literal `default`
 
@@ -76,13 +84,16 @@ period?
 | Migrate to an issued ID | Migrate each verified membership/state owner; issue new opaque-ID tokens and accept old signed tokens only through expiry. No implicit mirror entitlement. | Rebind the dev/local anonymous principal to an explicitly provisioned ID; update tests at `test_models.py`, `test_service_architecture.py`, `test_service_client.py`, `test_service_websocket_tickets.py`, and `test_service_verified_principal.py`. Phase 0 remains unchanged. |
 | Prohibit after the window | Reject new claims and, after expiry/grace, remaining signed `default` claims; migrate or revoke memberships. No mirror entitlement. | Disable auth-off `default`; dev/local must use an explicit identity. Convert tests to issued IDs while retaining rejection tests. Phase 0 remains unchanged. |
 
-**Non-binding recommended default:** reserved compatibility-only, explicitly
+**Pre-sign-off recommendation (confirmed by the signed choice):** reserved compatibility-only, explicitly
 gated outside production, until ownership and local-mode migration are
 approved. This minimizes accidental claim changes while keeping production
 closed.
 
-**Sign-off:** `[ ] reserved  [ ] migrate  [ ] prohibit`
-**Production prohibition confirmed:** `[ ] yes`  **Dev/local flag name:** `____________________`
+**Signed choice:** `[x] reserved  [ ] migrate  [ ] prohibit`
+**Production prohibition confirmed:** `[x] yes`
+**Dev/local flag name:** `DADBOT_ALLOW_LEGACY_DEFAULT_TENANT`
+`default` is not accepted by the opaque issued-ID TenantContext. Any permitted
+dev/local compatibility principal uses a separate, explicitly gated path.
 
 ## 5. Compatibility-window owner and expiry
 
@@ -94,13 +105,13 @@ what is the cutover/expiry date?
 | Name a Tenant Authority Owner role and set a date | Owner maintains evidence and approves membership/token cutover; no mirror entitlement is implied. | Add expiry/cutover tests for each retained identity class. Phase 0 is unchanged absent an explicit sharing grant. |
 | Set owner or expiry to `TBD-REQUIRES-SIGN-OFF` | No identity class retires and no membership/token migration is authorized; mirror remains unshared. | Keep compatibility tests and explicitly block Phase 2 identity wiring until resolved; Phase 0 remains conditional and fail-closed. |
 
-**Non-binding recommended default:** Tenant Authority Owner role, with a
+**Pre-sign-off recommendation (confirmed by the signed choice):** Tenant Authority Owner role, with a
 specific expiry date entered before any provenance enforcement or ID
 retirement. A role is accountable without embedding a personal identity.
 
-**Owner role:** `____________________`
-**Expiry date (YYYY-MM-DD) or `TBD-REQUIRES-SIGN-OFF`:** `____________________`
-**Sign-off:** `[ ] approved  [ ] defer`
+**Owner role:** `Platform Lead`
+**Expiry date (YYYY-MM-DD):** `2027-02-07`
+**Signed choice:** `[x] approved  [ ] defer`
 
 ## 6. Conditional Phase 0 assumption
 
@@ -120,15 +131,20 @@ separately reviewed grant.
 | Reject | Record the replacement ownership model and update affected membership/token decisions and tests before implementation. | Phase 0.1 must be reviewed before any sharing behavior is designed; no fallback is restored by rejection alone. |
 | Defer | No changes; Phase 2 remains blocked. | Keep the current fail-closed fix while the assumption remains unconfirmed. |
 
-**Non-binding recommended default:** acknowledge provisionally; the statement
+**Pre-sign-off recommendation (confirmed by the signed choice):** acknowledge provisionally; the statement
 does not grant access and preserves the security boundary while ownership is
 unknown.
 
-**Sign-off:** `[ ] acknowledge  [ ] reject  [ ] defer`
-**If rejected, record the proposed owner/grant model:** `____________________`
+**Signed choice:** `[x] acknowledge  [ ] reject  [ ] defer`
 
-## Human decision gate
+## Implementation boundaries
 
-Phase 2 tenant-context wiring must wait for Items 1–6 to be completed or
-explicitly deferred with a named owner and expiry. This packet does not
-authorize code changes or data migration.
+Items 1–6 are signed. Collision splitting is a policy choice, not a data
+migration: no owner mapping, membership, token, alias, or mirror is created
+without independent ownership evidence. `default` remains reserved for
+compatibility-only use outside production and only behind
+`DADBOT_ALLOW_LEGACY_DEFAULT_TENANT` in dev/local. Authenticated PostgreSQL
+boot remains excluded by
+[postgres-authenticated-boot.md](./postgres-authenticated-boot.md); RLS work
+may be developed and directly tested with a local `NOBYPASSRLS` role without
+reopening that production decision.

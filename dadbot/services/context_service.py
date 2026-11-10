@@ -324,6 +324,7 @@ class ContextService:
                 query_category="general",
                 query_mood="neutral",
                 limit=5,
+                state=state,
             )
             if hits and active_goals:
                 hits = self._goal_ranker.rerank(hits, active_goals)
@@ -374,6 +375,7 @@ class ContextService:
                         query_category="general",
                         query_mood="neutral",
                         limit=5,
+                        state=state,
                     )
                     if refined_hits:
                         if active_goals:
@@ -430,7 +432,16 @@ class ContextService:
                     state["memory_retrieval_set"] = merged
                     state["memory_influence_brief"] = self._memory_influence_brief(merged, active_goals)
         except Exception as exc:
-            logger.debug("ContextService: semantic index query failed (non-fatal): %s", exc)
+            logger.warning(
+                "ContextService semantic retrieval failed (error_type=%s)",
+                type(exc).__name__,
+            )
+            MemoryService.record_retrieval_status(
+                state,
+                status="degraded",
+                errors=[{"source": "context_pipeline", "error_type": type(exc).__name__}],
+                source="semantic_rag",
+            )
 
     def _stamp_build_results(
         self,
@@ -563,6 +574,13 @@ class ContextService:
         }
 
         state = getattr(turn_context, "state", None)
+        if isinstance(state, dict):
+            MemoryService.record_retrieval_status(
+                state,
+                status="ok",
+                errors=[],
+                source="context_snapshot",
+            )
         if isinstance(state, dict):
             canonical_memory_snapshot = {
                 "memory_recent_buffer": list(memory_snapshot.get("recent_buffer") or []),

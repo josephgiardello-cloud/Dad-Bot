@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import ast
-from pathlib import Path
 import sys
-
-import Dad as dad_entrypoint
-import api_entrypoint
-import install
-import launch
+from pathlib import Path
 
 import pytest
+
+import api_entrypoint
+import Dad
+import install
+import launch
 
 pytestmark = pytest.mark.unit
 
@@ -161,7 +161,7 @@ def test_entrypoints_delegate_startup_through_launch_main(monkeypatch) -> None:
     monkeypatch.setattr(launch, "main", fake_launch_main)
 
     monkeypatch.setattr(sys, "argv", ["launch.py", "--ui", "--model", "llama3.2"], raising=False)
-    assert dad_entrypoint.main() == 0
+    assert Dad.main() == 0
     assert calls.pop(0) == ["--ui", "--model", "llama3.2"]
 
     monkeypatch.setattr(sys, "argv", ["api_entrypoint.py", "--api-port", "9123"], raising=False)
@@ -177,3 +177,16 @@ def test_entrypoints_delegate_startup_through_launch_main(monkeypatch) -> None:
     monkeypatch.setattr(install.time, "sleep", lambda *_args, **_kwargs: None)
     install.launch()
     assert captured[-1][-1] == "launch.py"
+
+
+def test_launch_main_uses_canonical_app_runtime(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_app_main(argv=None, **_kwargs):
+        calls.append(list(argv or []))
+        return 17
+
+    monkeypatch.setattr(launch, "app_main", fake_app_main)
+
+    assert launch.main(["--api", "--api-port", "8010"]) == 17
+    assert calls == [["--api-port", "8010", "--serve-api"]]
