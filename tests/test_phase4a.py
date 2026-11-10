@@ -620,8 +620,8 @@ class TestPhase4ARealCheckpointing:
 
         with contextlib.closing(sqlite3.connect(phase4a_db_path)) as conn:
             rows = conn.execute(
-                "SELECT status, error FROM checkpoint_writes WHERE session_id = ?",
-                ("write-log-real",),
+                "SELECT status, error FROM checkpoint_writes WHERE tenant_id = ? AND session_id = ?",
+                ("default", "write-log-real"),
 
             ).fetchall()
 
@@ -807,8 +807,8 @@ class TestPhase4ADeterminismVeriication:
 
         with contextlib.closing(sqlite3.connect(phase4a_db_path)) as conn:
             write_count = conn.execute(
-                "SELECT COUNT(*) FROM checkpoint_writes WHERE session_id = ?",
-                ("metrics-obs",),
+                "SELECT COUNT(*) FROM checkpoint_writes WHERE tenant_id = ? AND session_id = ?",
+                ("default", "metrics-obs"),
             ).fetchone()[0]
 
         assert write_count == n_turns, "checkpoint_writes table: expected {n_turns} rows, got {write_count}"

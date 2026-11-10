@@ -1,24 +1,11 @@
-"""
-Unified tool executor interface for DadBot tools (reminders, calendar, web search, etc.).
-Integrates with Phase B tool registry for reliable action execution.
-"""
+"""Legacy executor registry and runtime tool definitions."""
 from typing import Any, Dict, Protocol
+
 
 class ToolExecutor(Protocol):
     def execute(self, action: str, **kwargs: Any) -> Any:
         ...
 
-class ReminderExecutor:
-    def execute(self, action: str, **kwargs: Any) -> Any:
-        return f"Reminder executed: {action} with {kwargs}"
-
-class CalendarExecutor:
-    def execute(self, action: str, **kwargs: Any) -> Any:
-        return f"Calendar action: {action} with {kwargs}"
-
-class WebSearchExecutor:
-    def execute(self, action: str, **kwargs: Any) -> Any:
-        return f"Web search: {action} with {kwargs}"
 
 class ToolRegistry:
     def __init__(self):
@@ -31,6 +18,8 @@ class ToolRegistry:
         return self._tools.get(name)
 
     def get_available_tools(self) -> list[dict[str, Any]]:
+        # These definitions are dispatched by ToolPipelineMixin, not by this
+        # legacy registry. Do not register placeholder executors here.
         definitions = {
             "reminder": {
                 "type": "function",
@@ -62,18 +51,14 @@ class ToolRegistry:
                 },
             },
         }
-        return [definitions[name] for name in ("reminder", "web_search") if name in self._tools]
+        return [definitions[name] for name in ("reminder", "web_search")]
 
     def describe_all(self) -> str:
         return ', '.join(self._tools.keys())
 
 
 def build_default_tool_registry() -> ToolRegistry:
-    registry = ToolRegistry()
-    registry.register('reminder', ReminderExecutor())
-    registry.register('calendar', CalendarExecutor())
-    registry.register('web_search', WebSearchExecutor())
-    return registry
+    return ToolRegistry()
 
 
 tool_registry = build_default_tool_registry()

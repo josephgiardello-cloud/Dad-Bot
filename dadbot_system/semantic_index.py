@@ -177,12 +177,10 @@ class SQLiteSemanticIndex(SemanticIndexBackend):
         )
         self._invalidate_cache()
 
-    def upsert_rows(self, rows):
-        if not rows:
-            return
-        self.ensure_storage()
-        self.with_connection(
-            lambda connection: connection.executemany(
+    @staticmethod
+    def _upsert_rows_on_connection(connection, rows):
+        if rows:
+            connection.executemany(
                 """
                 INSERT OR REPLACE INTO semantic_memories (
                     summary_key,
@@ -206,9 +204,40 @@ class SQLiteSemanticIndex(SemanticIndexBackend):
                     )
                     for row in rows
                 ],
-            ),
-            write=True,
-        )
+            )
+
+    def upsert_rows(self, rows):
+        if not rows:
+            return
+        self.ensure_storage()
+        self.with_connection(lambda connection: self._upsert_rows_on_connection(connection, rows), write=True)
+        self._invalidate_cache()
+
+    def apply_changes(self, rows, stale_keys, expected_hashes=None, previous_hashes=None):
+        """Publish replacements and deletions together or leave the index unchanged."""
+        self.ensure_storage()
+
+        def operation(connection):
+            connection.execute("BEGIN IMMEDIATE")
+            if previous_hashes is not None:
+                actual = dict(connection.execute(
+                    "SELECT summary_key, content_hash FROM semantic_memories"
+                ))
+                if actual != previous_hashes:
+                    raise RuntimeError("Semantic index changed while building candidate")
+            self._upsert_rows_on_connection(connection, rows)
+            connection.executemany(
+                "DELETE FROM semantic_memories WHERE summary_key = ?",
+                [(key,) for key in stale_keys],
+            )
+            if expected_hashes is not None:
+                actual = dict(connection.execute(
+                    "SELECT summary_key, content_hash FROM semantic_memories"
+                ))
+                if actual != expected_hashes:
+                    raise RuntimeError("Semantic index verification failed during publication")
+
+        self.with_connection(operation, write=True)
         self._invalidate_cache()
 
     def _row_dicts(self, rows):

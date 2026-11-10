@@ -1,5 +1,5 @@
-import os
 import json
+import os
 from datetime import date
 
 import ollama
@@ -30,6 +30,7 @@ def offline_model_transport(monkeypatch):
 @pytest.fixture
 def make_test_dadbot(offline_model_transport, tmp_path, monkeypatch):
     """Build isolated real managers rather than replacing public APIs with stubs."""
+    monkeypatch.setenv("DADBOT_ALLOW_LEGACY_DEFAULT_TENANT", "true")
     instances = []
 
     def factory(**overrides):
@@ -79,6 +80,13 @@ def make_test_dadbot(offline_model_transport, tmp_path, monkeypatch):
 @pytest.fixture
 def bot(make_test_dadbot):
     return make_test_dadbot()
+
+
+@pytest.fixture
+def persistence_failure_patch(bot):
+    """Restore injected persistence failures before the bot is shut down."""
+    with pytest.MonkeyPatch.context() as patch:
+        yield patch
 
 
 @pytest.fixture

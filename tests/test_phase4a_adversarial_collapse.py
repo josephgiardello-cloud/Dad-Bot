@@ -5,6 +5,7 @@ from copy import deepcopy
 import pytest
 
 from dadbot.core.execution_replay_engine import (
+    ExecutionRecovery,
     reconstruct_terminal_state_from_trace,
     verify_terminal_state_replay_equivalence,
 )

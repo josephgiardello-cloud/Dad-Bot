@@ -12,6 +12,7 @@ from typing import Any
 
 from dadbot.core.ledger_writer import LedgerWriter
 from dadbot.core.session_store import SessionStore
+from dadbot.core.tenant_session import current_tenant_id, resolve_tenant_id, tenant_session_scope
 
 
 class ReconciliationMixin:
@@ -22,10 +23,12 @@ class ReconciliationMixin:
         *,
         session_id: str,
         request_id: str,
+        tenant_id: str | None = None,
     ) -> bool:
         return self._ledger_index.has_ambiguous_request_inflight(
             session_id=session_id,
             request_id=request_id,
+            tenant_id=tenant_id,
         )
 
     def _emit_reconcile_required_event(
@@ -49,8 +52,14 @@ class ReconciliationMixin:
         )
 
     @staticmethod
-    def _reconciliation_trace_id(*, session_id: str, request_id: str, effect_id: str) -> str:
-        seed = f"{str(session_id or 'default')}|{str(request_id or '')}|{str(effect_id or '')}"
+    def _reconciliation_trace_id(
+        *,
+        session_id: str,
+        request_id: str,
+        effect_id: str,
+        tenant_id: str = "",
+    ) -> str:
+        seed = f"{str(tenant_id or '')}|{str(session_id or 'default')}|{str(request_id or '')}|{str(effect_id or '')}"
         return f"tr-reconcile-{hashlib.sha256(seed.encode('utf-8')).hexdigest()[:20]}"
 
     def _existing_reconcile_resolution(
@@ -69,6 +78,8 @@ class ReconciliationMixin:
             if str(event.get("type") or "") != str(event_type or ""):
                 continue
             if str(event.get("session_id") or "default") != sid:
+                continue
+            if str(event.get("tenant_id") or "") != str(current_tenant_id() or ""):
                 continue
             payload = dict(event.get("payload") or {})
             if str(payload.get(key_name) or "").strip() != token:
@@ -134,6 +145,7 @@ class ReconciliationMixin:
     def _write_job_reconciled_event(
         *,
         writer: LedgerWriter,
+        tenant_id: str,
         sid: str,
         trace_token: str,
         rid: str,
@@ -145,6 +157,7 @@ class ReconciliationMixin:
         writer.write_event(
             event_type="JOB_RECONCILED",
             session_id=sid,
+            tenant_id=tenant_id,
             trace_id=trace_token,
             kernel_step_id="control_plane.reconcile.apply",
             payload={
@@ -161,6 +174,7 @@ class ReconciliationMixin:
     def _write_effect_reconciled_event(
         *,
         writer: LedgerWriter,
+        tenant_id: str,
         sid: str,
         trace_token: str,
         rid: str,
@@ -172,6 +186,7 @@ class ReconciliationMixin:
         writer.write_event(
             event_type="EFFECT_RECONCILED",
             session_id=sid,
+            tenant_id=tenant_id,
             trace_id=trace_token,
             kernel_step_id="control_plane.reconcile.apply",
             payload={
@@ -188,6 +203,7 @@ class ReconciliationMixin:
         self,
         *,
         session_id: str,
+        tenant_id: str | None = None,
         request_id: str = "",
         effect_id: str = "",
         reason: str = "operator_reconcile",
@@ -197,7 +213,34 @@ class ReconciliationMixin:
         enforce = getattr(self, "_enforce_distributed_runtime_authority", None)
         if callable(enforce):
             enforce(operation="reconcile_apply")
-        sid = str(session_id or "default").strip() or "default"
+        sid = str(session_id or "").strip()
+        if not sid:
+            raise ValueError("session_id is required")
+        tenant = resolve_tenant_id(tenant_id, default_tenant_id="default")
+        with tenant_session_scope(tenant, sid, allow_tenant_switch=True):
+            return self._apply_reconciliation_in_scope(
+                tenant_id=tenant,
+                session_id=sid,
+                request_id=request_id,
+                effect_id=effect_id,
+                reason=reason,
+                mode=mode,
+            )
+
+    def _apply_reconciliation_in_scope(
+        self,
+        *,
+        tenant_id: str,
+        session_id: str,
+        request_id: str,
+        effect_id: str,
+        reason: str,
+        mode: str,
+    ) -> dict[str, Any]:
+        enforce = getattr(self, "_enforce_distributed_runtime_authority", None)
+        if callable(enforce):
+            enforce(operation="reconcile_apply")
+        sid = str(session_id)
         rid = str(request_id or "").strip()
         eid = str(effect_id or "").strip()
         if not rid and not eid:
@@ -212,13 +255,19 @@ class ReconciliationMixin:
             effect_resolution=effect_resolution,
         )
 
-        trace_token = self._reconciliation_trace_id(session_id=sid, request_id=rid, effect_id=eid)
+        trace_token = self._reconciliation_trace_id(
+            session_id=sid,
+            request_id=rid,
+            effect_id=eid,
+            tenant_id=tenant_id,
+        )
         writer = LedgerWriter(self.ledger)
         wrote_events: list[str] = []
 
         if rid and self._request_has_ambiguous_inflight_effect_state(session_id=sid, request_id=rid):
             self._write_job_reconciled_event(
                 writer=writer,
+                tenant_id=tenant_id,
                 sid=sid,
                 trace_token=trace_token,
                 rid=rid,
@@ -232,6 +281,7 @@ class ReconciliationMixin:
         if eid and self._effect_journal.is_ambiguous(session_id=sid, effect_id=eid):
             self._write_effect_reconciled_event(
                 writer=writer,
+                tenant_id=tenant_id,
                 sid=sid,
                 trace_token=trace_token,
                 rid=rid,
@@ -246,6 +296,7 @@ class ReconciliationMixin:
         return {
             "applied": bool(wrote_events),
             "events": wrote_events,
+            "tenant_id": tenant_id,
             "session_id": sid,
             "request_id": rid,
             "effect_id": eid,

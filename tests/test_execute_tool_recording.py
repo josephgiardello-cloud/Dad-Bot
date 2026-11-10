@@ -9,7 +9,9 @@ Validates that:
 
 from __future__ import annotations
 
+import json
 import uuid
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any
 
@@ -148,6 +150,143 @@ class TestExecuteToolRecording:
 
         # Execution still succeeds
         assert record.status in ("succeeded", "cached")
+
+    def test_tool_audit_log_is_structured_scoped_and_redacts_sensitive_values(self, caplog) -> None:
+        ctx = MockTurnContext()
+        ctx.metadata.update(
+            {
+                "tenant_id": "tenant-a",
+                "control_plane": {"session_id": "session-a"},
+            },
+        )
+        parameters = {
+            "title": "Contact person@example.com",
+            "api_token": "do-not-log-this-token",
+            "count": 2,
+        }
+
+        with caplog.at_level("INFO", logger="dadbot.core.tool_executor"):
+            execute_tool(
+                tool_name="set_reminder",
+                parameters=parameters,
+                executor=lambda: {"id": "reminder-1"},
+                turn_context=ctx,
+            )
+
+        audit = next(
+            json.loads(record.getMessage())
+            for record in reversed(caplog.records)
+            if record.name == "dadbot.core.tool_executor"
+            and json.loads(record.getMessage()).get("event") == "dadbot.tool.execution"
+        )
+        assert audit["tenant_id"] == "tenant-a"
+        assert audit["session_id"] == "session-a"
+        assert audit["trace_id"] == "test-trace"
+        assert audit["tool_name"] == "set_reminder"
+        assert audit["status"] == "succeeded"
+        assert audit["authorization_decision"] == "trusted_local"
+        assert audit["input_parameters"]["api_token"] == "[REDACTED]"
+        assert audit["input_parameters"]["title"] == "Contact [EMAIL REDACTED]"
+        assert "do-not-log-this-token" not in json.dumps(audit)
+        assert "person@example.com" not in json.dumps(audit)
+        assert audit["timestamp"]
+
+    def test_tool_audit_logs_missing_authority_denial_before_reraising(self, caplog) -> None:
+        from dadbot_system.delegation import require_live_effect_authority
+        from dadbot_system.security import AuthorizationError
+
+        ctx = MockTurnContext()
+        ctx.metadata.update({"tenant_id": "tenant-a", "session_id": "session-a"})
+        with caplog.at_level("INFO", logger="dadbot.core.tool_executor"):
+            with require_live_effect_authority():
+                with pytest.raises(AuthorizationError, match="Verified live execution authority is required"):
+                    execute_tool(
+                        tool_name="set_reminder",
+                        parameters={"title": "Test"},
+                        executor=lambda: {"id": "must-not-run"},
+                        turn_context=ctx,
+                    )
+
+        audit = next(
+            json.loads(record.getMessage())
+            for record in reversed(caplog.records)
+            if record.name == "dadbot.core.tool_executor"
+            and json.loads(record.getMessage()).get("event") == "dadbot.tool.execution"
+        )
+        assert audit["status"] == "authorization_denied"
+        assert audit["authorization_decision"] == "denied"
+        assert audit["authority_mode"] == "required_missing"
+
+    def test_tool_audit_records_verified_principal_as_pseudonymous_identity(self, caplog) -> None:
+        from dadbot_system.delegation import runtime_authority_scope
+        from dadbot_system.security import ServicePrincipal
+
+        principal = ServicePrincipal(
+            subject="private-subject",
+            tenant_id="tenant-a",
+            scopes=frozenset({"write"}),
+            issuer="test-issuer",
+            expires_at=4_000_000_000,
+        )
+        store = type(
+            "AuthorityStore",
+            (),
+            {
+                "publication_fence": staticmethod(nullcontext),
+                "require_membership": staticmethod(lambda **_kwargs: None),
+            },
+        )()
+        ctx = MockTurnContext()
+        ctx.metadata.update({"session_id": "session-a"})
+
+        with caplog.at_level("INFO", logger="dadbot.core.tool_executor"):
+            with runtime_authority_scope(
+                store,
+                principal,
+                scope="write",
+                tenant_id="tenant-a",
+            ):
+                execute_tool(
+                    tool_name="set_reminder",
+                    parameters={"title": "Test"},
+                    executor=lambda: {"id": "reminder-1"},
+                    turn_context=ctx,
+                )
+
+        audit = next(
+            json.loads(record.getMessage())
+            for record in reversed(caplog.records)
+            if record.name == "dadbot.core.tool_executor"
+            and json.loads(record.getMessage()).get("event") == "dadbot.tool.execution"
+        )
+        assert audit["authority_mode"] == "authenticated"
+        assert audit["authorization_decision"] == "verified"
+        assert audit["tenant_id"] == "tenant-a"
+        assert audit["session_id"] == "session-a"
+        assert audit["principal_ref"]
+        assert "private-subject" not in json.dumps(audit)
+
+    def test_tool_execution_event_includes_authority_decision_for_explanation(self) -> None:
+        from dadbot.core.orchestrator import DadBotOrchestrator as CoreOrchestrator
+
+        ctx = MockTurnContext()
+        execute_tool(
+            tool_name="set_reminder",
+            parameters={"title": "Private reminder"},
+            executor=lambda: {"id": "reminder-id"},
+            turn_context=ctx,
+        )
+
+        actions = CoreOrchestrator._tool_action_audit_from_context(ctx)
+
+        assert len(actions) == 1
+        assert actions[0]["tool_name"] == "set_reminder"
+        assert actions[0]["status"] == "succeeded"
+        assert actions[0]["authorization_decision"] == "trusted_local"
+        assert actions[0]["authority_mode"] == "trusted_local"
+        assert len(actions[0]["input_hash"]) == 64
+        assert len(actions[0]["output_hash"]) == 64
+        assert "Private reminder" not in str(actions)
 
     def test_idempotent_calls_both_recorded(self) -> None:
         """Both successful and cached executions are recorded."""

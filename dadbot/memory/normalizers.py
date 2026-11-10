@@ -781,6 +781,7 @@ class MemoryNormalizer:
         return {
             "summary": summary,
             "category": category,
+            "provenance": memory.get("provenance") if isinstance(memory.get("provenance"), dict) else None,
             "oral_history_evidence": (
                 memory["oral_history_evidence"] if isinstance(memory.get("oral_history_evidence"), dict) else None
             ),
@@ -814,6 +815,8 @@ class MemoryNormalizer:
             "summary": dumped["summary"],
             "category": dumped["category"],
         }
+        if dumped["provenance"] is not None:
+            normalized["provenance"] = dumped["provenance"]
         if dumped["oral_history_evidence"] is not None:
             normalized["oral_history_evidence"] = dumped["oral_history_evidence"]
         if "mood" in memory:
@@ -941,6 +944,7 @@ class MemoryNormalizer:
         payload = {
             "summary": summary,
             "category": category,
+            "provenance": memory.get("provenance") if isinstance(memory.get("provenance"), dict) else None,
             "oral_history_evidence": (
                 memory["oral_history_evidence"] if isinstance(memory.get("oral_history_evidence"), dict) else None
             ),
@@ -987,6 +991,8 @@ class MemoryNormalizer:
             "updated_at": updated_at,
             "contradictions": dumped["contradictions"],
         }
+        if dumped["provenance"] is not None:
+            normalized["provenance"] = dumped["provenance"]
         if dumped["oral_history_evidence"] is not None:
             normalized["oral_history_evidence"] = dumped["oral_history_evidence"]
         if dumped["event_time"] is not None:
@@ -1138,18 +1144,16 @@ class MemoryNormalizer:
             return default_store
 
         normalized = dict(default_store)
-        normalized["memories"] = (
-            sorted(
-                [
-                    entry
-                    for entry in (self.normalize_persisted_memory_entry(item) for item in store.get("memories", []))
-                    if entry is not None
-                ],
-                key=self.memory_sort_key,
-            )
-            if isinstance(store.get("memories"), list)
-            else []
-        )
+        raw_memories = store.get("memories", [])
+        if not isinstance(raw_memories, list):
+            raise ValueError("memories must be a list")
+        memories = []
+        for item in raw_memories:
+            entry = self.normalize_persisted_memory_entry(item)
+            if entry is None:
+                raise ValueError("memories must contain valid memory entries")
+            memories.append(entry)
+        normalized["memories"] = sorted(memories, key=self.memory_sort_key)
         archived_memories = store.get("archived_memories", [])
         if not isinstance(archived_memories, list):
             raise ValueError("archived_memories must be a list")

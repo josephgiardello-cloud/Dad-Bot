@@ -8,12 +8,13 @@ from types import SimpleNamespace
 import pytest
 
 from dadbot.core.control_plane_projection import ExecutionProjection
-from dadbot.core.execution_context import ExecutionTraceRecorder, bind_execution_trace
+from dadbot.core.execution_context import ExecutionTraceRecorder, RuntimeTraceViolation, bind_execution_trace
 from dadbot.core.execution_ledger import ExecutionLedger
 from dadbot.core.ledger_writer import LedgerWriter
 from dadbot.core.persistence_record_schema import PersistenceSchemaError, normalize_checkpoint_record
 from dadbot.core.replay_verifier import ReplayVerifier
 from dadbot.core.session_store import SessionStore
+from dadbot.core.tenant_session import tenant_session_scope
 from dadbot.managers.conversation_persistence import ConversationPersistenceManager
 
 pytestmark = pytest.mark.unit
@@ -160,6 +161,54 @@ def test_graph_checkpoint_snapshot_is_canonical_execution_state(tmp_path: Path):
     assert str(continuity.get("strict_sequence_hash") or "")
     assert replay["determinism"]["consistent"] is True
     assert replay["determinism"]["lock_hash"] == "lock-c"
+
+
+def test_graph_checkpoint_reads_are_scoped_by_tenant_session_and_trace(tmp_path: Path):
+    ledger = ExecutionLedger()
+    manager = ConversationPersistenceManager(_FakeBot(ledger, tmp_path))
+    for session_id, marker in (("session-a", "owner-a"), ("session-b", "owner-b")):
+        recorder = ExecutionTraceRecorder(trace_id="shared-trace", prompt="invariants")
+        with tenant_session_scope("tenant-test", session_id), bind_execution_trace(recorder, required=True):
+            manager.persist_graph_checkpoint(
+                {
+                    "trace_id": "shared-trace",
+                    "session_id": session_id,
+                    "stage": "save",
+                    "status": "after",
+                    "state": {"marker": marker},
+                },
+            )
+
+    for session_id, expected_marker in (("session-a", "owner-a"), ("session-b", "owner-b")):
+        recorder = ExecutionTraceRecorder(trace_id="shared-trace", prompt="invariants")
+        with tenant_session_scope("tenant-test", session_id), bind_execution_trace(recorder, required=True):
+            checkpoint = manager.load_latest_graph_checkpoint(
+                "shared-trace",
+                session_id=session_id,
+                tenant_id="tenant-test",
+            )
+        assert checkpoint is not None
+        assert checkpoint["execution_state"]["state"]["marker"] == expected_marker
+
+    recorder = ExecutionTraceRecorder(trace_id="shared-trace", prompt="invariants")
+    with tenant_session_scope("tenant-test", "session-a"), bind_execution_trace(recorder, required=True):
+        with pytest.raises(RuntimeTraceViolation, match="does not match the active session"):
+            manager.load_latest_graph_checkpoint(
+                "shared-trace",
+                session_id="session-b",
+                tenant_id="tenant-test",
+            )
+
+    stored_checkpoint_event = next(
+        event for event in ledger._events
+        if str(event.get("type") or "") == "GRAPH_CHECKPOINT"
+        and str(event.get("session_id") or "") == "session-a"
+    )
+    stored_checkpoint_event["payload"]["checkpoint"]["session_id"] = "session-b"
+    recorder = ExecutionTraceRecorder(trace_id="shared-trace", prompt="invariants")
+    with tenant_session_scope("tenant-test", "session-a"), bind_execution_trace(recorder, required=True):
+        with pytest.raises(PersistenceSchemaError, match="identity does not match"):
+            manager.load_latest_graph_checkpoint("shared-trace", session_id="session-a")
 
 
 def test_normalized_checkpoint_retains_execution_state_in_ledger(tmp_path: Path):

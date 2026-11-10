@@ -137,16 +137,20 @@ class MemorySearchMixin:
         backend = self._semantic_manager._semantic_index_backend
         candidate_limit = self.bot.runtime_config.memory_candidate_limit
         try:
-            if candidate_limit > 0 and len(current_memories) > candidate_limit and isinstance(
-                backend, PGVectorSemanticIndex,
-            ):
-                rows = backend.fetch_nearest_by_keys(
-                    current_memories.keys(), query_context["query_embedding"], candidate_limit,
-                )
-                status["bounded"] = True
-            else:
-                rows = self.catalog_semantic_rows(current_memories.keys())
-                status["bounded"] = False
+            with self._semantic_manager.verified_semantic_index_read(memories) as current:
+                if not current:
+                    status.update(degraded=True, reason="stale_index")
+                    return []
+                if candidate_limit > 0 and len(current_memories) > candidate_limit and isinstance(
+                    backend, PGVectorSemanticIndex,
+                ):
+                    rows = backend.fetch_nearest_by_keys(
+                        current_memories.keys(), query_context["query_embedding"], candidate_limit,
+                    )
+                    status["bounded"] = True
+                else:
+                    rows = self.catalog_semantic_rows(current_memories.keys())
+                    status["bounded"] = False
         except Exception as exc:
             logger.warning("Semantic memory lookup failed: %s", exc)
             status.update(degraded=True, reason="semantic_lookup_failed")

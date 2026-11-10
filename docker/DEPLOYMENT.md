@@ -13,6 +13,9 @@ This stack starts the Dad Bot API with durable backing services out of the box:
 - `docker-compose.yml`: starts `dadbot-api`, `redis`, and `postgres`
 - `.env.production.example`: starter environment file for production-like startup
 
+The supported API launch path is `launch.py --api`, which delegates to
+`dadbot.app_runtime.main` for service composition and lifecycle.
+
 ## Quick start
 
 1. Copy `.env.production.example` to `.env.production`.
@@ -30,7 +33,15 @@ docker compose ps
 docker compose logs dadbot-api --tail 100
 ```
 
-The API will be available at `http://localhost:8010/health`.
+The API will be available at `http://localhost:8010`. `/health` reports process-level
+diagnostics; `/ready` returns success only when configured state and authority stores are
+available and all configured workers are alive. Docker Compose uses `/ready` for its
+container healthcheck.
+
+If `DADBOT_REDIS_URL` or `DADBOT_POSTGRES_DSN` is configured but the service cannot be
+initialized, API startup fails instead of silently substituting in-memory state. With no
+external state backend configured, the explicitly supported local in-memory mode remains
+available.
 
 ## Persistent data
 

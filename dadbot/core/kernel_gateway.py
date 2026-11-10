@@ -66,6 +66,7 @@ class KernelGateway:
     ) -> KernelTrace:
         sovereign_context = dict(metadata.get("sovereign_context") or {})
         semantic_input = {
+            "tenant_id": str(metadata.get("tenant_id") or sovereign_context.get("tenant_id") or ""),
             "session_id": str(session_id or "default"),
             "user_input": str(user_input or ""),
             "attachments": list(attachments or []),

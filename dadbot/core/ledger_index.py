@@ -5,6 +5,7 @@ from typing import Any
 
 from dadbot.contracts import FinalizedTurnResult
 from dadbot.core.execution_ledger import ExecutionLedger
+from dadbot.core.tenant_session import current_tenant_id
 
 
 @dataclass(slots=True)
@@ -25,35 +26,37 @@ class LedgerIndex:
     def __init__(self, ledger: ExecutionLedger) -> None:
         self._ledger = ledger
         self._indexed_event_count = -1
-        self._completed_by_request: dict[tuple[str, str], FinalizedTurnResult] = {}
-        self._started_without_terminal: set[tuple[str, str]] = set()
-        self._effect_state: dict[tuple[str, str], EffectState] = {}
+        self._completed_by_request: dict[tuple[str, str, str], FinalizedTurnResult] = {}
+        self._started_without_terminal: set[tuple[str, str, str]] = set()
+        self._effect_state: dict[tuple[str, str, str], EffectState] = {}
         self._active_leases_by_worker: dict[str, set[str]] = {}
-        self._trace_roots: dict[str, str] = {}
+        self._trace_roots: dict[tuple[str, str], str] = {}
 
     @staticmethod
-    def _normalize_event(event: dict[str, Any]) -> tuple[str, str, str, dict[str, Any]]:
+    def _normalize_event(event: dict[str, Any]) -> tuple[str, str, str, str, dict[str, Any]]:
         event_type = str(event.get("type") or "")
         session_id = str(event.get("session_id") or "default").strip() or "default"
+        tenant_id = str(event.get("tenant_id") or "").strip()
         trace_id = str(event.get("trace_id") or "").strip()
         payload = dict(event.get("payload") or {})
-        return event_type, session_id, trace_id, payload
+        return event_type, tenant_id, session_id, trace_id, payload
 
     @staticmethod
     def _index_job_event(
         *,
         event_type: str,
+        tenant_id: str,
         session_id: str,
         payload: dict[str, Any],
-        completed_by_request: dict[tuple[str, str], FinalizedTurnResult],
-        started_without_terminal: set[tuple[str, str]],
+        completed_by_request: dict[tuple[str, str, str], FinalizedTurnResult],
+        started_without_terminal: set[tuple[str, str, str]],
     ) -> None:
         if event_type not in {"JOB_STARTED", "JOB_COMPLETED", "JOB_FAILED", "JOB_RECONCILED"}:
             return
         request_id = str(payload.get("request_id") or "").strip()
         if not request_id:
             return
-        key = (session_id, request_id)
+        key = (tenant_id, session_id, request_id)
         if event_type == "JOB_STARTED":
             started_without_terminal.add(key)
         else:
@@ -71,16 +74,17 @@ class LedgerIndex:
         *,
         event: dict[str, Any],
         event_type: str,
+        tenant_id: str,
         session_id: str,
         payload: dict[str, Any],
-        effect_state: dict[tuple[str, str], EffectState],
+        effect_state: dict[tuple[str, str, str], EffectState],
     ) -> None:
         if event_type not in {"EFFECT_BEGIN", "EFFECT_COMMIT", "EFFECT_RECONCILED"}:
             return
         effect_id = str(payload.get("effect_id") or "").strip()
         if not effect_id:
             return
-        key = (session_id, effect_id)
+        key = (tenant_id, session_id, effect_id)
         state = effect_state.get(key) or EffectState()
         if event_type == "EFFECT_BEGIN":
             state.begun = True
@@ -114,20 +118,22 @@ class LedgerIndex:
         if not force and event_count == self._indexed_event_count:
             return
 
-        completed_by_request: dict[tuple[str, str], FinalizedTurnResult] = {}
-        started_without_terminal: set[tuple[str, str]] = set()
-        effect_state: dict[tuple[str, str], EffectState] = {}
+        completed_by_request: dict[tuple[str, str, str], FinalizedTurnResult] = {}
+        started_without_terminal: set[tuple[str, str, str]] = set()
+        effect_state: dict[tuple[str, str, str], EffectState] = {}
         active_leases_by_worker: dict[str, set[str]] = {}
-        trace_roots: dict[str, str] = {}
+        trace_roots: dict[tuple[str, str], str] = {}
 
         for event in self._ledger.read():
-            event_type, session_id, trace_id, payload = self._normalize_event(event)
+            event_type, tenant_id, session_id, trace_id, payload = self._normalize_event(event)
 
-            if trace_id and trace_id not in trace_roots:
-                trace_roots[trace_id] = str(event.get("event_id") or "")
+            trace_key = (tenant_id, trace_id)
+            if trace_id and trace_key not in trace_roots:
+                trace_roots[trace_key] = str(event.get("event_id") or "")
 
             self._index_job_event(
                 event_type=event_type,
+                tenant_id=tenant_id,
                 session_id=session_id,
                 payload=payload,
                 completed_by_request=completed_by_request,
@@ -136,6 +142,7 @@ class LedgerIndex:
             self._index_effect_event(
                 event=event,
                 event_type=event_type,
+                tenant_id=tenant_id,
                 session_id=session_id,
                 payload=payload,
                 effect_state=effect_state,
@@ -153,9 +160,16 @@ class LedgerIndex:
         self._trace_roots = trace_roots
         self._indexed_event_count = event_count
 
-    def completed_result(self, *, session_id: str, request_id: str) -> FinalizedTurnResult | None:
+    def completed_result(
+        self,
+        *,
+        session_id: str,
+        request_id: str,
+        tenant_id: str | None = None,
+    ) -> FinalizedTurnResult | None:
         self.refresh()
         key = (
+            str(tenant_id or current_tenant_id() or "").strip(),
             str(session_id or "default").strip() or "default",
             str(request_id or "").strip(),
         )
@@ -163,9 +177,16 @@ class LedgerIndex:
             return None
         return self._completed_by_request.get(key)
 
-    def has_ambiguous_request_inflight(self, *, session_id: str, request_id: str) -> bool:
+    def has_ambiguous_request_inflight(
+        self,
+        *,
+        session_id: str,
+        request_id: str,
+        tenant_id: str | None = None,
+    ) -> bool:
         self.refresh()
         key = (
+            str(tenant_id or current_tenant_id() or "").strip(),
             str(session_id or "default").strip() or "default",
             str(request_id or "").strip(),
         )
@@ -173,9 +194,16 @@ class LedgerIndex:
             return False
         return key in self._started_without_terminal
 
-    def effect_state(self, *, session_id: str, effect_id: str) -> EffectState:
+    def effect_state(
+        self,
+        *,
+        session_id: str,
+        effect_id: str,
+        tenant_id: str | None = None,
+    ) -> EffectState:
         self.refresh()
         key = (
+            str(tenant_id or current_tenant_id() or "").strip(),
             str(session_id or "default").strip() or "default",
             str(effect_id or "").strip(),
         )
@@ -183,38 +211,47 @@ class LedgerIndex:
             return EffectState()
         return self._effect_state.get(key) or EffectState()
 
-    def is_effect_committed(self, *, session_id: str, effect_id: str) -> bool:
-        return self.effect_state(session_id=session_id, effect_id=effect_id).committed
+    def is_effect_committed(self, *, session_id: str, effect_id: str, tenant_id: str | None = None) -> bool:
+        return self.effect_state(session_id=session_id, effect_id=effect_id, tenant_id=tenant_id).committed
 
-    def has_ambiguous_effect_inflight(self, *, session_id: str, effect_id: str) -> bool:
-        state = self.effect_state(session_id=session_id, effect_id=effect_id)
+    def has_ambiguous_effect_inflight(
+        self,
+        *,
+        session_id: str,
+        effect_id: str,
+        tenant_id: str | None = None,
+    ) -> bool:
+        state = self.effect_state(session_id=session_id, effect_id=effect_id, tenant_id=tenant_id)
         return bool(state.begun and not state.committed)
 
     def ambiguous_effect_entries(self) -> list[dict[str, str]]:
         self.refresh()
         entries: list[dict[str, str]] = []
-        for (session_id, effect_id), state in self._effect_state.items():
+        for tenant_id, session_id, effect_id in self._effect_state:
+            state = self._effect_state[(tenant_id, session_id, effect_id)]
             if state.begun and not state.committed:
                 entries.append(
                     {
+                        "tenant_id": str(tenant_id or ""),
                         "session_id": str(session_id or "default"),
                         "effect_id": str(effect_id or ""),
                     },
                 )
-        entries.sort(key=lambda item: (item["session_id"], item["effect_id"]))
+        entries.sort(key=lambda item: (item["tenant_id"], item["session_id"], item["effect_id"]))
         return entries
 
     def ambiguous_request_entries(self) -> list[dict[str, str]]:
         self.refresh()
         entries = [
             {
+                "tenant_id": str(tenant_id or ""),
                 "session_id": str(session_id or "default"),
                 "request_id": str(request_id or ""),
             }
-            for session_id, request_id in self._started_without_terminal
+            for tenant_id, session_id, request_id in self._started_without_terminal
             if str(request_id or "").strip()
         ]
-        entries.sort(key=lambda item: (item["session_id"], item["request_id"]))
+        entries.sort(key=lambda item: (item["tenant_id"], item["session_id"], item["request_id"]))
         return entries
 
     def active_leases_for_worker(self, worker_id: str) -> set[str]:
@@ -223,7 +260,8 @@ class LedgerIndex:
 
     def trace_root(self, trace_token: str) -> str:
         self.refresh()
-        return str(self._trace_roots.get(str(trace_token or "").strip()) or "")
+        key = (str(current_tenant_id() or "").strip(), str(trace_token or "").strip())
+        return str(self._trace_roots.get(key) or "")
 
 
 __all__ = ["EffectState", "LedgerIndex"]

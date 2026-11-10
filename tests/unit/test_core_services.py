@@ -29,5 +29,19 @@ def test_development_service_factory_keeps_local_defaults(monkeypatch):
     services = build_services()
 
     assert isinstance(services["tool_registry"], ToolRegistry)
-    assert services["tool_registry"].get("reminder") is not None
+    assert services["tool_registry"].get("reminder") is None
+    assert services["tool_registry"].get("calendar") is None
+    assert services["tool_registry"].get("web_search") is None
     assert services["planner"] is not None
+
+
+def test_trace_provider_availability_uses_telemetry_adapter(monkeypatch):
+    from dadbot_system import runtime_signals
+
+    monkeypatch.setattr(
+        runtime_signals._adapter,
+        "trace_provider_available",
+        lambda: True,
+    )
+
+    assert runtime_signals.is_trace_provider_available() is True

@@ -8,6 +8,7 @@ from typing import Any
 
 from dadbot.utils import env_truthy
 from dadbot_system import ServiceConfig, normalize_tenant_id
+from dadbot_system.contracts import DEFAULT_TENANT_ID
 
 
 @dataclass(frozen=True)
@@ -342,9 +343,9 @@ class DadBotConfig:
     )
 
     def __post_init__(self) -> None:
-        self.tenant_id = normalize_tenant_id(
-            self.tenant_id or os.environ.get("DADBOT_TENANT_ID") or "",
-        )
+        if not self.tenant_id:
+            self.tenant_id = os.environ.get("DADBOT_TENANT_ID", DEFAULT_TENANT_ID)
+        self.tenant_id = normalize_tenant_id(self.tenant_id)
         self.append_signoff = bool(
             self.append_signoff and not env_truthy("DADBOT_NO_SIGNOFF", default=False),
         )

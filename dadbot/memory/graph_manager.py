@@ -91,6 +91,10 @@ class MemoryGraphManager:
         self._graph_store_backend.ensure_storage()
 
     def clear_graph_store(self):
+        storage = getattr(self._mm, "_storage", None)
+        local_backend = getattr(storage, "_local_authority_backend", None)
+        if callable(local_backend) and local_backend() is not None:
+            raise RuntimeError("Cannot clear graph independently of ledger-authoritative tenant memory")
         self._graph_store_backend.clear()
 
     # ------------------------------------------------------------------

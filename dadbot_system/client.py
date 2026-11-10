@@ -50,7 +50,9 @@ class ServiceClientConfig:
     redis_url: str = field(default_factory=lambda: str(os.environ.get("DADBOT_REDIS_URL") or "").strip())
     postgres_dsn: str = field(default_factory=lambda: str(os.environ.get("DADBOT_POSTGRES_DSN") or "").strip())
     tenant_id: str = field(
-        default_factory=lambda: normalize_tenant_id(os.environ.get("DADBOT_TENANT_ID") or DEFAULT_TENANT_ID)
+        default_factory=lambda: normalize_tenant_id(
+            os.environ["DADBOT_TENANT_ID"] if "DADBOT_TENANT_ID" in os.environ else DEFAULT_TENANT_ID
+        )
     )
     auth_token: str = field(default_factory=lambda: str(os.environ.get("DADBOT_API_AUTH_TOKEN") or "").strip())
     secret_key: str = field(default_factory=lambda: str(os.environ.get("DADBOT_SECRET_KEY") or "").strip())

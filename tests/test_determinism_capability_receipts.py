@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from dadbot.core.execution_ledger import ExecutionLedger
+from dadbot.core.execution_receipt import ReceiptChain
 
 pytestmark = pytest.mark.unit
 

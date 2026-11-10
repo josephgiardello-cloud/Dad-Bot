@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from dadbot.memory.storage import _only_memory_access_changed
-from dadbot.services.memory_service import MemoryService
+from dadbot.services.memory_service import MemoryRetrievalError, MemoryService
 from dadbot_system.semantic_index import PGVectorSemanticIndex
 
 pytestmark = pytest.mark.unit
@@ -192,6 +192,91 @@ def test_time_scoped_service_across_simulated_months(bot, monkeypatch):
     assert service.retrieve_for_query(query="project milestone", from_date="2025-07-01") == []
     with pytest.raises(ValueError, match="from_date"):
         service.retrieve_for_query(query="project milestone", from_date="invalid")
+
+
+def test_memory_retrieval_status_distinguishes_empty_results_from_backend_failure():
+    class EmptyRuntime:
+        def graph_retrieval_for_input(self, _query, limit=3):
+            return {}
+
+        def relevant_memories_for_input(self, _query, **_kwargs):
+            return []
+
+    class FailedRuntime(EmptyRuntime):
+        def relevant_memories_for_input(self, _query, **_kwargs):
+            raise OSError("backend unavailable")
+
+    empty_service = MemoryService(EmptyRuntime())
+    empty = empty_service.retrieve_for_query_with_status(query="an empty index")
+    assert empty.memories == []
+    assert empty.status == "ok"
+    assert empty.errors == []
+    assert empty_service.retrieve_for_query(query="an empty index") == []
+    empty_turn_state = {}
+    MemoryService.record_retrieval_status(
+        empty_turn_state,
+        status=empty.status,
+        errors=empty.errors,
+        source="post_tool",
+    )
+    assert empty_turn_state["memory_retrieval_status"] == {
+        "status": "ok",
+        "errors": [],
+        "sources": ["post_tool"],
+    }
+
+    failed_service = MemoryService(FailedRuntime())
+    failed = failed_service.retrieve_for_query_with_status(query="a failed index")
+    assert failed.memories == []
+    assert failed.status == "degraded"
+    assert failed.errors == [{"source": "memory_catalog", "error_type": "OSError"}]
+    with pytest.raises(MemoryRetrievalError) as error:
+        failed_service.retrieve_for_query(query="a failed index")
+    assert error.value.status == "degraded"
+    assert error.value.errors == [{"source": "memory_catalog", "error_type": "OSError"}]
+    failed_turn_state = {}
+    MemoryService.record_retrieval_status(
+        failed_turn_state,
+        status=failed.status,
+        errors=failed.errors,
+        source="post_tool",
+    )
+    assert failed_turn_state["memory_retrieval_status"] == {
+        "status": "degraded",
+        "errors": [{"source": "post_tool:memory_catalog", "error_type": "OSError"}],
+        "sources": ["post_tool"],
+    }
+    assert failed_turn_state["memory_retrieval_status"] != empty_turn_state["memory_retrieval_status"]
+
+
+def test_semantic_index_failure_is_recorded_in_turn_retrieval_status():
+    class FailedIndex:
+        def fetch_candidates(self, **_kwargs):
+            raise OSError("backend unavailable")
+
+    state = {}
+    MemoryService.record_retrieval_status(
+        state,
+        status="ok",
+        errors=[],
+        source="context_snapshot",
+    )
+    candidates = MemoryService.fetch_semantic_candidates(
+        FailedIndex(),
+        query_embedding=None,
+        query_tokens=[],
+        query_category="general",
+        query_mood="neutral",
+        limit=5,
+        state=state,
+    )
+
+    assert candidates == []
+    assert state["memory_retrieval_status"] == {
+        "status": "degraded",
+        "errors": [{"source": "semantic_rag:semantic_index", "error_type": "OSError"}],
+        "sources": ["context_snapshot", "semantic_rag"],
+    }
 
 
 def test_time_scope_uses_recorded_occurrence_not_write_date(bot, monkeypatch):

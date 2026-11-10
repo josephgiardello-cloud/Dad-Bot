@@ -90,7 +90,7 @@ services:
     command: ["api"]
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "python", "-c", "import json, urllib.request; data = json.load(urllib.request.urlopen('http://127.0.0.1:8010/health')); raise SystemExit(0 if data.get('status') == 'ok' else 1)"]
+      test: ["CMD", "python", "-c", "import json, urllib.request; data = json.load(urllib.request.urlopen('http://127.0.0.1:8010/ready')); raise SystemExit(0 if data.get('status') == 'ready' else 1)"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -113,7 +113,7 @@ services:
     environment:
       POSTGRES_DB: dadbot
       POSTGRES_USER: dadbot
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./docker/init-pgvector.sql:/docker-entrypoint-initdb.d/init-pgvector.sql:ro

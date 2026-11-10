@@ -14,6 +14,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from pathlib import Path
 
+from dadbot.speech.tts import resolve_piper_executable
 from dadbot.utils import create_temp_file_path, safe_unlink
 
 try:
@@ -32,6 +33,10 @@ class TTSManager:
 
     def __init__(self, bot):
         self.bot = bot
+
+    @staticmethod
+    def _piper_executable() -> str:
+        return resolve_piper_executable()
 
     @staticmethod
     def _voice_profile(bot: object) -> str:
@@ -222,8 +227,8 @@ class TTSManager:
         return scored[0][1] if scored and scored[0][1] else ""
 
     def piper_tts_available(self) -> bool:
-        """Quick check: piper binary exists on PATH and model file is configured."""
-        if not shutil.which("piper"):
+        """Check that Piper is installed and a model file is configured."""
+        if not self._piper_executable():
             return False
         voice = self._voice_config()
         model_path = voice.get("tts_piper_model_path") or voice.get("piper_model_path", "")
@@ -241,11 +246,14 @@ class TTSManager:
         if model_path is None:
             voice = self._voice_config()
             model_path = voice.get("tts_piper_model_path") or voice.get("piper_model_path", "")
+        piper_executable = self._piper_executable()
+        if not piper_executable:
+            return None, "Piper executable is unavailable in PATH or the active Python environment."
         if not model_path or not Path(model_path).is_file():
             return None, f"Piper model not found: {model_path}"
         tmp_path = create_temp_file_path(suffix=".wav", prefix="dadbot_tts_")
         try:
-            cmd = ["piper", "--model", str(model_path), "--output_file", tmp_path]
+            cmd = [piper_executable, "--model", str(model_path), "--output_file", tmp_path]
             result = subprocess.run(
                 cmd,
                 input=text,

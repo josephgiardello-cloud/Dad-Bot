@@ -49,14 +49,14 @@ Test anchors:
 
 ### L-1 Sealed Events View
 
-- Rule: sealed_events is an immutable tuple container over live authoritative event dict entries.
+- Rule: sealed_events is an immutable tuple container whose returned event values cannot mutate authoritative ledger events.
 - Authority: dadbot/core/execution_ledger.py, ExecutionLedger.sealed_events.
 - Consequence: tuple shape is immutable, but dict item mutation is reflected in ledger state.
 
 Test anchors:
 
 - tests/test_production_hardening_wave4.py::TestSealedEventsAndReplayFilters::test_sealed_events_returns_tuple
-- tests/test_production_hardening_wave4.py::TestSealedEventsAndReplayFilters::test_sealed_events_exposes_live_authoritative_events
+- tests/test_production_hardening_wave4.py::TestSealedEventsAndReplayFilters::test_sealed_events_cannot_mutate_authoritative_events
 
 ### L-2 Write Boundary and Causal Chain
 
@@ -124,14 +124,14 @@ Test anchors:
 
 ### P-3 Compaction Policy Contract
 
-- Rule: active compaction interval is every 25 turn events.
-- Rule: periodic full snapshot reads still occur for strict anchoring.
-- Rule: telemetry publishes recommended interval and retention under pressure.
+- Rule: compaction requires a durable checkpoint before event removal.
+- Rule: configured archive tiers retain and read back archived events.
+- Rule: compaction policy and snapshot thresholds can skip unsafe or unnecessary compaction.
 - Authority: dadbot/managers/conversation_persistence.py.
 
 Test anchors:
 
-- tests/test_production_hardening_wave4.py::TestCompaction::test_compact_removes_pre_snapshot_events
+- tests/test_production_hardening_wave4.py::TestCompaction::test_compaction_with_archive_tier
 
 ### P-4 Post-Commit Emission Contract
 

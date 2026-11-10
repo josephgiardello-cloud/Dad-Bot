@@ -40,12 +40,21 @@ def _manager(*, budget=6000, model_limit=32768, keep_alive=-1):
 
 @pytest.mark.parametrize(
     ("budget", "model_limit", "expected"),
-    [(256, 32768, 512), (512, 32768, 512), (513, 32768, 1024),
-     (1157, 32768, 2048), (1286, 32768, 2048), (1308, 32768, 2048),
-     (6000, 32768, 8192), (9000, 32768, 16384), (6000, 4096, 4096),
-     (6000, 7000, 7000), (6000, None, 8192)],
+    [
+        (256, 32768, 256),
+        (512, 32768, 512),
+        (513, 32768, 513),
+        (1157, 32768, 1157),
+        (1286, 32768, 1286),
+        (1308, 32768, 1308),
+        (6000, 32768, 6000),
+        (9000, 32768, 9000),
+        (6000, 4096, 4096),
+        (6000, 7000, 6000),
+        (6000, None, 6000),
+    ],
 )
-def test_context_bucket_preserves_prompt_guard_budget(budget, model_limit, expected):
+def test_context_budget_preserves_prompt_guard_budget(budget, model_limit, expected):
     manager, guarded_calls = _manager(model_limit=model_limit)
     options = {"num_ctx": budget, "num_keep": 42, "temperature": 0.2}
     guarded, prepared = manager._prepare_ollama_request(
@@ -60,13 +69,13 @@ def test_context_bucket_preserves_prompt_guard_budget(budget, model_limit, expec
     assert guarded[0]["content"] == "Hello"
 
 
-def test_default_context_bucket_does_not_depend_on_prompt_length():
+def test_default_context_budget_does_not_depend_on_prompt_length():
     manager, guarded_calls = _manager()
     for text in ("short", "long " * 500):
         _, options = manager._prepare_ollama_request(
             "test-model", [{"role": "user", "content": text}], None, "chat",
         )
-        assert options["num_ctx"] == 8192
+        assert options["num_ctx"] == 6000
         assert "num_keep" not in options
     assert all(call["context_budget"] == 6000 for call in guarded_calls)
 
@@ -120,7 +129,7 @@ def test_all_chat_paths_send_top_level_residency_setting(monkeypatch, method, ke
     assert len(calls) == 1
     assert calls[0]["keep_alive"] == keep_alive
     assert "keep_alive" not in calls[0]["options"]
-    assert calls[0]["options"]["num_ctx"] == 8192
+    assert calls[0]["options"]["num_ctx"] == 6000
 
 
 def test_residency_config_reads_environment_and_rejects_invalid_values(monkeypatch):

@@ -111,17 +111,14 @@ class TestFileWALLedgerBackend:
             events = backend.load()
             assert len(events) == 2
 
-    def test_corrupt_line_is_skipped(self):
+    def test_corrupt_line_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             wal_path = Path(tmpdir) / "ledger.wal"
             # Write a valid line then a corrupt one.
             wal_path.write_text('{"type": "JOB_QUEUED"}\nNOT_JSON\n{"type": "JOB_COMPLETED"}\n')
-            import warnings
-
-            with warnings.catch_warnings(record=True):
-                backend = FileWALLedgerBackend(wal_path, fsync=False)
-                events = backend.load()
-            assert len(events) == 2
+            backend = FileWALLedgerBackend(wal_path, fsync=False)
+            with pytest.raises(RuntimeError, match="Corrupt WAL record"):
+                backend.load()
 
     def test_ledger_load_from_backend(self):
         """ExecutionLedger.load_from_backend() repopulates in-memory state from WAL."""
@@ -438,7 +435,7 @@ class TestObservability:
             from dadbot.core.control_plane import ExecutionControlPlane, SessionRegistry
 
             async def executor(session, job):
-                return {"reply": "ok"}
+                return ("ok", False)
 
             plane = ExecutionControlPlane(
                 registry=SessionRegistry(),

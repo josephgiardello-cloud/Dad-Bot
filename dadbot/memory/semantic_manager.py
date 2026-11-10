@@ -9,7 +9,7 @@ import json
 import logging
 import os
 import sqlite3
-from contextlib import closing
+from contextlib import closing, contextmanager, nullcontext
 from datetime import datetime
 from pathlib import Path
 from threading import local
@@ -80,7 +80,37 @@ class SemanticIndexManager:
         self._semantic_index_backend.ensure_storage()
 
     def clear_semantic_memory_index(self):
-        self._semantic_index_backend.clear()
+        with self._semantic_write_fence([]):
+            self._semantic_index_backend.clear()
+
+    def _semantic_write_fence(self, memories):
+        manager = getattr(self._bot, "memory_manager", None)
+        storage = getattr(manager, "_storage", None)
+        fence = getattr(storage, "fenced_semantic_index_write", None)
+        return fence(memories) if callable(fence) else nullcontext()
+
+    @contextmanager
+    def verified_semantic_index_read(self, memories):
+        manager = getattr(self._bot, "memory_manager", None)
+        storage = getattr(manager, "_storage", None)
+        local_backend = getattr(storage, "_local_authority_backend", None)
+        if not callable(local_backend) or local_backend() is None:
+            yield True
+            return
+        catalog = list(manager.memory_projection().get("memories") or [])
+        by_key = self.semantic_memory_lookup(catalog)
+        if any(by_key.get(self.semantic_memory_key(memory)) != memory for memory in memories):
+            yield False
+            return
+        with storage.fenced_semantic_index_write(catalog):
+            expected = {
+                self.semantic_memory_key(memory): hashlib.sha256(
+                    self.memory_embedding_text(memory).encode("utf-8"),
+                ).hexdigest()
+                for memory in catalog
+                if self.semantic_memory_key(memory)
+            }
+            yield self._semantic_index_backend.existing_content_hashes() == expected
 
     def with_semantic_db(self, operation, write=False):
         if isinstance(self._semantic_index_backend, SQLiteSemanticIndex):
@@ -609,8 +639,67 @@ class SemanticIndexManager:
             return self._bot._pending_semantic_index_memories is None and self._bot._semantic_index_future is future
 
     def sync_semantic_memory_index(self, memories):
+        manager = getattr(self._bot, "memory_manager", None)
+        storage = getattr(manager, "_storage", None)
+        local_backend = getattr(storage, "_local_authority_backend", None)
+        if (
+            callable(local_backend)
+            and local_backend() is not None
+            and isinstance(self._semantic_index_backend, SQLiteSemanticIndex)
+        ):
+            self._sync_local_semantic_candidate(list(memories), storage)
+            return
+        with self._semantic_write_fence(memories):
+            self._sync_semantic_memory_index_unlocked(memories)
+
+    def _sync_local_semantic_candidate(self, memories, storage):
+        backend = self._semantic_index_backend
+        with storage.fenced_semantic_index_write(memories) as revision:
+            backend.ensure_storage()
+            existing = backend.existing_content_hashes()
+
+        payload = {}
+        for memory in memories:
+            key = self.semantic_memory_key(memory)
+            if key:
+                text = self.memory_embedding_text(memory)
+                payload[key] = (text, hashlib.sha256(text.encode("utf-8")).hexdigest(), memory)
+        pending = [
+            (key, text, content_hash, memory)
+            for key, (text, content_hash, memory) in payload.items()
+            if existing.get(key) != content_hash
+        ]
+        embeddings = self.embed_texts(
+            [text for _, text, _, _ in pending],
+            purpose="semantic memory indexing",
+        ) if pending else []
+        if len(embeddings) != len(pending):
+            raise RuntimeError(
+                f"Semantic memory indexing failed: embedding batch mismatch "
+                f"(expected {len(pending)}, got {len(embeddings)})"
+            )
+        rows = [
+            {
+                "summary_key": key,
+                "summary": memory.get("summary", ""),
+                "category": memory.get("category", "general"),
+                "mood": self._bot.normalize_mood(memory.get("mood")),
+                "updated_at": memory.get("updated_at", ""),
+                "content_hash": content_hash,
+                "embedding_json": json_dumps(embedding),
+            }
+            for (key, _, content_hash, memory), embedding in zip(pending, embeddings)
+        ]
+        with storage.fenced_semantic_index_write(memories, expected_revision=revision):
+            expected = {key: value[1] for key, value in payload.items()}
+            backend.apply_changes(
+                rows, set(existing) - set(payload),
+                expected_hashes=expected, previous_hashes=existing,
+            )
+
+    def _sync_semantic_memory_index_unlocked(self, memories):
         if not memories:
-            self.clear_semantic_memory_index()
+            self._semantic_index_backend.clear()
             return
 
         self.ensure_semantic_memory_db()
@@ -626,8 +715,6 @@ class SemanticIndexManager:
 
         existing_rows = self._semantic_index_backend.existing_content_hashes()
         stale_keys = set(existing_rows) - current_keys
-        if stale_keys:
-            self._semantic_index_backend.delete_keys(stale_keys)
 
         pending = []
         for summary_key, payload_text, memory in current_payload:
@@ -636,6 +723,8 @@ class SemanticIndexManager:
                 continue
             pending.append((summary_key, payload_text, content_hash, memory))
         if not pending:
+            if stale_keys:
+                self._semantic_index_backend.delete_keys(stale_keys)
             return
 
         # Use self.embed_texts directly — avoids the round-trip through bot facade
@@ -644,32 +733,33 @@ class SemanticIndexManager:
             purpose="semantic memory indexing",
         )
         if len(embeddings) != len(pending):
-            logger.info(
-                "Semantic memory indexing skipped: embedding batch mismatch "
-                "(expected %d, got %d). Will retry next cycle.",
-                len(pending),
-                len(embeddings),
+            raise RuntimeError(
+                f"Semantic memory indexing failed: embedding batch mismatch "
+                f"(expected {len(pending)}, got {len(embeddings)})",
             )
-            return
 
-        self._semantic_index_backend.upsert_rows(
-            [
-                {
-                    "summary_key": summary_key,
-                    "summary": memory.get("summary", ""),
-                    "category": memory.get("category", "general"),
-                    "mood": self._bot.normalize_mood(memory.get("mood")),
-                    "updated_at": memory.get("updated_at", ""),
-                    "content_hash": content_hash,
-                    "embedding": embedding,
-                    "embedding_json": json_dumps(embedding),
-                }
-                for (summary_key, _, content_hash, memory), embedding in zip(
-                    pending,
-                    embeddings,
-                )
-            ],
-        )
+        rows = [
+            {
+                "summary_key": summary_key,
+                "summary": memory.get("summary", ""),
+                "category": memory.get("category", "general"),
+                "mood": self._bot.normalize_mood(memory.get("mood")),
+                "updated_at": memory.get("updated_at", ""),
+                "content_hash": content_hash,
+                "embedding": embedding,
+                "embedding_json": json_dumps(embedding),
+            }
+            for (summary_key, _, content_hash, memory), embedding in zip(
+                pending,
+                embeddings,
+            )
+        ]
+        if isinstance(self._semantic_index_backend, SQLiteSemanticIndex):
+            self._semantic_index_backend.apply_changes(rows, stale_keys)
+        else:
+            self._semantic_index_backend.upsert_rows(rows)
+            if stale_keys:
+                self._semantic_index_backend.delete_keys(stale_keys)
 
     # ------------------------------------------------------------------
     # Lookup / search
@@ -822,18 +912,22 @@ class SemanticIndexManager:
         current_memories = self.semantic_memory_lookup(memories)
         try:
             candidate_limit = self._bot.runtime_config.memory_candidate_limit
-            if (
-                candidate_limit > 0
-                and len(current_memories) > candidate_limit
-                and isinstance(self._semantic_index_backend, PGVectorSemanticIndex)
-            ):
-                rows = self._semantic_index_backend.fetch_nearest_by_keys(
-                    current_memories.keys(), query_context["query_embedding"], candidate_limit,
-                )
-                self._last_retrieval_status["bounded"] = True
-            else:
-                rows = self.catalog_semantic_rows(current_memories.keys())
-                self._last_retrieval_status["bounded"] = False
+            with self.verified_semantic_index_read(memories) as current:
+                if not current:
+                    self._last_retrieval_status.update(degraded=True, reason="stale_index")
+                    return []
+                if (
+                    candidate_limit > 0
+                    and len(current_memories) > candidate_limit
+                    and isinstance(self._semantic_index_backend, PGVectorSemanticIndex)
+                ):
+                    rows = self._semantic_index_backend.fetch_nearest_by_keys(
+                        current_memories.keys(), query_context["query_embedding"], candidate_limit,
+                    )
+                    self._last_retrieval_status["bounded"] = True
+                else:
+                    rows = self.catalog_semantic_rows(current_memories.keys())
+                    self._last_retrieval_status["bounded"] = False
         except Exception as exc:
             logger.warning("Semantic memory lookup failed: %s", exc)
             self._last_retrieval_status["degraded"] = True

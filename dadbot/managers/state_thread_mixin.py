@@ -330,24 +330,34 @@ class _StateThreadMixin:
 
     def sync_active_thread_snapshot(self):
         with self.bot._session_lock:
+            previous_active_thread_id = self.active_thread_id
+            previous_snapshot = self.thread_snapshots.get(previous_active_thread_id)
+            if previous_snapshot is not None:
+                previous_snapshot = self.normalize_thread_snapshot(previous_snapshot)
             active_thread_id = self.ensure_chat_thread_state(
                 preserve_active_runtime=True,
             )
             snapshot = self.current_thread_runtime_snapshot()
             self.thread_snapshots[active_thread_id] = snapshot
+            snapshot_changed = (
+                previous_active_thread_id != active_thread_id
+                or previous_snapshot is None
+                or previous_snapshot != snapshot
+            )
             updated_threads = []
-            now = self.thread_timestamp()
             for index, thread in enumerate(self.chat_threads, start=1):
                 if thread.get("thread_id") == active_thread_id:
+                    updated_thread = {
+                        **dict(thread),
+                        "last_message": self.thread_preview(snapshot),
+                        "turn_count": self.thread_turn_count(snapshot),
+                        "closed": bool(snapshot.get("closed")),
+                    }
+                    if snapshot_changed:
+                        updated_thread["updated_at"] = self.thread_timestamp()
                     updated_threads.append(
                         self.normalize_chat_thread_entry(
-                            {
-                                **dict(thread),
-                                "updated_at": now,
-                                "last_message": self.thread_preview(snapshot),
-                                "turn_count": self.thread_turn_count(snapshot),
-                                "closed": bool(snapshot.get("closed")),
-                            },
+                            updated_thread,
                             snapshot,
                             fallback_index=index,
                         ),

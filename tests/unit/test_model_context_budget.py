@@ -21,6 +21,7 @@ def _client():
 
     bot = SimpleNamespace(
         ACTIVE_MODEL="thinking-model", CONTEXT_TOKEN_BUDGET=6000, RESERVED_RESPONSE_TOKENS=512,
+        runtime_config=SimpleNamespace(ollama_keep_alive_seconds=-1),
         effective_context_token_budget=lambda _model=None: 6000,
         adaptive_prompt_pressure_factor=lambda: 1.0,
         message_token_cost=cost, trim_message_to_token_budget=trim,

@@ -1,0 +1,162 @@
+{
+  "version": 1,
+  "server_name": "dadbot-local-services",
+  "tools": {
+    "runtime_health_snapshot": {
+      "approved": true,
+      "base_scope": "read",
+      "required_scope": "mcp:tool:runtime_health_snapshot",
+      "schema_sha256": "e2ac536c7c485da490d45edc29f6e614eab04095904e314c1d13a981a1c9835f"
+    },
+    "maintenance_snapshot": {
+      "approved": true,
+      "base_scope": "read",
+      "required_scope": "mcp:tool:maintenance_snapshot",
+      "schema_sha256": "a5dc92fec858506d62a0097da4a94d5b00239a6ce0cc44cf56350deedc5a2085"
+    },
+    "workshop_snapshot": {
+      "approved": true,
+      "base_scope": "read",
+      "required_scope": "mcp:tool:workshop_snapshot",
+      "schema_sha256": "9216125f8dfd9d9a6d037582faec117919a96ee4dfc543006bd8e8c72e6b7374"
+    },
+    "memory_snapshot": {
+      "approved": true,
+      "base_scope": "read",
+      "required_scope": "mcp:tool:memory_snapshot",
+      "schema_sha256": "c460a329ea995f45688659d461d38cbd24eb22a90fa39771845ad923f58dfe58"
+    },
+    "memory_search": {
+      "approved": true,
+      "base_scope": "read",
+      "required_scope": "mcp:tool:memory_search",
+      "schema_sha256": "61c4208974bc0e0e9775170b2728198efb6e9ae0744ab56ce3dd6106d8b5c2d8"
+    },
+    "add_reminder": {
+      "approved": true,
+      "base_scope": "write",
+      "required_scope": "mcp:tool:add_reminder",
+      "schema_sha256": "326ed927749cd4a388f8721001c3595a618cb78f9d9bc45e2d7a5a356b80c4c9"
+    },
+    "list_reminders": {
+      "approved": true,
+      "base_scope": "read",
+      "required_scope": "mcp:tool:list_reminders",
+      "schema_sha256": "bf899ed5cf9b25bcf5ba35b8cb65b5948a928175548819279bd989dc0492d8e2"
+    },
+    "add_calendar_event": {
+      "approved": true,
+      "base_scope": "write",
+      "required_scope": "mcp:tool:add_calendar_event",
+      "schema_sha256": "44533ab932e03ea95831e1f1ca7a9d2965338cbbf80ff42b7c34a23422502e9a"
+    },
+    "list_calendar_events": {
+      "approved": true,
+      "base_scope": "read",
+      "required_scope": "mcp:tool:list_calendar_events",
+      "schema_sha256": "bced089d9dc32a4b8f28a121312dee00b12689efd83c2cd2a41544e2c889851c"
+    },
+    "draft_email": {
+      "approved": true,
+      "base_scope": "write",
+      "required_scope": "mcp:tool:draft_email",
+      "schema_sha256": "0e3bb1a0849c38c23ee717f151edf748da94a6a513e2d410d239e67ad89e77cf"
+    },
+    "read_local_state": {
+      "approved": true,
+      "base_scope": "read",
+      "required_scope": "mcp:tool:read_local_state",
+      "schema_sha256": "05398e94431ee1ee8916f33058a80fdf95d3e9026b5a73fc3ea66e73f403e0c9"
+    },
+    "write_local_state": {
+      "approved": true,
+      "base_scope": "write",
+      "required_scope": "mcp:tool:write_local_state",
+      "schema_sha256": "56f7a0a65116d1f39f0a25cbb457b7ed3b54195ef89e29ca35989731b532092d"
+    },
+    "heritage_cross_link_query": {
+      "approved": true,
+      "base_scope": "read",
+      "required_scope": "mcp:tool:heritage_cross_link_query",
+      "schema_sha256": "cb7d3b9778f88e52e77f8ff401520af8c82bd536204cf9afa86a240204dd1a2c"
+    },
+    "browser_capabilities": {
+      "approved": true,
+      "base_scope": "read",
+      "required_scope": "mcp:tool:browser_capabilities",
+      "schema_sha256": "95691b19661d7f9dc37f13a88fbe89a429aad451ce654407aeba78bd2245b853"
+    },
+    "browser_open_url": {
+      "approved": true,
+      "base_scope": "write",
+      "required_scope": "mcp:tool:browser_open_url",
+      "schema_sha256": "b5e49aa0a2cfb04661ab62c07a0bb0820e2b4e90d380741afe46f66c59e6c14e"
+    },
+    "computer_list_directory": {
+      "approved": true,
+      "base_scope": "read",
+      "required_scope": "mcp:tool:computer_list_directory",
+      "schema_sha256": "c182acffbcae6f26c4f439045bef12f6df95fe665c09b34399714e8c8f303daf"
+    },
+    "computer_read_text_file": {
+      "approved": true,
+      "base_scope": "read",
+      "required_scope": "mcp:tool:computer_read_text_file",
+      "schema_sha256": "35e357e345b72848623d9977b525778f6a43989b251b30a5b6b6d3c8fc024d1f"
+    },
+    "computer_write_text_file": {
+      "approved": true,
+      "base_scope": "write",
+      "required_scope": "mcp:tool:computer_write_text_file",
+      "schema_sha256": "57942a2d9b151c19524bead66b70d9d326ef3f744eac9ca3ba67fb0c57b231b0"
+    },
+    "computer_search_directory": {
+      "approved": true,
+      "base_scope": "read",
+      "required_scope": "mcp:tool:computer_search_directory",
+      "schema_sha256": "2509be982b8a7079ea67389df59efe0a28c9483d08c971772c53bdc515a68546"
+    },
+    "computer_summarize_directory": {
+      "approved": true,
+      "base_scope": "read",
+      "required_scope": "mcp:tool:computer_summarize_directory",
+      "schema_sha256": "bdd6db10eaaa8d371c6ee4f159afdbdce06c07e4f53eb63bea94b6c48ab84aad"
+    },
+    "computer_refactor_python_function": {
+      "approved": true,
+      "base_scope": "write",
+      "required_scope": "mcp:tool:computer_refactor_python_function",
+      "schema_sha256": "db1c26ef0e5720dee01a4fc771d54fbe219792e702c4ddb32d1b1fc0a68abc92"
+    },
+    "research_fetch_url": {
+      "approved": true,
+      "base_scope": "write",
+      "required_scope": "mcp:tool:research_fetch_url",
+      "schema_sha256": "ecdfb09681b016b692b993dbc23c1617272182e2b8a7a4c746fef5d98f651071"
+    },
+    "research_search_web": {
+      "approved": true,
+      "base_scope": "write",
+      "required_scope": "mcp:tool:research_search_web",
+      "schema_sha256": "89d6286d182946146ce156a0de3c1898a5ce88b622b7f01e06c9157a1c9e0fd2"
+    },
+    "executive_add_task": {
+      "approved": true,
+      "base_scope": "write",
+      "required_scope": "mcp:tool:executive_add_task",
+      "schema_sha256": "3c773ac277551229c4f57b3729c1411b08ac081711349ad707dc977ada6daf22"
+    },
+    "executive_list_tasks": {
+      "approved": true,
+      "base_scope": "read",
+      "required_scope": "mcp:tool:executive_list_tasks",
+      "schema_sha256": "6779ce6b8a94258fdb5dbd641bbe9cbfbe5f851fc86f47f0983a7d753ddd3eab"
+    },
+    "executive_complete_task": {
+      "approved": true,
+      "base_scope": "write",
+      "required_scope": "mcp:tool:executive_complete_task",
+      "schema_sha256": "6dd706da4368249f294ab831709ac7d3729eb251fedc7555fe64c48546e78b4d"
+    }
+  }
+}

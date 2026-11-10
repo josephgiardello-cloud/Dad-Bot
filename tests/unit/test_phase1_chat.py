@@ -324,6 +324,7 @@ def test_runtime_preserves_selected_model_and_reasoning_defaults(monkeypatch, as
     monkeypatch.setattr(RuntimeClientManager, "_call_ollama_sync", staticmethod(chat))
     bot = SimpleNamespace(
         ACTIVE_MODEL="old-model",
+        runtime_config=SimpleNamespace(ollama_keep_alive_seconds=-1),
         model_runtime=SimpleNamespace(
             normalized_llm_provider=lambda: "ollama",
             normalized_llm_model=lambda model: model or DEFAULT_MODEL,

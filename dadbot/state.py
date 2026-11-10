@@ -168,7 +168,15 @@ class RuntimeStateManager(_StateThreadMixin, _StatePromptBudgetMixin):
             validated = PlannerDebugState.model_validate(
                 self.bot.default_planner_debug_state(),
             )
-        return validated.model_dump(mode="python")
+        normalized = validated.model_dump(mode="python")
+        normalized.update(
+            {
+                key: value
+                for key, value in payload.items()
+                if key not in normalized
+            },
+        )
+        return normalized
 
     @staticmethod
     def _coerce_non_negative_int(value):
@@ -494,44 +502,6 @@ class RuntimeStateManager(_StateThreadMixin, _StatePromptBudgetMixin):
         self.sync_active_thread_snapshot()
         return [dict(thread) for thread in self.chat_threads]
 
-    def sync_active_thread_snapshot(self):
-        with self.bot._session_lock:
-            active_thread_id = self.ensure_chat_thread_state(
-                preserve_active_runtime=True,
-            )
-            snapshot = self.current_thread_runtime_snapshot()
-            self.thread_snapshots[active_thread_id] = snapshot
-            updated_threads = []
-            now = self.thread_timestamp()
-            for index, thread in enumerate(self.chat_threads, start=1):
-                if thread.get("thread_id") == active_thread_id:
-                    updated_threads.append(
-                        self.normalize_chat_thread_entry(
-                            {
-                                **dict(thread),
-                                "updated_at": now,
-                                "last_message": self.thread_preview(snapshot),
-                                "turn_count": self.thread_turn_count(snapshot),
-                                "closed": bool(snapshot.get("closed")),
-                            },
-                            snapshot,
-                            fallback_index=index,
-                        ),
-                    )
-                else:
-                    existing_snapshot = self.normalize_thread_snapshot(
-                        self.thread_snapshots.get(thread.get("thread_id")),
-                    )
-                    updated_threads.append(
-                        self.normalize_chat_thread_entry(
-                            thread,
-                            existing_snapshot,
-                            fallback_index=index,
-                        ),
-                    )
-            self.chat_threads = updated_threads
-            return dict(self.active_chat_thread() or {})
-
     def create_chat_thread(self, title=""):
         with self.bot._session_lock:
             self.ensure_chat_thread_state(preserve_active_runtime=True)
@@ -751,15 +721,19 @@ class RuntimeStateManager(_StateThreadMixin, _StatePromptBudgetMixin):
 
     def load_session_state_snapshot(self, snapshot):
         payload = copy.deepcopy(dict(snapshot or {}))
-        normalized_memory_store = None
-        memory_store_payload = payload.get("memory_store")
-        if isinstance(memory_store_payload, dict):
-            normalized_memory_store = self.bot.memory_manager.normalize_memory_store(
-                memory_store_payload,
-            )
-            payload["memory_store"] = copy.deepcopy(normalized_memory_store)
-
         with self.bot._session_lock, self.bot._io_lock:
+            normalized_memory_store = None
+            memory_store_payload = payload.get("memory_store")
+            storage = getattr(self.bot.memory_manager, "_storage", None)
+            committed_projection = getattr(storage, "committed_tenant_projection", None)
+            committed_memory = committed_projection() if callable(committed_projection) else None
+            if committed_memory is not None:
+                memory_store_payload = committed_memory
+            if isinstance(memory_store_payload, dict):
+                normalized_memory_store = self.bot.memory_manager.normalize_memory_store(
+                    memory_store_payload,
+                )
+                payload["memory_store"] = copy.deepcopy(normalized_memory_store)
             history = [dict(message) for message in payload.get("history", []) if isinstance(message, dict)]
             if not history:
                 payload["history"] = self.bot.new_chat_session()

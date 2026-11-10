@@ -2,6 +2,7 @@ import pytest
 
 from dadbot.core.dadbot import DadBot
 from dadbot.core.execution_context import active_execution_trace, ensure_execution_trace_root
+from dadbot.core.tenant_session import tenant_session_scope
 
 pytestmark = pytest.mark.unit
 
@@ -16,17 +17,18 @@ def test_retired_alias_is_unavailable_in_replay_mode(bot) -> None:
 
 
 def test_relationship_apply_feedback_records_boundary_trace() -> None:
-    bot = DadBot()
+    bot = DadBot(tenant_id="tenant-replay-alias")
 
-    with ensure_execution_trace_root(operation="test.relationship.apply_feedback", required=True):
-        payload = bot.relationship.apply_feedback("supportive")
-        recorder = active_execution_trace()
-        assert recorder is not None
-        matching = [
-            step
-            for step in recorder.steps
-            if str(step.get("operation") or "") == "relationship.apply_feedback"
-        ]
+    with tenant_session_scope("tenant-replay-alias", "session-replay-alias"):
+        with ensure_execution_trace_root(operation="test.relationship.apply_feedback", required=True):
+            payload = bot.relationship.apply_feedback("supportive")
+            recorder = active_execution_trace()
+            assert recorder is not None
+            matching = [
+                step
+                for step in recorder.steps
+                if str(step.get("operation") or "") == "relationship.apply_feedback"
+            ]
 
     assert matching
     trace_payload = dict(matching[-1].get("payload") or {})

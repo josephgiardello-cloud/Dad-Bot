@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-from dadbot.core.graph import TurnGraph
+from dadbot.core.graph import SaveNode, TurnGraph
 from dadbot.core.graph_context import TurnContext
 
 
@@ -33,7 +33,7 @@ class _NodeFail:
 
 @pytest.mark.unit
 def test_graph_records_node_and_edge_trace_events() -> None:
-    graph = TurnGraph(registry=None, nodes=[_NodeA(), _NodeB()])
+    graph = TurnGraph(registry=None, nodes=[_NodeA(), _NodeB(), SaveNode()])
     ctx = TurnContext(user_input="trace enrichment")
 
     result = asyncio.run(graph.execute(ctx))
@@ -100,7 +100,7 @@ def test_graph_turn_trace_records_failed_node_status() -> None:
 
 @pytest.mark.unit
 def test_graph_turn_trace_ignores_preseeded_snapshot_authority() -> None:
-    graph = TurnGraph(registry=None, nodes=[_NodeA(), _NodeB()])
+    graph = TurnGraph(registry=None, nodes=[_NodeA(), _NodeB(), SaveNode()])
     ctx = TurnContext(user_input="sink contract")
     ctx.state["turn_trace"] = {"poison": True}
     ctx.metadata["turn_trace"] = {"poison": True}
@@ -116,7 +116,7 @@ def test_graph_turn_trace_ignores_preseeded_snapshot_authority() -> None:
 
 @pytest.mark.unit
 def test_graph_fails_when_projected_trace_event_count_diverges(monkeypatch) -> None:
-    graph = TurnGraph(registry=None, nodes=[_NodeA(), _NodeB()])
+    graph = TurnGraph(registry=None, nodes=[_NodeA(), _NodeB(), SaveNode()])
     ctx = TurnContext(user_input="projection mismatch")
 
     original_projector = graph._project_unified_trace_events

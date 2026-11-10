@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from datetime import date, datetime
 from types import SimpleNamespace
 
 import pytest
 
 from dadbot.managers.memory_coordination import MemoryCoordinator
+from dadbot.services.memory_service import extract_facts
 
 pytestmark = pytest.mark.unit
 
@@ -61,6 +63,7 @@ def test_update_memory_store_scrubs_pii_before_saving(monkeypatch):
     bot._graph_commit_active = True
     coordinator = MemoryCoordinator(bot)
     turn_context = SimpleNamespace(
+        trace_id="trace-memory-1",
         temporal=SimpleNamespace(
             wall_time=datetime.now().isoformat(timespec="seconds"),
             wall_date=date.today().isoformat(),
@@ -74,6 +77,12 @@ def test_update_memory_store_scrubs_pii_before_saving(monkeypatch):
                 "summary": "My email is test@example.com and my phone is 555-123-4567.",
                 "category": "personal",
                 "mood": "neutral",
+                "provenance": {
+                    "source": "user_message",
+                    "trust_level": 0.9,
+                    "agent": "ollama_memory_extractor",
+                    "evidence": "My email is test@example.com and my phone is 555-123-4567.",
+                },
             }
         ]
 
@@ -90,6 +99,91 @@ def test_update_memory_store_scrubs_pii_before_saving(monkeypatch):
     assert "_pii_scrubbed" in saved
     assert "email" in saved["_pii_scrubbed"]
     assert "phone" in saved["_pii_scrubbed"]
+    assert saved["provenance"]["source"] == "user_message"
+    assert saved["provenance"]["trust_level"] == 0.9
+    assert saved["provenance"]["trace_id"] == "trace-memory-1"
+    assert "test@example.com" not in saved["provenance"]["evidence"]
+    assert "555-123-4567" not in saved["provenance"]["evidence"]
+    assert "[EMAIL REDACTED]" in saved["provenance"]["evidence"]
+    assert "[PHONE REDACTED]" in saved["provenance"]["evidence"]
+    assert len(turn_context.state["_validated_memory_fact_refs"]) == 1
+
+
+def test_extract_facts_requires_valid_schema_and_exact_source_evidence():
+    source = "I am saving for a bike and feel excited."
+
+    class Runtime:
+        content = json.dumps(
+            [
+                {
+                    "fact": "saving for a bike",
+                    "category": "finance",
+                    "mood": "excited",
+                },
+                {
+                    "fact": "The user has a dog.",
+                    "category": "personal",
+                    "mood": "neutral",
+                },
+            ]
+        )
+
+        def call_ollama_chat(self, **kwargs):
+            assert kwargs["response_format"] == "json"
+            assert kwargs["purpose"] == "memory fact extraction"
+            return self.content
+
+        @staticmethod
+        def extract_ollama_message_content(response):
+            return response
+
+        @staticmethod
+        def parse_model_json_content(content):
+            return json.loads(content)
+
+    facts = extract_facts(Runtime(), source)
+
+    assert len(facts) == 1
+    assert facts[0].fact == "saving for a bike"
+
+    Runtime.content = json.dumps(
+        [{"summary": "legacy untyped memory", "category": "personal", "mood": "neutral"}]
+    )
+    with pytest.raises(ValueError):
+        extract_facts(Runtime(), source)
+
+
+def test_memory_coordinator_builds_provenance_from_extracted_user_fact():
+    bot = DummyBot()
+    source = "I am saving for a bike."
+    bot.build_memory_transcript = lambda history: source
+    bot.call_ollama_chat = lambda **kwargs: json.dumps(
+        [
+            {
+                "fact": "I am saving for a bike.",
+                "category": "finance",
+                "mood": "neutral",
+            }
+        ]
+    )
+    bot.extract_ollama_message_content = lambda response: response
+    bot.parse_model_json_content = json.loads
+
+    memories = MemoryCoordinator(bot).extract_session_memories([{"role": "user", "content": source}])
+
+    assert memories == [
+        {
+            "summary": "I am saving for a bike.",
+            "category": "finance",
+            "mood": "neutral",
+            "provenance": {
+                "source": "user_message",
+                "trust_level": 0.9,
+                "agent": "ollama_memory_extractor",
+                "evidence": "I am saving for a bike.",
+            },
+        }
+    ]
 
 
 def test_update_memory_store_skips_without_turn_context_even_if_commit_active(monkeypatch):

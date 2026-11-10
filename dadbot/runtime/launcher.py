@@ -344,7 +344,7 @@ def launch_api_service(args, *, dadbot_cls=None, build_service_state_store):
         event_bus=event_bus,
         planner_debug_factory=resolved_dadbot_cls.default_planner_debug_state,
     )
-    worker_manager = WorkerProcessManager(broker, config)
+    worker_manager = WorkerProcessManager(broker, config, telemetry_initializer=configure_tracing)
     worker_manager.start()
     app = create_api_app(orchestrator, worker_manager=worker_manager, config=config)
     try:

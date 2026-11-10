@@ -2,16 +2,66 @@
 
 from __future__ import annotations
 
-import pytest
+from contextlib import contextmanager
 from types import SimpleNamespace
+from typing import ClassVar
 from unittest.mock import Mock, patch
 
-from dadbot.core.response_engine import ResponseEngine, ResponseCandidate
+import pytest
+
 from dadbot.core.control_plane import ExecutionControlPlane
+from dadbot.core.kernel_gateway import KernelGateway
+from dadbot.core.response_engine import ResponseCandidate, ResponseEngine
+from dadbot.core.tenant_session import tenant_session_scope
+from dadbot_system.contracts import ChatRequest, WorkerTask
+from dadbot_system.delegation import SQLiteDelegationStore, _execution_authority
+from dadbot_system.security import ServiceTokenManager
 
 
 class TestResponseEngineControlPlaneIntegration:
     """Test ResponseEngine integration with control-plane execution flow."""
+
+    @pytest.fixture
+    def authorized_kernel_scope(self, tmp_path):
+        tenant_id = "tenant-response-engine"
+        secret = "response-engine-kernel-boundary-test-secret"
+        authority_path = str(tmp_path / "authority.db")
+        SQLiteDelegationStore.initialize(authority_path)
+        store = SQLiteDelegationStore(authority_path, secret)
+        store.grant_membership(
+            issuer="dadbot",
+            subject="response-engine-test",
+            tenant_id=tenant_id,
+            scopes={"write"},
+        )
+        tokens = ServiceTokenManager(secret)
+
+        @contextmanager
+        def scope(session_id):
+            request = ChatRequest(
+                session_id=session_id,
+                tenant_id=tenant_id,
+                user_input="response-engine integration test",
+            )
+            task = WorkerTask(
+                session_id=session_id,
+                tenant_id=tenant_id,
+                request=request,
+            )
+            token = tokens.issue(
+                subject="response-engine-test",
+                tenant_id=tenant_id,
+                scopes={"write"},
+            )
+            task.delegation = store.issue(token, task)
+            authority_token = _execution_authority.set((store, task))
+            try:
+                with tenant_session_scope(tenant_id, session_id), KernelGateway.open_scope():
+                    yield tenant_id
+            finally:
+                _execution_authority.reset(authority_token)
+
+        return scope
 
     def test_graph_candidate_tuple_is_normalized_to_reply_text(self):
         assert ExecutionControlPlane._candidate_reply_text(("4", False)) == "4"
@@ -112,8 +162,8 @@ class TestResponseEngineControlPlaneIntegration:
         class MockContext:
             user_input = "What is the meaning?"
             initial_response = "Life is meaning."
-            session_state = {}
-            job_metadata = {}
+            session_state: ClassVar[dict] = {}
+            job_metadata: ClassVar[dict] = {}
             trace_id = "test"
 
         context = MockContext()
@@ -144,8 +194,8 @@ class TestResponseEngineControlPlaneIntegration:
         class MockContext:
             user_input = ""
             initial_response = ""
-            session_state = {}
-            job_metadata = {}
+            session_state: ClassVar[dict] = {}
+            job_metadata: ClassVar[dict] = {}
             trace_id = "test"
 
         context = MockContext()
@@ -231,7 +281,7 @@ class TestResponseEngineControlPlaneIntegration:
         assert "safety" in reasoning
         assert "tools" in reasoning
 
-    def test_finalize_submit_success_persists_response_engine_telemetry(self):
+    def test_finalize_submit_success_persists_response_engine_telemetry(self, authorized_kernel_scope):
         mock_registry = Mock()
         mock_executor = Mock()
         mock_options = Mock()
@@ -273,24 +323,25 @@ class TestResponseEngineControlPlaneIntegration:
         job = Mock()
         job.user_input = "hello"
         job.trace_id = "trace-1"
-        job.metadata = {"execution_result": {"status": "running"}}
+        job.metadata = {"execution_result": {"status": "running"}, "tenant_id": "tenant-response-engine"}
         job.job_id = "job-1"
 
-        result = cp._finalize_submit_success(
-            job=job,
-            result=("initial response", False),
-            session_key="session-1",
-            trace_token="trace-1",
-            before_state_hash="hash-before",
-            dedupe_future=None,
-            loop_iterations=1,
-        )
+        with authorized_kernel_scope("session-1"):
+            result = cp._finalize_submit_success(
+                job=job,
+                result=("initial response", False),
+                session_key="session-1",
+                trace_token="trace-1",
+                before_state_hash="hash-before",
+                dedupe_future=None,
+                loop_iterations=1,
+            )
 
         assert result[0] == "ranked response"
         assert "response_engine_telemetry" in job.metadata
         assert job.metadata["response_engine_telemetry"]["selected"]["source"] == "direct"
 
-    def test_finalize_submit_success_persists_structured_decision_reasoning(self):
+    def test_finalize_submit_success_persists_structured_decision_reasoning(self, authorized_kernel_scope):
         mock_registry = Mock()
         mock_executor = Mock()
         mock_options = Mock()
@@ -367,18 +418,19 @@ class TestResponseEngineControlPlaneIntegration:
         job = Mock()
         job.user_input = "hello"
         job.trace_id = "trace-1"
-        job.metadata = {"execution_result": {"status": "running"}}
+        job.metadata = {"execution_result": {"status": "running"}, "tenant_id": "tenant-response-engine"}
         job.job_id = "job-1"
 
-        _ = cp._finalize_submit_success(
-            job=job,
-            result=("initial response", False),
-            session_key="session-1",
-            trace_token="trace-1",
-            before_state_hash="hash-before",
-            dedupe_future=None,
-            loop_iterations=1,
-        )
+        with authorized_kernel_scope("session-1"):
+            _ = cp._finalize_submit_success(
+                job=job,
+                result=("initial response", False),
+                session_key="session-1",
+                trace_token="trace-1",
+                before_state_hash="hash-before",
+                dedupe_future=None,
+                loop_iterations=1,
+            )
 
         report = dict(job.metadata.get("response_engine_decision_report") or {})
         assert report
@@ -507,7 +559,7 @@ class TestResponseEngineControlPlaneIntegration:
         assert dict(context.emotion_state)["valence"] == pytest.approx(0.6)
         assert dict(context.persona_state)["tone_baseline"] == "steady"
 
-    def test_finalize_submit_success_persists_pending_selection_for_next_turn_learning(self):
+    def test_finalize_submit_success_persists_pending_selection_for_next_turn_learning(self, authorized_kernel_scope):
         mock_registry = Mock()
         mock_executor = Mock()
         mock_options = Mock()
@@ -561,25 +613,26 @@ class TestResponseEngineControlPlaneIntegration:
         job = Mock()
         job.user_input = "hello"
         job.trace_id = "trace-1"
-        job.metadata = {"execution_result": {"status": "running"}}
+        job.metadata = {"execution_result": {"status": "running"}, "tenant_id": "tenant-response-engine"}
         job.job_id = "job-1"
 
-        _ = cp._finalize_submit_success(
-            job=job,
-            result=("initial response", False),
-            session_key="session-1",
-            trace_token="trace-1",
-            before_state_hash="hash-before",
-            dedupe_future=None,
-            loop_iterations=1,
-        )
+        with authorized_kernel_scope("session-1"):
+            _ = cp._finalize_submit_success(
+                job=job,
+                result=("initial response", False),
+                session_key="session-1",
+                trace_token="trace-1",
+                before_state_hash="hash-before",
+                dedupe_future=None,
+                loop_iterations=1,
+            )
 
         pending = dict(session["state"].get("response_learning_pending") or {})
         assert pending
         assert pending["trace_id"] == "trace-1"
         assert dict(pending.get("selected") or {}).get("source") == "direct"
 
-    def test_finalize_submit_success_updates_identity_state_and_continuity(self):
+    def test_finalize_submit_success_updates_identity_state_and_continuity(self, authorized_kernel_scope):
         mock_registry = Mock()
         mock_executor = Mock()
         mock_options = Mock()
@@ -624,18 +677,20 @@ class TestResponseEngineControlPlaneIntegration:
         job.metadata = {
             "execution_result": {"status": "running"},
             "semantic_memory_context": [{"memory_id": "m1"}],
+            "tenant_id": "tenant-response-engine",
         }
         job.job_id = "job-identity-1"
 
-        result = cp._finalize_submit_success(
-            job=job,
-            result=("initial response", False),
-            session_key="session-identity",
-            trace_token="trace-identity-1",
-            before_state_hash="hash-before",
-            dedupe_future=None,
-            loop_iterations=1,
-        )
+        with authorized_kernel_scope("session-identity"):
+            result = cp._finalize_submit_success(
+                job=job,
+                result=("initial response", False),
+                session_key="session-identity",
+                trace_token="trace-identity-1",
+                before_state_hash="hash-before",
+                dedupe_future=None,
+                loop_iterations=1,
+            )
 
         assert "!!" not in result[0]
         assert isinstance(dict(job.metadata.get("response_continuity") or {}), dict)
@@ -705,7 +760,54 @@ class TestResponseEngineControlPlaneIntegration:
         assert float(constraints.get("max_risk", 1.0) or 1.0) <= 0.45
         assert isinstance(dict(context.felt_persona_state or {}), dict)
 
-    def test_phase3_behavioral_stability_gate_30_turn_conflict_sequence(self):
+    def _run_behavioral_conflict_turns(self, cp, session, prompts, tenant_id):
+        arousal_trace: list[float] = []
+        valence_trace: list[float] = []
+        continuity_retained: list[bool] = []
+        felt_causality_retained: list[bool] = []
+
+        for turn in range(30):
+            user_input = prompts[turn % len(prompts)]
+            job = Mock()
+            job.user_input = user_input
+            job.trace_id = f"trace-phase3-{turn}"
+            job.metadata = {
+                "execution_result": {"status": "running"},
+                "semantic_memory_context": [{"memory_id": f"m-{turn}", "text": "next step together"}],
+                "tenant_id": tenant_id,
+            }
+            job.job_id = f"job-phase3-{turn}"
+
+            cp._finalize_submit_success(
+                job=job,
+                result=("initial response", False),
+                session_key="session-phase3-behavioral",
+                trace_token=f"trace-phase3-{turn}",
+                before_state_hash=f"hash-{turn}",
+                dedupe_future=None,
+                loop_iterations=1,
+            )
+
+            state = dict(session.get("state") or {})
+            emotion = dict(state.get("emotion_state") or {})
+            trajectory = dict(state.get("conversation_trajectory") or {})
+            arousal_trace.append(float(emotion.get("arousal", 0.0) or 0.0))
+            valence_trace.append(float(emotion.get("valence", 0.0) or 0.0))
+            continuity_retained.append(
+                bool(str(trajectory.get("preferred_tone") or "").strip())
+                and float(trajectory.get("continuity_pressure", 0.0) or 0.0) >= 0.5
+                and bool(list(trajectory.get("continuity_markers") or []))
+            )
+            felt_state = dict(state.get("felt_persona_state") or {})
+            felt_causality_retained.append(
+                bool(str(felt_state.get("narrative_phase") or "").strip())
+                and bool(str(felt_state.get("target_stance") or "").strip())
+                and float(felt_state.get("coherence_pressure", 0.0) or 0.0) >= 0.5
+            )
+
+        return arousal_trace, valence_trace, continuity_retained, felt_causality_retained
+
+    def test_phase3_behavioral_stability_gate_30_turn_conflict_sequence(self, authorized_kernel_scope):
         mock_registry = Mock()
         mock_executor = Mock()
         mock_options = Mock()
@@ -758,7 +860,10 @@ class TestResponseEngineControlPlaneIntegration:
             if "aggressive" in prompt or "push hard" in prompt:
                 return "We can stay steady and still move forward. Next step plan together is safer."
             if "detailed" in prompt:
-                return "Next step plan together: define the outcome, compare tradeoffs, and choose the smallest safe action."
+                return (
+                    "Next step plan together: define the outcome, compare tradeoffs, "
+                    "and choose the smallest safe action."
+                )
             return "Next step plan together. We keep this steady and move one safe step at a time."
 
         cp._response_engine.run = Mock(side_effect=_run_with_telemetry)
@@ -772,48 +877,13 @@ class TestResponseEngineControlPlaneIntegration:
             "No, be formal and technical.",
         ]
 
-        arousal_trace: list[float] = []
-        valence_trace: list[float] = []
-        continuity_retained: list[bool] = []
-        felt_causality_retained: list[bool] = []
-
-        for turn in range(30):
-            user_input = prompts[turn % len(prompts)]
-            job = Mock()
-            job.user_input = user_input
-            job.trace_id = f"trace-phase3-{turn}"
-            job.metadata = {
-                "execution_result": {"status": "running"},
-                "semantic_memory_context": [{"memory_id": f"m-{turn}", "text": "next step together"}],
-            }
-            job.job_id = f"job-phase3-{turn}"
-
-            _ = cp._finalize_submit_success(
-                job=job,
-                result=("initial response", False),
-                session_key="session-phase3-behavioral",
-                trace_token=f"trace-phase3-{turn}",
-                before_state_hash=f"hash-{turn}",
-                dedupe_future=None,
-                loop_iterations=1,
-            )
-
-            state = dict(session.get("state") or {})
-            emotion = dict(state.get("emotion_state") or {})
-            trajectory = dict(state.get("conversation_trajectory") or {})
-            arousal_trace.append(float(emotion.get("arousal", 0.0) or 0.0))
-            valence_trace.append(float(emotion.get("valence", 0.0) or 0.0))
-            continuity_retained.append(
-                bool(str(trajectory.get("preferred_tone") or "").strip())
-                and float(trajectory.get("continuity_pressure", 0.0) or 0.0) >= 0.5
-                and bool(list(trajectory.get("continuity_markers") or []))
-            )
-            felt_state = dict(state.get("felt_persona_state") or {})
-            felt_causality_retained.append(
-                bool(str(felt_state.get("narrative_phase") or "").strip())
-                and bool(str(felt_state.get("target_stance") or "").strip())
-                and float(felt_state.get("coherence_pressure", 0.0) or 0.0) >= 0.5
-            )
+        with authorized_kernel_scope("session-phase3-behavioral") as tenant_id:
+            (
+                arousal_trace,
+                valence_trace,
+                continuity_retained,
+                felt_causality_retained,
+            ) = self._run_behavioral_conflict_turns(cp, session, prompts, tenant_id)
 
         # Metric 1: Identity drift budget remains bounded under conflicting prompts.
         persona_state = dict(dict(session.get("state") or {}).get("persona_state") or {})

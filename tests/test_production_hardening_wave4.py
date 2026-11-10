@@ -7,7 +7,6 @@ import os
 import tempfile
 import time
 import uuid
-import warnings
 from pathlib import Path
 
 import pytest
@@ -128,7 +127,7 @@ class TestCRCFileWALBackend:
             assert len(events) == 2
             assert events[0]["type"] == "JOB_QUEUED"
 
-    def test_corrupt_line_skipped_with_warning(self):
+    def test_corrupt_line_fails_closed(self):
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "ledger.wal"
             # Write one valid CRC line, one corrupt line, one valid.
@@ -137,23 +136,22 @@ class TestCRCFileWALBackend:
             path.write_text(valid1 + "CORRUPT_LINE\n" + valid2, encoding="utf-8")
 
             backend = CRCFileWALLedgerBackend(path, fsync=False)
-            with warnings.catch_warnings(record=True) as w:
-                warnings.simplefilter("always")
-                events = backend.load()
-            assert len(events) == 2
-            assert any("corrupt" in str(warning.message).lower() for warning in w)
+            with pytest.raises(RuntimeError, match="Corrupt WAL record"):
+                backend.load()
 
     def test_partial_write_detection(self):
-        """A partial last line (no CRC match) is skipped on load."""
+        """A partial last line requires recovery before replay or further appends."""
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "ledger.wal"
             valid = CRC32LineCodec.encode({"type": "JOB_QUEUED"})
             # Simulate a partial write: truncate the last CRC line mid-way.
             path.write_text(valid + "0000000", encoding="utf-8")
             backend = CRCFileWALLedgerBackend(path, fsync=False)
-            with pytest.warns(RuntimeWarning, match="corrupt/partial"):
-                events = backend.load()
-            assert len(events) == 1
+            with pytest.raises(RuntimeError, match="Incomplete WAL tail"):
+                backend.load()
+            with pytest.raises(RuntimeError, match="Incomplete WAL tail"):
+                backend.append({"type": "JOB_COMPLETED"})
+            assert path.read_text(encoding="utf-8") == valid + "0000000"
 
     def test_load_from_backend_with_crc_backend(self):
         with tempfile.TemporaryDirectory() as d:
@@ -187,8 +185,8 @@ class TestSequenceValidator:
         report = SequenceValidator.validate(events)
         assert report["ok"] is True
 
-    def test_load_from_backend_warns_on_sequence_anomaly(self):
-        """load_from_backend emits a RuntimeWarning when sequence ordering is broken."""
+    def test_load_from_backend_rejects_sequence_anomaly(self):
+        """Do not replay events when sequence ordering is broken."""
 
         class OutOfOrderBackend(InMemoryLedgerBackend):
             def load(self):
@@ -219,10 +217,8 @@ class TestSequenceValidator:
                 ]
 
         ledger = ExecutionLedger(backend=OutOfOrderBackend())
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
+        with pytest.raises(RuntimeError, match="sequence anomaly"):
             ledger.load_from_backend()
-        assert any("sequence anomaly" in str(warning.message).lower() for warning in w)
 
 
 class TestFileLockMutex:
@@ -252,6 +248,109 @@ class TestFileLockMutex:
             assert not released
             assert lock.is_held
             lock.release(token)  # cleanup
+
+    def test_live_lock_is_not_evicted_after_stale_timeout(self, tmp_path, monkeypatch):
+        import dadbot.core.durability as durability
+
+        now = [1000.0]
+        monkeypatch.setattr(durability.time, "time", lambda: now[0])
+        path = tmp_path / "live.lock"
+        holder = FileLockMutex(path, stale_after_seconds=1.0)
+        token = holder.acquire(timeout_seconds=1.0)
+        now[0] += 10.0
+        contender = FileLockMutex(path, stale_after_seconds=1.0)
+        assert holder.is_held
+        with pytest.raises(RuntimeError, match="could not acquire"):
+            contender.acquire(timeout_seconds=0.1)
+        assert holder.release(token)
+
+    def test_incomplete_lock_record_is_recovered(self, tmp_path):
+        path = tmp_path / "incomplete.lock"
+        path.write_text('{"pid":', encoding="utf-8")
+        lock = FileLockMutex(path)
+        token = lock.acquire(timeout_seconds=1.0)
+        assert lock.is_held
+        assert lock.release(token)
+
+    def test_stale_reclamation_is_serialized_between_processes(self, tmp_path):
+        import subprocess
+        import sys
+
+        path = tmp_path / "contended.lock"
+        path.write_text(json.dumps({"pid": 99999999, "token": "dead"}), encoding="utf-8")
+        script = (
+            "import sys,time; from dadbot.core.durability import FileLockMutex; "
+            "lock=FileLockMutex(sys.argv[1]); token=lock.acquire(timeout_seconds=5); "
+            "print('acquired', flush=True); time.sleep(.2); "
+            "print('released' if lock.release(token) else 'release failed', flush=True)"
+        )
+        first = subprocess.Popen(
+            [sys.executable, "-c", script, str(path)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        assert first.stdout is not None
+        assert first.stdout.readline().strip() == "acquired"
+        contender = FileLockMutex(path)
+        with pytest.raises(RuntimeError, match="could not acquire"):
+            contender.acquire(timeout_seconds=0.1)
+        output, error = first.communicate(timeout=10)
+        assert first.returncode == 0, error
+        assert "released" in output
+        token = contender.acquire(timeout_seconds=1)
+        assert contender.release(token)
+
+    def test_dead_process_lock_can_be_reclaimed(self, tmp_path):
+        import subprocess
+        import sys
+
+        path = tmp_path / "crashed.lock"
+        script = (
+            "import os,sys; from dadbot.core.durability import FileLockMutex; "
+            "lock=FileLockMutex(sys.argv[1]); lock.acquire(timeout_seconds=2); os._exit(17)"
+        )
+        result = subprocess.run([sys.executable, "-c", script, str(path)], check=False)
+        assert result.returncode == 17
+        lock = FileLockMutex(path)
+        token = lock.acquire(timeout_seconds=2)
+        assert lock.release(token)
+
+    def test_simultaneous_stale_reclamation_keeps_critical_sections_disjoint(self, tmp_path):
+        import subprocess
+        import sys
+
+        path = tmp_path / "racing.lock"
+        gate = tmp_path / "start"
+        log = tmp_path / "critical.log"
+        path.write_text(json.dumps({"pid": 99999999, "token": "dead"}), encoding="utf-8")
+        script = (
+            "import os,sys,time; from dadbot.core.durability import FileLockMutex; "
+            "p,g,l=sys.argv[1:]; "
+            "\nwhile not os.path.exists(g): time.sleep(.005)\n"
+            "lock=FileLockMutex(p); token=lock.acquire(timeout_seconds=10); "
+            "f=open(l,'a'); f.write('enter '+str(os.getpid())+'\\n'); f.flush(); "
+            "time.sleep(.1); f.write('exit '+str(os.getpid())+'\\n'); f.close(); "
+            "assert lock.release(token)"
+        )
+        processes = [
+            subprocess.Popen(
+                [sys.executable, "-c", script, str(path), str(gate), str(log)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            for _ in range(3)
+        ]
+        gate.touch()
+        for process in processes:
+            _, error = process.communicate(timeout=20)
+            assert process.returncode == 0, error
+        lines = log.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 6
+        for index in range(0, 6, 2):
+            assert lines[index].startswith("enter ")
+            assert lines[index + 1] == lines[index].replace("enter ", "exit ", 1)
 
     def test_stale_lock_evicted(self):
         with tempfile.TemporaryDirectory() as d:
@@ -427,6 +526,13 @@ class TestTransactionalAtomicity:
 
 
 class TestFaultInjector:
+    def test_registered_certain_probability_triggers(self):
+        inj = FaultInjector()
+        inj.register("certain", probability=1.0)
+        with pytest.raises(RetryableError, match="Probabilistic fault"):
+            inj.check("certain")
+        assert inj.triggered_count("certain") == 1
+
     def test_arm_and_trigger_once(self):
         inj = FaultInjector()
         inj.arm("ledger.append", count=1)
@@ -465,6 +571,9 @@ class TestFaultInjector:
 
 
 class TestErrorClassifier:
+    def test_permission_error_is_terminal_not_retryable(self):
+        assert classify_error(PermissionError("denied")) == ErrorClassification.TERMINAL
+
     def test_classify_retryable_error(self):
         assert classify_error(RetryableError("x")) == ErrorClassification.RETRYABLE
 
@@ -877,7 +986,7 @@ class TestConsistencyModeBackends:
 
 
 class TestCompaction:
-    def test_compact_removes_pre_snapshot_events(self):
+    def test_compact_requires_durable_checkpoint(self):
         ledger = ExecutionLedger()
         _write_jobs(ledger, "s1", n=2)
         store = SessionStore(ledger=ledger)
@@ -889,9 +998,10 @@ class TestCompaction:
         policy = CompactionPolicy(max_events=1, min_snapshot_distance=0)  # force cutoff to head
         compactor = EventCompactor(policy=policy)
         report = compactor.compact(ledger=ledger, snapshot=snapshot, force=True)
-        assert report["compacted"] is True
-        assert report["events_removed"] > 0
-        assert len(ledger.read()) < before
+        assert report["compacted"] is False
+        assert report["reason"] == "durable_checkpoint_required"
+        assert report["events_removed"] == 0
+        assert len(ledger.read()) == before
 
     def test_compact_without_snapshot_skipped(self):
         ledger = ExecutionLedger()
@@ -1073,13 +1183,13 @@ class TestSealedEventsAndReplayFilters:
         assert isinstance(sealed, tuple)
         assert len(sealed) > 0
 
-    def test_sealed_events_exposes_live_authoritative_events(self):
+    def test_sealed_events_cannot_mutate_authoritative_events(self):
         ledger = ExecutionLedger()
         _write_jobs(ledger, "s1")
         sealed = ledger.sealed_events
-        # Tuple container is immutable, but event dict entries are authoritative.
+        original_type = ledger.read()[0]["type"]
         sealed[0]["type"] = "HACKED"
-        assert ledger.read()[0]["type"] == "HACKED"
+        assert ledger.read()[0]["type"] == original_type
 
     def test_replay_filter_applied_on_load(self):
         inner = InMemoryLedgerBackend()

@@ -2,14 +2,25 @@ from __future__ import annotations
 
 import copy
 import json
+import sqlite3
+import types
 from collections import defaultdict
+from contextlib import closing
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from threading import RLock
 from typing import Any, Protocol
 
 from .contracts import DEFAULT_TENANT_ID, ChatResponse, EventEnvelope, EventType, normalize_tenant_id
-
-import types
+from .execution_identity import require_scoped_tenant_id
+from .owned_sessions import (
+    CompositeOwnedSessions,
+    InMemoryOwnedSessions,
+    PostgresOwnedSessions,
+    RedisOwnedSessions,
+    SQLiteOwnedSessions,
+)
+from .owned_tasks import CompositeOwnedTasks, InMemoryOwnedTasks, OwnedTaskStore, RedisOwnedTasks
 
 try:
     import redis
@@ -32,6 +43,7 @@ class SessionRuntimeState:
     last_relationship_reflection_turn: int = 0
     pending_daily_checkin_context: bool = False
     active_tool_observation_context: str | None = None
+    last_tool_actions: list[dict[str, Any]] = field(default_factory=list)
     planner_debug: dict[str, Any] = field(default_factory=dict)
     chat_threads: list[dict[str, Any]] = field(default_factory=list)
     active_thread_id: str | None = None
@@ -54,6 +66,11 @@ class SessionRuntimeState:
         state.pending_daily_checkin_context = bool(payload.get("pending_daily_checkin_context"))
         active_tool = str(payload.get("active_tool_observation_context") or "").strip()
         state.active_tool_observation_context = active_tool or None
+        actions_payload = payload.get("last_tool_actions")
+        if isinstance(actions_payload, list):
+            state.last_tool_actions = [
+                dict(action) for action in actions_payload[-50:] if isinstance(action, dict)
+            ]
         planner_payload = payload.get("planner_debug")
         if isinstance(planner_payload, dict):
             state.planner_debug = dict(planner_payload)
@@ -79,6 +96,8 @@ class SessionRuntimeState:
 
 
 class StateStore(Protocol):
+    def check_available(self) -> None: ...
+
     def save_session_state(self, session_id: str, state: dict[str, Any]) -> None: ...
 
     def load_session_state(self, session_id: str) -> dict[str, Any] | None: ...
@@ -100,13 +119,114 @@ class StateStore(Protocol):
     def list_events(self, session_id: str) -> list[dict[str, Any]]: ...
 
 
+class SQLiteStateStore:
+    def __init__(self, path: str):
+        if not path or path == ":memory:":
+            raise ValueError("A persistent SQLite state path is required")
+        self.path = str(Path(path).resolve())
+        self._uri = Path(self.path).as_uri() + "?mode=rw"
+        with closing(sqlite3.connect(self.path, timeout=5)) as connection, connection:
+            connection.execute("PRAGMA synchronous=FULL")
+            connection.execute("CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, payload TEXT NOT NULL, response TEXT)"
+            )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS events (sequence INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "session_id TEXT NOT NULL, payload TEXT NOT NULL)"
+            )
+            connection.execute("CREATE INDEX IF NOT EXISTS events_session ON events(session_id, sequence)")
+        self.owned_sessions = SQLiteOwnedSessions(self.path)
+
+    def _connect(self):
+        connection = sqlite3.connect(self._uri, timeout=5, uri=True)
+        try:
+            connection.execute("PRAGMA synchronous=FULL")
+        except sqlite3.Error:
+            connection.close()
+            raise
+        return connection
+
+    def check_available(self) -> None:
+        with closing(self._connect()) as connection:
+            connection.execute("SELECT 1").fetchone()
+
+    def save_session_state(self, session_id: str, state: dict[str, Any]) -> None:
+        with closing(self._connect()) as connection, connection:
+            connection.execute(
+                "INSERT INTO sessions VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload",
+                (session_id, json.dumps(state)),
+            )
+
+    def load_session_state(self, session_id: str) -> dict[str, Any] | None:
+        with closing(self._connect()) as connection:
+            row = connection.execute("SELECT payload FROM sessions WHERE id=?", (session_id,)).fetchone()
+            return json.loads(row[0]) if row else None
+
+    def save_task(self, task_id: str, payload: dict[str, Any]) -> None:
+        with closing(self._connect()) as connection, connection:
+            connection.execute(
+                "INSERT INTO tasks (id, payload) VALUES (?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET payload=excluded.payload",
+                (task_id, json.dumps(payload)),
+            )
+
+    def load_task(self, task_id: str) -> dict[str, Any] | None:
+        with closing(self._connect()) as connection:
+            row = connection.execute("SELECT payload FROM tasks WHERE id=?", (task_id,)).fetchone()
+            return json.loads(row[0]) if row else None
+
+    def list_incomplete_tasks(self, limit: int = 1000) -> list[dict[str, Any]]:
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                "SELECT payload FROM tasks WHERE json_extract(payload, '$.status') IN ('queued', 'running') "
+                "ORDER BY json_extract(payload, '$.accepted_at'), id LIMIT ?",
+                (max(1, int(limit)),),
+            )
+            return [json.loads(row[0]) for row in rows]
+
+    def save_task_result(self, task_id: str, payload: dict[str, Any], response: dict[str, Any]) -> None:
+        with closing(self._connect()) as connection, connection:
+            cursor = connection.execute(
+                "UPDATE tasks SET payload=?, response=? WHERE id=?",
+                (json.dumps(payload), json.dumps(response), task_id),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError(f"Cannot persist result for unknown task_id={task_id}")
+
+    def save_response(self, task_id: str, response: dict[str, Any]) -> None:
+        with closing(self._connect()) as connection, connection:
+            cursor = connection.execute("UPDATE tasks SET response=? WHERE id=?", (json.dumps(response), task_id))
+            if cursor.rowcount != 1:
+                raise RuntimeError(f"Cannot persist response for unknown task_id={task_id}")
+
+    def load_response(self, task_id: str) -> dict[str, Any] | None:
+        with closing(self._connect()) as connection:
+            row = connection.execute("SELECT response FROM tasks WHERE id=?", (task_id,)).fetchone()
+            return json.loads(row[0]) if row and row[0] is not None else None
+
+    def append_event(self, session_id: str, event: dict[str, Any]) -> None:
+        with closing(self._connect()) as connection, connection:
+            connection.execute("INSERT INTO events (session_id, payload) VALUES (?, ?)", (session_id, json.dumps(event)))
+
+    def list_events(self, session_id: str) -> list[dict[str, Any]]:
+        with closing(self._connect()) as connection:
+            rows = connection.execute("SELECT payload FROM events WHERE session_id=? ORDER BY sequence", (session_id,))
+            return [json.loads(row[0]) for row in rows]
+
+
 class InMemoryStateStore:
     def __init__(self):
         self._lock = RLock()
+        self.owned_sessions = InMemoryOwnedSessions()
         self._sessions: dict[str, dict[str, Any]] = {}
         self._tasks: dict[str, dict[str, Any]] = {}
+        self.owned_tasks = InMemoryOwnedTasks(self._tasks)
         self._responses: dict[str, dict[str, Any]] = {}
         self._events: dict[str, list[dict[str, Any]]] = defaultdict(list)
+
+    def check_available(self) -> None:
+        return None
 
     def save_session_state(self, session_id: str, state: dict[str, Any]) -> None:
         with self._lock:
@@ -186,6 +306,28 @@ class CompositeStateStore:
     def __init__(self, fast_store: StateStore | None = None, durable_store: StateStore | None = None) -> None:
         self.fast_store = fast_store
         self.durable_store = durable_store
+        owned_stores = [
+            owned_sessions
+            for store in (fast_store, durable_store)
+            if (owned_sessions := getattr(store, "owned_sessions", None)) is not None
+        ]
+        configured_stores = [store for store in (fast_store, durable_store) if store is not None]
+        if owned_stores and len(owned_stores) != len(configured_stores):
+            raise RuntimeError("Every configured state backend must provide tenant-owned session storage")
+        self.owned_sessions = CompositeOwnedSessions(owned_stores) if owned_stores else None
+        task_stores = [
+            task_store
+            for store in (durable_store, fast_store)
+            if (task_store := getattr(store, "task_store", None)) is not None
+        ]
+        if task_stores and len(task_stores) != len(configured_stores):
+            raise RuntimeError("Every configured state backend must provide tenant-qualified task storage")
+        self.task_store = CompositeOwnedTasks(task_stores) if task_stores else None
+
+    def check_available(self) -> None:
+        for store in (self.fast_store, self.durable_store):
+            if store is not None:
+                store.check_available()
 
     def save_session_state(self, session_id: str, state: dict[str, Any]) -> None:
         for store in (self.fast_store, self.durable_store):
@@ -266,9 +408,16 @@ class CompositeStateStore:
 
 
 class NamespacedStateStore:
-    def __init__(self, store: StateStore, namespace: str) -> None:
+    def __init__(self, store: StateStore, namespace: str, *, tenant_id: str | None = None) -> None:
         self.store = store
         self.namespace = str(namespace or "").strip()
+        self.tenant_id = require_scoped_tenant_id(tenant_id) if tenant_id is not None else None
+        self.owned_sessions = getattr(store, "owned_sessions", None)
+        if self.tenant_id is not None and self.owned_sessions is None:
+            raise RuntimeError("Tenant-scoped state requires a tenant-owned session backend")
+
+    def check_available(self) -> None:
+        self.store.check_available()
 
     def _session_key(self, session_id: str) -> str:
         if not self.namespace:
@@ -276,16 +425,26 @@ class NamespacedStateStore:
         return f"{self.namespace}:{session_id}"
 
     def save_session_state(self, session_id: str, state: dict[str, Any]) -> None:
+        if self.tenant_id is not None:
+            self.owned_sessions.save_session_state(self.tenant_id, session_id, state)
+            return
         self.store.save_session_state(self._session_key(session_id), state)
 
     def load_session_state(self, session_id: str) -> dict[str, Any] | None:
+        if self.tenant_id is not None:
+            return self.owned_sessions.load_session_state(self.tenant_id, session_id)
         return self.store.load_session_state(self._session_key(session_id))
 
     def save_memory_state(self, session_id: str, state: dict[str, Any]) -> None:
+        if self.tenant_id is not None:
+            self.owned_sessions.save_session_state(self.tenant_id, session_id, state)
+            return
         save = getattr(self.store, "save_memory_state", self.store.save_session_state)
         save(self._session_key(session_id), state)
 
     def load_memory_state(self, session_id: str) -> dict[str, Any] | None:
+        if self.tenant_id is not None:
+            return self.owned_sessions.load_session_state(self.tenant_id, session_id)
         load = getattr(self.store, "load_memory_state", self.store.load_session_state)
         return load(self._session_key(session_id))
 
@@ -308,10 +467,65 @@ class NamespacedStateStore:
         return self.store.load_response(task_id)
 
     def append_event(self, session_id: str, event: dict[str, Any]) -> None:
+        if self.tenant_id is not None:
+            self.owned_sessions.append_event(self.tenant_id, session_id, event)
+            return
         self.store.append_event(self._session_key(session_id), event)
 
     def list_events(self, session_id: str) -> list[dict[str, Any]]:
+        if self.tenant_id is not None:
+            return self.owned_sessions.list_events(self.tenant_id, session_id)
         return self.store.list_events(self._session_key(session_id))
+
+
+class TenantOwnedStateStoreView:
+    def __init__(self, store: StateStore, tenant_id: str, task_store: Any) -> None:
+        self.tenant_id = require_scoped_tenant_id(tenant_id)
+        self._state_store = store
+        owned_sessions = getattr(store, "owned_sessions", None)
+        if owned_sessions is None:
+            raise RuntimeError("This state backend has no tenant-owned session store")
+        self.owned_sessions = owned_sessions
+        self.task_store = task_store
+
+    def check_available(self) -> None:
+        self._state_store.check_available()
+
+    def save_session_state(self, session_id: str, state: dict[str, Any]) -> None:
+        self.owned_sessions.save_session_state(self.tenant_id, session_id, state)
+
+    def load_session_state(self, session_id: str) -> dict[str, Any] | None:
+        return self.owned_sessions.load_session_state(self.tenant_id, session_id)
+
+    def list_sessions(self) -> list[str]:
+        return self.owned_sessions.list_sessions(self.tenant_id)
+
+    def delete_session(self, session_id: str) -> bool:
+        return self.owned_sessions.delete_session(self.tenant_id, session_id)
+
+    def append_event(self, session_id: str, event: dict[str, Any]) -> None:
+        self.owned_sessions.append_event(self.tenant_id, session_id, event)
+
+    def list_events(self, session_id: str) -> list[dict[str, Any]]:
+        return self.owned_sessions.list_events(self.tenant_id, session_id)
+
+    def save_task(self, task_id: str, payload: dict[str, Any]) -> None:
+        self.task_store.save_task(self.tenant_id, task_id, payload)
+
+    def load_task(self, task_id: str) -> dict[str, Any] | None:
+        return self.task_store.load_task(self.tenant_id, task_id)
+
+    def save_task_result(self, task_id: str, payload: dict[str, Any], response: dict[str, Any]) -> None:
+        self.task_store.save_task_result(self.tenant_id, task_id, payload, response)
+
+    def list_incomplete_tasks(self, limit: int = 1000) -> list[dict[str, Any]]:
+        return self.task_store.list_incomplete_tasks(self.tenant_id, limit=limit)
+
+    def save_response(self, task_id: str, response: dict[str, Any]) -> None:
+        self.task_store.save_response(self.tenant_id, task_id, response)
+
+    def load_response(self, task_id: str) -> dict[str, Any] | None:
+        return self.task_store.load_response(self.tenant_id, task_id)
 
 
 class RedisStateStore:
@@ -320,20 +534,27 @@ class RedisStateStore:
             raise RuntimeError("redis package is not installed")
         self._client = redis.from_url(redis_url, decode_responses=True)
         self._namespace = namespace
+        self.owned_sessions = RedisOwnedSessions(self._client, self._namespace)
+        self.task_store = RedisOwnedTasks(self._client, self._namespace)
 
     def _key(self, suffix: str) -> str:
         return f"{self._namespace}:{suffix}"
 
-    def save_session_state(self, session_id: str, state: dict[str, Any]) -> None:
-        self._client.set(self._key(f"session:{session_id}"), json.dumps(state))
+    def check_available(self) -> None:
+        if not self._client.ping():
+            raise RuntimeError("Redis state store health check failed")
 
-    def load_session_state(self, session_id: str) -> dict[str, Any] | None:
-        payload = self._client.get(self._key(f"session:{session_id}"))
-        if payload is None:
-            return None
-        if not isinstance(payload, str):
-            raise TypeError(f"Expected str from redis, got {type(payload)}")
-        return json.loads(payload)
+    def save_session_state(
+        self,
+        session_id: str,
+        state: dict[str, Any],
+        *,
+        tenant_id: str,
+    ) -> None:
+        self.owned_sessions.save_session_state(tenant_id, session_id, state)
+
+    def load_session_state(self, session_id: str, *, tenant_id: str) -> dict[str, Any] | None:
+        return self.owned_sessions.load_session_state(tenant_id, session_id)
 
     def save_task(self, task_id: str, payload: dict[str, Any]) -> None:
         self._client.set(self._key(f"task:{task_id}"), json.dumps(payload))
@@ -378,22 +599,20 @@ class RedisStateStore:
             raise TypeError(f"Expected str from redis, got {type(payload)}")
         return json.loads(payload)
 
-    def append_event(self, session_id: str, event: dict[str, Any]) -> None:
-        self._client.rpush(self._key(f"events:{session_id}"), json.dumps(event))
+    def append_event(self, session_id: str, event: dict[str, Any], *, tenant_id: str) -> None:
+        self.owned_sessions.append_event(tenant_id, session_id, event)
 
-    def list_events(self, session_id: str) -> list[dict[str, Any]]:
-        items = self._client.lrange(self._key(f"events:{session_id}"), 0, -1)
-        if not isinstance(items, list):
-            raise TypeError(f"Expected list from redis lrange, got {type(items)}")
-        result = []
-        for item in items:
-            if not isinstance(item, str):
-                raise TypeError(f"Expected str in redis lrange, got {type(item)}")
-            result.append(json.loads(item))
-        return result
+    def list_events(self, session_id: str, *, tenant_id: str) -> list[dict[str, Any]]:
+        return self.owned_sessions.list_events(tenant_id, session_id)
 
 
 class PostgresStateStore:
+    """PostgreSQL state storage with owner-qualified session access.
+
+    The legacy session/event tables remain for unowned trusted-local ledger
+    records; service snapshots and events use ``owned_sessions`` instead.
+    """
+
     def __init__(self, postgres_dsn: str, *, session_table: str, task_table: str, event_table: str) -> None:
         if psycopg is None:
             raise RuntimeError("psycopg package is not installed")
@@ -401,128 +620,96 @@ class PostgresStateStore:
         self._session_table = session_table
         self._task_table = task_table
         self._event_table = event_table
+        self._task_store: OwnedTaskStore
         self._ensure_tables()
+        self.owned_sessions = PostgresOwnedSessions(
+            self._dsn,
+            session_table=self._session_table,
+            event_table=self._event_table,
+            legacy_session_table=self._session_table,
+            legacy_event_table=self._event_table,
+        )
 
     def _connect(self):
         return psycopg.connect(self._dsn)
 
+    def check_available(self) -> None:
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT 1")
+            cursor.fetchone()
+
     def _ensure_tables(self) -> None:
         from psycopg import sql
+
+        from .owned_tasks import PostgresOwnedTasks
+
+        self._task_store = PostgresOwnedTasks(self._dsn, self._task_table)
         with self._connect() as connection, connection.cursor() as cursor:
             cursor.execute(
                 sql.SQL("CREATE TABLE IF NOT EXISTS {} (session_id TEXT PRIMARY KEY, payload JSONB NOT NULL)").format(sql.Identifier(self._session_table))
-            )
-            cursor.execute(
-                sql.SQL("CREATE TABLE IF NOT EXISTS {} (task_id TEXT PRIMARY KEY, payload JSONB NOT NULL, response JSONB)").format(sql.Identifier(self._task_table))
             )
             cursor.execute(
                 sql.SQL("CREATE TABLE IF NOT EXISTS {} (event_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, payload JSONB NOT NULL)").format(sql.Identifier(self._event_table))
             )
             connection.commit()
 
-    def save_session_state(self, session_id: str, state: dict[str, Any]) -> None:
-        from psycopg import sql
-        with self._connect() as connection, connection.cursor() as cursor:
-            cursor.execute(
-                sql.SQL("INSERT INTO {} (session_id, payload) VALUES (%s, %s) ON CONFLICT (session_id) DO UPDATE SET payload = EXCLUDED.payload").format(sql.Identifier(self._session_table)),
-                (session_id, json.dumps(state)),
-            )
-            connection.commit()
+    @property
+    def task_store(self) -> OwnedTaskStore:
+        return self._task_store
 
-    def load_session_state(self, session_id: str) -> dict[str, Any] | None:
-        from psycopg import sql
-        with self._connect() as connection, connection.cursor() as cursor:
-            cursor.execute(
-                sql.SQL("SELECT payload FROM {} WHERE session_id = %s").format(sql.Identifier(self._session_table)),
-                (session_id,)
-            )
-            row = cursor.fetchone()
-            return row[0] if row else None
+    def save_session_state(
+        self,
+        session_id: str,
+        state: dict[str, Any],
+        *,
+        tenant_id: str,
+    ) -> None:
+        self.owned_sessions.save_session_state(tenant_id, session_id, state)
 
-    def save_task(self, task_id: str, payload: dict[str, Any]) -> None:
-        from psycopg import sql
-        with self._connect() as connection, connection.cursor() as cursor:
-            cursor.execute(
-                sql.SQL("INSERT INTO {} (task_id, payload) VALUES (%s, %s) ON CONFLICT (task_id) DO UPDATE SET payload = EXCLUDED.payload").format(sql.Identifier(self._task_table)),
-                (task_id, json.dumps(payload)),
-            )
-            connection.commit()
+    def load_session_state(self, session_id: str, *, tenant_id: str) -> dict[str, Any] | None:
+        return self.owned_sessions.load_session_state(tenant_id, session_id)
 
-    def load_task(self, task_id: str) -> dict[str, Any] | None:
-        from psycopg import sql
-        with self._connect() as connection, connection.cursor() as cursor:
-            cursor.execute(
-                sql.SQL("SELECT payload FROM {} WHERE task_id = %s").format(sql.Identifier(self._task_table)),
-                (task_id,)
-            )
-            row = cursor.fetchone()
-            return row[0] if row else None
+    def save_task(self, task_id: str, payload: dict[str, Any], *, tenant_id: str) -> None:
+        self._task_store.save_task(tenant_id, task_id, payload)
 
-    def list_incomplete_tasks(self, limit: int = 1000) -> list[dict[str, Any]]:
-        from psycopg import sql
+    def load_task(self, task_id: str, *, tenant_id: str) -> dict[str, Any] | None:
+        return self._task_store.load_task(tenant_id, task_id)
 
-        with self._connect() as connection, connection.cursor() as cursor:
-            cursor.execute(
-                sql.SQL(
-                    "SELECT payload FROM {} "
-                    "WHERE payload->>'status' IN ('queued', 'running') "
-                    "ORDER BY payload->>'accepted_at' NULLS FIRST LIMIT %s"
-                ).format(sql.Identifier(self._task_table)),
-                (max(1, int(limit)),),
-            )
-            return [row[0] for row in cursor.fetchall()]
+    def list_incomplete_tasks(
+        self,
+        limit: int = 1000,
+        *,
+        tenant_id: str,
+    ) -> list[dict[str, Any]]:
+        return self._task_store.list_incomplete_tasks(tenant_id, limit=limit)
 
-    def save_task_result(self, task_id: str, payload: dict[str, Any], response: dict[str, Any]) -> None:
-        from psycopg import sql
+    def save_task_result(
+        self,
+        task_id: str,
+        payload: dict[str, Any],
+        response: dict[str, Any],
+        *,
+        tenant_id: str,
+    ) -> None:
+        self._task_store.save_task_result(tenant_id, task_id, payload, response)
 
-        with self._connect() as connection, connection.cursor() as cursor:
-            cursor.execute(
-                sql.SQL("UPDATE {} SET payload = %s, response = %s WHERE task_id = %s").format(
-                    sql.Identifier(self._task_table)
-                ),
-                (json.dumps(payload), json.dumps(response), task_id),
-            )
-            if cursor.rowcount != 1:
-                raise RuntimeError(f"Cannot persist result for unknown task_id={task_id}")
-            connection.commit()
+    def save_response(
+        self,
+        task_id: str,
+        response: dict[str, Any],
+        *,
+        tenant_id: str,
+    ) -> None:
+        self._task_store.save_response(tenant_id, task_id, response)
 
-    def save_response(self, task_id: str, response: dict[str, Any]) -> None:
-        from psycopg import sql
-        with self._connect() as connection, connection.cursor() as cursor:
-            cursor.execute(
-                sql.SQL("UPDATE {} SET response = %s WHERE task_id = %s").format(sql.Identifier(self._task_table)),
-                (json.dumps(response), task_id),
-            )
-            connection.commit()
+    def load_response(self, task_id: str, *, tenant_id: str) -> dict[str, Any] | None:
+        return self._task_store.load_response(tenant_id, task_id)
 
-    def load_response(self, task_id: str) -> dict[str, Any] | None:
-        from psycopg import sql
-        with self._connect() as connection, connection.cursor() as cursor:
-            cursor.execute(
-                sql.SQL("SELECT response FROM {} WHERE task_id = %s").format(sql.Identifier(self._task_table)),
-                (task_id,)
-            )
-            row = cursor.fetchone()
-            return row[0] if row and row[0] is not None else None
+    def append_event(self, session_id: str, event: dict[str, Any], *, tenant_id: str) -> None:
+        self.owned_sessions.append_event(tenant_id, session_id, event)
 
-    def append_event(self, session_id: str, event: dict[str, Any]) -> None:
-        from psycopg import sql
-        event_id = str(event.get("event_id") or "")
-        with self._connect() as connection, connection.cursor() as cursor:
-            cursor.execute(
-                sql.SQL("INSERT INTO {} (event_id, session_id, payload) VALUES (%s, %s, %s) ON CONFLICT (event_id) DO NOTHING").format(sql.Identifier(self._event_table)),
-                (event_id, session_id, json.dumps(event)),
-            )
-            connection.commit()
-
-    def list_events(self, session_id: str) -> list[dict[str, Any]]:
-        from psycopg import sql
-        with self._connect() as connection, connection.cursor() as cursor:
-            cursor.execute(
-                sql.SQL("SELECT payload FROM {} WHERE session_id = %s ORDER BY event_id").format(sql.Identifier(self._event_table)),
-                (session_id,)
-            )
-            return [row[0] for row in cursor.fetchall()]
+    def list_events(self, session_id: str, *, tenant_id: str) -> list[dict[str, Any]]:
+        return self.owned_sessions.list_events(tenant_id, session_id)
 
 
 class AppStateContainer:

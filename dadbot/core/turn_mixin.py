@@ -139,11 +139,13 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
     @staticmethod
     def _derive_confluence_key(
         *,
+        tenant_id: str = "",
         session_id: str,
         user_input: str,
         attachments: AttachmentList | None,
     ) -> str:
         payload = {
+            "tenant_id": str(tenant_id or ""),
             "session_id": str(session_id or "default"),
             "user_input": str(user_input or ""),
             "attachments": list(attachments or []),
@@ -165,6 +167,7 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
             getattr(self, "active_thread_id", "") or "default",
         )
         confluence_key = self._derive_confluence_key(
+            tenant_id=str(request_metadata.get("tenant_id") or ""),
             session_id=session_id,
             user_input=str(user_input or ""),
             attachments=attachments,
@@ -350,15 +353,12 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
 
     def _snapshot_kernel_state(self) -> dict[str, Any]:
         snapshot_fn = getattr(self, "snapshot_session_state", None)
-        if callable(snapshot_fn):
-            try:
-                raw = snapshot_fn()
-                if isinstance(raw, Mapping):
-                    return {str(k): v for k, v in raw.items()}
-                return {}
-            except Exception:  # noqa: BLE001
-                return {}
-        return {}
+        if not callable(snapshot_fn):
+            raise RuntimeError("Checkpoint requires a session state snapshot provider")
+        raw = snapshot_fn()
+        if not isinstance(raw, Mapping):
+            raise TypeError("Checkpoint session state snapshot must be a mapping")
+        return {str(k): v for k, v in raw.items()}
 
     def _restore_kernel_state(self, snapshot: dict[str, Any]) -> None:
         restore_fn = getattr(self, "load_session_state_snapshot", None)
@@ -368,13 +368,18 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
     def _checkpoint_turn_state(self, *, state_hash: str = "") -> None:
         tap = self._resolve_event_tap()
         if tap is None:
+            if not getattr(self, "_checkpoint_unavailable_reported", False):
+                logger.warning("Turn checkpoint unavailable: no event tap is configured")
+                self._checkpoint_unavailable_reported = True
             return
         maybe_checkpoint = getattr(tap, "maybe_checkpoint", None)
-        if callable(maybe_checkpoint):
-            maybe_checkpoint(
-                state_snapshot={"kernel_state": self._snapshot_kernel_state()},
-                state_hash=str(state_hash or ""),
-            )
+        if not callable(maybe_checkpoint):
+            raise RuntimeError("Configured event tap does not provide maybe_checkpoint")
+        self._checkpoint_unavailable_reported = False
+        maybe_checkpoint(
+            state_snapshot={"kernel_state": self._snapshot_kernel_state()},
+            state_hash=str(state_hash or ""),
+        )
 
     # ------------------------------------------------------------------
     # Stream helper
@@ -430,6 +435,13 @@ class DadBotTurnMixin(DadBotGraphFailureHandlerMixin):
             getattr(self, "active_thread_id", "") or "default",
         )
         request_metadata = dict(getattr(request, "metadata", {}) or {})
+        request_context = request.context or self._build_sovereign_context(mode=request.mode)
+        context_tenant_id = str(request_context.tenant_id or "").strip()
+        metadata_tenant_id = str(request_metadata.get("tenant_id") or "").strip()
+        if metadata_tenant_id and context_tenant_id and metadata_tenant_id != context_tenant_id:
+            raise ValueError("turn metadata tenant identity does not match its trusted context")
+        if context_tenant_id:
+            request_metadata["tenant_id"] = context_tenant_id
         event_mode = self._delivery_event_mode(request.delivery)
         previous_session_id = str(getattr(self, "_execute_turn_session_id", "") or "")
         previous_request_metadata = dict(getattr(self, "_execute_turn_request_metadata", {}) or {})

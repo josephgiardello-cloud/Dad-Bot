@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 import json
+import logging
 import os
 import uuid
 from collections import deque
@@ -28,6 +29,8 @@ except ImportError:  # pragma: no cover
 from dadbot.core.runtime_service_provider import DefaultCoreRuntimeServices
 from dadbot.defaults import default_planner_debug_state as _default_planner_debug_state
 from dadbot.utils import env_truthy, json_dump, json_load
+
+logger = logging.getLogger(__name__)
 
 
 class DadBotLifecycleState:
@@ -243,8 +246,82 @@ class DadBotBootMixin:
             self._tenant_document_store = NamespacedStateStore(
                 self._customer_state_store,
                 f"tenant-doc:{self.config.tenant_id}",
+                tenant_id=self.config.tenant_id,
             )
         self._lifecycle_state = DadBotLifecycleState.DOCUMENT_STORE
+
+    def _initialize_execution_ledger(self) -> None:
+        import hashlib
+
+        from dadbot.core.execution_ledger import ExecutionLedger
+        from dadbot.core.ledger_backend import FileWALLedgerBackend
+        from dadbot_system.state import CompositeStateStore, PostgresStateStore
+
+        durable = env_truthy("DADBOT_DURABLE_EXECUTION_LEDGER", default=False)
+        backend_name = os.getenv("DADBOT_EXECUTION_LEDGER_BACKEND", "file").strip().lower()
+        security_mode = self._dependency_overrides.get("storage_security_mode", "TRUSTED_LOCAL")
+        if security_mode not in {"AUTHENTICATED", "TRUSTED_LOCAL"}:
+            raise ValueError("Invalid execution ledger security mode")
+        if security_mode == "AUTHENTICATED" and backend_name == "postgres":
+            raise RuntimeError(
+                "PostgreSQL execution ledger is not supported for authenticated production; "
+                "use the durable file WAL. See docs/decisions/postgres-authenticated-boot.md."
+            )
+        if security_mode == "AUTHENTICATED" and (not durable or backend_name != "file"):
+            raise RuntimeError("Authenticated execution requires the durable file WAL")
+        if backend_name not in {"file", "postgres"}:
+            raise ValueError(f"Unsupported execution ledger backend: {backend_name!r}")
+        if backend_name == "postgres" and not durable:
+            raise ValueError("PostgreSQL execution ledger requires DADBOT_DURABLE_EXECUTION_LEDGER=1")
+        local_wal = self.config.session_log_dir / "execution_ledger.jsonl"
+        tenant_hash = hashlib.sha256(self.config.tenant_id.encode("utf-8")).hexdigest()
+        local_evidence = local_wal.with_name(local_wal.name + ".tenant-" + tenant_hash)
+        if local_evidence.exists() and (not durable or backend_name != "file"):
+            raise RuntimeError("Local tenant authority exists; disabling or switching its ledger is unsupported")
+        store = self._customer_state_store
+        if isinstance(store, CompositeStateStore):
+            store = store.durable_store
+        if backend_name != "postgres" and isinstance(store, PostgresStateStore):
+            from dadbot.core.postgres_ledger_backend import PostgresLedgerBackend
+
+            existing_ledger = ExecutionLedger(backend=PostgresLedgerBackend(store, stream="default"))
+            existing_ledger.load_from_backend()
+            if existing_ledger.replay_tenant_memory(self.config.tenant_id).revision:
+                raise RuntimeError(
+                    "The PostgreSQL execution ledger contains established tenant memory; "
+                    "switching to another backend is not supported",
+                )
+        if durable:
+            if backend_name == "postgres":
+                from dadbot.core.postgres_ledger_backend import PostgresLedgerBackend
+                if not isinstance(store, PostgresStateStore):
+                    raise ValueError("PostgreSQL execution ledger requires a PostgreSQL durable state store")
+                local_wal = self.config.session_log_dir / "execution_ledger.jsonl"
+                if local_wal.exists() and local_wal.stat().st_size:
+                    raise RuntimeError(
+                        "A local execution WAL exists; PostgreSQL ledger migration is not implemented",
+                    )
+                backend = PostgresLedgerBackend(store, stream="default")
+            else:
+                backend = FileWALLedgerBackend(
+                    self.config.session_log_dir / "execution_ledger.jsonl",
+                    security_mode=security_mode,
+                    tenant_id=self.config.tenant_id if security_mode == "AUTHENTICATED" else None,
+                )
+            ledger = ExecutionLedger(backend=backend)
+            ledger.load_from_backend()
+        else:
+            local_wal = self.config.session_log_dir / "execution_ledger.jsonl"
+            if local_wal.exists() and local_wal.stat().st_size:
+                existing_ledger = ExecutionLedger(backend=FileWALLedgerBackend(local_wal, security_mode=security_mode))
+                existing_ledger.load_from_backend()
+                if existing_ledger.replay_tenant_memory(self.config.tenant_id).revision:
+                    raise RuntimeError(
+                        "A durable execution ledger contains established tenant memory; "
+                        "it cannot be disabled while loading tenant snapshots",
+                    )
+            ledger = ExecutionLedger()
+        self._execution_ledger = ledger
 
     def _initialize_services(self) -> None:
         # Deferred import keeps cold module import topology lean.
@@ -376,11 +453,15 @@ class DadBotBootMixin:
 
     def _start_boot_background_tasks(self) -> None:
         if env_truthy("DADBOT_OTEL_ENABLED", default=False):
-            from dadbot.core.otel_bridge import install_otel_bridge
+            from dadbot_system.contracts import TelemetrySettings
+            from dadbot_system.runtime_signals import configure_tracing
 
-            status = install_otel_bridge(service_name=os.environ.get("DADBOT_SERVICE_NAME") or "dadbot")
-            if not status["installed"]:
-                raise RuntimeError(status["reason"])
+            configure_tracing(
+                TelemetrySettings(
+                    otel_enabled=True,
+                    service_name=os.environ.get("DADBOT_SERVICE_NAME") or "dadbot",
+                )
+            )
         disable_graph_init_task = env_truthy(
             "DADBOT_DISABLE_GRAPH_INIT_TASK",
             default=False,
@@ -461,9 +542,11 @@ class DadBotBootMixin:
         )
         self._ensure_runtime_paths()
         self._initialize_document_store(document_store)
+        self._initialize_execution_ledger()
         self._initialize_services()
         self._hydrate_profile_and_memory()
         self._initialize_runtime_caches()
+        self._memory_manager._storage.recover_local_projections()
         self._initialize_turn_orchestration()
         orchestrator = self.services.turn_orchestrator
         if orchestrator.control_plane is None:
@@ -513,6 +596,8 @@ class DadBotBootMixin:
         return "PYTEST_CURRENT_TEST" not in os.environ
 
     def shutdown(self) -> None:
+        if getattr(self, "_shutdown_completed", False):
+            return
         self._shutdown_ollama_async_client()
         self._lifecycle_state = DadBotLifecycleState.SHUTDOWN
         background_tasks = getattr(self, "background_tasks", None)
@@ -525,16 +610,21 @@ class DadBotBootMixin:
             if callable(close_memory_query):
                 close_memory_query()
             save_memory_store = getattr(self, "save_memory_store", None)
-            if callable(save_memory_store):
-                try:
-                    save_memory_store()
-                except Exception as exc:  # noqa: BLE001
-                    import logging
+            if not callable(save_memory_store):
+                raise RuntimeError("Final memory store flush unavailable: no save method")
+            storage = getattr(getattr(self, "memory_manager", None), "_storage", None)
+            if getattr(storage, "_authenticated_authority_required", False):
+                from dadbot_system.delegation import _execution_authority
+                from dadbot_system.security import AuthorizationError
 
-                    logging.getLogger(__name__).info(
-                        "Final memory store flush during shutdown failed: %s",
-                        exc,
-                    )
+                if _execution_authority.get() is None:
+                    self._shutdown_persistence_state = "authority_required"
+                    logger.error("Final memory flush blocked: authenticated execution authority is missing")
+                    raise AuthorizationError("Final memory flush requires authenticated execution authority")
+            self._shutdown_persistence_state = "flush_failed"
+            save_memory_store()
+            self._shutdown_persistence_state = "flushed"
+        self._shutdown_completed = True
 
     def _shutdown_ollama_async_client(self) -> None:
         """Best-effort close for cached async Ollama clients.

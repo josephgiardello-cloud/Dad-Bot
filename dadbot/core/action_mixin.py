@@ -66,13 +66,21 @@ class DadBotActionMixin:
         turn_context: Any | None = None,
     ):
         """Runtime-owned entrypoint for the canonical tool execution spine."""
-        return _execute_tool(
-            tool_name=tool_name,
-            parameters=parameters,
-            executor=executor,
-            compensating_action=compensating_action,
-            turn_context=turn_context,
+        from dadbot_system.delegation import require_live_effect_authority
+
+        dependency_overrides = getattr(self, "_dependency_overrides", {})
+        authenticated = (
+            isinstance(dependency_overrides, dict)
+            and dependency_overrides.get("storage_security_mode") == "AUTHENTICATED"
         )
+        with require_live_effect_authority(required=authenticated):
+            return _execute_tool(
+                tool_name=tool_name,
+                parameters=parameters,
+                executor=executor,
+                compensating_action=compensating_action,
+                turn_context=turn_context,
+            )
 
     def _queue_or_apply_memory_patch(self, **patch):
         normalized_patch = dict(patch or {})

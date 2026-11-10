@@ -1,11 +1,14 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import logging
 import re
+from dataclasses import dataclass, field
 from typing import Any, cast
 
 from dadbot.core.dadbot import DadBot
 from dadbot.core.execution_contract import SovereignContext, TurnDelivery, TurnResponse, live_turn_request
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -313,15 +316,25 @@ class UIRuntimeAPI:
         except Exception:
             return []
         current_session = str(getattr(self._bot, "active_thread_id", "") or "default")
+        current_tenant = str(getattr(getattr(self._bot, "config", None), "tenant_id", "") or "").strip()
         rows: list[dict[str, Any]] = []
         for event in reversed(events):
             if str(event.get("type") or "") != "GRAPH_CHECKPOINT":
                 continue
-            if str(event.get("session_id") or "") not in {"", current_session}:
+            event_session_id = str(event.get("session_id") or "").strip()
+            if event_session_id != current_session:
+                continue
+            if current_tenant and str(event.get("tenant_id") or "").strip() != current_tenant:
                 continue
             payload = dict(event.get("payload") or {})
             checkpoint = dict(payload.get("checkpoint") or {})
             if not checkpoint:
+                continue
+            if (
+                str(checkpoint.get("session_id") or "").strip() != event_session_id
+                or str(checkpoint.get("trace_id") or "").strip()
+                != str(payload.get("trace_id") or "").strip()
+            ):
                 continue
             rows.append(
                 {
@@ -341,9 +354,21 @@ class UIRuntimeAPI:
         resume = getattr(persistence, "resume_graph_checkpoint", None)
         if not callable(resume):
             return False
+        session_id = str(getattr(self._bot, "active_thread_id", "") or "default").strip() or "default"
+        tenant_id = str(getattr(getattr(self._bot, "config", None), "tenant_id", "") or "").strip()
         try:
-            restored = resume(trace_token=str(trace_id or "").strip())
+            restored = resume(
+                trace_token=str(trace_id or "").strip(),
+                session_id=session_id,
+                tenant_id=tenant_id or None,
+            )
         except Exception:
+            logger.exception(
+                "Checkpoint restoration failed for tenant=%s session=%s trace=%s",
+                tenant_id or "<missing>",
+                session_id,
+                str(trace_id or "").strip(),
+            )
             return False
         return isinstance(restored, dict) and bool(restored)
 
@@ -434,8 +459,8 @@ class StreamlitRuntime:
     def build(cls) -> "StreamlitRuntime":
         from types import SimpleNamespace
 
-        from dadbot.core.dadbot import DadBot
         from dadbot.config import DadBotConfig, DadRuntimeConfig
+        from dadbot.core.dadbot import DadBot
         from dadbot.state import RuntimeStateManager
 
         runtime_config = DadRuntimeConfig()

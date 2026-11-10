@@ -51,7 +51,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--contract", type=Path, default=DEFAULT_CONTRACT_MAP)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--check", action="store_true", help="Fail if output manifest differs from compiled result")
-    parser.add_argument("--validate-nodeids", action="store_true", help="Validate compiled nodeids via pytest --collect-only")
+    parser.add_argument(
+        "--validate-nodeids",
+        action="store_true",
+        help="Validate compiled nodeids via pytest --collect-only",
+    )
     parser.add_argument("--run-tests", action="store_true", help="Execute compiled nodeids with pytest")
     parser.add_argument("--fail-on-untested", action="store_true", help="Fail if any contract has no test anchors")
     parser.add_argument("--json", action="store_true", dest="json_output")
@@ -153,7 +157,7 @@ def _python_executable(root: Path) -> str:
 
 
 def _run(cmd: list[str], cwd: Path) -> tuple[int, str]:
-    completed = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True)
+    completed = subprocess.run(cmd, check=False, cwd=str(cwd), capture_output=True, text=True)
     output = (completed.stdout or "") + (completed.stderr or "")
     return int(completed.returncode), output
 
@@ -271,15 +275,17 @@ def main(argv: list[str] | None = None) -> int:
             print("[contract-compiler] ERROR: manifest drift detected. Rebuild manifest.", file=sys.stderr)
             return 1
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    if not args.check:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
     nodeids = list(manifest["compiled"]["nodeids"])
 
     if args.validate_nodeids:
         validation = _validate_nodeids(root, nodeids)
-        manifest["validation"] = validation
-        output_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        if not args.check:
+            manifest["validation"] = validation
+            output_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
         if not bool(validation.get("ok")):
             print(
                 "[contract-compiler] ERROR: one or more test anchors are not collectable:",
@@ -288,14 +294,21 @@ def main(argv: list[str] | None = None) -> int:
             for bad in validation.get("missing_nodeids", []):
                 print(f"  - {bad}", file=sys.stderr)
             return 1
+        if args.check:
+            print("[contract-compiler] manifest matches; node IDs are collectable")
+            return 0
+    elif args.check and not args.run_tests:
+        print("[contract-compiler] manifest matches")
+        return 0
 
     if args.run_tests:
         rc, output = _run_compiled_tests(root, nodeids)
-        manifest["last_test_run"] = {
-            "return_code": rc,
-            "nodeid_count": len(nodeids),
-        }
-        output_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        if not args.check:
+            manifest["last_test_run"] = {
+                "return_code": rc,
+                "nodeid_count": len(nodeids),
+            }
+            output_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
         if rc != 0:
             print(output)
             print("[contract-compiler] ERROR: compiled contract tests failed", file=sys.stderr)

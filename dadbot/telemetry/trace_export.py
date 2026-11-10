@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sys
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
@@ -17,13 +18,21 @@ from opentelemetry.trace import StatusCode
 
 logger = logging.getLogger(__name__)
 _SPAN_NAMES = frozenset(
-    {"scheduler.drain_once", "orchestrator.submit_chat", "worker.process_task", "gen_ai.chat", "mcp.call_tool"}
+    {
+        "scheduler.drain_once",
+        "orchestrator.submit_chat",
+        "worker.process_task",
+        "gen_ai.chat",
+        "dadbot.tool.execute",
+        "mcp.call_tool",
+    }
 )
 _ENUM_ATTRIBUTES = {
     "gen_ai.operation.name": frozenset({"chat"}),
     "gen_ai.provider.name": frozenset({"ollama"}),
     "mcp.method.name": frozenset({"tools/call"}),
 }
+_NAME_ATTRIBUTE_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 _COUNT_ATTRIBUTES = frozenset({"attempt", "gen_ai.usage.input_tokens", "gen_ai.usage.output_tokens"})
 
 
@@ -34,7 +43,11 @@ def _safe_attributes(attributes: Mapping[str, Any]) -> dict[str, Any]:
             result[key] = value
         elif key in _ENUM_ATTRIBUTES and isinstance(value, str) and value in _ENUM_ATTRIBUTES[key]:
             result[key] = value
-        elif key == "mcp.result.is_error" and type(value) is bool:
+        elif key in {"dadbot.tool.name", "dadbot.server.name", "mcp.tool.name", "mcp.server.name"} and (
+            isinstance(value, str) and _NAME_ATTRIBUTE_PATTERN.fullmatch(value)
+        ):
+            result[key] = value
+        elif key in {"dadbot.tool.is_error", "mcp.result.is_error"} and type(value) is bool:
             result[key] = value
     return result
 

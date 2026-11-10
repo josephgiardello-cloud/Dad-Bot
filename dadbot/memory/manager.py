@@ -130,6 +130,8 @@ class MemoryManager(MemoryLifecycleMixin, MemorySearchMixin, MemoryIntegrationMi
             self._lifecycle = MemoryLifecycleManager(self.bot, self)
 
     def memory_projection(self) -> dict:
+        if self._storage is not None:
+            self._storage._authorize_tenant_memory()
         state = self._current_memory_core_state()
 
         if isinstance(state, CoreState):
@@ -169,6 +171,8 @@ class MemoryManager(MemoryLifecycleMixin, MemorySearchMixin, MemoryIntegrationMi
         return dict(self._memory_projection_cache)
 
     def memory_core_state(self) -> CoreState:
+        if self._storage is not None:
+            self._storage._authorize_tenant_memory()
         return self._memory_core_state_cache
 
     def _set_memory_core_state_cache(self, state: CoreState) -> CoreState:
@@ -177,7 +181,7 @@ class MemoryManager(MemoryLifecycleMixin, MemorySearchMixin, MemoryIntegrationMi
         self._memory_projection_version = None
         return self._memory_core_state_cache
 
-    def load_memory_store(self, *, allow_tenant_mirror_fallback=True):
+    def load_memory_store(self, *, allow_tenant_mirror_fallback: bool | None = None):
         return self._storage.load_memory_store(allow_tenant_mirror_fallback=allow_tenant_mirror_fallback)
 
     def should_do_daily_checkin(self) -> bool:

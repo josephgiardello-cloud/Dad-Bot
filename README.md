@@ -42,7 +42,7 @@ contracts have narrow, strict xfails with explicit reasons; the canonical
 - **Actually remembers you**: Learns from your conversations over weeks/months. Tracks your goals, relationships, mood patterns.
 - **Feels real**: Adaptive personality, emotional awareness, proactive check-ins. More than a chatbot.
 - **Privacy controls**: Ollama chat and local voice backends are available; Auto voice may select a cloud-backed TTS service when installed/configured.
-- **Voice support path**: Local STT/Piper options and optional edge-tts/ElevenLabs backends are included; setup maturity depends on your machine tooling.
+- **Voice support path**: Browser voice capture can transcribe locally, submit a normal runtime turn, and synthesize the reply in local Piper sentence chunks. A Piper model must be configured; full-duplex streaming and acoustic barge-in are still experimental.
 - **No subscriptions**: Install once, use forever.
 
 ---
@@ -52,7 +52,7 @@ contracts have narrow, strict xfails with explicit reasons; the canonical
 
 - 🧠 **Deep Long-Term Memory** — Remembers conversations, goals, relationships, and emotional context
 - 💭 **Relationship Modeling** — Understands trust, emotional momentum, and personal history
-- 🎤 **Voice Pipeline (Experimental)** — Local STT/TTS integration hooks are present; full turnkey setup is still maturing
+- 🎤 **Voice Pipeline (Partial)** — Browser capture → local Whisper → canonical conversation runtime → local Piper reply is wired. Streaming playback, VAD turn detection, and hands-free barge-in are not yet certified.
 - 📜 **Oral History Capture** — Record or upload audio, review and correct the local transcript, then explicitly save it as an `oral_history` memory. The original audio is not retained.
 - 📅 **Calendar & Proactive Flows (Partial)** — Core reminder/check-in plumbing exists; full calendar-sync automation remains in progress
 - 📬 **Proactive Flows** — Daily check-in is fully supported; calendar sync and advanced scheduling are in development.
@@ -389,6 +389,84 @@ not the identity of the speaker, the truth of the account, or protection against
 Existing backups and other historical snapshots may still contain deleted evidence;
 this is not a secure-erasure guarantee.
 
+### Local service authority consistency
+
+When API authentication is enabled, app construction requires an initialized
+SQLite delegation authority and a token secret, in every environment. The
+authority file and the actual SQLite service-state file must be separate.
+Disabling API authentication selects trusted-local execution; do not expose
+that mode as an authenticated service.
+
+SQLite-backed authenticated result publication holds a write reservation on the
+authority database while it verifies the delegation and persists the result.
+Revocation and membership changes using that database are ordered by the same
+SQLite write lock: a revocation or invalidating membership change committed
+before verification rejects publication; one arriving after publication
+acquires the lock waits until publication ends.
+The authority and service-state databases must be separate files.
+
+This fence does not make the two databases one atomic transaction, prevent
+expiry during an already-authorized publication, or fence tool and other live
+effects. An interruption can persist session state before the task result;
+queued work can be retried, but this is not crash-atomic publication. An
+identical result for a completed task is accepted without publishing events
+again only after its current authority is verified; conflicting results are
+rejected. Legacy completed records lacking the original delegated snapshot may
+not support repeated publication. It does not provide a distributed or
+PostgreSQL authority guarantee.
+
+Task ownership remediation remains incomplete. The experimental
+`SQLiteOwnedTasks` repository uses a separate composite-key table and leaves
+legacy task rows untouched, but production state stores, task publication and
+recovery do not use it. Existing production task operations can still cross
+tenant boundaries; the experimental repository is not an authorization
+boundary and must not be used as evidence of tenant isolation.
+
+Authenticated worker-bound memory storage and tenant-ledger methods check the
+current delegation and tenant before the guarded operation. This is partial:
+newly opened local ledger instances, other cached data, and independent direct
+filesystem access are not covered by that binding. File-WAL backend reads and
+appends recheck authority and tenant-bearing events when a delegated context is
+present, and appends hold the authority fence. Authenticated workers now pass
+their configured mode into DadBot and require a durable file WAL. Its signed
+tenant header is checked against a separately persisted sibling `.binding`
+file and an authority-store identity; missing or inconsistent copies fail
+closed. `SQLiteDelegationStore.initialize` assigns that identity once. A
+consistent SQLite backup preserves it, while a newly initialized database
+receives a different identity. Initialize existing authority databases explicitly
+before using this experimental WAL format; a missing or unsupported identity
+fails closed. Version 1 experimental headers require an explicit migration,
+which is not implemented. Restoring an older authority backup can also restore
+old membership and revocation state; the identity does not prevent rollback.
+
+This is not yet a permanent security-mode boundary. Trusted-local files and
+legacy files remain unbound. A caller that can remove both the header and its
+local anchor can still reopen the remaining file through the default backend.
+Protecting against arbitrary replacement of both local files requires a
+separately protected trust anchor; independent filesystem access is outside
+these Python checks. Legacy ownership transitions are not implemented and
+legacy data is not automatically claimed. The API runtime's direct DadBot
+bootstrap has no delegated startup identity, so authenticated startup now
+fails rather than silently falling back to trusted-local execution; the
+worker path must be used with a verified delegation. Do not rely on this
+experimental implementation for tenant isolation.
+These checks do not establish tenant isolation. Authenticated tenant-ledger
+commits and local projection commits hold the SQLite authority write lock from
+delegation verification through the guarded commit. A revocation committed
+first is observed; one arriving afterward waits for the lock. Local tenant
+establishment and direct local commit helpers also hold this lock when a
+delegated execution context is present. If a process terminates after the WAL
+append but before snapshot repair, a later authorized establishment can
+replay the committed revision and repair the snapshot without appending it
+again. Other memory paths and raw backend calls without a delegated context are
+not covered by this guarantee. It is not a transaction across the authority and
+WAL or snapshot files.
+
+If an authenticated bot shuts down without execution authority, its final
+memory flush raises an authorization error and leaves shutdown incomplete so
+the caller can retry with current authority. The pending in-process projection
+is not guaranteed to survive process termination.
+
 ### Spatial Agent Live Avatar Integration
 
 Dad-Bot can embed a live avatar frontend (for example a fork of josepeon/spatial-agent) directly in the chat presence stage.
@@ -443,6 +521,14 @@ Browser clients must exchange HTTP credentials for an opaque ticket before each 
 2. Send JSON `{"channel":"pulse","session_id":"your-session","tenant_id":"your-tenant"}`. Channels are `events`, `pulse` and `spatial`; `spatial` does not need a session ID and requires write scope. Session streams require read scope.
 3. Use the returned ticket as `?ticket=...` on the matching WebSocket endpoint. A supplied `tenant_id` must match the authenticated tenant.
 
+Service execution requires tenant IDs already in the existing lowercase
+canonical form: letters, digits, `.`, `_`, and `-`, beginning and ending
+with a letter or digit. IDs that would require normalization are rejected at
+the service boundary rather than silently mapped to another tenant. This does
+not migrate existing tenant aliases or establish storage isolation. Custom
+worker bot factories must accept `model_name` and `tenant_id` and return a bot
+whose `config.tenant_id` matches the task.
+
 Tickets last **at most 60 seconds**, never outlive their original principal, and work exactly once. Redis 6.2+ provides atomic `GETDEL` consumption across API processes; configure `DADBOT_REDIS_URL` for ticket issuance. Missing/unavailable Redis fails closed (HTTP 503 or WebSocket close 1013); it never falls back to process-local ticket storage. The production Compose Redis 7 service supports this.
 
 Long-lived `access_token`, `dadbot_key` and `x_dadbot_key` query parameters are rejected on all three WebSocket endpoints. Non-browser clients may continue authenticating with headers. The Python service client's `authenticated_session_event_stream_url(...)` performs the HTTP exchange and returns a fresh, versioned ticket URL; request another URL after reconnecting. Ordinary stream URL helpers remain side-effect-free descriptors so offline dashboard rendering does not contact the API.
@@ -486,6 +572,49 @@ generation; validation failures remain explicit refusals, never device success.
 Every proposed MCP call pauses for explicit approval in the Chat page. The UI shows the exact tool name and validated arguments; each call in a multi-call plan requires a separate approval. Before an approved call is sent, Dad-Bot rechecks the live server's allowlist and input schema. Rejecting a call sends no request, and new chat input is held while an approval is pending in that conversation.
 
 The MCP loop returns the model's validated final answer, prompted in the Dad persona, rather than raw tool payloads or unparsed plans. If model finalization fails after tool execution, it reports that failure and warns that device actions may already have occurred; it does not claim success or fall back to a "no action performed" reply. This protection does not depend on Streamlit reply normalization.
+
+### Authenticated local MCP server
+
+The optional Dad-Bot-owned MCP server is a separate Streamable HTTP service at
+`http://127.0.0.1:8765/mcp` by default. It requires the `mcp` extra,
+`DADBOT_API_TOKEN_SECRET`, and `DADBOT_AUTHORITY_SQLITE_PATH`; use the same
+secret, issuer, and explicitly initialized authority database as the
+authenticated API. Initialize the authority database once with
+`SQLiteDelegationStore.initialize(path)` and provision active tenant memberships
+before starting the API; API startup validates the existing store but does not
+create a missing one. Then start the server with
+`python -m dadbot_system.local_mcp_server`.
+The server binds to loopback by default; changing `DADBOT_MCP_HOST` to expose
+it beyond the local machine requires an appropriately secured network boundary.
+
+An authenticated API client can exchange its API bearer token for a narrowly
+scoped MCP token. `$env:DADBOT_API_AUTH_TOKEN` must be a provisioned API token
+for an active tenant member with the base scope required by each requested
+tool:
+
+```powershell
+Invoke-RestMethod `
+  -Method Post `
+  -Uri "http://127.0.0.1:8010/v1/mcp/token" `
+  -Headers @{ Authorization = "Bearer $env:DADBOT_API_AUTH_TOKEN" } `
+  -ContentType "application/json" `
+  -Body '{"tools":["memory_snapshot","list_reminders"],"ttl_seconds":120}'
+```
+
+The caller must hold active tenant membership and the base `read` or `write`
+scope for every requested tool. Issued bearer tokens are audience-bound to
+`DADBOT_MCP_RESOURCE_URL` (default `http://127.0.0.1:8765/mcp`), include
+tool-specific grants, and expire within five minutes. The MCP server checks
+tenant authority again when each tool or resource is accessed; revocation
+therefore blocks subsequent effects. Tool listing and resource listing expose
+only items covered by the token. Set `DADBOT_MCP_RESOURCE_URL` consistently in
+the API and MCP server if the endpoint differs from the default.
+
+Startup fails closed when the approved tool manifest is missing, invalid, or
+does not match the registered tool schemas and descriptions. The manifest is a
+reviewed schema-drift lock, not a cryptographically signed manifest. Tokens use
+Dad-Bot's existing HMAC-signed service-token mechanism; this endpoint is not a
+standard OAuth 2.1 authorization server.
 
 ---
 
@@ -596,6 +725,152 @@ lower values skip reranking more often and can reduce recall. The isolated
 and reranker firing rate. Set `DADBOT_RUN_REAL_EMBEDDING_BENCHMARK=1` to run
 its real local Ollama embedding cases; those cases need `nomic-embed-text`.
 
+### Current memory persistence authority
+
+The configured tenant document store is the primary memory snapshot when it is
+durable; with a composite Redis/Postgres store, Postgres is primary. In the
+default local configuration, the document store is ephemeral and the JSON
+memory snapshot is the durable copy. Graph and semantic indexes are separate
+derived stores, and the JSON file can also be a mirror or backup. The
+execution ledger records control-plane events, not all tenant memory writes.
+It is optional and is not transactionally coupled to either snapshot.
+
+Consequently, a successful snapshot write is not evidence that a corresponding
+execution-ledger event exists, and a process crash can interrupt the
+cross-store coordination. Snapshot-plus-ledger replay parity, automatic
+repair of derived indexes after a crash, and safe memory-ledger compaction
+are not currently guaranteed. Do not delete snapshots or ledger records on
+the assumption that they are interchangeable.
+The control-plane session projection does replay its own `memory_store` field
+from session events. Subprocess crash tests cover interruption immediately
+before and after that event is appended. This is session-scoped recovery only:
+it does not rebuild or commit the tenant-wide memory store.
+
+Current tenant memory write and recovery surfaces:
+
+- Normal writes, including UI, maintenance, MCP, archive restore and delete,
+  route through `MemoryManager.mutate_memory_store` and
+  `MemoryStorageBackend._coordinated_commit`. The coordinator writes the
+  tenant snapshot and JSON mirror, then updates semantic and graph stores;
+  compensation is best effort, not crash-atomic.
+- Semantic-index sync reports an incomplete embedding batch as a failure and
+  retains old entries until replacement embeddings have been written. This
+  reduces partial index damage but does not provide automatic crash repair.
+- `save_memory_store` (including shutdown) and `clear_memory_projection`
+  write the snapshot directly. Loading can also write migrated snapshots,
+  restore a JSON backup, or initialize the tenant document store. These paths
+  do not append tenant mutation events to the execution ledger.
+- `MEMORY_STORE` replacement and session-snapshot restore update the in-memory
+  projection; a later save can persist it. When a tenant event exists in the
+  loaded ledger, session restore and transaction rollback instead preserve its
+  committed tenant projection after refreshing the ledger; rollback rebuilds
+  rather than restores the old graph. This does not make normal writes
+  ledger-authoritative or serialize restore against concurrent writers.
+  `save=False` mutations likewise change the projection without an immediate
+  durable write.
+- The turn-summary ledger, session-state snapshots, exports, forgetting
+  backups, semantic index and graph store persist independently. They are not
+  interchangeable with the tenant snapshot and can retain sensitive data
+  after a memory is removed.
+
+The intended atomicity model is **one authoritative tenant-scoped mutation
+log**, with snapshots and indexes as recoverable projections. A durable
+mutation becomes committed when its complete ledger record is durable, not
+when a mirror or index write succeeds. A write with an uncertain outcome
+must block further writes until recovery determines the committed head.
+Concurrent writers must serialize and reject stale revisions.
+
+For local mode this requires a durable execution-ledger backend with a
+cross-process single-writer boundary and a crash-safe migration of the
+existing JSON snapshot into an initial ledger checkpoint. For durable tenant
+stores, the ledger backend and any transactionally maintained checkpoint must
+use the same store and transaction (for example a Postgres transaction), not
+an independent local WAL. A Redis-only deployment must explicitly provide
+equivalent persistence and atomicity or reject durable authority mode.
+Mirrors and derived indexes must be rebuilt from the authoritative state after
+failure; they cannot cause a committed event to be silently rolled back.
+Backends without those capabilities must fail closed rather than fall back to
+another authority. This is the chosen design, **not an implemented mode**.
+It requires migration, tenant isolation, coordinated direct-save/clear paths,
+and replay verification before any snapshot or ledger history is retired.
+The execution ledger now exposes a tested tenant-event primitive with revision
+checks and operation IDs, but the memory manager does not use it yet. It is not
+a supported migration or a replacement for the existing tenant snapshot.
+The primitive also offers `reconcile_tenant_memory_operation` to reload and
+check an operation ID and its expected state after an uncertain append; this
+is not yet wired into application memory writes.
+Ledger reload validates tenant-event revisions and operation IDs for every
+tenant before accepting the stream, and fails closed on malformed events.
+For sealed tenant-event appends, file backends also check tenant revisions and
+operation IDs while holding their writer lock; PostgreSQL performs that check
+inside the transaction holding the ledger head. This protects the ledger
+primitive but does not connect application memory writes to it.
+If the selected ledger already contains tenant-memory events for the current
+tenant, startup refuses to hydrate a snapshot rather than silently overwrite
+that committed state. This is a safety stop, not replay or recovery; it does
+not detect a missing or truncated ledger that has lost all establishment
+evidence.
+Disabling the durable execution ledger also refuses startup if the existing
+local WAL contains tenant events for the configured tenant. If a PostgreSQL
+customer store is configured, switching away from its execution ledger also
+refuses startup when it contains tenant events. These checks cannot detect a
+missing ledger or authority stored only in an unconfigured backend.
+When a local file execution ledger is enabled, startup now attempts a fenced
+tenant import and snapshot repair. This path is experimental and incomplete:
+local mutations of fields that do not require semantic or graph repair use a
+revision-checked WAL commit, but changes that require those index repairs are
+rejected until fenced index repair is implemented. Clears and other mutation
+surfaces are not yet integrated with this commit path;
+PostgreSQL tenant establishment is not implemented, and power-loss durability
+of the evidence file's directory entry has not been established on Windows.
+Do not treat this implementation as production-ready.
+During an already-running process, snapshot-only saves, clears, and the internal
+snapshot-write helpers refuse snapshot-only writes if
+a refreshed ledger contains tenant events. This guard is not a concurrency boundary: another writer can
+commit after the check. It is not a substitute for ledger-backed writes.
+
+The proposed initialization order is: configure paths and select the tenant
+store; construct and validate the chosen ledger backend and its writer
+exclusion; import a validated legacy snapshot as the initial event only if no
+authority has previously been established; replay the tenant stream and repair
+its snapshot; then initialize caches, repair derived indexes, construct the
+control plane using the same ledger instance, and admit writes or background
+tasks. Boot now constructs and validates the control-plane ledger before memory
+hydration and reuses it in the control plane, but migration, tenant replay and
+repair are not implemented. Import must be serialized and restart-safe: an
+existing authority must never silently fall back to an old snapshot, and the
+migration must preserve evidence on failure.
+
+The proposed write boundary validates and normalizes against the current
+tenant revision, appends one durable mutation with its expected revision,
+then publishes the resulting projection. The append is the commit point:
+after it succeeds, failed snapshot or index updates require repair rather than
+an unlogged rollback. Before it succeeds no durable projection may change;
+an ambiguous append blocks further writes until verified recovery. A process
+may die after commit before returning, so callers must reconcile by operation
+ID rather than assume that an error means rollback. Explicit replacement,
+clear, direct save, staged changes and startup migration must respect the same
+boundary; session restore must not overwrite newer tenant state.
+
+Compaction must retain a verified durable checkpoint and tail, preserve chain
+continuity, and define retention of sensitive historical data.
+Execution-ledger compaction is currently disabled: the previous in-memory
+trimming did not compact the WAL or provide a durable replay checkpoint and
+could break subsequent sequence and hash-chain recovery. The ledger can grow
+without bound until safe retention is implemented; monitor disk and memory
+usage and preserve existing logs and backups.
+The session snapshot engine can reconstruct its session projection from a
+hash-checked snapshot plus tail, and can compare a snapshot to a complete
+ledger prefix. This is not a durable tenant-memory checkpoint, does not
+authenticate a snapshot against an independently trusted head, and does not
+make WAL compaction safe.
+The existing local `FileLockMutex` now uses a persistent sibling `.guard` file
+to serialize lock creation, stale-record recovery and release across cooperating
+processes. Do not remove the guard while any process may be using the lock.
+This helper is advisory, assumes processes use the same local filesystem and
+protocol. Execution WAL reads and appends use this lock, but tenant memory
+commits do not; it does not establish a memory authority or distributed fencing.
+
 The turn-summary memory ledger uses an atomic SQLite transaction to append an
 entry and update its chain head. `MemoryLedger.verify_chain()` detects malformed
 entries and mismatched or missing tails; it does not authenticate timestamps or
@@ -603,6 +878,58 @@ protect against an attacker who can rewrite the entire ledger and head. This
 ledger records finalized turns, not every memory mutation, and is not the
 authority for replaying the memory store. Custom persistence adapters that only
 implement the legacy get/set/list interface do not get atomic append semantics.
+Turn checkpoints require a configured event tap and a valid session snapshot;
+DadBot logs a warning when no tap is configured, and snapshot or checkpoint
+errors are surfaced rather than replaced with an empty state. A configured tap
+can still skip a checkpoint according to its checkpoint interval. Explicit
+shutdown propagates a final memory-flush failure to its caller.
+The optional execution ledger (`DADBOT_DURABLE_EXECUTION_LEDGER=1`) is separate
+from the memory store. It defaults to a local file WAL; explicitly setting
+`DADBOT_EXECUTION_LEDGER_BACKEND=postgres` selects a transactional execution
+ledger in the configured PostgreSQL state store instead. This requires a
+PostgreSQL durable store and rejects a nonempty local execution WAL because
+migration between those ledgers is not implemented. PostgreSQL serializes
+writers on a head row and commits the record and head in one transaction;
+stale writers must reload. This backend does not yet log tenant-memory writes.
+Its file WAL now refuses replay when a record is malformed
+or the last record is incomplete; it also refuses to append after an incomplete
+tail. Stop all writers and preserve a copy of the WAL before investigating or
+restoring from a known-good backup. Do not remove a record merely to make
+startup succeed: a missing record can change recovered state. This check is not
+automatic recovery or proof of memory snapshot/ledger parity. Chained records
+must retain their checksum fields; legacy unchained records remain readable.
+Ledger reads and returned appended events are detached copies; modifying them
+does not change the in-memory ledger. On replay, the next sequence accounts for
+the highest persisted sequence, including gaps in older logs.
+Without an independent trusted chain head, whole-file truncation or complete
+replacement cannot reliably be detected.
+
+### Optional checkpoint adapters
+
+`SQLiteCheckpointer` remains the default standalone checkpoint backend.
+`PostgresCheckpointer` and `RedisCheckpointer` are opt-in adapters and require
+`trusted_local=True`; they are not automatically constructed by the application.
+`RedisPostgresCheckpointer` uses PostgreSQL as the durable authority and Redis
+only as a cache, so cache failure or stale/conflicting cache data cannot replace
+the PostgreSQL result. These adapters are not supported for authenticated
+production, which continues to require the durable file execution WAL.
+
+File-backed ledger appends now use a shared advisory file lock and verify the
+persisted chain before accepting a chained event; stale writers must reload
+before retrying. Unchained legacy records can precede chained records but
+cannot be appended after a chain starts. All writers must use this backend
+and the same local filesystem lock; direct file edits and writers using older
+versions do not participate. Verification currently scans the WAL on each
+append, so write cost grows with WAL size. This does not yet make the ledger
+the tenant memory authority.
+If an execution-ledger append fails, its outcome can be uncertain even when
+an error is returned. The ledger blocks subsequent reads and writes until
+its backend is reloaded and validated. A failed reload leaves it blocked.
+Buffered backends additionally refuse to retry or reload after an uncertain
+flush, because retrying an already-persisted prefix could duplicate records;
+the inner backend and pending batch require explicit reconciliation.
+This protects the execution ledger's own state; it does not make memory
+snapshots and execution events a single atomic transaction.
 For a configured tenant document store, a failed tenant write fails the memory
 mutation rather than accepting a local mirror that could later be overwritten
 by stale tenant data. The local ephemeral document store also requires a
@@ -617,7 +944,9 @@ which attempts to roll back the mutation; rollback itself can fail and is
 reported as incomplete. This is not a crash-atomic transaction across stores.
 
 Local snapshot loading tries the previous backup when the primary is malformed
-or fails memory-store validation. If neither snapshot is valid, loading fails
+or fails memory-store validation, including a malformed memory catalog or entry.
+Invalid catalog mutations are rejected instead of silently discarding entries.
+If neither snapshot is valid, loading fails
 instead of silently starting with an empty store. A snapshot with a newer,
 unsupported schema also fails without rewriting it; use a compatible version
 or restore a valid backup. Editing a memory preserves its temporal and
@@ -774,7 +1103,7 @@ Anything beyond those lanes should be treated as supplemental, not mandatory.
 | Capability | Maturity | Evidence |
 |---|---|---|
 | Core local chat + memory pipeline | Available, with UI limitations | `dadbot/core/dadbot.py`, `dadbot/core/turn_mixin.py`, `dadbot/core/graph.py`; the Streamlit sample currently uses no-op turn-event/checkpoint persistence services. Profile and memory storage are separate. |
-| Voice stack hooks and optional deps | Experimental | `pyproject.toml` (`[project.optional-dependencies].voice`), `dad_streamlit.py`, `dadbot/agentic.py` |
+| Captured voice-to-reply path | Partial; full-duplex streaming not certified | `dadbot/speech/voice_loop.py`, `dadbot/ui/media/service.py`, `[project.optional-dependencies].voice` |
 | Local reminders + local calendar events | Shipped (local storage) | `dadbot/agentic.py` (`add_reminder`, `add_calendar_event`, `list_calendar_events`) |
 | Calendar feed synchronization | Partial | `dadbot/core/boot_mixin.py` (`ical_feed_url`, `schedule_calendar_sync`) |
 | Proactive heartbeat/nudges | Partial | `dadbot/core/boot_mixin.py` (`_run_proactive_heartbeat_loop`), `dadbot/assistant_runtime.py` |
@@ -824,6 +1153,39 @@ The checked-in [system audit report](artifacts/system_audit_matrix_report.json) 
 - **Health Levels**: `green` (normal) → `yellow` (pressure) → `red` (critical)
 - **Adaptive Guardrails**: Auto-throttling when memory/prompt pressure rises
 - **Status Dashboard**: Real-time memory usage, trim counters, runtime health signals
+
+The API's `/v1/health` route is a lightweight liveness/identity response.
+`/v1/ready` returns 200 only when state storage, configured authority storage,
+and workers are available; its checks are grouped into `dependencies`,
+`runtime`, `model`, `vector`, and `memory`. Model, vector, and memory probes
+are disabled by default, preserving the existing readiness behavior. Set
+`DADBOT_READINESS_PROBES=model,vector,memory` to enable selected probes and
+`DADBOT_READINESS_REQUIRED=model,vector,memory` to make the selected checks
+gate readiness. Probe timeouts are capped at five seconds
+(`DADBOT_READINESS_PROBE_TIMEOUT_MS`, default 1000 ms), and results are cached
+for ten seconds by default (`DADBOT_READINESS_PROBE_CACHE_SECONDS`). The model
+probe checks the configured Ollama model via `/api/tags`; the vector probe
+checks `DADBOT_VECTOR_STORE_URL` as a PostgreSQL DSN or HTTP(S) endpoint.
+The memory probe checks the configured semantic retrieval backend's connection
+with `SELECT 1`; it does not generate or assess embeddings. Memory retrieval
+status counts in `/v1/doctor` summarize the latest 100 in-process retrieval
+status observations and include no queries, memory content, or exception text.
+Compose does not enable these probes by default; production deployments should
+require model readiness when Ollama availability is necessary to serve turns,
+and require vector/memory readiness only when those backends are part of the
+serving path.
+The admin-scoped `/v1/doctor` route adds tool-registry, trace-provider, and
+cached runtime-health diagnostics and reflects enabled probe results.
+Pending-approval status is reported as not exposed until the API has an
+approval-status provider.
+
+Authenticated clients with session read access can request
+`GET /v1/sessions/{session_id}/actions/explain?limit=10` for a bounded,
+human-readable explanation of the latest turn's tool actions. The response is
+tenant-scoped and built from checksum-validated audit events; it includes
+authority decision metadata and input/output fingerprints, but never raw tool
+arguments or results. It is an explanation of recorded action metadata, not a
+replay or proof of the complete conversation.
 
 #### Local OpenTelemetry span export
 
@@ -915,6 +1277,7 @@ refusals and lexical false positives remain possible.
 
 - **Local mode** — Ollama chat, local STT, and Piper TTS can be configured to stay on-device.
 - **Cloud voice mode** — edge-tts and ElevenLabs send reply text to their respective services; the Auto backend can choose them when available. Do not use Auto when strict local-only processing is required.
+- **Local voice setup** — Install the `voice` extra with `uv sync --extra voice`, configure a Piper model path in Voice preferences, and select local Piper. Audio is held transiently during capture and is not saved as memory.
 - **Diagnostics** — Local logs, events, and snapshots may contain conversation text. Local inference does not mean that no data is written to disk.
 - **Story Mode Lock** — Optional password protection for sensitive contexts
 - **Data export** — Full access to your memory files (JSON, SQLite)

@@ -11,14 +11,14 @@ from urllib.request import urlopen
 import pytest
 
 from dadbot.core.observability import get_metrics
-from dadbot.core.otel_bridge import OpenTelemetryEventExporter, install_otel_bridge
 from dadbot.core.prometheus_bridge import start_prometheus_exporter
+from dadbot.telemetry.otel_bridge import OpenTelemetryEventExporter, install_otel_bridge
 
 pytestmark = pytest.mark.unit
 
 
 def test_install_otel_bridge_returns_status_dict() -> None:
-    from dadbot.core.otel_bridge import shutdown_otel_bridge
+    from dadbot.telemetry.otel_bridge import shutdown_otel_bridge
 
     try:
         status = install_otel_bridge()
@@ -62,7 +62,7 @@ def test_otel_event_exporter_forwards_to_emitter() -> None:
 
 def test_enabled_tracing_exports_spans_without_private_content(monkeypatch) -> None:
     pytest.importorskip("opentelemetry.sdk.trace")
-    from dadbot.core.otel_bridge import shutdown_otel_bridge
+    from dadbot.telemetry.otel_bridge import shutdown_otel_bridge
     from dadbot_system.contracts import TelemetrySettings
     from dadbot_system.telemetry import configure_tracing, start_span
 
@@ -88,12 +88,14 @@ def test_enabled_tracing_exports_spans_without_private_content(monkeypatch) -> N
 @pytest.fixture
 def trace_output(monkeypatch):
     pytest.importorskip("opentelemetry.sdk.trace")
-    from dadbot.core.otel_bridge import install_otel_bridge, shutdown_otel_bridge
+    from dadbot.telemetry.otel_bridge import shutdown_otel_bridge
+    from dadbot_system.contracts import TelemetrySettings
+    from dadbot_system.telemetry import configure_tracing
 
     shutdown_otel_bridge()
     output = io.StringIO()
     monkeypatch.setattr(sys, "stderr", output)
-    assert install_otel_bridge()["installed"]
+    assert configure_tracing(TelemetrySettings(otel_enabled=True)) is not None
     try:
         yield output
     finally:
@@ -102,7 +104,7 @@ def trace_output(monkeypatch):
 
 def test_kernel_spans_share_otel_parentage_without_changing_kernel_ids(trace_output):
     from dadbot.core.kernel_signals import get_tracer
-    from dadbot.core.otel_bridge import start_span
+    from dadbot.telemetry.otel_bridge import start_span
     from dadbot_system.runtime_signals import start_span as service_start_span
 
     tracer = get_tracer()
@@ -123,7 +125,7 @@ def test_kernel_spans_share_otel_parentage_without_changing_kernel_ids(trace_out
 
 
 def test_span_errors_propagate_without_exporting_exception_content(trace_output):
-    from dadbot.core.otel_bridge import start_span
+    from dadbot.telemetry.otel_bridge import start_span
 
     with pytest.raises(RuntimeError, match="PRIVATE-ERROR"):
         with start_span("gen_ai.chat"):
@@ -175,21 +177,52 @@ def test_mcp_transport_span_never_exports_tool_arguments_or_results(trace_output
 
     class Session:
         async def call_tool(self, name, arguments):
-            assert name == "PRIVATE-TOOL"
+            assert name == "get_state"
             assert arguments == {"value": "PRIVATE-ARGUMENT"}
             return SimpleNamespace(structured_content={"value": "PRIVATE-RESULT"}, is_error=True)
 
-    result = asyncio.run(MCPToolClient.call_tool(Session(), "PRIVATE-TOOL", {"value": "PRIVATE-ARGUMENT"}))
+    result = asyncio.run(MCPToolClient.call_tool(Session(), "get_state", {"value": "PRIVATE-ARGUMENT"}))
     assert result["is_error"] is True
     record = json.loads(trace_output.getvalue())
     assert record["name"] == "mcp.call_tool"
-    assert record["attributes"] == {"mcp.method.name": "tools/call", "mcp.result.is_error": True}
+    assert record["attributes"] == {
+        "mcp.method.name": "tools/call",
+        "mcp.result.is_error": True,
+        "mcp.server.name": "home_assistant",
+        "mcp.tool.name": "get_state",
+    }
+    assert "PRIVATE" not in trace_output.getvalue()
+
+
+def test_tool_execution_span_uses_safe_dadbot_attributes(trace_output):
+    from dadbot.core.tool_executor import execute_tool
+
+    context = SimpleNamespace(
+        trace_id="PRIVATE-APP-TRACE",
+        state={},
+        metadata={},
+    )
+    execute_tool(
+        tool_name="set_reminder",
+        parameters={"value": "PRIVATE-ARGUMENT"},
+        executor=lambda: {"value": "PRIVATE-RESULT"},
+        turn_context=context,
+    )
+
+    record = json.loads(trace_output.getvalue())
+    assert record["name"] == "dadbot.tool.execute"
+    assert record["attributes"] == {
+        "dadbot.server.name": "dadbot",
+        "dadbot.tool.is_error": False,
+        "dadbot.tool.name": "set_reminder",
+    }
     assert "PRIVATE" not in trace_output.getvalue()
 
 
 def test_exporter_filters_attributes_names_events_and_status_descriptions(trace_output):
     from opentelemetry.trace import Status, StatusCode
-    from dadbot.core.otel_bridge import get_trace_provider
+
+    from dadbot.telemetry.otel_bridge import get_trace_provider
 
     with get_trace_provider().get_tracer("test").start_as_current_span("PRIVATE-NAME") as span:
         span.set_attribute("gen_ai.provider.name", "PRIVATE-PROVIDER")
@@ -205,7 +238,7 @@ def test_exporter_filters_attributes_names_events_and_status_descriptions(trace_
 
 
 def test_trace_installation_is_idempotent_and_shutdown_flushes(trace_output, monkeypatch):
-    from dadbot.core.otel_bridge import get_trace_provider, install_otel_bridge, shutdown_otel_bridge, start_span
+    from dadbot.telemetry.otel_bridge import get_trace_provider, install_otel_bridge, shutdown_otel_bridge, start_span
 
     provider = get_trace_provider()
     flushed = []
@@ -230,7 +263,8 @@ def test_invalid_spans_and_output_failures_are_reported(caplog):
     pytest.importorskip("opentelemetry.sdk.trace")
     from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
     from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExportResult
-    from dadbot.core.trace_export import PrivacySafeConsoleSpanExporter
+
+    from dadbot.telemetry.trace_export import PrivacySafeConsoleSpanExporter
 
     exporter = PrivacySafeConsoleSpanExporter(io.StringIO())
     assert exporter.export([ReadableSpan("PRIVATE", context=None)]) == SpanExportResult.FAILURE
@@ -254,7 +288,7 @@ def test_invalid_spans_and_output_failures_are_reported(caplog):
 def test_installing_trace_export_does_not_enable_raw_event_export(monkeypatch):
     pytest.importorskip("opentelemetry.sdk.trace")
     from dadbot.core import kernel_signals
-    from dadbot.core.otel_bridge import shutdown_otel_bridge
+    from dadbot.telemetry.otel_bridge import shutdown_otel_bridge
 
     shutdown_otel_bridge()
     raw_events = []
@@ -270,7 +304,7 @@ def test_installing_trace_export_does_not_enable_raw_event_export(monkeypatch):
 
 
 def test_requested_tracing_without_sdk_is_an_explicit_failure(monkeypatch):
-    from dadbot.core import otel_bridge
+    from dadbot.telemetry import otel_bridge
     from dadbot_system.contracts import TelemetrySettings
     from dadbot_system.telemetry import configure_tracing
 
@@ -287,14 +321,18 @@ def test_requested_tracing_without_sdk_is_an_explicit_failure(monkeypatch):
 def test_api_lifespan_initializes_and_flushes_its_trace_provider(monkeypatch):
     pytest.importorskip("fastapi")
     from fastapi.testclient import TestClient
-    from dadbot.core.otel_bridge import get_trace_provider, shutdown_otel_bridge
+
+    from dadbot.telemetry.otel_bridge import get_trace_provider, shutdown_otel_bridge
     from dadbot_system.api import create_api_app
     from dadbot_system.contracts import ServiceConfig
+    from dadbot_system.orchestration import DadBotOrchestrator
+    from dadbot_system.telemetry import configure_tracing
 
     shutdown_otel_bridge()
     output = io.StringIO()
     monkeypatch.setattr(sys, "stderr", output)
     config = ServiceConfig.from_dict({"security": {"auth_required": False}, "telemetry": {"otel_enabled": True}})
-    with TestClient(create_api_app(SimpleNamespace(), config=config)):
+    assert configure_tracing(config.telemetry) is not None
+    with TestClient(create_api_app(DadBotOrchestrator(SimpleNamespace()), config=config)):
         assert get_trace_provider() is not None
     assert get_trace_provider() is None

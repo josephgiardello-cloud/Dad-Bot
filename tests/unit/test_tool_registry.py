@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from dadbot.core.runtime_types import (
@@ -21,6 +23,32 @@ from dadbot.core.tool_registry import (
 )
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.mark.parametrize(
+    ("factory", "spec", "method", "arguments", "payload_type"),
+    [
+        ("make_set_reminder_executor", "SET_REMINDER_SPEC", "add_reminder",
+         {"title": "Task", "due_text": "tomorrow"}, "reminder"),
+        ("make_web_search_executor", "WEB_SEARCH_SPEC", "lookup_web",
+         {"query": "weather"}, "web_search"),
+        ("make_create_calendar_event_executor", "CREATE_CALENDAR_EVENT_SPEC", "add_calendar_event",
+         {"title": "Meeting", "due_text": "tomorrow"}, "calendar_event"),
+        ("make_draft_email_executor", "DRAFT_EMAIL_SPEC", "draft_email",
+         {"recipient": "a", "subject": "b", "body": "c"}, "email_draft"),
+    ],
+)
+def test_builtin_executor_returns_canonical_payload(factory, spec, method, arguments, payload_type):
+    bot = SimpleNamespace(**{method: lambda *args: {"result": "ok"}})
+    factory_args = (bot, SimpleNamespace()) if factory == "make_create_calendar_event_executor" else (bot,)
+    executor = getattr(ToolRegistry, factory)(*factory_args)
+    invocation = SimpleNamespace(
+        arguments=arguments, tool_spec=getattr(ToolRegistry, spec), invocation_id="test"
+    )
+    result = executor(invocation)
+    assert result.status == ToolExecutionStatus.OK
+    assert result.payload.content == {"result": "ok"}
+    assert result.payload.payload_type == payload_type
 
 
 def _make_simple_executor(status=ToolExecutionStatus.OK, payload_content="ok"):

@@ -13,7 +13,7 @@ import ollama  # type: ignore[reportMissingImports]
 
 from dadbot.contracts import DadBotContext, SupportsDadBotAccess
 from dadbot.core.execution_boundary import ModelGatewayScope, enforce_model_gateway
-from dadbot.core.otel_bridge import start_span
+from dadbot_system.runtime_signals import start_span
 
 logger = logging.getLogger(__name__)
 litellm = importlib.import_module("litellm") if importlib.util.find_spec("litellm") else None
@@ -81,11 +81,7 @@ class RuntimeClientManager:
             context_budget = min(context_budget, model_limit)
         if context_budget < 256:
             raise ValueError("Ollama num_ctx must allow at least 256 tokens")
-        # Bucket allocation, not prompt capacity: the guard retains the requested budget.
-        allocation = max(512, 1 << (context_budget - 1).bit_length())
-        if isinstance(model_limit, int) and model_limit > 0:
-            allocation = min(allocation, model_limit)
-        request_options["num_ctx"] = allocation
+        request_options["num_ctx"] = context_budget
         reserved = max(64, int(self.bot.RESERVED_RESPONSE_TOKENS))
         capabilities = runtime.ollama_show_payload(model).get("capabilities") or []
         if "thinking" in capabilities:

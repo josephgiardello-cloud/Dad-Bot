@@ -119,13 +119,39 @@ class DadBotHealthMixin:
     # Checkpoint and replay delegates
     # ------------------------------------------------------------------
 
-    def load_latest_graph_checkpoint(self, trace_token: str = "") -> dict[str, Any] | None:
-        return self.conversation_persistence.load_latest_graph_checkpoint(
+    def load_latest_graph_checkpoint(
+        self,
+        trace_token: str = "",
+        *,
+        session_id: str | None = None,
+        tenant_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        resolved_session_id = str(
+            session_id or getattr(self, "active_thread_id", None) or "default",
+        ).strip() or "default"
+        persistence = getattr(self, "conversation_persistence")
+        return persistence.load_latest_graph_checkpoint(
             trace_token=trace_token,
+            session_id=resolved_session_id,
+            tenant_id=tenant_id,
         )
 
-    def resume_turn_from_checkpoint(self, trace_token: str = "") -> dict[str, Any] | None:
-        return self.conversation_persistence.resume_graph_checkpoint(trace_token=trace_token)
+    def resume_turn_from_checkpoint(
+        self,
+        trace_token: str = "",
+        *,
+        session_id: str | None = None,
+        tenant_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        resolved_session_id = str(
+            session_id or getattr(self, "active_thread_id", None) or "default",
+        ).strip() or "default"
+        persistence = getattr(self, "conversation_persistence")
+        return persistence.resume_graph_checkpoint(
+            trace_token=trace_token,
+            session_id=resolved_session_id,
+            tenant_id=tenant_id,
+        )
 
     def list_turn_events(self, trace_token: str, limit: int = 0) -> list[dict[str, Any]]:
         return self.conversation_persistence.list_turn_events(

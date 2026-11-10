@@ -20,7 +20,7 @@ import pytest
 
 from dadbot.core.execution_ledger import ExecutionLedger
 from dadbot.core.execution_policy import ResumabilityPolicy
-from dadbot.core.turn_resume_store import ResumePoint, TurnResumeStore
+from dadbot.core.turn_resume_store import ResumePoint, TurnResumeStore, _make_recovery
 
 pytestmark = pytest.mark.durability
 

@@ -5,6 +5,7 @@ import logging
 from typing import Any
 
 from .contracts import TelemetrySettings
+from .runtime_signals import register_telemetry_adapter
 
 STANDARD_LOG_FIELDS = {
     "name",
@@ -72,7 +73,7 @@ def configure_tracing(settings: TelemetrySettings | None = None):
     telemetry = settings or TelemetrySettings()
     if not telemetry.otel_enabled:
         return None
-    from dadbot.core.otel_bridge import get_trace_provider, install_otel_bridge
+    from dadbot.telemetry.otel_bridge import get_trace_provider, install_otel_bridge
 
     status = install_otel_bridge(service_name=telemetry.service_name)
     if not status["installed"]:
@@ -81,6 +82,26 @@ def configure_tracing(settings: TelemetrySettings | None = None):
 
 
 def start_span(name: str, **attributes: Any):
-    from dadbot.core.otel_bridge import start_span as bridge_start_span
+    from dadbot.telemetry.otel_bridge import start_span as bridge_start_span
 
     return bridge_start_span(name, **attributes)
+
+
+def shutdown_tracing() -> None:
+    from dadbot.telemetry.otel_bridge import shutdown_otel_bridge
+
+    shutdown_otel_bridge()
+
+
+def is_trace_provider_available() -> bool:
+    from dadbot.telemetry.otel_bridge import get_trace_provider
+
+    return get_trace_provider() is not None
+
+
+register_telemetry_adapter(
+    configure=configure_tracing,
+    start_span=start_span,
+    shutdown=shutdown_tracing,
+    trace_provider_available=is_trace_provider_available,
+)

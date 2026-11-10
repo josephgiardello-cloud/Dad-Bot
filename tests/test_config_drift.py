@@ -104,12 +104,17 @@ class TestDadBotConfigInstantiation:
         config = DadBotConfig()
         assert config is not None
 
-    def test_tenant_id_is_normalized(self):
+    def test_tenant_id_rejects_noncanonical_input(self):
         from dadbot.config import DadBotConfig
 
-        config = DadBotConfig(tenant_id="My Tenant!")
-        assert " " not in config.tenant_id
-        assert "!" not in config.tenant_id
+        with pytest.raises(ValueError, match="tenant identity must be canonical"):
+            DadBotConfig(tenant_id="My Tenant!")
+
+    def test_tenant_id_is_preserved_without_rewriting(self):
+        from dadbot.config import DadBotConfig
+
+        config = DadBotConfig(tenant_id="tenant-a")
+        assert config.tenant_id == "tenant-a"
 
     def test_active_model_is_non_empty(self):
         from dadbot.config import DadBotConfig

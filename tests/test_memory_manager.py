@@ -1,3 +1,4 @@
+import copy
 import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
@@ -55,6 +56,36 @@ def test_normalize_memory_entry_validates_dates_and_scores_without_changing_surf
     assert entry["relationship_impact"] == 0.6
     assert entry["pinned"] is True
     assert entry["contradictions"] == ["missed the budget once"]
+
+
+def test_memory_entry_provenance_survives_normalization_and_persisted_normalization(bot):
+    source = {
+        "source": "user_message",
+        "trust_level": 0.9,
+        "agent": "ollama_memory_extractor",
+        "evidence": "I am saving for an emergency fund.",
+        "trace_id": "trace-123",
+    }
+
+    entry = bot.normalize_memory_entry(
+        {
+            "summary": "I am saving for an emergency fund.",
+            "category": "finance",
+            "provenance": source,
+        }
+    )
+
+    assert entry["provenance"] == source
+    assert bot.normalize_persisted_memory_entry(entry)["provenance"] == source
+    bot.save_memory_catalog([entry])
+    assert bot.memory_catalog()[0]["provenance"] == source
+    assert bot.normalize_memory_entry(
+        {
+            "summary": "I am saving for an emergency fund.",
+            "category": "finance",
+            "provenance": {**source, "trust_level": 1.1},
+        }
+    ) is None
 
 
 def test_normalize_relationship_state_preserves_runtime_vocab_and_date_surface(bot):
@@ -551,15 +582,15 @@ def test_forgetting_preserves_concurrent_session_archive_update(bot, tmp_path, m
     assert len(bot.memory_manager.memory_projection()["archived_memories"]) == 1
 
 
-def test_archived_memory_restore_failure_preserves_archive(bot, tmp_path, monkeypatch):
+def test_archived_memory_restore_failure_preserves_archive(bot, tmp_path, monkeypatch, persistence_failure_patch):
     monkeypatch.setattr(type(bot), "script_path", property(lambda _self: tmp_path / "dadbot.py"))
     bot.memory_coordinator._finalize_forgetting_updates(
         kept=[], archived=[{"summary": "A specific old memory.", "category": "general"}],
         context={"wall_time": "2026-01-01T12:00:00", "backup_stamp": "20260101_120000", "decay_threshold": 0.16},
     )
     archive_id = bot.memory_manager.memory_projection()["archived_memories"][0]["archive_id"]
-    bot._tenant_document_store = None
-    monkeypatch.setattr(bot, "write_json_atomically", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk unavailable")))
+    persistence_failure_patch.setattr(bot, "_tenant_document_store", None)
+    persistence_failure_patch.setattr(bot, "write_json_atomically", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk unavailable")))
     with pytest.raises(RuntimeError, match="disk unavailable"):
         bot.memory_manager.restore_archived_memory(archive_id)
     assert bot.memory_catalog() == []
@@ -660,14 +691,14 @@ def test_invalid_conflict_resolution_does_not_supersede_entries(bot):
     assert all(not entry["superseded"] for entry in bot.consolidated_memories())
 
 
-def test_memory_commit_fails_if_only_durable_store_cannot_be_written(bot, monkeypatch):
-    bot._tenant_document_store = None
+def test_memory_commit_fails_if_only_durable_store_cannot_be_written(bot, persistence_failure_patch):
+    persistence_failure_patch.setattr(bot, "_tenant_document_store", None)
     before = bot.memory_catalog()
 
     def fail_write(*_args, **_kwargs):
         raise OSError("disk unavailable")
 
-    monkeypatch.setattr(bot, "write_json_atomically", fail_write)
+    persistence_failure_patch.setattr(bot, "write_json_atomically", fail_write)
     with pytest.raises(RuntimeError, match="disk unavailable"):
         bot.mutate_memory_store(memories=[{"summary": "A durable memory entry", "category": "general"}])
     assert bot.memory_catalog() == before
@@ -707,6 +738,33 @@ def test_composite_tenant_memory_does_not_read_stale_cache_when_durable_unavaila
         bot.memory_manager.load_memory_store(allow_tenant_mirror_fallback=False)
 
 
+def test_unavailable_tenant_memory_never_rehydrates_stale_json_mirror(bot, monkeypatch):
+    stale = {"memories": [{"summary": "Revoked memory", "category": "general"}]}
+    bot.MEMORY_PATH.write_text(json.dumps(stale), encoding="utf-8")
+    persisted = {}
+    writes = []
+    monkeypatch.setattr(bot, "_local_ephemeral_document_store", False)
+
+    def load_memory(_key):
+        raise OSError("tenant store temporarily unavailable")
+
+    def save_memory(key, value):
+        writes.append((key, copy.deepcopy(value)))
+        persisted[key] = copy.deepcopy(value)
+
+    monkeypatch.setattr(
+        bot,
+        "_tenant_document_store",
+        SimpleNamespace(load_session_state=load_memory, save_session_state=save_memory),
+    )
+
+    with pytest.raises(OSError, match="temporarily unavailable"):
+        bot.memory_manager.load_memory_store()
+
+    assert writes == []
+    assert persisted == {}
+
+
 def test_memory_commit_reports_success_when_tenant_write_succeeds_but_mirror_fails(bot, monkeypatch):
     writes = []
     tenant_store = SimpleNamespace(
@@ -723,12 +781,12 @@ def test_memory_commit_reports_success_when_tenant_write_succeeds_but_mirror_fai
     assert "durable memory" in writes[-1][1]["memories"][0]["summary"].lower()
 
 
-def test_memory_commit_fails_when_ephemeral_store_succeeds_but_mirror_fails(bot, monkeypatch):
+def test_memory_commit_fails_when_ephemeral_store_succeeds_but_mirror_fails(bot, persistence_failure_patch):
     writes = []
     tenant_store = SimpleNamespace(save_session_state=lambda key, value: writes.append((key, value)))
-    monkeypatch.setattr(bot, "_tenant_document_store", tenant_store)
-    monkeypatch.setattr(bot, "_local_ephemeral_document_store", True)
-    monkeypatch.setattr(
+    persistence_failure_patch.setattr(bot, "_tenant_document_store", tenant_store)
+    persistence_failure_patch.setattr(bot, "_local_ephemeral_document_store", True)
+    persistence_failure_patch.setattr(
         bot, "write_json_atomically",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("mirror unavailable")),
     )
@@ -739,38 +797,38 @@ def test_memory_commit_fails_when_ephemeral_store_succeeds_but_mirror_fails(bot,
     assert writes[-1][1]["memories"] == before
 
 
-def test_memory_commit_does_not_accept_mirror_when_tenant_write_fails(bot, monkeypatch):
+def test_memory_commit_does_not_accept_mirror_when_tenant_write_fails(bot, persistence_failure_patch):
     def fail_write(*_args, **_kwargs):
         raise OSError("tenant unavailable")
 
     before = bot.memory_catalog()
-    monkeypatch.setattr(bot, "_tenant_document_store", SimpleNamespace(save_session_state=fail_write))
-    monkeypatch.setattr(bot, "_local_ephemeral_document_store", False)
+    persistence_failure_patch.setattr(bot, "_tenant_document_store", SimpleNamespace(save_session_state=fail_write))
+    persistence_failure_patch.setattr(bot, "_local_ephemeral_document_store", False)
     with pytest.raises(RuntimeError, match="tenant unavailable"):
         bot.mutate_memory_store(memories=[{"summary": "A durable memory entry", "category": "general"}])
     assert bot.memory_catalog() == before
 
 
-def test_memory_commit_fails_if_tenant_and_mirror_writes_both_fail(bot, monkeypatch):
+def test_memory_commit_fails_if_tenant_and_mirror_writes_both_fail(bot, persistence_failure_patch):
     def fail_write(*_args, **_kwargs):
         raise OSError("no persistence available")
 
-    monkeypatch.setattr(bot, "_tenant_document_store", SimpleNamespace(save_session_state=fail_write))
-    monkeypatch.setattr(bot, "write_json_atomically", fail_write)
+    persistence_failure_patch.setattr(bot, "_tenant_document_store", SimpleNamespace(save_session_state=fail_write))
+    persistence_failure_patch.setattr(bot, "write_json_atomically", fail_write)
     with pytest.raises(RuntimeError, match="no persistence available"):
         bot.mutate_memory_store(memories=[{"summary": "A durable memory entry", "category": "general"}])
 
 
 @pytest.mark.parametrize("error_type", [OSError, RuntimeError])
-def test_clear_memory_restores_in_memory_state_when_persistence_fails(bot, monkeypatch, error_type):
-    bot._tenant_document_store = None
+def test_clear_memory_restores_in_memory_state_when_persistence_fails(bot, persistence_failure_patch, error_type):
+    persistence_failure_patch.setattr(bot, "_tenant_document_store", None)
     bot.mutate_memory_store(memories=[{"summary": "A durable memory entry", "category": "general"}])
     before = bot.memory_manager.memory_projection()["memories"]
 
     def fail_write(*_args, **_kwargs):
         raise error_type("disk unavailable")
 
-    monkeypatch.setattr(bot, "write_json_atomically", fail_write)
+    persistence_failure_patch.setattr(bot, "write_json_atomically", fail_write)
     with pytest.raises(error_type, match="disk unavailable"):
         bot.memory_manager.clear_memory_store()
     assert bot.memory_manager.memory_projection()["memories"] == before
@@ -1314,6 +1372,27 @@ def test_load_memory_store_recovers_from_invalid_archive_snapshot(bot):
     assert json.loads(bot.MEMORY_PATH.read_text(encoding="utf-8"))["archived_memories"] == []
 
 
+@pytest.mark.parametrize("invalid", [None, "invalid", [{"summary": ""}], ["invalid"]])
+def test_invalid_memory_catalog_cannot_overwrite_saved_state(bot, invalid):
+    bot.mutate_memory_store(memories=[{"summary": "Tony enjoys pottery.", "category": "general"}])
+    before = bot.memory_manager.memory_projection()
+    with pytest.raises(ValueError, match="memories must"):
+        bot.mutate_memory_store(memories=invalid)
+    assert bot.memory_manager.memory_projection() == before
+
+
+def test_invalid_memory_catalog_recovers_from_backup(bot):
+    bot._tenant_document_store = None
+    bot.mutate_memory_store(memories=[{"summary": "Tony enjoys pottery.", "category": "general"}])
+    expected = bot.memory_catalog()
+    backup = bot.json_backup_path(bot.MEMORY_PATH)
+    backup.write_text(bot.MEMORY_PATH.read_text(encoding="utf-8"), encoding="utf-8")
+    invalid = json.loads(bot.MEMORY_PATH.read_text(encoding="utf-8"))
+    invalid["memories"] = ["damaged record"]
+    bot.MEMORY_PATH.write_text(json.dumps(invalid), encoding="utf-8")
+    assert bot._load_memory_store()["memories"] == expected
+
+
 @pytest.mark.parametrize("invalid", ["{bad json", "[]"])
 def test_load_memory_store_refuses_to_replace_unrecoverable_snapshot(bot, invalid):
     bot._tenant_document_store = None
@@ -1360,6 +1439,51 @@ def test_failed_memory_migration_does_not_continue_with_partial_store(monkeypatc
     monkeypatch.setitem(migration._MIGRATIONS, 0, fail_migration)
     with pytest.raises(RuntimeError, match="migration v0 to v1 failed"):
         migration.MemoryMigrationRegistry.migrate({})
+
+
+@pytest.mark.parametrize("tenant_store", [False, True])
+def test_snapshot_migration_is_persisted_even_if_normalization_is_unchanged(bot, monkeypatch, tenant_store):
+    legacy = {"schema_version": 0, "memories": []}
+    writes = []
+    if tenant_store:
+        store = SimpleNamespace(
+            load_session_state=lambda _key: legacy,
+            save_session_state=lambda _key, value: writes.append(copy.deepcopy(value)),
+        )
+        monkeypatch.setattr(bot, "_tenant_document_store", store)
+    else:
+        monkeypatch.setattr(bot, "_tenant_document_store", None)
+        bot.MEMORY_PATH.write_text(json.dumps(legacy), encoding="utf-8")
+    monkeypatch.setattr(bot.memory_manager, "normalize_memory_store", lambda store: dict(store))
+
+    bot.memory_manager.load_memory_store(allow_tenant_mirror_fallback=False)
+
+    if tenant_store:
+        assert legacy == {"schema_version": 0, "memories": []}
+        assert writes and writes[-1]["schema_version"] == 1
+    else:
+        assert json.loads(bot.MEMORY_PATH.read_text(encoding="utf-8"))["schema_version"] == 1
+
+
+def test_failed_tenant_migration_does_not_mutate_loaded_snapshot(bot, monkeypatch):
+    from dadbot.memory import migration
+
+    original = {"schema_version": 0, "memories": []}
+    store = SimpleNamespace(
+        load_session_state=lambda _key: original,
+        save_session_state=MagicMock(),
+    )
+    monkeypatch.setattr(bot, "_tenant_document_store", store)
+
+    def fail_migration(snapshot):
+        snapshot["memories"].append({"summary": "partial"})
+        raise ValueError("injected failure")
+
+    monkeypatch.setitem(migration._MIGRATIONS, 0, fail_migration)
+    with pytest.raises(RuntimeError, match="migration v0 to v1 failed"):
+        bot.memory_manager.load_memory_store(allow_tenant_mirror_fallback=False)
+    assert original == {"schema_version": 0, "memories": []}
+    store.save_session_state.assert_not_called()
 
 
 @pytest.mark.slow

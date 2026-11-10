@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import hmac
 import json
@@ -11,6 +12,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from threading import Lock
 from typing import Any
+
+from .tenant_identity import is_versioned_tenant_id, log_legacy_tenant_id_acceptance, require_tenant_id
 
 try:
     from cryptography.fernet import Fernet, InvalidToken
@@ -60,6 +63,39 @@ def _normalize_tool_set(values: list[str] | tuple[str, ...] | set[str] | None) -
     return {str(value or "").strip() for value in list(values or []) if str(value or "").strip()}
 
 
+def _validate_principal_times(payload: dict[str, Any]) -> None:
+    for field_name in ("iat", "exp"):
+        value = payload.get(field_name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise AuthenticationError(f"Invalid bearer token {field_name}")
+        try:
+            finite = math.isfinite(value)
+        except OverflowError as exc:
+            raise AuthenticationError(f"Invalid bearer token {field_name}") from exc
+        if not finite:
+            raise AuthenticationError(f"Invalid bearer token {field_name}")
+    now = time.time()
+    if payload["exp"] <= now or payload["exp"] <= payload["iat"] or payload["iat"] > now + 30:
+        raise AuthenticationError("Bearer token has expired or has an invalid lifetime")
+
+
+def _validate_principal_claims(payload: dict[str, Any]) -> None:
+    for field_name in ("sub", "tenant_id", "jti"):
+        value = payload.get(field_name)
+        if not isinstance(value, str) or not value.strip() or value != value.strip():
+            raise AuthenticationError(f"Invalid bearer token {field_name}")
+    if payload["sub"].lower() == "anonymous":
+        raise AuthenticationError("Anonymous bearer token principal is not permitted")
+    _validate_principal_times(payload)
+    for field_name in ("scopes", "allowed_tools"):
+        value = payload.get(field_name)
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            raise AuthenticationError(f"Invalid bearer token {field_name}")
+    audience = payload.get("aud", "")
+    if not isinstance(audience, str) or audience != audience.strip():
+        raise AuthenticationError("Invalid bearer token audience")
+
+
 @dataclass(slots=True, frozen=True)
 class ServicePrincipal:
     subject: str
@@ -69,6 +105,8 @@ class ServicePrincipal:
     issuer: str = "dadbot"
     expires_at: float = 0.0
     token_id: str = ""
+    audience: str = ""
+    issued_at: float = 0.0
 
     def has_scope(self, scope: str) -> bool:
         normalized = str(scope or "").strip().lower()
@@ -92,6 +130,8 @@ class ServicePrincipal:
             "issuer": self.issuer,
             "expires_at": self.expires_at,
             "token_id": self.token_id,
+            "audience": self.audience,
+            "issued_at": self.issued_at,
         }
 
 
@@ -115,41 +155,78 @@ class ServiceTokenManager:
         allowed_tools: list[str] | tuple[str, ...] | set[str] | None = None,
         ttl_seconds: float = 3600.0,
         token_id: str = "",
+        audience: str = "",
     ) -> str:
+        if (
+            not isinstance(subject, str)
+            or not subject.strip()
+            or subject != subject.strip()
+            or subject.lower() == "anonymous"
+        ):
+            raise ValueError("A non-anonymous subject is required")
+        tenant_id = require_tenant_id(
+            tenant_id,
+            issuer=self._issuer,
+            subject=subject,
+            acceptance_path="ServiceTokenManager.issue",
+        )
+        ttl = float(ttl_seconds)
+        if not math.isfinite(ttl) or ttl <= 0:
+            raise ValueError("Token lifetime must be finite and positive")
         now = time.time()
         payload = {
             "v": self.VERSION,
-            "sub": str(subject or "service-client"),
-            "tenant_id": str(tenant_id or "default"),
+            "sub": subject,
+            "tenant_id": tenant_id,
             "scopes": sorted(_normalize_scope_set(scopes)),
             "allowed_tools": sorted(_normalize_tool_set(allowed_tools)),
             "iat": now,
-            "exp": now + max(1.0, float(ttl_seconds)),
+            "exp": now + ttl,
             "iss": self._issuer,
             "jti": str(token_id or hashlib.sha256(f"{now}:{subject}:{tenant_id}".encode()).hexdigest()[:16]),
         }
+        normalized_audience = str(audience or "").strip()
+        if normalized_audience:
+            payload["aud"] = normalized_audience
         payload_bytes = _stable_json(payload)
         signature = hmac.new(self._key, payload_bytes, self.ALGORITHM).hexdigest()
         return f"{_urlsafe_b64encode(payload_bytes)}.{signature}"
 
-    def verify(self, token: str) -> ServicePrincipal:
+    def verify(self, token: str, *, expected_audience: str | None = None) -> ServicePrincipal:
         try:
             encoded_payload, signature = str(token or "").rsplit(".", 1)
-        except ValueError as exc:
+            payload_bytes = _urlsafe_b64decode(encoded_payload)
+        except (ValueError, binascii.Error) as exc:
             raise AuthenticationError("Malformed bearer token") from exc
 
-        payload_bytes = _urlsafe_b64decode(encoded_payload)
         expected_signature = hmac.new(self._key, payload_bytes, self.ALGORITHM).hexdigest()
-        if not hmac.compare_digest(signature, expected_signature):
+        if not signature.isascii() or not hmac.compare_digest(signature, expected_signature):
             raise AuthenticationError("Invalid bearer token signature")
 
-        payload = dict(json.loads(payload_bytes))
-        if int(payload.get("v") or 0) != self.VERSION:
+        try:
+            payload = json.loads(payload_bytes)
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise AuthenticationError("Malformed bearer token payload") from exc
+        if not isinstance(payload, dict):
+            raise AuthenticationError("Invalid bearer token payload")
+        _validate_principal_claims(payload)
+        if type(payload.get("v")) is not int or payload["v"] != self.VERSION:
             raise AuthenticationError("Unsupported bearer token version")
         if str(payload.get("iss") or "") != self._issuer:
             raise AuthenticationError("Unexpected bearer token issuer")
+        audience = str(payload.get("aud") or "")
+        if expected_audience is not None and audience != expected_audience:
+            raise AuthenticationError("Unexpected bearer token audience")
         if float(payload.get("exp") or 0.0) < time.time():
             raise AuthenticationError("Bearer token has expired")
+
+        if not is_versioned_tenant_id(payload["tenant_id"]):
+            log_legacy_tenant_id_acceptance(
+                payload["tenant_id"],
+                issuer=payload["iss"],
+                subject=payload["sub"],
+                acceptance_path="ServiceTokenManager.verify",
+            )
 
         return ServicePrincipal(
             subject=str(payload.get("sub") or "service-client"),
@@ -159,6 +236,8 @@ class ServiceTokenManager:
             issuer=str(payload.get("iss") or self._issuer),
             expires_at=float(payload.get("exp") or 0.0),
             token_id=str(payload.get("jti") or ""),
+            audience=audience,
+            issued_at=float(payload.get("iat") or 0.0),
         )
 
 
@@ -238,6 +317,8 @@ class RedisWebSocketTicketStore:
                 issuer=metadata["issuer"],
                 expires_at=float(metadata["expires_at"]),
                 token_id=metadata["token_id"],
+                audience=str(metadata.get("audience") or ""),
+                issued_at=float(metadata.get("issued_at") or 0.0),
             )
         except (ValueError, KeyError, TypeError) as exc:
             raise AuthenticationError("Invalid WebSocket ticket data") from exc
