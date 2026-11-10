@@ -502,44 +502,6 @@ class RuntimeStateManager(_StateThreadMixin, _StatePromptBudgetMixin):
         self.sync_active_thread_snapshot()
         return [dict(thread) for thread in self.chat_threads]
 
-    def sync_active_thread_snapshot(self):
-        with self.bot._session_lock:
-            active_thread_id = self.ensure_chat_thread_state(
-                preserve_active_runtime=True,
-            )
-            snapshot = self.current_thread_runtime_snapshot()
-            self.thread_snapshots[active_thread_id] = snapshot
-            updated_threads = []
-            now = self.thread_timestamp()
-            for index, thread in enumerate(self.chat_threads, start=1):
-                if thread.get("thread_id") == active_thread_id:
-                    updated_threads.append(
-                        self.normalize_chat_thread_entry(
-                            {
-                                **dict(thread),
-                                "updated_at": now,
-                                "last_message": self.thread_preview(snapshot),
-                                "turn_count": self.thread_turn_count(snapshot),
-                                "closed": bool(snapshot.get("closed")),
-                            },
-                            snapshot,
-                            fallback_index=index,
-                        ),
-                    )
-                else:
-                    existing_snapshot = self.normalize_thread_snapshot(
-                        self.thread_snapshots.get(thread.get("thread_id")),
-                    )
-                    updated_threads.append(
-                        self.normalize_chat_thread_entry(
-                            thread,
-                            existing_snapshot,
-                            fallback_index=index,
-                        ),
-                    )
-            self.chat_threads = updated_threads
-            return dict(self.active_chat_thread() or {})
-
     def create_chat_thread(self, title=""):
         with self.bot._session_lock:
             self.ensure_chat_thread_state(preserve_active_runtime=True)
