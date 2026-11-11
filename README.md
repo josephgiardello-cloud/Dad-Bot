@@ -817,6 +817,17 @@ verified seals without hashing them a second time. Legacy and replay-filtered
 records retain their existing normalization/resealing behavior. These changes
 reduce durable write overhead without batching away commit boundaries.
 
+Successful trusted-local writes retain that fingerprint in the runtime ledger
+only when the verified prefix matches its previous all-byte fingerprint (or
+every persisted record exactly equals its runtime counterpart), and the new
+event matches exactly. This prevents routine job/session writes from forcing a
+full WAL reload during the next context read without comparing historical
+payloads again for an already verified prefix. The refresh still hashes every
+byte under the writer lock; a matching canonical head alone is insufficient.
+Concurrent successors, differing metadata, replay filters, authenticated
+execution and custom ledger/backend classes retain the full refresh path.
+Failed appends or runtime publication still require explicit recovery.
+
 SaveNode's local memory commits use the same byte-verified append prefix when
 it also exactly matches the reconciled shared runtime ledger. After fsync and
 snapshot publication, only the new committed event advances that runtime's

@@ -330,6 +330,30 @@ class ExecutionLedger:
         self.validate_cache()
         self._backend_uncertain = False
 
+    def _verified_append_digest(self, payload: dict[str, Any], previous_digest: bytes | None) -> bytes | None:
+        from dadbot_system.delegation import _execution_authority
+
+        backend = self._backend
+        if (
+            type(self) is not ExecutionLedger
+            or not isinstance(backend, (FileWALLedgerBackend, CRCFileWALLedgerBackend))
+            or type(backend) not in (FileWALLedgerBackend, CRCFileWALLedgerBackend)
+            or self._replay_filters
+            or self._authenticated_authority_required
+            or _execution_authority.get() is not None
+        ):
+            return None
+        with backend._lock:
+            snapshot = backend._append_verifier._snapshot
+            if snapshot is not None and len(snapshot[1]) == len(self._events) + 1 and snapshot[1][-1] == payload:
+                # Reuse an already bound runtime prefix, or establish exact record equality.
+                if (
+                    (previous_digest is not None and snapshot[2] == previous_digest)
+                    or snapshot[1][:-1] == self._events
+                ):
+                    return snapshot[0]
+        return None
+
     def write(self, event: dict[str, Any]) -> dict[str, Any]:
         from dadbot.core.ledger.enforcement import LedgerEnforcer
 
@@ -344,13 +368,16 @@ class ExecutionLedger:
             next_sequence = int(cache.get("sequence_counter") or 0) + 1
             identity, _ = self._apply_session_lineage(payload)
             self._seal_payload_hash_chain(payload, next_sequence)
+            previous_digest = self._backend_content_digest
             self._backend_content_digest = None
             self._backend_uncertain = True
             self._backend.append(
                 deepcopy(payload),
                 committed=bool(payload.get("committed", False)),
             )
+            digest = self._verified_append_digest(payload, previous_digest)
             self._record_committed_event(payload, identity)
+            self._backend_content_digest = digest
             return deepcopy(payload)
 
     def append(self, event: dict[str, Any]) -> dict[str, Any]:

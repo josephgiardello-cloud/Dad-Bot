@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -61,6 +62,185 @@ def test_unchanged_append_verifies_only_new_event_after_verified_prefix(tmp_path
     assert not loads
     assert ledger.verify_replay(mode="chain")["ok"]
     assert ExecutionLedger(backend_type(tmp_path / "ledger")).load_from_backend() == 12
+
+
+@pytest.mark.parametrize("backend_type", [FileWALLedgerBackend, CRCFileWALLedgerBackend])
+def test_successful_local_append_preserves_byte_verified_refresh(tmp_path, monkeypatch, backend_type):
+    path = tmp_path / "ledger"
+    backend = backend_type(path)
+    ledger = ExecutionLedger(backend)
+    ledger.commit_tenant_memory(
+        tenant_id="a", expected_revision=0, operation_id="one", state={"items": [1]},
+    )
+    loads = []
+    load = backend._load_unlocked
+
+    def capture_load():
+        loads.append(True)
+        return load()
+
+    monkeypatch.setattr(backend, "_load_unlocked", capture_load)
+    rebuilds = ledger.telemetry_snapshot()["cache_rebuild_count"]
+    for value in range(3):
+        ledger.write(_session_event(value))
+        assert ledger._backend_content_digest == hashlib.sha256(path.read_bytes()).digest()
+        assert ledger.refresh_tenant_memory("a").state == {"items": [1]}
+        assert ledger.telemetry_snapshot()["cache_rebuild_count"] == rebuilds
+    assert not loads
+    restored = ExecutionLedger(backend_type(path))
+    restored.load_from_backend()
+    assert restored.read() == ledger.read()
+    assert restored.verify_replay(mode="chain")["ok"]
+
+
+@pytest.mark.parametrize("backend_type", [FileWALLedgerBackend, CRCFileWALLedgerBackend])
+def test_append_refresh_reuses_verified_runtime_prefix_without_historical_comparisons(tmp_path, backend_type):
+    class NoHistoricalComparison(dict):
+        __hash__ = None
+
+        def __eq__(self, other):
+            pytest.fail("Unchanged runtime prefix must not compare historical payloads")
+
+    ledger = ExecutionLedger(backend_type(tmp_path / "ledger"))
+    ledger.write(_session_event(1))
+    ledger.load_from_backend(only_if_changed=True)
+    ledger._events[0] = NoHistoricalComparison(ledger._events[0])
+    ledger.write(_session_event(2))
+    assert ledger._backend_content_digest is not None
+
+
+@pytest.mark.parametrize("backend_type", [FileWALLedgerBackend, CRCFileWALLedgerBackend])
+def test_append_refresh_preserves_roundtrip_normalization_of_the_new_event(tmp_path, backend_type):
+    ledger = ExecutionLedger(backend_type(tmp_path / "ledger"))
+    ledger.write(_session_event(1))
+    ledger.load_from_backend(only_if_changed=True)
+    ledger.write(_session_event((2, 3)))
+    assert ledger._backend_content_digest is None
+    ledger.load_from_backend(only_if_changed=True)
+    assert ledger.read()[-1]["payload"]["state"]["value"] == [2, 3]
+
+
+@pytest.mark.parametrize("backend_type", [FileWALLedgerBackend, CRCFileWALLedgerBackend])
+def test_append_refresh_does_not_bless_a_mismatched_verified_prefix(tmp_path, monkeypatch, backend_type):
+    path = tmp_path / "ledger"
+    backend = backend_type(path)
+    ledger = ExecutionLedger(backend)
+    ledger.write(_session_event(1))
+    ledger.load_from_backend()
+    # Non-replay metadata can differ without breaking the canonical checksum chain.
+    ledger._events[0]["timestamp"] = "different-runtime-metadata"
+    ledger.write(_session_event(2))
+    assert ledger._backend_content_digest is None
+    loads = []
+    load = backend._load_unlocked
+
+    def capture_load():
+        loads.append(True)
+        return load()
+
+    monkeypatch.setattr(backend, "_load_unlocked", capture_load)
+    ledger.load_from_backend(only_if_changed=True)
+    assert loads == [True]
+    assert ledger.read()[0]["timestamp"] == "2026-01-01"
+
+
+@pytest.mark.parametrize("backend_type", [FileWALLedgerBackend, CRCFileWALLedgerBackend])
+def test_append_refresh_reloads_resealed_metadata_changes_with_an_unchanged_chain(tmp_path, backend_type):
+    path = tmp_path / "ledger"
+    ledger = ExecutionLedger(backend_type(path))
+    ledger.write(_session_event(1))
+    ledger.load_from_backend(only_if_changed=True)
+    event = ledger.read()[0]
+    event["timestamp"] = "2026-01-02"
+    line = (
+        json.dumps(event) + "\n"
+        if backend_type is FileWALLedgerBackend
+        else CRC32LineCodec.encode(event)
+    )
+    path.write_bytes(line.encode("utf-8"))
+    ledger.write(_session_event(2))
+    assert ledger._backend_content_digest is None
+    assert ledger.load_from_backend(only_if_changed=True) == 2
+    assert ledger.read()[0]["timestamp"] == "2026-01-02"
+    assert ledger.verify_replay(mode="chain")["ok"]
+
+
+@pytest.mark.parametrize("backend_type", [FileWALLedgerBackend, CRCFileWALLedgerBackend])
+def test_append_refresh_observes_same_backend_concurrent_successor(tmp_path, monkeypatch, backend_type):
+    backend = backend_type(tmp_path / "ledger")
+    ledger = ExecutionLedger(backend)
+    ledger.write(_session_event(1))
+    append = backend.append
+
+    def append_with_successor(event, *, committed=False):
+        append(event, committed=committed)
+        other = ExecutionLedger(backend)
+        other.load_from_backend()
+        with monkeypatch.context() as patch:
+            patch.setattr(backend, "append", append)
+            other.write(_session_event(3))
+
+    monkeypatch.setattr(backend, "append", append_with_successor)
+    ledger.write(_session_event(2))
+    assert ledger._backend_content_digest is None
+    assert ledger.load_from_backend(only_if_changed=True) == 3
+    assert ledger.read()[-1]["payload"]["state"]["value"] == 3
+
+
+@pytest.mark.parametrize("backend_type", [FileWALLedgerBackend, CRCFileWALLedgerBackend])
+@pytest.mark.parametrize("mode", ["filtered", "ledger_subclass", "backend_subclass", "authenticated"])
+def test_append_refresh_retains_full_paths_for_nonlocal_or_custom_views(tmp_path, monkeypatch, backend_type, mode):
+    class CustomBackend(backend_type):
+        pass
+
+    class CustomLedger(ExecutionLedger):
+        pass
+
+    backend = (CustomBackend if mode == "backend_subclass" else backend_type)(tmp_path / "ledger")
+    ledger = (CustomLedger if mode == "ledger_subclass" else ExecutionLedger)(backend)
+    if mode == "filtered":
+        ledger.add_replay_filter(lambda events: events)
+    elif mode == "authenticated":
+        ledger.require_authenticated_authority()
+    ledger.write(_session_event(1))
+    assert ledger._backend_content_digest is None
+    loads = []
+    load = backend._load_unlocked
+
+    def capture_load():
+        loads.append(True)
+        return load()
+
+    monkeypatch.setattr(backend, "_load_unlocked", capture_load)
+    assert ledger.load_from_backend(only_if_changed=True) == 1
+    assert loads == [True]
+
+
+@pytest.mark.parametrize("backend_type", [FileWALLedgerBackend, CRCFileWALLedgerBackend])
+def test_append_refresh_rejects_post_fsync_tampering_and_requires_recovery(tmp_path, monkeypatch, backend_type):
+    from dadbot.core import ledger_backend
+
+    path = tmp_path / "ledger"
+    ledger = ExecutionLedger(backend_type(path))
+    ledger.write(_session_event(1))
+    original = path.read_bytes()
+    fsync = ledger_backend.os.fsync
+
+    def tamper_after_fsync(fd):
+        fsync(fd)
+        path.write_bytes(path.read_bytes().replace(b'"value": 1', b'"value": 9'))
+
+    monkeypatch.setattr(ledger_backend.os, "fsync", tamper_after_fsync)
+    ledger.write(_session_event(2))
+    assert ledger._backend_content_digest != hashlib.sha256(path.read_bytes()).digest()
+    with pytest.raises(RuntimeError):
+        ledger.load_from_backend(only_if_changed=True)
+    path.write_bytes(original)
+    with pytest.raises(RuntimeError, match="reload"):
+        ledger.read()
+    with pytest.raises(RuntimeError, match="reload"):
+        ledger.load_from_backend(only_if_changed=True)
+    assert ledger.load_from_backend() == 1
 
 
 @pytest.mark.parametrize("backend_type", [FileWALLedgerBackend, CRCFileWALLedgerBackend])

@@ -93,7 +93,7 @@ class _WALAppendVerifier:
     """Reuse a sealed prefix only after checking all current bytes under the writer lock."""
 
     def __init__(self) -> None:
-        self._snapshot: tuple[bytes, list[dict[str, Any]]] | None = None
+        self._snapshot: tuple[bytes, list[dict[str, Any]], bytes] | None = None
 
     def load_prefix(
         self, path: Path, load: Callable[[], list[dict[str, Any]]], *, reuse: bool,
@@ -119,8 +119,9 @@ class _WALAppendVerifier:
         if reuse and event.get("chain_hash"):
             events.append(deepcopy(event))
             digest = hashlib.sha256(prefix_bytes)
+            prefix_digest = digest.digest()
             digest.update(line.encode("utf-8"))
-            self._snapshot = (digest.digest(), events)
+            self._snapshot = (digest.digest(), events, prefix_digest)
             return self._snapshot[0]
         return None
 
