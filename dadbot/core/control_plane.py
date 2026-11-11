@@ -446,7 +446,7 @@ class DurableReconcileQueue:
     def pending_entries(self) -> list[dict[str, Any]]:
         pending: list[dict[str, Any]] = []
         seen: set[tuple[str, str, str, str]] = set()
-        for event in self._ledger.read():
+        for event in self._ledger.read(event_types=frozenset({"JOB_RECONCILE_REQUIRED"})):
             if str(event.get("type") or "") != "JOB_RECONCILE_REQUIRED":
                 continue
             tenant_id, sid, rid, eid, reason = self._extract_reconcile_event_fields(event)

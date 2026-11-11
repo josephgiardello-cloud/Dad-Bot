@@ -769,6 +769,29 @@ Graph reads project the committed catalog rather than staged turn memory.
 This preserves pending updates for SaveNode without leaking them into graph
 context or weakening the tenant revision fence.
 
+Repeated committed-memory reads reuse the verified in-process ledger only
+when a SHA-256 digest of **all current WAL bytes**, read under the existing
+process lock, matches the last successfully loaded snapshot. Both plain
+and CRC WALs use this unchanged-file fast path; file size and modification
+time alone are never trusted. Binding checks still run on every plain-WAL
+check, and delegated/authenticated reads retain full per-event authority
+validation even when the bytes match. Any byte change triggers the full parse, seal,
+sequence, revision and replay-filter validation before publishing state.
+Local writes and new replay filters invalidate the digest. Explicit
+`load_from_backend()` recovery always performs a full reload, and failed
+reads/writes remain blocked until that explicit recovery succeeds.
+Stateful replay filters and custom backend subclasses retain full reloads.
+Graph and semantic index fences share a byte-verified committed projection
+snapshot while keeping the raw WAL writer lock held through publication.
+Every byte change forces a fresh verifier before checking the exact catalog
+and revision; staged runtime memory is never used as index authority.
+This removes repeated historical verification from context building
+without buffering commits, weakening fsync, or suppressing corruption.
+Hot-path request/effect indexes copy all event headers but only the payloads
+they actually consume; reconciliation reads copy only reconciliation events.
+Default full/tail reads still return complete, isolated deep copies, and
+trace roots, completion results and ambiguity checks remain ledger-derived.
+
 This local-first indexed-write path requires SQLite projections. Set
 `DADBOT_MEMORY_INDEX_BACKEND=sqlite` to select them without changing PostgreSQL
 snapshot persistence; unset or `auto` preserves the existing backend selection.

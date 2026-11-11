@@ -7,6 +7,11 @@ from dadbot.contracts import FinalizedTurnResult
 from dadbot.core.execution_ledger import ExecutionLedger
 from dadbot.core.tenant_session import current_tenant_id
 
+_INDEX_PAYLOAD_TYPES = frozenset({
+    "JOB_STARTED", "JOB_COMPLETED", "JOB_FAILED", "JOB_RECONCILED",
+    "EFFECT_BEGIN", "EFFECT_COMMIT", "EFFECT_RECONCILED", "EXECUTION_LIFECYCLE",
+})
+
 
 @dataclass(slots=True)
 class EffectState:
@@ -124,7 +129,7 @@ class LedgerIndex:
         active_leases_by_worker: dict[str, set[str]] = {}
         trace_roots: dict[tuple[str, str], str] = {}
 
-        for event in self._ledger.read():
+        for event in self._ledger.read(payload_types=_INDEX_PAYLOAD_TYPES):
             event_type, tenant_id, session_id, trace_id, payload = self._normalize_event(event)
 
             trace_key = (tenant_id, trace_id)

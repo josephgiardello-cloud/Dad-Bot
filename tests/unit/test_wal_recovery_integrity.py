@@ -7,9 +7,9 @@ import threading
 
 import pytest
 
-from dadbot.core.execution_ledger import ExecutionLedger
 from dadbot.core.compaction import CompactionPolicy, EventCompactor
 from dadbot.core.durability import CRC32LineCodec, FileLockMutex
+from dadbot.core.execution_ledger import ExecutionLedger
 from dadbot.core.ledger_backend import (
     BatchWriteBackend,
     CRCFileWALLedgerBackend,
@@ -18,6 +18,7 @@ from dadbot.core.ledger_backend import (
     InMemoryLedgerBackend,
     WALCorruptionError,
 )
+from dadbot.core.ledger_index import LedgerIndex
 
 
 def _session_event(value):
@@ -44,6 +45,53 @@ def test_ledger_events_are_isolated_from_caller_mutation():
     tail[0]["payload"]["state"]["value"] = 5
     assert ledger.read()[0]["payload"]["state"]["value"] == 1
     assert ledger.verify_replay(mode="chain")["ok"]
+
+
+def test_selective_ledger_reads_filter_before_copy_without_changing_full_reads():
+    ledger = ExecutionLedger()
+    ledger.write(_session_event(1))
+    ledger.write({**_session_event(2), "type": "GRAPH_CHECKPOINT"})
+    full = ledger.read()
+    selected = ledger.read(event_types=frozenset({"SESSION_STATE_UPDATED"}))
+    assert selected == full[:1]
+    compact = ledger.read(payload_types=frozenset({"SESSION_STATE_UPDATED"}))
+    assert compact[0] == full[0]
+    assert compact[1] == {key: value for key, value in full[1].items() if key != "payload"}
+    selected[0]["payload"]["state"]["value"] = 9
+    compact[0]["payload"]["state"]["value"] = 8
+    assert ledger.read() == full
+    ledger._backend_uncertain = True
+    with pytest.raises(RuntimeError, match="reload"):
+        ledger.read(event_types=frozenset())
+
+
+def test_hot_path_index_does_not_copy_checkpoint_payloads_and_preserves_trace_roots(monkeypatch):
+    ledger = ExecutionLedger()
+    root = ledger.write({**_session_event(1), "type": "GRAPH_CHECKPOINT"})
+    started = ledger.write({**_session_event(2), "type": "JOB_STARTED", "payload": {"request_id": "request"}})
+    index = LedgerIndex(ledger)
+    from dadbot.core import execution_ledger
+
+    original_copy = execution_ledger.deepcopy
+    snapshots = []
+
+    def capture_copy(value):
+        snapshots.append(value)
+        return original_copy(value)
+
+    monkeypatch.setattr(execution_ledger, "deepcopy", capture_copy)
+    assert index.trace_root("trace") == root["event_id"]
+    assert index.has_ambiguous_request_inflight(session_id="test", request_id="request")
+    assert snapshots[0][1] == started
+    assert "payload" not in snapshots[0][0]
+    assert len(snapshots) == 1
+    monkeypatch.setattr(execution_ledger, "deepcopy", original_copy)
+    ledger.write({
+        **_session_event(3), "type": "JOB_COMPLETED", "payload": {"request_id": "request", "result": ["ok", False]},
+    })
+    assert not index.has_ambiguous_request_inflight(session_id="test", request_id="request")
+    assert index.completed_result(session_id="test", request_id="request") == ("ok", False)
+    assert index.trace_root("trace") == root["event_id"]
 
 
 @pytest.mark.parametrize("backend_type", [FileWALLedgerBackend, CRCFileWALLedgerBackend])

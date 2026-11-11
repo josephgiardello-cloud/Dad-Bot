@@ -17,6 +17,7 @@ import uuid
 from contextlib import contextmanager
 from copy import deepcopy
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from dadbot.core.core_state import CoreState, InputEvent, memory_projection, transition
 from dadbot.core.execution_boundary import (
@@ -34,6 +35,9 @@ from dadbot.core.kernel_locks import KernelEventTotalityLock
 from dadbot.core.mutation_entry_invariants import enforce_mutation_entry_invariants
 from dadbot.core.state_lineage import canonical_state_hash
 from dadbot.memory.migration import MemoryMigrationRegistry
+
+if TYPE_CHECKING:
+    from dadbot.core.ledger_backend import FileWALLedgerBackend
 
 logger = logging.getLogger(__name__)
 
@@ -204,6 +208,7 @@ class MemoryStorageBackend:
         self._projected_store: dict[str, object] = {}
         self._tenant_base_revision: int | None = None
         self._tenant_recovery_required = False
+        self._fenced_tenant_snapshot: tuple[FileWALLedgerBackend, str, bytes, int, dict] | None = None
 
     def require_authenticated_authority(self) -> None:
         self._authenticated_authority_required = True
@@ -326,7 +331,6 @@ class MemoryStorageBackend:
             yield
             return
         from dadbot.core.durability import FileLockMutex
-        from dadbot.core.execution_ledger import ExecutionLedger
         from dadbot.core.ledger_backend import WALCorruptionError
         from dadbot.core.tenant_memory_ledger import TenantMemoryRevisionConflict
 
@@ -335,19 +339,43 @@ class MemoryStorageBackend:
             with lock.locked():
                 if not backend._path.exists():
                     raise WALCorruptionError("Execution WAL is missing during semantic index repair")
-                ledger = ExecutionLedger()
-                ledger._backend._events = backend._load_unlocked()
-                ledger.load_from_backend()
-                current = ledger.replay_tenant_memory(self.bot.config.tenant_id)
-                if current.state is None or current.revision == 0:
-                    raise RuntimeError("Tenant memory authority is unavailable during semantic indexing")
-                if list(current.state.get("memories") or []) != list(memories):
+                revision, state = self._fenced_tenant_projection(backend)
+                if list(state.get("memories") or []) != list(memories):
                     raise RuntimeError("Semantic index input does not match committed tenant memory")
-                if expected_revision is not None and current.revision != expected_revision:
+                if expected_revision is not None and revision != expected_revision:
                     raise TenantMemoryRevisionConflict(
                         "Semantic candidate is not based on the committed tenant revision"
                     )
-                yield current.revision
+                yield revision
+
+    def _fenced_tenant_projection(self, backend: FileWALLedgerBackend) -> tuple[int, dict]:
+        """Read committed authority while the caller holds the raw WAL writer fence."""
+        from dadbot.core.execution_ledger import ExecutionLedger
+        from dadbot.core.ledger_backend import FileWALLedgerBackend, InMemoryLedgerBackend
+
+        tenant_id = self.bot.config.tenant_id
+        snapshot = self._fenced_tenant_snapshot
+        self._fenced_tenant_snapshot = None
+        digest = snapshot[2] if (
+            snapshot is not None and snapshot[0] is backend and snapshot[1] == tenant_id
+            and type(backend) is FileWALLedgerBackend
+        ) else None
+        current_digest, events = backend._load_if_changed_unlocked(digest)
+        if events is None:
+            if snapshot is None:
+                raise RuntimeError("Unchanged WAL requires a previously verified tenant projection")
+            revision, state = snapshot[3], snapshot[4]
+        else:
+            verifier_backend = InMemoryLedgerBackend()
+            verifier_backend._events = events
+            ledger = ExecutionLedger(verifier_backend)
+            ledger.load_from_backend()
+            current = ledger.replay_tenant_memory(tenant_id)
+            if not isinstance(current.state, dict) or current.revision == 0:
+                raise RuntimeError("Tenant memory authority is unavailable during index repair")
+            revision, state = current.revision, current.state
+        self._fenced_tenant_snapshot = (backend, tenant_id, current_digest, revision, state)
+        return revision, deepcopy(state)
 
     @contextmanager
     def fenced_graph_index_write(self, expected_revision, expected_projection):
@@ -357,7 +385,6 @@ class MemoryStorageBackend:
             yield
             return
         from dadbot.core.durability import FileLockMutex
-        from dadbot.core.execution_ledger import ExecutionLedger
         from dadbot.core.ledger_backend import WALCorruptionError
         from dadbot.core.tenant_memory_ledger import TenantMemoryRevisionConflict
 
@@ -366,14 +393,10 @@ class MemoryStorageBackend:
             with lock.locked():
                 if not backend._path.exists():
                     raise WALCorruptionError("Execution WAL is missing during graph index repair")
-                ledger = ExecutionLedger()
-                ledger._backend._events = backend._load_unlocked()
-                ledger.load_from_backend()
-                current = ledger.replay_tenant_memory(self.bot.config.tenant_id)
+                revision, state = self._fenced_tenant_projection(backend)
                 if (
-                    current.state is None
-                    or current.revision != expected_revision
-                    or self._manager.normalize_memory_store(current.state) != expected_projection
+                    revision != expected_revision
+                    or self._manager.normalize_memory_store(state) != expected_projection
                 ):
                     raise TenantMemoryRevisionConflict("Graph projection is not based on the committed tenant revision")
                 yield

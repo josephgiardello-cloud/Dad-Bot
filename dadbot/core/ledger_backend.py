@@ -11,6 +11,7 @@ Usage:
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import inspect
 import json
@@ -380,6 +381,23 @@ class FileWALLedgerBackend(LedgerBackend):
         with self._lock, FileLockMutex(self._path.with_name(self._path.name + ".lock")).locked():
             return self._load_unlocked()
 
+    def load_if_changed(self, digest: bytes | None) -> tuple[bytes | None, list[dict[str, Any]] | None]:
+        """Reuse a snapshot only when all persisted bytes and live authority still match."""
+        from dadbot.core.durability import FileLockMutex
+
+        with self._lock, FileLockMutex(self._path.with_name(self._path.name + ".lock")).locked():
+            return self._load_if_changed_unlocked(digest)
+
+    def _load_if_changed_unlocked(self, digest: bytes | None) -> tuple[bytes, list[dict[str, Any]] | None]:
+        from dadbot_system.delegation import _execution_authority
+
+        self._authorize_event({})
+        self._read_binding()
+        current = hashlib.sha256(self._path.read_bytes()).digest()
+        if _execution_authority.get() is not None:
+            return current, self._load_unlocked()
+        return current, None if digest == current else self._load_unlocked()
+
     def _load_unlocked(self) -> list[dict[str, Any]]:
         self._authorize_event({})
         bound = self._read_binding()
@@ -465,6 +483,13 @@ class CRCFileWALLedgerBackend(LedgerBackend):
 
         with self._lock, FileLockMutex(self._path.with_name(self._path.name + ".lock")).locked():
             return self._load_unlocked()
+
+    def load_if_changed(self, digest: bytes | None) -> tuple[bytes | None, list[dict[str, Any]] | None]:
+        from dadbot.core.durability import FileLockMutex
+
+        with self._lock, FileLockMutex(self._path.with_name(self._path.name + ".lock")).locked():
+            current = hashlib.sha256(self._path.read_bytes()).digest()
+            return current, None if digest == current else self._load_unlocked()
 
     def _load_unlocked(self) -> list[dict[str, Any]]:
         from dadbot.core.durability import CRC32LineCodec

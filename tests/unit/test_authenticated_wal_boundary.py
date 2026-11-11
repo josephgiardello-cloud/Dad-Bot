@@ -93,12 +93,17 @@ def test_raw_backend_enforces_current_delegation_when_context_exists(tmp_path, a
             tenant_id="tenant-a", expected_revision=0, operation_id="first", state={"memory": "private"}
         )
         assert backend.load() == [event]
+        digest, snapshot = backend.load_if_changed(None)
+        assert snapshot == [event]
+        assert backend.load_if_changed(digest) == (digest, [event])
     finally:
         _execution_authority.reset(token)
     token = _execution_authority.set((store, tasks["tenant-b"]))
     try:
         with pytest.raises(AuthorizationError, match="tenant mismatch"):
             backend.load()
+        with pytest.raises(AuthorizationError, match="tenant mismatch"):
+            backend.load_if_changed(digest)
         with pytest.raises(AuthorizationError, match="tenant mismatch"):
             backend.append(event, committed=True)
     finally:
@@ -108,6 +113,8 @@ def test_raw_backend_enforces_current_delegation_when_context_exists(tmp_path, a
     try:
         with pytest.raises(AuthorizationError, match="revoked"):
             backend.load()
+        with pytest.raises(AuthorizationError, match="revoked"):
+            backend.load_if_changed(digest)
         with pytest.raises(AuthorizationError, match="revoked"):
             backend.append(event, committed=True)
     finally:

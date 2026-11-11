@@ -3,6 +3,9 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import threading
+from copy import deepcopy
+from types import SimpleNamespace
 
 import pytest
 
@@ -22,6 +25,205 @@ from dadbot.core.tenant_memory_ledger import (
     TenantMemoryOperationConflict,
     TenantMemoryRevisionConflict,
 )
+from dadbot.memory.storage import MemoryStorageBackend
+
+
+def test_graph_and_semantic_fences_reuse_only_byte_identical_committed_projection(tmp_path, monkeypatch):
+    path = tmp_path / "ledger"
+    backend = FileWALLedgerBackend(path)
+    ledger = ExecutionLedger(backend)
+    ledger.commit_tenant_memory(tenant_id="a", expected_revision=0, operation_id="one", state={"memories": []})
+    storage = MemoryStorageBackend(
+        SimpleNamespace(config=SimpleNamespace(tenant_id="a"), _execution_ledger=ledger, _io_lock=threading.RLock()),
+        SimpleNamespace(normalize_memory_store=deepcopy),
+    )
+    loads = []
+    load = backend._load_unlocked
+
+    def capture_load():
+        loads.append(True)
+        return load()
+
+    monkeypatch.setattr(backend, "_load_unlocked", capture_load)
+    with storage.fenced_semantic_index_write([], expected_revision=1) as revision:
+        assert revision == 1
+    with storage.fenced_graph_index_write(1, {"memories": []}):
+        pass
+    with storage.fenced_semantic_index_write([], expected_revision=1):
+        pass
+    assert len(loads) == 1
+    other = ExecutionLedger(FileWALLedgerBackend(path))
+    other.load_from_backend()
+    other.commit_tenant_memory(
+        tenant_id="a", expected_revision=1, operation_id="two", state={"memories": [], "changed": True}
+    )
+    with pytest.raises(TenantMemoryRevisionConflict):
+        with storage.fenced_graph_index_write(1, {"memories": []}):
+            pytest.fail("A stale graph projection crossed the WAL fence")
+    assert len(loads) == 2
+    with storage.fenced_graph_index_write(2, {"memories": [], "changed": True}):
+        pass
+    with pytest.raises(TenantMemoryRevisionConflict):
+        with storage.fenced_semantic_index_write([], expected_revision=1):
+            pytest.fail("A stale semantic revision crossed the WAL fence")
+
+
+def test_cached_projection_fence_revalidates_corruption_and_forgets_failed_snapshot(tmp_path):
+    path = tmp_path / "ledger"
+    backend = FileWALLedgerBackend(path)
+    ledger = ExecutionLedger(backend)
+    ledger.commit_tenant_memory(tenant_id="a", expected_revision=0, operation_id="one", state={"memories": []})
+    storage = MemoryStorageBackend(
+        SimpleNamespace(config=SimpleNamespace(tenant_id="a"), _execution_ledger=ledger, _io_lock=threading.RLock()),
+        SimpleNamespace(normalize_memory_store=deepcopy),
+    )
+    with storage.fenced_semantic_index_write([], expected_revision=1):
+        pass
+    original = path.read_bytes()
+    with path.open("ab") as handle:
+        handle.write(b'{"partial":')
+    with pytest.raises(RuntimeError):
+        with storage.fenced_graph_index_write(1, {"memories": []}):
+            pytest.fail("Corrupt WAL crossed the projection fence")
+    assert storage._fenced_tenant_snapshot is None
+    path.write_bytes(original)
+    with storage.fenced_graph_index_write(1, {"memories": []}):
+        pass
+
+
+@pytest.mark.parametrize("backend_type", [FileWALLedgerBackend, CRCFileWALLedgerBackend])
+def test_unchanged_refresh_does_not_reparse_or_rebuild_verified_ledger(tmp_path, monkeypatch, backend_type):
+    backend = backend_type(tmp_path / "ledger")
+    ledger = ExecutionLedger(backend)
+    ledger.commit_tenant_memory(tenant_id="a", expected_revision=0, operation_id="one", state={"items": [1]})
+    first = ledger.refresh_tenant_memory("a")
+    rebuilds = ledger.telemetry_snapshot()["cache_rebuild_count"]
+    loads = []
+    load = backend._load_unlocked
+
+    def capture_load():
+        loads.append(True)
+        return load()
+
+    monkeypatch.setattr(backend, "_load_unlocked", capture_load)
+    second = ledger.refresh_tenant_memory("a")
+    assert second.state == first.state
+    second.state["items"].append(2)
+    assert ledger.refresh_tenant_memory("a").state == {"items": [1]}
+    assert not loads
+    assert ledger.telemetry_snapshot()["cache_rebuild_count"] == rebuilds
+
+
+@pytest.mark.parametrize("backend_type", [FileWALLedgerBackend, CRCFileWALLedgerBackend])
+def test_refresh_detects_other_writer_and_invalidates_after_local_write(tmp_path, backend_type):
+    path = tmp_path / "ledger"
+    reader = ExecutionLedger(backend_type(path))
+    reader.commit_tenant_memory(tenant_id="a", expected_revision=0, operation_id="one", state={"items": [1]})
+    reader.refresh_tenant_memory("a")
+    other = ExecutionLedger(backend_type(path))
+    other.load_from_backend()
+    other.commit_tenant_memory(tenant_id="a", expected_revision=1, operation_id="two", state={"items": [2]})
+    assert reader.refresh_tenant_memory("a").state == {"items": [2]}
+    reader.commit_tenant_memory(tenant_id="a", expected_revision=2, operation_id="three", state={"items": [3]})
+    assert reader.refresh_tenant_memory("a").revision == 3
+    assert reader.refresh_tenant_memory("a").state == {"items": [3]}
+
+
+@pytest.mark.parametrize("backend_type", [FileWALLedgerBackend, CRCFileWALLedgerBackend])
+def test_refresh_reverifies_same_size_tampering_even_with_restored_mtime(tmp_path, backend_type):
+    import os
+
+    path = tmp_path / "ledger"
+    ledger = ExecutionLedger(backend_type(path))
+    ledger.commit_tenant_memory(tenant_id="a", expected_revision=0, operation_id="one", state={"value": 1})
+    ledger.refresh_tenant_memory("a")
+    stat = path.stat()
+    raw = path.read_bytes()
+    changed = raw.replace(b'"value": 1', b'"value": 9')
+    assert changed != raw and len(changed) == len(raw)
+    path.write_bytes(changed)
+    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    with pytest.raises(RuntimeError):
+        ledger.refresh_tenant_memory("a")
+    with pytest.raises(RuntimeError, match="reload"):
+        ledger.read()
+
+
+@pytest.mark.parametrize("backend_type", [FileWALLedgerBackend, CRCFileWALLedgerBackend])
+def test_explicit_reload_never_uses_unchanged_fast_path(tmp_path, monkeypatch, backend_type):
+    backend = backend_type(tmp_path / "ledger")
+    ledger = ExecutionLedger(backend)
+    ledger.commit_tenant_memory(tenant_id="a", expected_revision=0, operation_id="one", state={})
+    ledger.refresh_tenant_memory("a")
+    loads = []
+    load = backend._load_unlocked
+
+    def capture_load():
+        loads.append(True)
+        return load()
+
+    monkeypatch.setattr(backend, "_load_unlocked", capture_load)
+    ledger.load_from_backend()
+    assert loads == [True]
+
+
+def test_new_replay_filter_invalidates_verified_refresh(tmp_path):
+    ledger = ExecutionLedger(FileWALLedgerBackend(tmp_path / "ledger"))
+    ledger.commit_tenant_memory(tenant_id="a", expected_revision=0, operation_id="one", state={})
+    ledger.refresh_tenant_memory("a")
+    ledger.add_replay_filter(lambda events: [])
+    with pytest.raises(RuntimeError, match="filters cannot modify tenant memory"):
+        ledger.refresh_tenant_memory("a")
+    with pytest.raises(RuntimeError, match="reload"):
+        ledger.read()
+
+
+def test_stateful_filters_and_custom_backend_loaders_are_not_skipped(tmp_path):
+    class CustomBackend(FileWALLedgerBackend):
+        loads = 0
+
+        def load(self):
+            self.loads += 1
+            return super().load()
+
+    backend = CustomBackend(tmp_path / "custom-ledger")
+    ledger = ExecutionLedger(backend)
+    ledger.commit_tenant_memory(tenant_id="a", expected_revision=0, operation_id="one", state={})
+    ledger.refresh_tenant_memory("a")
+    ledger.refresh_tenant_memory("a")
+    assert backend.loads == 2
+    standard = ExecutionLedger(FileWALLedgerBackend(tmp_path / "filtered-ledger"))
+    standard.commit_tenant_memory(tenant_id="a", expected_revision=0, operation_id="one", state={})
+    calls = []
+    drop = []
+
+    def filter_events(events):
+        calls.append(True)
+        return [] if drop else events
+
+    standard.add_replay_filter(filter_events)
+    standard.refresh_tenant_memory("a")
+    drop.append(True)
+    with pytest.raises(RuntimeError, match="filters cannot modify tenant memory"):
+        standard.refresh_tenant_memory("a")
+    assert len(calls) == 2
+
+
+def test_failed_refresh_requires_explicit_recovery_even_if_original_bytes_return(tmp_path):
+    path = tmp_path / "ledger"
+    ledger = ExecutionLedger(FileWALLedgerBackend(path))
+    ledger.commit_tenant_memory(tenant_id="a", expected_revision=0, operation_id="one", state={})
+    ledger.refresh_tenant_memory("a")
+    raw = path.read_bytes()
+    with path.open("ab") as handle:
+        handle.write(b'{"partial":')
+    with pytest.raises(RuntimeError):
+        ledger.refresh_tenant_memory("a")
+    path.write_bytes(raw)
+    with pytest.raises(RuntimeError, match="reload"):
+        ledger.refresh_tenant_memory("a")
+    ledger.load_from_backend()
+    assert ledger.refresh_tenant_memory("a").revision == 1
 
 
 @pytest.mark.parametrize("backend_type", [FileWALLedgerBackend, CRCFileWALLedgerBackend])

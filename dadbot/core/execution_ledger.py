@@ -14,7 +14,12 @@ from dadbot.core.canonical_event import (
     canonicalize_event_payload,
 )
 from dadbot.core.event_schema import get_migrator, stamp_schema_version
-from dadbot.core.ledger_backend import InMemoryLedgerBackend, SequenceValidator
+from dadbot.core.ledger_backend import (
+    CRCFileWALLedgerBackend,
+    FileWALLedgerBackend,
+    InMemoryLedgerBackend,
+    SequenceValidator,
+)
 
 _TAIL_LIMIT = 256
 
@@ -145,6 +150,7 @@ class ExecutionLedger:
 
         self._authenticated_authority_required = _execution_authority.get() is not None
         self._backend = backend or InMemoryLedgerBackend()
+        self._backend_content_digest: bytes | None = None
         self._events: list[dict[str, Any]] = []
         self._cache: dict[str, Any] = {
             "sequence_counter": 0,
@@ -172,7 +178,9 @@ class ExecutionLedger:
         self,
         filter_fn: Callable[[list[dict[str, Any]]], list[dict[str, Any]]],
     ) -> None:
-        self._replay_filters.append(filter_fn)
+        with self._lock:
+            self._replay_filters.append(filter_fn)
+            self._backend_content_digest = None
 
     def _ensure_write_allowed(self) -> None:
         if self._strict_writes and self._write_guard_depth <= 0:
@@ -322,6 +330,7 @@ class ExecutionLedger:
             next_sequence = int(cache.get("sequence_counter") or 0) + 1
             identity, _ = self._apply_session_lineage(payload)
             self._seal_payload_hash_chain(payload, next_sequence)
+            self._backend_content_digest = None
             self._backend_uncertain = True
             self._backend.append(
                 deepcopy(payload),
@@ -364,7 +373,7 @@ class ExecutionLedger:
         self._authorize_tenant_memory(tenant_id)
         with self._lock:
             self._ensure_backend_reconciled()
-            self.load_from_backend()
+            self.load_from_backend(only_if_changed=True)
             return self.replay_tenant_memory(tenant_id)
 
     def reconcile_tenant_memory_operation(
@@ -484,13 +493,24 @@ class ExecutionLedger:
             finally:
                 self._tenant_memory_commit_depth -= 1
 
-    def read(self, full: bool = True) -> list[dict[str, Any]]:
+    def read(
+        self, full: bool = True, *,
+        event_types: frozenset[str] | None = None, payload_types: frozenset[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return isolated events, optionally selecting types/payloads before copying."""
         with self._lock:
             self._ensure_backend_reconciled()
             self.validate_cache()
-            if full:
-                return deepcopy(self._events)
-            return deepcopy(list(self._cache.get("recent_tail") or []))
+            events = self._events if full else list(self._cache.get("recent_tail") or [])
+            if event_types is not None:
+                events = [event for event in events if event.get("type") in event_types]
+            if payload_types is not None:
+                events = [
+                    event if event.get("type") in payload_types else {
+                        key: value for key, value in event.items() if key != "payload"
+                    } for event in events
+                ]
+            return deepcopy(events)
 
     def replay_hash(self) -> str:
         events = [event for event in self.read() if str(event.get("type") or "") not in NON_REPLAY_EVENT_TYPES]
@@ -584,10 +604,25 @@ class ExecutionLedger:
                     event.get("session_index") or 0,
                 )
 
-    def load_from_backend(self) -> int:
+    def load_from_backend(self, *, only_if_changed: bool = False) -> int:
         with self._lock:
+            if only_if_changed:
+                self._ensure_backend_reconciled()
             self._backend_uncertain = True
-            events = list(get_migrator().migrate_all(list(self._backend.load())))
+            digest = None
+            if (
+                only_if_changed and not self._replay_filters
+                and isinstance(self._backend, (FileWALLedgerBackend, CRCFileWALLedgerBackend))
+                and type(self._backend) in (FileWALLedgerBackend, CRCFileWALLedgerBackend)
+            ):
+                digest, loaded = self._backend.load_if_changed(self._backend_content_digest)
+                if loaded is None:
+                    self._backend_uncertain = False
+                    return len(self._events)
+            else:
+                loaded = self._backend.load()
+            self._backend_content_digest = None
+            events = list(get_migrator().migrate_all(list(loaded)))
             from dadbot.core.tenant_memory_ledger import (
                 replay_all_tenant_memory,
                 validate_tenant_event_seal,
@@ -615,6 +650,7 @@ class ExecutionLedger:
             self._rehydrate_loaded_events(events)
             self._rebuild_cache()
             self.validate_cache()
+            self._backend_content_digest = digest
             self._backend_uncertain = False
             return len(self._events)
 
