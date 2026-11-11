@@ -789,6 +789,10 @@ This removes repeated historical verification from context building
 without buffering commits, weakening fsync, or suppressing corruption.
 Hot-path request/effect indexes copy all event headers but only the payloads
 they actually consume; reconciliation reads copy only reconciliation events.
+Checkpoint, turn-event and lifecycle lookups likewise select their event
+types before copying; trace-to-session lookup needs only event headers.
+All existing tenant/session filters, malformed-record rejection, continuity
+hashes and explicit uncertain-ledger recovery requirements remain in place.
 Default full/tail reads still return complete, isolated deep copies, and
 trace roots, completion results and ambiguity checks remain ledger-derived.
 
