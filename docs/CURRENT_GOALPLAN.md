@@ -19,6 +19,10 @@ call, save state atomically, and recover after a crash.
 
 ## Kernel Scope
 
+The approved [Agent and Memory Hardening Plan](AGENT_MEMORY_PLAN.md) defines
+the next certification milestones. It distinguishes the implemented experimental
+loop from production-hardening work; baseline certification is in progress.
+
 Keep kernel internals stable. Kernel changes are limited to proven correctness
 bugs and regressions in atomic commits, replay determinism, or restart recovery.
 Structural rewrites and style-only refactors are out of scope.
