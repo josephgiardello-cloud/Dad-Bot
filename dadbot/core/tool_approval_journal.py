@@ -69,7 +69,7 @@ class ToolApprovalJournal:
 
     def _latest(self, events: list[dict[str, Any]] | None = None) -> dict[tuple[str, str], dict[str, Any]]:
         latest = {}
-        for event in events if events is not None else self.ledger.read():
+        for event in events if events is not None else self.ledger.read(event_types=frozenset({_EVENT})):
             if event.get("type") == _EVENT and event.get("tenant_id") == self.tenant_id:
                 payload = event.get("payload")
                 if event.get("committed") is not True or not isinstance(payload, dict) or not all(
@@ -129,7 +129,7 @@ class ToolApprovalJournal:
         """Project durable action outcomes and user confirmations without exposing IO."""
         self._require_session_scope(session_id)
         with self.ledger._lock:
-            events = self.ledger.read()
+            events = self.ledger.read(event_types=frozenset({_EVENT, _REVIEW_EVENT}))
             reviews = self._reviews(events)
             actions = []
             for key, event in self._latest(events).items():
@@ -169,7 +169,9 @@ class ToolApprovalJournal:
                 raise RuntimeError("Only uncertain action outcomes can be reviewed")
             if recorded["event_id"] != outcome_event_id:
                 raise ValueError("Action review outcome event is stale or does not match")
-            previous = self._reviews(self.ledger.read()).get((call.session_id, call.request_id))
+            previous = self._reviews(
+                self.ledger.read(event_types=frozenset({_REVIEW_EVENT})),
+            ).get((call.session_id, call.request_id))
             if previous is not None:
                 if previous["payload"]["outcome"] != outcome:
                     raise RuntimeError("This action already has a different review")

@@ -941,7 +941,7 @@ def _runtime_pool() -> StreamlitBotPool:
     return StreamlitBotPool()
 
 
-_STREAMLIT_RUNTIME_BUILD = "2026-11-11-append-refresh-ui-v30"
+_STREAMLIT_RUNTIME_BUILD = "2026-11-11-submit-audit-selective-ui-v31"
 
 st.set_page_config(
     page_title="DadBot",

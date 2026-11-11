@@ -828,6 +828,16 @@ Concurrent successors, differing metadata, replay filters, authenticated
 execution and custom ledger/backend classes retain the full refresh path.
 Failed appends or runtime publication still require explicit recovery.
 
+Job submission rebuilds the complete lifecycle projection from validated
+`EXECUTION_LIFECYCLE` events without copying unrelated memory/checkpoint payloads.
+Custom lifecycle projections retain their complete ledger input.
+Approval status/restart projections read all approval updates; the action queue
+reads approval updates and manual reviews together in one locked snapshot.
+These selectors preserve order, tenant/thread validation, isolated results and
+uncertain-ledger rejection. They do not narrow validation to only the selected
+thread or cache action decisions. Receipt replay still checks the original
+referenced event across the complete ledger before validating its IO type.
+
 SaveNode's local memory commits use the same byte-verified append prefix when
 it also exactly matches the reconciled shared runtime ledger. After fsync and
 snapshot publication, only the new committed event advances that runtime's

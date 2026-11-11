@@ -58,6 +58,99 @@ def _review_context(call, *, tenant_id="tenant-a"):
     )
 
 
+@pytest.mark.parametrize("operation", ["latest", "status", "actions", "review", "repeated_review", "expire"])
+def test_approval_projections_copy_only_the_complete_relevant_event_sets(monkeypatch, operation):
+    from dadbot.core import execution_ledger
+
+    ledger = ExecutionLedger()
+    journal = ToolApprovalJournal(ledger, tenant_id="tenant-a")
+    call = _uncertain_call(journal)
+    action = journal.actions(call.session_id)[0]
+    if operation == "repeated_review":
+        journal.review_action(
+            call, outcome_event_id=action.outcome_event_id, outcome="performed",
+            turn_context=_review_context(call),
+        )
+    pending = _call(request_id="pending-other-thread", session_id="other-thread")
+    journal.propose(pending)
+    another_tenant = ToolApprovalJournal(ledger, tenant_id="tenant-b")
+    another_tenant.propose(_call())
+    ledger.write({
+        "type": "SESSION_STATE_UPDATED", "session_id": "unrelated", "trace_id": "other",
+        "kernel_step_id": "test", "timestamp": 1.0,
+        "payload": {"state": {"history": ["unrelated-large-payload"] * 100}},
+    })
+    complete_events = ledger.read()
+    expected_latest = journal._latest(complete_events)
+    copied_sets = []
+    original_copy = execution_ledger.deepcopy
+
+    def capture_copy(value):
+        if isinstance(value, list):
+            types = {event["type"] for event in value}
+            assert types <= {"TOOL_APPROVAL_UPDATED", "TOOL_ACTION_REVIEWED"}
+            copied_sets.append(types)
+        return original_copy(value)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(execution_ledger, "deepcopy", capture_copy)
+        if operation == "latest":
+            latest = journal._latest()
+            assert latest == expected_latest
+            latest[(call.session_id, call.request_id)]["payload"]["status"] = "changed-copy"
+        elif operation == "status":
+            assert journal.status(call) == "uncertain"
+        elif operation == "actions":
+            assert journal.actions(call.session_id) == [action]
+        elif operation in {"review", "repeated_review"}:
+            journal.review_action(
+                call, outcome_event_id=action.outcome_event_id, outcome="performed",
+                turn_context=_review_context(call),
+            )
+        else:
+            journal.expire_recovered()
+    assert copied_sets
+    assert ledger.read(event_types=frozenset({"SESSION_STATE_UPDATED"})) == [
+        event for event in complete_events if event["type"] == "SESSION_STATE_UPDATED"
+    ]
+    assert journal.status(call) == "uncertain"
+    if operation == "expire":
+        assert journal.status(pending) == "expired"
+        assert another_tenant.status(_call()) == "pending"
+
+
+@pytest.mark.parametrize("event_type", ["TOOL_APPROVAL_UPDATED", "TOOL_ACTION_REVIEWED"])
+def test_selective_approval_projections_validate_other_threads_in_the_tenant(event_type):
+    journal = ToolApprovalJournal(ExecutionLedger(), tenant_id="tenant-a")
+    _uncertain_call(journal)
+    journal.ledger.write({
+        "type": event_type, "tenant_id": "tenant-a", "session_id": "other-thread", "trace_id": "other",
+        "kernel_step_id": "test", "timestamp": 1.0, "committed": True, "payload": {},
+    })
+    with pytest.raises(RuntimeError, match="invalid identity"):
+        journal.actions("thread-a")
+
+
+@pytest.mark.parametrize("operation", ["status", "actions", "review", "expire"])
+def test_selective_approval_projections_reject_uncertain_ledger(operation):
+    journal = ToolApprovalJournal(ExecutionLedger(), tenant_id="tenant-a")
+    call = _uncertain_call(journal)
+    action = journal.actions(call.session_id)[0]
+    journal.ledger._backend_uncertain = True
+    with pytest.raises(RuntimeError, match="backend state is uncertain"):
+        if operation == "status":
+            journal.status(call)
+        elif operation == "actions":
+            journal.actions(call.session_id)
+        elif operation == "review":
+            journal.review_action(
+                call, outcome_event_id=action.outcome_event_id, outcome="performed",
+                turn_context=_review_context(call),
+            )
+        else:
+            journal.expire_recovered()
+
+
 @pytest.mark.parametrize("outcome", ["performed", "not_performed"])
 def test_manual_review_is_durable_but_does_not_certify_success_or_authorize_retry(tmp_path, outcome):
     path = tmp_path / "review.jsonl"
@@ -969,6 +1062,11 @@ def test_completed_io_receipts_cannot_be_swapped_between_approvals(monkeypatch):
         and event["payload"]["status"] == "succeeded"
     ]
     completions[0]["payload"]["io_event_id"] = completions[1]["payload"]["io_event_id"]
-    monkeypatch.setattr(journal.ledger, "read", lambda: events)
+    monkeypatch.setattr(
+        journal.ledger, "read",
+        lambda *, event_types=None: deepcopy([
+            event for event in events if event_types is None or event["type"] in event_types
+        ]),
+    )
     with pytest.raises(ReplayInvariantViolation, match="scope"):
         asyncio.run(journal.replay(first, arguments={"entity_id": "light.kitchen"}))
