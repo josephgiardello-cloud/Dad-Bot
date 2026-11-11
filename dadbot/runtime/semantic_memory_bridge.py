@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from dadbot.runtime.context_pruner import MemoryRecall
+
 
 def _iso_utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -169,6 +171,139 @@ def build_semantic_snippet_provider(
     )
 
 
+def build_hybrid_memory_snippet_provider(
+    kernel: Any,
+    *,
+    top_k: int = 3,
+    session_id: str = "default",
+    sync_index: bool = True,
+) -> Any:
+    """Use the kernel's hybrid memory query for loop observations."""
+    query_manager = getattr(kernel, "memory_query", None)
+    retrieve = getattr(query_manager, "relevant_memories_for_input", None)
+    if not callable(retrieve):
+        return build_semantic_snippet_provider(
+            kernel,
+            top_k=top_k,
+            session_id=session_id,
+            sync_index=sync_index,
+        )
+
+    limit = max(1, int(top_k))
+    indexer = MemoryIndexer(kernel, session_id=str(session_id or "default"))
+
+    def provide(query: str) -> list[str]:
+        if sync_index:
+            indexer.sync()
+        memories = retrieve(_safe_str(query), limit=limit)
+        snippets: list[str] = []
+        for memory in memories or []:
+            if not isinstance(memory, dict):
+                raise TypeError("Hybrid memory results must be dictionaries")
+            summary = _safe_str(memory.get("summary"))
+            if summary:
+                category = _safe_str(memory.get("category") or "general")
+                snippets.append(f"[{category}] {summary}")
+        return snippets[:limit]
+
+    return provide
+
+
+def build_hybrid_memory_recall_provider(
+    kernel: Any,
+    *,
+    top_k: int = 3,
+    session_id: str = "default",
+    sync_index: bool = True,
+) -> Any:
+    """Return hybrid memories with bounded conflict and timestamp signals."""
+    query_manager = getattr(kernel, "memory_query", None)
+    retrieve = getattr(query_manager, "relevant_memories_for_input", None)
+    if not callable(retrieve):
+        snippets = build_semantic_snippet_provider(
+            kernel,
+            top_k=top_k,
+            session_id=session_id,
+            sync_index=sync_index,
+        )
+
+        def provide_semantic_recall(query: str) -> MemoryRecall:
+            return MemoryRecall(
+                snippets=list(snippets(query) or []),
+                signals={"conflicts": [], "temporal": []},
+            )
+
+        return provide_semantic_recall
+
+    limit = max(1, int(top_k))
+    indexer = MemoryIndexer(kernel, session_id=str(session_id or "default"))
+
+    def provide_hybrid_recall(query: str) -> MemoryRecall:
+        if sync_index:
+            indexer.sync()
+        memories = retrieve(_safe_str(query), limit=limit)
+        if memories is None:
+            memories = []
+        if not isinstance(memories, list) or any(not isinstance(memory, dict) for memory in memories):
+            raise TypeError("Hybrid memory results must be a list of dictionaries")
+        memories = memories[:limit]
+
+        snippets: list[str] = []
+        for memory in memories:
+            summary = _safe_str(memory.get("summary"))
+            if summary:
+                category = _safe_str(memory.get("category") or "general")[:80]
+                snippets.append(f"[{category}] {summary}")
+        return MemoryRecall(
+            snippets=snippets,
+            signals=_memory_signals(kernel, memories),
+        )
+
+    return provide_hybrid_recall
+
+
+def _memory_signals(kernel: Any, memories: list[dict[str, Any]]) -> dict[str, Any]:
+    temporal: list[dict[str, str]] = []
+    timestamp_fields = ("event_time", "created_at", "updated_at", "last_reinforced_at")
+    for memory in memories[:4]:
+        summary = _safe_str(memory.get("summary"))
+        timestamps: dict[str, str] = {}
+        for name in timestamp_fields:
+            value = _safe_str(memory.get(name))
+            if value:
+                timestamps[name] = value[:64]
+        if summary and timestamps:
+            temporal.append(
+                {
+                    "summary": summary[:240],
+                    "category": _safe_str(memory.get("category") or "general")[:80],
+                    **timestamps,
+                },
+            )
+
+    conflicts: list[dict[str, Any]] = []
+    coordinator = getattr(kernel, "memory_coordinator", None)
+    detect = getattr(coordinator, "detect_memory_contradictions", None)
+    if callable(detect) and memories:
+        insight_reader = getattr(kernel, "consolidated_memories", None)
+        insights = list(insight_reader() or [])[-8:] if callable(insight_reader) else []
+        for finding in detect(memories, insights)[:3]:
+            if not isinstance(finding, dict):
+                continue
+            left = _safe_str(finding.get("left"))
+            right = _safe_str(finding.get("right"))
+            reason = _safe_str(finding.get("reason"))
+            if left and right and reason:
+                conflicts.append(
+                    {
+                        "left": left[:240],
+                        "right": right[:240],
+                        "reason": reason[:160],
+                    },
+                )
+    return {"conflicts": conflicts, "temporal": temporal}
+
+
 class MemoryConsolidationJob:
     """Background consolidation job that emits MEMORY_CONSOLIDATED ledger events."""
 
@@ -261,8 +396,10 @@ class MemoryConsolidationJob:
 
 
 __all__ = [
+    "MemoryConsolidationJob",
     "MemoryIndexer",
     "SemanticRetrievalHook",
+    "build_hybrid_memory_recall_provider",
+    "build_hybrid_memory_snippet_provider",
     "build_semantic_snippet_provider",
-    "MemoryConsolidationJob",
 ]

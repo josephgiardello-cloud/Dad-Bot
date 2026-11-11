@@ -94,12 +94,19 @@ class TestLoopResumeFromSnapshot:
         assert not snap.is_incomplete
 
     def test_snapshot_policy_round_trips(self) -> None:
-        policy = DriverLoopPolicy(max_turns=3, max_failures=1)
+        policy = DriverLoopPolicy(
+            max_turns=3,
+            max_failures=1,
+            allowed_tools=["safe_tool"],
+            trigger_type="proactive",
+        )
         mgr = LoopSnapshotManager(SESSION_ID, "task", policy, base_dir=self._snap_dir)
         snap = LoopSessionSnapshot.load(SESSION_ID, base_dir=self._snap_dir)
         assert snap is not None
         assert snap.policy["max_turns"] == 3
         assert snap.policy["max_failures"] == 1
+        assert snap.policy["allowed_tools"] == ["safe_tool"]
+        assert snap.policy["trigger_type"] == "proactive"
 
     # -----------------------------------------------------------------------
     # Cold-start detection
@@ -143,6 +150,8 @@ class TestLoopResumeFromSnapshot:
             max_turns=snap.policy.get("max_turns", 8),
             max_failures=snap.policy.get("max_failures", 2),
             max_consecutive_noop=snap.policy.get("max_consecutive_noop", 2),
+            allowed_tools=snap.policy.get("allowed_tools"),
+            trigger_type=snap.policy.get("trigger_type", "interactive"),
         )
         kernel_b = _CountingKernel()
         loop_b = AgentDriverLoop(kernel_b, policy=resumed_policy)

@@ -24,7 +24,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-
 # ---------------------------------------------------------------------------
 # Default snapshot directory  (sibling of where Dad.py lives)
 # ---------------------------------------------------------------------------
@@ -152,6 +151,12 @@ class LoopSnapshotManager:
                     "max_turns": int(getattr(policy, "max_turns", 8)),
                     "max_failures": int(getattr(policy, "max_failures", 2)),
                     "max_consecutive_noop": int(getattr(policy, "max_consecutive_noop", 2)),
+                    "allowed_tools": (
+                        list(policy.allowed_tools)
+                        if isinstance(getattr(policy, "allowed_tools", None), list)
+                        else None
+                    ),
+                    "trigger_type": str(getattr(policy, "trigger_type", "interactive") or "interactive"),
                 }
             except Exception:
                 pass

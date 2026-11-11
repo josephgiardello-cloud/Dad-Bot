@@ -27,6 +27,12 @@ class PrunedContext:
     strategy: str
 
 
+@dataclass(slots=True)
+class MemoryRecall:
+    snippets: list[str]
+    signals: dict[str, Any]
+
+
 class ContextWindowPruner:
     """Builds a bounded context window from loop turn records.
 
@@ -176,6 +182,7 @@ def build_pruned_observation_hook(
     *,
     core_identity: str = "",
     snippet_provider: Any = None,
+    strict_snippets: bool = False,
 ) -> Any:
     """Return an ObservationHook that feeds a pruned context window into the loop.
 
@@ -192,14 +199,27 @@ def build_pruned_observation_hook(
         records = ctx.get("records", [])
         last_reply = str(ctx.get("last_reply") or "")
         initial = str(ctx.get("initial_observation") or "")
-        current_task = last_reply or initial
+        system_observation = str(ctx.get("system_observation") or "").strip()
+        current_task = "\n\n".join(
+            part for part in (system_observation, last_reply or initial) if part
+        )
 
         snippets: list[str] = []
+        ctx["memory_signals"] = {"conflicts": [], "temporal": []}
         if callable(snippet_provider) and current_task:
-            try:
-                snippets = list(snippet_provider(current_task) or [])
-            except Exception:
-                pass
+            if strict_snippets:
+                provided = snippet_provider(current_task)
+            else:
+                try:
+                    provided = snippet_provider(current_task)
+                except Exception:
+                    provided = None
+
+            if isinstance(provided, MemoryRecall):
+                snippets = list(provided.snippets)
+                ctx["memory_signals"] = dict(provided.signals)
+            else:
+                snippets = list(provided or [])
 
         turn_dicts = pruner.prune(records)
         ctx_obj = pruner.build_context_text(core_identity, turn_dicts, snippets)
@@ -209,7 +229,8 @@ def build_pruned_observation_hook(
 
 
 __all__ = [
-    "PrunedContext",
     "ContextWindowPruner",
+    "MemoryRecall",
+    "PrunedContext",
     "build_pruned_observation_hook",
 ]

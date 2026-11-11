@@ -6,7 +6,12 @@ from dataclasses import dataclass
 
 import pytest
 
-from dadbot.runtime.context_pruner import ContextWindowPruner, PrunedContext, build_pruned_observation_hook
+from dadbot.runtime.context_pruner import (
+    ContextWindowPruner,
+    MemoryRecall,
+    PrunedContext,
+    build_pruned_observation_hook,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -229,3 +234,45 @@ class TestBuildPrunedObservationHook:
         # Must not raise
         result = hook(ctx)
         assert isinstance(result, str)
+
+    def test_strict_provider_errors_are_visible(self) -> None:
+        def bad_provider(_query: str) -> None:
+            raise RuntimeError("memory store unavailable")
+
+        hook = build_pruned_observation_hook(
+            ContextWindowPruner(),
+            snippet_provider=bad_provider,
+            strict_snippets=True,
+        )
+        ctx = {"turn_index": 1, "last_reply": "", "initial_observation": "start", "records": []}
+
+        with pytest.raises(RuntimeError, match="memory store unavailable"):
+            hook(ctx)
+
+    def test_system_observation_is_included_in_current_task(self) -> None:
+        pruner = ContextWindowPruner()
+        hook = build_pruned_observation_hook(pruner)
+        ctx = {
+            "turn_index": 2,
+            "last_reply": "previous reply",
+            "initial_observation": "start",
+            "system_observation": "Plan verifier rejected the prior plan.",
+            "records": [],
+        }
+
+        result = hook(ctx)
+
+        assert "Plan verifier rejected the prior plan." in result
+
+    def test_memory_recall_signals_are_attached_to_reflection_context(self) -> None:
+        signals = {"conflicts": [{"left": "old", "right": "new"}], "temporal": [{"updated_at": "2026-01-01"}]}
+        hook = build_pruned_observation_hook(
+            ContextWindowPruner(),
+            snippet_provider=lambda _query: MemoryRecall(["[general] remembered"], signals),
+        )
+        ctx = {"turn_index": 1, "last_reply": "", "initial_observation": "start", "records": []}
+
+        result = hook(ctx)
+
+        assert "[general] remembered" in result
+        assert ctx["memory_signals"] == signals

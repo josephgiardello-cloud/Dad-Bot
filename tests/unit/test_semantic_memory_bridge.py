@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 
 import pytest
 
@@ -7,6 +8,7 @@ from dadbot.runtime.semantic_memory_bridge import (
     MemoryConsolidationJob,
     MemoryIndexer,
     SemanticRetrievalHook,
+    build_hybrid_memory_recall_provider,
 )
 
 pytestmark = pytest.mark.unit
@@ -111,3 +113,61 @@ def test_memory_consolidation_job_skips_when_not_enough_events():
 
     assert result["status"] == "skipped"
     assert result["reason"] == "insufficient_events"
+
+
+def test_hybrid_recall_includes_conflict_and_temporal_signals():
+    memories = [
+        {
+            "summary": "Lives in Seattle",
+            "category": "x" * 100,
+            "event_time": "2023-01-01",
+            "updated_at": "2023-01-02T00:00:00Z",
+        },
+        {
+            "summary": "Lives in Boston",
+            "category": "x" * 100,
+            "event_time": "t" * 100,
+            "updated_at": "2025-01-02T00:00:00Z",
+        },
+    ]
+    kernel = _Kernel([])
+    kernel.memory_query = SimpleNamespace(
+        relevant_memories_for_input=lambda _query, limit=3: memories[:limit],
+    )
+    kernel.memory_coordinator = SimpleNamespace(
+        detect_memory_contradictions=lambda rows, _insights: [
+            {
+                "left": rows[0]["summary"],
+                "right": rows[1]["summary"],
+                "reason": "opposing locations",
+            },
+        ],
+    )
+    kernel.consolidated_memories = lambda: []
+
+    provider = build_hybrid_memory_recall_provider(kernel, sync_index=False)
+    recall = provider("where does this person live")
+
+    assert recall.snippets == [
+        f"[{'x' * 80}] Lives in Seattle",
+        f"[{'x' * 80}] Lives in Boston",
+    ]
+    assert recall.signals["conflicts"] == [
+        {
+            "left": "Lives in Seattle",
+            "right": "Lives in Boston",
+            "reason": "opposing locations",
+        }
+    ]
+    assert recall.signals["temporal"][1]["event_time"] == "t" * 64
+
+
+def test_hybrid_recall_falls_back_to_semantic_snippets():
+    kernel = _Kernel([])
+    kernel.memory_catalog = lambda: [{"summary": "Likes tea", "category": "food"}]
+    kernel.semantic_memory_matches = lambda _query, memories, limit=3: memories[:limit]
+
+    recall = build_hybrid_memory_recall_provider(kernel, sync_index=False)("tea")
+
+    assert recall.snippets == ["[food] Likes tea"]
+    assert recall.signals == {"conflicts": [], "temporal": []}
