@@ -258,7 +258,7 @@ class ExecutionLedger:
         if int(self._cache.get("event_count") or 0) != len(self._events):
             self._rebuild_cache()
 
-    def _apply_session_lineage(self, payload: dict[str, Any]) -> tuple[str, str]:
+    def _apply_session_lineage(self, payload: dict[str, Any]) -> tuple[tuple[str, str], str]:
         session_id = str(payload.get("session_id") or "")
         tenant_id = str(payload.get("tenant_id") or "")
         identity = (tenant_id, session_id)
@@ -317,6 +317,19 @@ class ExecutionLedger:
             tail = tail[-_TAIL_LIMIT:]
         cache["recent_tail"] = tail
 
+    def _record_committed_event(self, payload: dict[str, Any], identity: tuple[str, str]) -> None:
+        cache = self._cache
+        self._update_session_heads(payload, identity)
+        self._events.append(payload)
+        cache["sequence_counter"] = int(payload.get("sequence") or int(cache.get("sequence_counter") or 0) + 1)
+        cache["event_count"] = int(cache.get("event_count") or 0) + 1
+        cache["last_event_hash"] = str(payload.get("chain_hash") or "")
+        self._update_trace_sequence_cache(payload, cache)
+        self._update_recent_tail_cache(payload, cache)
+        cache["version"] = int(cache.get("version") or 0) + 1
+        self.validate_cache()
+        self._backend_uncertain = False
+
     def write(self, event: dict[str, Any]) -> dict[str, Any]:
         from dadbot.core.ledger.enforcement import LedgerEnforcer
 
@@ -337,16 +350,7 @@ class ExecutionLedger:
                 deepcopy(payload),
                 committed=bool(payload.get("committed", False)),
             )
-            self._update_session_heads(payload, identity)
-            self._events.append(payload)
-            cache["sequence_counter"] = int(payload.get("sequence") or next_sequence)
-            cache["event_count"] = int(cache.get("event_count") or 0) + 1
-            cache["last_event_hash"] = str(payload.get("chain_hash") or "")
-            self._update_trace_sequence_cache(payload, cache)
-            self._update_recent_tail_cache(payload, cache)
-            cache["version"] = int(cache.get("version") or 0) + 1
-            self.validate_cache()
-            self._backend_uncertain = False
+            self._record_committed_event(payload, identity)
             return deepcopy(payload)
 
     def append(self, event: dict[str, Any]) -> dict[str, Any]:

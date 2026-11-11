@@ -360,11 +360,26 @@ class MemoryStorageBackend:
             snapshot is not None and snapshot[0] is backend and snapshot[1] == tenant_id
             and type(backend) is FileWALLedgerBackend
         ) else None
+        append_snapshot = backend._append_verifier._snapshot if type(backend) is FileWALLedgerBackend else None
+        if append_snapshot is not None:
+            digest = append_snapshot[0]
         current_digest, events = backend._load_if_changed_unlocked(digest)
-        if events is None:
-            if snapshot is None:
-                raise RuntimeError("Unchanged WAL requires a previously verified tenant projection")
+        if (
+            events is None and snapshot is not None and snapshot[0] is backend
+            and snapshot[1] == tenant_id and snapshot[2] == current_digest
+        ):
             revision, state = snapshot[3], snapshot[4]
+        elif events is None and append_snapshot is not None:
+            from dadbot.core.tenant_memory_ledger import replay_tenant_memory, validate_tenant_event_seal
+
+            for event in append_snapshot[1]:
+                validate_tenant_event_seal(event)
+            current = replay_tenant_memory(append_snapshot[1], tenant_id)
+            if not isinstance(current.state, dict) or current.revision == 0:
+                raise RuntimeError("Tenant memory authority is unavailable during index repair")
+            revision, state = current.revision, current.state
+        elif events is None:
+            raise RuntimeError("Unchanged WAL requires a previously verified tenant projection")
         else:
             verifier_backend = InMemoryLedgerBackend()
             verifier_backend._events = events
@@ -438,8 +453,9 @@ class MemoryStorageBackend:
                     projection,
                     publish or (lambda: None),
                     self._repair_established_snapshot,
+                    execution_ledger=ledger,
                 )
-                ledger.load_from_backend()
+                ledger.load_from_backend(only_if_changed=not ledger._backend_uncertain)
         except TenantMemoryRevisionConflict:
             raise
         except Exception:

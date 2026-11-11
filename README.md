@@ -805,6 +805,20 @@ verified seals without hashing them a second time. Legacy and replay-filtered
 records retain their existing normalization/resealing behavior. These changes
 reduce durable write overhead without batching away commit boundaries.
 
+SaveNode's local memory commits use the same byte-verified append prefix when
+it also exactly matches the reconciled shared runtime ledger. After fsync and
+snapshot publication, only the new committed event advances that runtime's
+head; the subsequent refresh still hashes all WAL bytes to detect another
+writer. Changed bytes, stale runtime heads, replay filters and delegated
+execution retain full validation/recovery. Tenant establishment evidence,
+revision fences and operation uniqueness are checked on every commit.
+Graph/semantic publication fences can reuse the backend's verified prefix
+after another all-byte check, while still validating the entire tenant
+catalog. This avoids repeatedly copying and rehydrating unrelated execution
+history during mood updates and maintenance saves. Failed writes or snapshot
+publication leave the shared ledger uncertain until explicit recovery; memory
+mutation also retains its existing restart/repair requirement.
+
 This local-first indexed-write path requires SQLite projections. Set
 `DADBOT_MEMORY_INDEX_BACKEND=sqlite` to select them without changing PostgreSQL
 snapshot persistence; unset or `auto` preserves the existing backend selection.

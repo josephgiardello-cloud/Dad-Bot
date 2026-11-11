@@ -34,6 +34,42 @@ def test_mutation_survives_restart(make_test_dadbot, monkeypatch, tmp_path):
     assert json.loads(memory.read_text(encoding="utf-8"))["last_mood"] == "stale-mirror"
 
 
+def test_save_boundary_mutations_reuse_byte_verified_head_without_full_rehydration(make_test_dadbot, monkeypatch):
+    from dadbot.core.execution_ledger import ExecutionLedger
+
+    monkeypatch.setenv("DADBOT_DURABLE_EXECUTION_LEDGER", "1")
+    bot = make_test_dadbot()
+    ledger = bot._execution_ledger
+    backend = ledger._backend
+    # Establish a verified append prefix using an ordinary canonical event.
+    ledger.write({
+        "type": "UI_RECONNECT_AUDIT", "tenant_id": bot.config.tenant_id, "session_id": "audit",
+        "trace_id": "verified-save-test", "payload": {}, "kernel_step_id": "audit.test", "timestamp": 1.0,
+    })
+    loads = []
+    rehydrate = ExecutionLedger._rehydrate_loaded_events
+
+    def capture_rehydration(self, *args, **kwargs):
+        loads.append(True)
+        return rehydrate(self, *args, **kwargs)
+
+    monkeypatch.setattr(ExecutionLedger, "_rehydrate_loaded_events", capture_rehydration)
+    for mood in ("positive", "neutral", "positive"):
+        bot.mutate_memory_store(last_mood=mood)
+    assert loads == []
+    assert ledger.replay_tenant_memory(bot.config.tenant_id).revision == 4
+    assert ledger.replay_tenant_memory(bot.config.tenant_id).state["last_mood"] == "positive"
+    with bot.memory_manager._storage.fenced_graph_index_write(
+        4, bot.memory_manager.normalize_memory_store(ledger.replay_tenant_memory(bot.config.tenant_id).state),
+    ):
+        pass
+    assert loads == []
+    assert ledger.verify_replay(mode="chain")["ok"]
+    restored = ExecutionLedger(type(backend)(backend._path))
+    restored.load_from_backend()
+    assert restored.read() == ledger.read()
+
+
 def test_local_commit_keeps_shared_execution_ledger_head_atomic(make_test_dadbot, monkeypatch):
     from dadbot.core import local_tenant_establishment
 
@@ -788,6 +824,8 @@ def test_post_append_snapshot_failure_blocks_further_writes_and_recovers(
     monkeypatch.setattr(first.memory_manager._storage, "_repair_established_snapshot", fail)
     with pytest.raises(OSError, match="snapshot repair failed"):
         first.mutate_memory_store(last_mood="positive")
+    with pytest.raises(RuntimeError, match="uncertain"):
+        first._execution_ledger.read()
     assert first.MEMORY_STORE["last_mood"] == "positive"
     with pytest.raises(RuntimeError, match="requires restart"):
         first.mutate_memory_store(last_mood="negative")
@@ -795,7 +833,8 @@ def test_post_append_snapshot_failure_blocks_further_writes_and_recovers(
     second = make_test_dadbot(memory_path=memory, session_log_dir=sessions)
     assert second.MEMORY_STORE["last_mood"] == "positive"
     assert second._execution_ledger.replay_tenant_memory(second.config.tenant_id).revision == 2
-    # The committed state is already published; a no-op shutdown performs no write.
+    first._execution_ledger.load_from_backend()
+    # Explicit ledger recovery permits a no-op shutdown, not new memory writes.
     first.save_memory_store()
     first.shutdown()
 

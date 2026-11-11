@@ -95,26 +95,34 @@ class _WALAppendVerifier:
     def __init__(self) -> None:
         self._snapshot: tuple[bytes, list[dict[str, Any]]] | None = None
 
-    def validate(
-        self, path: Path, load: Callable[[], list[dict[str, Any]]], event: dict[str, Any], *, reuse: bool,
-    ) -> tuple[list[dict[str, Any]], bytes]:
+    def load_prefix(
+        self, path: Path, load: Callable[[], list[dict[str, Any]]], *, reuse: bool,
+    ) -> tuple[list[dict[str, Any]], bytes, bool]:
         snapshot = self._snapshot
         self._snapshot = None
         prefix_bytes = path.read_bytes()
         digest = hashlib.sha256(prefix_bytes).digest()
         unchanged = reuse and snapshot is not None and snapshot[0] == digest
         events = snapshot[1] if unchanged and snapshot is not None else load()
+        return events, prefix_bytes, unchanged
+
+    def validate(
+        self, path: Path, load: Callable[[], list[dict[str, Any]]], event: dict[str, Any], *, reuse: bool,
+    ) -> tuple[list[dict[str, Any]], bytes]:
+        events, prefix_bytes, unchanged = self.load_prefix(path, load, reuse=reuse)
         _validate_append_head(events, event, verified_prefix=unchanged)
         return events, prefix_bytes
 
     def record(
         self, prefix_bytes: bytes, line: str, events: list[dict[str, Any]], event: dict[str, Any], *, reuse: bool,
-    ) -> None:
+    ) -> bytes | None:
         if reuse and event.get("chain_hash"):
             events.append(deepcopy(event))
             digest = hashlib.sha256(prefix_bytes)
             digest.update(line.encode("utf-8"))
             self._snapshot = (digest.digest(), events)
+            return self._snapshot[0]
+        return None
 
 
 def _coerce_event_record(event: dict[str, Any] | SovereignEvent) -> dict[str, Any]:

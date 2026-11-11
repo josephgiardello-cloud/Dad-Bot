@@ -28,6 +28,129 @@ from dadbot.core.tenant_memory_ledger import (
 from dadbot.memory.storage import MemoryStorageBackend
 
 
+def _established_local_ledger(tmp_path):
+    from dadbot.core.local_tenant_establishment import establish_local_tenant
+
+    backend = FileWALLedgerBackend(tmp_path / "local")
+    establish_local_tenant(backend, "a", lambda: {"memories": []}, lambda state: None)
+    ledger = ExecutionLedger(backend)
+    ledger.load_from_backend()
+    ledger.write({
+        "type": "TEST", "session_id": "test", "trace_id": "test", "kernel_step_id": "test",
+        "timestamp": 1.0, "payload": {},
+    })
+    return backend, ledger
+
+
+def test_local_commit_prefix_detects_same_size_tampering_before_publication(tmp_path):
+    import os
+
+    from dadbot.core.local_tenant_establishment import commit_local_tenant
+
+    backend, ledger = _established_local_ledger(tmp_path)
+    raw = backend._path.read_bytes()
+    stat = backend._path.stat()
+    changed = raw.replace(b'"memories": []', b'"memories": {}')
+    assert changed != raw and len(changed) == len(raw)
+    backend._path.write_bytes(changed)
+    os.utime(backend._path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    published = []
+    with pytest.raises(RuntimeError, match="checksum chain"):
+        commit_local_tenant(
+            backend, "a", 1, "update", {"memories": []}, lambda: published.append(True),
+            lambda state: published.append(True), execution_ledger=ledger,
+        )
+    assert published == []
+    assert backend._path.read_bytes() == changed
+    assert backend._append_verifier._snapshot is None
+
+
+def test_local_commit_with_changed_head_requires_full_validation_and_refresh(tmp_path, monkeypatch):
+    from dadbot.core.local_tenant_establishment import commit_local_tenant
+
+    backend, ledger = _established_local_ledger(tmp_path)
+    other = ExecutionLedger(FileWALLedgerBackend(backend._path))
+    other.load_from_backend()
+    other.write({
+        "type": "OTHER", "session_id": "other", "trace_id": "other", "kernel_step_id": "other",
+        "timestamp": 1.0, "payload": {},
+    })
+    loads = []
+    rehydrate = ExecutionLedger._rehydrate_loaded_events
+
+    def capture(self, *args, **kwargs):
+        loads.append(True)
+        return rehydrate(self, *args, **kwargs)
+
+    monkeypatch.setattr(ExecutionLedger, "_rehydrate_loaded_events", capture)
+    assert commit_local_tenant(
+        backend, "a", 1, "update", {"memories": [], "updated": True}, lambda: None,
+        lambda state: None, execution_ledger=ledger,
+    ) == 2
+    assert loads == [True]
+    with pytest.raises(RuntimeError, match="uncertain"):
+        ledger.read()
+    ledger.load_from_backend()
+    assert ledger.replay_tenant_memory("a").revision == 2
+    assert sum(event["type"] == "OTHER" for event in ledger.read()) == 1
+    assert ledger.verify_replay(mode="chain")["ok"]
+
+
+def test_local_prefix_does_not_reuse_replay_filtered_runtime_head(tmp_path, monkeypatch):
+    from dadbot.core.local_tenant_establishment import commit_local_tenant
+
+    backend, ledger = _established_local_ledger(tmp_path)
+    ledger.add_replay_filter(lambda events: events)
+    loads = []
+    rehydrate = ExecutionLedger._rehydrate_loaded_events
+
+    def capture(self, *args, **kwargs):
+        loads.append(True)
+        return rehydrate(self, *args, **kwargs)
+
+    monkeypatch.setattr(ExecutionLedger, "_rehydrate_loaded_events", capture)
+    commit_local_tenant(
+        backend, "a", 1, "update", {"memories": []}, lambda: None, lambda state: None, execution_ledger=ledger,
+    )
+    assert loads == [True]
+    ledger.load_from_backend()
+    assert ledger.replay_tenant_memory("a").revision == 2
+
+
+def test_local_prefix_fsync_failure_requires_explicit_recovery_and_idempotent_retry(tmp_path, monkeypatch):
+    from dadbot.core import local_tenant_establishment
+
+    backend, ledger = _established_local_ledger(tmp_path)
+    fsync = local_tenant_establishment.os.fsync
+    published = []
+
+    def fail_fsync(fd):
+        raise OSError("synthetic tenant fsync failure")
+
+    monkeypatch.setattr(local_tenant_establishment.os, "fsync", fail_fsync)
+    with pytest.raises(OSError, match="tenant fsync"):
+        local_tenant_establishment.commit_local_tenant(
+            backend, "a", 1, "update", {"memories": []}, lambda: published.append(True),
+            lambda state: None, execution_ledger=ledger,
+        )
+    assert not published
+    assert backend._append_verifier._snapshot is None
+    with pytest.raises(RuntimeError, match="uncertain"):
+        ledger.read()
+    monkeypatch.setattr(local_tenant_establishment.os, "fsync", fsync)
+    ledger.load_from_backend()
+    assert local_tenant_establishment.commit_local_tenant(
+        backend, "a", 1, "update", {"memories": []}, lambda: published.append(True),
+        lambda state: None, execution_ledger=ledger,
+    ) == 2
+    assert published == [True]
+    assert ledger.replay_tenant_memory("a").revision == 2
+    assert len([
+        event for event in backend.load()
+        if event["type"] == "TENANT_MEMORY_COMMITTED" and event["payload"]["operation_id"] == "update"
+    ]) == 1
+
+
 def test_graph_and_semantic_fences_reuse_only_byte_identical_committed_projection(tmp_path, monkeypatch):
     path = tmp_path / "ledger"
     backend = FileWALLedgerBackend(path)
@@ -51,7 +174,7 @@ def test_graph_and_semantic_fences_reuse_only_byte_identical_committed_projectio
         pass
     with storage.fenced_semantic_index_write([], expected_revision=1):
         pass
-    assert len(loads) == 1
+    assert len(loads) == 0
     other = ExecutionLedger(FileWALLedgerBackend(path))
     other.load_from_backend()
     other.commit_tenant_memory(
@@ -60,7 +183,7 @@ def test_graph_and_semantic_fences_reuse_only_byte_identical_committed_projectio
     with pytest.raises(TenantMemoryRevisionConflict):
         with storage.fenced_graph_index_write(1, {"memories": []}):
             pytest.fail("A stale graph projection crossed the WAL fence")
-    assert len(loads) == 2
+    assert len(loads) == 1
     with storage.fenced_graph_index_write(2, {"memories": [], "changed": True}):
         pass
     with pytest.raises(TenantMemoryRevisionConflict):
