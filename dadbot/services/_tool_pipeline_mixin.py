@@ -303,7 +303,7 @@ class ToolPipelineMixin:
                 "reason": "Turn context state is missing or invalid.",
             }
 
-        planner_snapshot = self.bot.planner_debug_snapshot()
+        planner_snapshot = self._execution_selection_snapshot(turn_context, state, self.bot.planner_debug_snapshot())
         decision_outcome = str(state.get("decision_outcome") or "no_tool_needed").strip().lower()
         planner_status = str(planner_snapshot.get("planner_status") or "").strip().lower()
         planner_tool = str(planner_snapshot.get("planner_tool") or "").strip()
@@ -367,6 +367,18 @@ class ToolPipelineMixin:
         }
         state["execution_truth_contract"] = dict(contract)
         return contract
+
+    @staticmethod
+    def _execution_selection_snapshot(
+        turn_context: Any, state: dict[str, Any], planner_snapshot: dict[str, Any],
+    ) -> dict[str, Any]:
+        if "mcp_approval_resolution" in getattr(turn_context, "metadata", {}):
+            selection = state.get("tool_execution") or {}
+            return {
+                "planner_tool": selection.get("selected_tool"),
+                "planner_status": selection.get("status"),
+            }
+        return planner_snapshot
 
     def validate_execution_truth_contract(
         self,

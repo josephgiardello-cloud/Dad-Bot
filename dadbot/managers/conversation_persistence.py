@@ -84,6 +84,7 @@ _CANONICAL_CHECKPOINT_FIELDS = {
     "event_sequence_id",
     "occurred_at",
     "execution_mode",
+    "tool_io_ledger",
 }
 
 

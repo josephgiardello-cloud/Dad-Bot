@@ -336,8 +336,31 @@ def _mcp_service(monkeypatch, *, result=None, follow_up=False, ledger=None):
     ))
     assert isinstance(request, MCPApprovalRequest)
     ledger = ledger if ledger is not None else ExecutionLedger()
-    bot = SimpleNamespace(_execution_ledger=ledger, config=SimpleNamespace(tenant_id="tenant-a"))
+    bot = SimpleNamespace(
+        _execution_ledger=ledger, config=SimpleNamespace(tenant_id="tenant-a"),
+        active_thread_id="thread-a",
+    )
     service = approval_service.MCPApprovalService(bot)
+    bot.decision_contexts = []
+
+    async def execute_turn(turn_request):
+        from dadbot.core.execution_contract import TurnResponse
+        from dadbot.core.graph_context import TurnContext
+        from dadbot.core.graph_pipeline_nodes import MCPToolNode
+
+        context = TurnContext(
+            user_input=turn_request.input.text, trace_id=f"decision-{turn_request.context.request_id}",
+            metadata={
+                **turn_request.metadata, "tenant_id": turn_request.context.tenant_id,
+                "session_id": turn_request.session_id, "request_id": turn_request.context.request_id,
+            },
+        )
+        bot.decision_contexts.append(context)
+        registry = SimpleNamespace(get=lambda *_args, **_kwargs: service)
+        await MCPToolNode().execute(registry, context)
+        return TurnResponse(reply=context.state["candidate"][0])
+
+    bot.execute_turn = execute_turn
     connections = []
     actions = []
 
@@ -373,6 +396,13 @@ def _mcp_service(monkeypatch, *, result=None, follow_up=False, ledger=None):
 def test_mcp_approved_call_uses_durable_journal_and_is_not_repeated(monkeypatch):
     service, ledger, _request, actions, _connections = _mcp_service(monkeypatch)
     assert "completed" in asyncio.run(service.resolve_mcp_approval("thread-a", approved=True))
+    assert len(service.bot.decision_contexts) == 1
+    context = service.bot.decision_contexts[0]
+    assert context.user_input == "Approve this Home Assistant action."
+    assert context.metadata["mcp_approval_resolution"] == {"request_id": _request.request_id, "approved": True}
+    record = context._tool_io_ledger.records[0]
+    assert record.metadata["scope"]["trace_id"] == context.trace_id
+    assert record.metadata["scope"]["request_id"] == context.metadata["request_id"]
     assert [event["payload"]["status"] for event in ledger.read() if event["type"] == "TOOL_APPROVAL_UPDATED"] == [
         "pending", "approved", "started", "succeeded",
     ]
@@ -437,6 +467,42 @@ def test_mcp_approval_audit_failure_blocks_dispatch_and_retains_proposal(monkeyp
     with pytest.raises(OSError, match="journal unavailable"):
         asyncio.run(service.resolve_mcp_approval("thread-a", approved=True))
     assert service.get_pending_mcp_approval("thread-a") is request
+    assert ledger.read()[-1]["payload"]["status"] == "pending"
+    assert not actions and not connections
+
+
+def test_mcp_stale_button_does_not_decide_a_different_proposal(monkeypatch):
+    service, ledger, request, actions, connections = _mcp_service(monkeypatch)
+    with pytest.raises(ValueError, match="no longer matches"):
+        asyncio.run(service.resolve_mcp_approval("thread-a", approved=True, request_id="old-request"))
+    assert service.get_pending_mcp_approval("thread-a") is request
+    assert ledger.read()[-1]["payload"]["status"] == "pending"
+    assert not actions and not connections and not service.bot.decision_contexts
+
+
+def test_mcp_removed_configuration_is_handled_inside_graph(monkeypatch):
+    service, ledger, _request, actions, connections = _mcp_service(monkeypatch)
+    monkeypatch.delenv("DADBOT_HA_MCP_URL")
+    assert "configuration changed" in asyncio.run(service.resolve_mcp_approval("thread-a", approved=True))
+    assert len(service.bot.decision_contexts) == 1
+    assert ledger.read()[-1]["payload"]["status"] == "expired"
+    assert not actions and not connections
+
+
+@pytest.mark.parametrize("approved", ["true", 1, None])
+def test_mcp_decision_requires_explicit_boolean(monkeypatch, approved):
+    service, ledger, _request, actions, connections = _mcp_service(monkeypatch)
+    with pytest.raises(ValueError, match="boolean"):
+        asyncio.run(service.resolve_mcp_approval("thread-a", approved=approved))
+    assert ledger.read()[-1]["payload"]["status"] == "pending"
+    assert not actions and not connections
+
+
+def test_mcp_decision_cannot_target_another_active_thread(monkeypatch):
+    service, ledger, _request, actions, connections = _mcp_service(monkeypatch)
+    service.bot.active_thread_id = "thread-b"
+    with pytest.raises(ValueError, match="active thread"):
+        asyncio.run(service.resolve_mcp_approval("thread-a", approved=True))
     assert ledger.read()[-1]["payload"]["status"] == "pending"
     assert not actions and not connections
 
@@ -538,11 +604,22 @@ def test_actual_mcp_service_records_kernel_io_and_restart_replay_never_connects(
     assert len(actions) == len(connections) == 1
     restored = ToolApprovalJournal(_ledger(tmp_path / "mcp.jsonl"), tenant_id="tenant-a")
     restored.expire_recovered()
-    assert asyncio.run(restored.replay(call, arguments={"entity_id": "light.kitchen"}))["content"] == "completed"
+    from dadbot.core.graph_context import TurnContext
+
+    executed = service.bot.decision_contexts[0]
+    context = TurnContext(user_input="", trace_id=executed.trace_id, metadata=dict(executed.metadata))
+    assert asyncio.run(restored.replay(
+        call, arguments={"entity_id": "light.kitchen"}, turn_context=context,
+    ))["content"] == "completed"
     assert len(actions) == len(connections) == 1
     event = next(event for event in ledger.read() if event["type"] == "TOOL_IO_RECORDED")
     assert event["session_id"] == "thread-a" and event["tenant_id"] == "tenant-a"
-    assert event["payload"]["tool_io"]["records"][0]["metadata"]["scope"]["request_id"] == call.request_id
+    assert (
+        event["payload"]["tool_io"]["records"][0]["metadata"]["scope"]["request_id"]
+        == context.metadata["request_id"]
+    )
+    assert event["trace_id"] == call.trace_id
+    assert event["payload"]["execution_scope"]["trace_id"] == context.trace_id
 
 
 def test_tool_replay_rejects_environment_drift(monkeypatch):

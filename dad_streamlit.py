@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import json
+import logging
 import datetime
 import os
 import traceback
@@ -17,6 +18,7 @@ from dadbot.components.voice import render_realtime_voice_call, render_voice_con
 from dadbot.config import DadBotConfig, DadRuntimeConfig
 from dadbot.contracts import DadBotContext
 from dadbot.core.dadbot import DadBot
+from dadbot.core.runtime_errors import NON_FATAL_RUNTIME_EXCEPTIONS
 from dadbot.managers.tts import TTSManager
 from dadbot.runtime.mcp.approval_service import MCPApprovalService
 from dadbot.runtime.mcp.tool_client import (
@@ -938,7 +940,7 @@ def _runtime_pool() -> StreamlitBotPool:
     return StreamlitBotPool()
 
 
-_STREAMLIT_RUNTIME_BUILD = "2026-11-11-kernel-tool-io-ui-v22"
+_STREAMLIT_RUNTIME_BUILD = "2026-11-11-graph-approval-ui-v23"
 
 st.set_page_config(
     page_title="DadBot",
@@ -982,12 +984,26 @@ def _process_user_message_with_thread(
             bot._streamlit_context_messages = []
 
 
-def _resolve_pending_mcp_approval(service: Any, *, approved: bool) -> str:
+def _resolve_pending_mcp_approval(service: Any, *, approved: bool, request_id: str) -> bool:
     with streamlit_turn_lock(bot):
         thread_id = _active_thread_id()
         set_runtime_thread_id(bot, thread_id)
         bot._streamlit_active_thread_id = thread_id
-        return asyncio.run(service.resolve_mcp_approval(thread_id, approved=approved))
+        bot._streamlit_context_messages = list(_thread_messages())
+        try:
+            reply = asyncio.run(service.resolve_mcp_approval(thread_id, approved=approved, request_id=request_id))
+        except NON_FATAL_RUNTIME_EXCEPTIONS:
+            logging.getLogger(__name__).exception("Canonical MCP approval continuation failed")
+            st.error(
+                "The approval turn could not finish. An action may already have run; "
+                "it will not be automatically resent. Check its audit status before trying a new action."
+            )
+            return False
+        finally:
+            bot._streamlit_context_messages = []
+        _append_chat_message("user", service.decision_text(approved=approved), stamp=_now_stamp())
+        _append_chat_message("assistant", bot.reply_finalization.normalize_reply(reply), stamp=_now_stamp())
+        return True
 
 
 avatar_path = Path("static/assets/dad_avatar.jpg")
@@ -1055,25 +1071,30 @@ if page == "Chat":
         mcp_service = registry.get("mcp_tool_service", optional=True) if registry is not None else None
         pending_approval = (
             mcp_service.get_pending_mcp_approval(_active_thread_id())
-            if callable(getattr(mcp_service, "get_pending_mcp_approval", None))
+            if mcp_service is not None and callable(getattr(mcp_service, "get_pending_mcp_approval", None))
             else None
         )
         if pending_approval is not None:
             st.warning("Review this exact Home Assistant action. It will not run unless you approve it.")
+            if source_mode:
+                st.info("Switch off source mode to approve or reject this pending action.")
             st.write("Tool:", pending_approval.tool_name)
             st.code(json.dumps(pending_approval.arguments, ensure_ascii=False, indent=2), language="json")
             approve_col, reject_col = st.columns(2)
-            if approve_col.button("Approve this action", key=f"mcp-approve-{pending_approval.request_id}"):
+            if approve_col.button(
+                "Approve this action", key=f"mcp-approve-{pending_approval.request_id}", disabled=source_mode,
+            ):
                 with st.spinner("Revalidating and executing the approved action..."):
-                    approval_reply = _resolve_pending_mcp_approval(mcp_service, approved=True)
-                approval_reply = bot.reply_finalization.normalize_reply(approval_reply)
-                _append_chat_message("assistant", approval_reply, stamp=_now_stamp())
-                st.rerun()
-            if reject_col.button("Reject this action", key=f"mcp-reject-{pending_approval.request_id}"):
-                approval_reply = _resolve_pending_mcp_approval(mcp_service, approved=False)
-                approval_reply = bot.reply_finalization.normalize_reply(approval_reply)
-                _append_chat_message("assistant", approval_reply, stamp=_now_stamp())
-                st.rerun()
+                    completed = _resolve_pending_mcp_approval(
+                        mcp_service, approved=True, request_id=pending_approval.request_id,
+                    )
+                if completed:
+                    st.rerun()
+            if reject_col.button(
+                "Reject this action", key=f"mcp-reject-{pending_approval.request_id}", disabled=source_mode,
+            ):
+                if _resolve_pending_mcp_approval(mcp_service, approved=False, request_id=pending_approval.request_id):
+                    st.rerun()
             chat_input_value = None
         elif source_mode:
             chat_input_value = st.chat_input("Ask Jor-El about approved sources...")
@@ -1127,7 +1148,7 @@ if page == "Chat":
             _append_chat_message("assistant", reply, stamp=now, thread_id=reply_thread_id)
             reply_message_index = len(_thread_messages(reply_thread_id)) - 1
             if (
-                callable(getattr(mcp_service, "get_pending_mcp_approval", None))
+                mcp_service is not None and callable(getattr(mcp_service, "get_pending_mcp_approval", None))
                 and mcp_service.get_pending_mcp_approval(reply_thread_id) is not None
             ):
                 st.rerun()

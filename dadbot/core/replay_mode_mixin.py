@@ -11,6 +11,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from dadbot.core.persistence_record_schema import PersistenceSchemaError
+from dadbot.core.runtime_errors import NON_FATAL_RUNTIME_EXCEPTIONS
 from dadbot.core.tool_recording import ToolIOLedger
 
 logger = logging.getLogger(__name__)
@@ -42,17 +44,9 @@ class ReplayModeMixin:
             metadata["checkpoint_available"] = True
 
             # Restore tool_io_ledger from checkpoint for fast lookup during execute_tool()
-            checkpoint_tool_ledger_dict = checkpoint.get("tool_io_ledger", {})
-            if checkpoint_tool_ledger_dict:
-                try:
-                    tool_io_ledger = ToolIOLedger.from_dict(checkpoint_tool_ledger_dict)
-                    metadata["_tool_io_ledger"] = tool_io_ledger
-                    metadata["tool_io_ledger_restored"] = True
-                except Exception as exc:
-                    logger.warning(
-                        "Failed to restore tool_io_ledger from checkpoint: %s",
-                        exc,
-                    )
+            if "tool_io_ledger" in checkpoint:
+                metadata["_tool_io_ledger"] = ToolIOLedger.from_checkpoint(checkpoint["tool_io_ledger"])
+                metadata["tool_io_ledger_restored"] = True
 
             logger.debug(
                 "Replay mode enabled for session %s: checkpoint found",
@@ -79,41 +73,26 @@ class ReplayModeMixin:
         Returns:
             Checkpoint dict if found, None otherwise.
         """
-        try:
-            # Try to get checkpoint from persistence service
-            persistence_service = getattr(self, "services", None)
-            if persistence_service is None:
-                return None
-
-            get_persistence = getattr(persistence_service, "get_persistence_service", None)
-            if not callable(get_persistence):
-                return None
-
-            try:
-                persistence = get_persistence()
-            except (AttributeError, RuntimeError):
-                return None
-
-            if persistence is None:
-                return None
-
-            # Load the checkpoint
-            load_latest = getattr(persistence, "load_latest_graph_checkpoint", None)
-            if not callable(load_latest):
-                return None
-
-            try:
-                checkpoint = load_latest(
-                    trace_token=str(trace_id or ""),
-                    session_id=str(session_id or "").strip() or "default",
-                )
-                if isinstance(checkpoint, dict):
-                    return checkpoint
-            except Exception:
-                pass
-
+        persistence_service = getattr(self, "services", None)
+        get_persistence = getattr(persistence_service, "get_persistence_service", None)
+        if not callable(get_persistence):
             return None
-
-        except Exception as exc:
+        try:
+            persistence = get_persistence()
+        except (AttributeError, RuntimeError) as exc:
+            logger.debug("Could not resolve checkpoint persistence: %s", exc)
+            return None
+        load_latest = getattr(persistence, "load_latest_graph_checkpoint", None)
+        if not callable(load_latest):
+            return None
+        try:
+            checkpoint = load_latest(
+                trace_token=str(trace_id or ""),
+                session_id=str(session_id or "").strip() or "default",
+            )
+        except PersistenceSchemaError:
+            raise
+        except NON_FATAL_RUNTIME_EXCEPTIONS as exc:
             logger.debug("Could not load checkpoint: %s", exc)
             return None
+        return checkpoint if isinstance(checkpoint, dict) else None

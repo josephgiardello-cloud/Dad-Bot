@@ -58,6 +58,7 @@ from dadbot.core.runtime_errors import (
     CanonicalInvariantViolation,
     ExecutionStageError,
     InvariantViolation,
+    ReplayInvariantViolation,
     TransientExecutionError,
 )
 from dadbot.core.tool_recording import ToolIOLedger
@@ -159,6 +160,8 @@ class _OrchestratorStateCoordinator:
         _OrchestratorStateCoordinator._hydrate_phase_history(context, execution_state)
         _OrchestratorStateCoordinator._hydrate_stage_traces(context, execution_state)
         _OrchestratorStateCoordinator._hydrate_checkpoint_bookkeeping(context, checkpoint, execution_state)
+        if "tool_io_ledger" in checkpoint:
+            context._tool_io_ledger = ToolIOLedger.from_checkpoint(checkpoint["tool_io_ledger"])
 
     @staticmethod
     def _hydrate_checkpoint_state_metadata(
@@ -982,9 +985,15 @@ class DadBotOrchestrator:
             self.bot._replay_mode = replay_mode
             self.bot._alias_layer_enabled = alias_layer_enabled
         if replay_mode and isinstance(loaded_checkpoint, dict):
-            restored_ledger = loaded_checkpoint.get("tool_io_ledger")
-            if isinstance(restored_ledger, dict) and restored_ledger:
-                context.metadata["_tool_io_ledger"] = ToolIOLedger.from_dict(restored_ledger)
+            if "tool_io_ledger" in loaded_checkpoint:
+                context.metadata["_tool_io_ledger"] = ToolIOLedger.from_checkpoint(loaded_checkpoint["tool_io_ledger"])
+            resolution = context.metadata.get("mcp_approval_resolution")
+            if resolution is not None:
+                saved_state = loaded_checkpoint.get("execution_state", {}).get("state", {})
+                if saved_state.get("mcp_approval_resolution") != resolution:
+                    raise ReplayInvariantViolation("Checkpoint approval resolution does not match the replay turn")
+                context.state["mcp_approval_resolution"] = dict(resolution)
+                context.state["mcp_approval_result"] = saved_state.get("mcp_approval_result")
         return loaded_checkpoint_anchor
 
     async def _run_graph_with_trace_binding(

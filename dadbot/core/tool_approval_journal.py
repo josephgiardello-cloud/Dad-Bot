@@ -132,14 +132,20 @@ class ToolApprovalJournal:
         tool_name: str,
         arguments: dict[str, Any],
         executor: Callable[[], Awaitable[dict[str, Any]]],
+        turn_context: TurnContext | None = None,
     ) -> dict[str, Any]:
         arguments = deepcopy(arguments)
         input_hash = canonical_state_hash({"tool_name": tool_name, "arguments": arguments})
         if tool_name != call.tool_name or input_hash != call.input_hash:
             raise ValueError("Approved tool name or arguments changed")
+        context = turn_context if turn_context is not None else self._tool_context(call)
+        scope = self._execution_scope(context, call)
+        previous_io = getattr(context, "_tool_io_ledger", None)
+        previous_count = len(previous_io.records) if isinstance(previous_io, ToolIOLedger) else 0
+        previous_version = context.metadata.get("tool_version")
         verify_live_authority()
         self._transition(call, "started", expected={"approved"})
-        context = self._tool_context(call)
+        context.metadata["tool_version"] = "mcp.approved.v1"
         try:
             record = await execute_tool_async(
                 tool_name=tool_name, parameters=arguments, executor=executor, turn_context=context,
@@ -148,6 +154,11 @@ class ToolApprovalJournal:
             self._transition(call, "uncertain", expected={"started"}, error_type=type(exc).__name__)
             logger.warning("Approved tool outcome is uncertain: %s", type(exc).__name__)
             raise
+        finally:
+            if previous_version is None:
+                context.metadata.pop("tool_version", None)
+            else:
+                context.metadata["tool_version"] = previous_version
         result = record.result
         if not isinstance(result, dict):
             raise TypeError("Approved tool execution must return a result mapping")
@@ -155,21 +166,25 @@ class ToolApprovalJournal:
             self._transition(call, "uncertain", expected={"started"}, output_hash=canonical_state_hash(result))
             return result
         io = getattr(context, "_tool_io_ledger", None)
-        if not isinstance(io, ToolIOLedger) or len(io.records) != 1:
+        if not isinstance(io, ToolIOLedger) or len(io.records) != previous_count + 1:
             raise RuntimeError("Approved tool execution did not produce exactly one kernel IO record")
-        snapshot = io.to_dict()
+        receipt = ToolIOLedger()
+        receipt.append(io.records[-1])
+        snapshot = receipt.to_dict()
         json.dumps(snapshot, allow_nan=False)
         with self.ledger._lock:
             event = self.writer.write_event(
                 _IO_EVENT, tenant_id=self.tenant_id, session_id=call.session_id, trace_id=call.trace_id,
                 kernel_step_id="tools.approval", committed=True,
                 payload={
-                    "request_id": call.request_id, "tool_io": snapshot, "tool_io_hash": canonical_state_hash(snapshot),
+                    "request_id": call.request_id, "execution_scope": scope,
+                    "tool_io": snapshot, "tool_io_hash": canonical_state_hash(snapshot),
                 },
             )
             self._transition(
                 call, "succeeded", expected={"started"},
                 output_hash=canonical_state_hash(result), io_event_id=event["event_id"],
+                execution_scope=scope,
             )
         return result
 
@@ -182,7 +197,26 @@ class ToolApprovalJournal:
             },
         )
 
-    async def replay(self, call: ApprovedToolCall, *, arguments: dict[str, Any]) -> dict[str, Any]:
+    def _execution_scope(self, context: TurnContext, call: ApprovedToolCall) -> dict[str, str]:
+        metadata = context.metadata
+        control_plane = metadata.get("control_plane") or {}
+        scope = {
+            "tenant_id": str(metadata.get("tenant_id") or control_plane.get("tenant_id") or ""),
+            "session_id": str(metadata.get("session_id") or control_plane.get("session_id") or ""),
+            "trace_id": str(context.trace_id or ""),
+            "request_id": str(metadata.get("request_id") or ""),
+        }
+        if (
+            scope["tenant_id"] != self.tenant_id or scope["session_id"] != call.session_id
+            or not all(scope.values())
+            or any(control_plane.get(key) not in (None, scope[key]) for key in ("tenant_id", "session_id"))
+        ):
+            raise ValueError("Tool execution context does not match the approval tenant/thread")
+        return scope
+
+    async def replay(
+        self, call: ApprovedToolCall, *, arguments: dict[str, Any], turn_context: TurnContext | None = None,
+    ) -> dict[str, Any]:
         """Read a completed receipt through kernel replay; never connect or dispatch."""
         arguments = deepcopy(arguments)
         if canonical_state_hash({"tool_name": call.tool_name, "arguments": arguments}) != call.input_hash:
@@ -203,6 +237,8 @@ class ToolApprovalJournal:
         ):
             raise ReplayInvariantViolation("Completed tool IO receipt is missing or has a different scope")
         payload = event["payload"]
+        context = turn_context if turn_context is not None else self._tool_context(call)
+        self._validate_receipt_scope(context, call, completion["payload"], payload)
         snapshot = payload.get("tool_io")
         if not isinstance(snapshot, dict) or canonical_state_hash(snapshot) != payload.get("tool_io_hash"):
             raise ReplayInvariantViolation("Completed tool IO receipt integrity check failed")
@@ -212,13 +248,16 @@ class ToolApprovalJournal:
             or not all(isinstance(records[0].get(key), dict) for key in ("input_payload", "output_payload", "metadata"))
         ):
             raise ReplayInvariantViolation("Completed tool IO receipt has an invalid record shape")
-        io = ToolIOLedger.from_dict(snapshot)
+        try:
+            io = ToolIOLedger.from_checkpoint(snapshot)
+        except ValueError as exc:
+            raise ReplayInvariantViolation("Completed tool IO receipt has an invalid record shape") from exc
         if len(io.records) != 1 or canonical_state_hash(io.to_dict()) != payload["tool_io_hash"]:
             raise ReplayInvariantViolation("Completed tool IO receipt has an invalid record shape")
         if canonical_state_hash(io.records[0].output_payload) != completion["payload"].get("output_hash"):
             raise ReplayInvariantViolation("Completed tool output does not match its approval receipt")
-        context = self._tool_context(call)
         context.metadata.update({"replay_mode": True, "_tool_io_ledger": io})
+        context.metadata["tool_version"] = "mcp.approved.v1"
 
         async def forbidden_dispatch() -> dict[str, Any]:
             raise ReplayInvariantViolation("Completed tool replay must not dispatch an external effect")
@@ -228,3 +267,15 @@ class ToolApprovalJournal:
         )
         result = record.result
         return result
+
+    def _validate_receipt_scope(
+        self, context: TurnContext, call: ApprovedToolCall,
+        completion: dict[str, Any], receipt: dict[str, Any],
+    ) -> None:
+        original_scope = self._execution_scope(self._tool_context(call), call)
+        recorded_scope = completion.get("execution_scope", original_scope)
+        if (
+            receipt.get("execution_scope", original_scope) != recorded_scope
+            or self._execution_scope(context, call) != recorded_scope
+        ):
+            raise ReplayInvariantViolation("Completed tool IO execution scope does not match the replay context")

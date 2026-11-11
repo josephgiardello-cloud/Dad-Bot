@@ -182,6 +182,13 @@ def normalize_checkpoint_record(record: dict[str, Any] | None) -> dict[str, Any]
         out["execution_state"] = _normalize_execution_state(execution_state)
     if continuity:
         out["continuity"] = _normalize_checkpoint_continuity(continuity)
+    if "tool_io_ledger" in payload:
+        from dadbot.core.tool_recording import ToolIOLedger
+
+        try:
+            out["tool_io_ledger"] = ToolIOLedger.from_checkpoint(payload["tool_io_ledger"]).to_dict()
+        except ValueError as exc:
+            raise PersistenceSchemaError("Recorded tool IO failed checkpoint validation") from exc
     return out
 
 

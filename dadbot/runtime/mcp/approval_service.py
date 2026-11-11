@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import inspect
 import logging
 import os
 from copy import deepcopy
 from typing import Any
 
+from dadbot.core.execution_contract import SovereignContext, TurnDelivery, TurnResponse, live_turn_request
 from dadbot.core.execution_ledger import ExecutionLedger
+from dadbot.core.graph_context import TurnContext
+from dadbot.core.runtime_errors import ReplayInvariantViolation
 from dadbot.core.state_lineage import canonical_state_hash
 from dadbot.core.tool_approval_journal import ApprovedToolCall, ToolApprovalJournal
-from dadbot.services._tool_pipeline_mixin import needs_tool_planning
 from dadbot.runtime.mcp.tool_client import (
     MCPApprovalRequest,
     MCPToolClient,
@@ -17,6 +20,7 @@ from dadbot.runtime.mcp.tool_client import (
     resume_mcp_with_fallback,
     run_mcp_with_fallback,
 )
+from dadbot.services._tool_pipeline_mixin import needs_tool_planning
 
 logger = logging.getLogger(__name__)
 
@@ -236,13 +240,94 @@ class MCPApprovalService:
             raise RuntimeError("MCP approval service returned an empty candidate")
         return reply, False
 
-    async def resolve_mcp_approval(self, thread_id: str, *, approved: bool) -> str:
+    @staticmethod
+    def decision_text(*, approved: bool) -> str:
+        return "Approve this Home Assistant action." if approved else "Reject this Home Assistant action."
+
+    async def resolve_mcp_approval(
+        self, thread_id: str, *, approved: bool, request_id: str | None = None,
+    ) -> str:
+        if type(approved) is not bool:
+            raise ValueError("MCP approval decision must be an explicit boolean")
         key = str(thread_id or "default")
+        if key != str(self.bot.active_thread_id):
+            raise ValueError("MCP approval decision must target the active thread")
+        pending = self._pending.get(key)
+        if pending is None:
+            if request_id is not None:
+                raise ValueError("MCP approval button no longer matches a pending proposal")
+            return "This Home Assistant approval is no longer pending. No additional action was sent."
+        call = pending[3]
+        if request_id is not None and request_id != call.request_id:
+            raise ValueError("MCP approval button no longer matches the pending proposal")
+        execute_turn = getattr(self.bot, "execute_turn", None)
+        if not callable(execute_turn):
+            raise RuntimeError("MCP approval resolution requires canonical execute_turn")
+        decision_id = "mcp-decision:" + canonical_state_hash({
+            "tenant_id": self.bot.config.tenant_id, "session_id": key,
+            "approval_id": call.request_id, "approved": approved,
+        })
+        request = live_turn_request(
+            self.decision_text(approved=approved), delivery=TurnDelivery.ASYNC,
+            context=SovereignContext(
+                tenant_id=self.bot.config.tenant_id, session_id=key, request_id=decision_id,
+            ),
+            metadata={
+                "request_id": decision_id,
+                "mcp_approval_resolution": {"request_id": call.request_id, "approved": approved},
+                "mcp_approval_parent_trace_id": call.trace_id,
+            },
+        )
+        response = execute_turn(request)
+        response = await response if inspect.isawaitable(response) else response
+        if not isinstance(response, TurnResponse) or not str(response.reply or "").strip():
+            raise RuntimeError("Canonical MCP approval turn returned an invalid response")
+        return str(response.reply)
+
+    async def resolve_in_graph(self, context: TurnContext) -> str:
+        resolution = context.metadata.get("mcp_approval_resolution")
+        if (
+            not isinstance(resolution, dict) or type(resolution.get("approved")) is not bool
+            or not isinstance(resolution.get("request_id"), str) or not resolution["request_id"]
+        ):
+            raise ValueError("Graph MCP resolution requires an exact request and boolean decision")
+        key = str(context.metadata.get("session_id") or "")
+        if (
+            context.metadata.get("tenant_id") != self.bot.config.tenant_id
+            or key != str(self.bot.active_thread_id)
+            or context.metadata.get("source_mode") is True
+        ):
+            raise ValueError("Graph MCP approval resolution has a different tenant/thread or source mode")
+        if context.metadata.get("replay_mode") is True:
+            reply = context.state.get("mcp_approval_result")
+            if (
+                context.state.get("mcp_approval_resolution") != resolution
+                or not isinstance(reply, str) or not reply.strip()
+            ):
+                raise ReplayInvariantViolation("MCP approval replay requires the matching checkpoint result")
+            return reply
+        context.state["decision_outcome"] = "no_tool_needed"
+        context.state["tool_execution"] = {
+            "executor": "kernel_mcp_v1", "selected_tool": None, "status": "not_dispatched",
+        }
+        reply = await self._resolve_pending(context, resolution)
+        context.state["mcp_approval_resolution"] = dict(resolution)
+        context.state["mcp_approval_result"] = reply
+        return reply
+
+    async def _resolve_pending(self, context: TurnContext, resolution: dict[str, Any]) -> str:
+        key = str(context.metadata["session_id"])
+        approved = resolution["approved"]
         pending = self._pending.get(key)
         if pending is None:
             return "This Home Assistant approval is no longer pending. No additional action was sent."
 
         request, _attachments, original_url, call = pending
+        if (
+            call.request_id != resolution["request_id"]
+            or context.metadata.get("mcp_approval_parent_trace_id") != call.trace_id
+        ):
+            raise ValueError("Graph MCP approval no longer matches the original proposal")
         journal = self._approval_journal()
         journal.decide(call, approved=approved)
         del self._pending[key]
@@ -259,10 +344,18 @@ class MCPApprovalService:
 
         async def execute_approved(session: Any, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
             frozen_arguments = deepcopy(arguments)
-            return await journal.execute(
-                call, tool_name=name, arguments=frozen_arguments,
-                executor=lambda: client.call_tool(session, name, deepcopy(frozen_arguments)),
-            )
+            context.state["decision_outcome"] = "executed_tool"
+            context.state["tool_execution"] = {
+                "executor": "kernel_mcp_v1", "selected_tool": name, "status": "approved",
+            }
+            try:
+                return await journal.execute(
+                    call, tool_name=name, arguments=frozen_arguments,
+                    executor=lambda: client.call_tool(session, name, deepcopy(frozen_arguments)),
+                    turn_context=context,
+                )
+            finally:
+                context.state["tool_execution"]["status"] = journal.status(call)
 
         result = await resume_mcp_with_fallback(
             request,
@@ -280,7 +373,7 @@ class MCPApprovalService:
             journal.expire(call)
         if isinstance(result, MCPApprovalRequest):
             self._queue_approval(
-                result, _attachments, original_url, thread_id=key, trace_id=call.trace_id,
+                result, _attachments, original_url, thread_id=key, trace_id=context.trace_id,
             )
             return "Another Home Assistant action needs your approval before it can run."
         return str(result or "")

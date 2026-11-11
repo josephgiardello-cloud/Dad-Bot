@@ -23,6 +23,7 @@ from dadbot.core.graph_temporal import (
     VirtualClock,
 )
 from dadbot.core.graph_types import StageTrace, _json_safe
+from dadbot.core.tool_recording import ToolIOLedger
 from dadbot.core.ux_projection import TurnHealthState
 
 
@@ -101,6 +102,7 @@ class TurnContext:
     # Hash-chain pointers for checkpoint integrity across load/save boundaries.
     last_checkpoint_hash: str = field(default="", init=False)
     prev_checkpoint_hash: str = field(default="", init=False)
+    _tool_io_ledger: ToolIOLedger | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         # Strict boundary contract: state/metadata/determinism_manifest must be dicts.
@@ -194,6 +196,13 @@ class TurnContext:
             # the full sequence forms a tamper-evident integrity chain.
             "prev_checkpoint_hash": chain_prev,
         }
+        tool_io = getattr(self, "_tool_io_ledger", None)
+        if tool_io is None:
+            tool_io = self.metadata.get("_tool_io_ledger")
+        if tool_io is not None:
+            if not isinstance(tool_io, ToolIOLedger):
+                raise TypeError("Checkpoint tool IO must be a ToolIOLedger")
+            snapshot["tool_io_ledger"] = ToolIOLedger.from_checkpoint(tool_io.to_dict()).to_dict()
         # Compute hash over the lightweight header fields (not the full state blob).
         _chain_payload = {
             "trace_id": self.trace_id,

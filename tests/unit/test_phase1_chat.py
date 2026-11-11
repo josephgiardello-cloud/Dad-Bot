@@ -575,8 +575,9 @@ def test_chat_approval_blocks_input_and_validates_result(bot, monkeypatch, appro
     resolved = []
     normalized = []
 
-    async def resolve(thread_id, *, approved):
+    async def resolve(thread_id, *, approved, request_id):
         nonlocal pending
+        assert request_id == pending.request_id
         resolved.append((thread_id, approved))
         pending = None
         return "  Action completed.  " if approved else "  Action rejected.  "
@@ -586,9 +587,12 @@ def test_chat_approval_blocks_input_and_validates_result(bot, monkeypatch, appro
         return ReplyFinalizationManager.normalize_reply(reply)
 
     registry = bot.services.registry
+    from dadbot.runtime.mcp.approval_service import MCPApprovalService
+
     registry.register("mcp_tool_service", SimpleNamespace(
         get_pending_mcp_approval=lambda _thread_id: pending,
         resolve_mcp_approval=resolve,
+        decision_text=MCPApprovalService.decision_text,
     ))
     test_bot = bot
     monkeypatch.setattr(test_bot.reply_finalization, "normalize_reply", normalize)
@@ -606,6 +610,10 @@ def test_chat_approval_blocks_input_and_validates_result(bot, monkeypatch, appro
     assert len(normalized) == 1
     expected = "Action completed." if approved else "Action rejected."
     assert app.session_state["chat_threads"]["default"][-1]["text"] == expected
+    assert (
+        app.session_state["chat_threads"]["default"][-2]["text"]
+        == MCPApprovalService.decision_text(approved=approved)
+    )
     assert app.chat_input
 
 
