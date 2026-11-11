@@ -25,7 +25,10 @@ import json
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from dadbot.core.execution_ledger import ExecutionLedger
 
 # ---------------------------------------------------------------------------
 # Compaction policy
@@ -144,23 +147,22 @@ class EventCompactor:
     def compact(
         self,
         *,
-        ledger,
+        ledger: ExecutionLedger,
         snapshot: dict[str, Any] | None = None,
         force: bool = False,
     ) -> dict[str, Any]:
-        """Run compaction if policy permits.
+        """Report why destructive compaction remains disabled without reading payloads.
 
         Args:
             ledger: ExecutionLedger instance.
             snapshot: Latest snapshot dict (from SnapshotEngine.latest()).
-            force: Bypass policy threshold check.
+            force: Reserved policy override; never bypasses durable checkpoint requirements.
 
         Returns:
             Report dict: compacted (bool), events_removed (int), archive_path (str|None).
 
         """
-        events = ledger.read()
-        if not events:
+        if not ledger.telemetry_snapshot()["event_count"]:
             return {
                 "compacted": False,
                 "events_removed": 0,

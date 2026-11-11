@@ -234,6 +234,26 @@ def test_selective_ledger_reads_filter_before_copy_without_changing_full_reads()
         ledger.read(event_types=frozenset())
 
 
+def test_trace_job_read_selection_preserves_union_order_and_payload_isolation():
+    ledger = ExecutionLedger()
+    ledger.write({**_session_event(1), "trace_id": " wanted "})
+    ledger.write({**_session_event(2), "trace_id": "other", "payload": {"job_id": " job-1 "}})
+    ledger.write({**_session_event(3), "trace_id": "other", "payload": {"job_id": "job-2"}})
+    full = ledger.read()
+    selected = ledger.read(trace_id="wanted", job_id="job-1")
+    assert selected == full[:2]
+    assert ledger.read(trace_id="wanted") == full[:1]
+    assert ledger.read(job_id="job-1") == full[1:2]
+    assert ledger.read(full=False, trace_id="wanted", job_id="job-1") == selected
+    headers = ledger.read(trace_id="wanted", job_id="job-1", payload_types=frozenset())
+    assert headers == [{key: value for key, value in e.items() if key != "payload"} for e in selected]
+    selected[0]["payload"]["state"]["value"] = 9
+    assert ledger.read() == full
+    ledger._backend_uncertain = True
+    with pytest.raises(RuntimeError, match="reload"):
+        ledger.read(trace_id="wanted", job_id="job-1")
+
+
 def test_hot_path_index_does_not_copy_checkpoint_payloads_and_preserves_trace_roots(monkeypatch):
     ledger = ExecutionLedger()
     root = ledger.write({**_session_event(1), "type": "GRAPH_CHECKPOINT"})
@@ -441,6 +461,30 @@ def test_compaction_does_not_break_wal_sequence_or_recovery(tmp_path, backend_ty
     restarted = ExecutionLedger(backend_type(path))
     assert restarted.load_from_backend() == 4
     assert restarted.verify_replay(mode="chain")["ok"]
+
+
+@pytest.mark.parametrize("empty,snapshot,reason", [
+    (True, None, "empty"),
+    (False, None, "no_snapshot"),
+    (False, {"head_sequence": 1}, "durable_checkpoint_required"),
+])
+def test_disabled_compactor_needs_no_payload_copy(monkeypatch, empty, snapshot, reason):
+    ledger = ExecutionLedger()
+    if not empty:
+        ledger.write(_session_event(1))
+        ledger._cache["event_count"] = 0
+
+    def forbid_read(*_args, **_kwargs):
+        raise AssertionError("Disabled compaction must not copy payloads")
+
+    monkeypatch.setattr(ledger, "read", forbid_read)
+    report = EventCompactor().compact(ledger=ledger, snapshot=snapshot, force=True)
+    assert report["reason"] == reason
+    assert not report["compacted"]
+    assert report["events_removed"] == 0
+    ledger._backend_uncertain = True
+    with pytest.raises(RuntimeError, match="reload"):
+        EventCompactor().compact(ledger=ledger, snapshot=snapshot, force=True)
 
 
 @pytest.mark.parametrize("backend_type", [FileWALLedgerBackend, CRCFileWALLedgerBackend])

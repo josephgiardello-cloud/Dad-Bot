@@ -10,29 +10,24 @@ from pathlib import Path
 from typing import Any
 
 from dadbot.core.compaction import ArchiveTier, CompactionPolicy, EventCompactor
+from dadbot.core.execution_ledger import ExecutionLedger
 from dadbot.core.semantic_primitives import hash as semantic_hash
 
 logger = logging.getLogger(__name__)
 
 
 class CompactionMixin:
+    ledger: ExecutionLedger
+
     @staticmethod
     def _stable_hash(payload: Any) -> str:
         return semantic_hash(payload)
 
     def _job_trace_events(self, job) -> list[dict[str, Any]]:
-        events = list(self.ledger.read())
         trace_id = str(job.trace_id or "").strip()
         job_id = str(job.job_id or "").strip()
-        filtered = [
-            dict(event)
-            for event in events
-            if (
-                str(event.get("trace_id") or "").strip() == trace_id
-                or str(dict(event.get("payload") or {}).get("job_id") or "").strip() == job_id
-            )
-        ]
-        return sorted(filtered, key=lambda item: int(item.get("sequence") or 0))
+        events = self.ledger.read(trace_id=trace_id, job_id=job_id)
+        return sorted(events, key=lambda item: int(item.get("sequence") or 0))
 
     @staticmethod
     def _event_stream_digest(events: list[dict[str, Any]]) -> str:
@@ -157,7 +152,9 @@ class CompactionMixin:
 
     def _maybe_compact_ledger(self) -> dict[str, Any]:
         hard_max = self._env_int("DADBOT_LEDGER_HARD_LIMIT_EVENTS", 50000, minimum=500)
-        pre_events = list(self.ledger.read())
+        with self.ledger._lock:
+            pre_events = self.ledger.read()
+            snapshot_version = self.ledger.telemetry_snapshot()["version"]
         event_count = len(pre_events)
 
         if event_count <= 0:
@@ -167,12 +164,19 @@ class CompactionMixin:
         compactor = self._ensure_compactor()
         snapshot = {"head_sequence": event_count}
         report = dict(compactor.compact(ledger=self.ledger, snapshot=snapshot, force=force) or {})
-        post_events = list(self.ledger.read())
+        with self.ledger._lock:
+            unchanged = (
+                type(compactor) is EventCompactor
+                and not bool(report.get("compacted", False))
+                and self.ledger.telemetry_snapshot()["version"] == snapshot_version
+            )
+            post_events = pre_events if unchanged else self.ledger.read()
+        pre_digest = self._event_stream_digest(pre_events)
         lossless_proof = {
             "contract_version": "ledger-compaction-lossless-v1",
             "equivalent": True,
-            "pre_digest": self._event_stream_digest(pre_events),
-            "reconstructed_digest": self._event_stream_digest(post_events),
+            "pre_digest": pre_digest,
+            "reconstructed_digest": pre_digest if unchanged else self._event_stream_digest(post_events),
             "archived_event_count": 0,
             "reconstructed_event_count": len(post_events),
             "sequence_equivalent": True,

@@ -793,6 +793,14 @@ Checkpoint, turn-event and lifecycle lookups likewise select their event
 types before copying; trace-to-session lookup needs only event headers.
 All existing tenant/session filters, malformed-record rejection, continuity
 hashes and explicit uncertain-ledger recovery requirements remain in place.
+Complete-run trace and composition checks select the union of matching trace
+headers and payload job IDs before copying, retaining each selected payload.
+The disabled built-in compactor checks the reconciled event count without
+copying payloads. Its control-plane report uses one complete isolated snapshot
+and one full payload digest when the locked ledger version is unchanged.
+Changed heads and custom compactors still require a separate post-operation
+snapshot and digest. No events are trimmed, no durable-checkpoint requirement
+is relaxed, and uncertainty still requires explicit ledger recovery.
 Default full/tail reads still return complete, isolated deep copies, and
 trace roots, completion results and ambiguity checks remain ledger-derived.
 

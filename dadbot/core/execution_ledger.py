@@ -501,14 +501,25 @@ class ExecutionLedger:
     def read(
         self, full: bool = True, *,
         event_types: frozenset[str] | None = None, payload_types: frozenset[str] | None = None,
+        trace_id: str | None = None, job_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Return isolated events, optionally selecting types/payloads before copying."""
+        """Return isolated events; supplied trace/job identities select their union."""
         with self._lock:
             self._ensure_backend_reconciled()
             self.validate_cache()
             events = self._events if full else list(self._cache.get("recent_tail") or [])
             if event_types is not None:
                 events = [event for event in events if event.get("type") in event_types]
+            if trace_id is not None or job_id is not None:
+                events = [
+                    event for event in events
+                    if (
+                        trace_id is not None and str(event.get("trace_id") or "").strip() == trace_id
+                    ) or (
+                        job_id is not None
+                        and str(dict(event.get("payload") or {}).get("job_id") or "").strip() == job_id
+                    )
+                ]
             if payload_types is not None:
                 events = [
                     event if event.get("type") in payload_types else {
