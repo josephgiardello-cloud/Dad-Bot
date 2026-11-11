@@ -34,6 +34,60 @@ def _session_event(value):
     }
 
 
+def test_digest_records_hash_complete_payloads_and_return_only_isolated_scalars(monkeypatch):
+    import hashlib
+
+    from dadbot.core import execution_ledger
+    from dadbot.core._control_plane_compaction import CompactionMixin
+
+    ledger = ExecutionLedger()
+    for value in ({"nested": [1, {"text": "retained"}]}, {"other": (2, 3)}):
+        ledger.write(_session_event(value))
+    before = ledger.read()
+    copied = []
+    original_copy = execution_ledger.deepcopy
+
+    def capture_copy(value):
+        copied.append(value)
+        return original_copy(value)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(execution_ledger, "deepcopy", capture_copy)
+        records = ledger.read_digest_records()
+    assert not copied
+    assert records == [
+        {
+            "sequence": int(event["sequence"]), "type": event["type"],
+            "trace_id": event["trace_id"], "session_id": event["session_id"],
+            "kernel_step_id": event["kernel_step_id"],
+            "payload_hash": hashlib.sha256(
+                json.dumps(event["payload"], sort_keys=True, default=str).encode("utf-8"),
+            ).hexdigest(),
+        }
+        for event in before
+    ]
+    assert CompactionMixin._digest_records(records) == CompactionMixin._event_stream_digest(before)
+    assert all(type(value) in (str, int) for record in records for value in record.values())
+    before_payload_hash = records[0]["payload_hash"]
+    records[0]["payload_hash"] = "changed-copy"
+    assert ledger.read() == before
+    ledger._events[0]["payload"]["state"]["value"]["nested"].append("changed-payload")
+    assert ledger.read_digest_records()[0]["payload_hash"] != before_payload_hash
+    assert CompactionMixin._digest_records(ledger.read_digest_records()) != CompactionMixin._event_stream_digest(before)
+
+
+def test_digest_records_validate_cache_and_reject_uncertain_state():
+    ledger = ExecutionLedger()
+    assert ledger.read_digest_records() == []
+    ledger.write(_session_event(1))
+    ledger._cache["event_count"] = 100
+    assert len(ledger.read_digest_records()) == 1
+    assert ledger.event_count() == 1
+    ledger._backend_uncertain = True
+    with pytest.raises(RuntimeError, match="reload"):
+        ledger.read_digest_records()
+
+
 @pytest.mark.parametrize("backend_type", [FileWALLedgerBackend, CRCFileWALLedgerBackend])
 def test_unchanged_append_verifies_only_new_event_after_verified_prefix(tmp_path, monkeypatch, backend_type):
     from dadbot.core import execution_ledger

@@ -24,6 +24,19 @@ from dadbot.core.ledger_backend import (
 _TAIL_LIMIT = 256
 
 
+def _event_digest_record(event: dict[str, Any]) -> dict[str, str | int]:
+    return {
+        "sequence": int(event.get("sequence") or 0),
+        "type": str(event.get("type") or ""),
+        "trace_id": str(event.get("trace_id") or ""),
+        "session_id": str(event.get("session_id") or ""),
+        "kernel_step_id": str(event.get("kernel_step_id") or ""),
+        "payload_hash": hashlib.sha256(
+            json.dumps(dict(event.get("payload") or {}), sort_keys=True, default=str).encode("utf-8"),
+        ).hexdigest(),
+    }
+
+
 class IntegrityBreachError(RuntimeError):
     """Raised when integrity checks require an immediate hard abort."""
 
@@ -524,6 +537,13 @@ class ExecutionLedger:
                 })
             finally:
                 self._tenant_memory_commit_depth -= 1
+
+    def read_digest_records(self) -> list[dict[str, str | int]]:
+        """Hash every payload under the ledger lock, returning only isolated scalar records."""
+        with self._lock:
+            self._ensure_backend_reconciled()
+            self.validate_cache()
+            return [_event_digest_record(event) for event in self._events]
 
     def read(
         self, full: bool = True, *,

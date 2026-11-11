@@ -796,10 +796,14 @@ hashes and explicit uncertain-ledger recovery requirements remain in place.
 Complete-run trace and composition checks select the union of matching trace
 headers and payload job IDs before copying, retaining each selected payload.
 The disabled built-in compactor checks the reconciled event count without
-copying payloads. Its control-plane report uses one complete isolated snapshot
-and one full payload digest when the locked ledger version is unchanged.
-Changed heads and custom compactors still require a separate post-operation
-snapshot and digest. No events are trimmed, no durable-checkpoint requirement
+copying payloads. Its trusted-local control-plane report hashes every complete
+payload under the ledger lock and keeps only isolated scalar digest records.
+It does not copy historical payloads or trust their canonical seals as a
+substitute for the full payload digest. An unchanged locked ledger version
+allows reuse of that exact digest. Changed heads still require a complete
+post-operation snapshot and digest; custom ledger/compactor/digest/partition
+implementations, replay filters and authenticated execution retain complete
+pre-operation snapshots. No events are trimmed, no durable-checkpoint requirement
 is relaxed, and uncertainty still requires explicit ledger recovery.
 Default full/tail reads still return complete, isolated deep copies, and
 trace roots, completion results and ambiguity checks remain ledger-derived.
