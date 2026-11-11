@@ -40,6 +40,258 @@ def _ledger(path):
     return ledger
 
 
+def _uncertain_call(journal, call=None):
+    call = call or _call()
+    journal.propose(call)
+    journal.decide(call, approved=True)
+    asyncio.run(_execute(journal, call, AsyncMock(return_value={"is_error": True, "result": "unknown"})))
+    return call
+
+
+def _review_context(call, *, tenant_id="tenant-a"):
+    from dadbot.core.graph_context import TurnContext
+
+    return TurnContext(
+        user_input="I verified that the Home Assistant action happened.",
+        trace_id="review-trace",
+        metadata={"tenant_id": tenant_id, "session_id": call.session_id, "request_id": "review-request"},
+    )
+
+
+@pytest.mark.parametrize("outcome", ["performed", "not_performed"])
+def test_manual_review_is_durable_but_does_not_certify_success_or_authorize_retry(tmp_path, outcome):
+    path = tmp_path / "review.jsonl"
+    journal = ToolApprovalJournal(_ledger(path), tenant_id="tenant-a")
+    call = _uncertain_call(journal)
+    action = journal.actions("thread-a")[0]
+    assert action.review_outcome == ""
+    assert action.retry_policy == "manual_review_required"
+    event = journal.review_action(
+        call, outcome_event_id=action.outcome_event_id, outcome=outcome, turn_context=_review_context(call),
+    )
+    assert event["type"] == "TOOL_ACTION_REVIEWED" and event["committed"] is True
+    assert event["payload"]["review_source"] == "user_confirmation"
+    assert "arguments" not in event["payload"] and "result" not in event["payload"]
+    assert event["trace_id"] == "review-trace"
+    restored = ToolApprovalJournal(_ledger(path), tenant_id="tenant-a")
+    restored.expire_recovered()
+    action = restored.actions("thread-a")[0]
+    assert action.status == "uncertain"
+    assert action.review_outcome == outcome
+    assert action.retry_policy == ("do_not_repeat" if outcome == "performed" else "new_proposal_required")
+    with pytest.raises(RuntimeError, match="successful"):
+        asyncio.run(restored.replay(call, arguments={"entity_id": "light.kitchen"}))
+    executor = AsyncMock(return_value={"is_error": False})
+    with pytest.raises(RuntimeError, match="not permitted"):
+        asyncio.run(_execute(restored, call, executor))
+    executor.assert_not_called()
+
+
+def test_manual_review_repeats_are_idempotent_and_conflicts_fail():
+    journal = ToolApprovalJournal(ExecutionLedger(), tenant_id="tenant-a")
+    call = _uncertain_call(journal)
+    event_id = journal.actions("thread-a")[0].outcome_event_id
+    first = journal.review_action(
+        call, outcome_event_id=event_id, outcome="performed", turn_context=_review_context(call),
+    )
+    count = len(journal.ledger.read())
+    assert journal.review_action(
+        call, outcome_event_id=event_id, outcome="performed", turn_context=_review_context(call),
+    ) == first
+    assert len(journal.ledger.read()) == count
+    with pytest.raises(RuntimeError, match="different review"):
+        journal.review_action(
+            call, outcome_event_id=event_id, outcome="not_performed", turn_context=_review_context(call),
+        )
+    assert len(journal.ledger.read()) == count
+
+
+def test_manual_review_stale_identity_and_wrong_tenant_fail():
+    journal = ToolApprovalJournal(ExecutionLedger(), tenant_id="tenant-a")
+    call = _uncertain_call(journal)
+    event_id = journal.actions("thread-a")[0].outcome_event_id
+    with pytest.raises(ValueError, match="outcome event"):
+        journal.review_action(
+            call, outcome_event_id="stale-event", outcome="performed", turn_context=_review_context(call),
+        )
+    with pytest.raises(ValueError, match="tenant/thread"):
+        journal.review_action(
+            call, outcome_event_id=event_id, outcome="performed",
+            turn_context=_review_context(call, tenant_id="tenant-b"),
+        )
+    with pytest.raises(ValueError, match="identity"):
+        journal.review_action(
+            replace(call, trace_id="another-trace"), outcome_event_id=event_id, outcome="performed",
+            turn_context=_review_context(call),
+        )
+    assert journal.actions("thread-a")[0].review_outcome == ""
+
+
+@pytest.mark.parametrize("status", ["pending", "approved", "started", "rejected", "expired", "succeeded"])
+def test_only_uncertain_outcomes_can_be_manually_reviewed(status):
+    journal = ToolApprovalJournal(ExecutionLedger(), tenant_id="tenant-a")
+    call = _call()
+    journal.propose(call)
+    if status == "rejected":
+        journal.decide(call, approved=False)
+    elif status == "expired":
+        journal.expire(call)
+    elif status != "pending":
+        journal.decide(call, approved=True)
+        if status == "started":
+            journal._transition(call, "started", expected={"approved"})
+        elif status == "succeeded":
+            asyncio.run(_execute(journal, call, AsyncMock(return_value={"is_error": False})))
+    action = journal.actions("thread-a")[0]
+    with pytest.raises(RuntimeError, match="uncertain"):
+        journal.review_action(
+            call, outcome_event_id=action.outcome_event_id, outcome="performed", turn_context=_review_context(call),
+        )
+
+
+def test_action_review_queue_is_tenant_and_thread_scoped():
+    ledger = ExecutionLedger()
+    journal = ToolApprovalJournal(ledger, tenant_id="tenant-a")
+    _uncertain_call(journal)
+    other = _call(session_id="thread-b", request_id="approval-b")
+    _uncertain_call(journal, other)
+    another_tenant = ToolApprovalJournal(ledger, tenant_id="tenant-b")
+    _uncertain_call(another_tenant, _call(tool_name="light_control"))
+    assert [action.call.session_id for action in journal.actions("thread-a")] == ["thread-a"]
+    assert len(another_tenant.actions("thread-a")) == 1
+    from dadbot.core.tenant_session import tenant_session_scope
+
+    with tenant_session_scope("tenant-a", "thread-a"):
+        with pytest.raises(ValueError, match="active session"):
+            journal.actions("thread-b")
+        with pytest.raises(ValueError, match="active session"):
+            another_tenant.actions("thread-a")
+
+
+def test_review_fsync_failure_blocks_reads_until_explicit_backend_recovery(tmp_path, monkeypatch):
+    from dadbot.core import ledger_backend
+
+    journal = ToolApprovalJournal(_ledger(tmp_path / "review.jsonl"), tenant_id="tenant-a")
+    call = _uncertain_call(journal)
+    event_id = journal.actions("thread-a")[0].outcome_event_id
+    monkeypatch.setattr(ledger_backend.os, "fsync", lambda _fd: (_ for _ in ()).throw(OSError("review fsync failed")))
+    with pytest.raises(OSError, match="review fsync"):
+        journal.review_action(
+            call, outcome_event_id=event_id, outcome="performed", turn_context=_review_context(call),
+        )
+    with pytest.raises(RuntimeError, match="backend state is uncertain"):
+        journal.actions("thread-a")
+    monkeypatch.undo()
+    restored = ToolApprovalJournal(_ledger(tmp_path / "review.jsonl"), tenant_id="tenant-a")
+    restored.expire_recovered()
+    assert restored.status(call) == "uncertain"
+    with pytest.raises(RuntimeError, match="successful"):
+        asyncio.run(restored.replay(call, arguments={"entity_id": "light.kitchen"}))
+
+
+def test_review_write_failure_does_not_remove_item_from_queue(monkeypatch):
+    journal = ToolApprovalJournal(ExecutionLedger(), tenant_id="tenant-a")
+    call = _uncertain_call(journal)
+    event_id = journal.actions("thread-a")[0].outcome_event_id
+    def unavailable(*_args, **_kwargs):
+        raise OSError("review store unavailable")
+    monkeypatch.setattr(journal.writer, "write_event", unavailable)
+    with pytest.raises(OSError, match="review store unavailable"):
+        journal.review_action(
+            call, outcome_event_id=event_id, outcome="performed", turn_context=_review_context(call),
+        )
+    assert journal.actions("thread-a")[0].review_outcome == ""
+
+
+def test_action_review_revoked_authority_cannot_commit(monkeypatch):
+    from dadbot.core import tool_approval_journal
+
+    journal = ToolApprovalJournal(ExecutionLedger(), tenant_id="tenant-a")
+    call = _uncertain_call(journal)
+    event_id = journal.actions("thread-a")[0].outcome_event_id
+    def revoked():
+        raise PermissionError("revoked")
+    monkeypatch.setattr(tool_approval_journal, "verify_live_authority", revoked)
+    with pytest.raises(PermissionError, match="revoked"):
+        journal.review_action(
+            call, outcome_event_id=event_id, outcome="performed", turn_context=_review_context(call),
+        )
+    assert journal.actions("thread-a")[0].review_outcome == ""
+
+
+@pytest.mark.parametrize("field,value", [
+    ("review_source", "provider_verified"),
+    ("outcome_event_id", "another-outcome"),
+    ("input_hash", "another-input"),
+    ("review_scope", {"request_id": 42}),
+])
+def test_recorded_action_review_corruption_is_not_projected_as_success(field, value):
+    journal = ToolApprovalJournal(ExecutionLedger(), tenant_id="tenant-a")
+    call = _uncertain_call(journal)
+    action = journal.actions("thread-a")[0]
+    payload = {
+        "request_id": call.request_id, "trace_id": call.trace_id, "tool_name": call.tool_name,
+        "input_hash": call.input_hash, "outcome_event_id": action.outcome_event_id,
+        "outcome": "performed", "review_source": "user_confirmation",
+        "review_scope": {
+            "tenant_id": "tenant-a", "session_id": "thread-a", "trace_id": "review-trace",
+            "request_id": "review-request",
+        },
+        field: value,
+    }
+    journal.writer.write_event(
+        "TOOL_ACTION_REVIEWED", tenant_id="tenant-a", session_id="thread-a", trace_id="review-trace",
+        kernel_step_id="tools.action_review", committed=True, payload=payload,
+    )
+    with pytest.raises(RuntimeError, match="Recorded action review"):
+        journal.actions("thread-a")
+    assert journal.status(call) == "uncertain"
+
+
+def test_committed_manual_review_survives_abrupt_process_exit(tmp_path):
+    path = tmp_path / "crash-review.jsonl"
+    script = """
+import os, sys, asyncio
+from dadbot.core.execution_ledger import ExecutionLedger
+from dadbot.core.ledger_backend import FileWALLedgerBackend
+from dadbot.core.graph_context import TurnContext
+from dadbot.core.tool_approval_journal import ToolApprovalJournal, ApprovedToolCall
+from dadbot.core.state_lineage import canonical_state_hash
+ledger = ExecutionLedger()
+ledger._backend = FileWALLedgerBackend(sys.argv[1])
+ledger.load_from_backend()
+journal = ToolApprovalJournal(ledger, tenant_id="tenant-a")
+call = ApprovedToolCall(
+    session_id="thread-a", trace_id="trace-a", request_id="approval-a", tool_name="light_control",
+    input_hash=canonical_state_hash({"tool_name":"light_control","arguments":{"entity_id":"light.kitchen"}}),
+)
+journal.propose(call)
+journal.decide(call, approved=True)
+async def remote():
+    return {"is_error": True}
+asyncio.run(journal.execute(
+    call, tool_name="light_control", arguments={"entity_id":"light.kitchen"}, executor=remote,
+))
+context = TurnContext(
+    user_input="", trace_id="review-trace",
+    metadata={"tenant_id":"tenant-a","session_id":"thread-a","request_id":"review-request"},
+)
+journal.review_action(
+    call, outcome_event_id=journal.actions("thread-a")[0].outcome_event_id,
+    outcome="not_performed", turn_context=context,
+)
+os._exit(31)
+"""
+    result = subprocess.run([sys.executable, "-c", script, str(path)], check=False, timeout=20)
+    assert result.returncode == 31
+    journal = ToolApprovalJournal(_ledger(path), tenant_id="tenant-a")
+    journal.expire_recovered()
+    assert journal.actions("thread-a")[0].review_outcome == "not_performed"
+    assert journal.actions("thread-a")[0].status == "uncertain"
+    assert journal.actions("thread-a")[0].retry_policy == "new_proposal_required"
+    assert sum(event["type"] == "TOOL_ACTION_REVIEWED" for event in journal.ledger.read()) == 1
+
+
 def test_approval_audit_is_scoped_and_does_not_store_arguments():
     ledger = ExecutionLedger()
     journal = ToolApprovalJournal(ledger, tenant_id="tenant-a")
@@ -436,6 +688,57 @@ def test_mcp_uncertain_outcome_is_audited_and_not_retried(monkeypatch):
     assert ledger.read()[-1]["payload"]["status"] == "uncertain"
     asyncio.run(service.resolve_mcp_approval("thread-a", approved=True))
     assert len(actions) == 1
+
+
+@pytest.mark.parametrize("outcome", ["performed", "not_performed"])
+def test_mcp_manual_review_is_a_canonical_no_dispatch_continuation(monkeypatch, outcome):
+    service, _ledger, request, actions, connections = _mcp_service(monkeypatch, result=TimeoutError("remote timeout"))
+    asyncio.run(service.resolve_mcp_approval("thread-a", approved=True))
+    action = service.get_mcp_action_history("thread-a")[0]
+    count = len(connections)
+    reply = asyncio.run(service.review_mcp_action(
+        "thread-a", request_id=request.request_id, outcome_event_id=action.outcome_event_id, outcome=outcome,
+    ))
+    assert "your confirmation" in reply and "not" in reply
+    assert len(service.bot.decision_contexts) == 2
+    context = service.bot.decision_contexts[-1]
+    assert context.state["decision_outcome"] == "no_tool_needed"
+    assert context._tool_io_ledger is None
+    assert context.metadata["mcp_approval_resolution"] == {
+        "request_id": request.request_id, "outcome_event_id": action.outcome_event_id, "review_outcome": outcome,
+    }
+    assert context.user_input == service.review_text(outcome=outcome, request_id=request.request_id)
+    assert len(actions) == 1 and len(connections) == count
+    assert service.get_pending_mcp_approval("thread-a") is None
+    restored = type(service)(service.bot)
+    assert restored.get_mcp_action_history("thread-a")[0].review_outcome == outcome
+    assert restored.get_mcp_action_history("thread-a")[0].status == "uncertain"
+    assert not restored.get_pending_mcp_approval("thread-a")
+
+
+def test_mcp_manual_review_stale_selection_is_rejected_before_graph_submission(monkeypatch):
+    service, _ledger, request, actions, connections = _mcp_service(monkeypatch, result=TimeoutError("remote timeout"))
+    asyncio.run(service.resolve_mcp_approval("thread-a", approved=True))
+    with pytest.raises(ValueError, match="no longer matches"):
+        asyncio.run(service.review_mcp_action(
+            "thread-a", request_id=request.request_id, outcome_event_id="stale-event", outcome="performed",
+        ))
+    assert len(actions) == len(connections) == len(service.bot.decision_contexts) == 1
+
+
+def test_mcp_manual_review_commit_failure_propagates_without_success_reply(monkeypatch):
+    service, _ledger, request, actions, connections = _mcp_service(monkeypatch, result=TimeoutError("remote timeout"))
+    asyncio.run(service.resolve_mcp_approval("thread-a", approved=True))
+    action = service.get_mcp_action_history("thread-a")[0]
+    def unavailable(*_args, **_kwargs):
+        raise OSError("action review unavailable")
+    monkeypatch.setattr(service._approval_journal().writer, "write_event", unavailable)
+    with pytest.raises(OSError, match="action review unavailable"):
+        asyncio.run(service.review_mcp_action(
+            "thread-a", request_id=request.request_id, outcome_event_id=action.outcome_event_id, outcome="performed",
+        ))
+    assert len(actions) == len(connections) == 1
+    assert service.get_mcp_action_history("thread-a")[0].review_outcome == ""
 
 
 def test_mcp_follow_up_requires_a_separate_recorded_approval(monkeypatch):

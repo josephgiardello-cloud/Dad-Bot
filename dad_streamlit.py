@@ -6,6 +6,7 @@ import datetime
 import os
 import traceback
 import uuid
+from collections.abc import Callable, Coroutine
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
@@ -940,7 +941,7 @@ def _runtime_pool() -> StreamlitBotPool:
     return StreamlitBotPool()
 
 
-_STREAMLIT_RUNTIME_BUILD = "2026-11-11-graph-approval-ui-v23"
+_STREAMLIT_RUNTIME_BUILD = "2026-11-11-action-review-ui-v24"
 
 st.set_page_config(
     page_title="DadBot",
@@ -985,25 +986,117 @@ def _process_user_message_with_thread(
 
 
 def _resolve_pending_mcp_approval(service: Any, *, approved: bool, request_id: str) -> bool:
+    return _run_mcp_continuation(
+        lambda thread_id: service.resolve_mcp_approval(thread_id, approved=approved, request_id=request_id),
+        user_text=service.decision_text(approved=approved),
+        failure_message=(
+            "The approval turn could not finish. An action may already have run; "
+            "it will not be automatically resent. Check its audit status before trying a new action."
+        ),
+    )
+
+
+def _run_mcp_continuation(
+    continuation: Callable[[str], Coroutine[Any, Any, str]], *, user_text: str, failure_message: str,
+) -> bool:
     with streamlit_turn_lock(bot):
         thread_id = _active_thread_id()
         set_runtime_thread_id(bot, thread_id)
         bot._streamlit_active_thread_id = thread_id
         bot._streamlit_context_messages = list(_thread_messages())
         try:
-            reply = asyncio.run(service.resolve_mcp_approval(thread_id, approved=approved, request_id=request_id))
+            if dict(st.session_state.get("thread_source_modes") or {}).get(thread_id):
+                raise ValueError("MCP continuations cannot run in source mode")
+            reply = asyncio.run(continuation(thread_id))
         except NON_FATAL_RUNTIME_EXCEPTIONS:
-            logging.getLogger(__name__).exception("Canonical MCP approval continuation failed")
-            st.error(
-                "The approval turn could not finish. An action may already have run; "
-                "it will not be automatically resent. Check its audit status before trying a new action."
-            )
+            logging.getLogger(__name__).exception("Canonical MCP continuation failed")
+            st.error(failure_message)
             return False
         finally:
             bot._streamlit_context_messages = []
-        _append_chat_message("user", service.decision_text(approved=approved), stamp=_now_stamp())
+        _append_chat_message("user", user_text, stamp=_now_stamp())
         _append_chat_message("assistant", bot.reply_finalization.normalize_reply(reply), stamp=_now_stamp())
         return True
+
+
+def _render_mcp_action_reviews() -> None:
+    st.subheader("Home Assistant action review")
+    service = bot.services.registry.get("mcp_tool_service", optional=True)
+    if not callable(getattr(service, "get_mcp_action_history", None)):
+        st.info("Action review is unavailable: the MCP approval service is not wired.")
+        return
+    with streamlit_turn_lock(bot):
+        thread_id = _active_thread_id()
+        set_runtime_thread_id(bot, thread_id)
+        bot._streamlit_active_thread_id = thread_id
+        try:
+            actions = service.get_mcp_action_history(thread_id)
+        except NON_FATAL_RUNTIME_EXCEPTIONS:
+            logging.getLogger(__name__).exception("Durable MCP action history could not be read")
+            st.error("Could not read action history. Review is blocked until the ledger is recovered and verified.")
+            return
+    if not actions:
+        st.info("No recorded Home Assistant actions in this conversation.")
+        return
+    st.dataframe(
+        [{
+            "approval": action.call.request_id, "tool": action.call.tool_name,
+            "recorded_outcome": action.status, "user_confirmation": action.review_outcome or "not recorded",
+            "retry_policy": action.retry_policy,
+        } for action in reversed(actions[-25:])],
+        use_container_width=True,
+    )
+    unresolved = [action for action in actions if action.status == "uncertain" and not action.review_outcome]
+    st.caption(
+        "This is a ledger-backed review queue, not an automatic retry queue. "
+        "User confirmations do not certify tool success or authorize replay. "
+        "Any repeat action requires a new proposal and approval."
+    )
+    if not unresolved:
+        st.info("No uncertain actions awaiting your review.")
+        return
+    by_id = {action.call.request_id: action for action in unresolved}
+    selected_id = st.selectbox(
+        "Uncertain action to review", list(by_id),
+        format_func=lambda request_id: f"{by_id[request_id].call.tool_name} | {request_id}",
+        key=f"action-review-selection-{thread_id}",
+    )
+    action = by_id[selected_id]
+    st.code(
+        f"Approval: {action.call.request_id}\nOriginal trace: {action.call.trace_id}\n"
+        f"Approved input hash: {action.call.input_hash}\nOutcome event: {action.outcome_event_id}",
+        language=None,
+    )
+    st.warning(
+        "Check the original proposal and Home Assistant's action history. "
+        "A device's current state alone does not prove whether this action happened. "
+        "If you cannot identify or verify the action, leave it unresolved."
+    )
+    source_mode = bool(dict(st.session_state.get("thread_source_modes") or {}).get(thread_id))
+    if source_mode:
+        st.info("Switch off source mode in Chat before recording an action review.")
+    checked = st.checkbox(
+        "I checked this exact action in Home Assistant",
+        key=f"action-reviewed-{thread_id}-{action.outcome_event_id}", disabled=source_mode,
+    )
+    performed_col, not_performed_col = st.columns(2)
+    performed = performed_col.button("I verified the action happened", disabled=source_mode or not checked)
+    not_performed = not_performed_col.button("I verified no action happened", disabled=source_mode or not checked)
+    if not (performed or not_performed):
+        return
+    outcome = "performed" if performed else "not_performed"
+    text = service.review_text(outcome=outcome, request_id=action.call.request_id)
+    if _run_mcp_continuation(
+        lambda active_thread: service.review_mcp_action(
+            active_thread, request_id=action.call.request_id, outcome_event_id=action.outcome_event_id, outcome=outcome,
+        ),
+        user_text=text,
+        failure_message=(
+            "The action-review turn could not finish. Your confirmation may already be recorded; "
+            "reload and check action history before retrying. This review does not send an external action."
+        ),
+    ):
+        st.rerun()
 
 
 avatar_path = Path("static/assets/dad_avatar.jpg")
@@ -1267,6 +1360,7 @@ elif page == "Status":
 elif page == "Workshop":
     st.caption("Operational tools restored for fast runtime inspection and recovery.")
     _render_guardrail_strip()
+    _render_mcp_action_reviews()
 
     col1, col2 = st.columns(2)
     with col1:

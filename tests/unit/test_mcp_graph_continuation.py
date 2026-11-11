@@ -72,6 +72,22 @@ def test_replay_uses_matching_checkpoint_result_without_dispatch(monkeypatch):
     forbidden.assert_not_awaited()
 
 
+@pytest.mark.parametrize("resolution", [
+    {"request_id": "a", "review_outcome": "performed"},
+    {"request_id": "a", "review_outcome": "performed", "outcome_event_id": ""},
+    {"request_id": "a", "review_outcome": "unknown", "outcome_event_id": "event"},
+    {"request_id": "a", "review_outcome": "performed", "outcome_event_id": "event", "approved": True},
+    {"request_id": "a", "approved": "true"},
+])
+def test_graph_action_resolution_rejects_ambiguous_or_incomplete_decisions(resolution):
+    service = MCPApprovalService(SimpleNamespace(
+        config=SimpleNamespace(tenant_id="tenant-a"), active_thread_id="thread-a",
+        _execution_ledger=ExecutionLedger(),
+    ))
+    with pytest.raises(ValueError, match="Graph MCP resolution"):
+        asyncio.run(service.resolve_in_graph(_context(mcp_approval_resolution=resolution)))
+
+
 @pytest.mark.parametrize("selected_tool,event_tool,consistent", [
     ("light_control", "light_control", True),
     ("light_control", "different_tool", False),

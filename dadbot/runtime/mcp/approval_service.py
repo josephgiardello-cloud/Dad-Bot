@@ -5,13 +5,14 @@ import logging
 import os
 from copy import deepcopy
 from typing import Any
+from uuid import uuid4
 
 from dadbot.core.execution_contract import SovereignContext, TurnDelivery, TurnResponse, live_turn_request
 from dadbot.core.execution_ledger import ExecutionLedger
 from dadbot.core.graph_context import TurnContext
 from dadbot.core.runtime_errors import ReplayInvariantViolation
 from dadbot.core.state_lineage import canonical_state_hash
-from dadbot.core.tool_approval_journal import ApprovedToolCall, ToolApprovalJournal
+from dadbot.core.tool_approval_journal import ApprovedToolCall, ToolActionState, ToolApprovalJournal
 from dadbot.runtime.mcp.tool_client import (
     MCPApprovalRequest,
     MCPToolClient,
@@ -75,6 +76,21 @@ class MCPApprovalService:
     def get_pending_mcp_approval(self, thread_id: str) -> MCPApprovalRequest | None:
         pending = self._pending.get(str(thread_id or "default"))
         return pending[0] if pending else None
+
+    def get_mcp_action_history(self, thread_id: str) -> list[ToolActionState]:
+        if thread_id != str(self.bot.active_thread_id):
+            raise ValueError("MCP action history must target the active thread")
+        return self._approval_journal().actions(thread_id)
+
+    def _review_target(self, thread_id: str, request_id: str, outcome_event_id: str) -> ToolActionState:
+        action = next((
+            action for action in self.get_mcp_action_history(thread_id) if action.call.request_id == request_id
+        ), None)
+        if action is None or action.outcome_event_id != outcome_event_id:
+            raise ValueError("MCP action review no longer matches the recorded outcome")
+        if action.status != "uncertain":
+            raise ValueError("MCP action review requires an uncertain outcome")
+        return action
 
     def _build_messages(
         self,
@@ -260,37 +276,71 @@ class MCPApprovalService:
         call = pending[3]
         if request_id is not None and request_id != call.request_id:
             raise ValueError("MCP approval button no longer matches the pending proposal")
-        execute_turn = getattr(self.bot, "execute_turn", None)
-        if not callable(execute_turn):
-            raise RuntimeError("MCP approval resolution requires canonical execute_turn")
         decision_id = "mcp-decision:" + canonical_state_hash({
             "tenant_id": self.bot.config.tenant_id, "session_id": key,
             "approval_id": call.request_id, "approved": approved,
         })
+        return await self._submit_continuation(
+            call, self.decision_text(approved=approved),
+            resolution={"request_id": call.request_id, "approved": approved}, request_id=decision_id,
+        )
+
+    @staticmethod
+    def review_text(*, outcome: str, request_id: str) -> str:
+        if outcome not in ("performed", "not_performed"):
+            raise ValueError("MCP action review requires performed or not_performed")
+        observed = "the action happened" if outcome == "performed" else "no action happened"
+        return f"I checked Home Assistant and verified that {observed} for approval {request_id}."
+
+    async def review_mcp_action(
+        self, thread_id: str, *, request_id: str, outcome_event_id: str, outcome: str,
+    ) -> str:
+        text = self.review_text(outcome=outcome, request_id=request_id)
+        action = self._review_target(thread_id, request_id, outcome_event_id)
+        return await self._submit_continuation(
+            action.call, text,
+            resolution={"request_id": request_id, "outcome_event_id": outcome_event_id, "review_outcome": outcome},
+            request_id="mcp-review:" + uuid4().hex,
+        )
+
+    async def _submit_continuation(
+        self, call: ApprovedToolCall, text: str, *, resolution: dict[str, Any], request_id: str,
+    ) -> str:
+        execute_turn = getattr(self.bot, "execute_turn", None)
+        if not callable(execute_turn):
+            raise RuntimeError("MCP continuation requires canonical execute_turn")
         request = live_turn_request(
-            self.decision_text(approved=approved), delivery=TurnDelivery.ASYNC,
+            text, delivery=TurnDelivery.ASYNC,
             context=SovereignContext(
-                tenant_id=self.bot.config.tenant_id, session_id=key, request_id=decision_id,
+                tenant_id=self.bot.config.tenant_id, session_id=call.session_id, request_id=request_id,
             ),
             metadata={
-                "request_id": decision_id,
-                "mcp_approval_resolution": {"request_id": call.request_id, "approved": approved},
+                "request_id": request_id, "mcp_approval_resolution": resolution,
                 "mcp_approval_parent_trace_id": call.trace_id,
             },
         )
         response = execute_turn(request)
         response = await response if inspect.isawaitable(response) else response
         if not isinstance(response, TurnResponse) or not str(response.reply or "").strip():
-            raise RuntimeError("Canonical MCP approval turn returned an invalid response")
+            raise RuntimeError("Canonical MCP continuation returned an invalid response")
         return str(response.reply)
 
+    @staticmethod
+    def _validate_resolution(resolution: Any) -> dict[str, Any]:
+        if not isinstance(resolution, dict) or not isinstance(resolution.get("request_id"), str):
+            raise ValueError("Graph MCP resolution requires an exact request identity")
+        decision = set(resolution) == {"request_id", "approved"} and type(resolution.get("approved")) is bool
+        review = (
+            set(resolution) == {"request_id", "review_outcome", "outcome_event_id"}
+            and resolution.get("review_outcome") in ("performed", "not_performed")
+            and isinstance(resolution.get("outcome_event_id"), str) and bool(resolution["outcome_event_id"])
+        )
+        if not resolution["request_id"] or not (decision or review):
+            raise ValueError("Graph MCP resolution requires a boolean decision or an exact action review")
+        return resolution
+
     async def resolve_in_graph(self, context: TurnContext) -> str:
-        resolution = context.metadata.get("mcp_approval_resolution")
-        if (
-            not isinstance(resolution, dict) or type(resolution.get("approved")) is not bool
-            or not isinstance(resolution.get("request_id"), str) or not resolution["request_id"]
-        ):
-            raise ValueError("Graph MCP resolution requires an exact request and boolean decision")
+        resolution = self._validate_resolution(context.metadata.get("mcp_approval_resolution"))
         key = str(context.metadata.get("session_id") or "")
         if (
             context.metadata.get("tenant_id") != self.bot.config.tenant_id
@@ -310,10 +360,36 @@ class MCPApprovalService:
         context.state["tool_execution"] = {
             "executor": "kernel_mcp_v1", "selected_tool": None, "status": "not_dispatched",
         }
-        reply = await self._resolve_pending(context, resolution)
+        if "review_outcome" in resolution:
+            reply = self._review_in_graph(context, resolution)
+        else:
+            reply = await self._resolve_pending(context, resolution)
         context.state["mcp_approval_resolution"] = dict(resolution)
         context.state["mcp_approval_result"] = reply
         return reply
+
+    def _review_in_graph(self, context: TurnContext, resolution: dict[str, Any]) -> str:
+        action = self._review_target(
+            context.metadata["session_id"], resolution["request_id"], resolution["outcome_event_id"],
+        )
+        if context.metadata.get("mcp_approval_parent_trace_id") != action.call.trace_id:
+            raise ValueError("Graph MCP action review has a different parent approval")
+        self._approval_journal().review_action(
+            action.call, outcome_event_id=resolution["outcome_event_id"],
+            outcome=resolution["review_outcome"], turn_context=context,
+        )
+        if resolution["review_outcome"] == "performed":
+            return (
+                "Recorded your confirmation that the Home Assistant action happened. "
+                "This is your observation, not a verified tool-success receipt. "
+                "The original uncertain action remains blocked from replay or resend."
+            )
+        return (
+            "Recorded your confirmation that no Home Assistant action happened. "
+            "This is your observation, not a provider-verified result. "
+            "The original uncertain action will not be replayed or resent. "
+            "To try again, request a new action and review its fresh approval."
+        )
 
     async def _resolve_pending(self, context: TurnContext, resolution: dict[str, Any]) -> str:
         key = str(context.metadata["session_id"])

@@ -169,6 +169,86 @@ def test_streamlit_mcp_decision_has_canonical_history_job_and_checkpoint(tmp_pat
         asyncio.run(service.resolve_mcp_approval(thread_id, approved=approved))
         assert len(connections) == before_connections
         assert len(actions) == int(approved)
+        if outcome == "uncertain":
+            history_before_review = list(history)
+            next(item for item in reloaded.radio if item.label == "Navigation").set_value("Workshop").run(timeout=60)
+            assert not reloaded.exception, list(reloaded.exception)
+            review_label = "I verified no action happened"
+            assert next(button for button in reloaded.button if button.label == review_label).disabled
+            source_modes = dict(reloaded.session_state["thread_source_modes"])
+            reloaded.session_state["thread_source_modes"] = {**source_modes, thread_id: True}
+            reloaded.run(timeout=60)
+            assert not reloaded.exception, list(reloaded.exception)
+            assert next(
+                checkbox for checkbox in reloaded.checkbox
+                if checkbox.label == "I checked this exact action in Home Assistant"
+            ).disabled
+            assert next(button for button in reloaded.button if button.label == review_label).disabled
+            assert next(
+                button for button in reloaded.button if button.label == "I verified the action happened"
+            ).disabled
+            reloaded.session_state["thread_source_modes"] = source_modes
+            reloaded.run(timeout=60)
+            next(
+                checkbox for checkbox in reloaded.checkbox
+                if checkbox.label == "I checked this exact action in Home Assistant"
+            ).check().run(timeout=60)
+            assert not next(button for button in reloaded.button if button.label == review_label).disabled
+            connections_before_review = len(connections)
+            safety_before_review = len(safety_calls)
+            journal = service._approval_journal()
+            write_event = journal.writer.write_event
+            def unavailable(event_type, **kwargs):
+                if event_type == "TOOL_ACTION_REVIEWED":
+                    raise OSError("Synthetic action-review audit outage")
+                return write_event(event_type, **kwargs)
+            journal.writer.write_event = unavailable
+            next(button for button in reloaded.button if button.label == review_label).click().run(timeout=60)
+            assert not reloaded.exception, list(reloaded.exception)
+            assert any("could not finish" in error.value for error in reloaded.error)
+            assert len(connections) == connections_before_review and len(actions) == 1
+            assert reloaded.session_state["chat_threads"][thread_id] == history_before_review
+            assert service.get_mcp_action_history(thread_id)[0].review_outcome == ""
+            failed_review = contexts[-1]
+            journal.writer.write_event = write_event
+            next(button for button in reloaded.button if button.label == review_label).click().run(timeout=60)
+            assert not reloaded.exception, list(reloaded.exception)
+            assert not reloaded.error, list(reloaded.error)
+            assert len(connections) == connections_before_review and len(actions) == 1
+            assert len(safety_calls) > safety_before_review
+            review = contexts[-1]
+            assert review.metadata["request_id"] != failed_review.metadata["request_id"]
+            assert review.fidelity.full_pipeline
+            assert review.state["decision_outcome"] == "no_tool_needed"
+            assert review.state["tool_ir"] == {"requests": []}
+            reviewed_history = reloaded.session_state["chat_threads"][thread_id]
+            assert reviewed_history[:4] == history_before_review
+            assert len(reviewed_history) == 6
+            assert "your confirmation" in reviewed_history[-1]["text"]
+            assert "fresh approval" in reviewed_history[-1]["text"]
+            assert "I checked Home Assistant" in reviewed_history[-2]["text"]
+            events_after_review = bot._execution_ledger.read()
+            review_events = [event for event in events_after_review if event["type"] == "TOOL_ACTION_REVIEWED"]
+            assert len(review_events) == 1
+            assert review_events[0]["trace_id"] == review.trace_id
+            assert review_events[0]["session_id"] == thread_id
+            assert review_events[0]["tenant_id"] == bot.config.tenant_id
+            assert review_events[0]["payload"]["review_source"] == "user_confirmation"
+            assert sum(event["type"] == "JOB_COMPLETED" for event in events_after_review) == 3
+            review_checkpoint = next(
+                event["payload"]["checkpoint"] for event in reversed(events_after_review)
+                if event["type"] == "GRAPH_CHECKPOINT" and event["trace_id"] == review.trace_id
+            )
+            assert "tool_io_ledger" not in review_checkpoint
+            assert "user_confirmation" not in str(review_checkpoint.get("tool_io_ledger"))
+            restored_service = approval_service.MCPApprovalService(bot)
+            assert restored_service.get_mcp_action_history(thread_id)[0].review_outcome == "not_performed"
+            assert restored_service.get_mcp_action_history(thread_id)[0].status == "uncertain"
+            reloaded.run(timeout=60)
+            assert not reloaded.exception, list(reloaded.exception)
+            assert not any(button.label == review_label for button in reloaded.button)
+            next(item for item in reloaded.radio if item.label == "Navigation").set_value("Chat").run(timeout=60)
+            assert reloaded.session_state["chat_history"] == reviewed_history
         bot.shutdown()
         """
     )
