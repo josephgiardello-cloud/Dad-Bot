@@ -23,6 +23,7 @@ from dadbot.core.capability_audit_runner import (
     build_runtime_capability_audit_report,
 )
 from dadbot.core.execution_context import ensure_execution_trace_root
+from dadbot.core.execution_ledger import ExecutionLedger
 from dadbot.core.graph import (
     FatalTurnError,
     LedgerMutationOp,
@@ -787,7 +788,13 @@ class _IntegrityVerifyMixin:
                 ledger = ledger_resolver()
                 read = getattr(ledger, "read", None)
                 if callable(read):
-                    raw_events = read()
+                    raw_events = (
+                        read(event_types=frozenset({"GRAPH_CHECKPOINT"}))
+                        if (
+                            type(ledger) is ExecutionLedger
+                            and getattr(read, "__func__", None) is ExecutionLedger.read
+                        ) else read()
+                    )
                     if isinstance(raw_events, list):
                         for event in reversed(raw_events):
                             if str(event.get("type") or "") != "GRAPH_CHECKPOINT":

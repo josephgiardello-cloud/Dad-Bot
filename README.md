@@ -791,6 +791,10 @@ Hot-path request/effect indexes copy all event headers but only the payloads
 they actually consume; reconciliation reads copy only reconciliation events.
 Checkpoint, turn-event and lifecycle lookups likewise select their event
 types before copying; trace-to-session lookup needs only event headers.
+SaveNode's built-in-ledger authority lookup selects complete `GRAPH_CHECKPOINT`
+events before copying, then still compares the full checkpoint and session
+state. Payload trace matching, latest-event order, missing-checkpoint fallback
+and uncertain-ledger failures are unchanged; custom ledgers keep full reads.
 All existing tenant/session filters, malformed-record rejection, continuity
 hashes and explicit uncertain-ledger recovery requirements remain in place.
 Complete-run trace and composition checks select the union of matching trace
