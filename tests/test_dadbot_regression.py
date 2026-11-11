@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, patch
 
 import ollama
 import pytest
+from dadbot.core.execution_contract import SovereignContext, live_turn_request
 from dadbot.core.execution_trace_context import ExecutionTraceRecorder, bind_execution_trace
 from dadbot.core.graph import LedgerMutationOp, TurnContext
 from dadbot.core.dadbot import DadBot
@@ -2836,12 +2837,14 @@ class TestDadBotRegression(unittest.TestCase):
     def test_binary_graph_checkpoint_can_resume_session_state(self):
         self.bot.history.append({"role": "user", "content": "Checkpoint this turn."})
         self.bot.sync_active_thread_snapshot()
+        session_id = self.bot.active_thread_id
 
         recorder = ExecutionTraceRecorder(trace_id="trace-123", prompt="checkpoint")
         with bind_execution_trace(recorder, required=True):
             self.bot.persist_graph_checkpoint(
                 {
                     "trace_id": "trace-123",
+                    "session_id": session_id,
                     "stage": "inference",
                     "status": "after",
                     "state": {"candidate": "draft reply"},
@@ -2850,7 +2853,7 @@ class TestDadBotRegression(unittest.TestCase):
         self.bot.reset_session_state()
 
         with bind_execution_trace(recorder, required=True):
-            checkpoint = self.bot.resume_turn_from_checkpoint("trace-123")
+            checkpoint = self.bot.resume_turn_from_checkpoint("trace-123", session_id=session_id)
 
         self.assertIsNotNone(checkpoint)
         self.assertEqual(checkpoint["trace_id"], "trace-123")
@@ -3215,11 +3218,18 @@ class TestDadBotRegression(unittest.TestCase):
         self.assertEqual(turn_context.mutation_queue.size(), 1)
         op = str(turn_context.mutation_queue.pending()[0].payload.get("op") or "")
         self.assertEqual(op, LedgerMutationOp.RECORD_TURN_STATE.value)
+        self.assertTrue(turn_context.mutation_queue.pending()[0].payload["should_offer_daily_checkin"])
 
-        self.bot.services.persistence_service.finalize_turn(
-            turn_context,
-            ("Glad to hear from you, buddy.", False),
-        )
+        with model_transport_reply("Glad to hear from you, buddy."):
+            self.bot.execute_turn(
+                live_turn_request(
+                    "Just checking in.",
+                    context=SovereignContext(
+                        session_id=self.bot.active_thread_id,
+                        tenant_id=self.bot.config.tenant_id,
+                    ),
+                ),
+            )
         self.assertFalse(self.bot._pending_daily_checkin_context)
 
         next_turn_context = TurnContext(user_input="Still here.")
@@ -3231,6 +3241,7 @@ class TestDadBotRegression(unittest.TestCase):
         self.assertIsNone(next_reply)
         self.assertFalse(next_should_end)
         self.assertFalse(self.bot._pending_daily_checkin_context)
+        self.assertFalse(next_turn_context.mutation_queue.pending()[0].payload["should_offer_daily_checkin"])
 
     def test_finalize_user_turn_queues_post_turn_maintenance(self):
         self.bot.LIGHT_MODE = False

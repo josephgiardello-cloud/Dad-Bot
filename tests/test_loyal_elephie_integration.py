@@ -35,9 +35,7 @@ class TestHybridRetriever:
             (0.7, {"id": "1", "text": "family memory"}),
         ]
         merged = retriever._reciprocal_rank_fusion(vector_ranked, bm25_ranked, k=60)
-        assert len(merged) > 0
-        # Item 2 should rank higher due to high scores in both lists
-        assert merged[0].get("id") == "2"
+        assert [item["id"] for _score, item in merged] == ["2", "1"]
 
     def test_hybrid_rank_with_fallback(self):
         """Test hybrid ranking with BM25 disabled (fallback to semantic)."""

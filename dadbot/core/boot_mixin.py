@@ -410,7 +410,6 @@ class DadBotBootMixin:
 
         self._model_metadata_cache: dict = {}
         self._tokenizer_cache: dict = {}
-        self._last_reply_supervisor: dict = {}
         self._tokenizer = self.initialize_tokenizer(self.config.active_model)
         self._ollama_async_client = None
         self._io_lock = RLock()

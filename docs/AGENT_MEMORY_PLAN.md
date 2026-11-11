@@ -39,9 +39,13 @@ product.
   tests passed.
 - Earlier foundation checks passed: 93 proactivity/authority/Streamlit checks and
   42 loop/snapshot checks.
-- Full-suite status remains unknown beyond the observed failures. The previous
-  run produced additional failure markers and repeated timeout stack dumps, then
-  was stopped. Those failures have not been individually diagnosed.
+- Broad-suite triage fixed deterministic fault sampling, boundary scanning, and
+  obsolete agent API tests. The next group exposed a shadowed supervisor cache
+  and stale checkpoint, SaveNode, and hybrid-ranking test assumptions.
+- Regression, hybrid, and authority checks now pass 192 cases, with 10 expected
+  failures. Memory-manager checks pass 72 cases, with 13 skips. Short Windows
+  temporary paths avoid failures creating long backup filenames.
+- The unfiltered baseline is still being collected; milestone 0 remains open.
 - The tagged
   [durable submission authority suite](../tests/unit/test_durable_submission_authority.py)
   passes 29 cases. It covers delegation, revocation, worker execution, and
